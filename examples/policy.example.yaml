@@ -1,0 +1,45 @@
+# Example policy file for QueryGate.
+#
+# `default` applies to any connection with no entry under `connections`.
+# Each entry under `connections` is merged on top of `default` (so you only
+# need to specify what differs). Set QUERYGATE_POLICY_FILE to point at your
+# own copy of this file.
+
+default:
+  enabled: true
+  max_joins: 4
+  max_select_columns: 20
+  max_where_depth: 4
+  max_group_by: 8
+  max_limit: 100
+  max_limit_aggregate: 1000
+  default_limit: 50
+  max_top_n: 50
+  max_partition_by: 5
+  max_batch_size: 10
+  timeout_seconds: 30
+  max_concurrency: 8
+  concurrency_wait_seconds: 10
+
+connections:
+  demo:
+    # Only these tables are queryable at all — anything else is rejected
+    # before compilation, even if it exists in the database. `employees` is
+    # deliberately left out here: it's known to the connection (see
+    # connections.example.yaml's known_tables) but contains HR/PII-shaped
+    # columns (ssn, salary) that shouldn't be agent-reachable by default —
+    # this is the realistic "wall off a sensitive table" scenario.
+    allowed_tables: [customers, orders, order_items, products]
+
+    # Column-level deny: email is queryable at the table level but this
+    # specific column is never selectable/filterable/sortable, even though
+    # the table itself is allowed.
+    denied_columns:
+      customers: [email]
+
+    max_limit: 200
+
+    # Example mandatory row filter — always AND-ed into any query that
+    # touches `orders`, e.g. for a policy that hides cancelled orders from
+    # every agent by default. Empty by default in this example.
+    mandatory_row_filters: []

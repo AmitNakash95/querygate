@@ -1,0 +1,65 @@
+[tool.black]
+line-length = 100
+
+
+[tool.poetry]
+name = "querygate"
+version = "0.1.0"
+description = "Agent-safe database access gateway — expose databases to AI agents over MCP and REST without raw SQL."
+authors = ["Amit Nakash"]
+readme = "README.md"
+packages = [
+    { include = "querygate", from = "src" },
+    { include = "examples" },
+]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pydantic = "2.11.5"
+pydantic-settings = "2.9.1"
+pydantic-core = "2.33.2"
+SQLAlchemy = "2.0.41"
+greenlet = "3.0.3"
+pyodbc = "^5.2.0"
+aioodbc = "0.5.0"
+uvicorn = ">=0.29.0"
+fastapi = ">=0.115.12"
+python-dotenv = "1.1.0"
+asyncpg = "^0.30.0"
+aiosqlite = "^0.22.1"
+mcp = ">=1.9.0"
+httpx = "^0.28.1"
+loguru = "^0.7.3"
+PyYAML = "^6.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "7.4.0"
+pytest-asyncio = "0.21.1"
+pytest-mock = "3.11.1"
+black = "25.1.0"
+
+[tool.poetry.scripts]
+querygate = "querygate.run:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+]
+markers = [
+    "asyncio: marks tests as async",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "verification: core-guarantee regression tests (see tests/integration/test_core_regression.py)",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

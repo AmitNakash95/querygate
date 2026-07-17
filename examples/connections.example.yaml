@@ -1,0 +1,28 @@
+# Example connection profiles for QueryGate.
+#
+# Connection strings are never inlined here — ${VAR} is resolved from the
+# environment at load time, so this file is safe to commit. Set
+# QUERYGATE_CONNECTIONS_FILE to point at your own copy of this file.
+#
+# `join_group` controls cross-connection joins: two connections may be
+# joined in one query only when they share the same join_group. Omit it to
+# default to the connection's own id (no cross-connection joins).
+
+connections:
+  - id: demo
+    dialect: postgresql
+    connection_string: ${QUERYGATE_DEMO_DB_URL}
+    description: "Example demo database — customers/orders/order_items/products/employees (see examples/demo_db/)"
+    enabled: true
+    known_tables: [customers, orders, order_items, products, employees]
+
+  # A second example showing an MSSQL connection and a shared join_group —
+  # uncomment and adapt once you have a real MSSQL database. Two connections
+  # on the same physical SQL Server instance can be joined cross-connection
+  # by giving them the same join_group.
+  # - id: mssql_reporting
+  #   dialect: mssql
+  #   connection_string: ${QUERYGATE_REPORTING_DB_URL}
+  #   description: "Reporting warehouse (MSSQL)"
+  #   join_group: reporting_instance
+  #   known_tables: [FactSales, DimCustomer]

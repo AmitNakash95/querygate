@@ -1,0 +1,294 @@
+# QueryGate
+
+**QueryGate is an agent-safe database access gateway.** It lets you expose a
+Postgres or MSSQL database to AI agents over MCP and REST — without ever
+letting them run raw SQL.
+
+Agents submit a structured, schema-checked query plan (a JSON AST), not a SQL
+string. QueryGate validates every table and column against the live
+reflected schema, enforces a per-connection policy (allow/deny lists,
+complexity caps, row limits, timeouts), compiles the plan to parameterized
+SQL through SQLAlchemy Core, executes it under a concurrency guardrail, and
+returns a bounded result set. There is no code path — REST or MCP — that
+accepts a SQL string.
+
+## Why raw SQL for agents is dangerous
+
+Handing an LLM a `run_sql(query: str)` tool means trusting a probabilistic
+text generator to never produce `DROP TABLE`, never wander into a table it
+shouldn't see, never write an unbounded cross join that takes your database
+down, and never leak a credential in a stack trace. Prompt injection makes
+this worse — a malicious document an agent reads can suggest SQL for it to
+run just as easily as a user can. None of the usual mitigations (asking the
+model nicely, read-only DB users, query timeouts alone) are structural
+guarantees:
+
+- A read-only DB user still lets an agent read every table you didn't mean
+  to expose, run an unindexed 12-way join, or exfiltrate an entire table in
+  one `SELECT *`.
+- Prompt-level instructions ("only query the `orders` table") are guidance,
+  not enforcement — nothing stops the next prompt, the next model, or an
+  injected instruction from ignoring them.
+- A query timeout limits *duration*, not *scope* — it doesn't stop a query
+  from touching a table or column it should never have reached at all.
+
+QueryGate's structural guarantee: **the only thing an agent can submit is a
+`StructuredQuery` object.** It's a Pydantic model with a fixed shape — no
+`sql` field exists anywhere in the schema, so there's no field to inject
+into. Every table/column reference in it is checked against the real,
+live-reflected schema and an explicit policy before a single SQL statement
+is compiled. A bad query gets a validation error before it ever reaches the
+database, not a raw error message from the database itself.
+
+## How QueryGate differs from generic MCP SQL connectors
+
+A lot of "MCP + database" integrations are a thin wrapper around
+`cursor.execute(model_generated_sql)`, sometimes with a read-only role and a
+row cap tacked on. QueryGate is structurally different:
+
+| | Generic MCP SQL connector | QueryGate |
+|---|---|---|
+| What the agent submits | A SQL string | A validated AST (`StructuredQuery`) |
+| Table/column safety | Whatever the DB role allows | Explicit allow/deny policy, checked before compilation |
+| Query shape limits | Usually none | Max joins, where-depth, select width, group-by, top-N — policy-enforced |
+| Row limits | Often just `LIMIT` appended, sometimes bypassable | Server-clamped, tiered by query shape (aggregate vs. row select) |
+| Multi-database support | One connection string, hardcoded | Dynamic connection registry, credential-isolated from schema/tool responses |
+| Concurrency/load control | Rare | Per-connection concurrency semaphore + execution timeout |
+| Multi-tenant scoping | DIY | Policy-level `mandatory_row_filters` |
+| Audit trail | Rare | Every query (success or rejection) logged with compiled SQL, principal, timing |
+
+## Quickstart
+
+```bash
+poetry install
+cp .env.example .env
+docker compose up -d          # starts the example demo Postgres database
+poetry run python -m querygate.run
+```
+
+Then, in another terminal:
+
+```bash
+curl http://localhost:8000/api/v1/connections
+curl http://localhost:8000/api/v1/demo/tables
+curl http://localhost:8000/api/v1/demo/tables/orders
+```
+
+See [`examples/rest_calls.md`](examples/rest_calls.md) and
+[`examples/mcp_calls.md`](examples/mcp_calls.md) for full request/response
+examples, including `query`, `query/explain`, and `query/batch`.
+
+To try it without Docker, seed a local SQLite file instead:
+
+```bash
+poetry run python examples/demo_db/seed.py
+```
+
+(SQLite is used for examples/tests only — see
+["Current limitations"](#current-limitations); production connections are
+Postgres or MSSQL.)
+
+## Example connection config
+
+Connections are file-configured, not hardcoded. Connection strings are never
+inlined — `${VAR}` is resolved from the environment at load time, so the
+file itself is safe to commit:
+
+```yaml
+# examples/connections.example.yaml
+connections:
+  - id: demo
+    dialect: postgresql
+    connection_string: ${QUERYGATE_DEMO_DB_URL}
+    description: "Example demo database — customers/orders/order_items"
+    enabled: true
+    known_tables: [customers, orders, order_items]
+```
+
+Point `CONNECTIONS_FILE` at your own copy. `list_connections` (MCP tool) and
+`GET /api/v1/connections` (REST) only ever return a credential-free
+projection — `id`, `dialect`, `enabled`, `description`.
+
+## Example policy config
+
+```yaml
+# examples/policy.example.yaml
+default:
+  max_joins: 4
+  max_select_columns: 20
+  max_where_depth: 4
+  max_limit: 100
+  max_limit_aggregate: 1000
+  timeout_seconds: 30
+  max_concurrency: 8
+
+connections:
+  demo:
+    allowed_tables: [customers, orders, order_items]
+    denied_columns:
+      customers: [email]
+    max_limit: 200
+    mandatory_row_filters: []   # e.g. [{table: orders, column: tenant_id, value: 42}]
+```
+
+Every table and column reference anywhere in a query — select, join keys,
+where, group_by, having, order_by, top_n — is checked against this policy
+*before* compilation. A denied column can't be used to filter or sort on
+even if it's never selected.
+
+## Example StructuredQuery payload
+
+```json
+{
+  "from": "orders",
+  "select": [
+    "orders.customer_id",
+    { "fn": "sum", "col": "orders.total_amount", "as": "total_spent" }
+  ],
+  "group_by": ["orders.customer_id"],
+  "order_by": [{ "col": "total_spent", "dir": "desc" }],
+  "limit": 5,
+  "intent": "top customers by total spend"
+}
+```
+
+`POST /api/v1/demo/query` with that body — or `execute_structured_query`
+over MCP with `connection: "demo"` and the same `query` object — runs it.
+Supported: multi-column select, inner/left joins (including cross-connection
+joins within a policy `join_group`), nested and/or `where`, `group_by` /
+`having`, `order_by`, `limit`/`offset`, aggregate and date-bucket select
+items, and `top_n` per-partition ranking (top-N-per-group).
+
+## Example MCP usage
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "execute_structured_query",
+    "arguments": {
+      "connection": "demo",
+      "query": {
+        "from": "orders",
+        "select": ["orders.id", "orders.status", "orders.total_amount"],
+        "where": { "col": "orders.status", "op": "eq", "value": "completed" },
+        "limit": 10
+      }
+    }
+  }
+}
+```
+
+POST this to `/mcp` (Streamable HTTP) with `MCP_ENABLED=true`. Tools:
+`list_connections`, `list_tables`, `describe_table`,
+`explain_structured_query`, `execute_structured_query`,
+`execute_structured_queries` (batch). More examples in
+[`examples/mcp_calls.md`](examples/mcp_calls.md).
+
+## Architecture overview
+
+```
+Agent (MCP) / Client (REST)
+        │  StructuredQuery JSON — never SQL
+        ▼
+┌───────────────────────────────────────────────────────────────┐
+│ querygate/execution/service.py  (StructuredQueryService)       │
+│                                                                  │
+│  1. validation/policy_validation.py  — caps + allow/deny        │
+│  2. validation/schema_validation.py  — reflect + verify exists  │
+│  3. compiler/sqlalchemy_compiler.py  — AST → SQLAlchemy Select  │
+│  4. execution/concurrency.py         — per-connection semaphore │
+│  5. connections/engine.py            — session + guardrails     │
+│  6. audit/logger.py                  — compiled SQL, timing,    │
+│                                         principal, outcome       │
+└───────────────────────────────────────────────────────────────┘
+        │
+        ▼
+  Real Postgres / MSSQL database
+```
+
+- **`connections/`** — `ConnectionProfile` registry loaded from YAML,
+  `${VAR}`-interpolated connection strings, per-dialect engine/session
+  lifecycle (`dialects.py` is the only place Postgres/MSSQL-specific SQL
+  lives).
+- **`schema/`** — table/column reflection with a per-connection metadata
+  cache (reflect once, reuse).
+- **`query_ast/`** — the `StructuredQuery` Pydantic model. This is the
+  entire agent-facing input surface.
+- **`policy/`** — `Policy` model + YAML loader (default + per-connection
+  overrides).
+- **`validation/`** — schema-truth checks (does this table/column exist?)
+  and policy checks (is it allowed? within caps?) — deliberately separate
+  modules, run in that order, both before compilation.
+- **`compiler/`** — turns a validated AST + policy into a SQLAlchemy Core
+  `Select`, including dialect-aware date bucketing and top-N ranking.
+- **`execution/`** — concurrency guardrail + the `StructuredQueryService`
+  that ties validation → compilation → execution → result shaping together.
+- **`audit/`** — structured, redaction-safe logging of every query attempt.
+- **`api/`** and **`mcp/`** — thin transport layers over the same
+  `StructuredQueryService`; neither has its own query logic.
+
+## Security model
+
+- **No raw SQL, anywhere.** `StructuredQuery` has no `sql`/`query`-string
+  field and rejects unknown fields (`extra="forbid"`) — there's no field to
+  smuggle SQL into, and no endpoint that would accept it if there were.
+- **Credentials never leave `connections/`.** `ConnectionProfile.connection_string`
+  is never returned by any API/MCP response — `list_connections` and
+  `GET /api/v1/connections` return `PublicConnectionInfo`, a separate model
+  with no such field. This is asserted directly by
+  `tests/unit/test_credential_redaction.py` against the live OpenAPI schema
+  and MCP tool schemas, not just by convention.
+- **Policy is enforced before compilation**, not as a post-hoc filter — a
+  denied table/column, an over-cap query, or a disabled connection is
+  rejected before a single line of SQL is built.
+- **Every identifier is schema-checked**, not agent-asserted — a
+  `Table.Column` reference that doesn't exist in the live reflected schema
+  is rejected, regardless of what the AST claims.
+- **Bounded execution** — every query runs under a per-connection
+  concurrency semaphore and a policy-configured timeout; row counts are
+  clamped server-side (tiered: lower for row selects, higher for
+  aggregates), not left to the caller's `limit`.
+- **Auth is pluggable.** `core/auth.py` defines an `Authenticator`
+  interface; `ApiKeyAuthenticator` (bearer token) is the only
+  implementation today, shared by REST and MCP, but OAuth/JWT/RBAC can be
+  added by implementing the same interface — no transport-layer changes
+  needed.
+- **Audit trail** — every query attempt, successful or rejected, is logged
+  with the compiled SQL, caller principal, connection id, timing, row count,
+  and rejection reason where applicable. Row *payloads* and connection
+  strings are never included in a log line.
+
+## Current limitations
+
+Being upfront about what's not done yet:
+
+- **MSSQL support is implemented but not live-verified** in this
+  environment (no MSSQL server available) — the dialect-isolation code
+  (`connections/dialects.py`, the compiler's DATEADD/DATEDIFF date-bucket
+  path) exists and is unit-tested against expected SQL text, but hasn't run
+  against a real SQL Server instance. Postgres is fully verified end-to-end
+  against a real database.
+- **Cross-connection joins** only make sense when both connections are
+  visible through one physical database engine (e.g. two MSSQL databases on
+  the same server) — the `join_group` policy mechanism gates *intent*, but
+  can't make a genuinely separate database server joinable in one SQL
+  statement.
+- **No OAuth/JWT/RBAC yet** — only API-key auth is implemented, though the
+  `Authenticator` abstraction is designed for this to be additive.
+- **No stored-procedure catalog** — deliberately out of scope for this
+  version; exposing stored procedures safely needs its own cataloging and
+  policy-approval mechanism, not a generic pass-through.
+- **No persisted audit store** — audit records are structured log lines
+  (JSON to stdout), not written to a database. Shipping them to a log
+  aggregator/SIEM is expected to be the operator's responsibility for now.
+- **Column-level policy is case-sensitive** by table/column name as written
+  in the policy file — it does not normalize casing across dialects.
+- **No write operations** — by design. QueryGate is read-only; there is no
+  insert/update/delete path anywhere in the AST or compiler.
+
+See `MIGRATION_REPORT.md` for what was preserved, generalized, or removed
+from the internal prototype this was extracted from, and what's recommended
+before a commercial release.
