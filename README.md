@@ -4,6 +4,11 @@
 Postgres or MSSQL database to AI agents over MCP and REST — without ever
 letting them run raw SQL.
 
+> **QueryGate runs inside your infrastructure.** It dynamically discovers
+> your schema, exposes policy-controlled MCP and REST tools, limits query
+> complexity and database load, and keeps credentials and data inside your
+> network.
+
 Agents submit a structured, schema-checked query plan (a JSON AST), not a SQL
 string. QueryGate validates every table and column against the live
 reflected schema, enforces a per-connection policy (allow/deny lists,
@@ -11,6 +16,10 @@ complexity caps, row limits, timeouts), compiles the plan to parameterized
 SQL through SQLAlchemy Core, executes it under a concurrency guardrail, and
 returns a bounded result set. There is no code path — REST or MCP — that
 accepts a SQL string.
+
+For commercial positioning, target buyers, pilot structure, packaging, and
+go-to-market notes, see the concise
+[QueryGate business brief](docs/business/GO_TO_MARKET.md).
 
 ## Why raw SQL for agents is dangerous
 
