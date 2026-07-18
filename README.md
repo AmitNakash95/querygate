@@ -378,6 +378,36 @@ POST this to `/mcp` (Streamable HTTP) with `MCP_ENABLED=true`. Tools:
 `execute_structured_queries` (batch). More examples in
 [`examples/mcp_calls.md`](examples/mcp_calls.md).
 
+## Production deployment
+
+The quickstart above is for local development. For an actual deployment,
+[`deploy/`](deploy/) has two verified reference stacks — a production-ish
+Docker Compose file and a Helm chart — covering app + Redis (distributed
+concurrency), config/secrets mounting, Prometheus scrape config,
+liveness/readiness probes, and a runbook for config reloads, secret
+rotation, and rollback:
+
+```bash
+# Docker Compose
+cd deploy/docker-compose && cp .env.production.example .env.production
+# ...fill in .env.production, adapt config/connections.yaml and config/policy.yaml...
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+
+# Helm
+helm install querygate deploy/helm/querygate \
+  --set image.repository=your-registry/querygate --set image.tag=0.1.0 \
+  -f my-values.yaml
+```
+
+Both were verified against a real deployment — not just rendered — before
+being committed: the Compose stack ran end-to-end against a real Postgres
+(including the audit sink and the optional bundled Prometheus actually
+scraping `/metrics`), and the Helm chart was installed into a real `kind`
+cluster with 2 replicas, a real query, and the non-root `securityContext`
+confirmed against the image's actual runtime user rather than assumed. See
+[`deploy/README.md`](deploy/README.md) for the full comparison and
+[`deploy/runbook.md`](deploy/runbook.md) for operational procedures.
+
 ## Architecture overview
 
 ```

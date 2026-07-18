@@ -1,0 +1,160 @@
+replicaCount: 2
+
+image:
+  repository: querygate
+  tag: ""              # defaults to Chart.appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+# uid 100 / gid 101 come from the production image's own `USER querygate`
+# directive (Dockerfile's `adduser --system`) — confirmed via
+# `docker run --rm <image> id`, not guessed, so this matches the image
+# exactly rather than fighting it.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 100
+  runAsGroup: 101
+  fsGroup: 101
+
+securityContext:
+  allowPrivilegeEscalation: false
+  # /app/var/audit needs a writable filesystem when AUDIT_SINK_BACKEND=jsonl
+  # (env.AUDIT_JSONL_PATH below); readOnlyRootFilesystem here would break
+  # that path specifically, not the app generally, so it stays off by
+  # default rather than silently breaking audit persistence.
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 8000
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+probes:
+  liveness:
+    path: /health
+    initialDelaySeconds: 5
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    path: /health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# Non-secret AppConfig knobs, merged into the pod's env alongside the
+# rendered secret (see `secrets` below). Full knob list: README.md and
+# src/querygate/core/config.py.
+env:
+  ENVIRONMENT: production
+  LOG_LEVEL: INFO
+  MCP_ENABLED: "false"
+  AUDIT_SINK_BACKEND: jsonl
+  AUDIT_JSONL_PATH: /app/var/audit/querygate-audit.jsonl
+  CONCURRENCY_BACKEND: redis
+  VAULT_ENABLED: "false"
+  VAULT_KV_MOUNT: secret
+
+# connections.yaml/policy.yaml/catalog.yaml content, rendered into a
+# ConfigMap and mounted at /app/config — safe to keep in this file and in
+# version control, since connection strings are always ${VAR}/${vault:...}
+# references, never literal secrets. See README.md's "Example connection
+# config" / "Example policy config" / "Example schema catalog" sections.
+config:
+  connectionsYaml: |
+    connections:
+      - id: primary
+        dialect: postgresql
+        connection_string: ${QUERYGATE_DATABASE_URL}
+        enabled: true
+  policyYaml: |
+    default:
+      enabled: false
+    connections:
+      primary:
+        enabled: true
+  catalogYaml: ""
+
+persistence:
+  # Backs /app/var/audit (only relevant when env.AUDIT_SINK_BACKEND=jsonl).
+  # Defaults to an ephemeral emptyDir — every audit event is always visible
+  # in pod stdout logs regardless of this setting (audit/logger.py logs
+  # both), so this only affects durability of the *persisted JSONL* copy
+  # specifically. A shared PVC across replicas needs a ReadWriteMany
+  # StorageClass, which isn't universally available, so this chart gives
+  # each replica its own volume rather than assuming one; centralize via
+  # your cluster's log aggregation (stdout) if you need one unified stream.
+  # Set enabled: true once you know your cluster's StorageClass to persist
+  # each replica's JSONL file across restarts.
+  enabled: false
+  storageClassName: ""
+  size: 1Gi
+
+redis:
+  # Distributed concurrency limiting (CONCURRENCY_BACKEND=redis) needs a
+  # real Redis whenever replicaCount > 1 — otherwise each replica enforces
+  # Policy.max_concurrency independently, silently multiplying the
+  # effective cap. This chart doesn't bundle a Redis subchart; bring your
+  # own (a managed Redis, or the Bitnami/redis chart) and set `url`, or set
+  # `enabled: false` and switch env.CONCURRENCY_BACKEND to in_process for a
+  # single-replica deployment only.
+  enabled: true
+  url: "redis://redis-master:6379/0"
+
+# Secret values — API keys, the Vault token, and every ${VAR} your
+# connections.yaml references. `create: true` with `env: {}` filled in is a
+# quick-start convenience ONLY: those values end up in this file and in
+# `helm get values` / `helm history` afterward. For real deployments, set
+# `create: false` and `existingSecretName` to a Secret your own secrets
+# tooling manages (External Secrets Operator, Vault, Sealed Secrets, ...).
+secrets:
+  create: false
+  existingSecretName: ""
+  env: {}
+    # API_KEYS: '["change-me"]'
+    # QUERYGATE_DATABASE_URL: "postgresql+asyncpg://user:pass@host:5432/db"
+    # VAULT_TOKEN: ""
+
+metrics:
+  serviceMonitor:
+    # Requires the Prometheus Operator CRD (monitoring.coreos.com/v1).
+    # Leave disabled if your cluster doesn't run it — /metrics is still
+    # reachable directly at the Service's port either way.
+    enabled: false
+    interval: 30s
+    labels: {}

@@ -1,0 +1,25 @@
+{{/*
+Requires the Prometheus Operator CRD (monitoring.coreos.com/v1) — leave
+metrics.serviceMonitor.enabled: false (the default) if your cluster doesn't
+run it. /metrics is reachable directly at the Service's port either way;
+this just automates discovery for Operator-managed Prometheus instances.
+*/}}
+{{- if .Values.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "querygate.fullname" . }}
+  labels:
+    {{- include "querygate.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "querygate.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+{{- end }}

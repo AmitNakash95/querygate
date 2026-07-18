@@ -1,0 +1,31 @@
+# Example production policy — replace with your own. `default.enabled: false`
+# plus an explicit per-connection `enabled: true` below (rather than a
+# `principals:` grant) is the right shape for a single always-on connection;
+# once you add a second connection or callers with different access needs,
+# switch to per-principal grants instead — see README.md's "For production,
+# the safest connection-discovery posture is deny by default".
+
+default:
+  enabled: false
+  max_joins: 4
+  max_select_columns: 20
+  max_where_depth: 4
+  max_group_by: 8
+  max_limit: 100
+  max_limit_aggregate: 1000
+  default_limit: 50
+  timeout_seconds: 30
+  max_concurrency: 8
+
+connections:
+  primary:
+    enabled: true
+    allowed_tables: []       # empty = no restriction; set explicitly for production
+    denied_columns: {}
+    mandatory_row_filters: []
+
+# principals:
+#   reporting-agent:
+#     primary:
+#       enabled: true
+#       max_limit: 20

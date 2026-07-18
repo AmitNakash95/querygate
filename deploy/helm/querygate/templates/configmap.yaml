@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "querygate.fullname" . }}-config
+  labels:
+    {{- include "querygate.labels" . | nindent 4 }}
+data:
+  connections.yaml: |
+    {{- .Values.config.connectionsYaml | nindent 4 }}
+  policy.yaml: |
+    {{- .Values.config.policyYaml | nindent 4 }}
+  {{- if .Values.config.catalogYaml }}
+  catalog.yaml: |
+    {{- .Values.config.catalogYaml | nindent 4 }}
+  {{- end }}

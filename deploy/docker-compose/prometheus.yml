@@ -1,0 +1,18 @@
+# Example Prometheus scrape config for QueryGate's unauthenticated /metrics
+# endpoint (querygate/metrics.py). Restrict network access to this port at
+# the proxy/firewall layer — see docs/THREAT_MODEL.md's deployment
+# requirements ("Restrict /metrics, /health, and admin routes at the
+# network/proxy layer").
+#
+# Used automatically by the bundled `prometheus` service in
+# docker-compose.prod.yml (--profile monitoring); copy the scrape_configs
+# block into your own Prometheus if you run it centrally instead.
+
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: querygate
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["querygate:8000"]

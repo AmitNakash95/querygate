@@ -30,6 +30,13 @@ All notable changes to QueryGate are documented here.
   immediately beforehand, so a version that stops validating between staging and applying
   is rejected, not silently activated. Rollback reuses the same apply endpoint against an
   older version id — history is never rewritten.
+- Production deployment reference stacks under `deploy/`: a Docker Compose file and a Helm
+  chart (app + Redis, config/secrets mounting, Prometheus scrape config, liveness/readiness
+  probes, `runbook.md` for reloads/rotation/rollback). Both verified against a real
+  deployment — a real Postgres for Compose, a real `kind` cluster for Helm — which caught
+  and fixed a real bug: a fresh named Docker volume is root-owned by default and the
+  production image runs as non-root, so the audit JSONL sink failed to write until a
+  one-shot init container (Compose) / `fsGroup` (Helm, automatic) fixed volume ownership.
 
 ## [0.1.0] — 2026-07-18
 

@@ -149,7 +149,13 @@ acceptable.
 
 ## 7. Deployment requirements
 
-The code controls above assume a correctly operated deployment:
+The code controls above assume a correctly operated deployment. `deploy/`
+(Docker Compose and Helm references, both verified against a real
+deployment — see `deploy/README.md`) applies every requirement below by
+default: non-root container user, no bundled database, Redis required once
+more than one replica runs, and secrets kept out of version-controlled
+config. Treat deviations from it as deliberate, reviewed decisions, not
+defaults.
 
 - Terminate TLS at a trusted proxy or at the service boundary; do not expose
   plaintext QueryGate traffic across an untrusted network.

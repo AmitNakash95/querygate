@@ -1,0 +1,29 @@
+QueryGate has been deployed as "{{ include "querygate.fullname" . }}" in namespace {{ .Release.Namespace }}.
+
+1. Check rollout status:
+   kubectl rollout status deployment/{{ include "querygate.fullname" . }} -n {{ .Release.Namespace }}
+
+2. Port-forward and check readiness:
+   kubectl port-forward svc/{{ include "querygate.fullname" . }} 8000:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+   curl http://localhost:8000/health
+
+{{- if not .Values.secrets.existingSecretName }}
+{{- if not .Values.secrets.create }}
+
+WARNING: secrets.create is false and secrets.existingSecretName is unset —
+QueryGate has no API_KEYS, no connection-string values, and (if
+env.VAULT_ENABLED=true) no VAULT_TOKEN. Set secrets.existingSecretName to a
+Secret your own tooling manages, or secrets.create: true with secrets.env
+for a quick start. See values.yaml's comment on `secrets`.
+{{- end }}
+{{- end }}
+
+{{- if and (eq (int .Values.replicaCount) 1) (not .Values.autoscaling.enabled) }}
+
+NOTE: replicaCount is 1 — redis.enabled can safely be false and
+env.CONCURRENCY_BACKEND set to "in_process" if you don't otherwise need
+Redis. Distributed concurrency limiting only matters once you run more than
+one replica.
+{{- end }}
+
+See ../../runbook.md for config reload, secret rotation, and rollback procedures.

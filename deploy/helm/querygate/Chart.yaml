@@ -1,0 +1,16 @@
+apiVersion: v2
+name: querygate
+description: Agent-safe database access gateway — expose Postgres/MSSQL to AI agents over MCP/REST without raw SQL.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/AGitmit/QueryGate
+sources:
+  - https://github.com/AGitmit/QueryGate
+keywords:
+  - database
+  - mcp
+  - ai-agents
+  - gateway
+maintainers:
+  - name: Amit Nakash

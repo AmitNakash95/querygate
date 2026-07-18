@@ -25,6 +25,7 @@ PRODUCT_PATHS = (
     "Dockerfile",
     "Makefile",
     "README.md",
+    "deploy",
     "docker-compose.yml",
     "examples",
     "scripts",

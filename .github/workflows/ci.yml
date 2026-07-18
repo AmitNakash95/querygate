@@ -50,6 +50,29 @@ jobs:
           poetry build
           poetry run python scripts/check_release_artifacts.py
 
+      - name: Validate deploy/ reference stacks (TODO.md item 29)
+        run: |
+          cp deploy/docker-compose/.env.production.example deploy/docker-compose/.env.production
+          docker compose -f deploy/docker-compose/docker-compose.prod.yml \
+            --env-file deploy/docker-compose/.env.production config --quiet
+          rm deploy/docker-compose/.env.production
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: "v3.16.1"
+
+      - name: helm lint + template deploy/helm/querygate (every optional feature enabled)
+        run: |
+          helm lint deploy/helm/querygate
+          helm template test deploy/helm/querygate \
+            --set autoscaling.enabled=true \
+            --set podDisruptionBudget.enabled=true \
+            --set metrics.serviceMonitor.enabled=true \
+            --set persistence.enabled=true \
+            --set secrets.create=true \
+            --set secrets.env.API_KEYS='["k"]' \
+            > /dev/null
+
   postgres-live:
     name: Real-Postgres tests (query timeout cancellation)
     runs-on: ubuntu-latest

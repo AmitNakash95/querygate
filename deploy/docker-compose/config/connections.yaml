@@ -1,0 +1,12 @@
+# Example production connections file — replace with your own. Safe to
+# commit as-is: connection strings are always ${VAR}/${vault:...}
+# references, never literal secrets. See README.md's "Example connection
+# config" and "Secret-backed connection strings (Vault)" sections.
+
+connections:
+  - id: primary
+    dialect: postgresql
+    connection_string: ${QUERYGATE_DATABASE_URL}
+    description: "Primary production database"
+    enabled: true
+    # known_tables: [orders, customers]   # optional — speeds up list_tables()

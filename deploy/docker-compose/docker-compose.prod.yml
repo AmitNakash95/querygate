@@ -1,0 +1,96 @@
+# Production-ish reference Compose stack for QueryGate.
+#
+# Differs from the repository root's docker-compose.yml on purpose: that one
+# also runs a demo Postgres database for the local quickstart. This stack
+# assumes you already have a real database — QueryGate never bundles one —
+# and only runs QueryGate itself plus the Redis instance it needs for
+# distributed concurrency limiting across replicas. See ../runbook.md for
+# operational procedures and ../README.md for the decision between this and
+# the Helm chart.
+#
+# Usage:
+#   cp .env.production.example .env.production   # then edit it
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#
+# Add --profile monitoring to also start the bundled Prometheus example:
+#   docker compose -f docker-compose.prod.yml --env-file .env.production --profile monitoring up -d
+
+services:
+  # A fresh named volume is root-owned by default; querygate runs as a
+  # non-root user (uid 100, gid 101 in the production image — confirmed via
+  # `docker run --rm <image> id`, not assumed) and cannot create the JSONL
+  # file otherwise. This one-shot init container chowns the volume once, and
+  # `querygate` waits for it to finish rather than racing it.
+  querygate-audit-init:
+    image: busybox:1.36
+    command: ["chown", "-R", "100:101", "/app/var/audit"]
+    volumes:
+      - querygate-audit:/app/var/audit
+
+  querygate:
+    image: ${QUERYGATE_IMAGE:-querygate:latest}
+    restart: unless-stopped
+    ports:
+      - "${QUERYGATE_HOST_PORT:-8000}:8000"
+    environment:
+      # Fixed by this stack's own layout — not meant to be overridden per
+      # deployment, so set directly rather than sourced from .env.production.
+      ENVIRONMENT: production
+      CONNECTIONS_FILE: /app/config/connections.yaml
+      POLICY_FILE: /app/config/policy.yaml
+      AUDIT_JSONL_PATH: /app/var/audit/querygate-audit.jsonl
+      CONCURRENCY_BACKEND: redis
+      CONCURRENCY_REDIS_URL: redis://querygate-redis:6379/0
+    # Everything else — API_KEYS, VAULT_*, AUDIT_SINK_BACKEND, LOG_LEVEL,
+    # MCP_*, CATALOG_FILE, and every ${VAR} your own connections.yaml
+    # references — comes from here. See .env.production.example.
+    env_file:
+      - .env.production
+    volumes:
+      # Read-only config mount — connections.yaml/policy.yaml/catalog.yaml
+      # never contain literal secrets (only ${VAR}/${vault:...} references),
+      # so this directory is safe to build from source control.
+      - ./config:/app/config:ro
+      # Persisted audit JSONL — mount on a real volume in production so
+      # events survive container recreation; omit if AUDIT_SINK_BACKEND=none.
+      - querygate-audit:/app/var/audit
+    depends_on:
+      querygate-redis:
+        condition: service_healthy
+      querygate-audit-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status in (200,503) else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  querygate-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # No published host port here — only querygate needs to reach Redis, and
+    # only on the Compose network. Add authentication (`--requirepass`) and
+    # TLS for anything beyond a single trusted host.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Optional — `docker compose --profile monitoring up` to include it.
+  # Most production deployments already run Prometheus centrally and only
+  # need the scrape-config snippet in prometheus.yml, not a bundled instance.
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    ports:
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - querygate
+
+volumes:
+  querygate-audit:

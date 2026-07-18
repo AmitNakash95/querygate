@@ -58,15 +58,17 @@ order-of-magnitude, not commitments.
 | 26 | Query-cost estimation before execution | L | 2, 3, 15 |
 | 27 | ✅ Semantic schema catalog and sensitivity metadata | L | 6, 16 |
 | 28 | ✅ Threat model + adversarial security test suite | M | 1, 6, 8, 10, 11 |
-| 29 | Production deployment reference stack | M | 4, 9, 12, 13, 14 |
+| 29 | ✅ Production deployment reference stack | M | 4, 9, 12, 13, 14 |
 | 30 | Distribution, SBOM, and signed release artifacts | M | 4, 14 |
 | 31 | Admin UI / policy designer | XL | 25 |
 | 32 | Governed adaptive semantic memory for agents | XL | 23, 25, 27, 28 |
+| 33 | Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
+| 34 | Interactive mocked HTML product sandbox | M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
 
-Items 21–32 are the next quality tranche from the current repo scan: mostly
+Items 21–33 are the next quality tranche from the current repo scan: mostly
 security consistency, enterprise operability, and product polish — the
 areas that move QueryGate from "strong engineering prototype" toward a
 credible 10/10 commercial infrastructure product.
@@ -1138,7 +1140,47 @@ for denied columns in filters/order/grouping, schema leakage, aggregation
 edge cases, large payload attempts, invalid JWT/scopes, cross-principal
 policy overrides, and sanitized DB errors.
 
-### 29. Production deployment reference stack
+### 29. Production deployment reference stack ✅ DONE
+
+**Shipped:** A `deploy/` directory with two verified reference stacks — a
+production-ish Docker Compose file and a Helm chart — sharing the same
+shape: app + Redis (distributed concurrency, required once more than one
+instance runs), config/secrets mounted separately (connections/policy/
+catalog YAML is safe to commit — always `${VAR}`/`${vault:...}` references,
+never literal secrets — but the resolved values live in a gitignored env
+file or an operator-managed Secret), a Prometheus scrape-config example,
+liveness/readiness probes against `/health`, and `deploy/runbook.md`
+covering both config-reload paths (direct file edit + `/admin/reload-config`
+vs. the item-25 governance API), secret rotation, and rollback (both
+config-version rollback and application-version rollback).
+
+Neither stack was shipped from rendering alone — both were verified against
+a real deployment, and doing so caught a real bug before it shipped: a
+fresh named Docker volume is root-owned by default, but the production
+image runs as a non-root user (uid 100, gid 101 — confirmed via `docker run
+--rm <image> id`, not assumed), so the audit JSONL sink failed with
+`PermissionError` on first write. Fixed in the Compose stack with a
+one-shot `busybox` init container that chowns the volume before `querygate`
+starts (`depends_on: condition: service_completed_successfully`); the Helm
+chart doesn't need the equivalent workaround because Kubernetes'
+`securityContext.fsGroup` (a mechanism Compose has no equivalent of) fixes
+volume ownership automatically, confirmed by inspecting the pod's actual
+mounted-volume permissions after a real deploy.
+
+Verification, concretely: the Compose stack was brought up against the real
+demo Postgres, executed a real structured query, confirmed `/metrics`
+populated post-query, confirmed the audit JSONL file was written with
+correct ownership and mode `0600`, and confirmed the optional
+`--profile monitoring` Prometheus service actually scraped `/metrics`
+(`health: "up"` via Prometheus's own targets API). The Helm chart was
+`helm lint`ed, rendered with every optional feature enabled
+(`autoscaling`, `podDisruptionBudget`, `metrics.serviceMonitor`,
+`persistence`, `secrets.create`) to exercise every template's conditional
+path, then actually installed into a real local `kind` cluster — 2
+replicas, a real in-cluster Postgres and Redis, a real structured query
+through a port-forwarded Service, `/metrics` populated, the non-root
+`securityContext` confirmed via `kubectl exec ... id`, and the audit file
+confirmed written correctly inside a live pod.
 
 **Effort: M (2–4 days).** Docker already exists; this adds the operational
 wrapper that lets another team deploy it correctly without guessing.
@@ -1169,6 +1211,134 @@ buyer confidence.
 container images. Generate an SBOM in CI, pin and review dependencies,
 publish immutable version tags, and document verification steps. Add a
 release checklist so every version is cut the same way.
+
+### 33. Permission-aware QueryGate product guide and configuration assistant
+
+**Effort: M–L (3–7 days).** A useful first version is a versioned help corpus
+plus a few read-only MCP/REST tools. Deployment-aware diagnostics, scoped
+configuration inspection, and a strong authorization/evaluation matrix push
+it toward L. Reuse item 25's governance APIs for all mutations rather than
+building a second configuration path.
+
+**Depends on:** Items 8 and 10 provide trustworthy caller scopes and claims;
+items 21 and 22 establish consistent authorization and caller-visible
+surfaces; item 25 supplies the scoped config read/validate/stage/apply
+workflow. The static product guide can ship incrementally before every
+dependency, but deployment-specific answers must not bypass them.
+
+**Why it matters:** An agent can use QueryGate's query tools and still have no
+reliable way to help a user install the product, configure a connection or
+policy, understand a schema rejection, or discover the safe next step. Make
+QueryGate an authoritative information center for its own setup and operation,
+not only a database gateway: agents should be able to retrieve compact,
+version-correct product guidance and, where authorized, explain the caller's
+effective deployment configuration and permissions.
+
+Generic documentation is not secret and should remain broadly available.
+Permission checks protect deployment-specific state and actions: what is
+configured here, which connections the caller can see, why this caller was
+denied, and whether the caller may validate or change configuration. The help
+system must never turn documentation access into an oracle for hidden
+connections, principals, policies, schema objects, or secrets.
+
+**What to do:**
+
+- Create a canonical, versioned help corpus covering installation, first-run
+  setup, connection and policy configuration, authentication/scopes, MCP and
+  REST usage, common validation/rejection reasons, observability, upgrades,
+  and troubleshooting. Generate examples from the actual config models/tool
+  schemas where practical so documentation drift is testable.
+- Expose narrow read-only MCP/REST capabilities such as help search, a guided
+  setup checklist, capability discovery, configuration-field explanation,
+  and "explain my access/error". Return structured, source-attributed answers
+  with the QueryGate version they apply to; keep the deterministic retrieval
+  layer useful even when no model provider is configured.
+- Separate static product knowledge from live deployment context. A normal
+  caller may see general guidance plus only their effective scopes, visible
+  connections, and safely actionable denial details. Deployment configuration
+  inspection requires the existing `admin:config:read` scope and must redact
+  connection strings, credentials, secret values/references, raw exceptions,
+  and hidden principal/policy entries.
+- Route every validate, stage, apply, or rollback operation through item 25's
+  existing `admin:config:write` governance workflow. Require an explicit user
+  action, validation result, diff/preview, attribution, and audit event; the
+  guide must never silently edit configuration or broaden its own access.
+- Apply authorization before search, ranking, context assembly, caching, and
+  error rendering—not as a final response filter. Protect against inference
+  through search counts, suggested topics, missing-result differences, cache
+  keys, diagnostics, and "nearby" configuration examples.
+- Add role-based and adversarial tests for anonymous/dev, ordinary principal,
+  operator, config reader, and config writer paths. Evaluate representative
+  onboarding, configuration, rejected-query, and troubleshooting tasks for
+  correctness, version freshness, useful next steps, and zero unauthorized
+  disclosure.
+
+**Definition of done:**
+
+- An agent can answer common setup and usage questions with citations to the
+  installed version's canonical guidance instead of guessing from its model
+  memory.
+- A caller can understand what they are allowed to use and receive a safe,
+  actionable explanation for common failures without learning that hidden
+  connections, schema objects, policies, or principals exist.
+- An authorized administrator can inspect a redacted effective configuration,
+  validate a proposed change, and enter the governed preview/apply flow; a
+  read-only caller cannot mutate anything.
+- Help retrieval works offline and without access to customer rows, database
+  credentials, or a hosted model, and remains useful when every live database
+  connection is unavailable.
+- Documentation/config-schema drift and cross-principal leakage are release-
+  blocking test failures.
+
+### 34. Interactive mocked HTML product sandbox
+
+**Effort: M (2–3 days).** This is a polished, self-contained product story,
+not a second frontend or a live integration. Most of the effort is in choosing
+representative scenarios, making policy effects visually obvious, and keeping
+the examples faithful to QueryGate's real configuration and behavior.
+
+**Why it matters:** The technical demo proves QueryGate works, but it asks an
+evaluator to understand configuration, database access, structured queries,
+and policy enforcement at the same time. A browser-only sandbox should make
+the core value intuitive first: an LLM attempts to query a database,
+QueryGate evaluates the request against a visible policy, and the request is
+either allowed, constrained, or rejected with a useful explanation.
+
+**What to do:** Build a mocked, static HTML sandbox that can be opened without
+a backend, credentials, model API, or database. Present a small sample
+database and a chat-like interaction where the user can choose or enter from
+a bounded set of realistic questions. Step through the resulting mock tool
+call and show QueryGate's decision in context rather than only displaying a
+final chat answer.
+
+- Include several curated scenarios with realistic sample queries: a safe
+  aggregate that passes, a request for a forbidden table or column that is
+  rejected, a query whose row limit is clamped, and a query affected by a
+  mandatory filter or principal-specific policy.
+- Show the relevant, real-shaped QueryGate configuration beside the demo and
+  make a few controls interactive (for example allowed tables/columns,
+  `max_rows`, mandatory filters, or principal). Changing a control should
+  immediately and predictably change the pass/reject decision and explanation.
+- Visualize the request path compactly: user prompt → mocked LLM/tool request
+  → QueryGate validation/policy checks → pass, constrained pass, or reject
+  → safe database result or actionable error. Make clear which parts are
+  mocked and which behavior mirrors the real product.
+- Use representative configurations and response/error shapes derived from
+  the current models and public interfaces; add a lightweight fixture or
+  snapshot check so the sandbox does not quietly drift into demonstrating
+  syntax or behavior QueryGate does not support.
+- Keep the experience deterministic, fast, accessible, responsive, and easy
+  to reset. It should work as a hosted landing-page embed and as a local static
+  file, with no production data and no network dependency after load.
+- End with a clear handoff to the real technical demo, documentation, or
+  runnable quickstart so the sandbox explains the value without pretending to
+  be execution proof.
+
+**Definition of done:** A first-time visitor can use the sandbox in under two
+minutes, explain why at least one request passed and another was rejected, and
+see how one policy/configuration change alters the outcome. Every showcased
+configuration, decision, and error is traceable to a tested QueryGate behavior,
+and the page is explicitly labeled as an illustrative mocked experience.
 
 ### 32. Governed adaptive semantic memory for agents
 

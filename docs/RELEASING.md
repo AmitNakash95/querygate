@@ -13,10 +13,13 @@ Included runtime surfaces:
 - the production Docker image; and
 - the Postgres/Redis Compose stack used for local verification.
 
-The landing page, business material, tests, documentation, and `archive/` are repository
-assets but are excluded from the container. Historical extraction reports live under
-`archive/extraction/`. Generated databases, local environment files, coverage output,
-and build artifacts must never be tracked.
+The landing page, business material, tests, documentation, `deploy/`, and `archive/` are
+repository assets but are excluded from the container. `deploy/` (production Docker
+Compose and Helm chart references, see `deploy/README.md`) is used directly from a
+checkout, not bundled into the package or image — operators clone or copy it, they don't
+`pip install` it. Historical extraction reports live under `archive/extraction/`.
+Generated databases, local environment files, coverage output, and build artifacts must
+never be tracked.
 
 ## Prerequisites
 
