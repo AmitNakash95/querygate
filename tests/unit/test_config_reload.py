@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from querygate import config_reload as reload_module
+from querygate.catalog.loader import get_catalog_store
 from querygate.config_reload import reload_config
 from querygate.connections.registry import get_registry
 from querygate.execution.concurrency import SEMAPHORES
@@ -166,3 +167,64 @@ connections:
         result = await reload_config(connections_file=connections_file, policy_file=policy_file)
 
     assert result.policy_connection_overrides == ["fresh"]
+
+
+@pytest.mark.asyncio
+async def test_reload_with_no_catalog_file_yields_empty_catalog_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_RELOAD_URL", "postgresql+asyncpg://user:pass@localhost/x")
+    connections_file = _write(
+        tmp_path,
+        "connections.yaml",
+        """
+connections:
+  - id: fresh
+    dialect: postgresql
+    connection_string: ${TEST_RELOAD_URL}
+""",
+    )
+    policy_file = _write(tmp_path, "policy.yaml", _POLICY_YAML)
+
+    with patch.object(reload_module, "dispose_engine", new_callable=AsyncMock):
+        result = await reload_config(
+            connections_file=connections_file, policy_file=policy_file, catalog_file=None
+        )
+
+    assert result.catalog_connection_ids == []
+    assert get_catalog_store().get_table("fresh", "anything") is None
+
+
+@pytest.mark.asyncio
+async def test_reload_swaps_in_new_catalog_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_RELOAD_URL", "postgresql+asyncpg://user:pass@localhost/x")
+    connections_file = _write(
+        tmp_path,
+        "connections.yaml",
+        """
+connections:
+  - id: fresh
+    dialect: postgresql
+    connection_string: ${TEST_RELOAD_URL}
+""",
+    )
+    policy_file = _write(tmp_path, "policy.yaml", _POLICY_YAML)
+    catalog_file = _write(
+        tmp_path,
+        "catalog.yaml",
+        """
+connections:
+  fresh:
+    tables:
+      widgets:
+        description: "One row per widget."
+""",
+    )
+
+    with patch.object(reload_module, "dispose_engine", new_callable=AsyncMock):
+        result = await reload_config(
+            connections_file=connections_file, policy_file=policy_file, catalog_file=catalog_file
+        )
+
+    assert result.catalog_connection_ids == ["fresh"]
+    entry = get_catalog_store().get_table("fresh", "widgets")
+    assert entry is not None
+    assert entry.description == "One row per widget."

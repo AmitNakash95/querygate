@@ -56,7 +56,7 @@ order-of-magnitude, not commitments.
 | 24 | ✅ Release hygiene and reproducible v0.1.0 cut | S–M | 4, 14, 17 |
 | 25 | Admin/config governance plane | L | 5, 6, 10, 13 |
 | 26 | Query-cost estimation before execution | L | 2, 3, 15 |
-| 27 | Semantic schema catalog and sensitivity metadata | L | 6, 16 |
+| 27 | ✅ Semantic schema catalog and sensitivity metadata | L | 6, 16 |
 | 28 | ✅ Threat model + adversarial security test suite | M | 1, 6, 8, 10, 11 |
 | 29 | Production deployment reference stack | M | 4, 9, 12, 13, 14 |
 | 30 | Distribution, SBOM, and signed release artifacts | M | 4, 14 |
@@ -917,7 +917,63 @@ estimated rows/cost where available, and rejects queries above configured
 thresholds. Start with Postgres, document MSSQL differences, and include
 clear denial messages that help the agent narrow the query safely.
 
-### 27. Semantic schema catalog and sensitivity metadata
+### 27. Semantic schema catalog and sensitivity metadata ✅ DONE
+
+**Shipped:** A new `querygate/catalog/` module (`models.py` + `loader.py`)
+mirroring the existing `policy/` module's shape: an optional, versioned,
+YAML-file-configured overlay (`CATALOG_FILE`, unset by default — a
+deployment with no curated catalog behaves identically) keyed by connection
+→ table → column, each entry carrying `description`, `aliases`,
+`sensitivity` (`none`/`internal`/`confidential`/`pii`), and `allow_samples`,
+plus table-level `default_aggregation` and `relationships` (curated,
+non-enforced join hints: `to_table`/`column`/`to_column`/`description`).
+
+`StructuredQueryService.describe_table` merges the resolved entry into a new
+`catalog` object on the response — one per table and one per column — for
+both MCP's `describe_table` tool and the REST `GET
+/{connection}/tables/{table}` endpoint (they share the same
+`TableDescription` model, so no separate REST wiring was needed).
+`list_tables` is deliberately unchanged in this pass — enriching it would
+break its existing `List[str]` response contract on both REST and MCP; left
+for a follow-up if a lightweight per-table blurb in the list view turns out
+to matter in practice.
+
+**Principal-safe by construction**, the security-sensitive part of this
+item: a denied column never reaches catalog lookup at all, because it's
+already excluded from `describe_table`'s column list by the pre-existing
+policy filter before catalog metadata is attached. Table-level
+`relationships` needed their own explicit filter
+(`catalog.models.visible_relationships`) — an admin's curated "orders joins
+customers via customer_id" hint is dropped from the response when the
+caller's resolved policy denies `customers`, so curated metadata can never
+disclose more than ordinary schema/policy discovery already allows. Covered
+by a dedicated adversarial test,
+`test_catalog_relationship_hint_cannot_disclose_a_denied_table`, plus the
+threat model's new QG-13 entry.
+
+Hot-reloadable without a restart through the existing config-reload
+machinery: `config_reload.reload_config()` gained an optional
+`catalog_file` parameter and swaps in a fresh `CatalogStore` alongside the
+registry/policy swap; the REST `POST /api/v1/admin/reload-config` endpoint
+(same `admin:reload-config` scope, no new endpoint) now reports
+`catalog_connection_ids` too. `querygate-validate-config` gained an optional
+`--catalog-file` flag that structurally validates the file and cross-checks
+its connection ids against the real registry, mirroring the existing
+policy cross-check.
+
+Bundled `examples/catalog.example.yaml` curates the demo's
+`customers`/`orders`/`order_items` tables (including marking
+`customers.email` as `pii`, matching `policy.example.yaml`'s existing
+denied-column example) and is wired into `.env.example` via `CATALOG_FILE`
+so the quickstart demo shows the feature end to end.
+
+**Explicitly out of scope for this pass** (this is item 27's own "what to
+do" scope, not item 32's — no per-entry provenance/status
+(draft/verified/stale), no approval workflow, no model-generated content, no
+usage-derived learning, and no row-level sample values — `allow_samples` is
+captured as a metadata flag now but nothing in this repo generates or
+returns samples yet). Those remain item 32's job, which depends on this
+item's data model.
 
 **Effort: L (1 week for a useful first version).** Reflection exists; the
 new work is storing curated metadata and making it available to agents

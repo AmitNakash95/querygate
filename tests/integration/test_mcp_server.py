@@ -11,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from querygate.api.app import create_app
+from querygate.catalog.loader import CatalogStore, set_catalog_store
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.config import AppConfig
@@ -293,6 +294,71 @@ async def test_mcp_describe_table_uses_per_principal_column_policy():
     payload = _parse_mcp_response(resp)
     columns = payload["result"]["structuredContent"]["result"]["columns"]
     assert {column["name"] for column in columns} == {"id", "name"}
+
+
+@pytest.mark.asyncio
+async def test_mcp_describe_table_includes_catalog_metadata_when_configured():
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "connections": {
+                    "demo": {
+                        "tables": {
+                            "customers": {
+                                "description": "One row per customer.",
+                                "sensitivity": "internal",
+                                "columns": {
+                                    "email": {"description": "Email address", "sensitivity": "pii"}
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+    customers = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("email", sa.String(100)),
+    )
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_keys=[_TEST_API_KEY])
+    app = create_app(settings)
+    with (
+        patch("querygate.execution.service.get_engine", return_value=MagicMock()),
+        patch(
+            "querygate.execution.service.get_table_schema",
+            AsyncMock(return_value=customers),
+        ),
+    ):
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url=_BASE_URL,
+                follow_redirects=True,
+            ) as client,
+        ):
+            resp = await client.post(
+                "/mcp/",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "describe_table",
+                        "arguments": {"connection": "demo", "table_name": "customers"},
+                    },
+                },
+                headers={**_HEADERS_JSON, "Authorization": f"Bearer {_TEST_API_KEY}"},
+            )
+    assert resp.status_code == 200
+    result = _parse_mcp_response(resp)["result"]["structuredContent"]["result"]
+    assert result["catalog"]["description"] == "One row per customer."
+    email_column = next(c for c in result["columns"] if c["name"] == "email")
+    assert email_column["catalog"]["sensitivity"] == "pii"
 
 
 @pytest.mark.asyncio

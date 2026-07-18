@@ -29,6 +29,7 @@ class TableDescribeToolResult(BaseModel):
     name: str
     columns: List[Dict[str, Any]]
     description: Optional[str] = None
+    catalog: Optional[Dict[str, Any]] = None
 
 
 @mcp_server.tool(
@@ -52,8 +53,12 @@ async def list_tables(
         "Describe columns for a table in the given connection (name, SQLAlchemy type "
         "string, nullable, and description when the source DB has a documented comment "
         "for that table/column — description may be null). Columns denied by policy are "
-        "omitted from the result, not flagged as errors. Use to discover valid "
-        "Table.Column references for structured queries."
+        "omitted from the result, not flagged as errors. Each column and the table itself "
+        "may carry an optional 'catalog' object (business description, aliases, "
+        "sensitivity class, allow_samples, and — table-level only — default_aggregation and "
+        "relationship hints to other tables) when the deployment has a curated schema "
+        "catalog configured; null when it doesn't. Use to discover valid Table.Column "
+        "references for structured queries."
     )
 )
 @safe_mcp_tool
@@ -67,4 +72,5 @@ async def describe_table(
         name=description.name,
         columns=[c.model_dump() for c in description.columns],
         description=description.description,
+        catalog=description.catalog.model_dump() if description.catalog else None,
     )

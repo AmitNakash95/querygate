@@ -68,6 +68,8 @@ trusted to return client-safe error messages.
 
 - Database credentials and connection topology.
 - Database schema, row data, aggregates, and sensitive column existence.
+- Curated schema-catalog metadata (descriptions, relationship hints,
+  sensitivity labels) layered on top of reflected schema.
 - Principal identity, claims, scopes, and per-principal policy decisions.
 - Availability of QueryGate and the databases behind it.
 - Configuration integrity, particularly connection and policy changes.
@@ -99,6 +101,7 @@ CI/CD, and secrets-management controls.
 | QG-02 | Table/column policy bypass through filters, joins, grouping, having, ordering, or ranking | Policy gathers every qualified reference before reflection; deny wins; matching is case-insensitive | Security parametrization `test_denied_column_cannot_be_used_for_inference` and denied-table smuggling test |
 | QG-03 | Implicit/undeclared table injection | Every referenced table must be the `from` table or an explicit join; each join must reference the joined table and connect to the existing graph | Security test `test_undeclared_table_reference_is_rejected_before_reflection`; schema-validation join tests |
 | QG-04 | Schema discovery leaks hidden resources | Connection listing, direct access, table listing, and column description resolve the caller's policy; hidden connections return the same not-found shape as unknown ones | `test_connection_visibility.py`; REST/MCP principal-scoping integration tests |
+| QG-13 | Curated schema-catalog metadata discloses a hidden table/column | Catalog entries are display-only and never bypass policy; a denied column is excluded from `describe_table` before catalog lookup happens; a relationship hint pointing at a policy-denied table is dropped from the response | `test_catalog_relationship_hint_cannot_disclose_a_denied_table`; catalog unit/integration tests |
 | QG-05 | Cross-principal or cross-tenant confusion | Immutable request-local `Principal`; per-principal policy resolution; claim-derived mandatory row filters; MCP caller stored in a reset `ContextVar` | Security principal-isolation and aggregate row-filter tests; policy-loader and MCP tests |
 | QG-06 | Authentication spoofing or token confusion | Constant-time API-key comparison; JWT signature, algorithm, issuer, audience, expiry, required subject, and configured JWKS verification; anonymous bypass only in local/development when no real authenticator is configured | `test_auth.py`, `test_jwt_auth.py`, REST/MCP authentication integration tests |
 | QG-07 | Credential, row, predicate, or backend-detail leakage | Public connection DTO has no credential field; unexpected REST/MCP/batch errors are generic; persisted audit schema excludes SQL, params, intent, exception text, and rows; explain/audit SQL is parameterized by default | `test_credential_redaction.py`, `test_audit.py`, security public-error tests |
@@ -184,6 +187,7 @@ The code controls above assume a correctly operated deployment:
 
 Review and version this threat model whenever QueryGate adds a write path, a
 new database dialect, stored procedures, a new authentication mechanism,
-browser-facing UI, external secret/audit backend, query-cost engine, or a new
-admin/config mutation surface. A release should also rerun `make test-security`
-and the full default suite.
+browser-facing UI, external secret/audit backend, query-cost engine, a new
+admin/config mutation surface, or a change to the schema-catalog data model
+(e.g. model-generated catalog content, item 32). A release should also rerun
+`make test-security` and the full default suite.

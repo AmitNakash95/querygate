@@ -8,14 +8,17 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from querygate.api.app import create_app
+from querygate.catalog.models import RelationshipHint
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import QueryValidationError
 from querygate.execution.service import (
     BatchQueryItemResult,
+    ColumnCatalogEntry,
     ColumnInfo,
     StructuredQueryResult,
+    TableCatalogInfo,
     TableDescription,
 )
 from querygate.policy.loader import PolicyStore, set_policy_store
@@ -160,6 +163,49 @@ async def test_describe_table(app):
             resp = await client.get("/api/v1/demo/tables/customers")
     assert resp.status_code == 200
     assert resp.json()["name"] == "customers"
+
+
+@pytest.mark.asyncio
+async def test_describe_table_includes_catalog_metadata_when_configured(app):
+    desc = TableDescription(
+        name="customers",
+        columns=[
+            ColumnInfo(
+                name="email",
+                type="VARCHAR",
+                nullable=True,
+                catalog=ColumnCatalogEntry(description="Customer email", sensitivity="pii"),
+            )
+        ],
+        catalog=TableCatalogInfo(
+            description="One row per customer.",
+            relationships=[
+                RelationshipHint(to_table="orders", column="id", to_column="customer_id")
+            ],
+        ),
+    )
+    with patch(f"{_SERVICE}.describe_table", new_callable=AsyncMock, return_value=desc):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.get("/api/v1/demo/tables/customers")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["catalog"]["description"] == "One row per customer."
+    assert body["catalog"]["relationships"][0]["to_table"] == "orders"
+    assert body["columns"][0]["catalog"]["sensitivity"] == "pii"
+
+
+@pytest.mark.asyncio
+async def test_describe_table_catalog_is_null_when_not_configured(app):
+    desc = TableDescription(
+        name="customers", columns=[ColumnInfo(name="id", type="INTEGER", nullable=False)]
+    )
+    with patch(f"{_SERVICE}.describe_table", new_callable=AsyncMock, return_value=desc):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.get("/api/v1/demo/tables/customers")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["catalog"] is None
+    assert body["columns"][0]["catalog"] is None
 
 
 @pytest.mark.asyncio
@@ -416,3 +462,33 @@ async def test_reload_config_succeeds_with_scope(tmp_path, monkeypatch):
             "/api/v1/connections", headers={"Authorization": "Bearer secret-key"}
         )
     assert [c["id"] for c in listed.json()] == ["reload-demo"]
+
+
+@pytest.mark.asyncio
+async def test_reload_config_swaps_in_catalog_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_RELOAD_DB_URL", "postgresql+asyncpg://user:pass@localhost/demo")
+    connections_file, policy_file = _write_reload_config_files(tmp_path)
+    catalog_file = tmp_path / "catalog.yaml"
+    catalog_file.write_text(
+        """
+connections:
+  reload-demo:
+    tables:
+      foo:
+        description: "Reloaded catalog entry."
+"""
+    )
+    settings = _settings(
+        api_keys=["secret-key"],
+        api_key_scopes=["admin:reload-config"],
+        connections_file=connections_file,
+        policy_file=policy_file,
+        catalog_file=str(catalog_file),
+    )
+    reload_app = create_app(settings)
+    async with AsyncClient(transport=ASGITransport(app=reload_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/reload-config", headers={"Authorization": "Bearer secret-key"}
+        )
+    assert resp.status_code == 200
+    assert resp.json()["catalog_connection_ids"] == ["reload-demo"]

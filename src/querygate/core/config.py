@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from enum import Enum
 from importlib import resources
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 import pydantic as pyd
 from pydantic_settings import BaseSettings
@@ -75,6 +75,12 @@ class AppConfig(BaseSettings):
         default_factory=lambda: _example_file("connections.example.yaml")
     )
     policy_file: str = pyd.Field(default_factory=lambda: _example_file("policy.example.yaml"))
+
+    # Optional curated schema-catalog overlay (querygate/catalog/) — business
+    # descriptions, aliases, relationship hints, and sensitivity metadata fed
+    # into describe_table. Unset by default: a deployment with no curated
+    # catalog behaves identically, just without the extra `catalog` field.
+    catalog_file: Optional[str] = pyd.Field(default=None)
 
     # REST and MCP share one API-key authenticator (see core/auth.py). Both
     # allow an anonymous dev-bypass outside production when no keys are set.

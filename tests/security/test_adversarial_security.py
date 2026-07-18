@@ -9,13 +9,14 @@ response limits if validation order regresses.
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
 
 from querygate.api.app import create_app
+from querygate.catalog.loader import CatalogStore, set_catalog_store
 from querygate.compiler.sqlalchemy_compiler import compile_structured_query
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
@@ -24,9 +25,10 @@ from querygate.core.exceptions import (
     PolicyViolationError,
     QueryValidationError,
 )
+from querygate.execution import service as svc
 from querygate.execution.service import StructuredQueryService, _cap_response_bytes
 from querygate.mcp.exceptions import _error_code_from_exception
-from querygate.policy.loader import PolicyStore
+from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import MandatoryRowFilter, Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
@@ -179,6 +181,59 @@ def test_principal_policy_cannot_bleed_between_callers():
         store.get("demo", principal=Principal(subject="standard-agent")),
         connection_id="demo",
     )
+
+
+@pytest.mark.asyncio
+async def test_catalog_relationship_hint_cannot_disclose_a_denied_table():
+    """A curated catalog relationship (querygate/catalog/) is admin-authored
+    display metadata, not a policy decision — it must not let a
+    principal-restricted caller learn that a table they cannot see or query
+    exists, the same non-enumeration guarantee connection/table/column
+    discovery already holds.
+    """
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "connections": {
+                    "demo": {
+                        "tables": {
+                            "orders": {
+                                "relationships": [
+                                    {
+                                        "to_table": "customers",
+                                        "column": "customer_id",
+                                        "to_column": "id",
+                                        "description": "The customer who placed this order.",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+    set_policy_store(
+        PolicyStore.from_dict(
+            {
+                "default": {},
+                "principals": {"restricted-agent": {"demo": {"denied_tables": ["customers"]}}},
+            }
+        )
+    )
+    orders_table = sa.Table("orders", sa.MetaData(), sa.Column("id", sa.Integer, primary_key=True))
+    service = StructuredQueryService(
+        connection_id="demo", principal=Principal(subject="restricted-agent")
+    )
+
+    with (
+        patch.object(svc, "get_engine", return_value=MagicMock()),
+        patch.object(svc, "get_table_schema", AsyncMock(return_value=orders_table)),
+    ):
+        description = await service.describe_table("orders")
+
+    assert description.catalog.relationships == []
+    assert "customers" not in json.dumps(description.model_dump())
 
 
 def test_aggregate_queries_retain_principal_mandatory_row_filter():

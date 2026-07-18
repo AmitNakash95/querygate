@@ -2,6 +2,18 @@
 
 All notable changes to QueryGate are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Optional curated schema-catalog overlay (`querygate/catalog/`, `CATALOG_FILE`): business
+  descriptions, aliases, relationship hints, sensitivity labels, default aggregation
+  preference, and an `allow_samples` flag, curated per connection/table/column and merged
+  into `describe_table` (MCP and REST) as a `catalog` object. Filtered by the same
+  per-principal policy as everything else — denied columns and relationship hints toward
+  denied tables never appear. Hot-reloadable via the existing config-reload endpoint and
+  validated by `querygate-validate-config --catalog-file`.
+
 ## [0.1.0] — 2026-07-18
 
 Initial self-hosted release candidate.

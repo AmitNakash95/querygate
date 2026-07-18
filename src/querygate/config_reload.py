@@ -1,17 +1,19 @@
-"""Hot-reload connections.yaml / policy.yaml without a process restart.
+"""Hot-reload connections.yaml / policy.yaml / catalog.yaml without a process restart.
 
-`connections/registry.py` and `policy/loader.py` each load their YAML file
-once into a process-wide singleton on first access — tightening a policy in
-response to an incident, or adding a connection, previously required a full
-redeploy. `reload_config()` rebuilds both stores from disk and swaps them in.
+`connections/registry.py`, `policy/loader.py`, and `catalog/loader.py` each
+load their YAML file once into a process-wide singleton on first access —
+tightening a policy in response to an incident, or adding a connection,
+previously required a full redeploy. `reload_config()` rebuilds every store
+from disk and swaps them in.
 """
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 import pydantic as pyd
 
+from querygate.catalog.loader import CatalogStore, set_catalog_store
 from querygate.connections.engine import dispose_engine
 from querygate.connections.registry import ConnectionRegistry, get_registry, set_registry
 from querygate.core.logging import get_logger
@@ -22,10 +24,13 @@ from querygate.policy.loader import PolicyStore, set_policy_store
 class ReloadResult(pyd.BaseModel):
     connection_ids: List[str]
     policy_connection_overrides: List[str]
+    catalog_connection_ids: List[str]
     disposed_connections: List[str]
 
 
-async def reload_config(*, connections_file: str, policy_file: str) -> ReloadResult:
+async def reload_config(
+    *, connections_file: str, policy_file: str, catalog_file: Optional[str] = None
+) -> ReloadResult:
     """Atomically swap in a freshly loaded registry + policy store.
 
     Safe for in-flight requests: `set_registry`/`set_policy_store` are a
@@ -50,9 +55,13 @@ async def reload_config(*, connections_file: str, policy_file: str) -> ReloadRes
     old_registry = get_registry()
     new_registry = ConnectionRegistry.from_file(connections_file)
     new_policy_store = PolicyStore.from_file(policy_file)
+    new_catalog_store = (
+        CatalogStore.from_file(catalog_file) if catalog_file else CatalogStore.empty()
+    )
 
     set_registry(new_registry)
     set_policy_store(new_policy_store)
+    set_catalog_store(new_catalog_store)
 
     disposed = await _dispose_stale_engines(old_registry, new_registry)
     for connection_id in new_registry.all_ids():
@@ -66,6 +75,7 @@ async def reload_config(*, connections_file: str, policy_file: str) -> ReloadRes
     return ReloadResult(
         connection_ids=new_registry.all_ids(),
         policy_connection_overrides=new_policy_store.override_connection_ids(),
+        catalog_connection_ids=new_catalog_store.connection_ids(),
         disposed_connections=disposed,
     )
 

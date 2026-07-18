@@ -203,6 +203,49 @@ used by REST, MCP, direct schema/query calls, and cross-connection joins.
 Deployment-level `enabled: false` in `connections.yaml` always wins and
 cannot be re-enabled by principal policy.
 
+## Example schema catalog (optional)
+
+Raw reflection tells an agent that `customers.email` exists and is a
+`VARCHAR`; it doesn't say what the table represents, how it joins to other
+tables, or that the column is sensitive. A curated schema catalog fills that
+gap:
+
+```yaml
+# examples/catalog.example.yaml
+version: 1
+connections:
+  demo:
+    tables:
+      customers:
+        description: "One row per registered customer."
+        aliases: ["clients", "accounts"]
+        default_aggregation: "count(customers.id)"
+        relationships:
+          - to_table: orders
+            column: id
+            to_column: customer_id
+            description: "A customer's orders."
+        columns:
+          email:
+            description: "Customer email address."
+            sensitivity: pii
+            allow_samples: false
+```
+
+Set `CATALOG_FILE` to point at your own copy (unset by default — a
+deployment with no curated catalog behaves identically). `describe_table`
+(MCP and REST) merges this into its response as a `catalog` object per
+table and per column when configured, `null` otherwise. It is purely
+descriptive: the catalog never affects query validation, compilation, or
+execution, and it is filtered by the same policy as everything else —
+denied columns never reach catalog lookup at all (they're already excluded
+from the response), and a relationship hint pointing at a table the caller's
+resolved policy denies is dropped, so curated metadata can never disclose
+more than ordinary schema discovery already allows. Reloadable without a
+restart via the same `POST /api/v1/admin/reload-config` endpoint used for
+connections/policy; validated by `querygate-validate-config --catalog-file
+...` alongside the other two files.
+
 ## Example StructuredQuery payload
 
 ```json
@@ -286,6 +329,9 @@ Agent (MCP) / Client (REST)
   entire agent-facing input surface.
 - **`policy/`** — `Policy` model + YAML loader (default + per-connection
   overrides).
+- **`catalog/`** — optional curated schema-catalog overlay (descriptions,
+  aliases, relationship hints, sensitivity labels) merged into
+  `describe_table`, filtered by the same policy as everything else.
 - **`validation/`** — schema-truth checks (does this table/column exist?)
   and policy checks (is it allowed? within caps?) — deliberately separate
   modules, run in that order, both before compilation.
@@ -315,6 +361,10 @@ Agent (MCP) / Client (REST)
 - **Every identifier is schema-checked**, not agent-asserted — a
   `Table.Column` reference that doesn't exist in the live reflected schema
   is rejected, regardless of what the AST claims.
+- **Curated catalog metadata is policy-filtered too** — an optional schema
+  catalog (business descriptions, relationship hints, sensitivity labels)
+  never affects query enforcement, and never discloses a table/column a
+  denied caller couldn't already see through ordinary schema discovery.
 - **Bounded execution** — every query runs under a per-connection
   concurrency semaphore and a policy-configured timeout; row counts are
   clamped server-side (tiered: lower for row selects, higher for

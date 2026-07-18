@@ -46,6 +46,7 @@ def main() -> None:
         "querygate/__init__.py",
         "examples/connections.example.yaml",
         "examples/policy.example.yaml",
+        "examples/catalog.example.yaml",
     }
     absent = sorted(required_wheel - set(wheel_members))
     if absent:

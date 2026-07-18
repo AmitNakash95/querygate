@@ -103,3 +103,85 @@ def test_both_files_broken_reports_both_errors(tmp_path):
         str(tmp_path / "missing_connections.yaml"), str(tmp_path / "missing_policy.yaml")
     )
     assert len(errors) == 2
+
+
+def test_catalog_file_is_optional(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_DEMO_DB_URL", "postgresql+asyncpg://user:pass@localhost/demo")
+    connections_file = _write(tmp_path, "connections.yaml", CONNECTIONS_YAML)
+    policy_file = _write(tmp_path, "policy.yaml", POLICY_YAML)
+
+    errors = validate_config(connections_file, policy_file, catalog_file=None)
+    assert errors == []
+
+
+def test_valid_catalog_file_has_no_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_DEMO_DB_URL", "postgresql+asyncpg://user:pass@localhost/demo")
+    connections_file = _write(tmp_path, "connections.yaml", CONNECTIONS_YAML)
+    policy_file = _write(tmp_path, "policy.yaml", POLICY_YAML)
+    catalog_file = _write(
+        tmp_path,
+        "catalog.yaml",
+        """
+connections:
+  demo:
+    tables:
+      customers:
+        description: "One row per customer."
+""",
+    )
+
+    errors = validate_config(connections_file, policy_file, catalog_file=catalog_file)
+    assert errors == []
+
+
+def test_missing_catalog_file_is_reported(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_DEMO_DB_URL", "postgresql+asyncpg://user:pass@localhost/demo")
+    connections_file = _write(tmp_path, "connections.yaml", CONNECTIONS_YAML)
+    policy_file = _write(tmp_path, "policy.yaml", POLICY_YAML)
+
+    errors = validate_config(
+        connections_file, policy_file, catalog_file=str(tmp_path / "missing_catalog.yaml")
+    )
+    assert len(errors) == 1
+    assert "missing_catalog.yaml" in errors[0]
+
+
+def test_catalog_referencing_unknown_connection_id_is_reported(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_DEMO_DB_URL", "postgresql+asyncpg://user:pass@localhost/demo")
+    connections_file = _write(tmp_path, "connections.yaml", CONNECTIONS_YAML)
+    policy_file = _write(tmp_path, "policy.yaml", POLICY_YAML)
+    catalog_file = _write(
+        tmp_path,
+        "catalog.yaml",
+        """
+connections:
+  typo_connection:
+    tables: {}
+""",
+    )
+
+    errors = validate_config(connections_file, policy_file, catalog_file=catalog_file)
+    assert len(errors) == 1
+    assert "typo_connection" in errors[0]
+    assert "demo" in errors[0]
+
+
+def test_invalid_catalog_field_is_reported(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_DEMO_DB_URL", "postgresql+asyncpg://user:pass@localhost/demo")
+    connections_file = _write(tmp_path, "connections.yaml", CONNECTIONS_YAML)
+    policy_file = _write(tmp_path, "policy.yaml", POLICY_YAML)
+    catalog_file = _write(
+        tmp_path,
+        "catalog.yaml",
+        """
+connections:
+  demo:
+    tables:
+      customers:
+        not_a_real_field: 1
+""",
+    )
+
+    errors = validate_config(connections_file, policy_file, catalog_file=catalog_file)
+    assert len(errors) == 1
+    assert catalog_file in errors[0]

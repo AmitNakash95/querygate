@@ -154,7 +154,9 @@ def build_router(
             )
         try:
             return await reload_config(
-                connections_file=cfg.connections_file, policy_file=cfg.policy_file
+                connections_file=cfg.connections_file,
+                policy_file=cfg.policy_file,
+                catalog_file=cfg.catalog_file,
             )
         except Exception as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

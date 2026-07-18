@@ -13,7 +13,13 @@ accepts one. Never guess table/column names — discover them first.
 1. list_connections() — see which connections this deployment exposes.
 2. list_tables(connection) — discover candidate tables for one connection.
 3. describe_table(connection, table_name) — learn columns/types/descriptions
-   for each table you will use.
+   for each table you will use. When the deployment has a curated schema
+   catalog configured, the table and each column may carry an extra
+   `catalog` object (business description, aliases, sensitivity, and —
+   table-level only — default_aggregation and relationship hints to other
+   tables); it's descriptive context only and never grants or implies
+   access beyond what policy already allows — `catalog: null` just means no
+   curated entry exists for that table/column.
 4. explain_structured_query(connection, query) — optional; sanity-check an
    expensive-looking query's compiled SQL before running it.
 5. execute_structured_query(connection, query) — run one StructuredQuery

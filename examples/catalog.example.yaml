@@ -1,0 +1,68 @@
+# Example curated schema catalog for QueryGate (optional — set CATALOG_FILE
+# to point at your own copy). This overlays business descriptions, aliases,
+# relationship hints, and sensitivity metadata on top of live schema
+# reflection; it never affects query validation, compilation, or execution —
+# Policy (see policy.example.yaml) remains the only enforcement point.
+#
+# describe_table (MCP and REST) returns this metadata as a `catalog` object
+# per table/column, filtered by the caller's resolved policy so curated
+# metadata can never disclose more than ordinary schema discovery already
+# allows: a relationship hint pointing at a table the caller's policy denies
+# is dropped, and a denied column never reaches catalog lookup at all because
+# it's already excluded from the response.
+
+version: 1
+
+connections:
+  demo:
+    tables:
+      customers:
+        description: "One row per registered customer."
+        aliases: ["clients", "accounts"]
+        default_aggregation: "count(customers.id)"
+        relationships:
+          - to_table: orders
+            column: id
+            to_column: customer_id
+            description: "A customer's orders."
+        columns:
+          id:
+            description: "Primary key, referenced by orders.customer_id."
+          email:
+            description: "Customer email address."
+            # Matches policy.example.yaml's denied_columns.customers: [email] —
+            # marked pii here as curated guidance for a deployment that does
+            # choose to allow it for some principal.
+            sensitivity: pii
+            allow_samples: false
+
+      orders:
+        description: "One row per customer order."
+        aliases: ["purchases"]
+        default_aggregation: "sum(orders.total_amount)"
+        relationships:
+          - to_table: customers
+            column: customer_id
+            to_column: id
+            description: "The customer who placed this order."
+          - to_table: order_items
+            column: id
+            to_column: order_id
+            description: "Line items belonging to this order."
+        columns:
+          total_amount:
+            description: "Order total in the deployment's base currency."
+          status:
+            description: "Order lifecycle state, e.g. pending/completed/cancelled."
+            aliases: ["order_status"]
+
+      order_items:
+        description: "One row per line item within an order."
+        relationships:
+          - to_table: orders
+            column: order_id
+            to_column: id
+            description: "The order this line item belongs to."
+        columns:
+          quantity:
+            description: "Units of the product purchased in this line item."

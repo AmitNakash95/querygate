@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import sqlalchemy as sa
 
+from querygate.catalog.loader import CatalogStore, set_catalog_store
 from querygate.core.auth import Principal
 from querygate.core.exceptions import QueryValidationError
 from querygate.execution import service as svc
@@ -515,6 +516,109 @@ async def test_describe_table_per_principal_policy_differs_on_same_connection():
 
     assert {c.name for c in desc_a.columns} == {"id"}
     assert {c.name for c in desc_b.columns} == {"id", "email"}
+
+
+@pytest.mark.asyncio
+async def test_describe_table_with_no_catalog_configured_has_no_catalog_fields():
+    table = sa.Table("customers", sa.MetaData(), sa.Column("id", sa.Integer, primary_key=True))
+    service = StructuredQueryService(connection_id="demo")
+    with (
+        patch.object(svc, "get_engine", return_value=MagicMock()),
+        patch.object(svc, "get_table_schema", AsyncMock(return_value=table)),
+    ):
+        desc = await service.describe_table("customers")
+    assert desc.catalog is None
+    assert desc.columns[0].catalog is None
+
+
+@pytest.mark.asyncio
+async def test_describe_table_merges_catalog_metadata():
+    table = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("email", sa.String(200)),
+    )
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "connections": {
+                    "demo": {
+                        "tables": {
+                            "customers": {
+                                "description": "One row per customer.",
+                                "sensitivity": "internal",
+                                "relationships": [
+                                    {
+                                        "to_table": "orders",
+                                        "column": "id",
+                                        "to_column": "customer_id",
+                                    }
+                                ],
+                                "columns": {
+                                    "email": {"description": "Email", "sensitivity": "pii"}
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+    service = StructuredQueryService(connection_id="demo")
+    with (
+        patch.object(svc, "get_engine", return_value=MagicMock()),
+        patch.object(svc, "get_table_schema", AsyncMock(return_value=table)),
+    ):
+        desc = await service.describe_table("customers")
+
+    assert desc.catalog.description == "One row per customer."
+    assert desc.catalog.sensitivity == "internal"
+    assert desc.catalog.relationships[0].to_table == "orders"
+    email_col = next(c for c in desc.columns if c.name == "email")
+    assert email_col.catalog.description == "Email"
+    assert email_col.catalog.sensitivity == "pii"
+    id_col = next(c for c in desc.columns if c.name == "id")
+    assert id_col.catalog is None  # no catalog entry for this column
+
+
+@pytest.mark.asyncio
+async def test_describe_table_catalog_hides_relationship_to_denied_table():
+    """A curated relationship hint toward a table the caller's resolved
+    policy denies must not leak that table's existence — the same
+    non-enumeration property policy enforces for the query AST itself.
+    """
+    table = sa.Table("orders", sa.MetaData(), sa.Column("id", sa.Integer, primary_key=True))
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "connections": {
+                    "demo": {
+                        "tables": {
+                            "orders": {
+                                "relationships": [
+                                    {
+                                        "to_table": "customers",
+                                        "column": "customer_id",
+                                        "to_column": "id",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+    set_policy_store(PolicyStore(default=Policy(denied_tables=["customers"]), overrides={}))
+    service = StructuredQueryService(connection_id="demo")
+    with (
+        patch.object(svc, "get_engine", return_value=MagicMock()),
+        patch.object(svc, "get_table_schema", AsyncMock(return_value=table)),
+    ):
+        desc = await service.describe_table("orders")
+
+    assert desc.catalog.relationships == []
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,13 @@ import sqlalchemy as sa
 
 from querygate.audit.events import AuditSurface, normalize_query_shape
 from querygate.audit.logger import audit_query
+from querygate.catalog.loader import get_catalog_store
+from querygate.catalog.models import (
+    ColumnCatalogEntry,
+    RelationshipHint,
+    SensitivityClass,
+    visible_relationships,
+)
 from querygate.compiler.sqlalchemy_compiler import compile_structured_query
 from querygate.connections.engine import get_engine, get_metadata, session_scope
 from querygate.connections.registry import get_registry
@@ -41,17 +48,34 @@ from querygate.validation.policy_validation import validate_policy
 from querygate.validation.schema_validation import validate_schema
 
 
+class TableCatalogInfo(pyd.BaseModel):
+    """Curated table-level metadata from an optional catalog overlay (see
+    `querygate/catalog/`) — display-only, never used for policy enforcement.
+    `relationships` is pre-filtered to targets the caller's resolved policy
+    allows (see `catalog.models.visible_relationships`).
+    """
+
+    description: Optional[str] = None
+    aliases: List[str] = pyd.Field(default_factory=list)
+    sensitivity: SensitivityClass = SensitivityClass.NONE
+    default_aggregation: Optional[str] = None
+    allow_samples: bool = False
+    relationships: List[RelationshipHint] = pyd.Field(default_factory=list)
+
+
 class ColumnInfo(pyd.BaseModel):
     name: str
     type: str
     nullable: bool
     description: Optional[str] = None
+    catalog: Optional[ColumnCatalogEntry] = None
 
 
 class TableDescription(pyd.BaseModel):
     name: str
     columns: List[ColumnInfo]
     description: Optional[str] = None
+    catalog: Optional[TableCatalogInfo] = None
 
 
 class StructuredQueryResult(pyd.BaseModel):
@@ -338,14 +362,33 @@ class StructuredQueryService:
             )
         engine = get_engine(self._connection_id)
         table = await get_table_schema(table_name, self._connection_id, engine)
+        # Denied columns are already excluded from `columns` below, so their
+        # catalog entries never get looked up in the first place — no
+        # separate column-level filtering is needed here.
+        catalog_entry = get_catalog_store().get_table(self._connection_id, table_name)
         columns = [
             ColumnInfo(
                 name=col.name,
                 type=_render_column_type(col.type),
                 nullable=bool(col.nullable),
                 description=col.comment,
+                catalog=(catalog_entry.column(col.name) if catalog_entry else None),
             )
             for col in table.columns
             if policy.column_allowed(table_name, col.name)
         ]
-        return TableDescription(name=table.name, columns=columns, description=table.comment)
+        table_catalog = (
+            TableCatalogInfo(
+                description=catalog_entry.description,
+                aliases=catalog_entry.aliases,
+                sensitivity=catalog_entry.sensitivity,
+                default_aggregation=catalog_entry.default_aggregation,
+                allow_samples=catalog_entry.allow_samples,
+                relationships=visible_relationships(catalog_entry, policy),
+            )
+            if catalog_entry
+            else None
+        )
+        return TableDescription(
+            name=table.name, columns=columns, description=table.comment, catalog=table_catalog
+        )
