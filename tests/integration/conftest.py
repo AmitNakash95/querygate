@@ -46,7 +46,11 @@ async def sqlite_app(monkeypatch):
     monkeypatch.setattr(svc_module, "session_scope", _session_scope)
     monkeypatch.setattr(sv_module, "get_engine", lambda connection_id: engine)
 
-    settings = AppConfig(environment="localhost", mcp_enabled=False)
+    settings = AppConfig(
+        environment="localhost",
+        mcp_enabled=False,
+        audit_sink_backend="none",
+    )
     app = create_app(settings)
     yield app
     await engine.dispose()

@@ -52,7 +52,7 @@ order-of-magnitude, not commitments.
 | 20 | ✅ Client SDK / integration examples | S | — |
 | 21 | ✅ Principal policy must apply to every MCP/config surface | S | 6, 8, 10 |
 | 22 | ✅ Principal-aware connection/tool visibility | S–M | 6, 8 |
-| 23 | Persisted audit/event sink | M | 1, 12 |
+| 23 | ✅ Persisted audit/event sink | M | 1, 12 |
 | 24 | Release hygiene and reproducible v0.1.0 cut | S–M | 4, 14, 17 |
 | 25 | Admin/config governance plane | L | 5, 6, 10, 13 |
 | 26 | Query-cost estimation before execution | L | 2, 3, 15 |
@@ -639,7 +639,33 @@ it consistently to REST `list_connections`, MCP `list_connections`, schema
 tools, health detail where relevant, and examples/docs. Add tests for a
 principal that can see one connection but not another.
 
-### 23. Persisted audit/event sink
+### 23. Persisted audit/event sink ✅ DONE
+
+**Shipped:** Added a versioned `AuditEvent` schema and pluggable `AuditSink`
+interface under `querygate/audit/`, with an append-only JSONL implementation
+enabled by `.env.example`. Events include event/correlation ids, timestamp,
+REST/MCP surface, operation, principal id/scopes, authentication method,
+connection id, normalized query shape, policy decision, outcome, duration,
+row count, response byte count, truncation, and a fixed error category.
+
+The persisted schema deliberately has no SQL, params, predicate values,
+natural-language intent, exception messages, connection strings, or returned
+rows. Both success and rejection paths are covered, including auth-method
+attribution (`api_key`, `jwt`, `anonymous`) and principal-aware REST/MCP
+surface propagation.
+
+`JsonlAuditSink` creates files with mode `0600`, uses append-only writes,
+reopens the path for every event so external rename-and-recreate rotation
+works, and optionally calls `fsync` per event. Sink failures produce a
+distinct `audit.sink.write_failed` structured log without converting an
+already-executed database read into a misleading client failure. Retention,
+immutable/WORM storage, and SIEM shipping remain operator responsibilities
+and are documented explicitly in the README.
+
+Regression coverage in `tests/unit/test_audit.py` proves append behavior,
+file permissions, lifecycle configuration/reset, correlation and identity
+metadata, rejection categorization, and absence of predicate, intent,
+exception, SQL, parameter, and returned-row data.
 
 **Effort: M (2–3 days).** Start with one durable sink (Postgres table,
 append-only JSONL file, or webhook) and a narrow event schema. Avoid trying

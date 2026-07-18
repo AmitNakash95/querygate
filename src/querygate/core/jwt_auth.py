@@ -79,6 +79,7 @@ class JwtAuthenticator:
             subject=str(subject),
             scopes=frozenset(_extract_scopes(claims, self._scopes_claim)),
             claims=claims,
+            auth_method="jwt",
         )
 
 

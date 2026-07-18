@@ -67,6 +67,7 @@ def test_valid_token_maps_claims_to_principal():
     assert principal.subject == "user-123"
     assert principal.scopes == frozenset({"read:orders", "write:orders"})
     assert principal.claims["tenant_id"] == "acme"
+    assert principal.auth_method == "jwt"
 
 
 def test_scopes_claim_as_list():

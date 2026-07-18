@@ -27,6 +27,13 @@ class ConcurrencyBackend(str, Enum):
     REDIS = "redis"
 
 
+class AuditSinkBackend(str, Enum):
+    """Persisted audit destination. Stdout audit logging remains always on."""
+
+    NONE = "none"
+    JSONL = "jsonl"
+
+
 def _parse_str_list(value: Any) -> Any:
     """Accept a JSON array, a comma-separated string, or a list as-is."""
     if isinstance(value, list):
@@ -95,6 +102,13 @@ class AppConfig(BaseSettings):
     # How often each enabled connection is pinged in the background for
     # GET /health's readiness signal (see querygate/health.py).
     health_check_interval_seconds: float = pyd.Field(default=30)
+
+    # Persisted audit events are separate from the always-on structured
+    # stdout audit log. JSONL is append-only and intended for a persistent
+    # volume or collection by the customer's log/SIEM agent.
+    audit_sink_backend: AuditSinkBackend = pyd.Field(default=AuditSinkBackend.NONE)
+    audit_jsonl_path: str = pyd.Field(default="var/audit/querygate-audit.jsonl")
+    audit_jsonl_fsync: bool = pyd.Field(default=False)
 
     concurrency_backend: ConcurrencyBackend = pyd.Field(default=ConcurrencyBackend.IN_PROCESS)
     concurrency_redis_url: str = pyd.Field(default="")

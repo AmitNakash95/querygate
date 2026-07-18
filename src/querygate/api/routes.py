@@ -58,7 +58,7 @@ def _require_connection(connection_id: str, principal: Principal) -> None:
 
 def _service(connection_id: str, principal: Principal) -> StructuredQueryService:
     _require_connection(connection_id, principal)
-    return StructuredQueryService(connection_id=connection_id, principal=principal)
+    return StructuredQueryService(connection_id=connection_id, principal=principal, surface="rest")
 
 
 def build_router(

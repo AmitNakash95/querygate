@@ -106,7 +106,11 @@ async def mssql_app():
     set_policy_store(PolicyStore(default=Policy(), overrides={}))
     reset_engines()
 
-    settings = AppConfig(environment="localhost", mcp_enabled=False)
+    settings = AppConfig(
+        environment="localhost",
+        mcp_enabled=False,
+        audit_sink_backend="none",
+    )
     app = create_app(settings)
     yield app
     # reset_engines() just drops references without awaiting dispose() —

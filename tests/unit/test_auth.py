@@ -15,6 +15,7 @@ def test_principal_defaults_to_empty_scopes_and_claims():
     principal = Principal(subject="svc")
     assert principal.scopes == frozenset()
     assert principal.claims == {}
+    assert principal.auth_method == "unknown"
 
 
 def test_principal_is_frozen():
@@ -32,6 +33,7 @@ def test_api_key_authenticator_attaches_configured_scopes():
     assert principal is not None
     assert principal.subject == "svc"
     assert principal.scopes == frozenset({"read:orders"})
+    assert principal.auth_method == "api_key"
 
 
 def test_api_key_authenticator_rejects_wrong_token():
@@ -56,6 +58,7 @@ def test_anonymous_authenticator_always_succeeds():
     assert principal is not None
     assert principal.subject == "anonymous-dev"
     assert principal.scopes == frozenset()
+    assert principal.auth_method == "anonymous"
 
     assert auth.authenticate("some-token").subject == "anonymous-dev"
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from querygate.audit.sinks import reset_audit_sink
 from querygate.connections.engine import reset_engines
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
@@ -32,6 +33,7 @@ def make_demo_registry(**profile_overrides) -> ConnectionRegistry:
 
 @pytest.fixture(autouse=True)
 def reset_state():
+    reset_audit_sink()
     set_registry(make_demo_registry())
     set_policy_store(PolicyStore(default=Policy(), overrides={}))
     reset_engines()
@@ -42,6 +44,7 @@ def reset_state():
     SEMAPHORES.clear()
     clear_redis_limiter()
     yield
+    reset_audit_sink()
     reset_engines()
     SEMAPHORES.clear()
     clear_redis_limiter()

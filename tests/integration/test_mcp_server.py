@@ -54,6 +54,7 @@ def _mcp_settings(**overrides) -> AppConfig:
         mcp_enabled=True,
         mcp_api_keys=[_TEST_API_KEY],
         mcp_mount_path="/mcp",
+        audit_sink_backend="none",
     )
     base.update(overrides)
     return AppConfig(**base)

@@ -26,6 +26,7 @@ class Principal:
     subject: str
     scopes: frozenset[str] = field(default_factory=frozenset)
     claims: Mapping[str, Any] = field(default_factory=dict)
+    auth_method: str = "unknown"
 
 
 class Authenticator(Protocol):
@@ -61,7 +62,7 @@ class ApiKeyAuthenticator:
             return None
         for key in self._api_keys:
             if hmac.compare_digest(bearer_token.encode("utf-8"), key.encode("utf-8")):
-                return Principal(subject=self._subject, scopes=self._scopes)
+                return Principal(subject=self._subject, scopes=self._scopes, auth_method="api_key")
         return None
 
 
@@ -80,7 +81,7 @@ class AnonymousAuthenticator:
         self._subject = subject
 
     def authenticate(self, bearer_token: Optional[str]) -> Optional[Principal]:
-        return Principal(subject=self._subject)
+        return Principal(subject=self._subject, auth_method="anonymous")
 
 
 class CompositeAuthenticator:

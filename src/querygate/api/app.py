@@ -13,6 +13,7 @@ from starlette import status
 
 from querygate.api.auth import build_principal_dependency
 from querygate.api.routes import build_router
+from querygate.audit.sinks import configure_audit_sink, reset_audit_sink
 from querygate.core.config import AppConfig, ConcurrencyBackend
 from querygate.core.config import config as default_config
 from querygate.core.logging import ContextLogger, context_logger, get_logger
@@ -30,6 +31,12 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         log = get_logger()
         log.info("querygate.startup", environment=conf.environment)
         mcp_task: Optional[asyncio.Task] = None
+
+        configure_audit_sink(
+            backend=conf.audit_sink_backend.value,
+            jsonl_path=conf.audit_jsonl_path,
+            fsync=conf.audit_jsonl_fsync,
+        )
 
         health_monitor = HealthMonitor(conf.health_check_interval_seconds)
         await health_monitor.start()
@@ -73,6 +80,7 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 app.state._mcp_stop.set()
                 await mcp_task
             await health_monitor.stop()
+            reset_audit_sink()
             if redis_client is not None:
                 clear_redis_limiter()
                 await redis_client.aclose()

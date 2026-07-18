@@ -64,7 +64,7 @@ row cap tacked on. QueryGate is structurally different:
 | Multi-database support | One connection string, hardcoded | Dynamic connection registry, credential-isolated from schema/tool responses |
 | Concurrency/load control | Rare | Per-connection concurrency semaphore + execution timeout |
 | Multi-tenant scoping | DIY | Policy-level `mandatory_row_filters` |
-| Audit trail | Rare | Every query (success or rejection) logged with compiled SQL, principal, timing |
+| Audit trail | Rare | Every query logged plus an optional persisted, redaction-safe JSONL event |
 
 ## Quickstart
 
@@ -84,6 +84,29 @@ for a single QueryGate process only.
 For development with automatic reload, use `make dev` (or its longer alias,
 `make run-dev`). `make run dev` is interpreted by Make as two separate
 targets and is not the development-server command.
+
+## Persisted audit events
+
+The example environment enables an append-only JSONL sink at
+`var/audit/querygate-audit.jsonl`. Each versioned event includes correlation
+id, REST/MCP surface, principal and authentication method, connection,
+normalized query shape, policy decision, outcome, timing, row/byte counts,
+truncation, and a fixed error category.
+
+Persisted events deliberately exclude SQL and parameters, predicate values,
+natural-language intent, exception text, connection strings, and returned
+rows. Structured stdout logs remain available for diagnostics and may contain
+redacted SQL; literal SQL appears there only when a policy explicitly enables
+`log_query_literals`.
+
+In production, mount `AUDIT_JSONL_PATH` on persistent storage and configure
+retention/collection with the customer's log agent, SIEM, or `logrotate`.
+QueryGate reopens the file for each append so rename-and-recreate rotation
+works without a process signal. Files are created with mode `0600`.
+`AUDIT_JSONL_FSYNC=true` requests an `fsync` per event for stronger crash
+durability at the cost of latency. A sink-write failure emits
+`audit.sink.write_failed` to stdout but does not report a successfully executed
+database read as failed after the fact.
 
 Then, in another terminal:
 
@@ -248,8 +271,8 @@ Agent (MCP) / Client (REST)
 │  3. compiler/sqlalchemy_compiler.py  — AST → SQLAlchemy Select  │
 │  4. execution/concurrency.py         — per-connection semaphore │
 │  5. connections/engine.py            — session + guardrails     │
-│  6. audit/logger.py                  — compiled SQL, timing,    │
-│                                         principal, outcome       │
+│  6. audit/                           — stdout + persisted JSONL  │
+│                                         event, timing, outcome    │
 └───────────────────────────────────────────────────────────────┘
         │
         ▼
@@ -273,7 +296,8 @@ Agent (MCP) / Client (REST)
   `Select`, including dialect-aware date bucketing and top-N ranking.
 - **`execution/`** — concurrency guardrail + the `StructuredQueryService`
   that ties validation → compilation → execution → result shaping together.
-- **`audit/`** — structured, redaction-safe logging of every query attempt.
+- **`audit/`** — structured stdout auditing plus a versioned, redaction-safe,
+  append-only JSONL event sink.
 - **`api/`** and **`mcp/`** — thin transport layers over the same
   `StructuredQueryService`; neither has its own query logic.
 
@@ -298,15 +322,13 @@ Agent (MCP) / Client (REST)
   concurrency semaphore and a policy-configured timeout; row counts are
   clamped server-side (tiered: lower for row selects, higher for
   aggregates), not left to the caller's `limit`.
-- **Auth is pluggable.** `core/auth.py` defines an `Authenticator`
-  interface; `ApiKeyAuthenticator` (bearer token) is the only
-  implementation today, shared by REST and MCP, but OAuth/JWT/RBAC can be
-  added by implementing the same interface — no transport-layer changes
-  needed.
+- **Auth is pluggable.** `core/auth.py` defines an `Authenticator` interface;
+  static API keys and JWKS-verified OAuth/JWT bearer tokens are shared by REST
+  and MCP without transport-specific authorization logic.
 - **Audit trail** — every query attempt, successful or rejected, is logged
-  with the compiled SQL, caller principal, connection id, timing, row count,
-  and rejection reason where applicable. Row *payloads* and connection
-  strings are never included in a log line.
+  to stdout and can be persisted as a narrow JSONL event. The persisted event
+  contains identity, surface, normalized query shape, policy decision, timing,
+  row/byte counts, and error category—never row payloads or query literals.
 
 ## Current limitations
 
@@ -324,9 +346,9 @@ Being upfront about what's not done yet:
 - **No stored-procedure catalog** — deliberately out of scope for this
   version; exposing stored procedures safely needs its own cataloging and
   policy-approval mechanism, not a generic pass-through.
-- **No persisted audit store** — audit records are structured log lines
-  (JSON to stdout), not written to a database. Shipping them to a log
-  aggregator/SIEM is expected to be the operator's responsibility for now.
+- **Audit retention is operator-managed** — QueryGate provides append-only
+  JSONL persistence and rotation-friendly writes, but not a WORM store,
+  retention scheduler, search UI, or built-in SIEM exporter yet.
 - **No write operations** — by design. QueryGate is read-only; there is no
   insert/update/delete path anywhere in the AST or compiler.
 - **Distributed concurrency enforcement (Redis-backed) is opt-in** — the

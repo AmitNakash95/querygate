@@ -13,13 +13,14 @@ from typing import Any, List, Optional, Tuple
 import pydantic as pyd
 import sqlalchemy as sa
 
+from querygate.audit.events import AuditSurface, normalize_query_shape
 from querygate.audit.logger import audit_query
 from querygate.compiler.sqlalchemy_compiler import compile_structured_query
 from querygate.connections.engine import get_engine, get_metadata, session_scope
 from querygate.connections.registry import get_registry
 from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.auth import Principal
-from querygate.core.exceptions import PolicyViolationError
+from querygate.core.exceptions import NotFoundError, PolicyViolationError
 from querygate.core.logging import log_execution
 from querygate.execution.concurrency import concurrency_slot
 from querygate.metrics import (
@@ -142,9 +143,15 @@ def _compile_to_text(stmt: Any, *, include_literals: bool) -> Tuple[str, Optiona
 class StructuredQueryService:
     """Validate, compile, and execute structured reads against `connection_id`."""
 
-    def __init__(self, connection_id: str, principal: Optional[Principal] = None) -> None:
+    def __init__(
+        self,
+        connection_id: str,
+        principal: Optional[Principal] = None,
+        surface: AuditSurface = "internal",
+    ) -> None:
         self._connection_id = connection_id
         self._principal = principal
+        self._surface = surface
 
     @property
     def _principal_subject(self) -> Optional[str]:
@@ -153,6 +160,10 @@ class StructuredQueryService:
     @property
     def _principal_scopes(self) -> Optional[List[str]]:
         return sorted(self._principal.scopes) if self._principal else None
+
+    @property
+    def _auth_method(self) -> str:
+        return self._principal.auth_method if self._principal else "unknown"
 
     def _get_policy(self) -> Policy:
         # Resolves connection-level policy merged with any per-principal
@@ -184,13 +195,18 @@ class StructuredQueryService:
 
     @log_execution
     async def execute(self, query: StructuredQuery) -> StructuredQueryResult:
-        policy = self._get_policy()
         start = time.monotonic()
+        query_shape = normalize_query_shape(query)
+        sql = ""
+        params: Optional[str] = None
+        policy_validated = False
         try:
+            policy = self._get_policy()
             async with concurrency_slot(
                 self._connection_id, policy.max_concurrency, policy.concurrency_wait_seconds
             ):
                 stmt, limit, _tables = await self._validate_and_compile(query)
+                policy_validated = True
                 sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
 
                 async with session_scope(self._connection_id, policy=policy) as session:
@@ -201,6 +217,7 @@ class StructuredQueryService:
                 row_limit_hit = len(rows) >= limit
                 rows, byte_cap_hit = _cap_response_bytes(rows, policy.max_response_bytes)
                 truncated = row_limit_hit or byte_cap_hit
+                response_bytes = len(json.dumps(rows, default=str).encode("utf-8"))
                 elapsed_seconds = time.monotonic() - start
                 audit_query(
                     connection_id=self._connection_id,
@@ -211,6 +228,12 @@ class StructuredQueryService:
                     duration_ms=int(elapsed_seconds * 1000),
                     principal=self._principal_subject,
                     principal_scopes=self._principal_scopes,
+                    auth_method=self._auth_method,
+                    surface=self._surface,
+                    query_shape=query_shape,
+                    response_bytes=response_bytes,
+                    truncated=truncated,
+                    policy_decision="allowed",
                 )
                 QUERIES_TOTAL.labels(connection=self._connection_id, status="success").inc()
                 QUERY_DURATION_SECONDS.labels(connection=self._connection_id).observe(
@@ -224,13 +247,30 @@ class StructuredQueryService:
                     offset=query.offset,
                 )
         except Exception as exc:
+            error_category = (
+                "not_found" if isinstance(exc, NotFoundError) else classify_rejection(exc)
+            )
             audit_query(
                 connection_id=self._connection_id,
-                sql="",
+                sql=sql,
+                params=params,
                 intent=query.intent,
                 duration_ms=int((time.monotonic() - start) * 1000),
                 principal=self._principal_subject,
                 principal_scopes=self._principal_scopes,
+                auth_method=self._auth_method,
+                surface=self._surface,
+                query_shape=query_shape,
+                error_category=error_category,
+                policy_decision=(
+                    "allowed"
+                    if policy_validated
+                    else (
+                        "denied"
+                        if error_category in ("policy", "schema", "not_found")
+                        else "unknown"
+                    )
+                ),
                 rejected=True,
                 rejection_reason=str(exc),
             )

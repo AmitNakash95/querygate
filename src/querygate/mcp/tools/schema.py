@@ -18,7 +18,7 @@ _CONNECTION_FIELD = Field(description="Connection id from list_connections.")
 
 def _service(connection: str) -> StructuredQueryService:
     caller = get_mcp_caller()
-    return StructuredQueryService(connection_id=connection, principal=caller)
+    return StructuredQueryService(connection_id=connection, principal=caller, surface="mcp")
 
 
 class TablesListToolResult(BaseModel):

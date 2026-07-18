@@ -26,7 +26,11 @@ _SERVICE = "querygate.api.routes.StructuredQueryService"
 
 
 def _settings(**overrides) -> AppConfig:
-    base = dict(environment="localhost", mcp_enabled=False)
+    base = dict(
+        environment="localhost",
+        mcp_enabled=False,
+        audit_sink_backend="none",
+    )
     base.update(overrides)
     return AppConfig(**base)
 
