@@ -20,7 +20,12 @@ from querygate.connections.engine import get_engine, get_metadata, session_scope
 from querygate.connections.registry import get_registry
 from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.auth import Principal
-from querygate.core.exceptions import NotFoundError, PolicyViolationError
+from querygate.core.exceptions import (
+    NotFoundError,
+    PolicyViolationError,
+    QueryValidationError,
+    public_error_message,
+)
 from querygate.core.logging import log_execution
 from querygate.execution.concurrency import concurrency_slot
 from querygate.metrics import (
@@ -91,25 +96,25 @@ def _render_column_type(col_type: sa.types.TypeEngine) -> str:
 
 
 def _cap_response_bytes(rows: List[dict], max_bytes: int) -> Tuple[List[dict], bool]:
-    """Truncate `rows` once their serialized size would exceed `max_bytes`.
+    """Truncate `rows` before their serialized list exceeds `max_bytes`.
 
     Row *count* is capped by `Policy.max_limit`/`max_limit_aggregate`, but
     nothing else stops a wide TEXT/JSONB/BLOB column from making an
-    otherwise-compliant query return a very large response body. A single
-    row over the cap is always kept whole (returning zero rows would look
-    like an error, not a cap), so this is a best-effort ceiling, not a hard
-    guarantee.
+    otherwise-compliant query return a very large response body. Oversized
+    rows are omitted—even when the first row alone exceeds the cap—so a
+    caller cannot bypass the ceiling with one large value.
     """
     if max_bytes <= 0:
         return rows, False
-    total = 0
+    total = 2  # opening and closing brackets for the serialized list
     kept: List[dict] = []
     for row in rows:
         row_bytes = len(json.dumps(row, default=str).encode("utf-8"))
-        if kept and total + row_bytes > max_bytes:
+        separator_bytes = 2 if kept else 0  # json.dumps uses ", " between items
+        if total + separator_bytes + row_bytes > max_bytes:
             return kept, True
         kept.append(row)
-        total += row_bytes
+        total += separator_bytes + row_bytes
     return kept, False
 
 
@@ -288,7 +293,7 @@ class StructuredQueryService:
                 result = await self.execute(query)
                 results.append(BatchQueryItemResult(**result.model_dump()))
             except Exception as exc:
-                results.append(BatchQueryItemResult(error=str(exc)))
+                results.append(BatchQueryItemResult(error=public_error_message(exc)))
         return results
 
     @log_execution
@@ -323,7 +328,10 @@ class StructuredQueryService:
     @log_execution
     async def describe_table(self, table_name: str) -> TableDescription:
         policy = self._get_policy()
-        sanitize_table_name(table_name)
+        try:
+            sanitize_table_name(table_name)
+        except ValueError as exc:
+            raise QueryValidationError(str(exc)) from exc
         if not policy.table_allowed(table_name):
             raise PolicyViolationError(
                 f"Table {table_name!r} is not accessible under the active policy"

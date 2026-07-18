@@ -12,6 +12,7 @@ import pytest
 import sqlalchemy as sa
 
 from querygate.core.auth import Principal
+from querygate.core.exceptions import QueryValidationError
 from querygate.execution import service as svc
 from querygate.execution.service import (
     StructuredQueryResult,
@@ -279,11 +280,11 @@ def test_cap_response_bytes_truncates_past_cap():
     assert 0 < len(kept) < len(rows)
 
 
-def test_cap_response_bytes_always_keeps_first_oversized_row():
+def test_cap_response_bytes_omits_first_oversized_row():
     rows = [{"blob": "x" * 1000}]
     kept, hit = _cap_response_bytes(rows, max_bytes=10)
-    assert kept == rows
-    assert hit is False
+    assert kept == []
+    assert hit is True
 
 
 def test_cap_response_bytes_disabled_when_non_positive():
@@ -329,7 +330,11 @@ async def test_execute_many_partial_failure():
     )
 
     service = StructuredQueryService(connection_id="demo")
-    with patch.object(service, "execute", AsyncMock(side_effect=[ok_result, ValueError("boom")])):
+    with patch.object(
+        service,
+        "execute",
+        AsyncMock(side_effect=[ok_result, QueryValidationError("boom")]),
+    ):
         results = await service.execute_many([query_ok, query_bad])
 
     assert len(results) == 2

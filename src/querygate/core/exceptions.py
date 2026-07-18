@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+PUBLIC_INTERNAL_ERROR = "An unexpected error occurred."
+
 
 class NotFoundError(Exception):
     """Raised when a requested resource (connection, table) doesn't exist."""
@@ -24,3 +26,26 @@ class ConcurrencyLimitError(ValueError):
     many concurrent queries" from other rejection reasons without sniffing
     exception message text.
     """
+
+
+class QueryValidationError(ValueError):
+    """Client-actionable query/schema validation failure.
+
+    The explicit type prevents an unrelated ValueError raised by a database
+    driver from being mistaken for safe validation text at a transport edge.
+    """
+
+
+def public_error_message(exc: Exception) -> str:
+    """Return a client-safe message without exposing unexpected internals.
+
+    Validation, policy, concurrency, and not-found failures are deliberately
+    actionable to callers. Everything else may contain driver details, SQL,
+    bind values, hostnames, or filesystem paths and is therefore masked.
+    """
+    if isinstance(
+        exc,
+        (NotFoundError, PolicyViolationError, ConcurrencyLimitError, QueryValidationError),
+    ):
+        return str(exc)
+    return PUBLIC_INTERNAL_ERROR

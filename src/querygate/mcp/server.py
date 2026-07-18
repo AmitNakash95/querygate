@@ -20,7 +20,17 @@ mcp_server: FastMCP = FastMCP(
     instructions=MCP_INSTRUCTIONS,
     streamable_http_path="/",
     stateless_http=True,
-    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[
+            "localhost",
+            "localhost:*",
+            "127.0.0.1",
+            "127.0.0.1:*",
+            "[::1]",
+            "[::1]:*",
+        ],
+    ),
 )
 
 
@@ -40,6 +50,11 @@ def setup_mcp(app: "FastAPI", cfg: "AppConfig") -> None:
     from querygate.mcp.auth import MCPAuthMiddleware
 
     server = create_mcp_server()
+    server.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=cfg.mcp_dns_rebinding_protection,
+        allowed_hosts=cfg.mcp_allowed_hosts,
+        allowed_origins=cfg.mcp_allowed_origins,
+    )
     mcp_asgi = server.streamable_http_app()
     authed_mcp = MCPAuthMiddleware(app=mcp_asgi, settings=cfg)
     app.mount(cfg.mcp_mount_path, authed_mcp)
@@ -50,4 +65,5 @@ def setup_mcp(app: "FastAPI", cfg: "AppConfig") -> None:
         mount_path=cfg.mcp_mount_path,
         tool_count=len(server._tool_manager._tools),
         auth_mode="api_keys" if cfg.mcp_api_keys else "dev_bypass",
+        dns_rebinding_protection=cfg.mcp_dns_rebinding_protection,
     )

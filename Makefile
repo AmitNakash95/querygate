@@ -58,6 +58,10 @@ test-integration: ## Run only integration tests
 test-verify: ## Run only the core-guarantee verification/regression suite (real DB, no mocks)
 	poetry run pytest -m verification
 
+.PHONY: test-security
+test-security: ## Run the adversarial security regression suite
+	poetry run pytest -m security
+
 .PHONY: test-postgres-live
 test-postgres-live: ## Run tests needing a real Postgres (timeout cancellation, etc.) — run compose-up first
 	poetry run pytest -m postgres_live

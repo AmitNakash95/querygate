@@ -94,11 +94,20 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
         if query.top_n.n > policy.max_top_n:
             raise PolicyViolationError(f"top_n.n exceeds max of {policy.max_top_n}")
 
-    for table in _collect_referenced_tables(query):
+    column_refs = list(_iter_column_refs(query))
+    referenced_tables = _collect_referenced_tables(query)
+    # A table mentioned only in WHERE/GROUP BY/HAVING/ORDER BY/join keys or
+    # top_n is still being accessed and must not bypass table policy merely
+    # because it is absent from the projection.
+    for ref in column_refs:
+        table, _column = parse_column_ref(ref)
+        referenced_tables.add(table)
+
+    for table in referenced_tables:
         if not policy.table_allowed(table):
             raise PolicyViolationError(f"Table {table!r} is not accessible under the active policy")
 
-    for ref in _iter_column_refs(query):
+    for ref in column_refs:
         t, c = parse_column_ref(ref)
         if not policy.column_allowed(t, c):
             raise PolicyViolationError(f"Column {ref!r} is not accessible under the active policy")

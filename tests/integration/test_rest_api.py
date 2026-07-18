@@ -11,6 +11,7 @@ from querygate.api.app import create_app
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.config import AppConfig
+from querygate.core.exceptions import QueryValidationError
 from querygate.execution.service import (
     BatchQueryItemResult,
     ColumnInfo,
@@ -120,7 +121,7 @@ async def test_query_validation_error_is_422(app):
     with patch(
         f"{_SERVICE}.execute",
         new_callable=AsyncMock,
-        side_effect=ValueError("Column 'x' not found"),
+        side_effect=QueryValidationError("Column 'x' not found"),
     ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
             resp = await client.post(

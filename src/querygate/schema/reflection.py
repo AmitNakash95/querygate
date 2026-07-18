@@ -11,6 +11,8 @@ import re
 from typing import Optional
 
 import sqlalchemy as sa
+
+from querygate.core.exceptions import QueryValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from querygate.core.logging import get_logger
@@ -22,7 +24,7 @@ _METADATA_LOCKS: dict[str, asyncio.Lock] = {}
 
 def sanitize_table_name(table_name: str) -> str:
     if not VALID_TABLE_NAME.match(table_name):
-        raise ValueError(f"Invalid table name: {table_name}")
+        raise QueryValidationError(f"Invalid table name: {table_name}")
     return table_name
 
 

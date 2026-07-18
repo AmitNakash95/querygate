@@ -331,6 +331,11 @@ Agent (MCP) / Client (REST)
   to stdout and can be persisted as a narrow JSONL event. The persisted event
   contains identity, surface, normalized query shape, policy decision, timing,
   row/byte counts, and error category—never row payloads or query literals.
+- **Adversarially tested boundary** — denied identifiers cannot be smuggled
+  through filters, joins, grouping, ordering, or ranking; undeclared tables
+  cannot enter an implicit `FROM`; unexpected backend errors are masked; and
+  MCP rejects unapproved Host headers. See [the threat model](docs/THREAT_MODEL.md)
+  and run `make test-security`.
 
 ## Current limitations
 
@@ -356,6 +361,9 @@ Being upfront about what's not done yet:
 - **Distributed concurrency enforcement (Redis-backed) is opt-in** — the
   default is an in-process semaphore, correct for a single instance only;
   set `concurrency_backend: redis` for multi-instance deployments.
+- **Security review is first-party** — the repository includes a maintained
+  threat model and adversarial regression suite, but has not yet undergone an
+  independent penetration test or formal compliance certification.
 
 MSSQL support (including the query-execution-timeout guardrail) and the
 Postgres statement-timeout guardrail are both verified against real

@@ -16,7 +16,13 @@ from querygate.connections.models import PublicConnectionInfo
 from querygate.connections.visibility import list_visible_connections, resolve_visible_connection
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
-from querygate.core.exceptions import NotFoundError, PolicyViolationError
+from querygate.core.exceptions import (
+    PUBLIC_INTERNAL_ERROR,
+    ConcurrencyLimitError,
+    NotFoundError,
+    PolicyViolationError,
+    QueryValidationError,
+)
 from querygate.execution.service import (
     BatchQueryItemResult,
     ExplainResult,
@@ -75,8 +81,11 @@ def build_router(
         service = _service(connection, principal)
         try:
             tables = await service.list_tables()
-        except Exception as exc:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=PUBLIC_INTERNAL_ERROR,
+            )
         return TablesListResult(tables=tables)
 
     @router.get("/{connection}/tables/{table}", response_model=TableDescription)
@@ -86,10 +95,13 @@ def build_router(
         service = _service(connection, principal)
         try:
             return await service.describe_table(table)
-        except PolicyViolationError as exc:
+        except (PolicyViolationError, QueryValidationError) as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
-        except Exception as exc:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=PUBLIC_INTERNAL_ERROR,
+            )
 
     @router.post("/{connection}/query/explain", response_model=ExplainResult)
     async def explain_query(
@@ -98,10 +110,13 @@ def build_router(
         service = _service(connection, principal)
         try:
             return await service.explain(query)
-        except ValueError as exc:
+        except (PolicyViolationError, QueryValidationError, ConcurrencyLimitError) as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
-        except Exception as exc:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=PUBLIC_INTERNAL_ERROR,
+            )
 
     @router.post("/{connection}/query", response_model=StructuredQueryResult)
     async def execute_query(
@@ -110,10 +125,13 @@ def build_router(
         service = _service(connection, principal)
         try:
             return await service.execute(query)
-        except ValueError as exc:
+        except (PolicyViolationError, QueryValidationError, ConcurrencyLimitError) as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
-        except Exception as exc:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=PUBLIC_INTERNAL_ERROR,
+            )
 
     @router.post("/{connection}/query/batch", response_model=BatchQueryResult)
     async def execute_query_batch(

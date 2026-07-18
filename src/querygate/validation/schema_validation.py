@@ -13,6 +13,7 @@ import sqlalchemy as sa
 from querygate.core.auth import Principal
 from querygate.connections.engine import get_engine, physical_db_name
 from querygate.connections.visibility import resolve_visible_connection
+from querygate.core.exceptions import QueryValidationError
 from querygate.query_ast.models import (
     AggregateSelectItem,
     DateBucketSelectItem,
@@ -26,12 +27,12 @@ from querygate.schema.reflection import get_table_schema, sanitize_table_name
 def parse_column_ref(col_ref: str) -> Tuple[str, str]:
     """Parse 'Table.Column' into (table, column). Bare names are rejected."""
     if "." not in col_ref:
-        raise ValueError(f"Column reference must be 'Table.Column', got {col_ref!r}")
+        raise QueryValidationError(f"Column reference must be 'Table.Column', got {col_ref!r}")
     table, column = col_ref.split(".", 1)
     table = table.strip()
     column = column.strip()
     if not table or not column:
-        raise ValueError(f"Invalid column reference: {col_ref!r}")
+        raise QueryValidationError(f"Invalid column reference: {col_ref!r}")
     sanitize_table_name(table)
     return table, column
 
@@ -40,7 +41,7 @@ def resolve_column(table: sa.Table, column_name: str) -> sa.Column:
     col_map = {c.name.lower(): c for c in table.c}
     key = column_name.lower()
     if key not in col_map:
-        raise ValueError(f"Column '{column_name}' not found in table '{table.name}'")
+        raise QueryValidationError(f"Column '{column_name}' not found in table '{table.name}'")
     return col_map[key]
 
 
@@ -124,7 +125,7 @@ def _check_join_group(
             )
             other_group = other_policy.join_group or other.effective_join_group()
             if primary_group != other_group:
-                raise ValueError(
+                raise QueryValidationError(
                     f"cross-connection join: {join.table!r} is in connection "
                     f"{join_connection_id!r}, which is not in the same join_group as the "
                     f"primary connection {connection_id!r} — run a separate query per "
@@ -132,6 +133,25 @@ def _check_join_group(
                 )
         table_connection[join.table] = join_connection_id
     return table_connection
+
+
+def _validate_join_graph(query: StructuredQuery) -> None:
+    """Require each declared join to connect exactly one new table to the graph."""
+    known = {query.from_table.lower()}
+    for join in query.joins:
+        left_t, _ = parse_column_ref(join.on[0])
+        right_t, _ = parse_column_ref(join.on[1])
+        sides = {left_t.lower(), right_t.lower()}
+        joined_table = join.table.lower()
+        if joined_table not in sides:
+            raise QueryValidationError(
+                f"Join condition for {join.table!r} must reference that table"
+            )
+        if not (sides - {joined_table}) & known:
+            raise QueryValidationError(
+                f"Join to {join.table!r} does not connect to the query table graph"
+            )
+        known.add(joined_table)
 
 
 async def validate_schema(
@@ -143,6 +163,7 @@ async def validate_schema(
     compiler.
     """
     table_connection = _check_join_group(query, connection_id, principal=principal)
+    _validate_join_graph(query)
 
     needed: Set[str] = {query.from_table}
     for join in query.joins:
@@ -189,6 +210,14 @@ async def validate_schema(
                 t, _ = parse_column_ref(order.col)
                 needed.add(t)
 
+    declared_tables = {query.from_table.lower(), *(join.table.lower() for join in query.joins)}
+    undeclared_tables = sorted(name for name in needed if name.lower() not in declared_tables)
+    if undeclared_tables:
+        raise QueryValidationError(
+            "Column references may only use the query's from table or an explicitly "
+            f"declared join table; undeclared: {undeclared_tables}"
+        )
+
     tables: Dict[str, sa.Table] = {}
     for name in needed:
         tables[name] = await _load_table(
@@ -209,17 +238,6 @@ async def validate_schema(
 
     _validate_top_n(query, tables)
 
-    # Joins must reference from_table or previously joined tables.
-    known = {query.from_table.lower()}
-    for join in query.joins:
-        left_t, _ = parse_column_ref(join.on[0])
-        right_t, _ = parse_column_ref(join.on[1])
-        if left_t.lower() not in known and right_t.lower() not in known:
-            raise ValueError(f"Join to {join.table!r} does not connect to the query table graph")
-        known.add(join.table.lower())
-        known.add(left_t.lower())
-        known.add(right_t.lower())
-
     return tables
 
 
@@ -232,7 +250,7 @@ def _validate_select_columns(query: StructuredQuery, tables: Dict[str, sa.Table]
             t, c = parse_column_ref(item.col)
             resolve_column(tables[t], c)
         elif item.fn != "count":
-            raise ValueError("Only count(*) is allowed as a star aggregate")
+            raise QueryValidationError("Only count(*) is allowed as a star aggregate")
 
 
 def _validate_join_columns(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None:
@@ -253,14 +271,14 @@ def _validate_group_by(query: StructuredQuery, tables: Dict[str, sa.Table]) -> N
             t, c = parse_column_ref(col_ref)
             resolve_column(tables[t], c)
         elif col_ref not in bucket_aliases:
-            raise ValueError(
+            raise QueryValidationError(
                 f"group_by reference {col_ref!r} is not a Table.Column or a "
                 "date_bucket select alias"
             )
 
     has_aggregate = any(isinstance(i, AggregateSelectItem) for i in query.select)
     if query.having and not has_aggregate and not query.group_by:
-        raise ValueError("having requires group_by or aggregate select items")
+        raise QueryValidationError("having requires group_by or aggregate select items")
 
 
 def _validate_top_n(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None:
@@ -276,7 +294,7 @@ def _validate_top_n(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None
 
         def _check(ref: str) -> None:
             if ref not in allowed_refs:
-                raise ValueError(
+                raise QueryValidationError(
                     f"top_n reference {ref!r} must be a group_by column or a "
                     "select alias when combined with group_by/aggregate select items"
                 )
@@ -289,7 +307,7 @@ def _validate_top_n(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None
                 t, c = parse_column_ref(ref)
                 resolve_column(tables[t], c)
             elif ref not in bucket_aliases:
-                raise ValueError(
+                raise QueryValidationError(
                     f"top_n reference {ref!r} is not a Table.Column or a "
                     "date_bucket select alias"
                 )
@@ -316,6 +334,6 @@ def _validate_predicate_columns(
     if "." not in pred.col:
         if allow_alias:
             return
-        raise ValueError(f"Column reference must be 'Table.Column', got {pred.col!r}")
+        raise QueryValidationError(f"Column reference must be 'Table.Column', got {pred.col!r}")
     t, c = parse_column_ref(pred.col)
     resolve_column(tables[t], c)

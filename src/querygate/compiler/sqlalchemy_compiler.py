@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import sqlalchemy as sa
 
 from querygate.core.auth import Principal
+from querygate.core.exceptions import QueryValidationError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
@@ -41,7 +42,7 @@ def _table_by_name(tables: Dict[str, sa.Table], name: str) -> sa.Table:
     for key, table in tables.items():
         if key.lower() == name.lower():
             return table
-    raise ValueError(f"Unknown table {name!r}")
+    raise QueryValidationError(f"Unknown table {name!r}")
 
 
 def _column(tables: Dict[str, sa.Table], col_ref: str) -> sa.Column:
@@ -76,7 +77,7 @@ def _apply_predicate(col: Any, pred: Predicate) -> Any:
         return col.is_(None)
     if op == "is_not_null":
         return col.is_not(None)
-    raise ValueError(f"Unsupported operator {op!r}")
+    raise QueryValidationError(f"Unsupported operator {op!r}")
 
 
 def _resolve_predicate_target(
@@ -86,7 +87,7 @@ def _resolve_predicate_target(
         return _column(tables, pred.col)
     if pred.col in alias_map:
         return alias_map[pred.col]
-    raise ValueError(f"Unknown column or alias {pred.col!r}")
+    raise QueryValidationError(f"Unknown column or alias {pred.col!r}")
 
 
 def _resolve_output_ref(
@@ -97,7 +98,7 @@ def _resolve_output_ref(
         return alias_map[ref]
     if allow_table_fallback and "." in ref:
         return _column(tables, ref)
-    raise ValueError(f"Unknown column or alias {ref!r}")
+    raise QueryValidationError(f"Unknown column or alias {ref!r}")
 
 
 def _ref_output_name(ref: str, alias_map: Dict[str, Any]) -> str:
@@ -140,7 +141,7 @@ def _sqlite_date_bucket_expr(col: Any, granularity: str) -> Any:
         return sa.func.date(
             sa.func.strftime("%Y", col) + "-" + sa.func.printf("%02d", quarter_start_month) + "-01"
         )
-    raise ValueError(f"Unsupported date_bucket granularity: {granularity!r}")
+    raise QueryValidationError(f"Unsupported date_bucket granularity: {granularity!r}")
 
 
 def _compile_where(node: WhereNode, tables: Dict[str, sa.Table], alias_map: Dict[str, Any]) -> Any:
@@ -181,7 +182,7 @@ def _build_select_columns(
         fn = _AGG_FNS[item.fn]
         if item.col == "*":
             if item.fn != "count":
-                raise ValueError("Only count(*) is allowed as a star aggregate")
+                raise QueryValidationError("Only count(*) is allowed as a star aggregate")
             expr = fn()
         else:
             expr = fn(_column(tables, item.col))
@@ -230,7 +231,7 @@ def clamp_limit(requested: Optional[int], policy: Policy, *, is_aggregate: bool 
     max_limit = policy.max_limit_aggregate if is_aggregate else policy.max_limit
     limit = policy.default_limit if requested is None else requested
     if limit < 1:
-        raise ValueError("limit must be >= 1")
+        raise QueryValidationError("limit must be >= 1")
     return min(limit, max_limit)
 
 

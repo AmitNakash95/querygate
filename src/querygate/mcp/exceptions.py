@@ -10,7 +10,13 @@ from typing import Any
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from querygate.core.exceptions import NotFoundError
+from querygate.core.exceptions import (
+    ConcurrencyLimitError,
+    NotFoundError,
+    PolicyViolationError,
+    QueryValidationError,
+    public_error_message,
+)
 from querygate.core.logging import get_logger
 
 
@@ -27,9 +33,9 @@ def _error_code_from_exception(exc: Exception) -> tuple[str, str]:
         detail = exc.detail
         message = str(detail.get("msg", detail)) if isinstance(detail, dict) else str(detail)
         return f"HTTP_{exc.status_code}", message
-    if isinstance(exc, ValueError):
-        return "VALIDATION", str(exc)
-    return "INTERNAL", "An unexpected error occurred."
+    if isinstance(exc, (PolicyViolationError, QueryValidationError, ConcurrencyLimitError)):
+        return "VALIDATION", public_error_message(exc)
+    return "INTERNAL", public_error_message(exc)
 
 
 def safe_mcp_tool(

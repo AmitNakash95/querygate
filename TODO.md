@@ -57,7 +57,7 @@ order-of-magnitude, not commitments.
 | 25 | Admin/config governance plane | L | 5, 6, 10, 13 |
 | 26 | Query-cost estimation before execution | L | 2, 3, 15 |
 | 27 | Semantic schema catalog and sensitivity metadata | L | 6, 16 |
-| 28 | Threat model + adversarial security test suite | M | 1, 6, 8, 10, 11 |
+| 28 | ✅ Threat model + adversarial security test suite | M | 1, 6, 8, 10, 11 |
 | 29 | Production deployment reference stack | M | 4, 9, 12, 13, 14 |
 | 30 | Distribution, SBOM, and signed release artifacts | M | 4, 14 |
 | 31 | Admin UI / policy designer | XL | 25 |
@@ -907,7 +907,27 @@ hints, sensitivity class, default aggregation preference, and whether sample
 values are allowed. Feed that metadata into MCP schema tools and REST
 schema responses, filtered by principal policy.
 
-### 28. Threat model + adversarial security test suite
+### 28. Threat model + adversarial security test suite ✅ DONE
+
+**Shipped:** Added `docs/THREAT_MODEL.md`, covering assets, trust boundaries,
+attacker capabilities, twelve concrete threat classes, implemented controls,
+deployment requirements, verification links, and explicit residual risks. It
+is intentionally described as a first-party model—not an external penetration
+test or compliance certification.
+
+Added a dedicated `security` pytest marker, `tests/security/` adversarial
+suite, and `make test-security`. The suite attacks denied-column inference
+through filters/grouping/having/ordering/ranking/join keys, denied-table
+smuggling, undeclared table injection, bound-value SQL injection, principal
+policy bleed, tenant filters on aggregate queries, single-row output-cap
+bypass, backend error disclosure, and MCP DNS rebinding.
+
+The work closed four confirmed gaps: table policy now covers every qualified
+reference rather than only projected/declared tables; schema validation
+rejects undeclared tables and malformed join graphs before reflection;
+unexpected REST/MCP/batch errors are client-safe; and the response byte cap
+omits a first row that alone exceeds the ceiling. MCP Host/Origin validation
+is also enabled by default and configurable for reverse-proxy deployments.
 
 **Effort: M (2–4 days).** The first pass can be a written threat model plus
 tests for the most likely bypass classes; it does not require a formal

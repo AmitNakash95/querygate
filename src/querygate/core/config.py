@@ -84,6 +84,20 @@ class AppConfig(BaseSettings):
     )
     mcp_api_key_subject: str = pyd.Field(default="mcp-service-account")
     mcp_api_key_scopes: list[str] = pyd.Field(default_factory=list)
+    # Protect locally reachable MCP servers from browser-driven DNS rebinding.
+    # Add the deployment's exact proxy/public Host header in production.
+    mcp_dns_rebinding_protection: bool = pyd.Field(default=True)
+    mcp_allowed_hosts: list[str] = pyd.Field(
+        default_factory=lambda: [
+            "localhost",
+            "localhost:*",
+            "127.0.0.1",
+            "127.0.0.1:*",
+            "[::1]",
+            "[::1]:*",
+        ]
+    )
+    mcp_allowed_origins: list[str] = pyd.Field(default_factory=list)
 
     # JWT bearer-token auth (core/jwt_auth.JwtAuthenticator) — a second,
     # optional Authenticator alongside the static api_keys above. Shared by
@@ -137,6 +151,8 @@ class AppConfig(BaseSettings):
         "mcp_api_keys",
         "api_key_scopes",
         "mcp_api_key_scopes",
+        "mcp_allowed_hosts",
+        "mcp_allowed_origins",
         "jwt_algorithms",
         mode="before",
     )

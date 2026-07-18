@@ -66,6 +66,7 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "verification: core-guarantee regression tests (see tests/integration/test_core_regression.py)",
+    "security: adversarial security regression tests (see tests/security/)",
     "real_db: needs a real database running (see make compose-up) — excluded from the default run",
     "postgres_live: needs a real Postgres server (see TODO.md item 3) — also marked real_db",
     "mssql_live: needs a real MSSQL server (see TODO.md item 2) — also marked real_db",
