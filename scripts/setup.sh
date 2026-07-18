@@ -47,12 +47,12 @@ fi
 # ─── 3. Demo database (optional — QueryGate itself needs no database of its own) ──
 if command -v docker >/dev/null 2>&1; then
     info "Starting the example demo Postgres database via Docker Compose..."
-    docker compose up -d
-    success "Demo database starting — see examples/ for connection/policy config and seed data."
+    docker compose up -d --wait
+    success "Demo Postgres and Redis are healthy; Postgres was seeded automatically."
 else
-    warn "docker not found — skipping the demo database. QueryGate works against SQLite too; see examples/demo_db."
+    warn "docker not found — skipping the Postgres/Redis demo infrastructure."
 fi
 
 # ─── Done ─────────────────────────────────────────────────────────────────────
 echo ""
-success "Setup complete. Run 'make seed-demo-db' to load sample data, then 'make run' to start the app."
+success "Setup complete. Run 'make run' to start QueryGate."

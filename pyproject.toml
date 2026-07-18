@@ -1,13 +1,24 @@
 [tool.black]
 line-length = 100
 
-
-[tool.poetry]
+[project]
 name = "querygate"
 version = "0.1.0"
 description = "Agent-safe database access gateway — expose databases to AI agents over MCP and REST without raw SQL."
-authors = ["Amit Nakash"]
+authors = [{ name = "Amit Nakash" }]
 readme = "README.md"
+requires-python = ">=3.11,<4.0"
+dynamic = ["dependencies"]
+
+[project.scripts]
+querygate = "querygate.run:main"
+querygate-validate-config = "querygate.cli:main"
+
+[project.urls]
+Repository = "https://github.com/AGitmit/QueryGate"
+Documentation = "https://github.com/AGitmit/QueryGate#readme"
+
+[tool.poetry]
 packages = [
     { include = "querygate", from = "src" },
     { include = "examples" },
@@ -42,10 +53,7 @@ pytest-mock = "3.11.1"
 black = "25.1.0"
 fakeredis = "^2.36.2"
 lupa = "^2.8"
-
-[tool.poetry.scripts]
-querygate = "querygate.run:main"
-querygate-validate-config = "querygate.cli:main"
+pytest-cov = "6.0.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

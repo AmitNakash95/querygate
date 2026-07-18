@@ -125,15 +125,10 @@ QueryGate into an agent framework directly instead of raw JSON-RPC/curl, see
 [`examples/claude_agent_sdk_integration.py`](examples/claude_agent_sdk_integration.py)
 (Claude Agent SDK, `pip install claude-agent-sdk`).
 
-To try it without Docker, seed a local SQLite file instead:
-
-```bash
-poetry run python examples/demo_db/seed.py
-```
-
-(SQLite is used for examples/tests only — see
-["Current limitations"](#current-limitations); production connections are
-Postgres or MSSQL.)
+The seed script under `examples/demo_db/` can generate a SQLite fixture for
+tests and data inspection, but SQLite is not a supported QueryGate connection.
+The runnable quickstart deliberately exercises the same Postgres path used in
+production.
 
 ## Example connection config
 
@@ -372,6 +367,6 @@ servers, not just unit-tested SQL text — see
 `tests/integration/test_postgres_timeout.py`. OAuth/JWT is implemented
 (`core/jwt_auth.py`) alongside static API keys.
 
-See `MIGRATION_REPORT.md` for what was preserved, generalized, or removed
-from the internal prototype this was extracted from, and what's recommended
-before a commercial release.
+For the repeatable source/package and container release gates, see
+[`docs/RELEASING.md`](docs/RELEASING.md). Historical extraction notes are
+kept outside the product surface under `archive/extraction/`.

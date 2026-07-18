@@ -2,16 +2,21 @@ FROM python:3.11-slim-bookworm AS builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential curl unixodbc-dev \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --upgrade pip poetry
+ARG POETRY_VERSION=2.4.1
+RUN pip install --upgrade pip "poetry==${POETRY_VERSION}"
 WORKDIR /app
 ENV POETRY_NO_INTERACTION=1 \
     POETRY_VIRTUALENVS_IN_PROJECT=1 \
     POETRY_VIRTUALENVS_CREATE=1 \
     POETRY_CACHE_DIR=/tmp/poetry_cache
 COPY pyproject.toml poetry.lock ./
+COPY README.md ./
 COPY src ./src
 COPY examples ./examples
-RUN poetry install --no-root --only main && rm -rf $POETRY_CACHE_DIR
+RUN poetry install --no-root --only main \
+    && poetry build --format wheel \
+    && .venv/bin/pip install --no-deps dist/*.whl \
+    && rm -rf $POETRY_CACHE_DIR dist
 
 FROM python:3.11-slim-bookworm AS production
 ENV PYTHONUNBUFFERED=1 \
@@ -47,10 +52,8 @@ RUN apt-get update \
 WORKDIR /app
 RUN addgroup --system querygate && adduser --system --ingroup querygate querygate
 COPY --from=builder /app/.venv /app/.venv
-COPY src ./src
-COPY examples ./examples
 RUN chown -R querygate:querygate /app
 USER querygate
 
 EXPOSE 8000
-CMD ["python3", "-m", "querygate.run"]
+CMD ["querygate"]

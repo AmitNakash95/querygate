@@ -34,7 +34,7 @@ run-dev: ## Start with auto-reload (development mode)
 dev: run-dev ## Alias for run-dev
 
 .PHONY: seed-demo-db
-seed-demo-db: ## Seed the example demo database (SQLite by default; see examples/demo_db)
+seed-demo-db: ## Generate an optional SQLite fixture for tests/inspection (not a runtime connection)
 	poetry run python examples/demo_db/seed.py
 
 .PHONY: validate-config
@@ -94,10 +94,26 @@ format-check: ## Check formatting without making changes
 .PHONY: lint
 lint: format-check ## Alias for format-check (extend with ruff/mypy when added)
 
+# ─── Release ──────────────────────────────────────────────────────────────────
+.PHONY: release-check
+release-check: ## Run deterministic source/package release gates and build artifacts
+	poetry check --lock
+	poetry run python scripts/check_release.py
+	$(MAKE) format-check
+	$(MAKE) test
+	QUERYGATE_DEMO_DB_URL=postgresql+asyncpg://user:pass@localhost/demo \
+		poetry run querygate-validate-config
+	poetry build
+	poetry run python scripts/check_release_artifacts.py
+
+.PHONY: release-smoke
+release-smoke: ## Build the image and execute a real structured query against Postgres
+	bash scripts/release_smoke.sh
+
 # ─── Docker Compose ───────────────────────────────────────────────────────────
 .PHONY: compose-up
-compose-up: ## Start the local demo Postgres and Redis services (detached)
-	docker compose up -d
+compose-up: ## Start the local demo Postgres and Redis services (detached and healthy)
+	docker compose up -d --wait
 
 .PHONY: compose-down
 compose-down: ## Stop and remove the local demo infrastructure containers

@@ -2,7 +2,7 @@
 #
 # `default` applies to any connection with no entry under `connections`.
 # Each entry under `connections` is merged on top of `default` (so you only
-# need to specify what differs). Set QUERYGATE_POLICY_FILE to point at your
+# need to specify what differs). Set POLICY_FILE to point at your
 # own copy of this file.
 #
 # `principals` (optional) layers a further override on top of whichever of

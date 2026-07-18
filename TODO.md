@@ -6,9 +6,9 @@ ready-to-ship commercial product. Grouped by priority. Each item explains
 criteria. Items marked with a file path point at where the current
 (incomplete) implementation lives.
 
-Cross-reference: `README.md` → "Current limitations" and
-`MIGRATION_REPORT.md` → "What still needs work" cover the same ground more
-briefly; this file is the actionable breakdown.
+Cross-reference: `README.md` → "Current limitations" covers the active gaps
+more briefly; historical extraction reports live under `archive/extraction/`.
+This file is the actionable breakdown.
 
 ## Effort scale
 
@@ -53,7 +53,7 @@ order-of-magnitude, not commitments.
 | 21 | ✅ Principal policy must apply to every MCP/config surface | S | 6, 8, 10 |
 | 22 | ✅ Principal-aware connection/tool visibility | S–M | 6, 8 |
 | 23 | ✅ Persisted audit/event sink | M | 1, 12 |
-| 24 | Release hygiene and reproducible v0.1.0 cut | S–M | 4, 14, 17 |
+| 24 | ✅ Release hygiene and reproducible v0.1.0 cut | S–M | 4, 14, 17 |
 | 25 | Admin/config governance plane | L | 5, 6, 10, 13 |
 | 26 | Query-cost estimation before execution | L | 2, 3, 15 |
 | 27 | Semantic schema catalog and sensitivity metadata | L | 6, 16 |
@@ -685,7 +685,34 @@ principal id, auth method, connection id, tool/API surface, normalized query
 shape, policy decision, timing, row count, byte count, and error category.
 Document retention and redaction behavior clearly.
 
-### 24. Release hygiene and reproducible v0.1.0 cut
+### 24. Release hygiene and reproducible v0.1.0 cut ✅ DONE
+
+**Shipped:** QueryGate now has one repeatable source/package gate
+(`make release-check`) and one isolated container/infrastructure gate
+(`make release-smoke`). The first validates the Poetry lock and synchronized
+version metadata, rejects tracked generated/secret/legacy product files,
+checks formatting, runs the default suite, validates the bundled example
+configuration, builds wheel and sdist, and inspects their members. The second
+uses dedicated ports and a disposable Compose project to build the production
+image from the wheel, wait for Postgres and Redis, verify readiness and
+connection discovery, and execute a real structured query against seeded
+Postgres.
+
+The package uses PEP 621 metadata and portable bundled example paths; runtime
+version defaults derive from `querygate.__version__`. CI declares its coverage
+plugin and runs both artifact checks and the real container/Postgres smoke.
+Docker build context exclusions, service health checks, configurable local
+ports, a changelog, and `docs/RELEASING.md` make the boundary explicit.
+Historical extraction reports were archived, the generated SQLite fixture was
+removed from Git, and the README/setup/examples now describe only supported
+runtime behavior.
+
+**Verified:** `make release-check` passed with 247 tests (16 explicit
+`real_db` tests excluded from the default run), the exact CI coverage command
+reported 90%, a fresh environment installed and validated the built wheel from
+outside the repository, and `make release-smoke` queried real Postgres through
+the production container. The local `v0.1.0` tag is created only after the
+release commit is final.
 
 **Effort: S–M (1–2 days).** Mostly cleanup and packaging discipline: decide
 what is in the release, what remains experimental, and make the repo state

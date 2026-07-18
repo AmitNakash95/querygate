@@ -8,9 +8,8 @@ QueryGate is an agent-safe database access gateway: it exposes Postgres/MSSQL
 databases to AI agents over MCP and REST, but the only thing a caller can ever
 submit is a validated `StructuredQuery` JSON AST — there is no raw-SQL field
 or endpoint anywhere in the codebase. See `README.md` for the product pitch,
-`MIGRATION_REPORT.md` for how this was extracted/generalized from an earlier
-prototype (`il-backoffice-api`), and `CLEANUP_REPORT.md` for the old-identity
-removal verification.
+`docs/RELEASING.md` for release gates, and `archive/extraction/` only when
+historical extraction context is explicitly needed.
 
 ## Commands
 
@@ -29,6 +28,8 @@ poetry run pytest -m integration        # integration only
 poetry run pytest tests/unit/test_compiler.py                              # one file
 poetry run pytest tests/unit/test_compiler.py::TestCompiler::test_simple_select_sql  # one test
 poetry run pytest --cov=src --cov-report=term-missing                      # coverage
+make test-security                     # adversarial boundary suite
+make test-postgres-live                # requires compose-up
 
 # Formatting
 poetry run black --check src/ tests/    # or: make format-check
@@ -36,12 +37,13 @@ poetry run black src/ tests/            # or: make format
 
 # Demo database (for manual/local verification against a real Postgres)
 docker compose up -d                    # starts querygate-demo-db on localhost:5433, auto-seeded
-python examples/demo_db/seed.py         # alternative: seeds a local SQLite file instead
+make release-check                      # source, package, formatting, tests, config
+make release-smoke                      # image + real structured Postgres query
 ```
 
-Tests never require a real database or docker — they mock at the seams
-described below, except `tests/integration/test_sqlite_end_to_end.py`, which
-uses a real in-memory SQLite engine.
+The default suite excludes tests marked `real_db`; CI also runs dedicated
+Postgres and MSSQL jobs. `test_sqlite_end_to_end.py` uses SQLite internally
+as a compiler/execution test, but SQLite is not a supported registry dialect.
 
 ## Architecture
 
@@ -66,21 +68,20 @@ in order, for `execute`/`explain`:
    Postgres `date_trunc` vs MSSQL `DATEADD`/`DATEDIFF` vs SQLite `strftime`)
    is isolated to one function here (`_date_bucket_expr`); everything else is
    dialect-agnostic Core.
-4. **`execution/concurrency.py`** — a per-connection `asyncio.Semaphore`
-   guards actual execution (`concurrency_slot`).
+4. **`execution/concurrency.py`** — guards actual execution through either a
+   single-process semaphore or a Redis-backed distributed limiter.
 5. **`connections/engine.py`** — session lifecycle + dialect-specific session
    guardrails (`connections/dialects.py`: Postgres `SET LOCAL
    lock_timeout`/`statement_timeout`, MSSQL `SET LOCK_TIMEOUT`/`XACT_ABORT`).
-6. **`audit/logger.py`** — every attempt (success or rejection) is logged
-   with compiled SQL, principal, timing, row count — never row payloads or
-   connection strings.
+6. **`audit/logger.py` / `audit/sinks.py`** — every attempt is logged and can
+   be persisted as a versioned, redaction-safe JSONL event. Persisted events
+   never include SQL, predicate values, rows, exceptions, or credentials.
 
 ### Connections and policy are file-configured, not code-configured
 
-`connections/registry.py` and `policy/loader.py` each load a YAML file lazily
-into a process-wide singleton (`get_registry()` / `get_policy_store()`), on
-first access. There is no app-owned database — no Alembic, no persisted
-config store. See `examples/connections.example.yaml` and
+`connections/registry.py` and `policy/loader.py` load YAML into process-wide
+stores and support an authorized, atomic hot reload. There is no app-owned
+configuration database yet. See `examples/connections.example.yaml` and
 `examples/policy.example.yaml` for the shape.
 
 **Security invariant**: `connections/models.py` splits `ConnectionProfile`
@@ -93,11 +94,10 @@ convention — keep that test meaningful if you touch either model.
 
 ### Auth
 
-`core/auth.py` defines an `Authenticator` protocol; `ApiKeyAuthenticator` is
-the only implementation. Both `api/auth.py` (FastAPI dependency, built via
-`build_principal_dependency(cfg)` so tests can construct different configs)
-and `mcp/auth.py` (ASGI middleware) wrap the same class — don't duplicate
-bearer-token logic in either transport.
+`core/auth.py` defines the shared authenticator boundary. Static API keys and
+JWKS-verified JWTs can be composed for both REST and MCP; principals carry
+subject, scopes, claims, and auth method. Don't duplicate bearer-token logic
+inside either transport.
 
 ### Testing gotchas (see `tests/conftest.py`)
 
@@ -130,3 +130,6 @@ Claude-assisted development workflow scaffolding (`memory/`, `agent_state/`,
 `journal/`, `workflows/`, `skills/`, `AGENT.md`, `CONSTRAINTS.md`). It's not
 imported by any code and not part of the product — ignore it unless
 specifically asked to consult old project history.
+
+`archive/extraction/` holds historical migration/cleanup reports. Neither
+archive directory is included in package or container release artifacts.

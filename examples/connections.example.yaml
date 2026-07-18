@@ -2,7 +2,7 @@
 #
 # Connection strings are never inlined here — ${VAR} is resolved from the
 # environment at load time, so this file is safe to commit. Set
-# QUERYGATE_CONNECTIONS_FILE to point at your own copy of this file.
+# CONNECTIONS_FILE to point at your own copy of this file.
 #
 # `join_group` controls cross-connection joins: two connections may be
 # joined in one query only when they share the same join_group. Omit it to

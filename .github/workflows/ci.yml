@@ -43,6 +43,13 @@ jobs:
         env:
           QUERYGATE_DEMO_DB_URL: postgresql+asyncpg://user:pass@localhost/demo
 
+      - name: Release metadata and package build
+        run: |
+          poetry check --lock
+          poetry run python scripts/check_release.py
+          poetry build
+          poetry run python scripts/check_release_artifacts.py
+
   postgres-live:
     name: Real-Postgres tests (query timeout cancellation)
     runs-on: ubuntu-latest
@@ -133,38 +140,11 @@ jobs:
         run: poetry run pytest -m mssql_live
 
   docker:
-    name: Docker build + smoke test
+    name: Docker + real-Postgres release smoke
     runs-on: ubuntu-latest
     needs: test
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build image
-        run: docker build -t querygate:ci .
-
-      - name: Run container
-        run: |
-          docker run -d --name querygate-ci -p 8000:8000 \
-            -e ENVIRONMENT=localhost \
-            -e CONNECTIONS_FILE=examples/connections.example.yaml \
-            -e POLICY_FILE=examples/policy.example.yaml \
-            -e QUERYGATE_DEMO_DB_URL="postgresql+asyncpg://user:pass@localhost/demo" \
-            querygate:ci
-          for i in $(seq 1 20); do
-            if curl -sf http://localhost:8000/health; then break; fi
-            sleep 1
-          done
-
-      - name: Smoke test /health
-        run: curl -sf http://localhost:8000/health
-
-      - name: Smoke test /api/v1/connections
-        run: curl -sf http://localhost:8000/api/v1/connections
-
-      - name: Container logs (on failure)
-        if: failure()
-        run: docker logs querygate-ci
-
-      - name: Stop container
-        if: always()
-        run: docker rm -f querygate-ci || true
+      - name: Build image and execute a structured query against Postgres
+        run: make release-smoke

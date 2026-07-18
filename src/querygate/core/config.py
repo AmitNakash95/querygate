@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import json
 from enum import Enum
+from importlib import resources
 from typing import Any, Literal
 
 import pydantic as pyd
 from pydantic_settings import BaseSettings
+
+from querygate import __version__
 
 
 class ConcurrencyBackend(str, Enum):
@@ -48,6 +51,11 @@ def _parse_str_list(value: Any) -> Any:
     return value
 
 
+def _example_file(name: str) -> str:
+    """Resolve bundled example config in both a checkout and an installed wheel."""
+    return str(resources.files("examples").joinpath(name))
+
+
 class AppConfig(BaseSettings):
     environment: Literal["production", "staging", "development", "localhost"] = pyd.Field(
         default="localhost"
@@ -55,7 +63,7 @@ class AppConfig(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = pyd.Field(default="INFO")
     host_address: str = pyd.Field(default="0.0.0.0")
     port: int = pyd.Field(default=8000)
-    app_version: str = pyd.Field(default="0.1.0")
+    app_version: str = pyd.Field(default=__version__)
     num_of_workers: int = pyd.Field(default=1)
     api_v1_prefix: str = pyd.Field(default="/api/v1")
 
@@ -63,8 +71,10 @@ class AppConfig(BaseSettings):
     # see examples/connections.example.yaml and examples/policy.example.yaml.
     # Connection strings are resolved via ${ENV_VAR} interpolation inside the
     # connections file, so secrets live only in the environment.
-    connections_file: str = pyd.Field(default="examples/connections.example.yaml")
-    policy_file: str = pyd.Field(default="examples/policy.example.yaml")
+    connections_file: str = pyd.Field(
+        default_factory=lambda: _example_file("connections.example.yaml")
+    )
+    policy_file: str = pyd.Field(default_factory=lambda: _example_file("policy.example.yaml"))
 
     # REST and MCP share one API-key authenticator (see core/auth.py). Both
     # allow an anonymous dev-bypass outside production when no keys are set.
