@@ -72,6 +72,10 @@ shared across multiple local QueryGate processes. If you intentionally run
 without Compose, set `CONCURRENCY_BACKEND=in_process`; that mode is suitable
 for a single QueryGate process only.
 
+For development with automatic reload, use `make dev` (or its longer alias,
+`make run-dev`). `make run dev` is interpreted by Make as two separate
+targets and is not the development-server command.
+
 Then, in another terminal:
 
 ```bash

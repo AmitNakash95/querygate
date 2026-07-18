@@ -15,6 +15,48 @@ def test_env_var_interpolation(monkeypatch):
     assert registry.get("demo").connection_string == "postgresql+asyncpg://user:pass@host/db"
 
 
+def test_dotenv_interpolation_matches_quickstart(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DOTENV_DB_URL", raising=False)
+    (tmp_path / ".env").write_text(
+        "DOTENV_DB_URL=postgresql+asyncpg://dotenv-user:dotenv-pass@host/db\n"
+    )
+    connections_file = tmp_path / "connections.yaml"
+    connections_file.write_text(
+        """
+connections:
+  - id: demo
+    dialect: postgresql
+    connection_string: ${DOTENV_DB_URL}
+"""
+    )
+
+    registry = ConnectionRegistry.from_file(str(connections_file))
+
+    assert (
+        registry.get("demo").connection_string
+        == "postgresql+asyncpg://dotenv-user:dotenv-pass@host/db"
+    )
+
+
+def test_process_environment_overrides_dotenv(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("PRECEDENCE_DB_URL=postgresql+asyncpg://dotenv/db\n")
+    monkeypatch.setenv("PRECEDENCE_DB_URL", "postgresql+asyncpg://process/db")
+
+    registry = ConnectionRegistry.from_entries(
+        [
+            {
+                "id": "demo",
+                "dialect": "postgresql",
+                "connection_string": "${PRECEDENCE_DB_URL}",
+            }
+        ]
+    )
+
+    assert registry.get("demo").connection_string == "postgresql+asyncpg://process/db"
+
+
 def test_missing_env_var_raises(monkeypatch):
     monkeypatch.delenv("MISSING_VAR", raising=False)
     with pytest.raises(ValueError, match="MISSING_VAR"):

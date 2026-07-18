@@ -30,6 +30,9 @@ run: ## Start the app (uses poetry run → uvicorn via querygate.run)
 run-dev: ## Start with auto-reload (development mode)
 	poetry run uvicorn querygate.api.app:app --host 0.0.0.0 --port 8000 --reload
 
+.PHONY: dev
+dev: run-dev ## Alias for run-dev
+
 .PHONY: seed-demo-db
 seed-demo-db: ## Seed the example demo database (SQLite by default; see examples/demo_db)
 	poetry run python examples/demo_db/seed.py
