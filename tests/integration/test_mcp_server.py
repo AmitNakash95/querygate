@@ -33,6 +33,13 @@ _EXPECTED_TOOLS = {
     "explain_structured_query",
     "execute_structured_query",
     "execute_structured_queries",
+    "search_querygate_guide",
+    "get_querygate_guide_topic",
+    "get_querygate_setup_checklist",
+    "explain_querygate_config_field",
+    "explain_querygate_error",
+    "describe_my_querygate_access",
+    "inspect_querygate_configuration",
 }
 
 
@@ -91,6 +98,99 @@ async def test_mcp_dev_bypass_lists_tools(mcp_dev_client):
     payload = _parse_mcp_response(resp)
     tool_names = {tool["name"] for tool in payload["result"]["tools"]}
     assert _EXPECTED_TOOLS.issubset(tool_names)
+
+
+@pytest.mark.asyncio
+async def test_mcp_product_guide_search_returns_packaged_versioned_citations(mcp_dev_client):
+    resp = await mcp_dev_client.post(
+        "/mcp/",
+        json={
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "tools/call",
+            "params": {
+                "name": "search_querygate_guide",
+                "arguments": {"query": "configure policy limits", "limit": 3},
+            },
+        },
+        headers=_HEADERS_JSON,
+    )
+
+    assert resp.status_code == 200
+    result = _parse_mcp_response(resp)["result"]["structuredContent"]["result"]
+    assert result["querygate_version"] == "0.1.0"
+    assert result["results"][0]["topic_id"] == "configuration.policy"
+    assert result["results"][0]["citation"]["version"] == "0.1.0"
+
+
+@pytest.mark.asyncio
+async def test_mcp_configuration_inspection_requires_config_read_scope():
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_key_scopes=[])
+    app = create_app(settings)
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(
+            transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+        ) as client,
+    ):
+        resp = await client.post(
+            "/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": 21,
+                "method": "tools/call",
+                "params": {"name": "inspect_querygate_configuration", "arguments": {}},
+            },
+            headers={**_HEADERS_JSON, "Authorization": f"Bearer {_TEST_API_KEY}"},
+        )
+
+    result = _parse_mcp_response(resp)["result"]["structuredContent"]["result"]
+    assert result["success"] is False
+    assert result["error_code"] == "FORBIDDEN"
+    assert result["error_message"] == "Missing required scope: 'admin:config:read'"
+
+
+@pytest.mark.asyncio
+async def test_mcp_configuration_inspection_uses_request_application_config(tmp_path):
+    connections_file = tmp_path / "guide-connections.yaml"
+    connections_file.write_text(
+        """
+connections:
+  - id: request-bound-config
+    dialect: postgresql
+    connection_string: ${REQUEST_BOUND_DATABASE_URL}
+"""
+    )
+    policy_file = tmp_path / "guide-policy.yaml"
+    policy_file.write_text("default:\n  enabled: true\n")
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(
+        connections_file=str(connections_file),
+        policy_file=str(policy_file),
+        mcp_api_key_scopes=["admin:config:read"],
+    )
+    app = create_app(settings)
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(
+            transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+        ) as client,
+    ):
+        resp = await client.post(
+            "/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": 22,
+                "method": "tools/call",
+                "params": {"name": "inspect_querygate_configuration", "arguments": {}},
+            },
+            headers={**_HEADERS_JSON, "Authorization": f"Bearer {_TEST_API_KEY}"},
+        )
+
+    result = _parse_mcp_response(resp)["result"]["structuredContent"]["result"]
+    assert [connection["id"] for connection in result["connections"]] == ["request-bound-config"]
+    assert "REQUEST_BOUND_DATABASE_URL" not in json.dumps(result)
 
 
 @pytest.mark.asyncio
@@ -190,6 +290,16 @@ async def test_mcp_connection_listing_and_direct_access_are_principal_scoped():
             },
             headers=auth_headers,
         )
+        access_response = await client.post(
+            "/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {"name": "describe_my_querygate_access", "arguments": {}},
+            },
+            headers=auth_headers,
+        )
 
     listed = _parse_mcp_response(listed_response)
     connections = listed["result"]["structuredContent"]["result"]["connections"]
@@ -200,6 +310,10 @@ async def test_mcp_connection_listing_and_direct_access_are_principal_scoped():
     assert error["success"] is False
     assert error["error_code"] == "NOT_FOUND"
     assert error["error_message"] == "Unknown connection: 'internal_finance'"
+
+    access = _parse_mcp_response(access_response)["result"]["structuredContent"]["result"]
+    assert [connection["id"] for connection in access["visible_connections"]] == ["demo"]
+    assert "internal_finance" not in json.dumps(access)
 
 
 @pytest.mark.asyncio

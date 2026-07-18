@@ -14,7 +14,12 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from querygate.admin.models import ConfigVersion, ConfigVersionStatus
+from querygate.admin.models import (
+    ConfigDocumentPreview,
+    ConfigPreview,
+    ConfigVersion,
+    ConfigVersionStatus,
+)
 from querygate.admin.store import ConfigVersionStore, get_config_version_store
 from querygate.audit.logger import audit_config_change
 from querygate.cli import validate_config
@@ -22,6 +27,7 @@ from querygate.config_reload import ReloadResult, reload_config
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import ConfigValidationError
+from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE
 from querygate.secrets.resolvers import build_secret_resolver_registry
 
 
@@ -86,11 +92,13 @@ def validate_candidate_content(
 
 def validate(
     cfg: AppConfig,
+    principal: Optional[Principal] = None,
     *,
     connections_yaml: Optional[str],
     policy_yaml: Optional[str],
     catalog_yaml: Optional[str],
 ) -> List[str]:
+    start = time.monotonic()
     store = get_config_version_store()
     resolved_connections, resolved_policy, resolved_catalog = _resolve_candidate(
         cfg,
@@ -99,7 +107,89 @@ def validate(
         policy_yaml=policy_yaml,
         catalog_yaml=catalog_yaml,
     )
-    return validate_candidate_content(cfg, resolved_connections, resolved_policy, resolved_catalog)
+    errors = validate_candidate_content(
+        cfg, resolved_connections, resolved_policy, resolved_catalog
+    )
+    if principal is not None:
+        audit_config_change(
+            action="validate",
+            outcome="rejected" if errors else "success",
+            principal=principal.subject,
+            principal_scopes=sorted(principal.scopes),
+            auth_method=principal.auth_method,
+            error_category="validation" if errors else None,
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+    return errors
+
+
+def preview(
+    cfg: AppConfig,
+    principal: Principal,
+    *,
+    connections_yaml: Optional[str],
+    policy_yaml: Optional[str],
+    catalog_yaml: Optional[str],
+) -> ConfigPreview:
+    """Validate a candidate and return a content-free document-level preview.
+
+    A caller with config-write but not config-read must be able to validate a
+    proposal without using preview as a side channel into the current files,
+    so this deliberately returns no paths, values, identifiers, hashes, or
+    line-level differences.
+    """
+    start = time.monotonic()
+    store = get_config_version_store()
+    active = _bootstrap(cfg, store)
+    resolved_connections, resolved_policy, resolved_catalog = _resolve_candidate(
+        cfg,
+        store,
+        connections_yaml=connections_yaml,
+        policy_yaml=policy_yaml,
+        catalog_yaml=catalog_yaml,
+    )
+    errors = validate_candidate_content(
+        cfg, resolved_connections, resolved_policy, resolved_catalog
+    )
+    can_compare = ADMIN_CONFIG_READ_SCOPE in principal.scopes
+
+    def change(
+        submitted: Optional[str], resolved: Optional[str], active_value: Optional[str]
+    ) -> str:
+        if not can_compare:
+            return "submitted" if submitted is not None else "inherited"
+        return "changed" if resolved != active_value else "unchanged"
+
+    documents = [
+        ConfigDocumentPreview(
+            document="connections",
+            change=change(connections_yaml, resolved_connections, active.connections_yaml),
+        ),
+        ConfigDocumentPreview(
+            document="policy",
+            change=change(policy_yaml, resolved_policy, active.policy_yaml),
+        ),
+        ConfigDocumentPreview(
+            document="catalog",
+            change=change(catalog_yaml, resolved_catalog, active.catalog_yaml),
+        ),
+    ]
+    audit_config_change(
+        action="preview",
+        outcome="rejected" if errors else "success",
+        principal=principal.subject,
+        principal_scopes=sorted(principal.scopes),
+        auth_method=principal.auth_method,
+        error_category="validation" if errors else None,
+        duration_ms=int((time.monotonic() - start) * 1000),
+    )
+    return ConfigPreview(
+        valid=not errors,
+        errors=errors,
+        documents=documents,
+        ready_to_stage=not errors
+        and any(item.change in ("changed", "submitted") for item in documents),
+    )
 
 
 def stage(

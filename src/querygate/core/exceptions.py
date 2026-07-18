@@ -46,6 +46,14 @@ class ConfigValidationError(ValueError):
     """
 
 
+class AuthorizationError(Exception):
+    """The authenticated caller lacks an explicit operation scope."""
+
+    def __init__(self, required_scope: str) -> None:
+        self.required_scope = required_scope
+        super().__init__(f"Missing required scope: {required_scope!r}")
+
+
 def public_error_message(exc: Exception) -> str:
     """Return a client-safe message without exposing unexpected internals.
 
@@ -61,6 +69,7 @@ def public_error_message(exc: Exception) -> str:
             ConcurrencyLimitError,
             QueryValidationError,
             ConfigValidationError,
+            AuthorizationError,
         ),
     ):
         return str(exc)

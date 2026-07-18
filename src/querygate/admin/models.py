@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 import pydantic as pyd
 
@@ -29,9 +29,10 @@ class ConfigVersion(pyd.BaseModel):
     created_by: str
     description: Optional[str] = None
 
-    # Full YAML content, never resolved — a version's connection strings are
-    # always ${...} references (see querygate/secrets/), never literal
-    # secret values, so persisting this content carries no credential.
+    # Full source YAML, never resolved. Operators should use ${...} references,
+    # but the model deliberately treats this as privileged content because a
+    # submitted file can still contain a literal connection string. Guide and
+    # audit projections therefore never serialize these fields.
     connections_yaml: str
     policy_yaml: str
     catalog_yaml: Optional[str] = None
@@ -42,5 +43,30 @@ class ConfigVersion(pyd.BaseModel):
     # moment this version became active — lets an operator trace exactly
     # what a given apply/rollback replaced.
     previous_active_version_id: Optional[str] = None
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class ConfigDocumentPreview(pyd.BaseModel):
+    """Content-free change signal safe for a config writer without read scope."""
+
+    document: Literal["connections", "policy", "catalog"]
+    change: Literal["changed", "unchanged", "submitted", "inherited"]
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class ConfigPreview(pyd.BaseModel):
+    valid: bool
+    errors: list[str] = pyd.Field(default_factory=list)
+    documents: list[ConfigDocumentPreview]
+    ready_to_stage: bool
+    redactions: list[str] = pyd.Field(
+        default_factory=lambda: [
+            "configuration contents",
+            "connection strings and secret values/references",
+            "principal, table, column, and catalog identifiers",
+        ]
+    )
 
     model_config = pyd.ConfigDict(extra="forbid")

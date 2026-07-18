@@ -17,18 +17,12 @@ import pydantic as pyd
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from querygate.admin import service as governance
-from querygate.admin.models import ConfigVersion
+from querygate.admin.models import ConfigPreview, ConfigVersion
 from querygate.config_reload import ReloadResult
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import ConfigValidationError, NotFoundError
-
-# Read: list/inspect versions and the current active version. Write: validate,
-# stage, apply/rollback. Split the same way most admin APIs separate
-# read-only visibility from mutating actions — a caller auditing config
-# history doesn't need the ability to change it.
-ADMIN_CONFIG_READ_SCOPE = "admin:config:read"
-ADMIN_CONFIG_WRITE_SCOPE = "admin:config:write"
+from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE, ADMIN_CONFIG_WRITE_SCOPE
 
 
 class ConfigChangeRequest(pyd.BaseModel):
@@ -71,11 +65,25 @@ def build_admin_config_router(
         _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
         errors = governance.validate(
             cfg,
+            principal,
             connections_yaml=request.connections_yaml,
             policy_yaml=request.policy_yaml,
             catalog_yaml=request.catalog_yaml,
         )
         return ValidationResult(valid=not errors, errors=errors)
+
+    @router.post("/preview", response_model=ConfigPreview)
+    async def preview_endpoint(
+        request: ConfigChangeRequest, principal: Principal = Depends(get_principal)
+    ):
+        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        return governance.preview(
+            cfg,
+            principal,
+            connections_yaml=request.connections_yaml,
+            policy_yaml=request.policy_yaml,
+            catalog_yaml=request.catalog_yaml,
+        )
 
     @router.post("/versions", response_model=ConfigVersion, status_code=status.HTTP_201_CREATED)
     async def stage_endpoint(

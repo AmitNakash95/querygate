@@ -62,7 +62,7 @@ order-of-magnitude, not commitments.
 | 30 | Distribution, SBOM, and signed release artifacts | M | 4, 14 |
 | 31 | Admin UI / policy designer | XL | 25 |
 | 32 | Governed adaptive semantic memory for agents | XL | 23, 25, 27, 28 |
-| 33 | Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
+| 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
@@ -752,7 +752,7 @@ mechanism (item 5) — never a parallel implementation of it. A new
   catalog themselves. History is never rewritten: rollback doesn't create a
   new snapshot, it moves the active pointer back to an older one, so every
   version that ever existed stays inspectable.
-- `admin/service.py` — orchestrates validate/stage/apply, reusing
+- `admin/service.py` — orchestrates validate/preview/stage/apply, reusing
   `cli.validate_config()` (item 17) and `config_reload.reload_config()`
   (item 5) directly rather than re-implementing either: staging validates
   against a scratch directory before persisting anything, and applying
@@ -761,7 +761,8 @@ mechanism (item 5) — never a parallel implementation of it. A new
   time, e.g. an env var disappeared, must not be silently activated) then
   calls the exact same `reload_config()` swap `/admin/reload-config` uses.
 
-Endpoints: `POST validate` (dry-run, persists nothing), `POST versions`
+Endpoints: `POST validate` (dry-run, persists nothing), `POST preview`
+(added by item 33: content-free document comparison, persists nothing), `POST versions`
 (stage — only submitted fields change, the rest inherit from the current
 active version), `GET versions` / `GET versions/{id}` / `GET current`
 (read-only history), and `POST versions/{id}/apply` — one endpoint serves
@@ -772,14 +773,15 @@ immediately beforehand, and labeled accordingly in the audit trail.
 
 Two new scopes, split the way most admin APIs separate visibility from
 mutation: `admin:config:read` (list/inspect history) and
-`admin:config:write` (validate/stage/apply/rollback) — deliberately
+`admin:config:write` (validate/preview/stage/apply/rollback) — deliberately
 separate from item 5's `admin:reload-config`, since "reload whatever's on
 disk" (infra-as-code workflow) and "submit new content over the API"
 (this item's workflow) are different operational modes that coexist
 without either depending on the other.
 
 Auditing extends the existing sink rather than adding a parallel one: a new
-`ConfigChangeEvent` (`audit/events.py`) — action, version id, previous
+`ConfigChangeEvent` (`audit/events.py`) — validate/preview/stage/apply/rollback
+action, version id, previous
 version id, actor, outcome, never the YAML content itself — flows through
 the same configured `AuditSink` (JSONL or none) as query-execution
 `AuditEvent`s, so one sink configuration and one file covers "who queried
@@ -799,9 +801,9 @@ scope/validation-integrity tests in `tests/security/test_adversarial_security.py
 **Explicitly out of scope for this pass** (matches this item's own "can be
 started as REST-only admin endpoints before adding UI" framing, not a
 gap discovered late): no approval/four-eyes workflow, no scheduled apply,
-no structured diff view (only full-YAML comparison across two versions),
-and no admin UI (TODO item 31, which depends on this item's API existing
-first).
+no detailed semantic diff (item 33 later added a deliberately content-free
+document-level preview), and no admin UI (TODO item 31, which depends on this
+item's API existing first).
 
 **Effort: L (1–2 weeks).** This is a new control-plane slice. It can be
 started as REST-only admin endpoints before adding UI, but it needs careful
@@ -1212,7 +1214,64 @@ container images. Generate an SBOM in CI, pin and review dependencies,
 publish immutable version tags, and document verification steps. Add a
 release checklist so every version is cut the same way.
 
-### 33. Permission-aware QueryGate product guide and configuration assistant
+### 33. Permission-aware QueryGate product guide and configuration assistant ✅ DONE
+
+**Shipped:** a new `querygate/help/` product-knowledge boundary with ten
+canonical Markdown topics packaged in the wheel and tied to the installed
+QueryGate version. `GuideCorpus` loads them through `importlib.resources` and
+performs deterministic weighted lexical retrieval entirely offline — no model
+provider, embeddings service, customer rows, live database, or deployment
+configuration enters the search index. Results and full topics carry stable
+topic ids, safe next actions, source paths, and the QueryGate version they
+describe. Configuration-field explanation is generated from the current
+`AppConfig`, `ConnectionProfile`, `Policy`, and `SchemaCatalog` Pydantic models,
+so new fields are automatically discoverable rather than relying only on
+hand-maintained prose.
+
+REST now exposes public static guidance at `/api/v1/help/search`,
+`/topics/{topic_id}`, `/setup-checklist`, `/config-fields/{model}/{field}`, and
+`/errors/{error_code}`. Authenticated `/help/my-access` returns only the current
+principal's own subject/auth method/scopes, derived capability flags, and the
+connections already filtered by the shared principal-aware visibility layer.
+`/help/configuration` additionally requires `admin:config:read` and reconstructs
+an allowlisted redacted projection: no raw YAML, connection string, credential
+value/reference, mandatory-filter value/claim, table/column policy identifier,
+catalog identifier/description, free-form configuration description, or other
+principal subject is serialized.
+Live context is assembled per request and is never put in the static corpus or
+a cross-principal cache.
+
+MCP has matching read-only tools: `search_querygate_guide`,
+`get_querygate_guide_topic`, `get_querygate_setup_checklist`,
+`explain_querygate_config_field`, `explain_querygate_error`,
+`describe_my_querygate_access`, and `inspect_querygate_configuration`. Server
+instructions explicitly tell agents to use the installed guide instead of
+guessing from model memory and keep every mutation in the governance plane.
+
+The existing config workflow gained `POST /api/v1/admin/config/preview`: a
+config writer can validate a proposed change and see which of the three config
+documents was submitted or inherited, but receives no contents, identifiers,
+hashes, secret references, or line-level diff that could turn write scope into
+read scope. A caller that also holds `admin:config:read` receives the actual
+document-level changed/unchanged comparison.
+Validate and preview actions are attributed and persisted as metadata-only
+`config.governance` audit events; stage/apply/rollback still use item 25's
+original version store and reload path, with no second mutation mechanism.
+
+Release-blocking coverage now checks corpus/runtime version agreement, every
+current config-model field's generated explanation, representative onboarding/
+configuration/troubleshooting/operations/upgrade search tasks, REST/MCP tool
+parity, role/scope behavior, document-level preview behavior and auditing,
+cross-principal context isolation, hidden-name search attempts, literal/env/
+Vault credential redaction, and inclusion of the full guide corpus in built
+wheel artifacts. The QG-16 threat-model entry records the new guide-oracle and
+cache-confusion boundary.
+
+**Deliberately not added:** a hosted-model answer generator, embeddings/vector
+database, arbitrary log/request-id inspection, mutating MCP guide tools, or a
+detailed diff visible to a write-only caller. The deterministic source material
+and structured responses are sufficient for any client-side model to explain
+the product safely; richer approval/review UX belongs with item 31.
 
 **Effort: M–L (3–7 days).** A useful first version is a versioned help corpus
 plus a few read-only MCP/REST tools. Deployment-aware diagnostics, scoped

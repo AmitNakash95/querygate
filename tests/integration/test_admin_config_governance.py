@@ -88,6 +88,29 @@ async def test_validate_endpoint_reports_errors_without_persisting(app):
 
 
 @pytest.mark.asyncio
+async def test_preview_endpoint_returns_redacted_document_diff_without_persisting(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/preview",
+            json={"policy_yaml": "default:\n  enabled: true\n  max_joins: 2\n"},
+            headers=_auth(_ADMIN_KEY),
+        )
+        versions_resp = await client.get("/api/v1/admin/config/versions", headers=_auth(_ADMIN_KEY))
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["valid"] is True
+    assert body["ready_to_stage"] is True
+    assert {item["document"]: item["change"] for item in body["documents"]} == {
+        "connections": "unchanged",
+        "policy": "changed",
+        "catalog": "unchanged",
+    }
+    assert "max_joins" not in resp.text
+    assert len(versions_resp.json()) == 1
+
+
+@pytest.mark.asyncio
 async def test_full_stage_apply_rollback_flow(app):
     async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
         stage_resp = await client.post(

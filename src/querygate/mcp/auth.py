@@ -22,6 +22,7 @@ from querygate.core.jwt_auth import build_jwt_authenticator
 from querygate.core.logging import get_logger
 
 _mcp_caller_var: contextvars.ContextVar[Principal] = contextvars.ContextVar("_mcp_caller")
+_mcp_config_var: contextvars.ContextVar[AppConfig] = contextvars.ContextVar("_mcp_config")
 
 
 class MCPAuthenticationError(Exception):
@@ -36,6 +37,14 @@ def get_mcp_caller() -> Principal:
         raise MCPAuthenticationError("MCP auth context is not initialised.") from exc
 
 
+def get_mcp_config() -> AppConfig:
+    """Return the application configuration bound to this MCP request."""
+    try:
+        return _mcp_config_var.get()
+    except LookupError as exc:
+        raise MCPAuthenticationError("MCP config context is not initialised.") from exc
+
+
 def _unauth_response() -> JSONResponse:
     return JSONResponse(
         content={"error": {"code": "UNAUTHENTICATED", "message": "Bearer token required."}},
@@ -48,6 +57,7 @@ class MCPAuthMiddleware:
 
     def __init__(self, app: ASGIApp, settings: AppConfig) -> None:
         self._app = app
+        self._settings = settings
         # Order matters: real credential schemes first, AnonymousAuthenticator
         # (matches unconditionally) last — see its docstring for why.
         authenticators: list[Authenticator] = [
@@ -95,7 +105,9 @@ class MCPAuthMiddleware:
         )
 
         ctx_token = _mcp_caller_var.set(principal)
+        config_token = _mcp_config_var.set(self._settings)
         try:
             await self._app(scope, receive, send)
         finally:
+            _mcp_config_var.reset(config_token)
             _mcp_caller_var.reset(ctx_token)
