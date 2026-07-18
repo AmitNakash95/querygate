@@ -9,10 +9,16 @@ from typing import Annotated, Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 
 from querygate.execution.service import StructuredQueryService
+from querygate.mcp.auth import get_mcp_caller
 from querygate.mcp.exceptions import MCPErrorResult, safe_mcp_tool
 from querygate.mcp.server import mcp_server
 
 _CONNECTION_FIELD = Field(description="Connection id from list_connections.")
+
+
+def _service(connection: str) -> StructuredQueryService:
+    caller = get_mcp_caller()
+    return StructuredQueryService(connection_id=connection, principal=caller)
 
 
 class TablesListToolResult(BaseModel):
@@ -36,7 +42,7 @@ class TableDescribeToolResult(BaseModel):
 async def list_tables(
     connection: Annotated[str, _CONNECTION_FIELD],
 ) -> Union[TablesListToolResult, MCPErrorResult]:
-    service = StructuredQueryService(connection_id=connection)
+    service = _service(connection)
     tables = await service.list_tables()
     return TablesListToolResult(tables=tables)
 
@@ -55,7 +61,7 @@ async def describe_table(
     connection: Annotated[str, _CONNECTION_FIELD],
     table_name: Annotated[str, Field(min_length=1, description="Table name")],
 ) -> Union[TableDescribeToolResult, MCPErrorResult]:
-    service = StructuredQueryService(connection_id=connection)
+    service = _service(connection)
     description = await service.describe_table(table_name)
     return TableDescribeToolResult(
         name=description.name,

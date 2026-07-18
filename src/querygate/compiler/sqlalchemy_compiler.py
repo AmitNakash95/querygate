@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import sqlalchemy as sa
 
+from querygate.core.auth import Principal
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
@@ -200,11 +201,20 @@ def _build_select_columns(
 
 
 def _apply_mandatory_row_filters(
-    stmt: sa.Select, policy: Policy, tables: Dict[str, sa.Table]
+    stmt: sa.Select,
+    policy: Policy,
+    tables: Dict[str, sa.Table],
+    principal: Optional[Principal],
 ) -> sa.Select:
     """AND in every policy-declared mandatory filter whose table is actually
     part of this query's graph — silently skipped for tables outside the
     graph, rather than erroring, so unrelated queries aren't blocked.
+
+    A filter's value is either a static literal or resolved from the
+    authenticated principal's claims (`MandatoryRowFilter.resolve` raises
+    `PolicyViolationError` if `from_claim` is set but the principal lacks
+    that claim — a caller with no matching claim can't fall through to an
+    unfiltered query).
     """
     for row_filter in policy.mandatory_row_filters:
         matches = [key for key in tables if key.lower() == row_filter.table.lower()]
@@ -212,7 +222,7 @@ def _apply_mandatory_row_filters(
             continue
         table = tables[matches[0]]
         col = resolve_column(table, row_filter.column)
-        stmt = stmt.where(col == row_filter.value)
+        stmt = stmt.where(col == row_filter.resolve(principal))
     return stmt
 
 
@@ -286,6 +296,7 @@ def compile_structured_query(
     tables: Dict[str, sa.Table],
     policy: Policy,
     dialect: str = "postgresql",
+    principal: Optional[Principal] = None,
 ) -> Tuple[sa.Select, int]:
     """Compile AST + reflected tables + policy into a Select.
 
@@ -305,7 +316,7 @@ def compile_structured_query(
         isouter = join.type == "left"
         stmt = stmt.join(right, left_col == right_col, isouter=isouter)
 
-    stmt = _apply_mandatory_row_filters(stmt, policy, tables)
+    stmt = _apply_mandatory_row_filters(stmt, policy, tables, principal)
 
     if query.where is not None:
         stmt = stmt.where(_compile_where(query.where, tables, alias_map={}))

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import Dict
 
+import pytest
 import sqlalchemy as sa
 
 from querygate.compiler.sqlalchemy_compiler import clamp_limit, compile_structured_query
+from querygate.core.auth import Principal
+from querygate.core.exceptions import PolicyViolationError
 from querygate.policy.models import MandatoryRowFilter, Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
@@ -214,6 +217,42 @@ class TestCompiler:
         stmt, _ = compile_structured_query(query, tables, policy)
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "completed" not in compiled
+
+    def test_mandatory_row_filter_resolves_from_principal_claim(self):
+        tables = _make_tables()
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="orders", column="status", from_claim="order_status")
+            ]
+        )
+        query = StructuredQuery(from_table="orders", select=["orders.id"], limit=5)
+        principal = Principal(subject="agent-a", claims={"order_status": "shipped"})
+        stmt, _ = compile_structured_query(query, tables, policy, principal=principal)
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "shipped" in compiled
+
+    def test_mandatory_row_filter_from_claim_without_principal_raises(self):
+        tables = _make_tables()
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="orders", column="status", from_claim="order_status")
+            ]
+        )
+        query = StructuredQuery(from_table="orders", select=["orders.id"], limit=5)
+        with pytest.raises(PolicyViolationError, match="order_status"):
+            compile_structured_query(query, tables, policy)
+
+    def test_mandatory_row_filter_from_claim_missing_from_principal_raises(self):
+        tables = _make_tables()
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="orders", column="status", from_claim="order_status")
+            ]
+        )
+        query = StructuredQuery(from_table="orders", select=["orders.id"], limit=5)
+        principal = Principal(subject="agent-a")  # no claims at all
+        with pytest.raises(PolicyViolationError, match="order_status"):
+            compile_structured_query(query, tables, policy, principal=principal)
 
     def test_aggregate_query_gets_higher_limit_cap(self):
         tables = _make_tables()

@@ -21,7 +21,7 @@ _CONNECTION_FIELD = Field(description="Connection id from list_connections.")
 
 def _service(connection: str) -> StructuredQueryService:
     caller = get_mcp_caller()
-    return StructuredQueryService(connection_id=connection, principal=caller.subject)
+    return StructuredQueryService(connection_id=connection, principal=caller)
 
 
 class StructuredQueryToolResult(BaseModel):
@@ -136,7 +136,8 @@ async def execute_structured_queries(
         Field(description="List of structured query ASTs to run in one call"),
     ],
 ) -> Union[BatchQueryToolResult, MCPErrorResult]:
-    validate_batch_size(len(queries), get_policy(connection))
+    caller = get_mcp_caller()
+    validate_batch_size(len(queries), get_policy(connection, principal=caller))
     service = _service(connection)
     results = await service.execute_many(queries)
     return BatchQueryToolResult(

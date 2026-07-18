@@ -6,10 +6,13 @@ import json
 
 import pytest
 import pytest_asyncio
+import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from querygate.api.app import create_app
 from querygate.core.config import AppConfig
+from querygate.policy.loader import PolicyStore, set_policy_store
 
 pytestmark = pytest.mark.integration
 
@@ -125,3 +128,147 @@ async def test_list_connections_tool_never_leaks_credentials(mcp_dev_client):
     connections = payload["result"]["structuredContent"]["result"]["connections"]
     assert connections[0]["id"] == "demo"
     assert "connection_string" not in connections[0]
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_tables_uses_per_principal_policy():
+    """Regression: MCP schema tools used to instantiate
+    StructuredQueryService without the authenticated MCP caller, exposing
+    connection-level schema rather than the caller-filtered view.
+    """
+    set_policy_store(
+        PolicyStore.from_dict(
+            {
+                "default": {},
+                "principals": {"agent-a": {"demo": {"denied_tables": ["order_items"]}}},
+            }
+        )
+    )
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_keys=[_TEST_API_KEY], mcp_api_key_subject="agent-a")
+    app = create_app(settings)
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(
+            transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+        ) as client,
+    ):
+        resp = await client.post(
+            "/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "list_tables", "arguments": {"connection": "demo"}},
+            },
+            headers={**_HEADERS_JSON, "Authorization": f"Bearer {_TEST_API_KEY}"},
+        )
+    assert resp.status_code == 200
+    payload = _parse_mcp_response(resp)
+    tables = payload["result"]["structuredContent"]["result"]["tables"]
+    assert "customers" in tables
+    assert "order_items" not in tables
+
+
+@pytest.mark.asyncio
+async def test_mcp_describe_table_uses_per_principal_column_policy():
+    set_policy_store(
+        PolicyStore.from_dict(
+            {
+                "default": {},
+                "principals": {"agent-a": {"demo": {"denied_columns": {"customers": ["email"]}}}},
+            }
+        )
+    )
+    customers = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("email", sa.String(100)),
+        sa.Column("name", sa.String(100)),
+    )
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_keys=[_TEST_API_KEY], mcp_api_key_subject="agent-a")
+    app = create_app(settings)
+    with (
+        patch("querygate.execution.service.get_engine", return_value=MagicMock()),
+        patch(
+            "querygate.execution.service.get_table_schema",
+            AsyncMock(return_value=customers),
+        ),
+    ):
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url=_BASE_URL,
+                follow_redirects=True,
+            ) as client,
+        ):
+            resp = await client.post(
+                "/mcp/",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "describe_table",
+                        "arguments": {"connection": "demo", "table_name": "customers"},
+                    },
+                },
+                headers={**_HEADERS_JSON, "Authorization": f"Bearer {_TEST_API_KEY}"},
+            )
+    assert resp.status_code == 200
+    payload = _parse_mcp_response(resp)
+    columns = payload["result"]["structuredContent"]["result"]["columns"]
+    assert {column["name"] for column in columns} == {"id", "name"}
+
+
+@pytest.mark.asyncio
+async def test_mcp_batch_uses_per_principal_max_batch_size():
+    set_policy_store(
+        PolicyStore.from_dict(
+            {
+                "default": {"max_batch_size": 10},
+                "principals": {"agent-a": {"demo": {"max_batch_size": 1}}},
+            }
+        )
+    )
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_keys=[_TEST_API_KEY], mcp_api_key_subject="agent-a")
+    app = create_app(settings)
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(
+            transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+        ) as client,
+    ):
+        resp = await client.post(
+            "/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "execute_structured_queries",
+                    "arguments": {
+                        "connection": "demo",
+                        "queries": [
+                            {
+                                "from": "customers",
+                                "select": ["customers.id"],
+                                "limit": 5,
+                            },
+                            {"from": "orders", "select": ["orders.id"], "limit": 5},
+                        ],
+                    },
+                },
+            },
+            headers={**_HEADERS_JSON, "Authorization": f"Bearer {_TEST_API_KEY}"},
+        )
+    assert resp.status_code == 200
+    payload = _parse_mcp_response(resp)
+    result = payload["result"]["structuredContent"]["result"]
+    assert result["success"] is False
+    assert result["error_code"] == "VALIDATION"
+    assert "max of 1" in result["error_message"]

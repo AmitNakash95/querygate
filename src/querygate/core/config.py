@@ -8,10 +8,23 @@ file so secrets never mix with app config or get serialized into a schema.
 from __future__ import annotations
 
 import json
+from enum import Enum
 from typing import Any, Literal
 
 import pydantic as pyd
 from pydantic_settings import BaseSettings
+
+
+class ConcurrencyBackend(str, Enum):
+    """Concurrency guardrail backend (execution/concurrency.py).
+
+    IN_PROCESS (default) is an asyncio.Semaphore per connection id — correct
+    for one instance only. REDIS enforces Policy.max_concurrency across every
+    instance sharing one Redis (see execution/redis_concurrency.py).
+    """
+
+    IN_PROCESS = "in_process"
+    REDIS = "redis"
 
 
 def _parse_str_list(value: Any) -> Any:
@@ -52,6 +65,10 @@ class AppConfig(BaseSettings):
         default_factory=list, validation_alias=pyd.AliasChoices("API_KEYS", "api_keys")
     )
     api_key_subject: str = pyd.Field(default="api-key-client")
+    # Scopes granted to every caller authenticating via `api_keys` — all keys
+    # in the list currently share one subject, so scopes are uniform too.
+    # Per-key/per-caller differentiation needs a richer Authenticator (JWT).
+    api_key_scopes: list[str] = pyd.Field(default_factory=list)
 
     mcp_enabled: bool = pyd.Field(default=False)
     mcp_mount_path: str = pyd.Field(default="/mcp")
@@ -59,6 +76,38 @@ class AppConfig(BaseSettings):
         default_factory=list, validation_alias=pyd.AliasChoices("MCP_API_KEYS", "mcp_api_keys")
     )
     mcp_api_key_subject: str = pyd.Field(default="mcp-service-account")
+    mcp_api_key_scopes: list[str] = pyd.Field(default_factory=list)
+
+    # JWT bearer-token auth (core/jwt_auth.JwtAuthenticator) — a second,
+    # optional Authenticator alongside the static api_keys above. Shared by
+    # both REST and MCP (one identity provider for both surfaces); when
+    # enabled, a caller may authenticate with either a configured API key or
+    # a valid JWT (see core/auth.CompositeAuthenticator).
+    jwt_enabled: bool = pyd.Field(default=False)
+    jwt_jwks_url: str = pyd.Field(default="")
+    jwt_issuer: str = pyd.Field(default="")
+    jwt_audience: str = pyd.Field(default="")
+    jwt_algorithms: list[str] = pyd.Field(default_factory=lambda: ["RS256"])
+    jwt_subject_claim: str = pyd.Field(default="sub")
+    jwt_scopes_claim: str = pyd.Field(default="scope")
+    jwt_leeway_seconds: float = pyd.Field(default=0)
+
+    # How often each enabled connection is pinged in the background for
+    # GET /health's readiness signal (see querygate/health.py).
+    health_check_interval_seconds: float = pyd.Field(default=30)
+
+    concurrency_backend: ConcurrencyBackend = pyd.Field(default=ConcurrencyBackend.IN_PROCESS)
+    concurrency_redis_url: str = pyd.Field(default="")
+    # Should comfortably exceed the longest legitimate query (policy
+    # timeout + scheduling/network slack) — a slot held past this is
+    # assumed to belong to a crashed instance and is reclaimed.
+    concurrency_redis_lease_seconds: float = pyd.Field(default=120)
+    concurrency_redis_poll_interval_seconds: float = pyd.Field(default=0.05)
+    # True (default) prioritizes availability: a Redis outage degrades to
+    # unenforced concurrency rather than rejecting every query. False fails
+    # closed instead — set it for deployments where an unenforced
+    # concurrency cap on the underlying database is the worse outcome.
+    concurrency_redis_fail_open: bool = pyd.Field(default=True)
 
     # Engine pool defaults, shared across connections (per-connection timeout /
     # concurrency guardrails live in policy, not here).
@@ -69,19 +118,36 @@ class AppConfig(BaseSettings):
     odbc_driver: str = pyd.Field(default="ODBC+Driver+17+for+SQL+Server")
     db_trust_server_certificate: bool = pyd.Field(default=False)
 
-    @pyd.field_validator("api_keys", "mcp_api_keys", mode="before")
+    @pyd.field_validator(
+        "api_keys",
+        "mcp_api_keys",
+        "api_key_scopes",
+        "mcp_api_key_scopes",
+        "jwt_algorithms",
+        mode="before",
+    )
     @classmethod
     def _parse_key_lists(cls, value: Any) -> Any:
         return _parse_str_list(value)
 
     @pyd.model_validator(mode="after")
     def _validate_production_auth(self) -> "AppConfig":
-        if self.environment == "production" and not self.api_keys:
-            raise ValueError("API_KEYS must be set when ENVIRONMENT=production")
-        if self.environment == "production" and self.mcp_enabled and not self.mcp_api_keys:
+        if self.environment == "production" and not self.api_keys and not self.jwt_enabled:
+            raise ValueError("API_KEYS or JWT_ENABLED must be set when ENVIRONMENT=production")
+        if (
+            self.environment == "production"
+            and self.mcp_enabled
+            and not self.mcp_api_keys
+            and not self.jwt_enabled
+        ):
             raise ValueError(
-                "MCP_API_KEYS must be set when ENVIRONMENT=production and MCP_ENABLED=true"
+                "MCP_API_KEYS or JWT_ENABLED must be set when ENVIRONMENT=production "
+                "and MCP_ENABLED=true"
             )
+        if self.jwt_enabled and not self.jwt_jwks_url:
+            raise ValueError("JWT_JWKS_URL must be set when JWT_ENABLED=true")
+        if self.concurrency_backend == ConcurrencyBackend.REDIS and not self.concurrency_redis_url:
+            raise ValueError("CONCURRENCY_REDIS_URL must be set when CONCURRENCY_BACKEND=redis")
         return self
 
     @property

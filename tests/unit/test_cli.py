@@ -1,0 +1,105 @@
+"""Unit tests for the `querygate-validate-config` CLI."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from querygate.cli import validate_config
+
+CONNECTIONS_YAML = """
+connections:
+  - id: demo
+    dialect: postgresql
+    connection_string: ${TEST_DEMO_DB_URL}
+    known_tables: [customers, orders]
+"""
+
+POLICY_YAML = """
+default:
+  enabled: true
+
+connections:
+  demo:
+    max_joins: 2
+"""
+
+
+def _write(path: Path, name: str, content: str) -> str:
+    file_path = path / name
+    file_path.write_text(content)
+    return str(file_path)
+
+
+def test_valid_config_has_no_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_DEMO_DB_URL", "postgresql+asyncpg://user:pass@localhost/demo")
+    connections_file = _write(tmp_path, "connections.yaml", CONNECTIONS_YAML)
+    policy_file = _write(tmp_path, "policy.yaml", POLICY_YAML)
+
+    errors = validate_config(connections_file, policy_file)
+    assert errors == []
+
+
+def test_missing_connections_file_is_reported(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_DEMO_DB_URL", "postgresql+asyncpg://user:pass@localhost/demo")
+    policy_file = _write(tmp_path, "policy.yaml", POLICY_YAML)
+
+    errors = validate_config(str(tmp_path / "does_not_exist.yaml"), policy_file)
+    assert len(errors) == 1
+    assert "does_not_exist.yaml" in errors[0]
+
+
+def test_unresolved_env_var_is_reported(tmp_path, monkeypatch):
+    monkeypatch.delenv("TEST_DEMO_DB_URL", raising=False)
+    connections_file = _write(tmp_path, "connections.yaml", CONNECTIONS_YAML)
+    policy_file = _write(tmp_path, "policy.yaml", POLICY_YAML)
+
+    errors = validate_config(connections_file, policy_file)
+    assert len(errors) == 1
+    assert "TEST_DEMO_DB_URL" in errors[0]
+
+
+def test_policy_referencing_unknown_connection_id_is_reported(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_DEMO_DB_URL", "postgresql+asyncpg://user:pass@localhost/demo")
+    connections_file = _write(tmp_path, "connections.yaml", CONNECTIONS_YAML)
+    policy_file = _write(
+        tmp_path,
+        "policy.yaml",
+        """
+default:
+  enabled: true
+
+connections:
+  typo_connection:
+    max_joins: 2
+""",
+    )
+
+    errors = validate_config(connections_file, policy_file)
+    assert len(errors) == 1
+    assert "typo_connection" in errors[0]
+    assert "demo" in errors[0]
+
+
+def test_invalid_policy_field_is_reported(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_DEMO_DB_URL", "postgresql+asyncpg://user:pass@localhost/demo")
+    connections_file = _write(tmp_path, "connections.yaml", CONNECTIONS_YAML)
+    policy_file = _write(
+        tmp_path,
+        "policy.yaml",
+        """
+default:
+  enabled: true
+  max_joins: "not-a-number"
+""",
+    )
+
+    errors = validate_config(connections_file, policy_file)
+    assert len(errors) == 1
+    assert policy_file in errors[0]
+
+
+def test_both_files_broken_reports_both_errors(tmp_path):
+    errors = validate_config(
+        str(tmp_path / "missing_connections.yaml"), str(tmp_path / "missing_policy.yaml")
+    )
+    assert len(errors) == 2

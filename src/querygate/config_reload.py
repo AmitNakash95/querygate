@@ -1,0 +1,87 @@
+"""Hot-reload connections.yaml / policy.yaml without a process restart.
+
+`connections/registry.py` and `policy/loader.py` each load their YAML file
+once into a process-wide singleton on first access — tightening a policy in
+response to an incident, or adding a connection, previously required a full
+redeploy. `reload_config()` rebuilds both stores from disk and swaps them in.
+"""
+
+from __future__ import annotations
+
+from typing import List
+
+import pydantic as pyd
+
+from querygate.connections.engine import dispose_engine
+from querygate.connections.registry import ConnectionRegistry, get_registry, set_registry
+from querygate.core.logging import get_logger
+from querygate.execution.concurrency import SEMAPHORES
+from querygate.policy.loader import PolicyStore, set_policy_store
+
+
+class ReloadResult(pyd.BaseModel):
+    connection_ids: List[str]
+    policy_connection_overrides: List[str]
+    disposed_connections: List[str]
+
+
+async def reload_config(*, connections_file: str, policy_file: str) -> ReloadResult:
+    """Atomically swap in a freshly loaded registry + policy store.
+
+    Safe for in-flight requests: `set_registry`/`set_policy_store` are a
+    single reference assignment (atomic under the GIL), so a request that
+    already read the old registry/policy keeps using it to completion — it
+    never observes a half-swapped state.
+
+    A connection that was removed, or whose `connection_string`/`dialect`
+    changed, has its cached engine disposed (see
+    `connections/engine.dispose_engine`) so the next use lazily reconnects
+    with the new settings; an unchanged connection keeps its existing
+    engine/pool to avoid unnecessary reconnect churn. Every connection's
+    concurrency semaphore is reset unconditionally (not diffed), since it's
+    the one piece of `Policy` baked into cached state
+    (`execution/concurrency.SEMAPHORES`) and reloads are rare, admin-
+    triggered operations, not hot-path — a request already holding a permit
+    on the old semaphore still releases it correctly; there's a brief
+    transition window where a connection's observed concurrency can exceed
+    either the old or new limit, an accepted tradeoff for a live reload over
+    a hard cutover.
+    """
+    old_registry = get_registry()
+    new_registry = ConnectionRegistry.from_file(connections_file)
+    new_policy_store = PolicyStore.from_file(policy_file)
+
+    set_registry(new_registry)
+    set_policy_store(new_policy_store)
+
+    disposed = await _dispose_stale_engines(old_registry, new_registry)
+    for connection_id in new_registry.all_ids():
+        SEMAPHORES.pop(connection_id, None)
+
+    get_logger().info(
+        "config.reload",
+        connections=new_registry.all_ids(),
+        disposed_connections=disposed,
+    )
+    return ReloadResult(
+        connection_ids=new_registry.all_ids(),
+        policy_connection_overrides=new_policy_store.override_connection_ids(),
+        disposed_connections=disposed,
+    )
+
+
+async def _dispose_stale_engines(old: ConnectionRegistry, new: ConnectionRegistry) -> List[str]:
+    old_ids = set(old.all_ids())
+    new_ids = set(new.all_ids())
+    stale = old_ids - new_ids
+    for connection_id in old_ids & new_ids:
+        old_profile = old.get(connection_id)
+        new_profile = new.get(connection_id)
+        if (
+            old_profile.connection_string != new_profile.connection_string
+            or old_profile.dialect != new_profile.dialect
+        ):
+            stale.add(connection_id)
+    for connection_id in stale:
+        await dispose_engine(connection_id)
+    return sorted(stale)

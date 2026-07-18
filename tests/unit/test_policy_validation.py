@@ -83,6 +83,23 @@ def test_denied_column_rejected_when_only_used_in_where():
         validate_policy(query, policy, connection_id="demo")
 
 
+def test_denied_column_rejected_with_mismatched_table_casing():
+    """policy.yaml keys and the casing a query/reflection actually uses can
+    differ (dialect-dependent) — the deny rule must still match.
+    """
+    query = StructuredQuery(from_table="Customers", select=["Customers.Email"])
+    policy = Policy(denied_columns={"customers": ["email"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_allowed_columns_rejected_with_mismatched_table_casing():
+    query = StructuredQuery(from_table="Customers", select=["Customers.Email"])
+    policy = Policy(allowed_columns={"customers": ["id"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
 def test_allowed_columns_wildcard_applies_to_every_table():
     query = StructuredQuery(from_table="customers", select=["customers.id", "customers.name"])
     policy = Policy(allowed_columns={"*": ["id"]})

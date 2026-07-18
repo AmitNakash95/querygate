@@ -9,7 +9,7 @@ shared without becoming a data-exfiltration surface itself.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 from querygate.core.logging import get_logger
 
@@ -18,10 +18,12 @@ def audit_query(
     *,
     connection_id: str,
     sql: str,
+    params: Optional[str] = None,
     intent: Optional[str] = None,
     row_count: Optional[int] = None,
     duration_ms: Optional[int] = None,
     principal: Optional[str] = None,
+    principal_scopes: Optional[List[str]] = None,
     rejected: bool = False,
     rejection_reason: Optional[str] = None,
 ) -> None:
@@ -29,7 +31,9 @@ def audit_query(
         "audit.query",
         connection=connection_id,
         principal=principal,
+        principal_scopes=principal_scopes,
         sql=sql,
+        params=params,
         intent=intent,
         row_count=row_count,
         duration_ms=duration_ms,

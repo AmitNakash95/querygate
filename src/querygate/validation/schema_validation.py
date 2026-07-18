@@ -6,10 +6,11 @@ validation/policy_validation.py, before this module ever reflects anything.
 
 from __future__ import annotations
 
-from typing import Dict, Set, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 import sqlalchemy as sa
 
+from querygate.core.auth import Principal
 from querygate.connections.engine import get_engine, physical_db_name
 from querygate.connections.registry import get_registry
 from querygate.policy.loader import get_policy
@@ -106,12 +107,14 @@ async def _load_table(connection_id: str, table_name: str, table_connection: str
     return await get_table_schema(table_name, connection_id, engine, schema=schema)
 
 
-def _check_join_group(query: StructuredQuery, connection_id: str) -> Dict[str, str]:
+def _check_join_group(
+    query: StructuredQuery, connection_id: str, principal: Optional[Principal] = None
+) -> Dict[str, str]:
     """Resolve which connection each table belongs to, rejecting any join
     whose connection isn't in the same policy join_group as the primary.
     """
     registry = get_registry()
-    policy = get_policy(connection_id)
+    policy = get_policy(connection_id, principal=principal)
     primary = registry.get(connection_id)
     primary_group = policy.join_group or primary.effective_join_group()
 
@@ -120,7 +123,7 @@ def _check_join_group(query: StructuredQuery, connection_id: str) -> Dict[str, s
         join_connection_id = join.connection or connection_id
         if join_connection_id != connection_id:
             other = registry.get(join_connection_id)
-            other_policy = get_policy(join_connection_id)
+            other_policy = get_policy(join_connection_id, principal=principal)
             other_group = other_policy.join_group or other.effective_join_group()
             if primary_group != other_group:
                 raise ValueError(
@@ -133,13 +136,15 @@ def _check_join_group(query: StructuredQuery, connection_id: str) -> Dict[str, s
     return table_connection
 
 
-async def validate_schema(query: StructuredQuery, connection_id: str) -> Dict[str, sa.Table]:
+async def validate_schema(
+    query: StructuredQuery, connection_id: str, principal: Optional[Principal] = None
+) -> Dict[str, sa.Table]:
     """Reflect + verify every table/column the query references exists.
 
     Returns the reflected tables, keyed by the name the query used, for the
     compiler.
     """
-    table_connection = _check_join_group(query, connection_id)
+    table_connection = _check_join_group(query, connection_id, principal=principal)
 
     needed: Set[str] = {query.from_table}
     for join in query.joins:

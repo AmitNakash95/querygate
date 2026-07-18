@@ -11,9 +11,11 @@ from typing import Callable, List
 import pydantic as pyd
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from querygate.config_reload import ReloadResult, reload_config
 from querygate.connections.models import PublicConnectionInfo
 from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
+from querygate.core.config import AppConfig
 from querygate.core.exceptions import PolicyViolationError
 from querygate.execution.service import (
     BatchQueryItemResult,
@@ -25,6 +27,12 @@ from querygate.execution.service import (
 from querygate.policy.loader import get_policy
 from querygate.query_ast.models import StructuredQuery
 from querygate.validation.policy_validation import validate_batch_size
+
+# Scope required to call POST /admin/reload-config — reloading connections/
+# policy is sensitive enough (it can swap which databases and rules are
+# active) to gate behind an explicit grant rather than any authenticated
+# caller, unlike the read-only/query endpoints below.
+ADMIN_RELOAD_CONFIG_SCOPE = "admin:reload-config"
 
 
 class TablesListResult(pyd.BaseModel):
@@ -50,10 +58,12 @@ def _require_connection(connection_id: str) -> None:
 
 def _service(connection_id: str, principal: Principal) -> StructuredQueryService:
     _require_connection(connection_id)
-    return StructuredQueryService(connection_id=connection_id, principal=principal.subject)
+    return StructuredQueryService(connection_id=connection_id, principal=principal)
 
 
-def build_router(get_principal: Callable[..., Principal], prefix: str = "/api/v1") -> APIRouter:
+def build_router(
+    get_principal: Callable[..., Principal], cfg: AppConfig, prefix: str = "/api/v1"
+) -> APIRouter:
     router = APIRouter(prefix=prefix)
 
     @router.get("/connections", response_model=List[PublicConnectionInfo])
@@ -111,10 +121,24 @@ def build_router(get_principal: Callable[..., Principal], prefix: str = "/api/v1
     ):
         service = _service(connection, principal)
         try:
-            validate_batch_size(len(payload.queries), get_policy(connection))
+            validate_batch_size(len(payload.queries), get_policy(connection, principal=principal))
         except PolicyViolationError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
         results = await service.execute_many(payload.queries)
         return BatchQueryResult(results=results)
+
+    @router.post("/admin/reload-config", response_model=ReloadResult)
+    async def reload_config_endpoint(principal: Principal = Depends(get_principal)):
+        if ADMIN_RELOAD_CONFIG_SCOPE not in principal.scopes:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required scope: {ADMIN_RELOAD_CONFIG_SCOPE!r}",
+            )
+        try:
+            return await reload_config(
+                connections_file=cfg.connections_file, policy_file=cfg.policy_file
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     return router

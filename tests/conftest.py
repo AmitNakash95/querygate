@@ -12,7 +12,7 @@ import pytest
 from querygate.connections.engine import reset_engines
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
-from querygate.execution.concurrency import SEMAPHORES
+from querygate.execution.concurrency import SEMAPHORES, clear_redis_limiter
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
 
@@ -40,6 +40,8 @@ def reset_state():
     # cached from a previous test would raise "bound to a different event
     # loop" (or, worse, look permanently "locked") if reused here.
     SEMAPHORES.clear()
+    clear_redis_limiter()
     yield
     reset_engines()
     SEMAPHORES.clear()
+    clear_redis_limiter()

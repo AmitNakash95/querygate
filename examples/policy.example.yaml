@@ -4,6 +4,14 @@
 # Each entry under `connections` is merged on top of `default` (so you only
 # need to specify what differs). Set QUERYGATE_POLICY_FILE to point at your
 # own copy of this file.
+#
+# `principals` (optional) layers a further override on top of whichever of
+# the above applies, keyed by the authenticated caller's Principal.subject —
+# an API key's configured subject, or a JWT's subject claim. Without this,
+# every caller of a connection gets identical access. Each principal entry
+# is keyed by connection id, or "*" for every connection; a connection-
+# specific entry wins over "*" for the same principal. See the `principals`
+# block below.
 
 default:
   enabled: true
@@ -41,5 +49,26 @@ connections:
 
     # Example mandatory row filter — always AND-ed into any query that
     # touches `orders`, e.g. for a policy that hides cancelled orders from
-    # every agent by default. Empty by default in this example.
+    # every agent by default. Empty by default in this example. A filter's
+    # value can also be `from_claim: <name>` instead of a static `value`,
+    # resolved from the authenticated principal's claims at query time
+    # (e.g. a JWT's `tenant_id` claim) — the shape most multi-tenant
+    # deployments need, since a static value is identical for every caller.
     mandatory_row_filters: []
+
+# Per-principal overrides — optional, on top of the `default`/`connections`
+# layers above. Uncomment and adapt once callers have distinct identities
+# (a per-key `api_key_subject`, or JWT auth — see AppConfig's `jwt_*`
+# fields and `core/jwt_auth.py`).
+# principals:
+#   agent-a:
+#     demo:
+#       # agent-a can't see email at all, on top of demo's own denied_columns.
+#       denied_columns:
+#         customers: [email]
+#         orders: []
+#   reporting-service:
+#     "*":
+#       # A read-only reporting caller gets a tighter row cap on every
+#       # connection it can reach, without needing a connection-specific entry.
+#       max_limit: 20

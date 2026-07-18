@@ -1,0 +1,28 @@
+"""Unit tests for querygate.metrics — rejection classification and rendering."""
+
+from __future__ import annotations
+
+from querygate.core.exceptions import ConcurrencyLimitError, PolicyViolationError
+from querygate.metrics import classify_rejection, render_latest
+
+
+def test_classify_concurrency_limit_error():
+    assert classify_rejection(ConcurrencyLimitError("too many")) == "concurrency"
+
+
+def test_classify_policy_violation_error():
+    assert classify_rejection(PolicyViolationError("denied")) == "policy"
+
+
+def test_classify_plain_value_error_as_schema():
+    assert classify_rejection(ValueError("bad column ref")) == "schema"
+
+
+def test_classify_other_exception_as_db_error():
+    assert classify_rejection(RuntimeError("connection reset")) == "db_error"
+
+
+def test_render_latest_produces_prometheus_text_format():
+    output = render_latest().decode("utf-8")
+    assert "querygate_queries_total" in output
+    assert "querygate_concurrency_in_use" in output

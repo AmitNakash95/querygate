@@ -9,7 +9,7 @@ connection only fails when something actually queries it.
 from __future__ import annotations
 
 import contextlib
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import (
@@ -23,10 +23,12 @@ from querygate.connections.dialects import (
     apply_session_guardrails,
     build_connect_args,
     build_engine_url,
+    register_query_timeout,
 )
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import get_registry
 from querygate.core.config import config as app_config
+from querygate.policy.models import Policy
 
 ENGINES: dict[str, AsyncEngine] = {}
 SESSIONMAKERS: dict[str, async_sessionmaker] = {}
@@ -52,7 +54,7 @@ def init_engine(connection_id: str) -> AsyncEngine:
     if not profile.connection_string:
         raise ValueError(f"Connection string for {connection_id!r} is not set.")
     policy = get_policy(connection_id)
-    return create_async_engine(
+    engine = create_async_engine(
         url=build_engine_url(profile),
         pool_size=app_config.pool_size,
         max_overflow=app_config.conn_max_overflow,
@@ -62,6 +64,8 @@ def init_engine(connection_id: str) -> AsyncEngine:
         isolation_level="READ COMMITTED",
         connect_args=build_connect_args(profile, policy.timeout_seconds),
     )
+    register_query_timeout(engine, profile.dialect, policy.timeout_seconds)
+    return engine
 
 
 def get_engine(connection_id: str) -> AsyncEngine:
@@ -85,11 +89,14 @@ def get_metadata(connection_id: str) -> sa.MetaData:
 
 
 @contextlib.asynccontextmanager
-async def session_scope(connection_id: str) -> AsyncGenerator[AsyncSession, None]:
-    from querygate.policy.loader import get_policy
-
+async def session_scope(
+    connection_id: str, policy: Optional[Policy] = None
+) -> AsyncGenerator[AsyncSession, None]:
     profile = _profile(connection_id)
-    policy = get_policy(connection_id)
+    if policy is None:
+        from querygate.policy.loader import get_policy
+
+        policy = get_policy(connection_id)
     async with get_sessionmaker(connection_id)() as session:
         try:
             await session.begin()
@@ -112,3 +119,19 @@ def reset_engines() -> None:
     ENGINES.clear()
     SESSIONMAKERS.clear()
     METADATAS.clear()
+
+
+async def dispose_engine(connection_id: str) -> None:
+    """Tear down one connection's cached engine (config reload — see
+    querygate/config_reload.py). A request already holding a checked-out
+    connection from this engine isn't interrupted: `AsyncEngine.dispose()`
+    only closes idle pooled connections; a connection currently checked out
+    finishes its work normally and is then discarded rather than returned to
+    the (now-disposed) pool for reuse. The next `get_engine()` call lazily
+    creates a fresh engine, same as at startup.
+    """
+    engine = ENGINES.pop(connection_id, None)
+    SESSIONMAKERS.pop(connection_id, None)
+    METADATAS.pop(connection_id, None)
+    if engine is not None:
+        await engine.dispose()

@@ -4,9 +4,28 @@ from __future__ import annotations
 
 import asyncio
 
+import fakeredis.aioredis
 import pytest
 
 from querygate.execution import concurrency as cc
+from querygate.execution.redis_concurrency import RedisConcurrencyLimiter
+from querygate.metrics import REGISTRY
+
+
+def _gauge(name: str, labels: dict) -> float:
+    return REGISTRY.get_sample_value(name, labels) or 0.0
+
+
+@pytest.mark.asyncio
+async def test_concurrency_slot_updates_in_use_gauge():
+    cc.SEMAPHORES.pop("demo", None)
+    assert _gauge("querygate_concurrency_in_use", {"connection": "demo"}) == 0.0
+
+    async with cc.concurrency_slot("demo", max_concurrency=2, wait_seconds=1):
+        assert _gauge("querygate_concurrency_in_use", {"connection": "demo"}) == 1.0
+
+    assert _gauge("querygate_concurrency_in_use", {"connection": "demo"}) == 0.0
+    assert _gauge("querygate_concurrency_max", {"connection": "demo"}) == 2.0
 
 
 @pytest.mark.asyncio
@@ -46,3 +65,28 @@ async def test_concurrency_caps_are_independent_per_connection():
     # Must not block on "demo"'s exhausted slot.
     async with cc.concurrency_slot("other", max_concurrency=1, wait_seconds=1):
         pass
+
+
+@pytest.mark.asyncio
+async def test_concurrency_slot_dispatches_to_redis_limiter_when_configured():
+    limiter = RedisConcurrencyLimiter(fakeredis.aioredis.FakeRedis(), lease_seconds=30)
+    cc.init_redis_limiter(limiter)
+    try:
+        # SEMAPHORES must stay untouched — proves the in-process path was
+        # never exercised for this call.
+        cc.SEMAPHORES.pop("demo", None)
+        async with cc.concurrency_slot("demo", max_concurrency=1, wait_seconds=1):
+            assert "demo" not in cc.SEMAPHORES
+    finally:
+        cc.clear_redis_limiter()
+
+
+@pytest.mark.asyncio
+async def test_clear_redis_limiter_reverts_to_in_process():
+    limiter = RedisConcurrencyLimiter(fakeredis.aioredis.FakeRedis(), lease_seconds=30)
+    cc.init_redis_limiter(limiter)
+    cc.clear_redis_limiter()
+
+    cc.SEMAPHORES.pop("demo", None)
+    async with cc.concurrency_slot("demo", max_concurrency=1, wait_seconds=1):
+        assert "demo" in cc.SEMAPHORES

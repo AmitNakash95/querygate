@@ -34,6 +34,10 @@ run-dev: ## Start with auto-reload (development mode)
 seed-demo-db: ## Seed the example demo database (SQLite by default; see examples/demo_db)
 	poetry run python examples/demo_db/seed.py
 
+.PHONY: validate-config
+validate-config: ## Validate connections.yaml/policy.yaml (CONNECTIONS_FILE / POLICY_FILE env vars, or pass ARGS="--connections-file ... --policy-file ...")
+	poetry run querygate-validate-config $(ARGS)
+
 # ─── Tests ────────────────────────────────────────────────────────────────────
 .PHONY: test
 test: ## Run the full test suite
@@ -50,6 +54,19 @@ test-integration: ## Run only integration tests
 .PHONY: test-verify
 test-verify: ## Run only the core-guarantee verification/regression suite (real DB, no mocks)
 	poetry run pytest -m verification
+
+.PHONY: test-postgres-live
+test-postgres-live: ## Run tests needing a real Postgres (timeout cancellation, etc.) — run compose-up first
+	poetry run pytest -m postgres_live
+
+.PHONY: test-mssql-live
+test-mssql-live: ## Run tests needing a real MSSQL server — see tests/integration/test_mssql_live.py's module docstring for setup
+	poetry run python tests/integration/setup_mssql_test_db.py
+	poetry run pytest -m mssql_live
+
+.PHONY: test-real-db
+test-real-db: ## Run every test needing a real database (Postgres + MSSQL)
+	poetry run pytest -m real_db
 
 .PHONY: test-cov
 test-cov: ## Run tests with coverage report

@@ -6,6 +6,7 @@ is no other path to a database from agent/client-facing code.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, List, Optional, Tuple
 
@@ -16,10 +17,18 @@ from querygate.audit.logger import audit_query
 from querygate.compiler.sqlalchemy_compiler import compile_structured_query
 from querygate.connections.engine import get_engine, get_metadata, session_scope
 from querygate.connections.registry import get_registry
+from querygate.core.auth import Principal
 from querygate.core.exceptions import PolicyViolationError
 from querygate.core.logging import log_execution
 from querygate.execution.concurrency import concurrency_slot
+from querygate.metrics import (
+    QUERIES_REJECTED_TOTAL,
+    QUERIES_TOTAL,
+    QUERY_DURATION_SECONDS,
+    classify_rejection,
+)
 from querygate.policy.loader import get_policy
+from querygate.policy.models import Policy
 from querygate.query_ast.models import StructuredQuery
 from querygate.schema.reflection import get_table_schema, list_live_tables, sanitize_table_name
 from querygate.validation.policy_validation import validate_policy
@@ -67,61 +76,142 @@ def _clean_row_values(row: dict) -> dict:
     return {k: (v.strip() if isinstance(v, str) else v) for k, v in row.items()}
 
 
-def _compile_to_text(stmt: Any) -> Tuple[str, Optional[str]]:
-    """Render a compiled statement to SQL text, falling back to unbound SQL + params."""
-    try:
-        compiled = stmt.compile(compile_kwargs={"literal_binds": True})
-        return str(compiled), None
-    except Exception:
-        compiled = stmt.compile()
-        params = str(compiled.params) if hasattr(compiled, "params") else None
-        return str(compiled), params
+def _render_column_type(col_type: sa.types.TypeEngine) -> str:
+    """`str(col.type)` renders SQLAlchemy's `NullType` as the string
+    `"NULL"` — indistinguishable from an error, and misleading for an agent
+    trying to understand a table's schema. MSSQL's `geography`/`geometry`
+    (CLR user-defined types) reflect to `NullType` because the dialect has
+    no native mapping for them, not because the column has no type — a
+    real gap, verified against a live MSSQL server (TODO.md item 2).
+    """
+    if isinstance(col_type, sa.types.NullType):
+        return "unsupported (driver could not determine this column's type — often a spatial/CLR type like geography or geometry)"
+    return str(col_type)
+
+
+def _cap_response_bytes(rows: List[dict], max_bytes: int) -> Tuple[List[dict], bool]:
+    """Truncate `rows` once their serialized size would exceed `max_bytes`.
+
+    Row *count* is capped by `Policy.max_limit`/`max_limit_aggregate`, but
+    nothing else stops a wide TEXT/JSONB/BLOB column from making an
+    otherwise-compliant query return a very large response body. A single
+    row over the cap is always kept whole (returning zero rows would look
+    like an error, not a cap), so this is a best-effort ceiling, not a hard
+    guarantee.
+    """
+    if max_bytes <= 0:
+        return rows, False
+    total = 0
+    kept: List[dict] = []
+    for row in rows:
+        row_bytes = len(json.dumps(row, default=str).encode("utf-8"))
+        if kept and total + row_bytes > max_bytes:
+            return kept, True
+        kept.append(row)
+        total += row_bytes
+    return kept, False
+
+
+def _compile_to_text(stmt: Any, *, include_literals: bool) -> Tuple[str, Optional[str]]:
+    """Render a compiled statement to SQL text for audit logging / explain.
+
+    Default posture (`include_literals=False`) is safe-by-default: SQL text
+    always uses bind placeholders, and parameter values are redacted before
+    being turned into the returned params string. Without this, WHERE-clause
+    literals (an email, an SSN) end up verbatim in the audit log and in
+    explain_structured_query's response, which contradicts the "audit
+    records never contain row payloads" guarantee for anything expressible
+    in a `where`. `include_literals=True` is an explicit per-policy opt-in
+    (`Policy.log_query_literals`) for deployments that want full literal SQL
+    for debugging.
+    """
+    compiled = stmt.compile()
+    params = dict(compiled.params) if hasattr(compiled, "params") else {}
+
+    if include_literals:
+        try:
+            literal_compiled = stmt.compile(compile_kwargs={"literal_binds": True})
+            return str(literal_compiled), None
+        except Exception:
+            pass  # some param types (e.g. arrays) can't render as literals — fall through
+
+    redacted = {k: "<redacted>" for k in params}
+    return str(compiled), (str(redacted) if redacted else None)
 
 
 class StructuredQueryService:
     """Validate, compile, and execute structured reads against `connection_id`."""
 
-    def __init__(self, connection_id: str, principal: Optional[str] = None) -> None:
+    def __init__(self, connection_id: str, principal: Optional[Principal] = None) -> None:
         self._connection_id = connection_id
         self._principal = principal
 
+    @property
+    def _principal_subject(self) -> Optional[str]:
+        return self._principal.subject if self._principal else None
+
+    @property
+    def _principal_scopes(self) -> Optional[List[str]]:
+        return sorted(self._principal.scopes) if self._principal else None
+
+    def _get_policy(self) -> Policy:
+        # Resolves connection-level policy merged with any per-principal
+        # override for this caller (see policy/loader.PolicyStore.get) — so
+        # every call site sees a consistent view of "the policy that
+        # applies to this principal on this connection", not just the
+        # connection-wide default.
+        return get_policy(self._connection_id, principal=self._principal)
+
     async def _validate_and_compile(self, query: StructuredQuery) -> Tuple[sa.Select, int, dict]:
-        policy = get_policy(self._connection_id)
+        policy = self._get_policy()
         validate_policy(query, policy, connection_id=self._connection_id)
-        tables = await validate_schema(query, connection_id=self._connection_id)
+        tables = await validate_schema(
+            query, connection_id=self._connection_id, principal=self._principal
+        )
         # Derived from the live engine, not ConnectionProfile.dialect — the
         # engine's own dialect is what actually executes the compiled SQL,
         # so this can't drift from reality (and lets tests swap in a SQLite
         # engine and get correct SQLite-flavored SQL, not Postgres/MSSQL SQL
         # that happens to fail against it).
         dialect = get_engine(self._connection_id).dialect.name
-        stmt, limit = compile_structured_query(query, tables, policy, dialect=dialect)
+        stmt, limit = compile_structured_query(
+            query, tables, policy, dialect=dialect, principal=self._principal
+        )
         return stmt, limit, tables
 
     @log_execution
     async def execute(self, query: StructuredQuery) -> StructuredQueryResult:
-        policy = get_policy(self._connection_id)
+        policy = self._get_policy()
         start = time.monotonic()
         try:
             async with concurrency_slot(
                 self._connection_id, policy.max_concurrency, policy.concurrency_wait_seconds
             ):
                 stmt, limit, _tables = await self._validate_and_compile(query)
-                sql, _params = _compile_to_text(stmt)
+                sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
 
-                async with session_scope(self._connection_id) as session:
+                async with session_scope(self._connection_id, policy=policy) as session:
                     result = await session.execute(stmt)
                     raw_rows = [dict(r) for r in result.mappings().all()]
 
                 rows = [_clean_row_values(r) for r in raw_rows]
-                truncated = len(rows) >= limit
+                row_limit_hit = len(rows) >= limit
+                rows, byte_cap_hit = _cap_response_bytes(rows, policy.max_response_bytes)
+                truncated = row_limit_hit or byte_cap_hit
+                elapsed_seconds = time.monotonic() - start
                 audit_query(
                     connection_id=self._connection_id,
                     sql=sql,
+                    params=params,
                     intent=query.intent,
                     row_count=len(rows),
-                    duration_ms=int((time.monotonic() - start) * 1000),
-                    principal=self._principal,
+                    duration_ms=int(elapsed_seconds * 1000),
+                    principal=self._principal_subject,
+                    principal_scopes=self._principal_scopes,
+                )
+                QUERIES_TOTAL.labels(connection=self._connection_id, status="success").inc()
+                QUERY_DURATION_SECONDS.labels(connection=self._connection_id).observe(
+                    elapsed_seconds
                 )
                 return StructuredQueryResult(
                     rows=rows,
@@ -136,10 +226,15 @@ class StructuredQueryService:
                 sql="",
                 intent=query.intent,
                 duration_ms=int((time.monotonic() - start) * 1000),
-                principal=self._principal,
+                principal=self._principal_subject,
+                principal_scopes=self._principal_scopes,
                 rejected=True,
                 rejection_reason=str(exc),
             )
+            QUERIES_TOTAL.labels(connection=self._connection_id, status="rejected").inc()
+            QUERIES_REJECTED_TOTAL.labels(
+                connection=self._connection_id, reason=classify_rejection(exc)
+            ).inc()
             raise
 
     async def execute_many(self, queries: List[StructuredQuery]) -> List[BatchQueryItemResult]:
@@ -156,12 +251,12 @@ class StructuredQueryService:
     @log_execution
     async def explain(self, query: StructuredQuery) -> ExplainResult:
         """Validate + compile without executing; returns the SQL that would run."""
-        policy = get_policy(self._connection_id)
+        policy = self._get_policy()
         async with concurrency_slot(
             self._connection_id, policy.max_concurrency, policy.concurrency_wait_seconds
         ):
             stmt, limit, tables = await self._validate_and_compile(query)
-            sql, params = _compile_to_text(stmt)
+            sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
             return ExplainResult(sql=sql, params=params, tables=sorted(tables), limit=limit)
 
     @log_execution
@@ -172,7 +267,7 @@ class StructuredQueryService:
         the connection profile; falls back to a live INFORMATION_SCHEMA query
         when neither is available.
         """
-        policy = get_policy(self._connection_id)
+        policy = self._get_policy()
         profile = get_registry().get(self._connection_id)
         metadata = get_metadata(self._connection_id)
         names = {t.split(".")[-1] for t in metadata.tables.keys()}
@@ -184,7 +279,7 @@ class StructuredQueryService:
 
     @log_execution
     async def describe_table(self, table_name: str) -> TableDescription:
-        policy = get_policy(self._connection_id)
+        policy = self._get_policy()
         sanitize_table_name(table_name)
         if not policy.table_allowed(table_name):
             raise PolicyViolationError(
@@ -195,7 +290,7 @@ class StructuredQueryService:
         columns = [
             ColumnInfo(
                 name=col.name,
-                type=str(col.type),
+                type=_render_column_type(col.type),
                 nullable=bool(col.nullable),
                 description=col.comment,
             )

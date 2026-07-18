@@ -76,7 +76,10 @@ curl http://localhost:8000/api/v1/demo/tables/orders
 
 See [`examples/rest_calls.md`](examples/rest_calls.md) and
 [`examples/mcp_calls.md`](examples/mcp_calls.md) for full request/response
-examples, including `query`, `query/explain`, and `query/batch`.
+examples, including `query`, `query/explain`, and `query/batch`. For wiring
+QueryGate into an agent framework directly instead of raw JSON-RPC/curl, see
+[`examples/claude_agent_sdk_integration.py`](examples/claude_agent_sdk_integration.py)
+(Claude Agent SDK, `pip install claude-agent-sdk`).
 
 To try it without Docker, seed a local SQLite file instead:
 
@@ -265,29 +268,33 @@ Agent (MCP) / Client (REST)
 
 Being upfront about what's not done yet:
 
-- **MSSQL support is implemented but not live-verified** in this
-  environment (no MSSQL server available) — the dialect-isolation code
-  (`connections/dialects.py`, the compiler's DATEADD/DATEDIFF date-bucket
-  path) exists and is unit-tested against expected SQL text, but hasn't run
-  against a real SQL Server instance. Postgres is fully verified end-to-end
-  against a real database.
 - **Cross-connection joins** only make sense when both connections are
   visible through one physical database engine (e.g. two MSSQL databases on
   the same server) — the `join_group` policy mechanism gates *intent*, but
   can't make a genuinely separate database server joinable in one SQL
   statement.
-- **No OAuth/JWT/RBAC yet** — only API-key auth is implemented, though the
-  `Authenticator` abstraction is designed for this to be additive.
+- **No RBAC beyond scopes/per-principal policy overrides** — `Principal`
+  carries scopes/claims and `policy.yaml`'s optional `principals:` section
+  can vary caps/allow-deny/mandatory-row-filters per caller, but there's no
+  role hierarchy or admin UI for managing this beyond hand-editing YAML.
 - **No stored-procedure catalog** — deliberately out of scope for this
   version; exposing stored procedures safely needs its own cataloging and
   policy-approval mechanism, not a generic pass-through.
 - **No persisted audit store** — audit records are structured log lines
   (JSON to stdout), not written to a database. Shipping them to a log
   aggregator/SIEM is expected to be the operator's responsibility for now.
-- **Column-level policy is case-sensitive** by table/column name as written
-  in the policy file — it does not normalize casing across dialects.
 - **No write operations** — by design. QueryGate is read-only; there is no
   insert/update/delete path anywhere in the AST or compiler.
+- **Distributed concurrency enforcement (Redis-backed) is opt-in** — the
+  default is an in-process semaphore, correct for a single instance only;
+  set `concurrency_backend: redis` for multi-instance deployments.
+
+MSSQL support (including the query-execution-timeout guardrail) and the
+Postgres statement-timeout guardrail are both verified against real
+servers, not just unit-tested SQL text — see
+`tests/integration/test_mssql_live.py` and
+`tests/integration/test_postgres_timeout.py`. OAuth/JWT is implemented
+(`core/jwt_auth.py`) alongside static API keys.
 
 See `MIGRATION_REPORT.md` for what was preserved, generalized, or removed
 from the internal prototype this was extracted from, and what's recommended

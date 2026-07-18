@@ -31,15 +31,21 @@ mcp = ">=1.9.0"
 httpx = "^0.28.1"
 loguru = "^0.7.3"
 PyYAML = "^6.0"
+prometheus-client = "^0.25.0"
+pyjwt = {extras = ["crypto"], version = "^2.13.0"}
+redis = "^8.0.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "7.4.0"
 pytest-asyncio = "0.21.1"
 pytest-mock = "3.11.1"
 black = "25.1.0"
+fakeredis = "^2.36.2"
+lupa = "^2.8"
 
 [tool.poetry.scripts]
 querygate = "querygate.run:main"
+querygate-validate-config = "querygate.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -52,12 +58,17 @@ addopts = [
     "-v",
     "--strict-markers",
     "--tb=short",
+    "-m",
+    "not real_db",
 ]
 markers = [
     "asyncio: marks tests as async",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "verification: core-guarantee regression tests (see tests/integration/test_core_regression.py)",
+    "real_db: needs a real database running (see make compose-up) — excluded from the default run",
+    "postgres_live: needs a real Postgres server (see TODO.md item 3) — also marked real_db",
+    "mssql_live: needs a real MSSQL server (see TODO.md item 2) — also marked real_db",
 ]
 
 [build-system]
