@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI, Request, Response
@@ -115,20 +114,16 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
 
     @application.get("/health", tags=["health"])
     async def health() -> JSONResponse:
-        connections = {}
+        connection_counts = {"healthy": 0, "unhealthy": 0, "unknown": 0}
         any_unhealthy = False
-        for conn_id, conn_status in application.state.health_monitor.snapshot().items():
+        for conn_status in application.state.health_monitor.snapshot().values():
             if conn_status.healthy is False:
                 any_unhealthy = True
-            connections[conn_id] = {
-                "healthy": conn_status.healthy,
-                "last_checked": (
-                    datetime.fromtimestamp(conn_status.last_checked, tz=timezone.utc).isoformat()
-                    if conn_status.last_checked is not None
-                    else None
-                ),
-                "error": conn_status.error,
-            }
+                connection_counts["unhealthy"] += 1
+            elif conn_status.healthy is True:
+                connection_counts["healthy"] += 1
+            else:
+                connection_counts["unknown"] += 1
         # A connection that hasn't been checked yet (right after startup, before
         # its first background ping lands) is treated as not-yet-proven-broken
         # rather than failing readiness — only a confirmed ping failure does.
@@ -136,7 +131,10 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             "status": "degraded" if any_unhealthy else "ok",
             "service": "querygate",
             "version": conf.app_version,
-            "connections": connections,
+            # This endpoint is intentionally unauthenticated for orchestrator
+            # readiness probes, so it returns aggregate counts rather than
+            # connection ids, database topology, or driver error details.
+            "connections": connection_counts,
         }
         return JSONResponse(
             content=body,

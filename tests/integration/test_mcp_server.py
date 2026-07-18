@@ -11,6 +11,8 @@ from httpx import ASGITransport, AsyncClient
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from querygate.api.app import create_app
+from querygate.connections.models import ConnectionProfile
+from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.config import AppConfig
 from querygate.policy.loader import PolicyStore, set_policy_store
 
@@ -128,6 +130,74 @@ async def test_list_connections_tool_never_leaks_credentials(mcp_dev_client):
     connections = payload["result"]["structuredContent"]["result"]["connections"]
     assert connections[0]["id"] == "demo"
     assert "connection_string" not in connections[0]
+
+
+@pytest.mark.asyncio
+async def test_mcp_connection_listing_and_direct_access_are_principal_scoped():
+    set_registry(
+        ConnectionRegistry(
+            {
+                connection_id: ConnectionProfile(
+                    id=connection_id,
+                    dialect="postgresql",
+                    connection_string=f"postgresql+asyncpg://user:pass@localhost/{connection_id}",
+                    known_tables=["customers"],
+                )
+                for connection_id in ("demo", "internal_finance")
+            }
+        )
+    )
+    set_policy_store(
+        PolicyStore.from_dict(
+            {
+                "default": {"enabled": False},
+                "principals": {"agent-a": {"demo": {"enabled": True}}},
+            }
+        )
+    )
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_keys=[_TEST_API_KEY], mcp_api_key_subject="agent-a")
+    app = create_app(settings)
+    auth_headers = {**_HEADERS_JSON, "Authorization": f"Bearer {_TEST_API_KEY}"}
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(
+            transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+        ) as client,
+    ):
+        listed_response = await client.post(
+            "/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {"name": "list_connections", "arguments": {}},
+            },
+            headers=auth_headers,
+        )
+        hidden_response = await client.post(
+            "/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "list_tables",
+                    "arguments": {"connection": "internal_finance"},
+                },
+            },
+            headers=auth_headers,
+        )
+
+    listed = _parse_mcp_response(listed_response)
+    connections = listed["result"]["structuredContent"]["result"]["connections"]
+    assert [connection["id"] for connection in connections] == ["demo"]
+
+    hidden = _parse_mcp_response(hidden_response)
+    error = hidden["result"]["structuredContent"]["result"]
+    assert error["success"] is False
+    assert error["error_code"] == "NOT_FOUND"
+    assert error["error_message"] == "Unknown connection: 'internal_finance'"
 
 
 @pytest.mark.asyncio

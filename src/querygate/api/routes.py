@@ -13,10 +13,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from querygate.config_reload import ReloadResult, reload_config
 from querygate.connections.models import PublicConnectionInfo
-from querygate.connections.registry import get_registry
+from querygate.connections.visibility import list_visible_connections, resolve_visible_connection
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
-from querygate.core.exceptions import PolicyViolationError
+from querygate.core.exceptions import NotFoundError, PolicyViolationError
 from querygate.execution.service import (
     BatchQueryItemResult,
     ExplainResult,
@@ -47,17 +47,17 @@ class BatchQueryResult(pyd.BaseModel):
     results: List[BatchQueryItemResult]
 
 
-def _require_connection(connection_id: str) -> None:
+def _require_connection(connection_id: str, principal: Principal) -> None:
     try:
-        get_registry().get(connection_id)
-    except KeyError:
+        resolve_visible_connection(connection_id, principal=principal)
+    except NotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown connection: {connection_id!r}"
         )
 
 
 def _service(connection_id: str, principal: Principal) -> StructuredQueryService:
-    _require_connection(connection_id)
+    _require_connection(connection_id, principal)
     return StructuredQueryService(connection_id=connection_id, principal=principal)
 
 
@@ -68,7 +68,7 @@ def build_router(
 
     @router.get("/connections", response_model=List[PublicConnectionInfo])
     async def list_connections(principal: Principal = Depends(get_principal)):
-        return get_registry().list_public()
+        return list_visible_connections(principal)
 
     @router.get("/{connection}/tables", response_model=TablesListResult)
     async def list_tables(connection: str, principal: Principal = Depends(get_principal)):

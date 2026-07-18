@@ -51,7 +51,7 @@ order-of-magnitude, not commitments.
 | 19 | Additional dialects | M–XL (per dialect) | 2 (do MSSQL first) |
 | 20 | ✅ Client SDK / integration examples | S | — |
 | 21 | ✅ Principal policy must apply to every MCP/config surface | S | 6, 8, 10 |
-| 22 | Principal-aware connection/tool visibility | S–M | 6, 8 |
+| 22 | ✅ Principal-aware connection/tool visibility | S–M | 6, 8 |
 | 23 | Persisted audit/event sink | M | 1, 12 |
 | 24 | Release hygiene and reproducible v0.1.0 cut | S–M | 4, 14, 17 |
 | 25 | Admin/config governance plane | L | 5, 6, 10, 13 |
@@ -437,7 +437,9 @@ each connection's own connect timeout) so `/health` never reports
 just a body flag) when any connection is unhealthy, so a load
 balancer/orchestrator actually routes around it. Verified against a real
 `uvicorn` process, not just mocked tests — see `tests/unit/test_health.py`
-and the health tests in `tests/integration/test_rest_api.py`.
+and the health tests in `tests/integration/test_rest_api.py`. Item 22 later
+hardened the unauthenticated response to aggregate counts so readiness
+checks do not disclose connection ids or raw driver errors.
 
 **Effort: S (~1 day).** One background task per connection pinging on an
 interval, plus wiring the cached result into `/health` — small, self
@@ -590,7 +592,31 @@ row cap doesn't address.
 configurable threshold) in `execution/service.py`'s result shaping, and
 decide the failure mode (truncate with a warning flag vs. hard reject).
 
-### 22. Principal-aware connection/tool visibility
+### 22. Principal-aware connection/tool visibility ✅ DONE
+
+**Shipped:** Added one shared visibility rule in
+`connections/visibility.py`: a connection is reachable only when both its
+deployment profile and the caller's resolved principal policy have
+`enabled: true`. REST and MCP `list_connections` now return only that
+caller's visible connections. Direct schema/query calls and
+cross-connection joins use the same resolver; hidden and nonexistent ids
+both return `Unknown connection`, preventing discovery-by-probing.
+
+The rule supports a strict, backwards-compatible deny-by-default setup:
+set `default.enabled: false`, then set `enabled: true` only for explicit
+principal/connection grants. Unknown principals consequently see no
+connections. A profile disabled in `connections.yaml` always wins and
+cannot be re-enabled by policy. This deployment pattern is documented in
+the README and example policy.
+
+Because `/health` is intentionally unauthenticated for orchestrators, it no
+longer exposes connection ids or raw driver errors. It reports aggregate
+healthy/unhealthy/unknown counts while preserving the existing 200/503
+readiness semantics; detailed failures remain in structured logs.
+
+Regression coverage proves REST and MCP callers can see one connection but
+not another, cannot access a hidden connection directly, unknown principals
+inherit deny-by-default, and deployment-disabled profiles stay hidden.
 
 **Effort: S–M (1–2 days).** The simple version filters existing
 `list_connections`/schema output based on the resolved principal. It grows

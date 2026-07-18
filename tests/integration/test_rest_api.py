@@ -8,6 +8,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from querygate.api.app import create_app
+from querygate.connections.models import ConnectionProfile
+from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.config import AppConfig
 from querygate.execution.service import (
     BatchQueryItemResult,
@@ -42,6 +44,41 @@ async def test_list_connections(app):
     body = resp.json()
     assert body[0]["id"] == "demo"
     assert "connection_string" not in body[0]
+
+
+@pytest.mark.asyncio
+async def test_list_connections_and_direct_access_are_principal_scoped(app):
+    set_registry(
+        ConnectionRegistry(
+            {
+                connection_id: ConnectionProfile(
+                    id=connection_id,
+                    dialect="postgresql",
+                    connection_string=f"postgresql+asyncpg://user:pass@localhost/{connection_id}",
+                    known_tables=["customers"],
+                )
+                for connection_id in ("demo", "internal_finance")
+            }
+        )
+    )
+    # Local development resolves to subject "anonymous-dev". A disabled
+    # default plus explicit grants is the strict deny-by-default setup.
+    set_policy_store(
+        PolicyStore.from_dict(
+            {
+                "default": {"enabled": False},
+                "principals": {"anonymous-dev": {"demo": {"enabled": True}}},
+            }
+        )
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        listed = await client.get("/api/v1/connections")
+        hidden_schema = await client.get("/api/v1/internal_finance/tables")
+
+    assert [connection["id"] for connection in listed.json()] == ["demo"]
+    assert hidden_schema.status_code == 404
+    assert hidden_schema.json()["detail"] == "Unknown connection: 'internal_finance'"
 
 
 @pytest.mark.asyncio
@@ -292,7 +329,8 @@ async def test_health_endpoint(app):
     body = resp.json()
     assert body["service"] == "querygate"
     assert body["status"] == "ok"
-    assert body["connections"]["demo"]["healthy"] is True
+    assert body["connections"] == {"healthy": 1, "unhealthy": 0, "unknown": 0}
+    assert "demo" not in resp.text
 
 
 @pytest.mark.asyncio
@@ -308,8 +346,9 @@ async def test_health_endpoint_reports_degraded_when_connection_unreachable(app)
     assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "degraded"
-    assert body["connections"]["demo"]["healthy"] is False
-    assert "refused" in body["connections"]["demo"]["error"]
+    assert body["connections"] == {"healthy": 0, "unhealthy": 1, "unknown": 0}
+    assert "demo" not in resp.text
+    assert "refused" not in resp.text
 
 
 def _write_reload_config_files(tmp_path):

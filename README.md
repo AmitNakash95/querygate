@@ -110,7 +110,12 @@ connections:
 
 Point `CONNECTIONS_FILE` at your own copy. `list_connections` (MCP tool) and
 `GET /api/v1/connections` (REST) only ever return a credential-free
-projection — `id`, `dialect`, `enabled`, `description`.
+projection — `id`, `dialect`, `enabled`, `description` — and only for
+connections visible to the authenticated principal. Visibility requires
+both the connection profile and that principal's resolved policy to have
+`enabled: true`. A hidden connection also behaves like an unknown connection
+when addressed directly, so schema/query calls cannot be used to enumerate
+internal database names.
 
 ## Example policy config
 
@@ -138,6 +143,26 @@ Every table and column reference anywhere in a query — select, join keys,
 where, group_by, having, order_by, top_n — is checked against this policy
 *before* compilation. A denied column can't be used to filter or sort on
 even if it's never selected.
+
+For production, the safest connection-discovery posture is deny by default:
+
+```yaml
+default:
+  enabled: false
+
+principals:
+  reporting-agent:
+    analytics:
+      enabled: true
+  support-agent:
+    customer-support:
+      enabled: true
+```
+
+Unknown principals then see no connections. The same visibility decision is
+used by REST, MCP, direct schema/query calls, and cross-connection joins.
+Deployment-level `enabled: false` in `connections.yaml` always wins and
+cannot be re-enabled by principal policy.
 
 ## Example StructuredQuery payload
 

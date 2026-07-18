@@ -57,6 +57,9 @@ class MandatoryRowFilter(pyd.BaseModel):
 
 
 class Policy(pyd.BaseModel):
+    # Access and discovery switch. A resolved false value hides the
+    # connection from REST/MCP listings and makes direct access behave as if
+    # the connection id does not exist.
     enabled: bool = True
 
     # Table/column allow-deny. An empty allow-list means "no restriction";

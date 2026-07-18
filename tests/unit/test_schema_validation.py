@@ -13,6 +13,7 @@ import sqlalchemy as sa
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.auth import Principal
+from querygate.core.exceptions import NotFoundError
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
 from querygate.query_ast.models import JoinSpec, Predicate, StructuredQuery
@@ -196,6 +197,39 @@ class TestCrossConnectionJoins:
         # view must reject the cross-connection join.
         await sv.validate_schema(query, connection_id="primary")
         with pytest.raises(ValueError, match="cross-connection"):
+            await sv.validate_schema(
+                query,
+                connection_id="primary",
+                principal=Principal(subject="agent-a"),
+            )
+
+    async def test_cross_connection_join_cannot_reach_principal_hidden_connection(
+        self, monkeypatch
+    ):
+        self._two_connections(group_a="shared", group_b="shared")
+        set_policy_store(
+            PolicyStore.from_dict(
+                {
+                    "default": {"enabled": True},
+                    "principals": {"agent-a": {"other": {"enabled": False}}},
+                }
+            )
+        )
+        _patch_load_table(monkeypatch, _make_tables())
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            joins=[
+                JoinSpec(
+                    table="customers",
+                    on=["orders.customer_id", "customers.id"],
+                    connection="other",
+                )
+            ],
+            limit=5,
+        )
+
+        with pytest.raises(NotFoundError, match="Unknown connection: 'other'"):
             await sv.validate_schema(
                 query,
                 connection_id="primary",

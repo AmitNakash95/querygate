@@ -12,8 +12,7 @@ import sqlalchemy as sa
 
 from querygate.core.auth import Principal
 from querygate.connections.engine import get_engine, physical_db_name
-from querygate.connections.registry import get_registry
-from querygate.policy.loader import get_policy
+from querygate.connections.visibility import resolve_visible_connection
 from querygate.query_ast.models import (
     AggregateSelectItem,
     DateBucketSelectItem,
@@ -113,17 +112,16 @@ def _check_join_group(
     """Resolve which connection each table belongs to, rejecting any join
     whose connection isn't in the same policy join_group as the primary.
     """
-    registry = get_registry()
-    policy = get_policy(connection_id, principal=principal)
-    primary = registry.get(connection_id)
+    primary, policy = resolve_visible_connection(connection_id, principal=principal)
     primary_group = policy.join_group or primary.effective_join_group()
 
     table_connection: Dict[str, str] = {query.from_table: connection_id}
     for join in query.joins:
         join_connection_id = join.connection or connection_id
         if join_connection_id != connection_id:
-            other = registry.get(join_connection_id)
-            other_policy = get_policy(join_connection_id, principal=principal)
+            other, other_policy = resolve_visible_connection(
+                join_connection_id, principal=principal
+            )
             other_group = other_policy.join_group or other.effective_join_group()
             if primary_group != other_group:
                 raise ValueError(

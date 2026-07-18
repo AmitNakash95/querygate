@@ -17,6 +17,7 @@ from querygate.audit.logger import audit_query
 from querygate.compiler.sqlalchemy_compiler import compile_structured_query
 from querygate.connections.engine import get_engine, get_metadata, session_scope
 from querygate.connections.registry import get_registry
+from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.auth import Principal
 from querygate.core.exceptions import PolicyViolationError
 from querygate.core.logging import log_execution
@@ -27,7 +28,6 @@ from querygate.metrics import (
     QUERY_DURATION_SECONDS,
     classify_rejection,
 )
-from querygate.policy.loader import get_policy
 from querygate.policy.models import Policy
 from querygate.query_ast.models import StructuredQuery
 from querygate.schema.reflection import get_table_schema, list_live_tables, sanitize_table_name
@@ -160,7 +160,10 @@ class StructuredQueryService:
         # every call site sees a consistent view of "the policy that
         # applies to this principal on this connection", not just the
         # connection-wide default.
-        return get_policy(self._connection_id, principal=self._principal)
+        _profile, policy = resolve_visible_connection(
+            self._connection_id, principal=self._principal
+        )
+        return policy
 
     async def _validate_and_compile(self, query: StructuredQuery) -> Tuple[sa.Select, int, dict]:
         policy = self._get_policy()

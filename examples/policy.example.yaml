@@ -14,6 +14,9 @@
 # block below.
 
 default:
+  # The runnable demo is permissive for quickstart convenience. For a
+  # production deny-by-default posture, set this to false and explicitly set
+  # enabled: true only for allowed principal/connection pairs below.
   enabled: true
   max_joins: 4
   max_select_columns: 20
@@ -63,6 +66,9 @@ connections:
 # principals:
 #   agent-a:
 #     demo:
+#       # Required when default.enabled is false. This controls both direct
+#       # access and whether REST/MCP connection discovery reveals `demo`.
+#       enabled: true
 #       # agent-a can't see email at all, on top of demo's own denied_columns.
 #       denied_columns:
 #         customers: [email]

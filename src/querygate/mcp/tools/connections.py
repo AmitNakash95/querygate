@@ -12,7 +12,8 @@ from typing import List, Union
 import pydantic as pyd
 
 from querygate.connections.models import PublicConnectionInfo
-from querygate.connections.registry import get_registry
+from querygate.connections.visibility import list_visible_connections
+from querygate.mcp.auth import get_mcp_caller
 from querygate.mcp.exceptions import MCPErrorResult, safe_mcp_tool
 from querygate.mcp.server import mcp_server
 
@@ -23,12 +24,13 @@ class ConnectionsListToolResult(pyd.BaseModel):
 
 @mcp_server.tool(
     description=(
-        "List every database connection this deployment exposes (id, SQL dialect, "
-        "enabled state, description). Never returns credentials — there is no field or "
-        "tool anywhere that can. Call this first: every other tool takes a `connection` "
-        "id from this list."
+        "List database connections visible to the authenticated caller (id, SQL dialect, "
+        "enabled state, description). Principal policy and deployment-level disabled "
+        "connections are omitted. Never returns credentials — there is no field or tool "
+        "anywhere that can. Call this first: every other tool takes a `connection` id "
+        "from this list."
     )
 )
 @safe_mcp_tool
 async def list_connections() -> Union[ConnectionsListToolResult, MCPErrorResult]:
-    return ConnectionsListToolResult(connections=get_registry().list_public())
+    return ConnectionsListToolResult(connections=list_visible_connections(get_mcp_caller()))
