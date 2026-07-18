@@ -61,11 +61,12 @@ order-of-magnitude, not commitments.
 | 29 | Production deployment reference stack | M | 4, 9, 12, 13, 14 |
 | 30 | Distribution, SBOM, and signed release artifacts | M | 4, 14 |
 | 31 | Admin UI / policy designer | XL | 25 |
+| 32 | Governed adaptive semantic memory for agents | XL | 23, 25, 27, 28 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
 
-Items 21–31 are the next quality tranche from the current repo scan: mostly
+Items 21–32 are the next quality tranche from the current repo scan: mostly
 security consistency, enterprise operability, and product polish — the
 areas that move QueryGate from "strong engineering prototype" toward a
 credible 10/10 commercial infrastructure product.
@@ -976,6 +977,257 @@ buyer confidence.
 container images. Generate an SBOM in CI, pin and review dependencies,
 publish immutable version tags, and document verification steps. Add a
 release checklist so every version is cut the same way.
+
+### 32. Governed adaptive semantic memory for agents
+
+**Effort: XL (4–8+ weeks after item 27).** A useful prototype can be built
+faster, but a production-grade version needs a durable knowledge model,
+principal-safe retrieval, schema-change invalidation, provider isolation,
+approval/version workflows, background processing, evaluation, and
+adversarial testing. Provider integrations or a full review UI can extend
+the estimate further.
+
+**Depends on:** Item 27 provides the versioned semantic catalog this feature
+learns into; item 25 provides governance, actor identity, approval, and
+rollback; item 23 provides the redaction-safe activity signal and audit sink;
+item 28 defines the security boundary the learning loop must preserve. Item
+31 may later provide the ideal human review UX, but REST/CLI workflows must
+work without it.
+
+**Why it matters:** Schema reflection tells an agent what fields exist, not
+what the business means. On an unfamiliar database the agent repeatedly lists
+tables, describes candidates, guesses relationships and timestamps, and may
+still choose a technically valid but semantically wrong query. QueryGate can
+turn that repeated discovery into customer-owned, governed memory: what a
+table represents, which joins are preferred, which definitions are verified,
+what is sensitive, and what changed since the knowledge was produced.
+
+This can become a defining product message:
+
+> QueryGate does not only protect the database. It builds a governed,
+> continuously updated understanding of the data each agent is allowed to use.
+
+The marketable outcome is lower time-to-answer, fewer discovery calls, fewer
+invalid or misleading queries, consistent business definitions, and safer
+agent behavior that improves with verified usage—not an opaque claim that an
+autonomous model "trained itself" on production data.
+
+#### Product principle: evidence before inference
+
+The catalog must keep four knowledge classes structurally separate and apply
+an explicit precedence order:
+
+1. **Observed facts** — deterministic schema evidence: table/column names,
+   types, nullability, constraints, foreign keys, comments, and schema hash.
+2. **Inferred drafts** — model-generated descriptions, relationship
+   hypotheses, likely timestamp/identifier roles, metric suggestions, and
+   confidence scores. These are never silently presented as verified truth.
+3. **Verified knowledge** — administrator-approved or edited definitions,
+   ownership, sensitivity, approved joins, business glossary mappings, and
+   usage guidance. Verified content wins over inferred content.
+4. **Learned usage suggestions** — recurring safe query shapes, joins,
+   aggregations, and explicit user/admin corrections. These remain proposals
+   until policy and confidence thresholds allow publication or an actor
+   approves them.
+
+The canonical store must be structured and versioned. Markdown "documents for
+the agent" are generated views or export artifacts, not the source of truth;
+runtime context is retrieved selectively under a token budget rather than
+injecting an ever-growing document into every prompt.
+
+#### Production-grade scope
+
+**1. Durable knowledge model and provenance**
+
+- Store entries for connections, tables, columns, relationships, glossary
+  terms, metrics, temporal semantics, recommended joins, warnings, and usage
+  guidance in a migration-managed durable store.
+- Give every entry a stable id, catalog/schema version, source class, source
+  evidence, confidence, status (`draft`, `verified`, `rejected`, `stale`, or
+  `archived`), creator/approver identity, timestamps, and optional model and
+  prompt-template version.
+- Define deterministic precedence and merge rules. Regeneration must never
+  overwrite a human-verified field; conflicting evidence creates a reviewable
+  proposal.
+- Support history, diff, rollback, export/import, retention, deletion, and
+  backup/restore. Catalog migrations must be reversible and tested.
+
+**2. Safe discovery and enrichment pipeline**
+
+- Run onboarding and refresh as idempotent background jobs, not on the query
+  request path. QueryGate must continue serving ordinary schema/query tools if
+  enrichment is disabled, slow, rate-limited, or unavailable.
+- Begin with reflection, constraints, foreign keys, indexes, and database
+  comments. Do not inspect row values by default.
+- Make optional statistics or representative samples a separate, explicit
+  policy capability with sensitivity checks, hard size/cardinality limits,
+  redaction, audit events, and a default of disabled.
+- Treat database comments, identifiers, and any permitted samples as untrusted
+  data—not instructions. Delimit them from model instructions and test prompt-
+  injection attempts embedded in schema metadata.
+- Fingerprint the observed schema and produce a structured diff. Added,
+  removed, renamed, or type-changed objects must invalidate or mark affected
+  knowledge stale without discarding unrelated verified context.
+
+**3. Pluggable and privacy-aware model execution**
+
+- Define a provider interface supporting disabled/manual-only operation,
+  customer-configured hosted models, and local/on-prem models. QueryGate must
+  not require a vendor-controlled model or send metadata outside the customer
+  network by default.
+- Before an outbound call, compute the minimum policy-approved metadata
+  payload and record which provider, region/endpoint, model, and purpose will
+  receive it. Never send connection strings, credentials, query literals,
+  returned rows, or hidden schema objects.
+- Require structured, schema-validated model output; cap tokens, cost,
+  concurrency, retries, and wall time; make jobs resumable; and quarantine
+  malformed or policy-invalid output rather than partially publishing it.
+- Version prompts and provider settings, expose a kill switch, and document
+  data-residency, retention, and "provider may train on inputs" requirements.
+
+**4. Governance and human correction loop**
+
+- Add least-privilege scopes for catalog read, generate, review, approve,
+  reject, edit, publish, rollback, export, and delete operations.
+- Support draft review, field-level edits, rejection reasons, bulk approval,
+  ownership assignment, and test-as-principal previews before publication.
+- Audit every generation job and every state transition without copying
+  sensitive source material into the persisted event.
+- Allow corrections from agent/application feedback only through an explicit
+  typed channel. Feedback is attributed and rate-limited; repeated statements
+  do not become truth merely through volume.
+- The catalog can recommend narrower access or a sensitivity review, but it
+  must never create, broaden, or silently modify connection/policy permissions.
+
+**5. Bounded learning from real usage**
+
+- Learn only from redaction-safe normalized query shapes, success/failure
+  categories, explicit corrections, and verified outcomes—not query literals,
+  natural-language secrets, row payloads, or raw database exceptions.
+- Aggregate signals per customer/connection and preserve principal boundaries.
+  Never train or create shared memory across customers.
+- Require minimum support, confidence thresholds, recency/decay, and conflict
+  detection before proposing a common join, metric, filter, or table purpose.
+- Prevent feedback loops: generated guidance being followed by an agent is not
+  independent evidence that the guidance was correct.
+- Make learned suggestions explainable: show the non-sensitive evidence,
+  sample size, confidence, first/last observation, and reason for promotion.
+
+**6. Principal-safe retrieval and agent context**
+
+- Apply connection/table/column policy before keyword search, ranking,
+  embeddings, counts, relationship traversal, or context assembly. A caller
+  must not infer hidden objects from search hits, empty-result differences,
+  embedding neighbors, suggested joins, or catalog statistics.
+- Enrich existing `list_tables`/`describe_table` responses and add narrow MCP
+  and REST capabilities such as catalog search, business-term lookup,
+  relationship paths, metric definitions, and "context for this task".
+- Return compact, relevance-ranked context with citations to catalog entry id,
+  provenance, verification status, confidence, schema version, and freshness.
+  Enforce per-call result and token/byte budgets.
+- Cache only after authorization or include the complete policy/principal
+  scope in cache keys. Invalidate caches on policy, catalog, or schema changes.
+- Never let semantic retrieval become a second query execution or raw-value
+  search path.
+
+**7. Operational lifecycle and resilience**
+
+- Provide onboarding, refresh, pause, resume, cancel, retry, and rebuild
+  commands/APIs with idempotency keys and multi-instance job locking.
+- Define retry/backoff, dead-letter/quarantine behavior, partial-failure
+  recovery, provider outage behavior, and safe reprocessing after upgrades.
+- Surface freshness, stale/failed entries, last successful schema scan, queued
+  review count, and provider health without leaking hidden object names.
+- Add metrics for job duration/outcome, provider latency/errors, tokens/cost,
+  entries by state, schema drift, approval time, retrieval latency, cache hit
+  rate, and policy-filtered results. Keep labels low-cardinality.
+- Include storage sizing, retention, backup/restore, disaster recovery, and
+  upgrade/rollback instructions in the production runbook.
+
+**8. Security, privacy, and abuse resistance**
+
+- Extend `docs/THREAT_MODEL.md` for catalog poisoning, prompt injection,
+  sensitive-schema inference, cross-principal retrieval, malicious feedback,
+  provider exfiltration, embedding leakage, stale guidance, and model-supply-
+  chain compromise.
+- Encrypt the catalog and model credentials according to the deployment's
+  storage/secrets posture; strictly partition customer and connection data.
+- Define deletion and retention semantics for catalog versions, feedback,
+  embeddings, provider requests, and derived suggestions.
+- Rate-limit generation, feedback, search, and refresh operations. Protect
+  against adversarial schemas that create excessive prompts, relationship
+  graphs, or catalog entries.
+- Do not embed or persist credentials, row values, query literals, free-form
+  exceptions, or unrestricted natural-language history. Test this invariant at
+  serialization, provider, logging, audit, cache, and retrieval boundaries.
+
+**9. Evaluation before product claims**
+
+- Build a versioned benchmark of representative unfamiliar schemas and
+  business questions with expected table choices, joins, filters, metrics, and
+  forbidden objects. Include ambiguous and adversarial cases.
+- Compare baseline QueryGate discovery against semantic memory on: tool calls,
+  tokens, time-to-answer, schema-validation failures, correct table/join/metric
+  selection, stale-guidance detection, and policy/security violations.
+- Define release thresholds before implementation results are known. The
+  feature must demonstrate a meaningful improvement without increasing hidden-
+  schema disclosure or unsafe-query rate.
+- Run deterministic unit tests, store/migration tests, provider contract tests,
+  REST/MCP integration tests, multi-principal adversarial tests, schema-drift
+  tests, background-job failure tests, and realistic load/soak tests.
+- Keep a human-reviewed evaluation report per release; do not market the
+  system as "self-learning" solely because it generated descriptions.
+
+#### Phased delivery
+
+1. **32A — Semantic memory MVP:** after item 27, add the durable provenance
+   model, schema fingerprints/diffs, manual provider, generated drafts, compact
+   policy-filtered retrieval, and deterministic evaluation baseline.
+2. **32B — Governed publishing:** integrate item 25's scopes, review/publish/
+   reject workflows, version history, rollback, audit events, provider privacy
+   controls, and schema-change invalidation.
+3. **32C — Adaptive learning and hardening:** add redaction-safe usage signals,
+   feedback/correction proposals, confidence/decay/conflict rules, background-
+   job resilience, full observability, adversarial coverage, and load tests.
+
+Each phase must be independently deployable and fail safely. Generated or
+learned content remains opt-in until 32B governance exists.
+
+#### Definition of done
+
+- Observed, inferred, verified, and learned fields cannot overwrite one
+  another outside documented precedence and approval rules.
+- Every answer contains provenance, state, freshness/schema version, and
+  confidence where applicable; stale content is never presented as current.
+- All catalog surfaces and internal searches produce exactly the view allowed
+  by the requesting principal, including relationship and aggregate metadata.
+- No default pipeline sends or stores row values, credentials, query literals,
+  hidden schema, raw exceptions, or unrestricted natural-language history.
+- Provider/model failure cannot block or weaken ordinary QueryGate policy,
+  schema validation, query execution, or deterministic discovery.
+- No learned signal can expand access, weaken a mandatory filter, change a
+  sensitivity label, or publish itself as verified truth.
+- Schema changes reliably invalidate only affected entries, and refresh is
+  idempotent across retries and multiple QueryGate instances.
+- Review, publication, rollback, export, deletion, retention, and disaster-
+  recovery workflows are implemented, authorized, audited, and documented.
+- Benchmarks show a predefined material improvement in agent correctness and
+  discovery efficiency with zero regression in adversarial policy-isolation
+  tests.
+- A clean deployment can disable all model calls and still use the manually
+  curated item-27 catalog; an air-gapped deployment can use a local provider.
+
+#### Explicit non-goals
+
+- Training a shared/global model on customer schemas or behavior.
+- Autonomously granting access or editing QueryGate policy.
+- Building a generic data warehouse, lineage platform, or row-value search
+  engine.
+- Treating generated descriptions, frequent usage, or database comments as
+  automatically correct.
+- Sending production metadata to a QueryGate-operated cloud service unless a
+  separately designed hosted product, customer contract, and privacy boundary
+  explicitly introduce that capability.
 
 ---
 
