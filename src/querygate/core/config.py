@@ -140,6 +140,13 @@ class AppConfig(BaseSettings):
     audit_jsonl_path: str = pyd.Field(default="var/audit/querygate-audit.jsonl")
     audit_jsonl_fsync: bool = pyd.Field(default=False)
 
+    # Config-governance version history (querygate/admin/) — staged/applied/
+    # rolled-back snapshots of connections.yaml/policy.yaml/catalog.yaml,
+    # separate from the files AppConfig itself points at (which the existing
+    # POST /admin/reload-config keeps reloading unchanged, for infra-as-code
+    # deployments that edit files directly rather than through this API).
+    config_governance_dir: str = pyd.Field(default="var/config_versions")
+
     concurrency_backend: ConcurrencyBackend = pyd.Field(default=ConcurrencyBackend.IN_PROCESS)
     concurrency_redis_url: str = pyd.Field(default="")
     # Should comfortably exceed the longest legitimate query (policy

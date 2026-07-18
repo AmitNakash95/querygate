@@ -7,11 +7,11 @@ import threading
 from pathlib import Path
 from typing import Protocol
 
-from querygate.audit.events import AuditEvent
+from querygate.audit.events import PersistableEvent
 
 
 class AuditSink(Protocol):
-    def emit(self, event: AuditEvent) -> None:
+    def emit(self, event: PersistableEvent) -> None:
         """Persist one event or raise when persistence fails."""
         ...
 
@@ -21,7 +21,7 @@ class AuditSink(Protocol):
 
 
 class NullAuditSink:
-    def emit(self, event: AuditEvent) -> None:
+    def emit(self, event: PersistableEvent) -> None:
         return None
 
     def close(self) -> None:
@@ -45,7 +45,7 @@ class JsonlAuditSink:
         self._fsync = fsync
         self._lock = threading.Lock()
 
-    def emit(self, event: AuditEvent) -> None:
+    def emit(self, event: PersistableEvent) -> None:
         payload = (event.model_dump_json(exclude_none=True) + "\n").encode("utf-8")
         flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
         with self._lock:

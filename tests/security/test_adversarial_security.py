@@ -452,3 +452,102 @@ async def test_mcp_rejects_unapproved_host_header():
         )
 
     assert response.status_code == 421
+
+
+def _governance_app(*, scopes: list[str]) -> AppConfig:
+    return AppConfig(
+        environment="localhost",
+        mcp_enabled=False,
+        audit_sink_backend="none",
+        api_keys=["governance-caller-key"],
+        api_key_scopes=scopes,
+    )
+
+
+@pytest.mark.asyncio
+async def test_config_governance_write_endpoints_require_write_scope():
+    """A caller holding only admin:config:read (or no config scope at all)
+    must not be able to stage, apply, or roll back a config version — read
+    visibility into config history is not the same privilege as changing it.
+    """
+    app = create_app(_governance_app(scopes=["admin:config:read"]))
+    headers = {"Authorization": "Bearer governance-caller-key"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        stage_resp = await client.post(
+            "/api/v1/admin/config/versions",
+            json={"policy_yaml": "default:\n  enabled: true\n"},
+            headers=headers,
+        )
+        validate_resp = await client.post("/api/v1/admin/config/validate", json={}, headers=headers)
+        apply_resp = await client.post("/api/v1/admin/config/versions/1/apply", headers=headers)
+
+    assert stage_resp.status_code == 403
+    assert validate_resp.status_code == 403
+    assert apply_resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_config_governance_read_endpoints_require_read_scope():
+    """A caller holding only admin:config:write must not be able to list or
+    inspect config version history — write access shouldn't imply read
+    access to every prior version's content.
+    """
+    app = create_app(_governance_app(scopes=["admin:config:write"]))
+    headers = {"Authorization": "Bearer governance-caller-key"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        list_resp = await client.get("/api/v1/admin/config/versions", headers=headers)
+        current_resp = await client.get("/api/v1/admin/config/current", headers=headers)
+        get_resp = await client.get("/api/v1/admin/config/versions/1", headers=headers)
+
+    assert list_resp.status_code == 403
+    assert current_resp.status_code == 403
+    assert get_resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_config_governance_endpoints_reject_unauthenticated_callers():
+    app = create_app(_governance_app(scopes=[]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        resp = await client.get("/api/v1/admin/config/current")
+    assert resp.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_invalid_staged_version_is_rejected_not_silently_applied():
+    """A candidate that fails validation must never become a persisted,
+    applicable version — an admin caller retrying a broken submission
+    should never be able to accidentally activate it.
+    """
+    app = create_app(_governance_app(scopes=["admin:config:read", "admin:config:write"]))
+    headers = {"Authorization": "Bearer governance-caller-key"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        stage_resp = await client.post(
+            "/api/v1/admin/config/versions",
+            json={"connections_yaml": "connections:\n  - id: x\n    dialect: postgresql\n"},
+            headers=headers,
+        )
+        list_resp = await client.get("/api/v1/admin/config/versions", headers=headers)
+
+    assert stage_resp.status_code == 422
+    assert len(list_resp.json()) == 1  # only the bootstrap version — nothing invalid persisted
+
+
+def test_config_change_audit_event_never_carries_yaml_content_or_secrets():
+    """The config-governance audit event (querygate/admin/, audit/events.py)
+    is metadata-only by construction — no field exists for connections/
+    policy/catalog YAML text, so a version's content (and any secret
+    reference inside it) structurally cannot end up in the audit trail.
+    """
+    from querygate.audit.events import ConfigChangeEvent
+
+    event = ConfigChangeEvent(
+        action="apply", outcome="success", principal_id="agent-a", version_id="2"
+    )
+    serialized = event.model_dump_json()
+    assert "connections_yaml" not in serialized
+    assert "policy_yaml" not in serialized
+    assert "catalog_yaml" not in serialized
+    assert (
+        set(ConfigChangeEvent.model_fields) & {"connections_yaml", "policy_yaml", "catalog_yaml"}
+        == set()
+    )

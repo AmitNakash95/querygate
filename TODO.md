@@ -54,7 +54,7 @@ order-of-magnitude, not commitments.
 | 22 | ✅ Principal-aware connection/tool visibility | S–M | 6, 8 |
 | 23 | ✅ Persisted audit/event sink | M | 1, 12 |
 | 24 | ✅ Release hygiene and reproducible v0.1.0 cut | S–M | 4, 14, 17 |
-| 25 | Admin/config governance plane | L | 5, 6, 10, 13 |
+| 25 | ✅ Admin/config governance plane | L | 5, 6, 10, 13 |
 | 26 | Query-cost estimation before execution | L | 2, 3, 15 |
 | 27 | ✅ Semantic schema catalog and sensitivity metadata | L | 6, 16 |
 | 28 | ✅ Threat model + adversarial security test suite | M | 1, 6, 8, 10, 11 |
@@ -731,7 +731,75 @@ then tag a clear local release candidate. The release gate should be:
 `black --check`, default `pytest`, config validation, Docker build/smoke
 test, and at least one real Postgres run.
 
-### 25. Admin/config governance plane
+### 25. Admin/config governance plane ✅ DONE
+
+**Shipped:** A REST-only admin API (`/api/v1/admin/config/*`,
+`api/admin_config_routes.py`) layered on top of the existing hot-reload
+mechanism (item 5) — never a parallel implementation of it. A new
+`querygate/admin/` package owns the model:
+
+- `admin/models.ConfigVersion` — a complete, immutable snapshot of
+  connections.yaml + policy.yaml + an optional catalog.yaml (never a diff),
+  with `status` (`staged`/`active`/`inactive`), `created_by`/`created_at`,
+  `applied_by`/`applied_at`, and `previous_active_version_id` (recorded the
+  moment a version becomes active, so every apply/rollback is traceable to
+  exactly what it replaced).
+- `admin/store.ConfigVersionStore` — a file-backed, versioned history under
+  `AppConfig.config_governance_dir` (default `var/config_versions/`), the
+  same "file-configured, not a database" posture as connections/policy/
+  catalog themselves. History is never rewritten: rollback doesn't create a
+  new snapshot, it moves the active pointer back to an older one, so every
+  version that ever existed stays inspectable.
+- `admin/service.py` — orchestrates validate/stage/apply, reusing
+  `cli.validate_config()` (item 17) and `config_reload.reload_config()`
+  (item 5) directly rather than re-implementing either: staging validates
+  against a scratch directory before persisting anything, and applying
+  re-validates once more immediately before activating (closing a real gap
+  — a version that validated when staged but stopped validating by apply
+  time, e.g. an env var disappeared, must not be silently activated) then
+  calls the exact same `reload_config()` swap `/admin/reload-config` uses.
+
+Endpoints: `POST validate` (dry-run, persists nothing), `POST versions`
+(stage — only submitted fields change, the rest inherit from the current
+active version), `GET versions` / `GET versions/{id}` / `GET current`
+(read-only history), and `POST versions/{id}/apply` — one endpoint serves
+both "apply" (a staged version's first activation) and "rollback"
+(reactivating a version that was active before); the two are the same
+underlying operation, distinguished only by the version's status
+immediately beforehand, and labeled accordingly in the audit trail.
+
+Two new scopes, split the way most admin APIs separate visibility from
+mutation: `admin:config:read` (list/inspect history) and
+`admin:config:write` (validate/stage/apply/rollback) — deliberately
+separate from item 5's `admin:reload-config`, since "reload whatever's on
+disk" (infra-as-code workflow) and "submit new content over the API"
+(this item's workflow) are different operational modes that coexist
+without either depending on the other.
+
+Auditing extends the existing sink rather than adding a parallel one: a new
+`ConfigChangeEvent` (`audit/events.py`) — action, version id, previous
+version id, actor, outcome, never the YAML content itself — flows through
+the same configured `AuditSink` (JSONL or none) as query-execution
+`AuditEvent`s, so one sink configuration and one file covers "who queried
+what" and "who changed access to what" together. `AuditSink.emit()`'s type
+widened to a `PersistableEvent` union to carry both.
+
+Verified live against a real running app and real Postgres, not just
+mocked tests: staged a policy version that additionally denied
+`customers.name`, applied it and confirmed the column was actually
+rejected on a real query, then rolled back and confirmed the original
+policy (and query result) was restored, with version history correctly
+attributing both the stage and the two applies. See
+`tests/unit/test_admin_store.py`, `tests/unit/test_admin_service.py`,
+`tests/integration/test_admin_config_governance.py`, and the governance
+scope/validation-integrity tests in `tests/security/test_adversarial_security.py`.
+
+**Explicitly out of scope for this pass** (matches this item's own "can be
+started as REST-only admin endpoints before adding UI" framing, not a
+gap discovered late): no approval/four-eyes workflow, no scheduled apply,
+no structured diff view (only full-YAML comparison across two versions),
+and no admin UI (TODO item 31, which depends on this item's API existing
+first).
 
 **Effort: L (1–2 weeks).** This is a new control-plane slice. It can be
 started as REST-only admin endpoints before adding UI, but it needs careful

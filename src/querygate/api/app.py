@@ -11,6 +11,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from starlette import status
 
+from querygate.api.admin_config_routes import build_admin_config_router
 from querygate.api.auth import build_principal_dependency
 from querygate.api.routes import build_router
 from querygate.audit.sinks import configure_audit_sink, reset_audit_sink
@@ -103,6 +104,9 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
 
     principal_dependency = build_principal_dependency(conf)
     application.include_router(build_router(principal_dependency, conf, prefix=conf.api_v1_prefix))
+    application.include_router(
+        build_admin_config_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
+    )
 
     @application.middleware("http")
     async def inject_request_context(request: Request, call_next):

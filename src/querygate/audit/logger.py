@@ -11,7 +11,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from querygate.audit.events import AuditDecision, AuditEvent, AuditSurface
+from querygate.audit.events import (
+    AuditDecision,
+    AuditEvent,
+    AuditSurface,
+    ConfigChangeAction,
+    ConfigChangeEvent,
+)
 from querygate.audit.sinks import get_audit_sink
 from querygate.core.logging import get_logger
 
@@ -79,6 +85,63 @@ def audit_query(
         # A persistence outage must be visible but cannot turn a successfully
         # executed read into a misleading client error after the DB work has
         # already happened. Operators should alert on this log event.
+        log.error(
+            "audit.sink.write_failed",
+            audit_event_id=event.event_id,
+            sink_type=type(get_audit_sink()).__name__,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+def audit_config_change(
+    *,
+    action: ConfigChangeAction,
+    outcome: str,
+    principal: Optional[str] = None,
+    principal_scopes: Optional[List[str]] = None,
+    auth_method: str = "unknown",
+    surface: AuditSurface = "internal",
+    version_id: Optional[str] = None,
+    previous_version_id: Optional[str] = None,
+    description: Optional[str] = None,
+    duration_ms: Optional[int] = None,
+    error_category: Optional[str] = None,
+) -> None:
+    """Record a config-governance action (validate/stage/apply/rollback) —
+    same durable sink as `audit_query`, so a customer's audit trail covers
+    both query attempts and who changed access to a database, when.
+    """
+    log = get_logger()
+    event = ConfigChangeEvent(
+        correlation_id=log.extra.get("request_id"),
+        surface=surface,
+        action=action,
+        principal_id=principal,
+        auth_method=auth_method,
+        principal_scopes=principal_scopes or [],
+        version_id=version_id,
+        previous_version_id=previous_version_id,
+        description=description,
+        outcome="success" if outcome == "success" else "rejected",
+        error_category=error_category,
+        duration_ms=max(duration_ms or 0, 0),
+    )
+    log.info(
+        "audit.config_change",
+        audit_event_id=event.event_id,
+        action=action,
+        version_id=version_id,
+        previous_version_id=previous_version_id,
+        principal=principal,
+        principal_scopes=principal_scopes,
+        auth_method=auth_method,
+        surface=surface,
+        outcome=event.outcome,
+        error_category=error_category,
+    )
+    try:
+        get_audit_sink().emit(event)
+    except Exception as exc:
         log.error(
             "audit.sink.write_failed",
             audit_event_id=event.event_id,

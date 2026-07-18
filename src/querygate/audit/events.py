@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import pydantic as pyd
 
@@ -19,6 +19,7 @@ from querygate.query_ast.models import (
 
 AuditDecision = Literal["allowed", "denied", "unknown"]
 AuditSurface = Literal["rest", "mcp", "internal"]
+ConfigChangeAction = Literal["stage", "apply", "rollback"]
 
 
 class AuditEvent(pyd.BaseModel):
@@ -51,6 +52,41 @@ class AuditEvent(pyd.BaseModel):
     error_category: Optional[str] = None
 
     model_config = pyd.ConfigDict(extra="forbid")
+
+
+class ConfigChangeEvent(pyd.BaseModel):
+    """Versioned event for the config-governance plane (querygate/admin/):
+    validating, staging, applying, or rolling back a connections/policy/
+    catalog version. Deliberately excludes raw YAML content — a version's
+    files never contain secret values (only `${...}` references, see
+    `querygate/secrets/`), but keeping this event narrow, like `AuditEvent`,
+    means the audit trail stays a metadata-only record regardless.
+    """
+
+    schema_version: str = "1"
+    event_id: str = pyd.Field(default_factory=lambda: str(uuid.uuid4()))
+    occurred_at: datetime = pyd.Field(default_factory=lambda: datetime.now(timezone.utc))
+    event_type: Literal["config.governance"] = "config.governance"
+    correlation_id: Optional[str] = None
+    surface: AuditSurface = "internal"
+    action: ConfigChangeAction
+    principal_id: Optional[str] = None
+    auth_method: str = "unknown"
+    principal_scopes: List[str] = pyd.Field(default_factory=list)
+    version_id: Optional[str] = None
+    previous_version_id: Optional[str] = None
+    description: Optional[str] = None
+    outcome: Literal["success", "rejected"]
+    error_category: Optional[str] = None
+    duration_ms: int = pyd.Field(default=0, ge=0)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+# Sinks (see audit/sinks.py) persist either kind of event through the same
+# configured backend — one durable audit trail for both query attempts and
+# config-governance actions.
+PersistableEvent = Union[AuditEvent, ConfigChangeEvent]
 
 
 def _select_shape(item: object) -> Dict[str, Any]:

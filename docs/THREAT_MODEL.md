@@ -4,8 +4,8 @@
 **Last reviewed:** 2026-07-19
 **Scope:** the REST and MCP request paths, authentication, policy/schema
 validation, query compilation and execution, Redis concurrency coordination,
-configuration reload, secret resolution, and audit/log outputs in this
-repository.
+configuration reload, the config-governance version store, secret
+resolution, and audit/log outputs in this repository.
 
 This document explains what QueryGate is designed to defend, which controls
 exist in code, and which risks remain with the operator. It is not an external
@@ -60,6 +60,15 @@ Customer database (read-only account recommended)
 Config load/reload (operator-triggered)
         |
         +-----> secrets/resolvers.py (env, optionally Vault KV v2)
+
+Admin caller (admin:config:read / admin:config:write)
+        |
+        v
+admin/service.py — validate/stage/apply/rollback
+        |
+        +-----> admin/store.py (versioned connections/policy/catalog snapshots)
+        +-----> config_reload.reload_config() (same swap as /admin/reload-config)
+        +-----> audit trail (config.governance events)
 ```
 
 The agent/client, all request fields, natural-language intent, JWTs, API keys
@@ -80,6 +89,8 @@ trusted to return client-safe error messages.
 - Principal identity, claims, scopes, and per-principal policy decisions.
 - Availability of QueryGate and the databases behind it.
 - Configuration integrity, particularly connection and policy changes.
+- Config-governance version history — every staged/applied/rolled-back
+  connections/policy/catalog snapshot and its actor attribution.
 - Audit-event integrity, availability, and correlation metadata.
 
 ## 4. Attacker capabilities
@@ -114,10 +125,11 @@ CI/CD, and secrets-management controls.
 | QG-07 | Credential, row, predicate, or backend-detail leakage | Public connection DTO has no credential field; unexpected REST/MCP/batch errors are generic; persisted audit schema excludes SQL, params, intent, exception text, and rows; explain/audit SQL is parameterized by default | `test_credential_redaction.py`, `test_audit.py`, security public-error tests |
 | QG-08 | Oversized or abusive requests/results | AST depth/width/join/top-N/batch caps; server-side row limits; hard serialized-row byte ceiling, including a single oversized row; database timeout; per-connection concurrency | Policy/service tests, real timeout tests, security oversized-row test |
 | QG-09 | Cross-connection access | Both connections must be visible to the principal and share the resolved `join_group`; the join uses the primary engine and declared physical database mapping | Cross-connection schema tests, including hidden-connection denial |
-| QG-10 | Unauthorized configuration changes | Reload endpoint requires `admin:reload-config`; new files are fully validated before atomic registry/policy replacement | REST reload scope tests and config-reload tests |
+| QG-10 | Unauthorized configuration changes | `/admin/reload-config` requires `admin:reload-config`; the config-governance API (`/admin/config/*`) separately requires `admin:config:write` for validate/stage/apply/rollback and `admin:config:read` for history/inspection; every path fully validates new content before atomic registry/policy replacement | REST reload scope tests, config-reload tests, `test_config_governance_write_endpoints_require_write_scope`, `test_config_governance_read_endpoints_require_read_scope` |
 | QG-11 | Browser-driven DNS rebinding against local MCP | MCP validates `Host` and, when present, `Origin`; protection is enabled by default with loopback hosts allowlisted | Security test `test_mcp_rejects_unapproved_host_header` |
 | QG-12 | Audit data becomes a new exfiltration channel | Narrow versioned event schema, explicit normalization without values, mode `0600`, append-only application writes, optional `fsync` | `test_audit.py` |
 | QG-14 | Secret-backend failure or misconfiguration discloses a Vault token or backend response text | `SecretResolver.resolve` errors carry only the reference being looked up and the exception type, never the configured token or the backend's own error/response text; a resolved secret value is never returned by any REST/MCP response, matching the existing credential-redaction guarantee | `test_vault_resolver_error_never_leaks_token_or_backend_response_text`, `test_vault_resolved_secret_never_appears_in_connection_listing_or_errors` |
+| QG-15 | A config-governance version that stops validating (e.g. an env var/Vault path it depends on disappears between staging and applying) gets silently activated anyway | `apply` re-validates a version's content immediately before activating it, regardless of whether it validated when staged; a failed re-validation leaves the active version and pointer untouched and is recorded as a rejected audit event | `test_apply_rejects_a_version_that_no_longer_validates`, `test_invalid_staged_version_is_rejected_not_silently_applied` |
 
 ## 6. Error and data-disclosure policy
 
@@ -164,6 +176,16 @@ The code controls above assume a correctly operated deployment:
   `audit.sink.write_failed`.
 - Restrict `/metrics`, `/health`, and admin routes at the network/proxy layer as
   appropriate for the environment.
+- Grant `admin:config:write` only to identities that should be able to change
+  what QueryGate connects to and enforces — treat it as equivalent in
+  sensitivity to `admin:reload-config`. Grant `admin:config:read` more
+  broadly if config-change visibility (not the ability to change it) is
+  useful for an on-call/audit role; both are read-only into the same version
+  history otherwise available only via the persisted audit trail.
+- Back up `AppConfig.config_governance_dir` (default `var/config_versions/`)
+  like any other durable state — it is QueryGate's own version history, not
+  reconstructable from `connections.yaml`/`policy.yaml` alone once history
+  has diverged from what's currently on disk.
 
 ## 8. Residual risks and explicit non-goals
 
@@ -178,9 +200,12 @@ The code controls above assume a correctly operated deployment:
   row from leaving QueryGate, but the database driver must first receive that
   row. Database-side statement limits and denial of large/blob columns remain
   important.
-- **Configuration governance:** YAML reload has validation and an admin scope,
-  but no approval workflow, version history, rollback ledger, or separation of
-  duties (TODO item 25).
+- **Configuration governance has version history and rollback, but no
+  approval workflow yet:** the `/admin/config/*` API validates, versions,
+  attributes, and audits every change, and a single `admin:config:write`
+  caller can stage and apply a version in one session with no second-
+  approver/four-eyes requirement, scheduled apply, or diff view beyond
+  comparing two versions' full YAML. No admin UI (TODO item 31).
 - **Secrets lifecycle:** connection secrets resolve from either the
   environment or, optionally, HashiCorp Vault (token auth only — no
   AppRole/Kubernetes auth yet). `VAULT_TOKEN` itself is still a static,

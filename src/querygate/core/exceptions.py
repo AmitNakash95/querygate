@@ -36,6 +36,16 @@ class QueryValidationError(ValueError):
     """
 
 
+class ConfigValidationError(ValueError):
+    """A staged or applied config-governance version fails validation
+    (bad YAML, unresolvable secret reference, unknown connection id, ...).
+
+    Client-actionable for the same reason as QueryValidationError — an admin
+    caller needs to see exactly what's wrong with a candidate config, not a
+    masked internal error.
+    """
+
+
 def public_error_message(exc: Exception) -> str:
     """Return a client-safe message without exposing unexpected internals.
 
@@ -45,7 +55,13 @@ def public_error_message(exc: Exception) -> str:
     """
     if isinstance(
         exc,
-        (NotFoundError, PolicyViolationError, ConcurrencyLimitError, QueryValidationError),
+        (
+            NotFoundError,
+            PolicyViolationError,
+            ConcurrencyLimitError,
+            QueryValidationError,
+            ConfigValidationError,
+        ),
     ):
         return str(exc)
     return PUBLIC_INTERNAL_ERROR

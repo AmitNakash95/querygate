@@ -240,6 +240,50 @@ used by REST, MCP, direct schema/query calls, and cross-connection joins.
 Deployment-level `enabled: false` in `connections.yaml` always wins and
 cannot be re-enabled by principal policy.
 
+## Config-governance API (staged versions, apply, rollback)
+
+`POST /api/v1/admin/reload-config` (above) reloads whatever
+`connections.yaml`/`policy.yaml`/`catalog.yaml` currently contain on disk —
+the right fit for infra-as-code deployments that edit those files directly.
+For teams that want to submit config changes over the API instead — with
+validation, staged review, full version history, and rollback — a separate
+`/api/v1/admin/config/*` surface layers on top of the same reload mechanism,
+never bypassing it:
+
+```bash
+# See what's currently active
+curl -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/current
+
+# Dry-run a candidate without persisting anything
+curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/validate \
+  -d '{"policy_yaml": "default:\n  enabled: true\n  max_joins: 2\n"}'
+
+# Stage it as a new version (only the fields you send change; everything
+# else inherits from the current active version)
+curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions \
+  -d '{"policy_yaml": "...", "description": "tighten max_joins for pilot customer X"}'
+# -> {"id": "7", "status": "staged", ...}
+
+# Apply it — validates once more, then reloads exactly like
+# /admin/reload-config does, and records the new active version
+curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions/7/apply
+
+# Roll back — the same "apply" endpoint, targeting an older version id.
+# QueryGate never rewrites history: every version that ever existed stays
+# inspectable via GET /admin/config/versions/{id}.
+curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions/1/apply
+```
+
+Every validate/stage/apply/rollback is attributed to the calling principal
+and recorded in the same audit trail as query execution (a `config.governance`
+event — action, version id, outcome, actor — never the YAML content itself,
+which stays only in the version store). The first call to any `/admin/config/*`
+endpoint bootstraps version `"1"` from whatever `connections.yaml`/
+`policy.yaml`/`catalog.yaml` the deployment started with, so "current active
+version" always means something. Gated behind two scopes, matching the
+read/write split most admin APIs use: `admin:config:read` (list/inspect
+versions) and `admin:config:write` (validate/stage/apply/rollback).
+
 ## Example schema catalog (optional)
 
 Raw reflection tells an agent that `customers.email` exists and is a
@@ -381,7 +425,11 @@ Agent (MCP) / Client (REST)
 - **`execution/`** — concurrency guardrail + the `StructuredQueryService`
   that ties validation → compilation → execution → result shaping together.
 - **`audit/`** — structured stdout auditing plus a versioned, redaction-safe,
-  append-only JSONL event sink.
+  append-only JSONL event sink, shared by both query execution and
+  config-governance events.
+- **`admin/`** — config-governance version store and orchestration: staging,
+  applying, and rolling back connections/policy/catalog versions on top of
+  `config_reload.py`'s existing swap mechanism.
 - **`api/`** and **`mcp/`** — thin transport layers over the same
   `StructuredQueryService`; neither has its own query logic.
 
@@ -422,6 +470,12 @@ Agent (MCP) / Client (REST)
   to stdout and can be persisted as a narrow JSONL event. The persisted event
   contains identity, surface, normalized query shape, policy decision, timing,
   row/byte counts, and error category—never row payloads or query literals.
+- **Config changes are versioned, attributed, and never silently applied.**
+  Every `/admin/config/*` validate/stage/apply/rollback is attributed to the
+  calling principal, gated behind `admin:config:read`/`admin:config:write`,
+  recorded as its own audit event (never the YAML content), and re-validated
+  immediately before it takes effect — a version that fails validation is
+  never activated, even if it validated when it was first staged.
 - **Adversarially tested boundary** — denied identifiers cannot be smuggled
   through filters, joins, grouping, ordering, or ranking; undeclared tables
   cannot enter an implicit `FROM`; unexpected backend errors are masked; and
@@ -447,6 +501,11 @@ Being upfront about what's not done yet:
 - **Audit retention is operator-managed** — QueryGate provides append-only
   JSONL persistence and rotation-friendly writes, but not a WORM store,
   retention scheduler, search UI, or built-in SIEM exporter yet.
+- **Config-governance has no approval workflow yet** — a caller with
+  `admin:config:write` can stage and immediately apply a version in one
+  session; there's no second-approver/four-eyes requirement, scheduled
+  apply, or diff view beyond comparing two versions' full YAML by hand. No
+  admin UI either — the governance API is REST-only for now.
 - **No write operations** — by design. QueryGate is read-only; there is no
   insert/update/delete path anywhere in the AST or compiler.
 - **Distributed concurrency enforcement (Redis-backed) is opt-in** — the

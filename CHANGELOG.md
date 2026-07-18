@@ -21,6 +21,15 @@ All notable changes to QueryGate are documented here.
   or validated. Every `${...}` reference re-resolves on each config load/hot reload, so a
   rotated secret takes effect without a restart. Resolver errors never echo the configured
   token or the backend's own response text.
+- Config-governance API (`querygate/admin/`, `/api/v1/admin/config/*`): validate, stage,
+  apply, and roll back versioned connections/policy/catalog snapshots over REST, separate
+  from and layered on top of the existing `/admin/reload-config` file-reload endpoint.
+  Every version is attributed to the calling principal, gated behind new
+  `admin:config:read`/`admin:config:write` scopes, and recorded in the same audit sink as
+  query execution via a new `ConfigChangeEvent`. Applying re-validates a version
+  immediately beforehand, so a version that stops validating between staging and applying
+  is rejected, not silently activated. Rollback reuses the same apply endpoint against an
+  older version id — history is never rewritten.
 
 ## [0.1.0] — 2026-07-18
 
