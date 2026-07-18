@@ -30,6 +30,8 @@ poetry run pytest tests/unit/test_compiler.py::TestCompiler::test_simple_select_
 poetry run pytest --cov=src --cov-report=term-missing                      # coverage
 make test-security                     # adversarial boundary suite
 make test-postgres-live                # requires compose-up
+make test-load                         # bounded real-Postgres concurrency load gate
+make test-soak SOAK_ROUNDS=100         # repeated guardrail load scenarios
 
 # Formatting
 poetry run black --check src/ tests/    # or: make format-check

@@ -6,6 +6,10 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- A repeatable real-PostgreSQL load/soak harness for execution guardrails. Concurrent REST
+  bursts are checked against PostgreSQL's observed active-query count, covering strict
+  `max_concurrency` enforcement, overflow rejection, queued completion, and statement
+  timeout cancellation under load (`make test-load` / `make test-soak`).
 - Optional curated schema-catalog overlay (`querygate/catalog/`, `CATALOG_FILE`): business
   descriptions, aliases, relationship hints, sensitivity labels, default aggregation
   preference, and an `allow_samples` flag, curated per connection/table/column and merged
