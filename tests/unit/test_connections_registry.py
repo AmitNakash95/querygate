@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from querygate.connections.registry import ConnectionRegistry
+from querygate.secrets.resolvers import EnvSecretResolver, SecretResolverRegistry
 
 
 def test_env_var_interpolation(monkeypatch):
@@ -105,3 +106,34 @@ def test_list_public_excludes_connection_string(monkeypatch):
     dumped = public[0].model_dump()
     assert "connection_string" not in dumped
     assert "supersecret" not in str(dumped)
+
+
+class _FakeResolver:
+    def __init__(self, values: dict[str, str]) -> None:
+        self._values = values
+
+    def resolve(self, reference: str) -> str:
+        return self._values[reference]
+
+
+def test_connection_string_resolved_through_custom_resolver_registry():
+    registry = SecretResolverRegistry(
+        {
+            "env": EnvSecretResolver({}),
+            "vault": _FakeResolver({"demo#url": "postgresql+asyncpg://vault-resolved/db"}),
+        }
+    )
+    connections = ConnectionRegistry.from_entries(
+        [{"id": "demo", "dialect": "postgresql", "connection_string": "${vault:demo#url}"}],
+        resolver_registry=registry,
+    )
+    assert connections.get("demo").connection_string == "postgresql+asyncpg://vault-resolved/db"
+
+
+def test_unregistered_scheme_is_reported_clearly():
+    registry = SecretResolverRegistry({"env": EnvSecretResolver({})})
+    with pytest.raises(ValueError, match="No secret resolver registered for scheme 'vault'"):
+        ConnectionRegistry.from_entries(
+            [{"id": "demo", "dialect": "postgresql", "connection_string": "${vault:demo#url}"}],
+            resolver_registry=registry,
+        )

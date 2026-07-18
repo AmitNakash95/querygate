@@ -42,7 +42,7 @@ order-of-magnitude, not commitments.
 | 10 | ✅ No OAuth/JWT | M | 8 (helps) |
 | 11 | ✅ No response byte-size cap | S | — |
 | 12 | ✅ No metrics/observability | M | — |
-| 13 | No secrets-manager integration | M–L | 5 (pairs well) |
+| 13 | ✅ No secrets-manager integration | M–L | 5 (pairs well) |
 | 14 | ✅ Docker image never built/run (found + fixed as a side effect of item 4) | S* | — |
 | 15 | No load/soak testing | M | — |
 | 16 | ✅ Column policy case-sensitivity gap | XS | — |
@@ -787,7 +787,48 @@ rejected (by reason: policy/schema/timeout/concurrency), query duration,
 per-connection concurrency-slot utilization, and expose via `/metrics` or an
 OTel exporter.
 
-### 13. No secrets-manager integration for connection strings
+### 13. No secrets-manager integration for connection strings ✅ DONE
+
+**Shipped:** A new `querygate/secrets/` module defines a `SecretResolver`
+protocol — one method, `resolve(reference: str) -> str` — mirroring the
+`Authenticator` (`core/auth.py`) and `AuditSink` (`audit/sinks.py`)
+pluggable-backend shape already used elsewhere in this codebase.
+`connections/registry.py`'s interpolation is now scheme-dispatched through a
+`SecretResolverRegistry`: a bare identifier (`${QUERYGATE_DEMO_DB_URL}`)
+still means an environment variable, unchanged; anything else must be
+`${scheme:reference}` (e.g. `${vault:querygate/demo-db#connection_string}`),
+routed by `scheme` to whichever resolver is registered for it. Adding a
+future backend (AWS Secrets Manager, GCP Secret Manager) is a new resolver
+class plus one registration line in `build_secret_resolver_registry` —
+`ConnectionRegistry`, `config_reload.py`, and `querygate-validate-config`
+never change.
+
+Shipped one real backend, `VaultSecretResolver`, reading a HashiCorp Vault
+KV v2 secret (`<path>#<field>`) via `hvac`, token auth only for this first
+pass. Selectable via `AppConfig.vault_enabled` + `vault_addr`/`vault_token`/
+`vault_kv_mount`/`vault_namespace`; validated at config-load time the same
+way `jwt_enabled` requires `jwt_jwks_url`. Every `${...}` reference —
+including `${vault:...}` — is re-resolved on every config load or hot
+reload (item 5's `POST /api/v1/admin/reload-config`), so a rotated secret
+takes effect on the next reload without a restart, closing the rotation gap
+this item's own "why it matters" called out.
+
+Error handling is deliberately conservative: a `VaultError`/network failure
+is wrapped in a `ValueError` carrying only the secret path and the
+exception's type name — never the configured token or Vault's own
+response text, which could otherwise end up in an operator's terminal, a
+CI log, or a support ticket. Covered by `tests/unit/test_secrets.py`,
+`tests/unit/test_connections_registry.py`, `tests/unit/test_cli.py`,
+`tests/unit/test_config_reload.py`, a REST integration test proving a
+`${vault:...}`-backed connection actually resolves through the real admin
+reload endpoint, and two adversarial security tests (a masked Vault error,
+and a Vault-resolved secret confirmed absent from connection listing and
+error responses).
+
+**Not done in this pass** (left for a real follow-up, not silently
+dropped): AppRole/Kubernetes Vault auth (token auth only), AWS/GCP Secrets
+Manager backends, and rotation of `VAULT_TOKEN` itself (still a static,
+env-configured credential — see `docs/THREAT_MODEL.md`'s residual risks).
 
 **Effort: M–L (2–4 days).** One backend (e.g. Vault) is the M end; doing it
 generically pluggable plus wiring in rotation (which leans on item 5) pushes

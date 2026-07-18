@@ -13,6 +13,7 @@ from querygate.config_reload import reload_config
 from querygate.connections.registry import get_registry
 from querygate.execution.concurrency import SEMAPHORES
 from querygate.policy.loader import get_policy
+from querygate.secrets.resolvers import EnvSecretResolver, SecretResolverRegistry
 
 
 def _write(tmp_path: Path, name: str, content: str) -> str:
@@ -228,3 +229,60 @@ connections:
     entry = get_catalog_store().get_table("fresh", "widgets")
     assert entry is not None
     assert entry.description == "One row per widget."
+
+
+class _FakeResolver:
+    def __init__(self, values: dict[str, str]) -> None:
+        self._values = values
+
+    def resolve(self, reference: str) -> str:
+        return self._values[reference]
+
+
+@pytest.mark.asyncio
+async def test_reload_resolves_connection_strings_through_custom_resolver_registry(tmp_path):
+    connections_file = _write(
+        tmp_path,
+        "connections.yaml",
+        """
+connections:
+  - id: fresh
+    dialect: postgresql
+    connection_string: ${vault:fresh#url}
+""",
+    )
+    policy_file = _write(tmp_path, "policy.yaml", _POLICY_YAML)
+    resolver_registry = SecretResolverRegistry(
+        {
+            "env": EnvSecretResolver({}),
+            "vault": _FakeResolver({"fresh#url": "postgresql+asyncpg://vault-resolved/db"}),
+        }
+    )
+
+    with patch.object(reload_module, "dispose_engine", new_callable=AsyncMock):
+        await reload_config(
+            connections_file=connections_file,
+            policy_file=policy_file,
+            resolver_registry=resolver_registry,
+        )
+
+    assert get_registry().get("fresh").connection_string == "postgresql+asyncpg://vault-resolved/db"
+
+
+@pytest.mark.asyncio
+async def test_reload_without_resolver_registry_only_resolves_env_references(tmp_path):
+    connections_file = _write(
+        tmp_path,
+        "connections.yaml",
+        """
+connections:
+  - id: fresh
+    dialect: postgresql
+    connection_string: ${vault:fresh#url}
+""",
+    )
+    policy_file = _write(tmp_path, "policy.yaml", _POLICY_YAML)
+
+    with patch.object(reload_module, "dispose_engine", new_callable=AsyncMock):
+        with pytest.raises(ValueError, match="No secret resolver registered for scheme 'vault'"):
+            await reload_config(connections_file=connections_file, policy_file=policy_file)

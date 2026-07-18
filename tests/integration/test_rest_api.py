@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -10,7 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from querygate.api.app import create_app
 from querygate.catalog.models import RelationshipHint
 from querygate.connections.models import ConnectionProfile
-from querygate.connections.registry import ConnectionRegistry, set_registry
+from querygate.connections.registry import ConnectionRegistry, get_registry, set_registry
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import QueryValidationError
 from querygate.execution.service import (
@@ -492,3 +492,55 @@ connections:
         )
     assert resp.status_code == 200
     assert resp.json()["catalog_connection_ids"] == ["reload-demo"]
+
+
+@pytest.mark.asyncio
+async def test_reload_config_resolves_vault_backed_connection_string(tmp_path):
+    connections_file = tmp_path / "connections.yaml"
+    connections_file.write_text(
+        """
+connections:
+  - id: vault-demo
+    dialect: postgresql
+    connection_string: ${vault:querygate/demo#connection_string}
+    known_tables: [foo]
+"""
+    )
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("default:\n  enabled: true\n")
+
+    settings = _settings(
+        api_keys=["secret-key"],
+        api_key_scopes=["admin:reload-config"],
+        connections_file=str(connections_file),
+        policy_file=str(policy_file),
+        vault_enabled=True,
+        vault_addr="http://vault.internal:8200",
+        vault_token="test-vault-token",
+    )
+
+    fake_client = MagicMock()
+    fake_client.secrets.kv.v2.read_secret_version.return_value = {
+        "data": {"data": {"connection_string": "postgresql+asyncpg://vault-resolved/db"}}
+    }
+    with patch("hvac.Client", return_value=fake_client) as mock_hvac_client:
+        reload_app = create_app(settings)
+        async with AsyncClient(
+            transport=ASGITransport(app=reload_app), base_url=_BASE_URL
+        ) as client:
+            resp = await client.post(
+                "/api/v1/admin/reload-config", headers={"Authorization": "Bearer secret-key"}
+            )
+
+    assert resp.status_code == 200
+    assert resp.json()["connection_ids"] == ["vault-demo"]
+    # The connection string actually resolved through Vault, not just that
+    # reload reported success — and hvac.Client was built with the
+    # deployment's own token/address, not left at some default.
+    assert (
+        get_registry().get("vault-demo").connection_string
+        == "postgresql+asyncpg://vault-resolved/db"
+    )
+    mock_hvac_client.assert_called_once_with(
+        url="http://vault.internal:8200", token="test-vault-token", namespace=None
+    )

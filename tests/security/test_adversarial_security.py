@@ -15,9 +15,12 @@ import pytest
 import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
 
+import hvac.exceptions
+
 from querygate.api.app import create_app
 from querygate.catalog.loader import CatalogStore, set_catalog_store
 from querygate.compiler.sqlalchemy_compiler import compile_structured_query
+from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import (
@@ -30,6 +33,7 @@ from querygate.execution.service import StructuredQueryService, _cap_response_by
 from querygate.mcp.exceptions import _error_code_from_exception
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import MandatoryRowFilter, Policy
+from querygate.secrets.resolvers import VaultSecretResolver
 from querygate.query_ast.models import (
     AggregateSelectItem,
     JoinSpec,
@@ -234,6 +238,94 @@ async def test_catalog_relationship_hint_cannot_disclose_a_denied_table():
 
     assert description.catalog.relationships == []
     assert "customers" not in json.dumps(description.model_dump())
+
+
+def test_vault_resolver_error_never_leaks_token_or_backend_response_text():
+    """A Vault failure (bad token, revoked lease, network blip) must surface
+    as a clear operator-facing failure without ever echoing the configured
+    Vault token or Vault's own response text — Vault error bodies can
+    contain request/path details a deployment wouldn't want captured in a
+    log line or pasted into a support ticket.
+    """
+    vault_token = "hvs.CAESISUPERSECRETTOKENVALUE"
+    fake_client = MagicMock()
+    fake_client.secrets.kv.v2.read_secret_version.side_effect = hvac.exceptions.Forbidden(
+        f"permission denied for token {vault_token} on path querygate/prod-db"
+    )
+    resolver = VaultSecretResolver(
+        url="http://vault.internal", token=vault_token, client=fake_client
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        resolver.resolve("querygate/prod-db#connection_string")
+
+    message = str(exc_info.value)
+    assert vault_token not in message
+    assert "permission denied" not in message
+
+
+@pytest.mark.asyncio
+async def test_vault_resolved_secret_never_appears_in_connection_listing_or_errors(tmp_path):
+    """The resolved value of a `${vault:...}`-backed connection string is as
+    sensitive as an env-resolved one — REST connection listing and error
+    responses must never echo it, matching the existing guarantee
+    `test_credential_redaction.py` asserts for env-backed connections.
+    """
+    marker = "vault-resolved-super-secret-password-marker"
+    connections_file = tmp_path / "connections.yaml"
+    connections_file.write_text(
+        """
+connections:
+  - id: vault-demo
+    dialect: postgresql
+    connection_string: ${vault:querygate/demo#connection_string}
+"""
+    )
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("default:\n  enabled: true\n")
+
+    settings = AppConfig(
+        environment="localhost",
+        mcp_enabled=False,
+        audit_sink_backend="none",
+        connections_file=str(connections_file),
+        policy_file=str(policy_file),
+        api_keys=["admin-key"],
+        api_key_scopes=["admin:reload-config"],
+        vault_enabled=True,
+        vault_addr="http://vault.internal:8200",
+        vault_token="test-vault-token",
+    )
+    fake_client = MagicMock()
+    fake_client.secrets.kv.v2.read_secret_version.return_value = {
+        "data": {"data": {"connection_string": f"postgresql+asyncpg://{marker}@host/db"}}
+    }
+    with patch("hvac.Client", return_value=fake_client):
+        app = create_app(settings)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://localhost"
+        ) as client:
+            # Load the vault-backed connection via the real admin reload
+            # path, exactly as an operator would — nothing in this test
+            # reaches into internal state to seed the registry directly.
+            reload_resp = await client.post(
+                "/api/v1/admin/reload-config", headers={"Authorization": "Bearer admin-key"}
+            )
+            assert reload_resp.status_code == 200
+            list_resp = await client.get(
+                "/api/v1/connections", headers={"Authorization": "Bearer admin-key"}
+            )
+            missing_table_resp = await client.get(
+                "/api/v1/vault-demo/tables/does-not-exist",
+                headers={"Authorization": "Bearer admin-key"},
+            )
+
+    assert marker not in reload_resp.text
+    assert marker not in list_resp.text
+    assert marker not in missing_table_resp.text
+    assert get_registry().get("vault-demo").connection_string == (
+        f"postgresql+asyncpg://{marker}@host/db"
+    )
 
 
 def test_aggregate_queries_retain_principal_mandatory_row_filter():

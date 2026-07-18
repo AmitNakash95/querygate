@@ -153,6 +153,17 @@ class AppConfig(BaseSettings):
     # concurrency cap on the underlying database is the worse outcome.
     concurrency_redis_fail_open: bool = pyd.Field(default=True)
 
+    # HashiCorp Vault-backed secret resolution (querygate/secrets/) — an
+    # alternative to ${ENV_VAR} for connection strings that shouldn't live in
+    # the environment at all, selectable per-reference via a `${vault:...}`
+    # scheme prefix in connections.yaml (env var interpolation keeps working
+    # unchanged either way). Token auth only for this first backend.
+    vault_enabled: bool = pyd.Field(default=False)
+    vault_addr: str = pyd.Field(default="")
+    vault_token: str = pyd.Field(default="")
+    vault_kv_mount: str = pyd.Field(default="secret")
+    vault_namespace: str = pyd.Field(default="")
+
     # Engine pool defaults, shared across connections (per-connection timeout /
     # concurrency guardrails live in policy, not here).
     pool_size: int = pyd.Field(default=20)
@@ -194,6 +205,10 @@ class AppConfig(BaseSettings):
             raise ValueError("JWT_JWKS_URL must be set when JWT_ENABLED=true")
         if self.concurrency_backend == ConcurrencyBackend.REDIS and not self.concurrency_redis_url:
             raise ValueError("CONCURRENCY_REDIS_URL must be set when CONCURRENCY_BACKEND=redis")
+        if self.vault_enabled and not self.vault_addr:
+            raise ValueError("VAULT_ADDR must be set when VAULT_ENABLED=true")
+        if self.vault_enabled and not self.vault_token:
+            raise ValueError("VAULT_TOKEN must be set when VAULT_ENABLED=true")
         return self
 
     @property

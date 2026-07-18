@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from querygate.cli import validate_config
+from querygate.secrets.resolvers import EnvSecretResolver, SecretResolverRegistry
 
 CONNECTIONS_YAML = """
 connections:
@@ -185,3 +186,50 @@ connections:
     errors = validate_config(connections_file, policy_file, catalog_file=catalog_file)
     assert len(errors) == 1
     assert catalog_file in errors[0]
+
+
+def test_validate_config_resolves_connection_strings_through_custom_resolver_registry(tmp_path):
+    connections_file = _write(
+        tmp_path,
+        "connections.yaml",
+        """
+connections:
+  - id: demo
+    dialect: postgresql
+    connection_string: ${vault:demo#url}
+""",
+    )
+    policy_file = _write(tmp_path, "policy.yaml", POLICY_YAML)
+    resolver_registry = SecretResolverRegistry(
+        {"env": EnvSecretResolver({}), "vault": _FakeResolver({"demo#url": "postgresql://ok"})}
+    )
+
+    errors = validate_config(connections_file, policy_file, resolver_registry=resolver_registry)
+    assert errors == []
+
+
+def test_validate_config_reports_unresolvable_vault_reference(tmp_path):
+    connections_file = _write(
+        tmp_path,
+        "connections.yaml",
+        """
+connections:
+  - id: demo
+    dialect: postgresql
+    connection_string: ${vault:demo#url}
+""",
+    )
+    policy_file = _write(tmp_path, "policy.yaml", POLICY_YAML)
+    resolver_registry = SecretResolverRegistry({"env": EnvSecretResolver({})})
+
+    errors = validate_config(connections_file, policy_file, resolver_registry=resolver_registry)
+    assert len(errors) == 1
+    assert "No secret resolver registered for scheme 'vault'" in errors[0]
+
+
+class _FakeResolver:
+    def __init__(self, values: dict[str, str]) -> None:
+        self._values = values
+
+    def resolve(self, reference: str) -> str:
+        return self._values[reference]

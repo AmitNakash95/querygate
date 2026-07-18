@@ -45,6 +45,7 @@ PyYAML = "^6.0"
 prometheus-client = "^0.25.0"
 pyjwt = {extras = ["crypto"], version = "^2.13.0"}
 redis = "^8.0.1"
+hvac = "^2.4.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "7.4.0"

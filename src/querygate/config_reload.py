@@ -19,6 +19,7 @@ from querygate.connections.registry import ConnectionRegistry, get_registry, set
 from querygate.core.logging import get_logger
 from querygate.execution.concurrency import SEMAPHORES
 from querygate.policy.loader import PolicyStore, set_policy_store
+from querygate.secrets.resolvers import SecretResolverRegistry
 
 
 class ReloadResult(pyd.BaseModel):
@@ -29,7 +30,11 @@ class ReloadResult(pyd.BaseModel):
 
 
 async def reload_config(
-    *, connections_file: str, policy_file: str, catalog_file: Optional[str] = None
+    *,
+    connections_file: str,
+    policy_file: str,
+    catalog_file: Optional[str] = None,
+    resolver_registry: Optional[SecretResolverRegistry] = None,
 ) -> ReloadResult:
     """Atomically swap in a freshly loaded registry + policy store.
 
@@ -51,9 +56,18 @@ async def reload_config(
     transition window where a connection's observed concurrency can exceed
     either the old or new limit, an accepted tradeoff for a live reload over
     a hard cutover.
+
+    `resolver_registry` (see `querygate/secrets/resolvers.py`) resolves any
+    `${...}` reference in the reloaded connections file — env-only when
+    omitted, matching `ConnectionRegistry.from_file`'s own default. Vault
+    connectivity itself (`AppConfig.vault_*`) is process-level config and
+    isn't part of what this function reloads; pass a registry built from the
+    current `AppConfig` to resolve `${vault:...}` references during reload.
     """
     old_registry = get_registry()
-    new_registry = ConnectionRegistry.from_file(connections_file)
+    new_registry = ConnectionRegistry.from_file(
+        connections_file, resolver_registry=resolver_registry
+    )
     new_policy_store = PolicyStore.from_file(policy_file)
     new_catalog_store = (
         CatalogStore.from_file(catalog_file) if catalog_file else CatalogStore.empty()

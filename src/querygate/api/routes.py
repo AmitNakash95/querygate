@@ -32,6 +32,7 @@ from querygate.execution.service import (
 )
 from querygate.policy.loader import get_policy
 from querygate.query_ast.models import StructuredQuery
+from querygate.secrets.resolvers import build_secret_resolver_registry
 from querygate.validation.policy_validation import validate_batch_size
 
 # Scope required to call POST /admin/reload-config — reloading connections/
@@ -157,6 +158,7 @@ def build_router(
                 connections_file=cfg.connections_file,
                 policy_file=cfg.policy_file,
                 catalog_file=cfg.catalog_file,
+                resolver_registry=build_secret_resolver_registry(cfg),
             )
         except Exception as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

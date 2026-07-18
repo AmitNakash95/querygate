@@ -1,52 +1,26 @@
 """File-driven connection profile registry.
 
-Connection strings are resolved via ${ENV_VAR} interpolation, so the
-connections file itself never needs to contain a secret — only the name of
-the environment variable that holds it. This replaces the old hardcoded
-`DataBase` enum with a dynamic, deployment-specific registry (goal: "support
-dynamic database connection profiles instead of hardcoded enum members").
+Connection strings are resolved via ${...} interpolation (see
+`querygate/secrets/resolvers.py`), so the connections file itself never
+needs to contain a secret — only a reference to where the real value lives.
+This replaces the old hardcoded `DataBase` enum with a dynamic,
+deployment-specific registry (goal: "support dynamic database connection
+profiles instead of hardcoded enum members").
 """
 
 from __future__ import annotations
 
-import os
-import re
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Optional
 
 import yaml
-from dotenv import dotenv_values
 
 from querygate.connections.models import ConnectionProfile, PublicConnectionInfo
-
-_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-
-
-def _runtime_environment() -> Mapping[str, Optional[str]]:
-    """Connection-string variables come from the process or the local .env.
-
-    Pydantic Settings reads `.env` into `AppConfig`, but intentionally does
-    not mutate `os.environ`. Connection profiles use arbitrary variable names
-    that are not AppConfig fields, so load the same dotenv file explicitly.
-    Real process environment values win over `.env`, matching Pydantic's
-    precedence and normal deployment expectations.
-    """
-    return {**dotenv_values(".env"), **os.environ}
+from querygate.secrets.resolvers import EnvSecretResolver, SecretResolverRegistry
 
 
-def _interpolate_env(value: str, environment: Optional[Mapping[str, Optional[str]]] = None) -> str:
-    environment = _runtime_environment() if environment is None else environment
-
-    def _replace(match: "re.Match[str]") -> str:
-        var_name = match.group(1)
-        resolved = environment.get(var_name)
-        if resolved is None:
-            raise ValueError(
-                f"Environment variable {var_name!r} referenced in the connections file is not set"
-            )
-        return resolved
-
-    return _ENV_VAR_PATTERN.sub(_replace, value)
+def _default_resolver_registry() -> SecretResolverRegistry:
+    return SecretResolverRegistry({"env": EnvSecretResolver()})
 
 
 class ConnectionRegistry:
@@ -56,26 +30,26 @@ class ConnectionRegistry:
         self._profiles = profiles
 
     @classmethod
-    def from_file(cls, path: str) -> "ConnectionRegistry":
+    def from_file(
+        cls, path: str, resolver_registry: Optional[SecretResolverRegistry] = None
+    ) -> "ConnectionRegistry":
         file_path = Path(path)
         if not file_path.exists():
             raise FileNotFoundError(f"Connections file not found: {path}")
         raw = yaml.safe_load(file_path.read_text()) or {}
-        return cls.from_entries(raw.get("connections", []))
+        return cls.from_entries(raw.get("connections", []), resolver_registry=resolver_registry)
 
     @classmethod
     def from_entries(
         cls,
         entries: list[dict],
-        environment: Optional[Mapping[str, Optional[str]]] = None,
+        resolver_registry: Optional[SecretResolverRegistry] = None,
     ) -> "ConnectionRegistry":
-        environment = _runtime_environment() if environment is None else environment
+        registry = resolver_registry or _default_resolver_registry()
         profiles: dict[str, ConnectionProfile] = {}
         for raw_entry in entries:
             entry = dict(raw_entry)
-            entry["connection_string"] = _interpolate_env(
-                entry["connection_string"], environment=environment
-            )
+            entry["connection_string"] = registry.interpolate(entry["connection_string"])
             profile = ConnectionProfile.model_validate(entry)
             if profile.id in profiles:
                 raise ValueError(f"Duplicate connection id in connections file: {profile.id!r}")
@@ -105,8 +79,11 @@ def get_registry() -> ConnectionRegistry:
     global _registry
     if _registry is None:
         from querygate.core.config import config
+        from querygate.secrets.resolvers import build_secret_resolver_registry
 
-        _registry = ConnectionRegistry.from_file(config.connections_file)
+        _registry = ConnectionRegistry.from_file(
+            config.connections_file, resolver_registry=build_secret_resolver_registry(config)
+        )
     return _registry
 
 

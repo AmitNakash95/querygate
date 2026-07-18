@@ -156,6 +156,43 @@ both the connection profile and that principal's resolved policy to have
 when addressed directly, so schema/query calls cannot be used to enumerate
 internal database names.
 
+### Secret-backed connection strings (Vault)
+
+`${VAR}` (a bare environment variable name) always resolves from the
+environment, unchanged. A `${scheme:reference}` reference resolves through
+a pluggable secret backend instead — today `vault`, reading a HashiCorp
+Vault KV v2 secret:
+
+```yaml
+connections:
+  - id: demo
+    dialect: postgresql
+    connection_string: ${vault:querygate/demo-db#connection_string}
+```
+
+`path` (`querygate/demo-db`) is the KV v2 secret path under
+`VAULT_KV_MOUNT` (default `secret`); `field` (`connection_string`) is the
+key within that secret's data. Enable it with:
+
+```bash
+VAULT_ENABLED=true
+VAULT_ADDR=https://vault.internal:8200
+VAULT_TOKEN=...
+VAULT_KV_MOUNT=secret
+VAULT_NAMESPACE=            # Vault Enterprise only, optional
+```
+
+Token auth only for this first backend. Resolution is pluggable
+(`querygate/secrets/resolvers.py`'s `SecretResolver` protocol — the same
+one-method-interface shape as `Authenticator` and `AuditSink`): a future
+backend (AWS Secrets Manager, GCP Secret Manager, ...) is a new resolver
+class plus one registration line, never a change to how
+`connections.yaml` is loaded, to `config_reload`, or to
+`querygate-validate-config`. `${...}` references resolve fresh on every
+load — including a hot reload via `POST /api/v1/admin/reload-config` — so a
+rotated Vault secret takes effect on the next reload without a restart, no
+env var/process restart required the way a bare `${VAR}` reference does.
+
 ## Example policy config
 
 ```yaml
@@ -320,9 +357,13 @@ Agent (MCP) / Client (REST)
 ```
 
 - **`connections/`** — `ConnectionProfile` registry loaded from YAML,
-  `${VAR}`-interpolated connection strings, per-dialect engine/session
+  `${...}`-interpolated connection strings, per-dialect engine/session
   lifecycle (`dialects.py` is the only place Postgres/MSSQL-specific SQL
   lives).
+- **`secrets/`** — pluggable `${scheme:reference}` secret resolution
+  (`SecretResolver` protocol): the built-in `env` backend plus an optional
+  `vault` backend, selectable per-reference without touching how
+  connections are loaded or reloaded.
 - **`schema/`** — table/column reflection with a per-connection metadata
   cache (reflect once, reuse).
 - **`query_ast/`** — the `StructuredQuery` Pydantic model. This is the
@@ -372,6 +413,11 @@ Agent (MCP) / Client (REST)
 - **Auth is pluggable.** `core/auth.py` defines an `Authenticator` interface;
   static API keys and JWKS-verified OAuth/JWT bearer tokens are shared by REST
   and MCP without transport-specific authorization logic.
+- **Secret resolution is pluggable and fails loud, not quiet.** `secrets/`
+  defines a `SecretResolver` interface; a Vault error surfaces as a clear
+  config-load failure that never echoes the configured Vault token or
+  Vault's own response text — only what was being looked up and why it
+  failed.
 - **Audit trail** — every query attempt, successful or rejected, is logged
   to stdout and can be persisted as a narrow JSONL event. The persisted event
   contains identity, surface, normalized query shape, policy decision, timing,

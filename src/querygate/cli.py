@@ -19,17 +19,30 @@ from typing import Optional
 from querygate.catalog.loader import CatalogStore
 from querygate.connections.registry import ConnectionRegistry
 from querygate.policy.loader import PolicyStore
+from querygate.secrets.resolvers import SecretResolverRegistry
 
 
 def validate_config(
-    connections_file: str, policy_file: str, catalog_file: Optional[str] = None
+    connections_file: str,
+    policy_file: str,
+    catalog_file: Optional[str] = None,
+    resolver_registry: Optional[SecretResolverRegistry] = None,
 ) -> list[str]:
-    """Return a list of human-readable problems; empty means every given file is valid."""
+    """Return a list of human-readable problems; empty means every given file is valid.
+
+    `resolver_registry` resolves any `${...}` reference in the connections
+    file — env-only when omitted (matches `ConnectionRegistry.from_file`'s
+    own default). Pass a registry built from the real `AppConfig` (see
+    `main()` below) to also catch a broken `${vault:...}` reference before
+    deploy, the same way a missing environment variable is already caught.
+    """
     errors: list[str] = []
 
     registry: ConnectionRegistry | None = None
     try:
-        registry = ConnectionRegistry.from_file(connections_file)
+        registry = ConnectionRegistry.from_file(
+            connections_file, resolver_registry=resolver_registry
+        )
     except Exception as exc:
         errors.append(f"{connections_file}: {exc}")
 
@@ -93,12 +106,18 @@ def main() -> None:
     args = parser.parse_args()
 
     from querygate.core.config import config
+    from querygate.secrets.resolvers import build_secret_resolver_registry
 
     connections_file = args.connections_file or config.connections_file
     policy_file = args.policy_file or config.policy_file
     catalog_file = args.catalog_file or config.catalog_file
 
-    errors = validate_config(connections_file, policy_file, catalog_file)
+    errors = validate_config(
+        connections_file,
+        policy_file,
+        catalog_file,
+        resolver_registry=build_secret_resolver_registry(config),
+    )
     if errors:
         print(f"Config validation FAILED ({len(errors)} problem(s)):", file=sys.stderr)
         for error in errors:

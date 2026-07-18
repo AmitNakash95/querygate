@@ -13,6 +13,14 @@ All notable changes to QueryGate are documented here.
   per-principal policy as everything else — denied columns and relationship hints toward
   denied tables never appear. Hot-reloadable via the existing config-reload endpoint and
   validated by `querygate-validate-config --catalog-file`.
+- Pluggable secret resolution for connection strings (`querygate/secrets/`): `${VAR}`
+  keeps resolving from the environment unchanged, and a new `${vault:path#field}` syntax
+  resolves a HashiCorp Vault KV v2 secret (`VAULT_ENABLED`/`VAULT_ADDR`/`VAULT_TOKEN`/
+  `VAULT_KV_MOUNT`/`VAULT_NAMESPACE`). A `SecretResolver` interface keeps future backends
+  (AWS/GCP Secrets Manager) additive — no change to how connections are loaded, reloaded,
+  or validated. Every `${...}` reference re-resolves on each config load/hot reload, so a
+  rotated secret takes effect without a restart. Resolver errors never echo the configured
+  token or the backend's own response text.
 
 ## [0.1.0] — 2026-07-18
 

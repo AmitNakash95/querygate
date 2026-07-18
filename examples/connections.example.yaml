@@ -4,6 +4,11 @@
 # environment at load time, so this file is safe to commit. Set
 # CONNECTIONS_FILE to point at your own copy of this file.
 #
+# A `${vault:path#field}` reference resolves through HashiCorp Vault instead
+# (see querygate/secrets/resolvers.py and README.md's "Secret-backed
+# connection strings" section) when VAULT_ENABLED=true, e.g.:
+#   connection_string: ${vault:querygate/demo-db#connection_string}
+#
 # `join_group` controls cross-connection joins: two connections may be
 # joined in one query only when they share the same join_group. Omit it to
 # default to the connection's own id (no cross-connection joins).

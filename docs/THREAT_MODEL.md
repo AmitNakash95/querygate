@@ -1,10 +1,11 @@
 # QueryGate threat model
 
 **Status:** first-party security model for QueryGate 0.1.x
-**Last reviewed:** 2026-07-18
+**Last reviewed:** 2026-07-19
 **Scope:** the REST and MCP request paths, authentication, policy/schema
 validation, query compilation and execution, Redis concurrency coordination,
-configuration reload, and audit/log outputs in this repository.
+configuration reload, secret resolution, and audit/log outputs in this
+repository.
 
 This document explains what QueryGate is designed to defend, which controls
 exist in code, and which risks remain with the operator. It is not an external
@@ -55,6 +56,10 @@ Customer database (read-only account recommended)
         |
         +-----> structured result caps
         +-----> stdout logs / persisted audit JSONL
+
+Config load/reload (operator-triggered)
+        |
+        +-----> secrets/resolvers.py (env, optionally Vault KV v2)
 ```
 
 The agent/client, all request fields, natural-language intent, JWTs, API keys
@@ -67,6 +72,8 @@ trusted to return client-safe error messages.
 ## 3. Assets
 
 - Database credentials and connection topology.
+- Secret-backend credentials (e.g. a Vault token) and resolved connection
+  secrets, from load through use.
 - Database schema, row data, aggregates, and sensitive column existence.
 - Curated schema-catalog metadata (descriptions, relationship hints,
   sensitivity labels) layered on top of reflected schema.
@@ -110,6 +117,7 @@ CI/CD, and secrets-management controls.
 | QG-10 | Unauthorized configuration changes | Reload endpoint requires `admin:reload-config`; new files are fully validated before atomic registry/policy replacement | REST reload scope tests and config-reload tests |
 | QG-11 | Browser-driven DNS rebinding against local MCP | MCP validates `Host` and, when present, `Origin`; protection is enabled by default with loopback hosts allowlisted | Security test `test_mcp_rejects_unapproved_host_header` |
 | QG-12 | Audit data becomes a new exfiltration channel | Narrow versioned event schema, explicit normalization without values, mode `0600`, append-only application writes, optional `fsync` | `test_audit.py` |
+| QG-14 | Secret-backend failure or misconfiguration discloses a Vault token or backend response text | `SecretResolver.resolve` errors carry only the reference being looked up and the exception type, never the configured token or the backend's own error/response text; a resolved secret value is never returned by any REST/MCP response, matching the existing credential-redaction guarantee | `test_vault_resolver_error_never_leaks_token_or_backend_response_text`, `test_vault_resolved_secret_never_appears_in_connection_listing_or_errors` |
 
 ## 6. Error and data-disclosure policy
 
@@ -143,6 +151,11 @@ The code controls above assume a correctly operated deployment:
   is misconfigured.
 - Keep connection files and environment/secrets readable only by the service
   identity. Do not place production connection strings in source control.
+- When using `${vault:...}` references, scope `VAULT_TOKEN`'s Vault policy to
+  only the secret paths QueryGate needs (read-only), and rotate it through
+  the deployment's normal secret-rotation process — QueryGate re-resolves
+  every `${...}` reference on each config load/reload, so a rotated token or
+  secret value takes effect on the next reload without a restart.
 - Use private, authenticated, TLS-protected Redis in multi-instance setups.
   Consider `CONCURRENCY_REDIS_FAIL_OPEN=false` when database protection is more
   important than availability during a Redis outage.
@@ -168,8 +181,14 @@ The code controls above assume a correctly operated deployment:
 - **Configuration governance:** YAML reload has validation and an admin scope,
   but no approval workflow, version history, rollback ledger, or separation of
   duties (TODO item 25).
-- **Secrets lifecycle:** connection secrets currently resolve from environment
-  variables; external secret-manager rotation is TODO item 13.
+- **Secrets lifecycle:** connection secrets resolve from either the
+  environment or, optionally, HashiCorp Vault (token auth only — no
+  AppRole/Kubernetes auth yet). `VAULT_TOKEN` itself is still a static,
+  env-configured credential with no built-in rotation of its own; rotating
+  it is an operator responsibility, same as any other credential. Other
+  secret-manager backends (AWS/GCP Secrets Manager) remain unimplemented,
+  though the `SecretResolver` interface is designed to add them without a
+  breaking change.
 - **Static-key identity:** every key in one configured API-key list shares one
   subject and scopes. Use JWT for per-human/per-agent identity and expiry.
 - **Concurrency fail-open:** Redis-backed concurrency can intentionally fail
