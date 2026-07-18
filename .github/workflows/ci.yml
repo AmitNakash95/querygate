@@ -74,7 +74,7 @@ jobs:
             > /dev/null
 
   postgres-live:
-    name: Real-Postgres tests (query timeout cancellation)
+    name: Real-Postgres tests (timeout + load guardrails)
     runs-on: ubuntu-latest
     services:
       postgres:

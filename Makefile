@@ -63,8 +63,18 @@ test-security: ## Run the adversarial security regression suite
 	poetry run pytest -m security
 
 .PHONY: test-postgres-live
-test-postgres-live: ## Run tests needing a real Postgres (timeout cancellation, etc.) — run compose-up first
+test-postgres-live: ## Run tests needing a real Postgres (timeout + load guardrails) — run compose-up first
 	poetry run pytest -m postgres_live
+
+LOAD_ROUNDS ?= 3
+.PHONY: test-load
+test-load: ## Verify concurrency/timeout guardrails under concurrent real-Postgres load
+	QUERYGATE_LOAD_ROUNDS=$(LOAD_ROUNDS) poetry run pytest -m load
+
+SOAK_ROUNDS ?= 100
+.PHONY: test-soak
+test-soak: ## Repeat the real-Postgres guardrail load scenarios (override SOAK_ROUNDS=N)
+	QUERYGATE_LOAD_ROUNDS=$(SOAK_ROUNDS) poetry run pytest -m load
 
 .PHONY: test-mssql-live
 test-mssql-live: ## Run tests needing a real MSSQL server — see tests/integration/test_mssql_live.py's module docstring for setup

@@ -79,6 +79,7 @@ markers = [
     "real_db: needs a real database running (see make compose-up) — excluded from the default run",
     "postgres_live: needs a real Postgres server (see TODO.md item 3) — also marked real_db",
     "mssql_live: needs a real MSSQL server (see TODO.md item 2) — also marked real_db",
+    "load: concurrent load/soak verification against a real database (see docs/LOAD_TESTING.md)",
 ]
 
 [build-system]

@@ -592,7 +592,10 @@ MSSQL support (including the query-execution-timeout guardrail) and the
 Postgres statement-timeout guardrail are both verified against real
 servers, not just unit-tested SQL text — see
 `tests/integration/test_mssql_live.py` and
-`tests/integration/test_postgres_timeout.py`. OAuth/JWT is implemented
+`tests/integration/test_postgres_timeout.py`. The real-Postgres load/soak
+harness also proves the observed database concurrency cap, overflow rejection,
+queued completion, and timeout cancellation under concurrent REST traffic; see
+[`docs/LOAD_TESTING.md`](docs/LOAD_TESTING.md). OAuth/JWT is implemented
 (`core/jwt_auth.py`) alongside static API keys.
 
 For the repeatable source/package and container release gates, see
