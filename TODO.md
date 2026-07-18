@@ -63,7 +63,7 @@ order-of-magnitude, not commitments.
 | 31 | Admin UI / policy designer | XL | 25 |
 | 32 | Governed adaptive semantic memory for agents | XL | 23, 25, 27, 28 |
 | 33 | Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
-| 34 | Interactive mocked HTML product sandbox | M | — |
+| 34 | ✅ Interactive mocked HTML product sandbox | M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
@@ -1290,7 +1290,59 @@ connections, principals, policies, schema objects, or secrets.
 - Documentation/config-schema drift and cross-principal leakage are release-
   blocking test failures.
 
-### 34. Interactive mocked HTML product sandbox
+### 34. Interactive mocked HTML product sandbox ✅ DONE
+
+**Shipped:** `landing/sandbox.html` — a single self-contained, static HTML
+page (fonts via Google Fonts CDN, everything else inline, no build step, no
+network calls after load) linked from `landing/index.html`'s nav, footer,
+and attack-demo section. It runs entirely in the browser: a scenario picker
+with six curated, bounded (not free-text) agent questions, a request-pipeline
+"theater" (prompt → mocked LLM tool call as a real `StructuredQuery` AST →
+six pipeline gates → decision → result table or actionable rejection → an
+illustrative compiled-SQL preview and audit line), and a live "policy
+studio" panel (principal selector, allowed-tables/denied-column checkboxes,
+a `max_limit` control, and a mandatory-row-filter toggle) that recomputes
+every scenario's outcome immediately on change.
+
+The six scenarios cover every category the item asked for: a raw-SQL attempt
+rejected at the request contract (no field exists to hold it), a safe
+aggregate join that passes, a denied-column rejection (`customers.email`),
+a denied-table rejection (`employees`, with its PII-shaped columns visible
+if a visitor deliberately re-enables it), a requested `limit: 5000` silently
+clamped to policy's `max_limit` (and truly truncated if a visitor lowers the
+studio's `max_limit` below the dataset size), and a mandatory row filter
+that's AND-ed into the compiled SQL without ever appearing in the caller's
+request. Switching the principal to `reporting-service` demonstrates a
+per-principal policy override (`max_limit: 20` via a `"*"` connection
+entry) that visibly overrides — and disables — the connection-level control,
+mirroring `examples/policy.example.yaml`'s own commented example.
+
+The policy-decision logic (table/column allow-deny, cap checks, limit
+clamping) is a JS port of `validation/policy_validation.py` and
+`compiler/sqlalchemy_compiler.clamp_limit`, not hand-typed per-scenario
+outcomes; query *execution* runs a small generic join/filter/group/order/
+limit engine over a fixed sample dataset seeded from
+`examples/demo_db/init_postgres.sql`'s actual rows, so aggregate results
+(e.g. per-country revenue) are genuinely computed, not hardcoded. Rejection
+messages, the `{"detail": "..."}` error shape, and the `StructuredQuery`
+JSON field names are copied from the real Pydantic models and
+`validate_policy`'s actual `PolicyViolationError` strings, not invented.
+
+**Drift guard:** `tests/unit/test_sandbox_fixtures.py` extracts the page's
+embedded `#scenario-fixtures` JSON and replays every scenario through the
+real `StructuredQuery`, `Policy`, `validate_policy`, and `clamp_limit` —
+asserting the same pass/reject/clamp outcome the page claims, and asserting
+the raw-SQL attempt really does fail Pydantic's `extra="forbid"` validation.
+A scenario added to the page without a matching expectation in the test's
+`EXPECTED` map fails the suite by design, closing the "quietly drifts into
+demonstrating behavior QueryGate does not support" risk called out in this
+item's own "what to do."
+
+The mocked LLM tool-call JSON shows only a faded few-line peek by default,
+with a "show full JSON"/"collapse" toggle to expand it — so a first-time
+visitor sees the decision and result first and opens the full AST only if
+they want the technical detail, rather than either hiding it entirely or
+letting it dominate the pipeline view.
 
 **Effort: M (2–3 days).** This is a polished, self-contained product story,
 not a second frontend or a live integration. Most of the effort is in choosing
