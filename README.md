@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="landing/assets/logo-wordmark.svg" alt="QueryGate" width="640">
+  <img src="landing/assets/logo-wordmark.svg" alt="QueryGate" width="520">
 </p>
 
 **QueryGate is an agent-safe database access gateway.** It lets you expose a
@@ -420,3 +420,7 @@ servers, not just unit-tested SQL text — see
 For the repeatable source/package and container release gates, see
 [`docs/RELEASING.md`](docs/RELEASING.md). Historical extraction notes are
 kept outside the product surface under `archive/extraction/`.
+
+<p align="center">
+  <img src="landing/assets/favicon.svg" alt="QueryGate app icon" width="64">
+</p>
