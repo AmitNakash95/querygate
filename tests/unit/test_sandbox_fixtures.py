@@ -85,7 +85,9 @@ def test_raw_sql_scenario_is_not_a_valid_structured_query(fixtures: dict):
         StructuredQuery.model_validate(attempt)
 
 
-@pytest.mark.parametrize("scenario_id", [s for s in EXPECTED if EXPECTED[s]["kind"] != "contract_reject"])
+@pytest.mark.parametrize(
+    "scenario_id", [s for s in EXPECTED if EXPECTED[s]["kind"] != "contract_reject"]
+)
 def test_scenario_matches_real_policy_engine(fixtures: dict, base_policy: Policy, scenario_id: str):
     expected = EXPECTED[scenario_id]
     scenario = next(s for s in fixtures["scenarios"] if s["id"] == scenario_id)
@@ -100,7 +102,9 @@ def test_scenario_matches_real_policy_engine(fixtures: dict, base_policy: Policy
 
     if "clamp_from" in expected:
         assert query.limit == expected["clamp_from"]
-        is_aggregate = any(not isinstance(item, str) and hasattr(item, "fn") for item in query.select)
+        is_aggregate = any(
+            not isinstance(item, str) and hasattr(item, "fn") for item in query.select
+        )
         clamped = clamp_limit(query.limit, base_policy, is_aggregate=is_aggregate)
         assert clamped == expected["clamp_to"]
 
