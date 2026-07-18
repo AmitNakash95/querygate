@@ -500,6 +500,11 @@ a crashed instance is reclaimed automatically instead of leaking forever.
 Redis itself is unreachable — fail open (unenforced concurrency, favors
 availability) or fail closed, both implemented and tested.
 
+The local Compose stack now includes a health-checked Redis service bound to
+`127.0.0.1:6379`, and `.env.example` selects it by default. This makes the
+distributed limiter exercised by the normal quickstart instead of requiring
+operators to provision an undocumented dependency separately.
+
 Tested against `fakeredis` (real Lua execution via the `lupa` extra, no
 real Redis needed for the suite — `tests/unit/test_redis_concurrency.py`,
 `tests/unit/test_concurrency.py`) and separately verified against a real

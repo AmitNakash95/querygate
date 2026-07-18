@@ -62,9 +62,15 @@ row cap tacked on. QueryGate is structurally different:
 ```bash
 poetry install
 cp .env.example .env
-docker compose up -d          # starts the example demo Postgres database
+docker compose up -d          # starts demo Postgres and the Redis limiter
 poetry run python -m querygate.run
 ```
+
+The example environment selects `CONCURRENCY_BACKEND=redis` and connects to
+the Compose service at `redis://localhost:6379/0`, so concurrency limits are
+shared across multiple local QueryGate processes. If you intentionally run
+without Compose, set `CONCURRENCY_BACKEND=in_process`; that mode is suitable
+for a single QueryGate process only.
 
 Then, in another terminal:
 

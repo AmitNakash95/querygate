@@ -89,15 +89,15 @@ lint: format-check ## Alias for format-check (extend with ruff/mypy when added)
 
 # ─── Docker Compose ───────────────────────────────────────────────────────────
 .PHONY: compose-up
-compose-up: ## Start the example demo Postgres database (detached)
+compose-up: ## Start the local demo Postgres and Redis services (detached)
 	docker compose up -d
 
 .PHONY: compose-down
-compose-down: ## Stop and remove the demo database container
+compose-down: ## Stop and remove the local demo infrastructure containers
 	docker compose down
 
 .PHONY: compose-logs
-compose-logs: ## Tail logs from the demo database container
+compose-logs: ## Tail logs from the local demo infrastructure
 	docker compose logs -f
 
 # ─── Cleanup ──────────────────────────────────────────────────────────────────

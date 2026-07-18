@@ -1,6 +1,7 @@
-# Runs the example demo database used by examples/connections.example.yaml —
+# Runs the local infrastructure used by QueryGate's example configuration.
 # QueryGate itself has no database of its own (connections and policy are
-# file-configured, see examples/).
+# file-configured, see examples/); Postgres is the demo target database and
+# Redis coordinates concurrency limits across QueryGate processes.
 services:
   querygate-demo-db:
     image: postgres:15.1
@@ -13,3 +14,16 @@ services:
       - 5433:5432
     volumes:
       - ./examples/demo_db/init_postgres.sql:/docker-entrypoint-initdb.d/init_postgres.sql:ro
+
+  querygate-redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      # Local development only; production deployments should keep Redis on
+      # a private network and require authentication/TLS as appropriate.
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
