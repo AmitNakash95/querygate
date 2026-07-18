@@ -32,14 +32,9 @@ from querygate.execution.service import (
 )
 from querygate.policy.loader import get_policy
 from querygate.query_ast.models import StructuredQuery
+from querygate.core.scopes import ADMIN_RELOAD_CONFIG_SCOPE
 from querygate.secrets.resolvers import build_secret_resolver_registry
 from querygate.validation.policy_validation import validate_batch_size
-
-# Scope required to call POST /admin/reload-config — reloading connections/
-# policy is sensitive enough (it can swap which databases and rules are
-# active) to gate behind an explicit grant rather than any authenticated
-# caller, unlike the read-only/query endpoints below.
-ADMIN_RELOAD_CONFIG_SCOPE = "admin:reload-config"
 
 
 class TablesListResult(pyd.BaseModel):

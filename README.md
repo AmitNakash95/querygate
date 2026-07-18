@@ -258,6 +258,12 @@ curl -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/current
 curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/validate \
   -d '{"policy_yaml": "default:\n  enabled: true\n  max_joins: 2\n"}'
 
+# Preview the submitted configuration documents. A caller who also has read
+# scope sees changed/unchanged; write-only sees submitted/inherited so the
+# preview cannot be used as an equality oracle. No content is returned.
+curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/preview \
+  -d '{"policy_yaml": "default:\n  enabled: true\n  max_joins: 2\n"}'
+
 # Stage it as a new version (only the fields you send change; everything
 # else inherits from the current active version)
 curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions \
@@ -274,7 +280,7 @@ curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions/
 curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions/1/apply
 ```
 
-Every validate/stage/apply/rollback is attributed to the calling principal
+Every validate/preview/stage/apply/rollback is attributed to the calling principal
 and recorded in the same audit trail as query execution (a `config.governance`
 event — action, version id, outcome, actor — never the YAML content itself,
 which stays only in the version store). The first call to any `/admin/config/*`
@@ -282,7 +288,7 @@ endpoint bootstraps version `"1"` from whatever `connections.yaml`/
 `policy.yaml`/`catalog.yaml` the deployment started with, so "current active
 version" always means something. Gated behind two scopes, matching the
 read/write split most admin APIs use: `admin:config:read` (list/inspect
-versions) and `admin:config:write` (validate/stage/apply/rollback).
+versions) and `admin:config:write` (validate/preview/stage/apply/rollback).
 
 ## Example schema catalog (optional)
 
@@ -375,7 +381,8 @@ items, and `top_n` per-partition ranking (top-N-per-group).
 POST this to `/mcp` (Streamable HTTP) with `MCP_ENABLED=true`. Tools:
 `list_connections`, `list_tables`, `describe_table`,
 `explain_structured_query`, `execute_structured_query`,
-`execute_structured_queries` (batch). More examples in
+`execute_structured_queries` (batch), plus the product-guide and access tools
+described below. More examples in
 [`examples/mcp_calls.md`](examples/mcp_calls.md).
 
 ## Production deployment
@@ -460,6 +467,9 @@ Agent (MCP) / Client (REST)
 - **`admin/`** — config-governance version store and orchestration: staging,
   applying, and rolling back connections/policy/catalog versions on top of
   `config_reload.py`'s existing swap mechanism.
+- **`help/`** — packaged, versioned technical guide; deterministic offline
+  search; config-field reference; caller-scoped access explanation; and
+  redacted admin configuration summaries shared by REST and MCP.
 - **`api/`** and **`mcp/`** — thin transport layers over the same
   `StructuredQueryService`; neither has its own query logic.
 
@@ -501,7 +511,7 @@ Agent (MCP) / Client (REST)
   contains identity, surface, normalized query shape, policy decision, timing,
   row/byte counts, and error category—never row payloads or query literals.
 - **Config changes are versioned, attributed, and never silently applied.**
-  Every `/admin/config/*` validate/stage/apply/rollback is attributed to the
+  Every `/admin/config/*` validate/preview/stage/apply/rollback is attributed to the
   calling principal, gated behind `admin:config:read`/`admin:config:write`,
   recorded as its own audit event (never the YAML content), and re-validated
   immediately before it takes effect — a version that fails validation is
@@ -511,6 +521,37 @@ Agent (MCP) / Client (REST)
   cannot enter an implicit `FROM`; unexpected backend errors are masked; and
   MCP rejects unapproved Host headers. See [the threat model](docs/THREAT_MODEL.md)
   and run `make test-security`.
+
+## Built-in product guide
+
+QueryGate includes a canonical technical guide for the installed version. It
+works offline, does not require a model provider or a healthy database, and
+uses deterministic lexical retrieval rather than sending documentation or
+deployment context to an external search service.
+
+Public REST guide endpoints include:
+
+- `GET /api/v1/help/search?q=configure+policy`
+- `GET /api/v1/help/topics/{topic_id}`
+- `GET /api/v1/help/setup-checklist?profile=production`
+- `GET /api/v1/help/config-fields/{app|connection|policy|catalog}/{field}`
+- `GET /api/v1/help/errors/{error_code}`
+
+`GET /api/v1/help/my-access` is authenticated and returns only the current
+caller's scopes, capability flags, and policy-visible connections.
+`GET /api/v1/help/configuration` additionally requires
+`admin:config:read`; its structured summary omits raw YAML, connection
+strings, secret values/references, table/column policy identifiers, catalog
+identifiers, free-form configuration descriptions, and other principal subjects.
+
+The equivalent MCP tools are `search_querygate_guide`,
+`get_querygate_guide_topic`, `get_querygate_setup_checklist`,
+`explain_querygate_config_field`, `explain_querygate_error`,
+`describe_my_querygate_access`, and `inspect_querygate_configuration`.
+Guide responses include the applicable QueryGate version and a citation to
+their packaged canonical topic. Product guidance never mutates configuration;
+changes continue through the scoped validate/preview/stage/apply/rollback
+governance API.
 
 ## Current limitations
 
@@ -534,8 +575,10 @@ Being upfront about what's not done yet:
 - **Config-governance has no approval workflow yet** — a caller with
   `admin:config:write` can stage and immediately apply a version in one
   session; there's no second-approver/four-eyes requirement, scheduled
-  apply, or diff view beyond comparing two versions' full YAML by hand. No
-  admin UI either — the governance API is REST-only for now.
+  apply, or detailed semantic diff. The preview reports changed/unchanged only
+  with read scope; write-only callers see submitted/inherited so write scope
+  cannot become read scope. No admin UI either — the governance mutation API
+  is REST-only for now.
 - **No write operations** — by design. QueryGate is read-only; there is no
   insert/update/delete path anywhere in the AST or compiler.
 - **Distributed concurrency enforcement (Redis-backed) is opt-in** — the

@@ -11,6 +11,13 @@ _EXPECTED_TOOLS = {
     "explain_structured_query",
     "execute_structured_query",
     "execute_structured_queries",
+    "search_querygate_guide",
+    "get_querygate_guide_topic",
+    "get_querygate_setup_checklist",
+    "explain_querygate_config_field",
+    "explain_querygate_error",
+    "describe_my_querygate_access",
+    "inspect_querygate_configuration",
 }
 
 

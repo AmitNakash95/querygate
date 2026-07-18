@@ -83,6 +83,79 @@ def test_validate_valid_candidate_has_no_errors(tmp_path, monkeypatch):
     assert errors == []
 
 
+def test_preview_validates_and_reports_only_document_level_changes(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    principal = _principal()
+
+    result = governance.preview(
+        cfg,
+        principal,
+        connections_yaml=None,
+        policy_yaml="default:\n  enabled: true\n  max_joins: 2\n",
+        catalog_yaml=None,
+    )
+
+    assert result.valid is True
+    assert result.ready_to_stage is True
+    assert {item.document: item.change for item in result.documents} == {
+        "connections": "inherited",
+        "policy": "submitted",
+        "catalog": "inherited",
+    }
+    serialized = result.model_dump_json()
+    assert "max_joins" not in serialized
+    assert "TEST_ADMIN_URL" not in serialized
+    assert "postgresql" not in serialized
+
+
+@pytest.mark.security
+def test_write_only_preview_is_not_an_active_config_equality_oracle(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    principal = _principal()
+
+    exact = governance.preview(
+        cfg,
+        principal,
+        connections_yaml=None,
+        policy_yaml=_VALID_POLICY,
+        catalog_yaml=None,
+    )
+    different = governance.preview(
+        cfg,
+        principal,
+        connections_yaml=None,
+        policy_yaml="default:\n  enabled: true\n  max_joins: 2\n",
+        catalog_yaml=None,
+    )
+
+    assert exact.documents == different.documents
+    assert exact.documents[1].change == "submitted"
+
+
+def test_preview_is_audited_without_candidate_content(tmp_path, monkeypatch):
+    audit_path = tmp_path / "preview-audit.jsonl"
+    set_audit_sink(JsonlAuditSink(str(audit_path)))
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+
+    governance.preview(
+        cfg,
+        _principal(),
+        connections_yaml=None,
+        policy_yaml="default:\n  enabled: true\n  max_joins: 2\n",
+        catalog_yaml=None,
+    )
+
+    raw = audit_path.read_text()
+    event = json.loads(raw)
+    assert event["action"] == "preview"
+    assert event["principal_id"] == "agent-a"
+    assert "max_joins" not in raw
+    assert "TEST_ADMIN_URL" not in raw
+
+
 def test_stage_creates_staged_version_without_activating(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch)
     set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))

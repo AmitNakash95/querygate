@@ -479,10 +479,12 @@ async def test_config_governance_write_endpoints_require_write_scope():
             headers=headers,
         )
         validate_resp = await client.post("/api/v1/admin/config/validate", json={}, headers=headers)
+        preview_resp = await client.post("/api/v1/admin/config/preview", json={}, headers=headers)
         apply_resp = await client.post("/api/v1/admin/config/versions/1/apply", headers=headers)
 
     assert stage_resp.status_code == 403
     assert validate_resp.status_code == 403
+    assert preview_resp.status_code == 403
     assert apply_resp.status_code == 403
 
 

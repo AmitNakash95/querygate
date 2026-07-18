@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 
 from querygate.core.exceptions import (
+    AuthorizationError,
     ConcurrencyLimitError,
     NotFoundError,
     PolicyViolationError,
@@ -33,6 +34,8 @@ def _error_code_from_exception(exc: Exception) -> tuple[str, str]:
         detail = exc.detail
         message = str(detail.get("msg", detail)) if isinstance(detail, dict) else str(detail)
         return f"HTTP_{exc.status_code}", message
+    if isinstance(exc, AuthorizationError):
+        return "FORBIDDEN", public_error_message(exc)
     if isinstance(exc, (PolicyViolationError, QueryValidationError, ConcurrencyLimitError)):
         return "VALIDATION", public_error_message(exc)
     return "INTERNAL", public_error_message(exc)
