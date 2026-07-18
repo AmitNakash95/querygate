@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/images/QueryGate_logo_transparent.png" alt="QueryGate" width="640">
+  <img src="landing/assets/logo-wordmark.svg" alt="QueryGate" width="640">
 </p>
 
 **QueryGate is an agent-safe database access gateway.** It lets you expose a
