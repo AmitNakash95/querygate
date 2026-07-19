@@ -67,7 +67,7 @@ order-of-magnitude, not commitments.
 | 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
 | 36 | Extensive production-grade QA project / edge-case test suite | L | 15, 28 |
 | 37 | ✅ Automated end-to-end proof of adaptive semantic learning | M–L | 23, 25, 27, 28, 32B, 32C |
-| 38 | Admin UI catalog-governance workspace | L | 27, 31, 32B |
+| 38 | ✅ Admin UI catalog-governance workspace (phase 1: core review/approve/reject/publish/rollback loop; phase 2: bulk ops, export/import UI, generation triggers not started) | L | 27, 31, 32B |
 | 39 | ✅ Draft-aware policy simulation before staging | M–L | 6, 17, 25, 31 |
 | 40 | Semantic access diff for config changes | L | 6, 25, 31, 39 |
 | 41 | Policy-change blast-radius analysis | M–L | 22, 25, 31, 40 |
@@ -2567,7 +2567,75 @@ and report baseline-versus-learned correctness, discovery-call reduction,
 stale detection, duplicate proposals, and security violations. Do not make a
 "self-learning" product claim until this test and the adversarial suite pass.
 
-### 38. Admin UI catalog-governance workspace
+### 38. Admin UI catalog-governance workspace (phase 1 ✅; phase 2 not started)
+
+**Shipped (phase 1):** A new "Catalog review" section in the existing admin
+UI (`admin_ui/index.html`/`app.js`/`app.css`), calling only item 32B's
+existing REST routes — no new mutation path. Covers the core
+review-→-approve/reject-→-publish-→-rollback loop the item's own "why it
+matters" identifies as the actual gap:
+
+- Connection, status, source (`inferred`/`learned`), and object-type
+  (table/column/relationship) filters over a bounded proposal queue.
+- A detail panel with side-by-side proposed-versus-currently-published
+  fields — the published side is read live via the same policy-filtered
+  `describe_table` call the schema-review tab already uses (table
+  `catalog`, per-column `catalog`, and matched-by-identity relationship
+  entries), not a new comparison endpoint.
+- Provenance/confidence/schema-freshness chips, sourced from three new
+  fields (`source_class`, `confidence`, `created_at`) added to the existing
+  `ProposalListItem` REST response — the only backend change this phase
+  needed.
+- Edit/approve/reject(reason)/publish actions, each independently gated on
+  its own least-privilege scope (`catalog:edit`/`approve`/`reject`/
+  `publish`) and only shown when the proposal's `review_status` makes that
+  action legal, mirroring `catalog/governance.py`'s state machine exactly
+  (edit/approve only from `pending`, reject from `pending` or `approved`,
+  publish only from `approved`) rather than showing a button the backend
+  would 409 on.
+- A publish-conflict preview (`GET .../proposals/{id}/preview`) surfaced
+  before publish, and a typed-confirmation dialog (reusing the same
+  `confirmAction()` pattern as item 31's version activate/rollback) for the
+  agent-visible mutations: publish and catalog-version rollback.
+- Connection-scoped catalog version history with rollback, reusing the same
+  table/history UI pattern as item 25's config version history.
+
+Verified end-to-end against a real running server and real Postgres (not
+just the ASGI test client): generated table/column/relationship proposals,
+edited one, approved/published/rolled-back one, rejected another, and
+confirmed the "currently published" comparison panel's logic against
+`describe_table`'s actual response shape for all three target kinds. No
+browser-automation tool was available in this environment, so this was
+exercised as the exact sequence of REST calls the JS makes rather than
+pixel-verified in a rendered page; the JS itself was syntax-checked
+(`node --check`) and its static markup/script content is asserted in
+`tests/integration/test_admin_ui.py`.
+
+**Not done in this pass — explicit phase 2, not silently dropped:** bulk
+approve/reject/delete UI, export/import UI (backup/restore), triggering
+`generate-drafts`/`learn` from the browser (still CLI/REST-only), a
+per-proposal `review_history` detail view, and usage-signal browsing. None
+of these are required for the core review/publish/rollback loop; each is a
+real but separable value-add matching this item's own "bulk operations"
+callout, deferred rather than rushed into the same slice as the core
+workflow.
+
+**Unrelated bug found during verification, not fixed here:** the background
+schema-refresh scanner (`SEMANTIC_MEMORY_REFRESH_ENABLED=true`,
+`catalog/refresh.py`'s `scan_connection_schema`) raised `NoSuchTableError`
+against a real live demo Postgres even for tables confirmed to exist via
+`psql` and reflected successfully by the ordinary `describe_table`/
+`list_tables` path (which shares `schema/reflection.py`'s
+`get_table_schema`). Worked around for this item's verification by building
+an `ObservedSchemaSnapshot` directly from a real reflected `sa.MetaData`
+instead of the scanner. Reproducible outside this item's own code
+(`catalog_governance_routes.py`, `admin_ui/`) — worth a dedicated
+investigation, since it means the *documented* `SEMANTIC_MEMORY_REFRESH_ENABLED`
+background-scanning path may not currently work against Postgres at all;
+the explicit `querygate-semantic-memory refresh` CLI path was not itself
+exercised successfully either, only bypassed.
+
+**Original scope (for reference — see above for what actually shipped):**
 
 **Effort: L (3–5 days).** The governed backend, scopes, proposal state
 machine, version history, and REST routes already exist from item 32B, so

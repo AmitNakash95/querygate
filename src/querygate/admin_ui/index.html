@@ -39,6 +39,9 @@
         <button class="nav-item" type="button" data-view-target="audit">
           <span class="nav-glyph">06</span><span>Audit trail</span>
         </button>
+        <button class="nav-item" type="button" data-view-target="catalog">
+          <span class="nav-glyph">07</span><span>Catalog review</span><span id="catalog-pending-dot" class="draft-dot" hidden></span>
+        </button>
       </nav>
 
       <div class="sidebar-foot">
@@ -260,6 +263,108 @@
         <div class="audit-meta"><p id="audit-count">No events loaded</p><p id="audit-source"></p></div>
         <div id="audit-list" class="audit-list"><p class="empty-state">Connect to browse persisted events.</p></div>
         <div class="load-more"><button id="audit-more" class="button secondary" type="button" hidden>Load older events</button></div>
+      </section>
+
+      <section id="view-catalog" class="view" data-view="catalog" hidden>
+        <div class="section-intro">
+          <div><p class="eyebrow">Governed proposals</p><h2>Review generated and learned drafts before agents ever see them.</h2><p>Proposals stay quarantined until an authorized reviewer approves and publishes them. Editing, approval, and publication are always separate, actor-attributed steps.</p></div>
+          <button id="refresh-catalog" class="button secondary" type="button">Refresh proposals</button>
+        </div>
+        <form id="catalog-filters" class="filter-bar">
+          <label><span>Connection</span><select id="catalog-connection"></select></label>
+          <label><span>Status</span>
+            <select id="catalog-status-filter">
+              <option value="pending" selected>Pending</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+              <option value="published">Published</option>
+              <option value="">All statuses</option>
+            </select>
+          </label>
+          <label><span>Source</span>
+            <select id="catalog-source-filter">
+              <option value="">Any source</option>
+              <option value="inferred">Generated</option>
+              <option value="learned">Usage-learned</option>
+            </select>
+          </label>
+          <label><span>Object type</span>
+            <select id="catalog-object-filter">
+              <option value="">Any type</option>
+              <option value="table">Table</option>
+              <option value="column">Column</option>
+              <option value="relationship">Relationship</option>
+            </select>
+          </label>
+        </form>
+
+        <div class="catalog-layout">
+          <aside class="proposal-rail" aria-label="Proposal queue">
+            <div id="proposal-list" class="proposal-list"><p class="empty-state">Connect with catalog:review to load proposals.</p></div>
+          </aside>
+          <div class="proposal-workbench">
+            <div id="proposal-empty" class="large-empty">
+              <span class="empty-glyph">DR</span><h3>Select a proposal</h3><p>Choose a queued proposal to compare it with published catalog content and take a review action.</p>
+            </div>
+            <div id="proposal-content" hidden>
+              <div class="proposal-title-row">
+                <div><p id="proposal-kicker" class="kicker">—</p><h3 id="proposal-title">—</h3></div>
+                <div class="proposal-badges">
+                  <span id="proposal-source-chip" class="status-chip neutral">—</span>
+                  <span id="proposal-freshness-chip" class="status-chip neutral">—</span>
+                  <span id="proposal-confidence-chip" class="status-chip neutral" hidden></span>
+                </div>
+              </div>
+              <div class="proposal-body">
+                <div class="compare-grid">
+                  <article class="panel">
+                    <div class="panel-head"><p class="eyebrow">Proposed</p></div>
+                    <dl id="proposal-fields" class="compare-fields"></dl>
+                  </article>
+                  <article class="panel">
+                    <div class="panel-head"><p class="eyebrow">Currently published</p></div>
+                    <dl id="published-fields" class="compare-fields"></dl>
+                  </article>
+                </div>
+
+                <article class="panel" id="edit-panel">
+                  <div class="panel-head"><div><p class="eyebrow">Edit before deciding</p><h3>Adjust proposed content</h3></div></div>
+                  <div class="form-grid">
+                    <label class="span-2"><span>Description</span><textarea id="edit-description" rows="2"></textarea></label>
+                    <label><span>Aliases <small>comma-separated</small></span><input id="edit-aliases" type="text"></label>
+                    <label><span>Default aggregation</span><input id="edit-default-aggregation" type="text" placeholder="table targets only"></label>
+                  </div>
+                  <div class="form-actions"><button id="save-proposal-edit" class="button secondary" type="button">Save edit</button></div>
+                </article>
+
+                <article class="panel" id="publish-preview-panel">
+                  <div class="panel-head"><div><p class="eyebrow">Publish conflict check</p><h3>Preview as principal</h3></div></div>
+                  <div class="button-row">
+                    <input id="preview-principal" type="text" placeholder="reporting-agent">
+                    <button id="run-preview" class="button secondary" type="button">Preview</button>
+                  </div>
+                  <div id="preview-result" class="decision-result" hidden></div>
+                </article>
+
+                <div id="proposal-actions" class="proposal-actions">
+                  <div id="reject-row" class="reject-row" hidden>
+                    <input id="reject-reason" type="text" placeholder="Reason for rejection" maxlength="500">
+                    <button id="confirm-reject" class="button danger-button" type="button">Confirm reject</button>
+                    <button id="cancel-reject" class="button secondary" type="button">Cancel</button>
+                  </div>
+                  <div id="proposal-action-buttons" class="button-row">
+                    <button id="reject-proposal" class="button danger-button" type="button">Reject</button>
+                    <button id="approve-proposal" class="button secondary" type="button">Approve</button>
+                    <button id="publish-proposal" class="button primary" type="button">Publish</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-intro catalog-history-head"><div><p class="eyebrow">Catalog version history</p><h2>Every publish and rollback, connection-scoped.</h2></div><button id="refresh-catalog-versions" class="button secondary" type="button">Refresh versions</button></div>
+        <div class="table-wrap"><table class="history-table"><thead><tr><th>Version</th><th>Action</th><th>Target</th><th>Fields changed</th><th>Actor</th><th>When</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="catalog-history-body"><tr><td colspan="7" class="empty-cell">Select a connection to load catalog version history.</td></tr></tbody></table></div>
       </section>
     </main>
   </div>

@@ -379,15 +379,26 @@ The control plane provides:
   allow/deny, effective guardrails, and mandatory-filter claim readiness;
 - active-versus-draft document diffs, dry-run validation and redacted preview;
 - immutable version history with explicit activation and rollback confirmation;
+- a catalog review workspace — connection/status/source/object-type filters over
+  the quarantined proposal queue from item 32B, side-by-side proposed-versus-
+  published fields (read live via the same policy-filtered `describe_table` the
+  schema-review tab uses), provenance/confidence/freshness indicators,
+  edit/approve/reject/publish actions gated on their own least-privilege scopes
+  and only shown when the proposal's status makes that action legal, a
+  publish-conflict preview, and connection-scoped catalog version rollback;
 - filtered, newest-first browsing of persisted JSONL query/config/catalog audit
   events (when `AUDIT_SINK_BACKEND=jsonl`).
 
 The UI does not create a second configuration path: every stage/apply/rollback
 still goes through the config-governance API described above, and
 `querygate-validate-config` plus file-based reloads remain supported for
-infrastructure-as-code deployments. A write-only principal can validate and
-stage submitted content but cannot use the UI to read the active documents;
-normal operation therefore grants both config scopes to the human admin role.
+infrastructure-as-code deployments. The catalog workspace is the same way —
+every edit/approve/reject/publish/rollback goes through item 32B's existing
+REST routes; bulk operations, export/import, and triggering draft generation
+from the browser remain CLI/REST-only for now (TODO item 38 phase 2). A
+write-only principal can validate and stage submitted content but cannot use
+the UI to read the active documents; normal operation therefore grants both
+config scopes to the human admin role.
 
 ## Example schema catalog (optional)
 

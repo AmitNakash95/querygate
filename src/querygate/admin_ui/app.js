@@ -9,6 +9,7 @@
     changes: ["Control plane / Change set", "Validate before activation"],
     history: ["Control plane / Versions", "Immutable configuration history"],
     audit: ["Control plane / Audit trail", "Decisions without sensitive payloads"],
+    catalog: ["Control plane / Catalog review", "Review, approve, and publish schema-catalog proposals"],
   };
   const documentKeys = ["policy", "connections", "catalog"];
   const guardrailFields = {
@@ -49,6 +50,10 @@
     validatedFingerprint: null,
     auditCursor: 0,
     auditNextCursor: null,
+    catalogProposals: [],
+    catalogVersions: [],
+    selectedProposalId: null,
+    publishedComparison: null,
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -130,6 +135,10 @@
     window.history.replaceState({}, "", name === "overview" ? "/admin/" : `/admin/#${name}`);
     if (name === "connections" && state.connections.length && !state.selectedConnection) selectConnection(state.connections[0].id);
     if (name === "audit" && state.access && !$("#audit-list .audit-event")) loadAudit(false);
+    if (name === "catalog" && state.access && $("#catalog-connection").value && !state.catalogProposals.length && !state.selectedProposalId) {
+      loadCatalogProposals();
+      loadCatalogVersions();
+    }
   }
 
   function formatDate(value) {
@@ -721,6 +730,354 @@
     }
   }
 
+  function selectedProposal() {
+    return state.catalogProposals.find((item) => item.proposal_id === state.selectedProposalId) || null;
+  }
+
+  function proposalTargetLabel(target) {
+    if (target.object_type === "table") return target.table;
+    if (target.object_type === "column") return `${target.table}.${target.column}`;
+    return `${target.table}.${target.column} → ${target.to_table}.${target.to_column}`;
+  }
+
+  function populateCatalogConnectionOptions() {
+    const select = $("#catalog-connection");
+    const previous = select.value;
+    const items = state.connections.map((c) => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.id)}</option>`).join("");
+    select.innerHTML = items || '<option value="">No visible connections</option>';
+    if (previous && state.connections.some((c) => c.id === previous)) select.value = previous;
+  }
+
+  function applyCatalogScopeGating() {
+    $("#save-proposal-edit").disabled = !hasScope("catalog:edit");
+    $("#approve-proposal").disabled = !hasScope("catalog:approve");
+    $("#reject-proposal").disabled = !hasScope("catalog:reject");
+    $("#publish-proposal").disabled = !hasScope("catalog:publish");
+  }
+
+  function resetProposalSelection() {
+    state.selectedProposalId = null;
+    state.publishedComparison = null;
+    $("#proposal-empty").hidden = false;
+    $("#proposal-content").hidden = true;
+  }
+
+  async function loadCatalogProposals() {
+    const connection = $("#catalog-connection").value;
+    resetProposalSelection();
+    if (!connection) {
+      $("#proposal-list").innerHTML = '<p class="empty-state">Select a connection to load proposals.</p>';
+      return;
+    }
+    if (!hasScope("catalog:review")) {
+      $("#proposal-list").innerHTML = '<p class="empty-state">Connect with catalog:review to load proposals.</p>';
+      return;
+    }
+    const status = $("#catalog-status-filter").value;
+    const params = new URLSearchParams();
+    if (status) params.set("review_status", status);
+    try {
+      state.catalogProposals = await api(`/admin/catalog/${encodeURIComponent(connection)}/proposals?${params}`);
+      renderProposalList();
+    } catch (error) {
+      state.catalogProposals = [];
+      $("#proposal-list").innerHTML = `<p class="empty-state">${escapeHtml(error.message)}</p>`;
+    }
+  }
+
+  function renderProposalList() {
+    const source = $("#catalog-source-filter").value;
+    const objectType = $("#catalog-object-filter").value;
+    const items = state.catalogProposals.filter((proposal) =>
+      (!source || proposal.source_class === source) &&
+      (!objectType || proposal.target.object_type === objectType)
+    );
+    $("#catalog-pending-dot").hidden = !state.catalogProposals.some((p) => p.review_status === "pending");
+    $("#proposal-list").innerHTML = items.length ? items.map((proposal) => `
+      <button class="proposal-item ${state.selectedProposalId === proposal.proposal_id ? "active" : ""}" type="button" data-proposal-id="${escapeHtml(proposal.proposal_id)}">
+        <div class="proposal-item-head"><strong title="${escapeHtml(proposalTargetLabel(proposal.target))}">${escapeHtml(proposalTargetLabel(proposal.target))}</strong><span class="status-chip ${proposal.review_status === "published" ? "good" : proposal.review_status === "rejected" ? "bad" : "neutral"}">${escapeHtml(proposal.review_status)}</span></div>
+        <div class="proposal-item-meta"><span>${escapeHtml(proposal.target.object_type)}</span><span>${escapeHtml(proposal.source_class)}</span><span>${escapeHtml(proposal.schema_status)}</span></div>
+      </button>`).join("") : '<p class="empty-state">No matching proposals.</p>';
+  }
+
+  function fieldsMarkup(content) {
+    const rows = [
+      ["Description", content?.description],
+      ["Aliases", content?.aliases && content.aliases.length ? content.aliases.join(", ") : null],
+      ["Default aggregation", content?.default_aggregation],
+    ];
+    return rows.map(([label, value]) =>
+      `<dt>${escapeHtml(label)}</dt><dd class="${value ? "" : "empty"}">${value ? escapeHtml(value) : "Not set"}</dd>`
+    ).join("");
+  }
+
+  async function loadPublishedComparison(proposal) {
+    const dl = $("#published-fields");
+    dl.innerHTML = '<p class="empty-state">Loading published catalog content…</p>';
+    try {
+      const description = await api(
+        `/${encodeURIComponent(proposal.target.connection_id)}/tables/${encodeURIComponent(proposal.target.table)}`
+      );
+      let published = null;
+      if (proposal.target.object_type === "table") {
+        published = description.catalog;
+      } else if (proposal.target.object_type === "column") {
+        const column = (description.columns || []).find((c) => c.name.toLowerCase() === proposal.target.column.toLowerCase());
+        published = column?.catalog || null;
+      } else {
+        const relationship = (description.catalog?.relationships || []).find((r) =>
+          r.column.toLowerCase() === proposal.target.column.toLowerCase() &&
+          r.to_table.toLowerCase() === proposal.target.to_table.toLowerCase() &&
+          r.to_column.toLowerCase() === proposal.target.to_column.toLowerCase()
+        );
+        published = relationship ? { description: relationship.description, aliases: [], default_aggregation: null } : null;
+      }
+      state.publishedComparison = published;
+      dl.innerHTML = published ? fieldsMarkup(published) : fieldsMarkup(null);
+      if (!published) dl.insertAdjacentHTML("afterbegin", '<p class="empty-state">Nothing published for this target yet — publishing will create a new entry.</p>');
+    } catch (error) {
+      dl.innerHTML = `<p class="empty-state">${escapeHtml(error.message)}</p>`;
+    }
+  }
+
+  function selectProposal(proposalId) {
+    state.selectedProposalId = proposalId;
+    const proposal = selectedProposal();
+    if (!proposal) return;
+    renderProposalList();
+    $("#proposal-empty").hidden = true;
+    $("#proposal-content").hidden = false;
+    $("#proposal-kicker").textContent = `${proposal.target.connection_id} / ${proposal.target.object_type}`;
+    $("#proposal-title").textContent = proposalTargetLabel(proposal.target);
+    $("#proposal-source-chip").textContent = proposal.source_class;
+    $("#proposal-freshness-chip").textContent = proposal.schema_status;
+    $("#proposal-freshness-chip").className = `status-chip ${proposal.schema_status === "stale" ? "warning" : "neutral"}`;
+    if (typeof proposal.confidence === "number") {
+      $("#proposal-confidence-chip").hidden = false;
+      $("#proposal-confidence-chip").textContent = `confidence ${proposal.confidence.toFixed(2)}`;
+    } else {
+      $("#proposal-confidence-chip").hidden = true;
+    }
+    $("#proposal-fields").innerHTML = fieldsMarkup(proposal.content);
+    $("#edit-description").value = proposal.content?.description || "";
+    $("#edit-aliases").value = (proposal.content?.aliases || []).join(", ");
+    $("#edit-default-aggregation").value = proposal.content?.default_aggregation || "";
+    $("#preview-result").hidden = true;
+    hideRejectRow();
+    applyCatalogScopeGating();
+    // Mirrors catalog/governance.py's state machine exactly: edit/approve
+    // only from pending, reject from pending or approved, publish only from
+    // approved — showing a button the backend would reject just trades one
+    // error toast for a worse one, so the UI hides what can't legally run.
+    const status = proposal.review_status;
+    $("#edit-panel").hidden = status !== "pending";
+    $("#approve-proposal").hidden = status !== "pending";
+    $("#reject-proposal").hidden = !(status === "pending" || status === "approved");
+    $("#publish-proposal").hidden = status !== "approved";
+    $("#publish-preview-panel").hidden = status !== "approved";
+    $("#proposal-action-buttons").hidden = !(status === "pending" || status === "approved");
+    loadPublishedComparison(proposal);
+  }
+
+  async function refreshSelectedProposalAfterMutation() {
+    const previouslySelected = state.selectedProposalId;
+    await loadCatalogProposals();
+    if (previouslySelected && state.catalogProposals.some((p) => p.proposal_id === previouslySelected)) {
+      selectProposal(previouslySelected);
+    }
+  }
+
+  async function saveProposalEdit() {
+    const proposal = selectedProposal();
+    if (!proposal) return;
+    const button = $("#save-proposal-edit");
+    setBusy(button, true, "Saving…");
+    try {
+      const content = {};
+      const description = $("#edit-description").value.trim();
+      const aliases = csvValues($("#edit-aliases").value);
+      const defaultAggregation = $("#edit-default-aggregation").value.trim();
+      if (description) content.description = description;
+      if (aliases.length) content.aliases = aliases;
+      if (defaultAggregation) content.default_aggregation = defaultAggregation;
+      if (!Object.keys(content).length) throw new Error("Provide at least one field before saving.");
+      await api(
+        `/admin/catalog/${encodeURIComponent(proposal.target.connection_id)}/proposals/${encodeURIComponent(proposal.proposal_id)}`,
+        { method: "PATCH", body: JSON.stringify({ content }) }
+      );
+      toast("Proposal content updated.");
+      await refreshSelectedProposalAfterMutation();
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function runPublishPreview() {
+    const proposal = selectedProposal();
+    if (!proposal) return;
+    const principal = $("#preview-principal").value.trim();
+    if (!principal) { toast("Enter a principal subject to preview against.", "bad"); return; }
+    const button = $("#run-preview");
+    setBusy(button, true, "Checking…");
+    try {
+      const params = new URLSearchParams({ principal_subject: principal });
+      const result = await api(
+        `/admin/catalog/${encodeURIComponent(proposal.target.connection_id)}/proposals/${encodeURIComponent(proposal.proposal_id)}/preview?${params}`
+      );
+      const el = $("#preview-result");
+      el.hidden = false;
+      const bad = !result.visible_to_principal || result.would_conflict;
+      el.className = `decision-result ${bad ? "denied" : "allowed"}`;
+      const lines = [
+        `Visible to ${escapeHtml(principal)}: ${result.visible_to_principal ? "yes" : "no"}`,
+        `Would ${escapeHtml(result.change_kind || "change")} this entry`,
+      ];
+      if (result.would_conflict) lines.push(`Conflicts on: ${result.conflicting_fields.join(", ")}`);
+      el.innerHTML = `
+        <div class="decision-head"><div><p class="eyebrow">Publish preview</p><h3>${result.would_conflict ? "Would be a reviewable conflict" : "Safe to publish"}</h3></div><span class="status-chip ${bad ? "bad" : "good"}">${result.would_conflict ? "Conflict" : "Clear"}</span></div>
+        <ul>${lines.map((line) => `<li>${line}</li>`).join("")}</ul>`;
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function approveSelectedProposal() {
+    const proposal = selectedProposal();
+    if (!proposal) return;
+    const button = $("#approve-proposal");
+    setBusy(button, true, "Approving…");
+    try {
+      await api(
+        `/admin/catalog/${encodeURIComponent(proposal.target.connection_id)}/proposals/${encodeURIComponent(proposal.proposal_id)}/approve`,
+        { method: "POST" }
+      );
+      toast("Proposal approved.");
+      await refreshSelectedProposalAfterMutation();
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  function showRejectRow() {
+    $("#reject-row").hidden = false;
+    $("#proposal-action-buttons").hidden = true;
+    $("#proposal-actions").classList.add("reasoning");
+    $("#reject-reason").value = "";
+    $("#reject-reason").focus();
+  }
+
+  function hideRejectRow() {
+    $("#reject-row").hidden = true;
+    $("#proposal-action-buttons").hidden = false;
+    $("#proposal-actions").classList.remove("reasoning");
+  }
+
+  async function confirmRejectProposal() {
+    const proposal = selectedProposal();
+    if (!proposal) return;
+    const reason = $("#reject-reason").value.trim();
+    if (!reason) { toast("A rejection reason is required.", "bad"); return; }
+    const button = $("#confirm-reject");
+    setBusy(button, true, "Rejecting…");
+    try {
+      await api(
+        `/admin/catalog/${encodeURIComponent(proposal.target.connection_id)}/proposals/${encodeURIComponent(proposal.proposal_id)}/reject`,
+        { method: "POST", body: JSON.stringify({ reason }) }
+      );
+      toast("Proposal rejected.");
+      hideRejectRow();
+      await refreshSelectedProposalAfterMutation();
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function publishSelectedProposal() {
+    const proposal = selectedProposal();
+    if (!proposal) return;
+    const confirmed = await confirmAction({
+      title: "Publish this proposal?",
+      message: "This merges the proposed content into the live catalog agents read from. Type PUBLISH to continue.",
+      phrase: "PUBLISH",
+    });
+    if (!confirmed) { toast('Confirmation cancelled. Enter "PUBLISH" exactly to continue.'); return; }
+    try {
+      const result = await api(
+        `/admin/catalog/${encodeURIComponent(proposal.target.connection_id)}/proposals/${encodeURIComponent(proposal.proposal_id)}/publish`,
+        { method: "POST" }
+      );
+      toast(`Published as catalog version v${result.version_id}.`);
+      await refreshSelectedProposalAfterMutation();
+      await loadCatalogVersions();
+    } catch (error) {
+      toast(error.message, "bad");
+    }
+  }
+
+  async function loadCatalogVersions() {
+    const connection = $("#catalog-connection").value;
+    if (!connection || !hasScope("catalog:review")) {
+      state.catalogVersions = [];
+      $("#catalog-history-body").innerHTML = '<tr><td colspan="7" class="empty-cell">Select a connection to load catalog version history.</td></tr>';
+      return;
+    }
+    try {
+      state.catalogVersions = await api(`/admin/catalog/${encodeURIComponent(connection)}/versions`);
+      renderCatalogHistory();
+    } catch (error) {
+      state.catalogVersions = [];
+      $("#catalog-history-body").innerHTML = `<tr><td colspan="7" class="empty-cell">${escapeHtml(error.message)}</td></tr>`;
+    }
+  }
+
+  function catalogVersionTargetLabel(version) {
+    const label = version.column ? `${version.table}.${version.column}` : version.table;
+    return version.to_table ? `${label} → ${version.to_table}.${version.to_column}` : label;
+  }
+
+  function renderCatalogHistory() {
+    $("#catalog-history-body").innerHTML = state.catalogVersions.length ? [...state.catalogVersions].reverse().map((version) => `
+      <tr>
+        <td>v${escapeHtml(version.version_id)}</td>
+        <td><span class="status-chip ${version.action === "rollback" ? "warning" : "good"}">${escapeHtml(version.action)}</span></td>
+        <td>${escapeHtml(catalogVersionTargetLabel(version))}</td>
+        <td>${escapeHtml(version.fields_changed.join(", ") || "—")}</td>
+        <td>${escapeHtml(version.actor)}</td>
+        <td title="${escapeHtml(formatDate(version.occurred_at))}">${escapeHtml(relativeDate(version.occurred_at))}</td>
+        <td><button class="button secondary" type="button" data-rollback-version="${escapeHtml(version.version_id)}" ${hasScope("catalog:rollback") ? "" : "disabled"}>Roll back</button></td>
+      </tr>`).join("") : '<tr><td colspan="7" class="empty-cell">No catalog versions yet for this connection.</td></tr>';
+  }
+
+  async function rollbackCatalogVersion(versionId) {
+    const connection = $("#catalog-connection").value;
+    const phrase = `ROLLBACK v${versionId}`;
+    const confirmed = await confirmAction({
+      title: `Roll back catalog to v${versionId}?`,
+      message: `This restores the field values this version replaced (or removes the entry it created). Type ${phrase} to continue.`,
+      phrase,
+    });
+    if (!confirmed) { toast(`Confirmation cancelled. Enter “${phrase}” exactly to proceed.`); return; }
+    try {
+      await api(
+        `/admin/catalog/${encodeURIComponent(connection)}/versions/${encodeURIComponent(versionId)}/rollback`,
+        { method: "POST" }
+      );
+      toast(`Catalog rolled back to v${versionId}.`);
+      await loadCatalogVersions();
+      await refreshSelectedProposalAfterMutation();
+    } catch (error) {
+      toast(error.message, "bad");
+    }
+  }
+
   async function loadGovernance(preserveDraft = true) {
     if (!canRead()) return;
     const [current, versions, configuration] = await Promise.all([
@@ -752,6 +1109,7 @@
     setBanner("");
     renderConnectionList();
     populateConnectionSelects();
+    populateCatalogConnectionOptions();
     renderOverview();
     if (canRead()) {
       await loadGovernance(false);
@@ -853,6 +1211,28 @@
     $("#audit-filters").addEventListener("submit", (event) => { event.preventDefault(); loadAudit(false); });
     $("#refresh-audit").addEventListener("click", () => loadAudit(false));
     $("#audit-more").addEventListener("click", () => loadAudit(true));
+    $("#catalog-connection").addEventListener("change", () => { loadCatalogProposals(); loadCatalogVersions(); });
+    $("#catalog-status-filter").addEventListener("change", loadCatalogProposals);
+    $("#catalog-source-filter").addEventListener("change", renderProposalList);
+    $("#catalog-object-filter").addEventListener("change", renderProposalList);
+    $("#catalog-filters").addEventListener("submit", (event) => event.preventDefault());
+    $("#refresh-catalog").addEventListener("click", () => loadCatalogProposals().then(() => toast("Proposal queue refreshed.")).catch((error) => toast(error.message, "bad")));
+    $("#refresh-catalog-versions").addEventListener("click", () => loadCatalogVersions().then(() => toast("Catalog version history refreshed.")).catch((error) => toast(error.message, "bad")));
+    $("#proposal-list").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-proposal-id]");
+      if (button) selectProposal(button.dataset.proposalId);
+    });
+    $("#save-proposal-edit").addEventListener("click", saveProposalEdit);
+    $("#run-preview").addEventListener("click", runPublishPreview);
+    $("#approve-proposal").addEventListener("click", approveSelectedProposal);
+    $("#reject-proposal").addEventListener("click", showRejectRow);
+    $("#cancel-reject").addEventListener("click", hideRejectRow);
+    $("#confirm-reject").addEventListener("click", confirmRejectProposal);
+    $("#publish-proposal").addEventListener("click", publishSelectedProposal);
+    $("#catalog-history-body").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-rollback-version]");
+      if (button) rollbackCatalogVersion(button.dataset.rollbackVersion);
+    });
     $("#confirm-cancel").addEventListener("click", () => { $("#confirm-dialog").returnValue = "cancel"; });
     $("#confirm-accept").addEventListener("click", (event) => {
       const phrase = $("#confirm-phrase-input").placeholder;

@@ -138,6 +138,10 @@ async def test_full_generate_approve_publish_rollback_flow(sources):
         assert len(proposals) == 1
         proposal_id = proposals[0]["proposal_id"]
         assert proposals[0]["review_status"] == "pending"
+        # Provenance fields the admin UI's catalog workspace (TODO.md item
+        # 38) filters and displays alongside review_status/schema_status.
+        assert proposals[0]["source_class"] == "inferred"
+        assert proposals[0]["confidence"] == 0.8
 
         # A draft cannot publish itself: publishing before approval must fail.
         early_publish = await client.post(

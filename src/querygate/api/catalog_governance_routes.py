@@ -113,6 +113,14 @@ class ProposalListItem(pyd.BaseModel):
     content: CatalogDraftContent
     review_status: ProposalReviewStatus
     schema_status: str
+    # Provenance fields the admin UI's catalog workspace (TODO.md item 38)
+    # filters and displays alongside review_status/schema_status — never the
+    # proposal's evidence references or actor identities, which stay in the
+    # privileged CatalogDraftProposal/CatalogEntryProvenance shape returned
+    # nowhere over this list endpoint.
+    source_class: str
+    confidence: Optional[float] = None
+    created_at: Optional[datetime] = None
     published_entry_id: Optional[str] = None
     published_version_id: Optional[str] = None
 
@@ -127,6 +135,9 @@ class ProposalListItem(pyd.BaseModel):
             content=proposal.content,
             review_status=proposal.review_status,
             schema_status=proposal.provenance.status.value,
+            source_class=proposal.provenance.source_class.value,
+            confidence=proposal.provenance.confidence,
+            created_at=proposal.provenance.created_at,
             published_entry_id=proposal.published_entry_id,
             published_version_id=proposal.published_version_id,
         )

@@ -74,6 +74,9 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     assert script.status_code == 200
     assert "policy/test" in script.text
     assert "/admin/config/simulate" in script.text
+    assert "Catalog review" in response.text
+    assert "/admin/catalog/" in script.text
+    assert "catalog:review" in script.text
     assert logo.status_code == 200
     assert "QueryGate</tspan>" in logo.text
     assert ">;</tspan>" in logo.text
