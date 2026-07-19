@@ -313,6 +313,15 @@ curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/validate 
 curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/preview \
   -d '{"policy_yaml": "default:\n  enabled: true\n  max_joins: 2\n"}'
 
+# Simulate a decision against the draft before staging anything. Unset
+# documents inherit from the active version; the target principal is
+# independent of the caller's own identity. Returns a typed allow/deny,
+# effective guardrails, and mandatory-filter readiness — never resolved
+# secrets, static filter/claim values, query predicates, or compiled SQL.
+curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/simulate \
+  -d '{"policy_yaml": "default:\n  enabled: true\n  max_joins: 2\n",
+       "principal": "reporting-agent", "connection": "analytics", "table": "orders"}'
+
 # Stage it as a new version (only the fields you send change; everything
 # else inherits from the current active version)
 curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions \
@@ -329,15 +338,23 @@ curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions/
 curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions/1/apply
 ```
 
-Every validate/preview/stage/apply/rollback is attributed to the calling principal
-and recorded in the same audit trail as query execution (a `config.governance`
-event — action, version id, outcome, actor — never the YAML content itself,
-which stays only in the version store). The first call to any `/admin/config/*`
-endpoint bootstraps version `"1"` from whatever `connections.yaml`/
-`policy.yaml`/`catalog.yaml` the deployment started with, so "current active
-version" always means something. Gated behind two scopes, matching the
-read/write split most admin APIs use: `admin:config:read` (list/inspect
-versions) and `admin:config:write` (validate/preview/stage/apply/rollback).
+Every validate/preview/simulate/stage/apply/rollback is attributed to the calling
+principal and recorded in the same audit trail as query execution (a
+`config.governance` event — action, version id, outcome, actor — never the
+YAML content itself, which stays only in the version store). The first call to
+any `/admin/config/*` endpoint bootstraps version `"1"` from whatever
+`connections.yaml`/`policy.yaml`/`catalog.yaml` the deployment started with, so
+"current active version" always means something. Gated behind two scopes,
+matching the read/write split most admin APIs use: `admin:config:read`
+(list/inspect versions) and `admin:config:write` (validate/preview/stage/
+apply/rollback). `simulate` requires *both* scopes at once — it echoes back
+semantic policy detail like a read endpoint, but also resolves caller-supplied
+config/secret references like a write endpoint, so a read-only principal can't
+turn it into a secret-existence oracle. `simulate` loads the candidate
+documents into an isolated, temporary registry/policy/catalog context (reusing
+the real loaders and validation logic) and never touches the live
+registry/policy singletons or the version store, so concurrent production
+requests and other simulations can't see or affect it.
 
 ### Browser admin control plane
 
@@ -353,8 +370,13 @@ The control plane provides:
 
 - policy-filtered connection, table, column, and catalog-sensitivity review;
 - a visual default/connection/principal policy designer plus raw YAML editing;
-- active-policy simulation for a target principal, table, columns, and scalar
-  claims, without executing a query or returning mandatory-filter values;
+- policy simulation for a target principal, connection, table, columns,
+  scalar claims, and optionally a structured-query shape, without executing a
+  query. A caller with both config scopes simulates the local *uncommitted
+  draft* in an isolated context (item 39); a read-only caller simulates the
+  currently active policy instead. Neither returns resolved secrets, static
+  row-filter/claim values, query predicates, or compiled SQL — only a typed
+  allow/deny, effective guardrails, and mandatory-filter claim readiness;
 - active-versus-draft document diffs, dry-run validation and redacted preview;
 - immutable version history with explicit activation and rollback confirmation;
 - filtered, newest-first browsing of persisted JSONL query/config/catalog audit

@@ -19,7 +19,7 @@ from querygate.query_ast.models import (
 
 AuditDecision = Literal["allowed", "denied", "unknown"]
 AuditSurface = Literal["rest", "mcp", "internal"]
-ConfigChangeAction = Literal["validate", "preview", "stage", "apply", "rollback"]
+ConfigChangeAction = Literal["validate", "preview", "simulate", "stage", "apply", "rollback"]
 CatalogGovernanceAction = Literal[
     "generate",
     "learn",
@@ -81,8 +81,8 @@ class AuditEvent(pyd.BaseModel):
 
 class ConfigChangeEvent(pyd.BaseModel):
     """Versioned event for the config-governance plane (querygate/admin/):
-    validating, staging, applying, or rolling back a connections/policy/
-    catalog version. Deliberately excludes raw YAML content — a version's
+    validating, previewing/simulating, staging, applying, or rolling back a
+    connections/policy/catalog version. Deliberately excludes raw YAML content — a version's
     files may contain secret references or an operator-submitted literal, so
     keeping this event narrow, like `AuditEvent`, means the audit trail stays
     a metadata-only record regardless.

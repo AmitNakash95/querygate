@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from typing import Optional
 
 from querygate.catalog.loader import CatalogStore
@@ -22,19 +23,26 @@ from querygate.policy.loader import PolicyStore
 from querygate.secrets.resolvers import SecretResolverRegistry
 
 
-def validate_config(
+@dataclass(frozen=True)
+class LoadedConfigContext:
+    """Validated config objects built without installing process globals."""
+
+    registry: ConnectionRegistry
+    policy_store: PolicyStore
+    catalog_store: CatalogStore
+
+
+def load_config_context(
     connections_file: str,
     policy_file: str,
     catalog_file: Optional[str] = None,
     resolver_registry: Optional[SecretResolverRegistry] = None,
-) -> list[str]:
-    """Return a list of human-readable problems; empty means every given file is valid.
+) -> tuple[Optional[LoadedConfigContext], list[str]]:
+    """Load and cross-validate config, returning isolated objects on success.
 
-    `resolver_registry` resolves any `${...}` reference in the connections
-    file — env-only when omitted (matches `ConnectionRegistry.from_file`'s
-    own default). Pass a registry built from the real `AppConfig` (see
-    `main()` below) to also catch a broken `${vault:...}` reference before
-    deploy, the same way a missing environment variable is already caught.
+    This is the common implementation behind the validation CLI and the
+    draft-policy simulator. It never calls any singleton setter, so callers
+    can safely inspect a candidate alongside live requests.
     """
     errors: list[str] = []
 
@@ -61,11 +69,12 @@ def validate_config(
                     f"connection id in {connections_file} (known ids: {sorted(known_ids)})"
                 )
 
-    catalog_store: CatalogStore | None = None
+    catalog_store: CatalogStore | None = CatalogStore.empty()
     if catalog_file:
         try:
             catalog_store = CatalogStore.from_file(catalog_file)
         except Exception as exc:
+            catalog_store = None
             errors.append(f"{catalog_file}: {exc}")
 
     if registry is not None and catalog_store is not None:
@@ -77,6 +86,31 @@ def validate_config(
                     f"connection id in {connections_file} (known ids: {sorted(known_ids)})"
                 )
 
+    if errors or registry is None or policy_store is None or catalog_store is None:
+        return None, errors
+    return LoadedConfigContext(registry, policy_store, catalog_store), []
+
+
+def validate_config(
+    connections_file: str,
+    policy_file: str,
+    catalog_file: Optional[str] = None,
+    resolver_registry: Optional[SecretResolverRegistry] = None,
+) -> list[str]:
+    """Return a list of human-readable problems; empty means every given file is valid.
+
+    `resolver_registry` resolves any `${...}` reference in the connections
+    file — env-only when omitted (matches `ConnectionRegistry.from_file`'s
+    own default). Pass a registry built from the real `AppConfig` (see
+    `main()` below) to also catch a broken `${vault:...}` reference before
+    deploy, the same way a missing environment variable is already caught.
+    """
+    _context, errors = load_config_context(
+        connections_file,
+        policy_file,
+        catalog_file,
+        resolver_registry=resolver_registry,
+    )
     return errors
 
 

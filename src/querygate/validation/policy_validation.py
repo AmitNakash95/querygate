@@ -70,6 +70,20 @@ def _iter_column_refs(query: StructuredQuery) -> Iterator[str]:
                 yield order.col
 
 
+def referenced_tables(query: StructuredQuery) -> Set[str]:
+    """Return every table touched by a query using the production policy walk.
+
+    Candidate simulation uses this to scope mandatory-filter readiness to the
+    same query graph that policy validation sees, without inspecting predicate
+    values or compiling SQL.
+    """
+    tables = _collect_referenced_tables(query)
+    for ref in _iter_column_refs(query):
+        table, _column = parse_column_ref(ref)
+        tables.add(table)
+    return tables
+
+
 def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) -> None:
     if not policy.enabled:
         raise PolicyViolationError(f"Connection {connection_id!r} is disabled by policy")
@@ -95,15 +109,9 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
             raise PolicyViolationError(f"top_n.n exceeds max of {policy.max_top_n}")
 
     column_refs = list(_iter_column_refs(query))
-    referenced_tables = _collect_referenced_tables(query)
-    # A table mentioned only in WHERE/GROUP BY/HAVING/ORDER BY/join keys or
-    # top_n is still being accessed and must not bypass table policy merely
-    # because it is absent from the projection.
-    for ref in column_refs:
-        table, _column = parse_column_ref(ref)
-        referenced_tables.add(table)
+    tables = referenced_tables(query)
 
-    for table in referenced_tables:
+    for table in tables:
         if not policy.table_allowed(table):
             raise PolicyViolationError(f"Table {table!r} is not accessible under the active policy")
 

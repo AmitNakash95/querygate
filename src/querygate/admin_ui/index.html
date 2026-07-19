@@ -193,8 +193,8 @@
             </article>
 
             <article class="panel test-panel">
-              <div class="panel-head"><div><p class="eyebrow">Test as principal</p><h3>Simulate active policy access</h3></div><span class="status-chip neutral">Read-only</span></div>
-              <p class="panel-copy">This check evaluates the currently active policy. Stage and activate a draft before expecting it here.</p>
+              <div class="panel-head"><div><p class="eyebrow">Test as principal</p><h3>Simulate draft policy access</h3></div><span class="status-chip neutral">Nothing persisted</span></div>
+              <p class="panel-copy">With config read and write scopes, this evaluates the local uncommitted draft in an isolated context. Read-only sessions evaluate the active policy.</p>
               <form id="policy-test-form" class="form-grid">
                 <label><span>Principal subject</span><input id="test-principal" required type="text" placeholder="reporting-agent"></label>
                 <label><span>Connection</span><select id="test-connection" required></select></label>

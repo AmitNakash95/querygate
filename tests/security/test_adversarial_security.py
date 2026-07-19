@@ -788,11 +788,17 @@ async def test_config_governance_write_endpoints_require_write_scope():
         )
         validate_resp = await client.post("/api/v1/admin/config/validate", json={}, headers=headers)
         preview_resp = await client.post("/api/v1/admin/config/preview", json={}, headers=headers)
+        simulate_resp = await client.post(
+            "/api/v1/admin/config/simulate",
+            json={"principal": "agent", "connection": "demo"},
+            headers=headers,
+        )
         apply_resp = await client.post("/api/v1/admin/config/versions/1/apply", headers=headers)
 
     assert stage_resp.status_code == 403
     assert validate_resp.status_code == 403
     assert preview_resp.status_code == 403
+    assert simulate_resp.status_code == 403
     assert apply_resp.status_code == 403
 
 
@@ -808,10 +814,16 @@ async def test_config_governance_read_endpoints_require_read_scope():
         list_resp = await client.get("/api/v1/admin/config/versions", headers=headers)
         current_resp = await client.get("/api/v1/admin/config/current", headers=headers)
         get_resp = await client.get("/api/v1/admin/config/versions/1", headers=headers)
+        simulate_resp = await client.post(
+            "/api/v1/admin/config/simulate",
+            json={"principal": "agent", "connection": "demo"},
+            headers=headers,
+        )
 
     assert list_resp.status_code == 403
     assert current_resp.status_code == 403
     assert get_resp.status_code == 403
+    assert simulate_resp.status_code == 403
 
 
 @pytest.mark.asyncio
