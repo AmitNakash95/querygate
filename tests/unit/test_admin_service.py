@@ -437,6 +437,105 @@ default:
     event = json.loads(audit_path.read_text())
     assert event["action"] == "diff"
     assert event["outcome"] == "rejected"
+
+
+def test_blast_radius_reports_baseline_and_configured_principal_impact(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    live_registry = get_registry()
+    live_policy_store = get_policy_store()
+
+    result = governance.compute_blast_radius(
+        cfg,
+        _diff_actor(),
+        ConfigSemanticDiffRequest(
+            policy_yaml=(
+                "default:\n"
+                "  enabled: true\n"
+                "  max_joins: 2\n"
+                "principals:\n"
+                "  agent-a:\n"
+                "    '*':\n"
+                "      denied_tables: [orders]\n"
+            )
+        ),
+    )
+
+    assert result.evaluation_scope == "connection_baseline_plus_configured_principals"
+    assert any(c.object == "max_joins" for c in result.baseline.changes)
+    assert result.principals_configured == 1
+    assert result.principals_affected == 1
+    (impact,) = result.principal_impacts
+    assert impact.principal == "agent-a"
+    assert any(c.category == "table_access" for c in impact.changes)
+    # A newly-denied table for agent-a is tightening, so it won't be in
+    # highest_risk (which only ranks access-expanding changes); the baseline
+    # max_joins tightening is likewise excluded.
+    assert result.highest_risk == []
+    # The isolated diff must not touch the live singletons or governance store.
+    assert get_registry() is live_registry
+    assert get_policy_store() is live_policy_store
+    assert get_config_version_store().list_versions() == []
+
+
+def test_blast_radius_with_no_candidate_changes_is_empty(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+
+    result = governance.compute_blast_radius(cfg, _diff_actor(), ConfigSemanticDiffRequest())
+
+    assert result.baseline.changes == []
+    assert result.principal_impacts == []
+    assert result.principals_configured == 0
+
+
+def test_blast_radius_emits_success_audit_event(tmp_path, monkeypatch):
+    audit_path = tmp_path / "blast-radius-audit.jsonl"
+    set_audit_sink(JsonlAuditSink(str(audit_path)))
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+
+    governance.compute_blast_radius(
+        cfg,
+        _diff_actor(),
+        ConfigSemanticDiffRequest(policy_yaml="default:\n  enabled: true\n  max_limit: 5\n"),
+    )
+
+    event = json.loads(audit_path.read_text())
+    assert event["action"] == "blast_radius"
+    assert event["outcome"] == "success"
+
+
+@pytest.mark.security
+def test_blast_radius_masks_invalid_candidate_and_audits_rejection(tmp_path, monkeypatch):
+    audit_path = tmp_path / "blast-radius-audit.jsonl"
+    set_audit_sink(JsonlAuditSink(str(audit_path)))
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    marker = "static-filter-value-must-not-leak"
+
+    with pytest.raises(ConfigValidationError) as exc_info:
+        governance.compute_blast_radius(
+            cfg,
+            _diff_actor(),
+            ConfigSemanticDiffRequest(
+                policy_yaml=f"""
+default:
+  enabled: true
+  mandatory_row_filters:
+    - table: orders
+      column: tenant_id
+      value: {marker}
+      unsupported_field: true
+"""
+            ),
+        )
+
+    assert marker not in str(exc_info.value)
+    assert marker not in audit_path.read_text()
+    event = json.loads(audit_path.read_text())
+    assert event["action"] == "blast_radius"
+    assert event["outcome"] == "rejected"
     assert get_config_version_store().list_versions() == []
 
 

@@ -24,6 +24,7 @@ from querygate.admin.models import (
     ConfigPreview,
     ConfigSemanticDiffRequest,
     ConfigVersion,
+    PolicyBlastRadiusReport,
     SemanticAccessDiff,
 )
 from querygate.config_reload import ReloadResult
@@ -126,6 +127,22 @@ def build_admin_config_router(
             return await run_in_threadpool(
                 governance.diff_candidate_access, cfg, principal, request
             )
+        except ConfigValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    @router.post("/blast-radius", response_model=PolicyBlastRadiusReport)
+    async def blast_radius_endpoint(
+        request: ConfigSemanticDiffRequest,
+        principal: Principal = Depends(get_principal),
+    ):
+        # Same request shape and scope reasoning as /diff: it echoes resolved
+        # policy detail (config-read) while resolving caller-supplied
+        # config/secret references (config-write), now aggregated across every
+        # configured principal rather than the connection baseline alone.
+        _require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        try:
+            return await run_in_threadpool(governance.compute_blast_radius, cfg, principal, request)
         except ConfigValidationError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 

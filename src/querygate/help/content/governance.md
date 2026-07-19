@@ -2,7 +2,7 @@
 id: configuration.governance
 title: Validate, preview, stage, apply, and roll back configuration
 summary: Configuration changes use the existing scoped governance workflow with validation, immutable versions, attribution, audit events, and rollback.
-tags: [configuration, governance, validate, preview, diff, stage, apply, rollback, audit]
+tags: [configuration, governance, validate, preview, diff, blast-radius, stage, apply, rollback, audit]
 next_actions:
   - Validate and preview the candidate before staging it.
   - Apply only the intended staged version and retain its previous active version for rollback.
@@ -24,7 +24,19 @@ connection baseline — rather than a YAML line diff. Like policy simulation, th
 diff requires both `admin:config:read` and `admin:config:write` (it echoes
 resolved policy detail while resolving caller-supplied config/secret
 references) and never includes static filter values, secrets, predicate values,
-or raw YAML. Secret values and references are never included. Staging
+or raw YAML. Secret values and references are never included. A change that
+lives purely in a `principals:` override is flagged `analysis_incomplete`
+by the diff rather than silently omitted — `blast-radius` is the follow-up
+that resolves it: it runs the same diff once at the connection baseline and
+once more for every principal explicitly configured in `policy.yaml`'s
+`principals:` section (bounded to 100 principals), then ranks the
+access-*expanding* results — a removed mandatory row filter above a newly
+visible table/column, above a loosened guardrail — and tags each finding
+`baseline` (affects every principal without an override) or `principal`
+(affects only that one caller), so a reviewer can tell a targeted access
+expansion from a fleet-wide one before staging a candidate. It shares
+`diff`'s scope requirement, isolation, and redaction posture exactly, and
+persists nothing. Staging
 validates again, records the actor, and creates a new version without
 activating it. Applying validates once more, reloads the version through the
 normal configuration path, changes the active pointer, and emits an audit
