@@ -36,13 +36,30 @@ FAILURE_CATEGORY_TIMEOUT = "timeout"
 FAILURE_CATEGORY_ERROR = "error"
 
 
-def classify_failure(exc: BaseException) -> str:
-    """Map a ping failure to a stable, redaction-safe category.
+def _iter_exception_chain(exc: BaseException):
+    """Yield exc and every wrapped/chained exception under it, once each.
 
-    Classification uses the exception type (stdlib isinstance plus driver
-    class-name matching), never the message, so a driver error that embeds a
-    hostname/username/password can never leak through the category.
+    SQLAlchemy wraps a driver error in `OperationalError`/`InterfaceError`
+    (a `DBAPIError`, with the original DBAPI exception on `.orig` and in
+    `__cause__`), so the outermost type a ping failure raises is usually the
+    generic wrapper, not the specific asyncpg/pyodbc error. Walking the chain
+    lets classification see the real cause.
     """
+    seen: set[int] = set()
+    stack: list[Optional[BaseException]] = [exc]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        stack.append(getattr(current, "orig", None))
+        stack.append(current.__cause__)
+        stack.append(current.__context__)
+
+
+def _classify_one(exc: BaseException) -> Optional[str]:
+    """Category for a single exception by type only, or None if unrecognized."""
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
         return FAILURE_CATEGORY_TIMEOUT
     if isinstance(exc, (ConnectionRefusedError, ConnectionError, OSError)):
@@ -56,6 +73,22 @@ def classify_failure(exc: BaseException) -> str:
         return FAILURE_CATEGORY_TIMEOUT
     if any(token in type_name for token in ("connect", "network", "unreach", "dns")):
         return FAILURE_CATEGORY_UNREACHABLE
+    return None
+
+
+def classify_failure(exc: BaseException) -> str:
+    """Map a ping failure to a stable, redaction-safe category.
+
+    Classification uses the exception type (stdlib isinstance plus driver
+    class-name matching) across the whole wrapped/chained exception tree, never
+    the message, so a driver error that embeds a hostname/username/password can
+    never leak through the category while still being classified correctly even
+    when SQLAlchemy has wrapped it in a generic `OperationalError`.
+    """
+    for current in _iter_exception_chain(exc):
+        category = _classify_one(current)
+        if category is not None:
+            return category
     return FAILURE_CATEGORY_ERROR
 
 

@@ -101,6 +101,30 @@ def test_classify_failure_categories(exc, expected):
     assert health_module.classify_failure(exc) == expected
 
 
+def test_classify_failure_unwraps_sqlalchemy_style_wrappers():
+    """A driver error wrapped by SQLAlchemy (`.orig`) or explicitly chained
+    (`raise ... from`) must still classify by the underlying cause, not fall
+    through to the generic 'error' bucket."""
+
+    class _DBAPIError(Exception):
+        def __init__(self, orig):
+            super().__init__("(OperationalError) connection failed")
+            self.orig = orig
+
+    # SQLAlchemy-style .orig wrapping.
+    wrapped = _DBAPIError(orig=ConnectionRefusedError("refused"))
+    assert health_module.classify_failure(wrapped) == "unreachable"
+
+    # Explicit __cause__ chaining.
+    try:
+        try:
+            raise TimeoutError("connect timeout")
+        except TimeoutError as inner:
+            raise RuntimeError("wrapper") from inner
+    except RuntimeError as outer:
+        assert health_module.classify_failure(outer) == "timeout"
+
+
 def test_classify_failure_never_uses_the_message():
     # A driver error embedding host/user/password must classify by type only.
     leaky = type("WeirdError", (Exception,), {})("host=db.internal user=admin password=hunter2")
