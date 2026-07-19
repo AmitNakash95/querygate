@@ -50,13 +50,15 @@ class AuditEvent(pyd.BaseModel):
     response_bytes: Optional[int] = pyd.Field(default=None, ge=0)
     truncated: Optional[bool] = None
     error_category: Optional[str] = None
-    # Agent-visible admission info (TODO.md item 35 phase 1) — a stable id
+    # Agent-visible admission info (TODO.md item 35) — a stable id
     # correlating this attempt across REST/MCP responses, metrics, and this
     # audit event, how long it waited for a concurrency slot, and whether it
-    # ended in a caller-visible capacity timeout.
+    # completed, hit a caller-visible capacity timeout, or was rejected
+    # outright because the queue itself was already at its configured depth
+    # (phase 2's max_queue_depth/max_queue_depth_per_principal).
     admission_id: Optional[str] = None
     queue_wait_ms: Optional[int] = pyd.Field(default=None, ge=0)
-    admission_state: Optional[Literal["completed", "capacity_timeout"]] = None
+    admission_state: Optional[Literal["completed", "capacity_timeout", "queue_full"]] = None
 
     model_config = pyd.ConfigDict(extra="forbid")
 

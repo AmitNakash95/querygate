@@ -34,6 +34,8 @@ from querygate.core.exceptions import (
     NotFoundError,
     PolicyViolationError,
     QueryValidationError,
+    QueueDepthExceededError,
+    QueueFullError,
     public_error_message,
 )
 from querygate.core.logging import get_logger, log_execution
@@ -287,7 +289,12 @@ class StructuredQueryService:
             queue_start = time.monotonic()
             try:
                 async with concurrency_slot(
-                    self._connection_id, policy.max_concurrency, wait_seconds
+                    self._connection_id,
+                    policy.max_concurrency,
+                    wait_seconds,
+                    principal_subject=self._principal_subject,
+                    max_queue_depth=policy.max_queue_depth,
+                    max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
                 ):
                     queue_wait_ms = int((time.monotonic() - queue_start) * 1000)
                     stmt, limit, _tables, dialect = await self._validate_and_compile(query)
@@ -350,6 +357,11 @@ class StructuredQueryService:
                     )
             except ConcurrencyLimitError as exc:
                 queue_wait_ms = int((time.monotonic() - queue_start) * 1000)
+                if isinstance(exc, QueueDepthExceededError):
+                    QUEUE_WAIT_SECONDS.labels(
+                        connection=self._connection_id, outcome="queue_full"
+                    ).observe(queue_wait_ms / 1000)
+                    raise QueueFullError(str(exc), admission_id=admission_id) from exc
                 QUEUE_WAIT_SECONDS.labels(
                     connection=self._connection_id, outcome="capacity_timeout"
                 ).observe(queue_wait_ms / 1000)
@@ -385,9 +397,7 @@ class StructuredQueryService:
                 rejection_reason=str(exc),
                 admission_id=admission_id,
                 queue_wait_ms=queue_wait_ms,
-                admission_state=(
-                    "capacity_timeout" if isinstance(exc, CapacityTimeoutError) else None
-                ),
+                admission_state=getattr(exc, "admission_state", None),
             )
             QUERIES_TOTAL.labels(connection=self._connection_id, status="rejected").inc()
             QUERIES_REJECTED_TOTAL.labels(

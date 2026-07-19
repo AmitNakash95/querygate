@@ -19,6 +19,7 @@ from querygate.core.exceptions import (
     CapacityTimeoutError,
     CostEstimateExceededError,
     QueryValidationError,
+    QueueFullError,
 )
 from querygate.execution import concurrency as cc
 from querygate.execution import service as svc
@@ -981,3 +982,145 @@ async def test_execute_capacity_timeout_is_audited_with_admission_fields():
     assert kwargs["queue_wait_ms"] is not None
     assert kwargs["admission_state"] == "capacity_timeout"
     assert kwargs["rejected"] is True
+
+
+# --- Queue-depth pressure controls (TODO.md item 35 phase 2) ---------------
+
+
+def _queued_execute_kwargs():
+    """A schema-mocked execute() body, used by the tests below so a released
+    waiter can run to a real success instead of hitting unrelated
+    NoSuchTableError noise once its concurrency slot is finally granted.
+    """
+    table = _company_table()
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = []
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    return table, _scope
+
+
+@pytest.mark.asyncio
+async def test_execute_raises_queue_full_error_once_max_queue_depth_is_met():
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+    set_policy_store(
+        PolicyStore(
+            default=Policy(max_concurrency=1, concurrency_wait_seconds=5, max_queue_depth=1),
+            overrides={},
+        )
+    )
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+
+    table, _scope = _queued_execute_kwargs()
+    service = StructuredQueryService(connection_id="demo")
+
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        task = asyncio.create_task(
+            service.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=5)
+        )
+        await asyncio.sleep(0.02)  # let it actually start waiting (queue depth == 1)
+
+        with pytest.raises(QueueFullError) as exc_info:
+            await service.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=5)
+
+        assert exc_info.value.admission_id
+        assert exc_info.value.queue_wait_ms == 0
+        assert exc_info.value.admission_state == "queue_full"
+
+        cc.SEMAPHORES["demo"].release()
+        await task  # the first (legitimate) waiter still succeeds normally
+
+
+@pytest.mark.asyncio
+async def test_execute_queue_full_is_audited_with_queue_full_admission_state():
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+    set_policy_store(
+        PolicyStore(
+            default=Policy(max_concurrency=1, concurrency_wait_seconds=5, max_queue_depth=1),
+            overrides={},
+        )
+    )
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+
+    table, _scope = _queued_execute_kwargs()
+    service = StructuredQueryService(connection_id="demo")
+
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        task = asyncio.create_task(
+            service.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=5)
+        )
+        await asyncio.sleep(0.02)
+
+        audit_query = MagicMock()
+        with patch.object(svc, "audit_query", audit_query):
+            with pytest.raises(QueueFullError):
+                await service.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=5)
+
+        audit_query.assert_called_once()
+        kwargs = audit_query.call_args.kwargs
+        assert kwargs["admission_id"]
+        assert kwargs["queue_wait_ms"] == 0
+        assert kwargs["admission_state"] == "queue_full"
+        assert kwargs["rejected"] is True
+
+        cc.SEMAPHORES["demo"].release()
+        await task
+
+
+@pytest.mark.asyncio
+async def test_execute_max_queue_depth_per_principal_does_not_affect_other_principals():
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                max_concurrency=1, concurrency_wait_seconds=5, max_queue_depth_per_principal=1
+            ),
+            overrides={},
+        )
+    )
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+
+    table, _scope = _queued_execute_kwargs()
+    noisy_service = StructuredQueryService(
+        connection_id="demo", principal=Principal(subject="noisy-agent")
+    )
+    other_service = StructuredQueryService(
+        connection_id="demo", principal=Principal(subject="other-agent")
+    )
+
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        noisy_task = asyncio.create_task(
+            noisy_service.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=5)
+        )
+        await asyncio.sleep(0.02)
+
+        # Same noisy principal, queue already has one of theirs waiting -> queue_full.
+        with pytest.raises(QueueFullError):
+            await noisy_service.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=5)
+
+        # A different principal must not be affected by noisy-agent's cap.
+        other_task = asyncio.create_task(
+            other_service.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=5)
+        )
+        await asyncio.sleep(0.02)
+
+        cc.SEMAPHORES["demo"].release()
+        await noisy_task
+        await other_task

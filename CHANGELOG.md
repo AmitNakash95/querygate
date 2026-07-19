@@ -6,6 +6,20 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- Queue-depth pressure controls and cross-replica admission state for capacity waiting
+  (TODO.md item 35 phase 2). `Policy.max_queue_depth`/`max_queue_depth_per_principal`
+  (both optional, unset/unlimited by default) cap how many callers may be *waiting* for a
+  concurrency slot at once — separate from `max_concurrency`, which caps how many may
+  *run* — so an unbounded `queue_mode=wait` pile-up can't itself become a
+  resource-exhaustion vector. A caller past either cap is rejected immediately
+  (`queue_wait_ms: 0`) with a distinct `admission_state` of `queue_full`, told apart from a
+  genuine wait-timeout's `capacity_timeout` in REST headers, MCP fields, metrics
+  (`querygate_queue_wait_seconds`/`querygate_queries_rejected_total` gain a `queue_full`
+  bucket), and the audit event. When `concurrency_backend: redis` is selected, both the cap
+  and the `querygate_queue_depth` gauge are enforced/computed against the same Redis every
+  replica shares (`RedisConcurrencyLimiter.enter_queue`/`leave_queue`, mirroring its
+  existing `acquire`/`release` sorted-set-plus-lease design), closing phase 1's
+  documented single-process-only gap for Redis-backed deployments.
 - Supply-chain SBOM and dependency vulnerability audit (`scripts/generate_sbom.py`,
   TODO.md item 30 phase 1), run as the final step of `make release-check` and available
   standalone via `make sbom`. Builds a throwaway virtual environment from exactly

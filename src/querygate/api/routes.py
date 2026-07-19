@@ -174,7 +174,7 @@ def build_router(
                 detail=str(exc),
                 headers=_admission_headers(
                     admission_id=exc.admission_id,
-                    state="capacity_timeout",
+                    state=exc.admission_state,
                     queue_wait_ms=exc.queue_wait_ms,
                 ),
             )

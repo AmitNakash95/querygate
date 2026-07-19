@@ -447,6 +447,8 @@ _GUARDRAIL_FIELDS = (
     "timeout_seconds",
     "max_concurrency",
     "concurrency_wait_seconds",
+    "max_queue_depth",
+    "max_queue_depth_per_principal",
     "log_query_literals",
     "max_estimated_rows",
     "max_estimated_cost",

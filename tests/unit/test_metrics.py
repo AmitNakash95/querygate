@@ -6,6 +6,7 @@ from querygate.core.exceptions import (
     ConcurrencyLimitError,
     CostEstimateExceededError,
     PolicyViolationError,
+    QueueFullError,
 )
 from querygate.metrics import classify_rejection, render_latest
 
@@ -24,6 +25,15 @@ def test_classify_cost_estimate_exceeded_error_as_its_own_reason():
     `policy` bucket — see TODO.md item 26.
     """
     assert classify_rejection(CostEstimateExceededError("too expensive")) == "cost_estimate"
+
+
+def test_classify_queue_full_error_as_its_own_reason():
+    """QueueFullError subclasses CapacityTimeoutError (itself a
+    ConcurrencyLimitError) but must report its own `queue_full` reason, not
+    fall into the coarser `concurrency` bucket — see TODO.md item 35 phase 2.
+    """
+    exc = QueueFullError("queue is full", admission_id="admission-1")
+    assert classify_rejection(exc) == "queue_full"
 
 
 def test_classify_plain_value_error_as_schema():

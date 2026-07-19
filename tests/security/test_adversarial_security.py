@@ -9,6 +9,7 @@ response limits if validation order regresses.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -30,6 +31,7 @@ from querygate.core.exceptions import (
     CapacityTimeoutError,
     PolicyViolationError,
     QueryValidationError,
+    QueueFullError,
 )
 from querygate.execution import concurrency as cc
 from querygate.execution import service as svc
@@ -394,6 +396,100 @@ async def test_caller_cannot_extend_the_operators_concurrency_wait_ceiling():
     elapsed = time.monotonic() - start
 
     assert elapsed < 1.0
+
+
+@pytest.mark.asyncio
+async def test_unbounded_waiting_queue_is_capped_not_a_dos_vector():
+    """TODO.md item 35 phase 2: without max_queue_depth, a caller happy to
+    wait (queue_mode=wait) could park an unbounded number of requests behind
+    an occupied connection, each holding a task/event-loop resource for up
+    to concurrency_wait_seconds — an unbounded waiting queue becoming its
+    own resource-exhaustion vector, distinct from (and not covered by)
+    max_concurrency, which only bounds *running* queries. Once
+    max_queue_depth is set, a caller past the cap is rejected immediately
+    (queue_wait_ms == 0), not queued indefinitely.
+    """
+    set_policy_store(
+        PolicyStore(
+            default=Policy(max_concurrency=1, concurrency_wait_seconds=5, max_queue_depth=3),
+            overrides={},
+        )
+    )
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot, never released
+
+    service = StructuredQueryService(connection_id="demo")
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+
+    tasks = [
+        asyncio.create_task(
+            service.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=5)
+        )
+        for _ in range(3)
+    ]
+    await asyncio.sleep(0.05)  # let all three actually start waiting (queue depth == 3)
+
+    start = time.monotonic()
+    with pytest.raises(QueueFullError) as exc_info:
+        await service.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=5)
+    elapsed = time.monotonic() - start
+
+    # Rejected immediately — not queued behind the existing three waiters.
+    assert elapsed < 1.0
+    assert exc_info.value.queue_wait_ms == 0
+    assert exc_info.value.admission_state == "queue_full"
+
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_max_queue_depth_per_principal_prevents_one_caller_starving_another():
+    """A single noisy principal filling the whole connection's queue budget
+    would starve every other caller even though max_queue_depth itself has
+    headroom. max_queue_depth_per_principal caps one principal's share of the
+    queue without affecting a different principal's ability to wait.
+    """
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                max_concurrency=1, concurrency_wait_seconds=5, max_queue_depth_per_principal=1
+            ),
+            overrides={},
+        )
+    )
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot, never released
+
+    noisy = StructuredQueryService(connection_id="demo", principal=Principal(subject="noisy-agent"))
+    victim = StructuredQueryService(
+        connection_id="demo", principal=Principal(subject="victim-agent")
+    )
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+
+    noisy_task = asyncio.create_task(
+        noisy.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=5)
+    )
+    await asyncio.sleep(0.05)
+
+    # A second wait from the same noisy principal is rejected...
+    with pytest.raises(QueueFullError):
+        await noisy.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=5)
+
+    # ...but a different principal can still queue normally.
+    victim_task = asyncio.create_task(
+        victim.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=5)
+    )
+    await asyncio.sleep(0.05)
+
+    for task in (noisy_task, victim_task):
+        task.cancel()
+    for task in (noisy_task, victim_task):
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 @pytest.mark.asyncio

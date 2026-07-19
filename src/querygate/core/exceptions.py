@@ -28,20 +28,60 @@ class ConcurrencyLimitError(ValueError):
     """
 
 
+class QueueDepthExceededError(ConcurrencyLimitError):
+    """Raised by `execution/concurrency.py` when a connection's (or a single
+    principal's) waiting queue is already at `Policy.max_queue_depth` /
+    `max_queue_depth_per_principal` (TODO.md item 35 phase 2) — the caller is
+    rejected before it attempts to wait for a concurrency slot at all, so an
+    unbounded number of parked waiters can't become its own resource-
+    exhaustion vector. Plain, low-level signal — same "raise a bare
+    `ConcurrencyLimitError` at the guardrail, enrich it into a public
+    exception at the service boundary" split `ConcurrencyLimitError` already
+    uses for a genuine wait-timeout (see `QueueFullError` below).
+    """
+
+
 class CapacityTimeoutError(ConcurrencyLimitError):
     """`ConcurrencyLimitError` enriched with an admission id and elapsed
     queue-wait time (TODO.md item 35 phase 1). Subclasses
     `ConcurrencyLimitError` so every existing `isinstance`/`except` site
     (REST/MCP error mapping, `metrics.classify_rejection`) keeps working
     unchanged; the extra attributes let REST/MCP additionally surface a
-    stable, machine-readable `capacity_timeout` state without changing the
+    stable, machine-readable `admission_state` without changing the
     existing string message contract callers already parse.
     """
 
-    def __init__(self, message: str, *, admission_id: str, queue_wait_ms: int) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        admission_id: str,
+        queue_wait_ms: int,
+        admission_state: str = "capacity_timeout",
+    ) -> None:
         super().__init__(message)
         self.admission_id = admission_id
         self.queue_wait_ms = queue_wait_ms
+        self.admission_state = admission_state
+
+
+class QueueFullError(CapacityTimeoutError):
+    """`QueueDepthExceededError` enriched with an admission id at the
+    `StructuredQueryService` boundary (TODO.md item 35 phase 2) — mirrors how
+    `CapacityTimeoutError` enriches a plain `ConcurrencyLimitError` for a
+    genuine wait-timeout. `queue_wait_ms` is always 0 (the caller never began
+    waiting) and `admission_state` is `"queue_full"`, distinct from
+    `"capacity_timeout"`, so REST/MCP/audit can tell "the queue itself is at
+    its configured depth cap" apart from "waited and ran out of time".
+    Subclasses `CapacityTimeoutError` (not `QueueDepthExceededError`) so every
+    existing `except CapacityTimeoutError` site at the REST/MCP boundary
+    handles it identically without a new branch.
+    """
+
+    def __init__(self, message: str, *, admission_id: str) -> None:
+        super().__init__(
+            message, admission_id=admission_id, queue_wait_ms=0, admission_state="queue_full"
+        )
 
 
 class CostEstimateExceededError(PolicyViolationError):

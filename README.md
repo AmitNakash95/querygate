@@ -472,8 +472,34 @@ alongside the existing concurrency metrics.
 
 This is phase 1 of TODO.md item 35 — a synchronous, caller-tunable version of
 the wait that already existed. MCP progress notifications, a REST
-`202`-plus-cancel contract, mid-queue cancellation, and Redis-backed
-admission state for multi-replica deployments are phase 2.
+`202`-plus-cancel contract, mid-queue cancellation, and a `429`+`Retry-After`
+evaluation are phase 3.
+
+### Queue-depth pressure controls and cross-replica visibility
+
+`Policy.max_queue_depth`/`max_queue_depth_per_principal` (both optional,
+unset/unlimited by default — phase 2 of item 35) cap how many callers may be
+*waiting* for a slot at once, separately from `max_concurrency` (which caps
+how many may *run*). Without a cap, a burst of `queue_mode=wait` callers
+against an already-saturated connection can itself become a resource-
+exhaustion vector — each waiter parked for up to `concurrency_wait_seconds`.
+A caller whose admission would exceed either cap is rejected immediately
+(`queue_wait_ms: 0`), with a distinct `admission_state` of `"queue_full"` so
+it can be told apart from a genuine wait-timeout (`"capacity_timeout"`) in
+REST headers, MCP fields, metrics, and the audit event:
+
+```yaml
+connections:
+  demo:
+    max_queue_depth: 50              # this connection's whole waiting queue
+    max_queue_depth_per_principal: 5 # one caller's share of it
+```
+
+When `concurrency_backend: redis` is selected, both the cap and the
+`querygate_queue_depth` gauge are enforced/computed against the same Redis
+every replica shares — the same sorted-set-plus-lease design
+`max_concurrency`'s own Redis limiter already uses — so the depth is the
+true cross-replica count, not one process's own local tally.
 
 ## Production deployment
 
@@ -690,13 +716,15 @@ Being upfront about what's not done yet:
 - **Distributed concurrency enforcement (Redis-backed) is opt-in** — the
   default is an in-process semaphore, correct for a single instance only;
   set `concurrency_backend: redis` for multi-instance deployments.
-- **Agent-visible capacity waiting is phase 1 only** — a caller can choose
-  `queue_mode=fail_fast`/a shorter `wait_timeout_seconds` and gets a stable
-  `admission_id` back (above), but there's no MCP progress notification, REST
-  `202`-plus-cancel contract, mid-queue cancellation, or Redis-backed
-  cross-replica admission/queue-depth state yet (TODO item 35 phase 2); the
-  `querygate_queue_depth` gauge is single-process visibility only, like
-  `querygate_concurrency_in_use`.
+- **Agent-visible capacity waiting still has no cancellation or async
+  contract** — a caller can choose `queue_mode=fail_fast`/a shorter
+  `wait_timeout_seconds`, gets a stable `admission_id` back, and (with
+  `concurrency_backend: redis`) a queue-depth cap and gauge that are
+  accurate across replicas (above), but there's still no MCP progress
+  notification, REST `202`-plus-cancel contract, mid-queue cancellation, or
+  `429`+`Retry-After` evaluation (TODO item 35 phase 3). The in-process
+  (non-Redis) `querygate_queue_depth` gauge remains single-process
+  visibility only, like `querygate_concurrency_in_use`.
 - **Security review is first-party** — the repository includes a maintained
   threat model and adversarial regression suite, but has not yet undergone an
   independent penetration test or formal compliance certification.

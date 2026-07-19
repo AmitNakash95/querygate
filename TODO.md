@@ -64,7 +64,7 @@ order-of-magnitude, not commitments.
 | 32 | Governed adaptive semantic memory for agents | XL | 23, 25, 27, 28 |
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
-| 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: progress notifications, REST 202+cancel, Redis-backed admission state not started) | L | 9, 12, 15, 20 |
+| 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
@@ -1688,9 +1688,68 @@ machinery below:
   a caller cannot use `wait_timeout_seconds` to wait longer than the operator
   configured.
 
-**Explicitly deferred to phase 2** (each needs its own careful design and is
-independently useful once the synchronous contract above exists and is
-proven under load — this is not a gap, it's the next slice):
+**Phase 2 shipped:** Redis-backed cross-replica admission state, plus the
+queue-depth pressure controls phase 1 deliberately left out —
+`Policy.max_queue_depth` (whole-connection) and
+`max_queue_depth_per_principal` (one caller's share), both optional and
+unset/unlimited by default. `execution/concurrency.py`'s `concurrency_slot()`
+now takes `principal_subject`/`max_queue_depth`/`max_queue_depth_per_principal`
+and enforces them *before* a caller starts waiting at all — a caller past
+either cap is rejected immediately (`queue_wait_ms: 0`), never queued.
+`core/exceptions.QueueDepthExceededError` (raised by `concurrency.py`, plain,
+mirroring how a bare `ConcurrencyLimitError` signals a wait-timeout) is
+enriched into `QueueFullError` (subclasses `CapacityTimeoutError`, adds
+`admission_state="queue_full"`, distinct from `"capacity_timeout"`) at the
+`StructuredQueryService` boundary — the same low-level/enriched split
+`CapacityTimeoutError` already established. `CapacityTimeoutError` itself
+gained an `admission_state` field (default `"capacity_timeout"`) so REST/MCP
+read it off the exception instead of hardcoding the string, which is what
+let `QueueFullError` reuse the exact same REST `422`-plus-headers and MCP
+`MCPErrorResult` mapping with no new branch at either boundary.
+`querygate_queue_wait_seconds`'s `outcome` label and
+`querygate_queries_rejected_total`'s `reason` label both gained a `queue_full`
+bucket, broken out from `capacity_timeout`/`concurrency` so operators can
+tell "the queue's own pressure control tripped" apart from "waited and ran
+out of time."
+
+Cross-replica admission state: `execution/redis_concurrency.py`'s
+`RedisConcurrencyLimiter` gained `enter_queue`/`leave_queue`, mirroring
+`acquire`/`release`'s existing sorted-set-plus-lease design with a second
+pair of per-connection (and, when a principal is given, per-connection-
+per-principal) sorted sets. When `concurrency_backend: redis` is selected,
+`max_queue_depth`/`max_queue_depth_per_principal` are enforced against the
+true cross-replica count (one atomic Lua script checks both caps and admits
+or rejects the waiter), and `querygate_queue_depth` is set from that same
+count rather than one process's own local increments — closing the exact
+gap phase 1 flagged ("single-process visibility only, like
+querygate_concurrency_in_use"). The in-process (non-Redis) fallback keeps
+its pre-existing single-process-only gauge semantics, now paired with a
+plain-dict depth count purely for cap enforcement (Prometheus gauges have
+no public "current value for these labels" read). Both paths fail open on a
+Redis error the same way `acquire()` already does, for the same
+availability-over-strict-enforcement reason.
+
+Tested against fakeredis (`tests/unit/test_redis_concurrency.py`'s
+`enter_queue`/`leave_queue` tests, including cross-limiter-instance
+enforcement standing in for cross-replica), `tests/unit/test_concurrency.py`
+(local-path caps, per-principal isolation, Redis-path cap enforcement and
+gauge accuracy across two separate limiter instances sharing one Redis),
+`tests/unit/test_service.py` (`QueueFullError` wiring, `admission_state`
+audit field), `tests/unit/test_metrics.py` (`queue_full` classification),
+REST/MCP integration tests proving the `422`/`MCPErrorResult` mapping, and
+two adversarial security regressions
+(`test_unbounded_waiting_queue_is_capped_not_a_dos_vector`,
+`test_max_queue_depth_per_principal_prevents_one_caller_starving_another`)
+proving the actual security property: a caller happy to wait indefinitely
+cannot pile up an unbounded number of waiters, and one noisy principal
+cannot exhaust another principal's share of the queue.
+
+**Explicitly deferred to phase 3** (each remaining piece needs its own
+protocol/design decision — a wire format for MCP progress notifications, a
+new REST resource lifecycle for asynchronous execution plus its cancellation
+semantics, and a breaking-change evaluation for HTTP status codes — that are
+independent of phase 2's storage/admission-control work above and are each
+easier to scope correctly on their own than bundled together):
 
 - MCP progress notifications for a client that advertises support.
 - A REST asynchronous contract (`202` + status/cancel endpoints, or a
@@ -1699,11 +1758,6 @@ proven under load — this is not a gap, it's the next slice):
 - Idempotent mid-queue cancellation, including whether cancellation is
   queue-only or must invoke and verify dialect-specific database
   cancellation before reporting `cancelled`.
-- Redis-backed admission state so `queued`/cancellation are visible and safe
-  across multiple QueryGate replicas (today's `querygate_queue_depth` is
-  single-process only, like `querygate_concurrency_in_use`), plus a
-  queue-depth limit and per-principal pressure controls so an unbounded
-  waiting queue can't become its own denial-of-service vector.
 - Evaluate `429` + `Retry-After` for REST capacity responses without
   breaking clients that currently handle `422`.
 
@@ -1714,7 +1768,8 @@ a caller-selected period, cannot distinguish "queued behind two queries" from
 waits. An interactive agent should be able to say that QueryGate is at
 capacity, keep waiting within an operator-approved bound, and let the user
 cancel rather than appearing hung or retrying blindly. Phase 1 answers the
-first two; phase 2 answers the rest.
+first two; phase 2 makes the waiting itself bounded and cross-replica-safe;
+phase 3 answers the rest.
 
 ### 32. Governed adaptive semantic memory for agents
 
