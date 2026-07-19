@@ -113,6 +113,13 @@ made via the governance API, and vice versa.
   shouldn't need a credential); returns aggregate healthy/unhealthy counts,
   never connection ids or driver errors. 503 when any connection is
   unhealthy.
+- `GET /api/v1/admin/connections` (scope `admin:connections:read`) — when
+  `/health` reports something unhealthy, this is the credential-free per-
+  connection view that says *which* one: dialect, enabled state,
+  healthy/degraded/disabled/unknown status, last check/success, latency,
+  schema-reflected state, and a redacted failure category
+  (`authentication`/`unreachable`/`timeout`/`error`). It never returns a
+  connection string or the raw driver error — that stays in stdout logs.
 - `GET /metrics` — unauthenticated Prometheus text format; empty samples
   (only `# HELP`/`# TYPE` lines) until at least one query has run in the
   process's lifetime — that's expected, not a bug.
