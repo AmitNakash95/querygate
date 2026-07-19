@@ -15,9 +15,15 @@ from typing import Callable, List, Optional
 
 import pydantic as pyd
 from fastapi import APIRouter, Depends, HTTPException, status
+from starlette.concurrency import run_in_threadpool
 
 from querygate.admin import service as governance
-from querygate.admin.models import ConfigPreview, ConfigVersion
+from querygate.admin.models import (
+    CandidatePolicySimulation,
+    CandidatePolicySimulationRequest,
+    ConfigPreview,
+    ConfigVersion,
+)
 from querygate.config_reload import ReloadResult
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
@@ -84,6 +90,24 @@ def build_admin_config_router(
             policy_yaml=request.policy_yaml,
             catalog_yaml=request.catalog_yaml,
         )
+
+    @router.post("/simulate", response_model=CandidatePolicySimulation)
+    async def simulate_candidate_endpoint(
+        request: CandidatePolicySimulationRequest,
+        principal: Principal = Depends(get_principal),
+    ):
+        # Candidate simulation returns semantic policy details, so config-read
+        # is required. It also resolves caller-supplied config/secret
+        # references, so config-write is independently required to prevent a
+        # read-only principal from turning it into a secret-existence oracle.
+        _require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        try:
+            return await run_in_threadpool(
+                governance.simulate_candidate_policy, cfg, principal, request
+            )
+        except ConfigValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
     @router.post("/versions", response_model=ConfigVersion, status_code=status.HTTP_201_CREATED)
     async def stage_endpoint(

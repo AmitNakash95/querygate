@@ -444,24 +444,30 @@
       let claims;
       try { claims = JSON.parse($("#test-claims").value || "{}"); }
       catch { throw new Error("Claims must be valid JSON."); }
-      const body = await api("/admin/ui/policy/test", {
+      const candidate = canRead() && canWrite();
+      const target = {
+        principal: $("#test-principal").value,
+        connection: $("#test-connection").value,
+        table: $("#test-table").value || null,
+        columns: csvValues($("#test-columns").value),
+        claims,
+      };
+      const body = await api(candidate ? "/admin/config/simulate" : "/admin/ui/policy/test", {
         method: "POST",
-        body: JSON.stringify({
-          principal: $("#test-principal").value,
-          connection: $("#test-connection").value,
-          table: $("#test-table").value || null,
-          columns: csvValues($("#test-columns").value),
-          claims,
-        }),
+        body: JSON.stringify(candidate ? { ...draftPayload(), ...target } : target),
       });
       const result = $("#policy-test-result");
+      const allowed = candidate ? body.decision === "allow" : body.allowed;
+      const reasons = body.reasons.map((reason) => typeof reason === "string" ? reason : reason.message);
       result.hidden = false;
-      result.className = `decision-result ${body.allowed ? "allowed" : "denied"}`;
+      result.className = `decision-result ${allowed ? "allowed" : "denied"}`;
+      const effectiveGuardrails = body.guardrails || {};
       const guardrails = ["max_limit", "timeout_seconds", "max_concurrency", "max_joins"]
-        .map((key) => `<span>${escapeHtml(key)}: ${escapeHtml(body.guardrails[key])}</span>`).join("");
+        .filter((key) => effectiveGuardrails[key] !== undefined)
+        .map((key) => `<span>${escapeHtml(key)}: ${escapeHtml(effectiveGuardrails[key])}</span>`).join("");
       result.innerHTML = `
-        <div class="decision-head"><div><p class="eyebrow">Effective active policy</p><h3>${body.allowed ? "Access permitted" : "Access rejected"}</h3></div><span class="status-chip ${body.allowed ? "good" : "bad"}">${body.allowed ? "Allow" : "Deny"}</span></div>
-        <ul>${body.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>
+        <div class="decision-head"><div><p class="eyebrow">Effective ${candidate ? "candidate" : "active"} policy</p><h3>${allowed ? "Access permitted" : "Access rejected"}</h3></div><span class="status-chip ${allowed ? "good" : "bad"}">${allowed ? "Allow" : "Deny"}</span></div>
+        <ul>${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>
         <div class="decision-guardrails">${guardrails}</div>`;
     } catch (error) {
       toast(error.message, "bad");

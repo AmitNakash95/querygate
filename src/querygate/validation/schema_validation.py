@@ -6,14 +6,16 @@ validation/policy_validation.py, before this module ever reflects anything.
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Set, Tuple
+from typing import Callable, Dict, Optional, Set, Tuple
 
 import sqlalchemy as sa
 
 from querygate.core.auth import Principal
 from querygate.connections.engine import get_engine, physical_db_name
+from querygate.connections.models import ConnectionProfile
 from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.exceptions import QueryValidationError
+from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
     DateBucketSelectItem,
@@ -22,6 +24,8 @@ from querygate.query_ast.models import (
     WhereNode,
 )
 from querygate.schema.reflection import get_table_schema, sanitize_table_name
+
+ConnectionResolver = Callable[[str, Optional[Principal]], Tuple[ConnectionProfile, Policy]]
 
 
 def parse_column_ref(col_ref: str) -> Tuple[str, str]:
@@ -107,22 +111,30 @@ async def _load_table(connection_id: str, table_name: str, table_connection: str
     return await get_table_schema(table_name, connection_id, engine, schema=schema)
 
 
-def _check_join_group(
-    query: StructuredQuery, connection_id: str, principal: Optional[Principal] = None
+def resolve_query_table_connections(
+    query: StructuredQuery,
+    connection_id: str,
+    principal: Optional[Principal] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
 ) -> Dict[str, str]:
     """Resolve which connection each table belongs to, rejecting any join
     whose connection isn't in the same policy join_group as the primary.
+
+    ``connection_resolver`` lets the config simulator run this exact
+    production visibility/join-group rule against isolated candidate stores.
+    Normal query execution leaves it unset and therefore uses the live stores.
     """
-    primary, policy = resolve_visible_connection(connection_id, principal=principal)
+    resolver = connection_resolver or (
+        lambda target, actor: resolve_visible_connection(target, principal=actor)
+    )
+    primary, policy = resolver(connection_id, principal)
     primary_group = policy.join_group or primary.effective_join_group()
 
     table_connection: Dict[str, str] = {query.from_table: connection_id}
     for join in query.joins:
         join_connection_id = join.connection or connection_id
         if join_connection_id != connection_id:
-            other, other_policy = resolve_visible_connection(
-                join_connection_id, principal=principal
-            )
+            other, other_policy = resolver(join_connection_id, principal)
             other_group = other_policy.join_group or other.effective_join_group()
             if primary_group != other_group:
                 raise QueryValidationError(
@@ -162,7 +174,7 @@ async def validate_schema(
     Returns the reflected tables, keyed by the name the query used, for the
     compiler.
     """
-    table_connection = _check_join_group(query, connection_id, principal=principal)
+    table_connection = resolve_query_table_connections(query, connection_id, principal=principal)
     _validate_join_graph(query)
 
     needed: Set[str] = {query.from_table}

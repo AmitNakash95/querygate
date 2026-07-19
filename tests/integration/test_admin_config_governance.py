@@ -4,11 +4,17 @@
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from querygate.admin.store import get_config_version_store
 from querygate.api.app import create_app
+from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.config import AppConfig
+from querygate.policy.loader import PolicyStore, set_policy_store
 
 pytestmark = pytest.mark.integration
 
@@ -108,6 +114,81 @@ async def test_preview_endpoint_returns_redacted_document_diff_without_persistin
     }
     assert "max_joins" not in resp.text
     assert len(versions_resp.json()) == 1
+
+
+@pytest.mark.asyncio
+async def test_candidate_simulation_uses_draft_without_persisting_or_changing_live_policy(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("GOV_TEST_DB_URL", "postgresql+asyncpg://user:pass@localhost/x")
+    connections_file, policy_file = _write_source_files(tmp_path)
+    source_connections = Path(connections_file).read_text()
+    source_policy = Path(policy_file).read_text()
+    set_registry(ConnectionRegistry.from_file(connections_file))
+    set_policy_store(PolicyStore.from_file(policy_file))
+    candidate_policy = """
+default:
+  enabled: true
+  denied_tables: [foo]
+  mandatory_row_filters:
+    - table: foo
+      column: hidden_tenant_id
+      value: static-secret-must-not-return
+"""
+    app = create_app(_settings(connections_file, policy_file))
+    candidate_request = {
+        "policy_yaml": candidate_policy,
+        "principal": "reporting-agent",
+        "connection": "gov-demo",
+        "table": "foo",
+        "columns": ["id"],
+        "claims": {"tenant_id": "claim-secret-must-not-return"},
+        "query": {
+            "from": "foo",
+            "select": ["foo.id"],
+            "where": {"col": "foo.id", "op": "eq", "value": "literal-must-not-return"},
+        },
+    }
+    active_request = {
+        "principal": "reporting-agent",
+        "connection": "gov-demo",
+        "table": "foo",
+        "columns": ["id"],
+        "claims": {},
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        calls = []
+        for _ in range(12):
+            calls.extend(
+                [
+                    client.post(
+                        "/api/v1/admin/config/simulate",
+                        json=candidate_request,
+                        headers=_auth(_ADMIN_KEY),
+                    ),
+                    client.post(
+                        "/api/v1/admin/ui/policy/test",
+                        json=active_request,
+                        headers=_auth(_ADMIN_KEY),
+                    ),
+                ]
+            )
+        responses = await asyncio.gather(*calls)
+
+    candidate_responses = responses[0::2]
+    active_responses = responses[1::2]
+    assert all(response.status_code == 200 for response in candidate_responses)
+    assert all(response.json()["decision"] == "deny" for response in candidate_responses)
+    assert all(response.status_code == 200 for response in active_responses)
+    assert all(response.json()["allowed"] is True for response in active_responses)
+    candidate_text = "".join(response.text for response in candidate_responses)
+    assert "static-secret-must-not-return" not in candidate_text
+    assert "claim-secret-must-not-return" not in candidate_text
+    assert "literal-must-not-return" not in candidate_text
+    assert "hidden_tenant_id" not in candidate_text
+    assert get_config_version_store().list_versions() == []
+    assert Path(connections_file).read_text() == source_connections
+    assert Path(policy_file).read_text() == source_policy
 
 
 @pytest.mark.asyncio

@@ -7,12 +7,18 @@ import json
 import pytest
 
 from querygate.admin import service as governance
-from querygate.admin.models import ConfigVersionStatus
-from querygate.admin.store import ConfigVersionStore, set_config_version_store
+from querygate.admin.models import CandidatePolicySimulationRequest, ConfigVersionStatus
+from querygate.admin.store import (
+    ConfigVersionStore,
+    get_config_version_store,
+    set_config_version_store,
+)
 from querygate.audit.sinks import JsonlAuditSink, reset_audit_sink, set_audit_sink
+from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import ConfigValidationError
+from querygate.policy.loader import get_policy_store
 
 _VALID_CONNECTIONS = """
 connections:
@@ -154,6 +160,192 @@ def test_preview_is_audited_without_candidate_content(tmp_path, monkeypatch):
     assert event["principal_id"] == "agent-a"
     assert "max_joins" not in raw
     assert "TEST_ADMIN_URL" not in raw
+
+
+def test_candidate_simulation_uses_isolated_context_and_redacts_values(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    resolved_secret_marker = "resolved-connection-secret"
+    monkeypatch.setenv(
+        "TEST_ADMIN_URL",
+        f"postgresql+asyncpg://user:{resolved_secret_marker}@localhost/x",
+    )
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    live_registry = get_registry()
+    live_policy_store = get_policy_store()
+    static_marker = "static-filter-super-secret"
+    claim_marker = "claim-super-secret"
+    predicate_marker = "query-predicate-super-secret"
+    candidate_policy = f"""
+default:
+  enabled: false
+principals:
+  reporting-agent:
+    fresh:
+      enabled: true
+      allowed_tables: [orders]
+      denied_columns:
+        orders: [customer_email]
+      max_limit: 17
+      mandatory_row_filters:
+        - table: orders
+          column: tenant_id
+          from_claim: tenant_id
+        - table: orders
+          column: region
+          value: {static_marker}
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        Principal(
+            subject="admin-a",
+            scopes=frozenset({"admin:config:read", "admin:config:write"}),
+        ),
+        CandidatePolicySimulationRequest(
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            claims={"tenant_id": claim_marker},
+            connection="fresh",
+            table="orders",
+            columns=["id"],
+            query={
+                "from": "orders",
+                "select": ["orders.id"],
+                "where": {"col": "orders.status", "op": "eq", "value": predicate_marker},
+            },
+        ),
+    )
+
+    assert result.decision == "allow"
+    assert result.query_allowed is True
+    assert result.guardrails is not None
+    assert result.guardrails.max_limit == 17
+    assert [item.model_dump() for item in result.mandatory_filters] == [
+        {
+            "table": "orders",
+            "column": "tenant_id",
+            "source": "claim",
+            "claim": "tenant_id",
+            "ready": True,
+        },
+        {
+            "table": "orders",
+            "column": "region",
+            "source": "configured_literal",
+            "claim": None,
+            "ready": True,
+        },
+    ]
+    serialized = result.model_dump_json()
+    assert static_marker not in serialized
+    assert claim_marker not in serialized
+    assert predicate_marker not in serialized
+    assert resolved_secret_marker not in serialized
+    assert "TEST_ADMIN_URL" not in serialized
+    assert get_config_version_store().list_versions() == []
+    assert get_registry() is live_registry
+    assert get_policy_store() is live_policy_store
+
+
+def test_candidate_simulation_denies_query_and_missing_mandatory_claim(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_policy = """
+default:
+  enabled: true
+  max_select_columns: 1
+  mandatory_row_filters:
+    - table: orders
+      column: tenant_id
+      from_claim: tenant_id
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            connection="fresh",
+            table="orders",
+            query={"from": "orders", "select": ["orders.id", "orders.total"]},
+        ),
+    )
+
+    assert result.decision == "deny"
+    assert result.query_allowed is False
+    assert {reason.code for reason in result.reasons} == {
+        "query_policy_denied",
+        "mandatory_claim_missing",
+    }
+    assert result.mandatory_filters[0].ready is False
+
+
+@pytest.mark.security
+def test_candidate_simulation_does_not_reveal_filters_for_denied_table(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    hidden_column = "hidden_tenant_column"
+    candidate_policy = f"""
+default:
+  enabled: true
+  denied_tables: [payroll]
+  mandatory_row_filters:
+    - table: payroll
+      column: {hidden_column}
+      value: do-not-return
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            connection="fresh",
+            table="payroll",
+        ),
+    )
+
+    assert result.decision == "deny"
+    assert result.mandatory_filters == []
+    assert hidden_column not in result.model_dump_json()
+
+
+@pytest.mark.security
+def test_candidate_simulation_masks_invalid_candidate_content(tmp_path, monkeypatch):
+    audit_path = tmp_path / "simulation-audit.jsonl"
+    set_audit_sink(JsonlAuditSink(str(audit_path)))
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    marker = "static-filter-value-must-not-leak"
+
+    with pytest.raises(ConfigValidationError) as exc_info:
+        governance.simulate_candidate_policy(
+            cfg,
+            _principal(),
+            CandidatePolicySimulationRequest(
+                policy_yaml=f"""
+default:
+  enabled: true
+  mandatory_row_filters:
+    - table: orders
+      column: tenant_id
+      value: {marker}
+      unsupported_field: true
+""",
+                principal="reporting-agent",
+                connection="fresh",
+                table="orders",
+            ),
+        )
+
+    assert marker not in str(exc_info.value)
+    assert marker not in audit_path.read_text()
+    event = json.loads(audit_path.read_text())
+    assert event["action"] == "simulate"
+    assert event["outcome"] == "rejected"
+    assert get_config_version_store().list_versions() == []
 
 
 def test_stage_creates_staged_version_without_activating(tmp_path, monkeypatch):

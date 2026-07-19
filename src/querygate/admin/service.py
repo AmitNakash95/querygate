@@ -15,20 +15,41 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from querygate.admin.models import (
+    CandidateColumnDecision,
+    CandidatePolicySimulation,
+    CandidatePolicySimulationRequest,
+    CandidateSimulationReason,
     ConfigDocumentPreview,
     ConfigPreview,
     ConfigVersion,
     ConfigVersionStatus,
+    EffectiveGuardrails,
+    MandatoryFilterReadiness,
 )
 from querygate.admin.store import ConfigVersionStore, get_config_version_store
 from querygate.audit.logger import audit_config_change
-from querygate.cli import validate_config
+from querygate.cli import LoadedConfigContext, load_config_context, validate_config
 from querygate.config_reload import ReloadResult, reload_config
+from querygate.connections.models import ConnectionProfile
+from querygate.connections.visibility import resolve_visible_connection_from
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
-from querygate.core.exceptions import ConfigValidationError
+from querygate.core.exceptions import (
+    ConfigValidationError,
+    NotFoundError,
+    PolicyViolationError,
+    QueryValidationError,
+)
 from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE
+from querygate.policy.models import Policy
 from querygate.secrets.resolvers import build_secret_resolver_registry
+from querygate.validation.policy_validation import referenced_tables, validate_policy
+from querygate.validation.schema_validation import resolve_query_table_connections
+
+_SAFE_SIMULATION_VALIDATION_ERROR = (
+    "Candidate configuration is invalid; run the config validation endpoint for details "
+    "before simulating it."
+)
 
 
 def _bootstrap(cfg: AppConfig, store: ConfigVersionStore) -> ConfigVersion:
@@ -66,6 +87,268 @@ def _resolve_candidate(
         policy_yaml if policy_yaml is not None else active.policy_yaml,
         catalog_yaml if catalog_yaml is not None else active.catalog_yaml,
     )
+
+
+def _resolve_candidate_without_persisting(
+    cfg: AppConfig,
+    store: ConfigVersionStore,
+    *,
+    connections_yaml: Optional[str],
+    policy_yaml: Optional[str],
+    catalog_yaml: Optional[str],
+) -> Tuple[str, str, Optional[str]]:
+    """Resolve inheritance without bootstrapping config-governance history."""
+    active = store.get_active_version()
+    if active is None:
+        active_connections = Path(cfg.connections_file).read_text()
+        active_policy = Path(cfg.policy_file).read_text()
+        active_catalog = (
+            Path(cfg.catalog_file).read_text()
+            if cfg.catalog_file and Path(cfg.catalog_file).exists()
+            else None
+        )
+    else:
+        active_connections = active.connections_yaml
+        active_policy = active.policy_yaml
+        active_catalog = active.catalog_yaml
+    return (
+        connections_yaml if connections_yaml is not None else active_connections,
+        policy_yaml if policy_yaml is not None else active_policy,
+        catalog_yaml if catalog_yaml is not None else active_catalog,
+    )
+
+
+def _load_isolated_candidate_context(
+    cfg: AppConfig,
+    connections_yaml: str,
+    policy_yaml: str,
+    catalog_yaml: Optional[str],
+) -> LoadedConfigContext:
+    """Use the normal loaders/cross-file checks without installing globals."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        connections_file = tmp_path / "connections.yaml"
+        connections_file.write_text(connections_yaml)
+        policy_file = tmp_path / "policy.yaml"
+        policy_file.write_text(policy_yaml)
+        catalog_file: Optional[str] = None
+        if catalog_yaml is not None:
+            catalog_path = tmp_path / "catalog.yaml"
+            catalog_path.write_text(catalog_yaml)
+            catalog_file = str(catalog_path)
+        context, errors = load_config_context(
+            str(connections_file),
+            str(policy_file),
+            catalog_file,
+            resolver_registry=build_secret_resolver_registry(cfg),
+        )
+    if errors or context is None:
+        # Validation details can echo secret-reference names, static filter
+        # input, or other candidate content. The existing /validate endpoint
+        # is the intentionally detailed surface; simulation stays redacted.
+        raise ConfigValidationError(_SAFE_SIMULATION_VALIDATION_ERROR)
+    return context
+
+
+def _effective_guardrails(policy: Policy) -> EffectiveGuardrails:
+    return EffectiveGuardrails.model_validate(
+        policy.model_dump(include=set(EffectiveGuardrails.model_fields))
+    )
+
+
+def simulate_candidate_policy(
+    cfg: AppConfig,
+    actor: Principal,
+    request: CandidatePolicySimulationRequest,
+) -> CandidatePolicySimulation:
+    """Evaluate an uncommitted candidate without mutating live config state."""
+    start = time.monotonic()
+    store = get_config_version_store()
+    try:
+        resolved_connections, resolved_policy, resolved_catalog = (
+            _resolve_candidate_without_persisting(
+                cfg,
+                store,
+                connections_yaml=request.connections_yaml,
+                policy_yaml=request.policy_yaml,
+                catalog_yaml=request.catalog_yaml,
+            )
+        )
+        context = _load_isolated_candidate_context(
+            cfg, resolved_connections, resolved_policy, resolved_catalog
+        )
+    except ConfigValidationError:
+        audit_config_change(
+            action="simulate",
+            outcome="rejected",
+            principal=actor.subject,
+            principal_scopes=sorted(actor.scopes),
+            auth_method=actor.auth_method,
+            error_category="validation",
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        raise
+
+    target = Principal(
+        subject=request.principal,
+        claims=request.claims,
+        auth_method="admin_candidate_simulation",
+    )
+    reasons: list[CandidateSimulationReason] = []
+
+    def candidate_resolver(
+        connection_id: str, principal: Optional[Principal]
+    ) -> Tuple[ConnectionProfile, Policy]:
+        return resolve_visible_connection_from(
+            context.registry,
+            context.policy_store,
+            connection_id,
+            principal=principal,
+        )
+
+    try:
+        _profile, policy = candidate_resolver(request.connection, target)
+    except NotFoundError:
+        result = CandidatePolicySimulation(
+            decision="deny",
+            principal=request.principal,
+            connection=request.connection,
+            table=request.table,
+            query_evaluated=request.query is not None,
+            query_allowed=False if request.query is not None else None,
+            reasons=[
+                CandidateSimulationReason(
+                    code="connection_not_visible",
+                    message=(
+                        "The target connection is not visible to this principal under the "
+                        "candidate configuration."
+                    ),
+                )
+            ],
+        )
+        audit_config_change(
+            action="simulate",
+            outcome="success",
+            principal=actor.subject,
+            principal_scopes=sorted(actor.scopes),
+            auth_method=actor.auth_method,
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        return result
+
+    column_decisions: list[CandidateColumnDecision] = []
+    requested_table_allowed = (
+        policy.table_allowed(request.table) if request.table is not None else True
+    )
+    if not requested_table_allowed:
+        reasons.append(
+            CandidateSimulationReason(
+                code="table_denied",
+                message="The requested table is denied by the effective candidate policy.",
+            )
+        )
+    for column in request.columns:
+        allowed = requested_table_allowed and policy.column_allowed(request.table or "", column)
+        column_decisions.append(CandidateColumnDecision(column=column, allowed=allowed))
+        if not allowed:
+            reasons.append(
+                CandidateSimulationReason(
+                    code="column_denied",
+                    message=("A requested column is denied by the effective candidate policy."),
+                )
+            )
+
+    query_allowed: Optional[bool] = None
+    requested_tables = {request.table} if request.table is not None else set()
+    if request.query is not None:
+        requested_tables.update(referenced_tables(request.query))
+        query_allowed = True
+        try:
+            validate_policy(request.query, policy, connection_id=request.connection)
+        except PolicyViolationError as exc:
+            query_allowed = False
+            reasons.append(CandidateSimulationReason(code="query_policy_denied", message=str(exc)))
+        if query_allowed:
+            try:
+                resolve_query_table_connections(
+                    request.query,
+                    request.connection,
+                    principal=target,
+                    connection_resolver=candidate_resolver,
+                )
+            except (NotFoundError, QueryValidationError):
+                query_allowed = False
+                reasons.append(
+                    CandidateSimulationReason(
+                        code="query_connection_denied",
+                        message=(
+                            "The structured query references a connection that is not visible "
+                            "to the target principal or is outside the candidate join group."
+                        ),
+                    )
+                )
+
+    # Do not enumerate mandatory-filter identifiers for a table the target
+    # policy itself hides. Requested names may still receive a table-denied
+    # decision, but no additional hidden policy metadata rides with it.
+    requested_table_keys = {
+        table.casefold() for table in requested_tables if policy.table_allowed(table)
+    }
+    filter_readiness: list[MandatoryFilterReadiness] = []
+    for row_filter in policy.mandatory_row_filters:
+        if row_filter.table.casefold() not in requested_table_keys:
+            continue
+        ready = True
+        if row_filter.from_claim is not None:
+            try:
+                row_filter.resolve(target)
+            except PolicyViolationError:
+                ready = False
+                reasons.append(
+                    CandidateSimulationReason(
+                        code="mandatory_claim_missing",
+                        message="A mandatory row-filter claim is missing for the target principal.",
+                    )
+                )
+        filter_readiness.append(
+            MandatoryFilterReadiness(
+                table=row_filter.table,
+                column=row_filter.column,
+                source=("claim" if row_filter.from_claim is not None else "configured_literal"),
+                claim=row_filter.from_claim,
+                ready=ready,
+            )
+        )
+
+    if not reasons:
+        reasons.append(
+            CandidateSimulationReason(
+                code="allowed",
+                message="The candidate policy permits the requested access shape.",
+            )
+        )
+    decision = "allow" if all(reason.code == "allowed" for reason in reasons) else "deny"
+    result = CandidatePolicySimulation(
+        decision=decision,
+        principal=request.principal,
+        connection=request.connection,
+        table=request.table,
+        columns=column_decisions,
+        query_evaluated=request.query is not None,
+        query_allowed=query_allowed,
+        mandatory_filters=filter_readiness,
+        guardrails=_effective_guardrails(policy),
+        reasons=reasons,
+    )
+    audit_config_change(
+        action="simulate",
+        outcome="success",
+        principal=actor.subject,
+        principal_scopes=sorted(actor.scopes),
+        auth_method=actor.auth_method,
+        duration_ms=int((time.monotonic() - start) * 1000),
+    )
+    return result
 
 
 def validate_candidate_content(
