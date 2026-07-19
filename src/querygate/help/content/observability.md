@@ -2,12 +2,17 @@
 id: operations.observability
 title: Operate and observe QueryGate
 summary: Use health, metrics, structured logs, persisted audit events, timeouts, and concurrency controls to operate QueryGate safely.
-tags: [operations, health, readiness, metrics, prometheus, logs, audit, timeout, concurrency, redis]
+tags: [operations, health, readiness, metrics, prometheus, logs, audit, timeout, concurrency, redis, connections]
 next_actions:
   - Monitor health, rejection counters, latency, truncation, and audit-sink failures.
 ---
 `/health` reports service version and aggregate connection health without
-revealing connection identifiers. `/metrics` provides Prometheus-format
+revealing connection identifiers. For per-connection operational detail,
+`GET /api/v1/admin/connections` (scope `admin:connections:read`) returns a
+credential-free status for each configured connection — dialect, enabled state,
+healthy/degraded/disabled/unknown status, last check and last success, latency,
+schema-reflected state, and a stable redacted failure category — never a
+connection string or raw driver error. `/metrics` provides Prometheus-format
 operational metrics. Structured application logs carry request correlation
 IDs, while persisted audit events record normalized query shape, caller,
 surface, outcome, timing, and bounded result metadata without predicate

@@ -82,3 +82,84 @@ async def test_one_connection_failure_does_not_block_others():
             assert snapshot["bad"].healthy is False
         finally:
             await monitor.stop()
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (TimeoutError(), "timeout"),
+        (ConnectionRefusedError(), "unreachable"),
+        (OSError("network is unreachable"), "unreachable"),
+        (ConnectionError("reset"), "unreachable"),
+        (type("InvalidPasswordError", (Exception,), {})(), "authentication"),
+        (type("LoginTimeoutError", (Exception,), {})(), "authentication"),
+        (type("SomeConnectError", (Exception,), {})(), "unreachable"),
+        (type("QueryError", (Exception,), {})(), "error"),
+    ],
+)
+def test_classify_failure_categories(exc, expected):
+    assert health_module.classify_failure(exc) == expected
+
+
+def test_classify_failure_unwraps_sqlalchemy_style_wrappers():
+    """A driver error wrapped by SQLAlchemy (`.orig`) or explicitly chained
+    (`raise ... from`) must still classify by the underlying cause, not fall
+    through to the generic 'error' bucket."""
+
+    class _DBAPIError(Exception):
+        def __init__(self, orig):
+            super().__init__("(OperationalError) connection failed")
+            self.orig = orig
+
+    # SQLAlchemy-style .orig wrapping.
+    wrapped = _DBAPIError(orig=ConnectionRefusedError("refused"))
+    assert health_module.classify_failure(wrapped) == "unreachable"
+
+    # Explicit __cause__ chaining.
+    try:
+        try:
+            raise TimeoutError("connect timeout")
+        except TimeoutError as inner:
+            raise RuntimeError("wrapper") from inner
+    except RuntimeError as outer:
+        assert health_module.classify_failure(outer) == "timeout"
+
+
+def test_classify_failure_never_uses_the_message():
+    # A driver error embedding host/user/password must classify by type only.
+    leaky = type("WeirdError", (Exception,), {})("host=db.internal user=admin password=hunter2")
+    category = health_module.classify_failure(leaky)
+    assert category == "error"
+    for secret in ("db.internal", "admin", "hunter2"):
+        assert secret not in category
+
+
+@pytest.mark.asyncio
+async def test_check_once_records_latency_and_last_success():
+    with patch.object(health_module, "_ping", new_callable=AsyncMock):
+        monitor = HealthMonitor(interval_seconds=1000)
+        await monitor._check_once("demo")
+    status = monitor.snapshot()["demo"]
+    assert status.healthy is True
+    assert status.last_success is not None
+    assert status.latency_ms is not None and status.latency_ms >= 0
+    assert status.failure_category is None
+
+
+@pytest.mark.asyncio
+async def test_last_success_persists_across_a_later_failure():
+    with patch.object(health_module, "_ping", new_callable=AsyncMock):
+        monitor = HealthMonitor(interval_seconds=1000)
+        await monitor._check_once("demo")
+    first_success = monitor.snapshot()["demo"].last_success
+    assert first_success is not None
+
+    with patch.object(
+        health_module, "_ping", new_callable=AsyncMock, side_effect=ConnectionRefusedError("no")
+    ):
+        await monitor._check_once("demo")
+    after = monitor.snapshot()["demo"]
+    assert after.healthy is False
+    assert after.failure_category == "unreachable"
+    # The last known-good timestamp survives the failure for the admin view.
+    assert after.last_success == first_success
