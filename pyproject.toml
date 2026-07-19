@@ -38,7 +38,6 @@ uvicorn = ">=0.29.0"
 fastapi = ">=0.115.12"
 python-dotenv = "1.1.0"
 asyncpg = "^0.30.0"
-aiosqlite = "^0.22.1"
 mcp = ">=1.9.0"
 httpx = "^0.28.1"
 loguru = "^0.7.3"
@@ -58,6 +57,7 @@ lupa = "^2.8"
 pytest-cov = "6.0.0"
 cyclonedx-bom = "^7.3.0"
 pip-audit = "^2.10.1"
+aiosqlite = "^0.22.1"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
