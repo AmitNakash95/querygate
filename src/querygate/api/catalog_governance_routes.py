@@ -1,12 +1,13 @@
-"""REST admin API for catalog governance (TODO.md item 32B-1).
+"""REST admin API for catalog governance (TODO.md item 32B).
 
-Privileged review/edit/approve/reject/publish/rollback workflow for quarantined
-inferred draft proposals (32A-2). Agent-facing catalog retrieval
-(`GET /{connection}/catalog/search`, `describe_table`) stays read-only and
-principal-filtered in `api/routes.py` — this router never changes that
-surface, it only lets an authorized reviewer move a proposal through its
-state machine and, on publish, merge it into the catalog every caller
-already reads from.
+Privileged review/edit/approve/reject/publish/rollback workflow (32B-1) for
+quarantined inferred draft proposals (32A-2), plus export/import
+(backup/restore) and retention/deletion (32B-2). Agent-facing catalog
+retrieval (`GET /{connection}/catalog/search`, `describe_table`) stays
+read-only and principal-filtered in `api/routes.py` — this router never
+changes that surface, it only lets an authorized reviewer move a proposal
+through its state machine and, on publish, merge it into the catalog every
+caller already reads from.
 
 Every mutation goes through the same `CatalogFileRepository` lock 32A's
 refresh/generate-drafts already use (see `catalog/governance.py`) — there is
@@ -22,6 +23,7 @@ from typing import Callable, List, Optional
 
 import pydantic as pyd
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 
 from querygate.audit.logger import audit_catalog_governance
 from querygate.catalog import governance
@@ -31,6 +33,7 @@ from querygate.catalog.models import (
     CatalogDraftContent,
     CatalogDraftProposal,
     CatalogDraftTarget,
+    CatalogExportBundle,
     CatalogVersionRecord,
     ProposalReviewStatus,
 )
@@ -46,7 +49,9 @@ from querygate.core.config import AppConfig
 from querygate.core.exceptions import CatalogGovernanceError, NotFoundError
 from querygate.core.scopes import (
     CATALOG_APPROVE_SCOPE,
+    CATALOG_DELETE_SCOPE,
     CATALOG_EDIT_SCOPE,
+    CATALOG_EXPORT_SCOPE,
     CATALOG_GENERATE_SCOPE,
     CATALOG_PUBLISH_SCOPE,
     CATALOG_REJECT_SCOPE,
@@ -561,5 +566,99 @@ def build_catalog_governance_router(
             version_id=update.version_id,
             rolled_back_version_id=update.rolled_back_version_id,
         )
+
+    @router.get("/{connection}/export", response_model=CatalogExportBundle)
+    async def export_connection_endpoint(
+        connection: str, principal: Principal = Depends(get_principal)
+    ):
+        _require_scope(principal, CATALOG_EXPORT_SCOPE)
+        _require_known_connection(connection)
+        start = time.monotonic()
+        store = get_catalog_store()
+        bundle = governance.export_connection(store, connection_id=connection)
+        audit_catalog_governance(
+            action="export",
+            outcome="success",
+            principal=principal.subject,
+            principal_scopes=sorted(principal.scopes),
+            auth_method=principal.auth_method,
+            connection_id=connection,
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        # Returned as a raw JSONResponse (response_model is documentation
+        # only here) so `round_trip=True` can omit computed fields (e.g.
+        # provenance precedence) — the same reason CatalogStore.to_dict()
+        # uses it — letting this exact response body be POSTed straight to
+        # /import without a validation error.
+        return JSONResponse(
+            content=bundle.model_dump(mode="json", exclude_none=True, round_trip=True)
+        )
+
+    @router.post("/{connection}/import", response_model=GovernanceActionResult)
+    async def import_connection_endpoint(
+        connection: str, bundle: CatalogExportBundle, principal: Principal = Depends(get_principal)
+    ):
+        update = await _run_mutation(
+            action="import",
+            scope=CATALOG_EXPORT_SCOPE,
+            connection=connection,
+            principal=principal,
+            proposal_id=None,
+            mutator=lambda store: governance.import_connection(
+                store, bundle=bundle, connection_id=connection, actor=principal.subject
+            ),
+        )
+        return GovernanceActionResult(outcome=update.outcome)
+
+    @router.delete("/{connection}/proposals/{proposal_id}", response_model=GovernanceActionResult)
+    async def delete_proposal_endpoint(
+        connection: str, proposal_id: str, principal: Principal = Depends(get_principal)
+    ):
+        update = await _run_mutation(
+            action="delete_proposal",
+            scope=CATALOG_DELETE_SCOPE,
+            connection=connection,
+            principal=principal,
+            proposal_id=proposal_id,
+            mutator=lambda store: governance.delete_proposal(
+                store, proposal_id=proposal_id, connection_id=connection, actor=principal.subject
+            ),
+        )
+        return GovernanceActionResult(outcome=update.outcome, proposal_id=update.proposal_id)
+
+    @router.post("/{connection}/proposals/bulk-delete", response_model=BulkResult)
+    async def bulk_delete_proposals_endpoint(
+        connection: str,
+        request: BulkProposalRequest,
+        principal: Principal = Depends(get_principal),
+    ):
+        proposal_ids = tuple(request.proposal_ids)
+        update = await _run_mutation(
+            action="bulk_delete",
+            scope=CATALOG_DELETE_SCOPE,
+            connection=connection,
+            principal=principal,
+            proposal_id=None,
+            mutator=lambda store: governance.bulk_delete_proposals(
+                store, proposal_ids=proposal_ids, connection_id=connection, actor=principal.subject
+            ),
+        )
+        return BulkResult(outcome=update.outcome, proposal_ids=list(update.proposal_ids))
+
+    @router.delete("/{connection}/versions/{version_id}", response_model=GovernanceActionResult)
+    async def delete_version_endpoint(
+        connection: str, version_id: str, principal: Principal = Depends(get_principal)
+    ):
+        update = await _run_mutation(
+            action="delete_version",
+            scope=CATALOG_DELETE_SCOPE,
+            connection=connection,
+            principal=principal,
+            proposal_id=None,
+            mutator=lambda store: governance.delete_version_record(
+                store, version_id=version_id, connection_id=connection, actor=principal.subject
+            ),
+        )
+        return GovernanceActionResult(outcome=update.outcome, version_id=update.version_id)
 
     return router

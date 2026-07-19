@@ -576,6 +576,49 @@ class CatalogGenerationRecord(pyd.BaseModel):
         return self
 
 
+class CatalogExportBundle(pyd.BaseModel):
+    """A connection-scoped, self-contained snapshot for export/backup and
+    import/restore (TODO item 32B-2). Contains exactly the same kinds of
+    content already privileged behind ``catalog:review``/``catalog:export``
+    (published entries, quarantined draft proposals with review history,
+    generation records, version history, and the schema snapshot) — never
+    row values, credentials, or anything not already part of the catalog
+    file's own privileged record.
+    """
+
+    export_version: Literal[1] = 1
+    connection_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=100)]
+    exported_at: pyd.AwareDatetime
+    catalog_version: int = pyd.Field(ge=1)
+    tables: dict[str, TableCatalogEntry] = pyd.Field(default_factory=dict)
+    schema_snapshot: Optional[ObservedSchemaSnapshot] = None
+    draft_proposals: list[CatalogDraftProposal] = pyd.Field(default_factory=list)
+    generation_records: list[CatalogGenerationRecord] = pyd.Field(default_factory=list)
+    version_history: list[CatalogVersionRecord] = pyd.Field(default_factory=list)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _content_matches_connection(self) -> "CatalogExportBundle":
+        if (
+            self.schema_snapshot is not None
+            and self.schema_snapshot.connection_id != self.connection_id
+        ):
+            raise ValueError("export schema_snapshot must match the bundle's connection_id")
+        if any(p.target.connection_id != self.connection_id for p in self.draft_proposals):
+            raise ValueError("export draft_proposals must all target the bundle's connection_id")
+        if any(r.connection_id != self.connection_id for r in self.generation_records):
+            raise ValueError(
+                "export generation_records must all belong to the bundle's connection_id"
+            )
+        if any(
+            record.changes[0].target.connection_id != self.connection_id
+            for record in self.version_history
+        ):
+            raise ValueError("export version_history must all target the bundle's connection_id")
+        return self
+
+
 class SchemaCatalog(pyd.BaseModel):
     # Version 1 remains accepted.  CatalogStore upgrades its entries in
     # memory with deterministic provenance; new files should use version 2.

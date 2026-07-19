@@ -1,6 +1,6 @@
 """Integration tests for the catalog-governance admin API
 (querygate/api/catalog_governance_routes.py) — full REST review/publish/
-rollback flow (TODO.md item 32B-1).
+rollback (32B-1) and export/import/delete (32B-2) flows.
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ _ALL_CATALOG_SCOPES = [
     "catalog:reject",
     "catalog:publish",
     "catalog:rollback",
+    "catalog:export",
+    "catalog:delete",
 ]
 
 
@@ -240,3 +242,102 @@ async def test_unknown_connection_and_unknown_proposal_return_404(sources):
             "/api/v1/admin/catalog/demo/proposals/does-not-exist", headers=_auth()
         )
         assert unknown_proposal.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_export_import_round_trip_via_rest(sources):
+    connections_file, policy_file, catalog_file, snapshot = sources
+    app = create_app(
+        _settings(connections_file, policy_file, catalog_file, scopes=_ALL_CATALOG_SCOPES)
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        gen_resp = await client.post(
+            "/api/v1/admin/catalog/demo/generate-drafts",
+            json={"batch": _batch(snapshot)},
+            headers=_auth(),
+        )
+        assert gen_resp.status_code == 201
+        proposal_id = (
+            await client.get("/api/v1/admin/catalog/demo/proposals", headers=_auth())
+        ).json()[0]["proposal_id"]
+        await client.post(
+            f"/api/v1/admin/catalog/demo/proposals/{proposal_id}/approve", headers=_auth()
+        )
+        await client.post(
+            f"/api/v1/admin/catalog/demo/proposals/{proposal_id}/publish", headers=_auth()
+        )
+
+        export_resp = await client.get("/api/v1/admin/catalog/demo/export", headers=_auth())
+        assert export_resp.status_code == 200
+        bundle = export_resp.json()
+        assert bundle["connection_id"] == "demo"
+        assert len(bundle["draft_proposals"]) == 1
+        # The exported bundle must round-trip: no computed field (e.g.
+        # provenance precedence) leaks into the response and blocks re-import.
+        assert "precedence" not in str(bundle)
+
+        import_resp = await client.post(
+            "/api/v1/admin/catalog/demo/import", json=bundle, headers=_auth()
+        )
+        assert import_resp.status_code == 200
+        assert import_resp.json()["outcome"] == "imported"
+
+        after_import = await client.get(
+            "/api/v1/demo/catalog/search", params={"q": "customer master"}, headers=_auth()
+        )
+        assert any(hit["table"] == "customers" for hit in after_import.json()["results"])
+
+
+@pytest.mark.asyncio
+async def test_import_requires_matching_connection_id_via_rest(sources):
+    connections_file, policy_file, catalog_file, snapshot = sources
+    app = create_app(
+        _settings(connections_file, policy_file, catalog_file, scopes=_ALL_CATALOG_SCOPES)
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        bundle = {
+            "export_version": 1,
+            "connection_id": "not-demo",
+            "exported_at": "2026-01-01T00:00:00Z",
+            "catalog_version": 2,
+        }
+        resp = await client.post("/api/v1/admin/catalog/demo/import", json=bundle, headers=_auth())
+        assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_delete_and_bulk_delete_via_rest(sources):
+    connections_file, policy_file, catalog_file, snapshot = sources
+    app = create_app(
+        _settings(connections_file, policy_file, catalog_file, scopes=_ALL_CATALOG_SCOPES)
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        gen_resp = await client.post(
+            "/api/v1/admin/catalog/demo/generate-drafts",
+            json={"batch": _batch(snapshot, generation_id="gen-delete")},
+            headers=_auth(),
+        )
+        assert gen_resp.status_code == 201
+        proposal_id = (
+            await client.get("/api/v1/admin/catalog/demo/proposals", headers=_auth())
+        ).json()[0]["proposal_id"]
+
+        # A pending proposal cannot be deleted directly.
+        early_delete = await client.delete(
+            f"/api/v1/admin/catalog/demo/proposals/{proposal_id}", headers=_auth()
+        )
+        assert early_delete.status_code == 409
+
+        await client.post(
+            f"/api/v1/admin/catalog/demo/proposals/{proposal_id}/reject",
+            json={"reason": "cleanup"},
+            headers=_auth(),
+        )
+        delete_resp = await client.delete(
+            f"/api/v1/admin/catalog/demo/proposals/{proposal_id}", headers=_auth()
+        )
+        assert delete_resp.status_code == 200
+        assert delete_resp.json()["outcome"] == "deleted"
+
+        list_resp = await client.get("/api/v1/admin/catalog/demo/proposals", headers=_auth())
+        assert list_resp.json() == []

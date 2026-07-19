@@ -15,8 +15,12 @@ from querygate.catalog.schema_memory import ObservedSchemaSnapshot
 from querygate.catalog_cli import (
     approve_proposal,
     default_benchmark_path,
+    delete_proposal,
+    delete_version,
     edit_proposal,
+    export_connection,
     generate_manual_drafts_file,
+    import_connection,
     list_proposals,
     list_versions,
     publish_proposal,
@@ -240,6 +244,106 @@ def test_cli_show_unknown_proposal_raises_not_found(tmp_path):
     catalog_path, _snapshot = _catalog_file(tmp_path)
     with pytest.raises(NotFoundError):
         show_proposal(catalog_file=str(catalog_path), connection_id="demo", proposal_id="nope")
+
+
+def _cli_publish(tmp_path: Path) -> tuple[Path, str]:
+    catalog_path, proposal_id = _catalog_with_pending_proposal(tmp_path)
+    approve_proposal(
+        catalog_file=str(catalog_path),
+        connection_id="demo",
+        proposal_id=proposal_id,
+        actor="reviewer",
+    )
+    publish_proposal(
+        catalog_file=str(catalog_path),
+        connection_id="demo",
+        proposal_id=proposal_id,
+        actor="publisher",
+    )
+    return catalog_path, proposal_id
+
+
+def test_cli_export_import_round_trip(tmp_path):
+    catalog_path, proposal_id = _cli_publish(tmp_path)
+
+    import json as _json
+
+    bundle = export_connection(catalog_file=str(catalog_path), connection_id="demo")
+    bundle_file = tmp_path / "bundle.json"
+    bundle_file.write_text(_json.dumps(bundle))
+
+    fresh_catalog = tmp_path / "restored.yaml"
+    fresh_catalog.write_text(yaml.safe_dump({"version": 2, "connections": {}}))
+    result = import_connection(
+        catalog_file=str(fresh_catalog),
+        connection_id="demo",
+        bundle_file=str(bundle_file),
+        actor="operator",
+    )
+    assert result["outcome"] == "imported"
+
+    restored = CatalogStore.from_file(str(fresh_catalog))
+    assert restored.get_table("demo", "customers").description == "Customer master data."
+    assert restored.get_draft_proposal(proposal_id).review_status.value == "published"
+
+
+def test_cli_delete_rejected_proposal(tmp_path):
+    catalog_path, proposal_id = _catalog_with_pending_proposal(tmp_path)
+    from querygate.catalog_cli import reject_proposal as _reject
+
+    _reject(
+        catalog_file=str(catalog_path),
+        connection_id="demo",
+        proposal_id=proposal_id,
+        actor="reviewer",
+        reason="no longer needed",
+    )
+    result = delete_proposal(
+        catalog_file=str(catalog_path),
+        connection_id="demo",
+        proposal_id=proposal_id,
+        actor="operator",
+    )
+    assert result["outcome"] == "deleted"
+    assert CatalogStore.from_file(str(catalog_path)).get_draft_proposal(proposal_id) is None
+
+
+def test_cli_delete_published_proposal_requires_rollback_first(tmp_path):
+    catalog_path, proposal_id = _cli_publish(tmp_path)
+    with pytest.raises(CatalogGovernanceError, match="still live"):
+        delete_proposal(
+            catalog_file=str(catalog_path),
+            connection_id="demo",
+            proposal_id=proposal_id,
+            actor="operator",
+        )
+
+    rollback_version(
+        catalog_file=str(catalog_path), connection_id="demo", version_id="1", actor="operator"
+    )
+    result = delete_proposal(
+        catalog_file=str(catalog_path),
+        connection_id="demo",
+        proposal_id=proposal_id,
+        actor="operator",
+    )
+    assert result["outcome"] == "deleted"
+
+
+def test_cli_delete_version_only_allows_rollback_records(tmp_path):
+    catalog_path, _proposal_id = _cli_publish(tmp_path)
+    with pytest.raises(CatalogGovernanceError, match="rollback record"):
+        delete_version(
+            catalog_file=str(catalog_path), connection_id="demo", version_id="1", actor="operator"
+        )
+
+    rollback_version(
+        catalog_file=str(catalog_path), connection_id="demo", version_id="1", actor="operator"
+    )
+    result = delete_version(
+        catalog_file=str(catalog_path), connection_id="demo", version_id="2", actor="operator"
+    )
+    assert result["outcome"] == "deleted"
 
 
 def test_semantic_memory_configuration_is_safe_by_default_and_rejects_live_mode():

@@ -61,7 +61,7 @@ order-of-magnitude, not commitments.
 | 29 | ✅ Production deployment reference stack | M | 4, 9, 12, 13, 14 |
 | 30 | ✅ Distribution, SBOM, and signed release artifacts (phase 1: SBOM + audit; phase 2: publishing + signing not started) | M | 4, 14 |
 | 31 | Admin UI / policy designer | XL | 25 |
-| 32 | Governed adaptive semantic memory for agents (32A ✅; 32B-1 ✅; 32B-2/32C not started) | XL | 23, 25, 27, 28 |
+| 32 | Governed adaptive semantic memory for agents (32A ✅; 32B ✅; 32C not started) | XL | 23, 25, 27, 28 |
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
 | 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
@@ -1861,12 +1861,65 @@ independent of every other; `catalog:review` alone cannot mutate anything;
 unauthenticated callers are rejected; a proposal cannot publish itself
 before an explicit, separately-scoped approval).
 
-**Explicitly out of scope for this pass, and not silently dropped — see
-32B-2 below:** export/import, backup/restore, retention/deletion of catalog
-governance records, and their `catalog:export`/`catalog:delete` scopes.
-32C's adaptive usage-learning loop has not started, and 32C must not begin
-until 32B-2 either ships or is deliberately deferred with the same
-explicitness as this note.
+**32B-2 shipped — export/import, backup/restore, and retention/deletion.**
+Completes 32B (all nine catalog-governance scopes are now implemented) on
+top of 32B-1's state machine, still through the same `CatalogFileRepository`
+lock and no second catalog file:
+
+- `export_connection`/`import_connection` (gated by one bidirectional
+  `catalog:export` scope) are a single mechanism serving both data
+  portability and disaster recovery: export produces a self-contained,
+  connection-scoped `CatalogExportBundle` (published entries, quarantined
+  proposals with full review history, generation records, version history,
+  and the schema snapshot); import is a full, destructive replace of that
+  connection's governed content from a bundle. Both `version_id`s and
+  `generation_id`s are file-global, not per-connection, so import re-numbers/
+  de-duplicates them against the target catalog's current content — an
+  operator-chosen generation id like `"onboarding-1"` reused across two
+  environments' exports, or two independently-numbered version histories,
+  can never collide or corrupt an unrelated connection's history on import.
+  Every internal cross-reference (`rolled_back_version_id`, a proposal's
+  `published_version_id`/`generation_id`) is remapped consistently.
+- `delete_proposal`/`bulk_delete_proposals`/`delete_version_record` (gated
+  by `catalog:delete`) prune only terminal-state records: a rejected
+  proposal deletes standalone; a published-then-rolled-back proposal is
+  deleted together with its now-reverted publish record *and* the rollback
+  record that reverted it (that rollback record's own
+  `rolled_back_version_id` would otherwise dangle-reference a deleted
+  record — the model's own referential-integrity validators catch this,
+  which is how the cascade requirement was found); a standalone rollback
+  record (never referenced by anything else) deletes on its own. A proposal
+  that is still `pending`/`approved`, or `published` with its publish still
+  live, can never be deleted — it must be rejected or rolled back first —
+  so deletion can never destroy the only record of why current catalog
+  content exists. Deleting a proposal also removes its id from its
+  generation record's `proposal_ids` list to keep that reference valid.
+  Bulk delete is bounded to 50 ids and atomic, matching 32B-1's other bulk
+  operations.
+- New REST endpoints under the same `/api/v1/admin/catalog/{connection}/...`
+  prefix: `GET .../export`, `POST .../import`, `DELETE .../proposals/{id}`,
+  `POST .../proposals/bulk-delete`, `DELETE .../versions/{id}`. New CLI
+  subcommands: `export`, `import`, `delete-proposal`, `delete-version`.
+  Every action emits a redaction-safe `catalog.governance` audit event
+  (`export`/`import`/`delete_proposal`/`bulk_delete`/`delete_version`
+  actions), never draft content or raw catalog YAML.
+- "Migration" (the remaining word in the original 32B non-negotiable list)
+  needed no new code: legacy version-1 catalogs already upgrade in memory
+  to durably-provenanced version-2 content (`catalog/loader.py`'s
+  `_normalize_catalog`, shipped with 32A-1), and every 32B-1/32B-2 field
+  added to `CatalogDraftProposal`/`SchemaCatalog` has a Pydantic default, so
+  a catalog file written before this item shipped still loads correctly.
+
+Covered by new export/import/deletion sections in
+`tests/unit/test_catalog_governance.py` (self-contained bundles, a
+publish→export→import round trip into a fresh store, cross-connection
+version/generation id collision avoidance, destructive-replace semantics,
+and every deletion precondition/cascade), `tests/unit/test_catalog_cli.py`,
+`tests/integration/test_catalog_governance_rest.py` (REST export/import
+round trip — including that the exported response body can be POSTed
+straight back to `/import` without a computed-field validation error — and
+delete/bulk-delete), and new adversarial tests proving `catalog:export`/
+`catalog:delete` are independent of each other and of every 32B-1 scope.
 
 **32A-1 shipped — durable provenance, schema fingerprints/diffs, and
 policy-first retrieval.** This is an independently deployable first slice of
@@ -2168,17 +2221,19 @@ injecting an ever-growing document into every prompt.
    publish with reviewable-conflict detection, durable version history +
    authorized rollback, REST + CLI surfaces, seven least-privilege scopes,
    and redaction-safe audit events. See the shipped note above.
-4. **32B-2 — Catalog-governance lifecycle (not started):** export/import,
-   backup/restore, retention/deletion of proposals and version history, and
-   the `catalog:export`/`catalog:delete` scopes 32B-1 deliberately left
-   unimplemented rather than half-built.
-5. **32C — Adaptive learning and hardening (not started, blocked on 32B-2):**
-   add redaction-safe usage signals, feedback/correction proposals,
-   confidence/decay/conflict rules, background-job resilience, full
-   observability, adversarial coverage, and load tests.
+4. **32B-2 — Catalog-governance lifecycle ✅ DONE:** export/import
+   (backup/restore, one bidirectional `catalog:export` scope with
+   file-global id remapping) and retention/deletion (`catalog:delete`,
+   cascade-safe against every referential-integrity rule the state machine
+   established). See the shipped note above. All nine 32B scopes now exist.
+5. **32C — Adaptive learning and hardening (not started, 32B's governance
+   boundary is now complete):** add redaction-safe usage signals,
+   feedback/correction proposals, confidence/decay/conflict rules,
+   background-job resilience, full observability, adversarial coverage, and
+   load tests.
 
 Each phase must be independently deployable and fail safely. Generated or
-learned content remains opt-in until its governed publish path (32B-1) has
+learned content remains opt-in until its governed publish path (32B) has
 authorized it.
 
 #### Definition of done

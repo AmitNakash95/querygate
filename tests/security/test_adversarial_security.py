@@ -1047,3 +1047,85 @@ async def test_a_draft_proposal_cannot_publish_itself(tmp_path, monkeypatch):
             "/api/v1/demo/catalog/search", params={"q": "never auto-verified"}, headers=headers
         )
         assert search_resp.json()["results"] == []
+
+
+@pytest.mark.asyncio
+async def test_catalog_export_and_delete_scopes_are_independent(tmp_path, monkeypatch):
+    """32B-2: `catalog:export` and `catalog:delete` are their own
+    least-privilege scopes — neither review nor publish access implies
+    either of them, and each is independent of the other.
+    """
+    app = create_app(
+        _catalog_governance_app(
+            tmp_path, scopes=["catalog:review", "catalog:publish"], monkeypatch=monkeypatch
+        )
+    )
+    headers = {"Authorization": "Bearer catalog-governance-caller-key"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        export_resp = await client.get("/api/v1/admin/catalog/demo/export", headers=headers)
+        import_resp = await client.post(
+            "/api/v1/admin/catalog/demo/import",
+            json={
+                "connection_id": "demo",
+                "exported_at": "2026-01-01T00:00:00Z",
+                "catalog_version": 2,
+            },
+            headers=headers,
+        )
+        delete_proposal_resp = await client.delete(
+            "/api/v1/admin/catalog/demo/proposals/anything", headers=headers
+        )
+        bulk_delete_resp = await client.post(
+            "/api/v1/admin/catalog/demo/proposals/bulk-delete",
+            json={"proposal_ids": ["anything"]},
+            headers=headers,
+        )
+        delete_version_resp = await client.delete(
+            "/api/v1/admin/catalog/demo/versions/1", headers=headers
+        )
+
+    assert export_resp.status_code == 403
+    assert import_resp.status_code == 403
+    assert delete_proposal_resp.status_code == 403
+    assert bulk_delete_resp.status_code == 403
+    assert delete_version_resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_catalog_delete_scope_alone_cannot_export_or_import(tmp_path, monkeypatch):
+    app = create_app(
+        _catalog_governance_app(tmp_path, scopes=["catalog:delete"], monkeypatch=monkeypatch)
+    )
+    headers = {"Authorization": "Bearer catalog-governance-caller-key"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        export_resp = await client.get("/api/v1/admin/catalog/demo/export", headers=headers)
+        import_resp = await client.post(
+            "/api/v1/admin/catalog/demo/import",
+            json={
+                "connection_id": "demo",
+                "exported_at": "2026-01-01T00:00:00Z",
+                "catalog_version": 2,
+            },
+            headers=headers,
+        )
+
+    assert export_resp.status_code == 403
+    assert import_resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_catalog_export_scope_alone_cannot_delete(tmp_path, monkeypatch):
+    app = create_app(
+        _catalog_governance_app(tmp_path, scopes=["catalog:export"], monkeypatch=monkeypatch)
+    )
+    headers = {"Authorization": "Bearer catalog-governance-caller-key"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        delete_proposal_resp = await client.delete(
+            "/api/v1/admin/catalog/demo/proposals/anything", headers=headers
+        )
+        delete_version_resp = await client.delete(
+            "/api/v1/admin/catalog/demo/versions/1", headers=headers
+        )
+
+    assert delete_proposal_resp.status_code == 403
+    assert delete_version_resp.status_code == 403

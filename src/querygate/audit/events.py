@@ -29,6 +29,11 @@ CatalogGovernanceAction = Literal[
     "bulk_reject",
     "publish",
     "rollback",
+    "export",
+    "import",
+    "delete_proposal",
+    "bulk_delete",
+    "delete_version",
 ]
 
 

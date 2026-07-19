@@ -16,7 +16,12 @@ from querygate.catalog import governance
 from querygate.catalog.benchmark import evaluate_benchmark, load_benchmark
 from querygate.catalog.generation import CatalogGenerationUpdate, generate_catalog_drafts
 from querygate.catalog.loader import CatalogStore
-from querygate.catalog.models import CatalogDraftContent, CatalogDraftProposal, CatalogVersionRecord
+from querygate.catalog.models import (
+    CatalogDraftContent,
+    CatalogDraftProposal,
+    CatalogExportBundle,
+    CatalogVersionRecord,
+)
 from querygate.catalog.providers import (
     ManualDraftBatch,
     ManualSemanticMemoryProvider,
@@ -252,6 +257,49 @@ def rollback_version(*, catalog_file: str, connection_id: str, version_id: str, 
     }
 
 
+def export_connection(*, catalog_file: str, connection_id: str) -> dict:
+    store = CatalogStore.from_file(catalog_file)
+    bundle = governance.export_connection(store, connection_id=connection_id)
+    # round_trip=True omits computed fields (e.g. provenance precedence) so
+    # the exported JSON can be fed straight back into `import_connection`,
+    # the same reason `CatalogStore.to_dict()` uses it.
+    return bundle.model_dump(mode="json", exclude_none=True, round_trip=True)
+
+
+def import_connection(
+    *, catalog_file: str, connection_id: str, bundle_file: str, actor: str
+) -> dict:
+    raw = yaml.safe_load(Path(bundle_file).read_text()) or {}
+    bundle = CatalogExportBundle.model_validate(raw)
+    update = _governed_update(
+        catalog_file,
+        lambda store: governance.import_connection(
+            store, bundle=bundle, connection_id=connection_id, actor=actor
+        ),
+    )
+    return {"outcome": update.outcome}
+
+
+def delete_proposal(*, catalog_file: str, connection_id: str, proposal_id: str, actor: str) -> dict:
+    update = _governed_update(
+        catalog_file,
+        lambda store: governance.delete_proposal(
+            store, proposal_id=proposal_id, connection_id=connection_id, actor=actor
+        ),
+    )
+    return {"outcome": update.outcome, "proposal_id": update.proposal_id}
+
+
+def delete_version(*, catalog_file: str, connection_id: str, version_id: str, actor: str) -> dict:
+    update = _governed_update(
+        catalog_file,
+        lambda store: governance.delete_version_record(
+            store, version_id=version_id, connection_id=connection_id, actor=actor
+        ),
+    )
+    return {"outcome": update.outcome, "version_id": update.version_id}
+
+
 def _catalog_path(argument: Optional[str], configured: Optional[str]) -> str:
     path = argument or configured
     if not path:
@@ -341,6 +389,29 @@ def main() -> None:
     rollback_version_parser.add_argument("--connection", required=True)
     rollback_version_parser.add_argument("--version-id", required=True)
     rollback_version_parser.add_argument("--actor", required=True)
+
+    export_parser = subparsers.add_parser("export")
+    export_parser.add_argument("--catalog-file")
+    export_parser.add_argument("--connection", required=True)
+    export_parser.add_argument("--output-file", help="Write the bundle here instead of stdout")
+
+    import_parser = subparsers.add_parser("import")
+    import_parser.add_argument("--catalog-file")
+    import_parser.add_argument("--connection", required=True)
+    import_parser.add_argument("--bundle-file", required=True)
+    import_parser.add_argument("--actor", required=True)
+
+    delete_proposal_parser = subparsers.add_parser("delete-proposal")
+    delete_proposal_parser.add_argument("--catalog-file")
+    delete_proposal_parser.add_argument("--connection", required=True)
+    delete_proposal_parser.add_argument("--proposal-id", required=True)
+    delete_proposal_parser.add_argument("--actor", required=True)
+
+    delete_version_parser = subparsers.add_parser("delete-version")
+    delete_version_parser.add_argument("--catalog-file")
+    delete_version_parser.add_argument("--connection", required=True)
+    delete_version_parser.add_argument("--version-id", required=True)
+    delete_version_parser.add_argument("--actor", required=True)
 
     args = parser.parse_args()
     from querygate.core.config import config
@@ -512,6 +583,58 @@ def main() -> None:
             print(
                 json.dumps(
                     rollback_version(
+                        catalog_file=catalog_file,
+                        connection_id=args.connection,
+                        version_id=args.version_id,
+                        actor=args.actor,
+                    ),
+                    indent=2,
+                )
+            )
+            return
+        if args.command == "export":
+            payload = json.dumps(
+                export_connection(catalog_file=catalog_file, connection_id=args.connection),
+                indent=2,
+            )
+            if args.output_file:
+                Path(args.output_file).write_text(payload)
+                print(
+                    json.dumps({"outcome": "exported", "output_file": args.output_file}, indent=2)
+                )
+            else:
+                print(payload)
+            return
+        if args.command == "import":
+            print(
+                json.dumps(
+                    import_connection(
+                        catalog_file=catalog_file,
+                        connection_id=args.connection,
+                        bundle_file=args.bundle_file,
+                        actor=args.actor,
+                    ),
+                    indent=2,
+                )
+            )
+            return
+        if args.command == "delete-proposal":
+            print(
+                json.dumps(
+                    delete_proposal(
+                        catalog_file=catalog_file,
+                        connection_id=args.connection,
+                        proposal_id=args.proposal_id,
+                        actor=args.actor,
+                    ),
+                    indent=2,
+                )
+            )
+            return
+        if args.command == "delete-version":
+            print(
+                json.dumps(
+                    delete_version(
                         catalog_file=catalog_file,
                         connection_id=args.connection,
                         version_id=args.version_id,

@@ -499,11 +499,12 @@ curl -X POST -H "Authorization: Bearer $KEY" \
 The same workflow is available without any REST client via
 `querygate-semantic-memory`: `list-proposals`, `show-proposal`,
 `edit-proposal`, `approve-proposal`, `reject-proposal`, `publish-proposal`,
-`preview-publish`, `list-versions`, `show-version`, and `rollback-version`.
-Seven independent least-privilege scopes gate the surface —
-`catalog:generate`, `catalog:review` (read), `catalog:edit`,
-`catalog:approve`, `catalog:reject`, `catalog:publish`, and
-`catalog:rollback` — none implied by another, matching the read/write
+`preview-publish`, `list-versions`, `show-version`, `rollback-version`,
+`export`, `import`, `delete-proposal`, and `delete-version`. Nine
+independent least-privilege scopes gate the surface — `catalog:generate`,
+`catalog:review` (read), `catalog:edit`, `catalog:approve`,
+`catalog:reject`, `catalog:publish`, `catalog:rollback`, `catalog:export`,
+and `catalog:delete` — none implied by another, matching the read/write
 separation the config-governance API above already uses. Every generation
 and state transition is recorded as a redaction-safe `catalog.governance`
 audit event through the same sink as query execution and config governance:
@@ -513,12 +514,45 @@ version-history record; `GET .../versions` reports a metadata-only diff
 (which field names changed), and `GET .../versions/{id}` returns the full
 before/after content to a `catalog:review`-scoped caller.
 
-Bulk approve/reject are bounded to 50 proposal ids per call and validate
-every id before mutating any of them, so a single invalid id in a batch
-fails the whole call rather than partially applying it. Catalog export/
-import, backup/restore, and retention/deletion remain a later phase (TODO.md
-item 32B-2); this workflow's version history is otherwise bounded to 2000
-entries per catalog file.
+Bulk approve/reject/delete are bounded to 50 proposal ids per call and
+validate every id before mutating any of them, so a single invalid id in a
+batch fails the whole call rather than partially applying it.
+
+### Export, import, backup/restore, and retention
+
+`GET .../export` (`catalog:export`) returns a self-contained,
+connection-scoped snapshot — published entries, quarantined proposals with
+their full review history, generation records, version history, and the
+schema snapshot. `POST .../import` (the same `catalog:export` scope — one
+bidirectional data-portability privilege) is a full, destructive replace of
+that connection's governed content from a bundle, serving both migrating
+governed state between environments and restoring from a saved export.
+Version and generation ids are file-global, not per-connection, so import
+re-numbers/de-duplicates them against the target catalog's current content
+and remaps every internal cross-reference — an operator-chosen generation id
+like `"onboarding-1"` reused across two environments can never collide with,
+or corrupt, an unrelated connection's history:
+
+```bash
+# Back up (or migrate) everything governed for this connection
+curl -H "Authorization: Bearer $KEY" "$HOST/api/v1/admin/catalog/demo/export" > demo-backup.json
+
+# Restore it — destructively replaces "demo"'s governed content only
+curl -X POST -H "Authorization: Bearer $KEY" \
+  -d @demo-backup.json "$HOST/api/v1/admin/catalog/demo/import"
+```
+
+`DELETE .../proposals/{id}` and `DELETE .../versions/{id}` (`catalog:delete`)
+prune only terminal-state records: a rejected proposal deletes standalone; a
+published-and-since-rolled-back proposal deletes together with its now-
+reverted publish record and the rollback record that reverted it (so no
+record is left referencing a deleted one); a standalone rollback record
+deletes on its own. A proposal that's still pending/approved, or published
+with its publish still live, can't be deleted — reject or roll it back
+first — so deletion can never destroy the only record of why current
+catalog content exists. `POST .../proposals/bulk-delete` is the same bounded,
+atomic bulk pattern as bulk approve/reject. Version history is otherwise
+bounded to 2000 entries per catalog file.
 
 ## Example StructuredQuery payload
 
@@ -711,8 +745,10 @@ Agent (MCP) / Client (REST)
   and filtered before search/ranking by the same policy as everything else.
   `governance.py` implements the deny-by-default draft review/edit/approve/
   reject/publish/rollback state machine, publish-time conflict detection
-  against verified content, and durable version history, all through the
-  same `CatalogFileRepository` lock as schema refresh and draft generation.
+  against verified content, durable version history, connection-scoped
+  export/import (backup/restore), and terminal-state-only retention/
+  deletion — all through the same `CatalogFileRepository` lock as schema
+  refresh and draft generation.
 - **`validation/`** — schema-truth checks (does this table/column exist?)
   and policy checks (is it allowed? within caps?) — deliberately separate
   modules, run in that order, both before compilation.
@@ -871,16 +907,16 @@ Being upfront about what's not done yet:
   `429`+`Retry-After` evaluation (TODO item 35 phase 3). The in-process
   (non-Redis) `querygate_queue_depth` gauge remains single-process
   visibility only, like `querygate_concurrency_in_use`.
-- **Semantic memory phases 32A and 32B-1 are complete, not item 32
+- **Semantic memory phases 32A and 32B are complete, not item 32
   overall** — durable provenance, deterministic schema refresh/diffs,
   selective staleness, policy-first retrieval, disabled/manual-only
-  quarantined drafts, a fixed benchmark, and a governed review/edit/
+  quarantined drafts, a fixed benchmark, a governed review/edit/
   approve/reject/publish/rollback workflow (with durable version history
-  and audit events) are shipped. There is still no catalog export/import/
-  backup/restore/retention (32B-2), embedding index, or adaptive
-  usage-learning loop (32C). A draft never reaches agents until it is
-  explicitly approved and published by an authorized reviewer through the
-  workflow below.
+  and audit events), and connection-scoped export/import (backup/restore)
+  and retention/deletion are all shipped. There is still no embedding
+  index or adaptive usage-learning loop (32C). A draft never reaches
+  agents until it is explicitly approved and published by an authorized
+  reviewer through the workflow below.
 - **Security review is first-party** — the repository includes a maintained
   threat model and adversarial regression suite, but has not yet undergone an
   independent penetration test or formal compliance certification.

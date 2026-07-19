@@ -6,6 +6,26 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- Governed semantic memory phase 32B-2, completing item 32B: connection-
+  scoped export/import (`governance.export_connection`/`import_connection`,
+  gated by one bidirectional `catalog:export` scope) serving both data
+  portability and disaster recovery — import is a full destructive replace
+  of the target connection's governed content, with version and generation
+  ids (file-global, not per-connection) re-numbered/de-duplicated against
+  the target catalog so importing can never collide with or corrupt an
+  unrelated connection's history. Retention/deletion
+  (`delete_proposal`/`bulk_delete_proposals`/`delete_version_record`, gated
+  by `catalog:delete`) prunes only terminal-state records — a rejected
+  proposal, or a published-then-rolled-back proposal together with its
+  now-reverted publish record and the rollback record that reverted it
+  (cascaded together to avoid a dangling reference), or a standalone
+  rollback record — never a proposal whose publish is still live. New REST
+  endpoints (`GET/POST .../export`, `.../import`, `DELETE .../proposals/
+  {id}`, `POST .../proposals/bulk-delete`, `DELETE .../versions/{id}`) and
+  CLI subcommands (`export`, `import`, `delete-proposal`, `delete-version`)
+  complete the 32B governance surface — all nine originally-scoped scopes
+  (`catalog:generate/review/edit/approve/reject/publish/rollback/export/
+  delete`) now exist. 32C (adaptive usage learning) has not started.
 - Governed semantic memory phase 32B-1: a deny-by-default review/publish/
   rollback workflow for the quarantined inferred draft proposals 32A-2
   generates. New `querygate/catalog/governance.py` implements an
