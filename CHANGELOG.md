@@ -6,6 +6,30 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- Semantic access diff for config changes, phase 1 (TODO.md item 40).
+  `POST /api/v1/admin/config/diff` (`admin/access_diff.py`,
+  `admin.service.diff_candidate_access`) returns a server-derived,
+  authorization-aware diff of *resolved* access — not a line diff of YAML —
+  between the active config-governance version and a caller-supplied candidate
+  (unset documents inherit from active). Phase 1's `connection_baseline`
+  scope resolves the default and per-connection policy layers with no principal
+  applied and reports typed `SemanticAccessChange` items for connection
+  visibility, every guardrail cap, table/column access, mandatory-filter
+  requirements, and join groups, each classified tightening/loosening/neutral
+  with a direction-count summary and loosening-first ordering. Both snapshots
+  load through item 39's isolated candidate-context path, so the live
+  registry/policy/catalog and concurrent requests are provably untouched, and
+  nothing is persisted. Like `/simulate`, it requires **both**
+  `admin:config:read` and `admin:config:write` (it echoes resolved policy
+  detail while resolving caller-supplied config/secret references), and its
+  output structurally excludes static mandatory-filter values, resolved
+  secrets, connection strings, predicate values, and raw YAML. When the
+  per-principal override layer changes, an allow-list toggles between
+  restricted and unrestricted, or the change list is truncated,
+  `analysis_incomplete` is set with a reason rather than silently
+  under-reporting. Documented as QG-20 in `docs/THREAT_MODEL.md`. Phase 2
+  (per-configured-principal resolution — "reporting-agent gains `orders.total`"
+  — which then feeds item 41's blast-radius analysis) is not started.
 - Browser admin control plane (TODO item 31) at `/admin/`, served by the
   QueryGate process with no separate frontend runtime. It adds policy-filtered
   schema review, a layered visual policy designer and active-policy
