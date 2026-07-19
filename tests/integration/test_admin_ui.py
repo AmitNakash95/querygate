@@ -63,6 +63,8 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
         response = await client.get("/admin/")
         script = await client.get("/admin/app.js")
+        logo = await client.get("/admin/logo-wordmark.svg")
+        favicon = await client.get("/admin/favicon.svg")
 
     assert response.status_code == 200
     assert "QueryGate Control Plane" in response.text
@@ -71,6 +73,11 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     assert response.headers["cache-control"] == "no-store"
     assert script.status_code == 200
     assert "policy/test" in script.text
+    assert logo.status_code == 200
+    assert "QueryGate</tspan>" in logo.text
+    assert ">;</tspan>" in logo.text
+    assert favicon.status_code == 200
+    assert ">;</text>" in favicon.text
 
 
 @pytest.mark.asyncio

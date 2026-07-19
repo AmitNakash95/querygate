@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 24 520 116" role="img" aria-label="QueryGate;">
+  <title>QueryGate;</title>
+  <style>
+    .wordmark { font-family: Georgia, 'Times New Roman', serif; font-weight: 400; }
+  </style>
+  <text x="6" y="106" class="wordmark">
+    <tspan font-size="90" fill="#F2F3F5">QueryGate</tspan><tspan font-size="106" dy="6" fill="#FF914D">;</tspan>
+  </text>
+</svg>
