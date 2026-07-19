@@ -11,6 +11,20 @@ from __future__ import annotations
 
 import pytest
 
+# `AppConfig` reads the repo's ".env" by default (see core/config.py's
+# `class Config: env_file = ".env"`), so `make run`/`make run-dev` work with
+# zero extra setup for local dev. That must not leak into the test suite: a
+# developer's local .env (real API keys, SEMANTIC_MEMORY_PROVIDER,
+# CATALOG_FILE, etc., per .env.example) would silently override the
+# defaults tests construct and assert against. This has to happen before
+# the first `querygate.core.config` import anywhere (its module-level
+# `config` singleton is built at import time), so it runs before every
+# other import in this file, including the ones below.
+import querygate.core.config as _config_module  # noqa: E402
+
+_config_module.AppConfig.model_config["env_file"] = None
+_config_module.config = _config_module.AppConfig()
+
 from querygate.admin.store import ConfigVersionStore, set_config_version_store
 from querygate.audit.sinks import reset_audit_sink
 from querygate.catalog.loader import CatalogStore, set_catalog_store
