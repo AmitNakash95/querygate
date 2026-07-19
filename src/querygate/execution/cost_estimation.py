@@ -16,6 +16,14 @@ not a one-line prefix on the already-compiled statement. Tracked as
 follow-up work in TODO.md item 26; a policy with `max_estimated_rows`/
 `max_estimated_cost` set on an MSSQL connection is accepted but has no
 effect there.
+
+Fail-open by design (see `estimate_postgres_query_cost`), and observable by
+design too: every path that can't produce an estimate increments
+`querygate_cost_estimation_unavailable_total{reason}` so an operator can
+alert on this guardrail silently going dark, and `Policy.cost_estimation_mode`
+(`CostEstimationMode.OBSERVE`) lets a deployment measure what a threshold
+*would* reject against real traffic (`querygate_cost_estimation_would_reject_total`)
+before switching a connection over to actually enforcing it.
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from querygate.core.exceptions import CostEstimateExceededError
 from querygate.core.logging import get_logger
+from querygate.metrics import COST_ESTIMATION_ATTEMPTS_TOTAL, COST_ESTIMATION_UNAVAILABLE_TOTAL
 from querygate.policy.models import Policy
 
 
@@ -40,7 +49,7 @@ class QueryCostEstimate:
 
 
 async def estimate_postgres_query_cost(
-    session: AsyncSession, stmt: sa.Select
+    session: AsyncSession, stmt: sa.Select, *, connection_id: str
 ) -> Optional[QueryCostEstimate]:
     """Plan `stmt` with Postgres's `EXPLAIN (FORMAT JSON)` and return the
     root plan node's estimated row count / total cost.
@@ -50,8 +59,13 @@ async def estimate_postgres_query_cost(
     construct that fails to compile with literal binds, an unexpected plan
     shape) degrades to "not enforced for this query" rather than blocking a
     query the existing reactive guardrails would otherwise have handled
-    safely. Never raises.
+    safely. Never raises. Every failure path also increments
+    `querygate_cost_estimation_unavailable_total{reason=...}` — fail-open
+    must stay observable, not just quietly logged, or an operator has no way
+    to notice this guardrail stopped protecting a connection.
     """
+    COST_ESTIMATION_ATTEMPTS_TOTAL.labels(connection=connection_id).inc()
+
     try:
         # literal_binds inlines every bound value directly into the SQL text
         # instead of using driver bind parameters. EXPLAIN never executes
@@ -64,6 +78,9 @@ async def estimate_postgres_query_cost(
             dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
         )
     except Exception as exc:
+        COST_ESTIMATION_UNAVAILABLE_TOTAL.labels(
+            connection=connection_id, reason="compile_failed"
+        ).inc()
         get_logger().bind(func="estimate_postgres_query_cost").warning(
             "cost_estimation.compile_failed", error=f"{type(exc).__name__}: {exc}"
         )
@@ -73,6 +90,9 @@ async def estimate_postgres_query_cost(
         result = await session.execute(sa.text(f"EXPLAIN (FORMAT JSON) {compiled}"))
         raw_plan = result.scalar()
     except Exception as exc:
+        COST_ESTIMATION_UNAVAILABLE_TOTAL.labels(
+            connection=connection_id, reason="explain_failed"
+        ).inc()
         get_logger().bind(func="estimate_postgres_query_cost").warning(
             "cost_estimation.explain_failed", error=f"{type(exc).__name__}: {exc}"
         )
@@ -84,6 +104,9 @@ async def estimate_postgres_query_cost(
         estimated_rows = root_plan.get("Plan Rows")
         estimated_total_cost = root_plan.get("Total Cost")
     except (TypeError, KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
+        COST_ESTIMATION_UNAVAILABLE_TOTAL.labels(
+            connection=connection_id, reason="plan_parse_failed"
+        ).inc()
         get_logger().bind(func="estimate_postgres_query_cost").warning(
             "cost_estimation.plan_parse_failed", error=f"{type(exc).__name__}: {exc}"
         )
@@ -97,10 +120,12 @@ async def estimate_postgres_query_cost(
     )
 
 
-def enforce_cost_estimate(estimate: QueryCostEstimate, policy: Policy) -> None:
-    """Raise `CostEstimateExceededError` with a message that tells the agent
-    what to do next, not just that it was rejected — matches TODO item 26's
-    "clear denial messages that help the agent narrow the query safely".
+def cost_estimate_violations(estimate: QueryCostEstimate, policy: Policy) -> list[str]:
+    """Human-readable descriptions of every threshold `estimate` exceeds, or
+    an empty list if it's within policy. Shared by `enforce_cost_estimate`
+    (ENFORCE mode: raises) and execute()'s OBSERVE-mode logging (records
+    what would have been rejected without blocking the query) so the two
+    modes can never disagree about what counts as a violation.
     """
     violations: list[str] = []
     if (
@@ -121,10 +146,24 @@ def enforce_cost_estimate(estimate: QueryCostEstimate, policy: Policy) -> None:
             f"estimated planner cost ({estimate.estimated_total_cost:.0f}) exceeds "
             f"max_estimated_cost ({policy.max_estimated_cost:.0f})"
         )
+    return violations
+
+
+def format_cost_estimate_violation_message(violations: list[str]) -> str:
+    return (
+        "Query rejected by pre-execution cost estimate: "
+        + "; ".join(violations)
+        + ". Narrow the query with additional filters, a smaller limit/top_n, "
+        "or a more selective time range and try again."
+    )
+
+
+def enforce_cost_estimate(estimate: QueryCostEstimate, policy: Policy) -> None:
+    """Raise `CostEstimateExceededError` with a message that tells the agent
+    what to do next, not just that it was rejected — matches TODO item 26's
+    "clear denial messages that help the agent narrow the query safely".
+    Only called under `CostEstimationMode.ENFORCE` — see execute().
+    """
+    violations = cost_estimate_violations(estimate, policy)
     if violations:
-        raise CostEstimateExceededError(
-            "Query rejected by pre-execution cost estimate: "
-            + "; ".join(violations)
-            + ". Narrow the query with additional filters, a smaller limit/top_n, "
-            "or a more selective time range and try again."
-        )
+        raise CostEstimateExceededError(format_cost_estimate_violation_message(violations))

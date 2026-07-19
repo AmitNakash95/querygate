@@ -74,6 +74,42 @@ CONCURRENCY_MAX = Gauge(
     registry=REGISTRY,
 )
 
+COST_ESTIMATION_ATTEMPTS_TOTAL = Counter(
+    "querygate_cost_estimation_attempts_total",
+    "Pre-execution Postgres cost-estimation attempts — execute() calls where "
+    "Policy.cost_estimation_enabled is true and the dialect is postgresql — "
+    "by connection. Pairs with querygate_cost_estimation_unavailable_total to "
+    "compute a fail-open rate.",
+    ["connection"],
+    registry=REGISTRY,
+)
+
+COST_ESTIMATION_UNAVAILABLE_TOTAL = Counter(
+    "querygate_cost_estimation_unavailable_total",
+    "Cost-estimation attempts that failed to produce a usable estimate. The "
+    "gate fails open (TODO.md item 26), so the query still ran, but this "
+    "guardrail did not evaluate it — alert on this climbing, since it means "
+    "max_estimated_rows/max_estimated_cost has silently stopped protecting "
+    "this connection.",
+    # reason: compile_failed (statement can't render with literal binds) |
+    # explain_failed (the EXPLAIN itself errored) | plan_parse_failed
+    # (unexpected plan JSON shape) — see execution/cost_estimation.py.
+    ["connection", "reason"],
+    registry=REGISTRY,
+)
+
+COST_ESTIMATION_WOULD_REJECT_TOTAL = Counter(
+    "querygate_cost_estimation_would_reject_total",
+    "Queries that would have been rejected by the cost-estimate gate while "
+    "Policy.cost_estimation_mode is 'observe' — did not actually block the "
+    "query. Use this (and the accompanying "
+    "cost_estimation.observed_would_reject log line) to calibrate "
+    "max_estimated_rows/max_estimated_cost against real traffic before "
+    "switching a connection over to 'enforce'.",
+    ["connection"],
+    registry=REGISTRY,
+)
+
 
 def classify_rejection(exc: BaseException) -> str:
     if isinstance(exc, ConcurrencyLimitError):
@@ -99,6 +135,9 @@ __all__ = [
     "QUERY_DURATION_SECONDS",
     "CONCURRENCY_IN_USE",
     "CONCURRENCY_MAX",
+    "COST_ESTIMATION_ATTEMPTS_TOTAL",
+    "COST_ESTIMATION_UNAVAILABLE_TOTAL",
+    "COST_ESTIMATION_WOULD_REJECT_TOTAL",
     "classify_rejection",
     "render_latest",
 ]

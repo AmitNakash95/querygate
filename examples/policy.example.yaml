@@ -39,9 +39,13 @@ default:
   # planner first and reject it before it touches real data if the
   # estimate is past either threshold. max_estimated_cost is in Postgres's
   # own arbitrary planner-cost units, not seconds — tune it against your
-  # own schema/hardware rather than copying this number directly.
+  # own schema/hardware rather than copying this number directly. Start
+  # with cost_estimation_mode: observe to see what these thresholds would
+  # reject (querygate_cost_estimation_would_reject_total) against real
+  # traffic before switching to enforce.
   # max_estimated_rows: 1000000
   # max_estimated_cost: 100000
+  # cost_estimation_mode: observe
 
 connections:
   demo:

@@ -24,7 +24,7 @@ from querygate.execution.service import (
 )
 from querygate.metrics import REGISTRY
 from querygate.policy.loader import PolicyStore, set_policy_store
-from querygate.policy.models import MandatoryRowFilter, Policy
+from querygate.policy.models import CostEstimationMode, MandatoryRowFilter, Policy
 from querygate.query_ast.models import Predicate, StructuredQuery
 
 
@@ -380,6 +380,83 @@ async def test_execute_skips_cost_estimation_for_non_postgres_dialect():
 
     mock_estimate.assert_not_called()
     assert result.row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_in_observe_mode_runs_the_query_instead_of_rejecting():
+    """CostEstimationMode.OBSERVE must not block the query — it's a
+    calibration aid, not a second enforcement path.
+    """
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                max_estimated_rows=1000, cost_estimation_mode=CostEstimationMode.OBSERVE
+            ),
+            overrides={},
+        )
+    )
+    estimate = QueryCostEstimate(estimated_rows=999_999, estimated_total_cost=None)
+    before = _sample("querygate_cost_estimation_would_reject_total", {"connection": "demo"})
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+        patch.object(svc, "estimate_postgres_query_cost", AsyncMock(return_value=estimate)),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        result = await service.execute(query)  # must not raise
+
+    assert result.row_count == 1
+    mock_session.execute.assert_awaited_once()
+    after = _sample("querygate_cost_estimation_would_reject_total", {"connection": "demo"})
+    assert after == before + 1
+
+
+@pytest.mark.asyncio
+async def test_execute_in_observe_mode_does_not_flag_a_query_within_threshold():
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                max_estimated_rows=1000, cost_estimation_mode=CostEstimationMode.OBSERVE
+            ),
+            overrides={},
+        )
+    )
+    estimate = QueryCostEstimate(estimated_rows=10, estimated_total_cost=None)
+    before = _sample("querygate_cost_estimation_would_reject_total", {"connection": "demo"})
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+        patch.object(svc, "estimate_postgres_query_cost", AsyncMock(return_value=estimate)),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query)
+
+    after = _sample("querygate_cost_estimation_would_reject_total", {"connection": "demo"})
+    assert after == before
 
 
 def test_cap_response_bytes_keeps_all_rows_under_cap():

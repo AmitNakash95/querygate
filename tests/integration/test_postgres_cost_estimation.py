@@ -18,8 +18,9 @@ from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.exceptions import CostEstimateExceededError
 from querygate.execution.cost_estimation import estimate_postgres_query_cost
 from querygate.execution.service import StructuredQueryService
+from querygate.metrics import REGISTRY
 from querygate.policy.loader import PolicyStore, set_policy_store
-from querygate.policy.models import Policy
+from querygate.policy.models import CostEstimationMode, Policy
 from querygate.query_ast.models import StructuredQuery
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_db, pytest.mark.postgres_live]
@@ -70,7 +71,7 @@ async def test_estimator_returns_real_plan_numbers_from_postgres():
     stmt = sa.select(table.c.id, table.c.status, table.c.total_amount)
 
     async with session_scope("demo") as session:
-        estimate = await estimate_postgres_query_cost(session, stmt)
+        estimate = await estimate_postgres_query_cost(session, stmt, connection_id="demo")
 
     assert estimate is not None
     assert estimate.estimated_rows is not None and estimate.estimated_rows >= 0
@@ -107,3 +108,31 @@ async def test_disabled_by_default_never_blocks_a_full_scan():
     service = StructuredQueryService(connection_id="demo")
     result = await service.execute(_full_scan_query())
     assert result.row_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_observe_mode_runs_the_query_and_records_would_reject():
+    """CostEstimationMode.OBSERVE against a real over-threshold plan: the
+    query must still succeed, and querygate_cost_estimation_would_reject_total
+    must increment — proves the calibration path end to end, not just against
+    a mocked estimate (see the mocked equivalent in tests/unit/test_service.py).
+    """
+    _use_policy(max_estimated_rows=0, cost_estimation_mode=CostEstimationMode.OBSERVE)
+    before = (
+        REGISTRY.get_sample_value(
+            "querygate_cost_estimation_would_reject_total", {"connection": "demo"}
+        )
+        or 0.0
+    )
+
+    service = StructuredQueryService(connection_id="demo")
+    result = await service.execute(_full_scan_query())  # must not raise
+
+    assert result.row_count >= 1
+    after = (
+        REGISTRY.get_sample_value(
+            "querygate_cost_estimation_would_reject_total", {"connection": "demo"}
+        )
+        or 0.0
+    )
+    assert after == before + 1

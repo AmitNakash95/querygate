@@ -1076,6 +1076,39 @@ the feature adds proactive rejection of *likely* full scans/join
 explosions without becoming a new way to accidentally block legitimate
 traffic on an EXPLAIN edge case.
 
+**Follow-up shipped in this same pass — fail-open observability and a
+calibration mode, so the two honest caveats above ("fails open" and
+"thresholds aren't portable, so they need per-deployment tuning") aren't
+silent gaps:**
+
+- `querygate_cost_estimation_attempts_total{connection}` and
+  `querygate_cost_estimation_unavailable_total{connection,reason}` (reason:
+  `compile_failed`/`explain_failed`/`plan_parse_failed`) make the fail-open
+  path observable instead of only a stdout warning — an operator can alert
+  on the unavailable counter climbing, which means the gate has silently
+  stopped evaluating queries on that connection, rather than discovering it
+  after the fact.
+- New `Policy.cost_estimation_mode` (`CostEstimationMode`, default
+  `ENFORCE`) adds `OBSERVE`: the estimate is still computed and compared
+  against the threshold, but a would-be rejection is only recorded (a
+  `cost_estimation.observed_would_reject` log line plus
+  `querygate_cost_estimation_would_reject_total{connection}`), never
+  raised. `execution/cost_estimation.py`'s `cost_estimate_violations()` is
+  the single source of truth both `enforce_cost_estimate()` (ENFORCE) and
+  `StructuredQueryService._observe_cost_estimate()` (OBSERVE) build on, so
+  the two modes can never disagree about what counts as a violation. Lets
+  an operator calibrate `max_estimated_rows`/`max_estimated_cost` against
+  real production traffic before switching a connection to `ENFORCE`,
+  instead of guessing a threshold from documentation on day one.
+
+Covered by `tests/unit/test_cost_estimation.py` (attempts/unavailable
+metrics per failure path, `cost_estimate_violations`/
+`format_cost_estimate_violation_message`), `tests/unit/test_service.py`
+(OBSERVE mode runs the query instead of rejecting; does not flag a query
+within threshold), and a real-Postgres
+`test_observe_mode_runs_the_query_and_records_would_reject` in
+`tests/integration/test_postgres_cost_estimation.py`.
+
 MSSQL is explicitly a no-op, not an error: a policy with these fields set on
 an MSSQL connection is valid and simply has no effect there (see the phase 2
 write-up below for why). Covered by `tests/unit/test_cost_estimation.py`
@@ -1088,8 +1121,8 @@ Postgres — a genuinely large sequential-scan-shaped query is rejected under
 a small `max_estimated_rows`, a selective indexed query passes under the
 same policy, and disabling the gate (the default) never issues an EXPLAIN at
 all. `docs/THREAT_MODEL.md`'s QG-08 row and residual-risk section were
-updated; `help/service.py`'s redacted policy summary now reports the two new
-guardrail values like every other numeric cap.
+updated; `help/service.py`'s redacted policy summary now reports these new
+guardrail values (including `cost_estimation_mode`) like every other cap.
 
 **Phase 2 — MSSQL estimated-plan equivalent, not started:** SQL Server's
 `SET SHOWPLAN_XML ON` can't be prefixed onto an already-compiled statement
