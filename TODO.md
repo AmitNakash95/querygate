@@ -2620,20 +2620,37 @@ real but separable value-add matching this item's own "bulk operations"
 callout, deferred rather than rushed into the same slice as the core
 workflow.
 
-**Unrelated bug found during verification, not fixed here:** the background
-schema-refresh scanner (`SEMANTIC_MEMORY_REFRESH_ENABLED=true`,
-`catalog/refresh.py`'s `scan_connection_schema`) raised `NoSuchTableError`
-against a real live demo Postgres even for tables confirmed to exist via
-`psql` and reflected successfully by the ordinary `describe_table`/
-`list_tables` path (which shares `schema/reflection.py`'s
-`get_table_schema`). Worked around for this item's verification by building
-an `ObservedSchemaSnapshot` directly from a real reflected `sa.MetaData`
-instead of the scanner. Reproducible outside this item's own code
-(`catalog_governance_routes.py`, `admin_ui/`) — worth a dedicated
-investigation, since it means the *documented* `SEMANTIC_MEMORY_REFRESH_ENABLED`
-background-scanning path may not currently work against Postgres at all;
-the explicit `querygate-semantic-memory refresh` CLI path was not itself
-exercised successfully either, only bypassed.
+**Two real bugs found and fixed as follow-ups, not silently left broken:**
+
+1. **UI panel closing on approve/reject/publish.** `selectProposal()` looked
+   the open proposal up in the currently *filtered* proposal list. Approving
+   a proposal moves it out of the default "pending" filter, so the
+   post-action refresh (which reloads that filtered list) could no longer
+   find it — the panel silently reset to its empty state and the
+   newly-available Publish button never appeared, breaking the very
+   review-→-approve-→-publish flow this workspace exists for. Fixed by
+   decoupling the open detail panel from the filtered queue: it now renders
+   from a proposal fetched directly (`GET .../proposals/{id}`) after every
+   mutation, regardless of whether that proposal still matches the active
+   filter. Verified with a headless jsdom harness driving the real served
+   `admin_ui` against a live server (still no browser tool available in this
+   environment) through the full approve → preview → publish sequence.
+2. **`list_live_tables()` leaked Postgres system catalog tables**
+   (`schema/reflection.py`) — found via the background schema-refresh
+   scanner (`SEMANTIC_MEMORY_REFRESH_ENABLED=true`,
+   `catalog/refresh.py`'s `scan_connection_schema`) raising `NoSuchTableError`
+   against a real live demo Postgres for tables confirmed to exist via
+   `psql`. Root cause: Postgres's own `information_schema.tables` lists
+   `pg_catalog`/`information_schema` system tables (`pg_type`,
+   `pg_aggregate`, ...) alongside real ones when queried without a schema
+   filter, unlike MSSQL's INFORMATION_SCHEMA. This is shared, foundational
+   code — the same bug also leaked system table names into agent-facing
+   `list_tables()`/MCP discovery for any Postgres connection without a
+   `known_tables` seed, not just the catalog scanner. Fixed with a
+   `TABLE_SCHEMA NOT IN ('pg_catalog', 'information_schema', 'sys')` filter;
+   regression-tested against real Postgres in
+   `tests/integration/test_postgres_schema_discovery.py`
+   (`make test-postgres-live`).
 
 **Original scope (for reference — see above for what actually shipped):**
 
