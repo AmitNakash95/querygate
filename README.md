@@ -1012,6 +1012,13 @@ queued completion, timeout cancellation, `queue_mode=fail_fast` never
 waiting, and a caller-shortened `wait_timeout_seconds` being honored under
 concurrent REST traffic; see [`docs/LOAD_TESTING.md`](docs/LOAD_TESTING.md).
 OAuth/JWT is implemented (`core/jwt_auth.py`) alongside static API keys.
+Every `Policy` complexity cap (joins, select width, where-depth, group-by,
+top-N, partition-by, batch size) is boundary-tested at exactly its configured
+limit, and the SQLAlchemy compiler is fuzzed with Hypothesis-generated random
+`StructuredQuery` combinations — including that a mandatory row filter
+survives every generated shape — rather than only the fixed set of
+hand-written cases; see `tests/unit/test_policy_boundaries.py` and
+`tests/unit/test_compiler_properties.py`.
 
 For the repeatable source/package and container release gates, see
 [`docs/RELEASING.md`](docs/RELEASING.md). Historical extraction notes are
