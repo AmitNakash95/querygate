@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -15,7 +16,9 @@ from querygate.catalog.loader import CatalogStore, set_catalog_store
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.config import AppConfig
+from querygate.execution import concurrency as cc
 from querygate.policy.loader import PolicyStore, set_policy_store
+from querygate.policy.models import Policy
 
 pytestmark = pytest.mark.integration
 
@@ -523,3 +526,53 @@ async def test_mcp_batch_uses_per_principal_max_batch_size():
     assert result["success"] is False
     assert result["error_code"] == "VALIDATION"
     assert "max of 1" in result["error_message"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_execute_fail_fast_reports_capacity_timeout_with_admission_fields():
+    """TODO.md item 35 phase 1: queue_mode="fail_fast" must reject immediately
+    (never waiting for a slot) and surface a stable admission_id plus a
+    machine-readable capacity_timeout state — not just a generic VALIDATION
+    error indistinguishable from a bad query.
+    """
+    set_policy_store(
+        PolicyStore(default=Policy(max_concurrency=1, concurrency_wait_seconds=5), overrides={})
+    )
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_keys=[], concurrency_backend="in_process")
+    app = create_app(settings)
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(
+            transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+        ) as client,
+    ):
+        resp = await client.post(
+            "/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {
+                    "name": "execute_structured_query",
+                    "arguments": {
+                        "connection": "demo",
+                        "query": {"from": "customers", "select": ["customers.id"], "limit": 5},
+                        "queue_mode": "fail_fast",
+                    },
+                },
+            },
+            headers=_HEADERS_JSON,
+        )
+    assert resp.status_code == 200
+    payload = _parse_mcp_response(resp)
+    result = payload["result"]["structuredContent"]["result"]
+    assert result["success"] is False
+    assert result["error_code"] == "VALIDATION"
+    assert "too many concurrent" in result["error_message"]
+    assert result["admission_state"] == "capacity_timeout"
+    assert result["admission_id"]
+    assert result["queue_wait_ms"] is not None

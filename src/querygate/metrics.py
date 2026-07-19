@@ -74,6 +74,26 @@ CONCURRENCY_MAX = Gauge(
     registry=REGISTRY,
 )
 
+QUEUE_DEPTH = Gauge(
+    "querygate_queue_depth",
+    "Callers currently waiting for a concurrency slot on this process, by "
+    "connection (TODO.md item 35 phase 1). Single-process visibility only — "
+    "like querygate_concurrency_in_use, it does not aggregate across "
+    "replicas even when the Redis concurrency backend is selected; "
+    "cross-replica admission state is item 35 phase 2.",
+    ["connection"],
+    registry=REGISTRY,
+)
+
+QUEUE_WAIT_SECONDS = Histogram(
+    "querygate_queue_wait_seconds",
+    "Time a structured query spent waiting for a concurrency slot before "
+    "running or hitting a capacity timeout, by connection and outcome "
+    "(TODO.md item 35 phase 1).",
+    ["connection", "outcome"],  # outcome: completed | capacity_timeout
+    registry=REGISTRY,
+)
+
 COST_ESTIMATION_ATTEMPTS_TOTAL = Counter(
     "querygate_cost_estimation_attempts_total",
     "Pre-execution Postgres cost-estimation attempts — execute() calls where "
@@ -135,6 +155,8 @@ __all__ = [
     "QUERY_DURATION_SECONDS",
     "CONCURRENCY_IN_USE",
     "CONCURRENCY_MAX",
+    "QUEUE_DEPTH",
+    "QUEUE_WAIT_SECONDS",
     "COST_ESTIMATION_ATTEMPTS_TOTAL",
     "COST_ESTIMATION_UNAVAILABLE_TOTAL",
     "COST_ESTIMATION_WOULD_REJECT_TOTAL",

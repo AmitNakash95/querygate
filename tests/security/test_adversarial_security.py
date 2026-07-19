@@ -8,7 +8,9 @@ response limits if validation order regresses.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,10 +27,13 @@ from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import (
     PUBLIC_INTERNAL_ERROR,
+    CapacityTimeoutError,
     PolicyViolationError,
     QueryValidationError,
 )
+from querygate.execution import concurrency as cc
 from querygate.execution import service as svc
+from querygate.execution.admission import QueueMode
 from querygate.execution.service import StructuredQueryService, _cap_response_bytes
 from querygate.mcp.exceptions import _error_code_from_exception
 from querygate.policy.loader import PolicyStore, set_policy_store
@@ -363,6 +368,32 @@ def test_single_oversized_row_cannot_bypass_response_cap():
     assert kept == []
     assert truncated is True
     assert len(json.dumps(kept).encode("utf-8")) <= 1024
+
+
+@pytest.mark.asyncio
+async def test_caller_cannot_extend_the_operators_concurrency_wait_ceiling():
+    """TODO.md item 35 phase 1's entire security property: a caller-requested
+    wait_timeout_seconds can only shorten the effective wait below
+    Policy.concurrency_wait_seconds, never lengthen it. Without this, a
+    caller could turn a deliberately short operator ceiling into an
+    effectively unbounded wait and grow the waiting queue without bound.
+    """
+    set_policy_store(
+        PolicyStore(default=Policy(max_concurrency=1, concurrency_wait_seconds=0.1), overrides={})
+    )
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot, never released
+
+    service = StructuredQueryService(connection_id="demo")
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+
+    start = time.monotonic()
+    with pytest.raises(CapacityTimeoutError):
+        # Request an hour-long wait against a 0.1s operator ceiling.
+        await service.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=3600.0)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 1.0
 
 
 @pytest.mark.asyncio

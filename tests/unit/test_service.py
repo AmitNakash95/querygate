@@ -5,6 +5,8 @@ validate_schema; policy validation runs for real against a permissive Policy.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,8 +15,14 @@ import sqlalchemy as sa
 
 from querygate.catalog.loader import CatalogStore, set_catalog_store
 from querygate.core.auth import Principal
-from querygate.core.exceptions import CostEstimateExceededError, QueryValidationError
+from querygate.core.exceptions import (
+    CapacityTimeoutError,
+    CostEstimateExceededError,
+    QueryValidationError,
+)
+from querygate.execution import concurrency as cc
 from querygate.execution import service as svc
+from querygate.execution.admission import QueueMode
 from querygate.execution.cost_estimation import QueryCostEstimate
 from querygate.execution.service import (
     StructuredQueryResult,
@@ -853,3 +861,123 @@ async def test_execute_mandatory_row_filter_resolved_from_principal_claim():
 
     compiled = str(captured_stmt["stmt"].compile(compile_kwargs={"literal_binds": True}))
     assert "Ada" in compiled
+
+
+# --- Agent-visible capacity waiting (TODO.md item 35 phase 1) --------------
+
+
+@pytest.mark.asyncio
+async def test_execute_returns_admission_id_and_queue_wait_ms_on_success():
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        result = await service.execute(query)
+
+    assert result.admission_id
+    assert result.queue_wait_ms is not None and result.queue_wait_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_execute_two_calls_get_different_admission_ids():
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = []
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        first = await service.execute(query)
+        second = await service.execute(query)
+
+    assert first.admission_id != second.admission_id
+
+
+@pytest.mark.asyncio
+async def test_execute_fail_fast_raises_capacity_timeout_without_waiting():
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+    set_policy_store(
+        PolicyStore(default=Policy(max_concurrency=1, concurrency_wait_seconds=5), overrides={})
+    )
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    validate_schema = AsyncMock()
+
+    with patch.object(svc, "validate_schema", validate_schema):
+        service = StructuredQueryService(connection_id="demo")
+        start = time.monotonic()
+        with pytest.raises(CapacityTimeoutError) as exc_info:
+            await service.execute(query, queue_mode=QueueMode.FAIL_FAST)
+        elapsed = time.monotonic() - start
+
+    # fail_fast must not wait anywhere near the 5s policy ceiling.
+    assert elapsed < 1.0
+    assert exc_info.value.admission_id
+    assert exc_info.value.queue_wait_ms is not None
+    # Never reached schema validation — the slot was never acquired.
+    validate_schema.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_wait_timeout_seconds_cannot_exceed_policy_ceiling():
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+    set_policy_store(
+        PolicyStore(default=Policy(max_concurrency=1, concurrency_wait_seconds=0.1), overrides={})
+    )
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot, never released
+
+    service = StructuredQueryService(connection_id="demo")
+    start = time.monotonic()
+    with pytest.raises(CapacityTimeoutError):
+        # A caller cannot extend the operator's 0.1s ceiling by asking for 999s.
+        await service.execute(query, queue_mode=QueueMode.WAIT, wait_timeout_seconds=999.0)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 1.0
+
+
+@pytest.mark.asyncio
+async def test_execute_capacity_timeout_is_audited_with_admission_fields():
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+    set_policy_store(
+        PolicyStore(default=Policy(max_concurrency=1, concurrency_wait_seconds=5), overrides={})
+    )
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+
+    audit_query = MagicMock()
+    with patch.object(svc, "audit_query", audit_query):
+        service = StructuredQueryService(connection_id="demo")
+        with pytest.raises(CapacityTimeoutError):
+            await service.execute(query, queue_mode=QueueMode.FAIL_FAST)
+
+    audit_query.assert_called_once()
+    kwargs = audit_query.call_args.kwargs
+    assert kwargs["admission_id"]
+    assert kwargs["queue_wait_ms"] is not None
+    assert kwargs["admission_state"] == "capacity_timeout"
+    assert kwargs["rejected"] is True

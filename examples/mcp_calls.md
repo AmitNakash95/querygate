@@ -72,6 +72,33 @@ text/event-stream`, plus `Authorization: Bearer <key>` once
 }
 ```
 
+## Capacity waiting (queue_mode / wait_timeout_seconds)
+
+Optional tool arguments, separate from `query` — see the README's
+"Agent-visible capacity waiting" section for the full contract. Reject
+immediately instead of waiting for a concurrency slot:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 41,
+  "method": "tools/call",
+  "params": {
+    "name": "execute_structured_query",
+    "arguments": {
+      "connection": "demo",
+      "query": { "from": "orders", "select": ["orders.id"], "limit": 10 },
+      "queue_mode": "fail_fast"
+    }
+  }
+}
+```
+
+A capacity rejection returns `success: false`, `error_code: "VALIDATION"`,
+and `admission_state: "capacity_timeout"` plus `admission_id`/`queue_wait_ms`
+on the `MCPErrorResult`. A successful call returns those same
+`admission_id`/`queue_wait_ms` fields on the tool result instead.
+
 ## Top-N per group: top 2 orders by value per customer
 
 ```json

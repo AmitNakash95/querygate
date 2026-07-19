@@ -322,3 +322,132 @@ async def test_concurrency_and_timeout_guardrails_under_load(postgres_load_app):
 
         async with monitor_engine.connect() as conn:
             assert await _active_probe_queries(conn, _TIMEOUT_PROBE) == 0
+
+
+# --- Agent-visible capacity waiting (TODO.md item 35 phase 1) --------------
+
+
+async def _fill_capacity(client: AsyncClient) -> list[asyncio.Task]:
+    """Launch _CAP concurrent short-probe requests and give them long enough
+    to actually acquire their concurrency slots before the caller proceeds.
+    """
+    tasks = [
+        asyncio.create_task(
+            client.post(f"/api/v1/{_CONNECTION_ID}/query", json=_query_payload(_SHORT_PROBE))
+        )
+        for _ in range(_CAP)
+    ]
+    await asyncio.sleep(0.05)
+    return tasks
+
+
+@pytest.mark.asyncio
+async def test_fail_fast_never_waits_even_though_capacity_frees_up_shortly(postgres_load_app):
+    """queue_mode=fail_fast must reject immediately. A long policy ceiling
+    (3s) that's well past the occupiers' ~0.35s probe duration would let a
+    caller that merely *waited* eventually succeed — fail_fast must not do
+    that.
+    """
+    app, monitor_engine = postgres_load_app
+    await get_table_schema(_SHORT_PROBE, _CONNECTION_ID, get_engine(_CONNECTION_ID))
+    _set_load_policy(wait_seconds=3, timeout_seconds=5)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        occupiers = await _fill_capacity(client)
+
+        start = time.monotonic()
+        resp = await client.post(
+            f"/api/v1/{_CONNECTION_ID}/query",
+            json=_query_payload(_SHORT_PROBE),
+            params={"queue_mode": "fail_fast"},
+        )
+        elapsed = time.monotonic() - start
+
+        occupier_responses = await asyncio.gather(*occupiers)
+
+    assert all(r.status_code == 200 for r in occupier_responses)
+    assert resp.status_code == 422
+    assert "too many concurrent" in resp.json()["detail"]
+    assert resp.headers["X-QueryGate-Admission-State"] == "capacity_timeout"
+    assert resp.headers.get("X-QueryGate-Admission-Id")
+    # Well under the occupiers' ~0.35s probe duration and nowhere near the 3s
+    # policy ceiling — proves fail_fast never actually waited.
+    assert elapsed < 0.2
+
+
+@pytest.mark.asyncio
+async def test_wait_timeout_seconds_is_honored_when_shorter_than_policy_ceiling(
+    postgres_load_app,
+):
+    """A caller-selected wait shorter than the operator's ceiling must be
+    honored (rejected around the caller's own deadline), not silently
+    extended to the full policy ceiling.
+    """
+    app, monitor_engine = postgres_load_app
+    await get_table_schema(_SHORT_PROBE, _CONNECTION_ID, get_engine(_CONNECTION_ID))
+    # Ceiling (3s) is long enough for the occupiers to finish (~0.35s), but
+    # the caller asks for a much shorter wait.
+    _set_load_policy(wait_seconds=3, timeout_seconds=5)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        occupiers = await _fill_capacity(client)
+
+        start = time.monotonic()
+        resp = await client.post(
+            f"/api/v1/{_CONNECTION_ID}/query",
+            json=_query_payload(_SHORT_PROBE),
+            params={"queue_mode": "wait", "wait_timeout_seconds": "0.1"},
+        )
+        elapsed = time.monotonic() - start
+
+        await asyncio.gather(*occupiers)
+
+    assert resp.status_code == 422
+    assert resp.headers["X-QueryGate-Admission-State"] == "capacity_timeout"
+    # Honored the caller's shorter 0.1s wait, not the operator's 3s ceiling.
+    assert 0.05 <= elapsed < 0.3
+
+
+@pytest.mark.asyncio
+async def test_capacity_released_before_callers_deadline_still_succeeds(postgres_load_app):
+    """A caller-selected wait that's shorter than the ceiling but still long
+    enough to outlast the occupiers must succeed once capacity frees up —
+    proving the shortened wait still queues, it doesn't just fail_fast.
+    """
+    app, monitor_engine = postgres_load_app
+    await get_table_schema(_SHORT_PROBE, _CONNECTION_ID, get_engine(_CONNECTION_ID))
+    _set_load_policy(wait_seconds=3, timeout_seconds=5)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        occupiers = await _fill_capacity(client)
+
+        resp = await client.post(
+            f"/api/v1/{_CONNECTION_ID}/query",
+            json=_query_payload(_SHORT_PROBE),
+            params={"queue_mode": "wait", "wait_timeout_seconds": "2"},
+        )
+
+        await asyncio.gather(*occupiers)
+
+    assert resp.status_code == 200
+    assert resp.headers["X-QueryGate-Admission-State"] == "completed"
+    assert int(resp.headers["X-QueryGate-Queue-Wait-Ms"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_successful_query_carries_admission_headers_under_real_load(postgres_load_app):
+    app, monitor_engine = postgres_load_app
+    await get_table_schema(_SHORT_PROBE, _CONNECTION_ID, get_engine(_CONNECTION_ID))
+    _set_load_policy(wait_seconds=1, timeout_seconds=5)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            f"/api/v1/{_CONNECTION_ID}/query", json=_query_payload(_SHORT_PROBE)
+        )
+
+    assert resp.status_code == 200
+    assert resp.headers["X-QueryGate-Admission-State"] == "completed"
+    assert resp.headers.get("X-QueryGate-Admission-Id")
+    assert resp.headers.get("X-QueryGate-Queue-Wait-Ms") is not None
+    body = resp.json()
+    assert body["admission_id"] == resp.headers["X-QueryGate-Admission-Id"]

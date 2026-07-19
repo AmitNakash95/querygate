@@ -434,6 +434,47 @@ POST this to `/mcp` (Streamable HTTP) with `MCP_ENABLED=true`. Tools:
 described below. More examples in
 [`examples/mcp_calls.md`](examples/mcp_calls.md).
 
+## Agent-visible capacity waiting
+
+`Policy.max_concurrency` and `concurrency_wait_seconds` already bound how
+many queries run at once per connection and how long an over-cap request
+waits for a slot before it's rejected. `queue_mode` and `wait_timeout_seconds`
+(both optional, request-level — REST query params on `POST .../query` and
+`.../query/batch`; extra MCP tool arguments on `execute_structured_query`/
+`execute_structured_queries`) make that existing wait caller-tunable:
+
+- `queue_mode=fail_fast` — reject immediately if the connection is at
+  capacity, no waiting at all.
+- `queue_mode=wait` (default) with `wait_timeout_seconds` — wait up to that
+  many seconds for a slot. A caller may request a **shorter** wait than the
+  operator's `concurrency_wait_seconds`; it can never request a longer one —
+  `wait_timeout_seconds=3600` against a 5-second policy ceiling still only
+  waits 5 seconds. Omitting both preserves the original behavior exactly.
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/demo/query?queue_mode=fail_fast" \
+  -H "Content-Type: application/json" \
+  -d '{"from": "orders", "select": ["orders.id"], "limit": 10}'
+```
+
+Every call — successful or capacity-rejected — gets a stable `admission_id`
+and how long it waited (`queue_wait_ms`). REST returns these as response
+headers (`X-QueryGate-Admission-Id`, `X-QueryGate-Admission-State` —
+`completed` or `capacity_timeout` — and `X-QueryGate-Queue-Wait-Ms`) so the
+existing `422 {"detail": "too many concurrent ..."}` rejection body never
+changes shape; a successful `StructuredQueryResult`/`BatchQueryItemResult`
+also carries `admission_id`/`queue_wait_ms` fields directly. MCP's
+`MCPErrorResult` gains the same `admission_id`/`admission_state`/
+`queue_wait_ms` fields for a capacity rejection. `querygate_queue_depth`
+(current waiters, single-process visibility) and
+`querygate_queue_wait_seconds` (histogram, by outcome) are exported
+alongside the existing concurrency metrics.
+
+This is phase 1 of TODO.md item 35 — a synchronous, caller-tunable version of
+the wait that already existed. MCP progress notifications, a REST
+`202`-plus-cancel contract, mid-queue cancellation, and Redis-backed
+admission state for multi-replica deployments are phase 2.
+
 ## Production deployment
 
 The quickstart above is for local development. For an actual deployment,
@@ -649,6 +690,13 @@ Being upfront about what's not done yet:
 - **Distributed concurrency enforcement (Redis-backed) is opt-in** — the
   default is an in-process semaphore, correct for a single instance only;
   set `concurrency_backend: redis` for multi-instance deployments.
+- **Agent-visible capacity waiting is phase 1 only** — a caller can choose
+  `queue_mode=fail_fast`/a shorter `wait_timeout_seconds` and gets a stable
+  `admission_id` back (above), but there's no MCP progress notification, REST
+  `202`-plus-cancel contract, mid-queue cancellation, or Redis-backed
+  cross-replica admission/queue-depth state yet (TODO item 35 phase 2); the
+  `querygate_queue_depth` gauge is single-process visibility only, like
+  `querygate_concurrency_in_use`.
 - **Security review is first-party** — the repository includes a maintained
   threat model and adversarial regression suite, but has not yet undergone an
   independent penetration test or formal compliance certification.
@@ -659,9 +707,10 @@ servers, not just unit-tested SQL text — see
 `tests/integration/test_mssql_live.py` and
 `tests/integration/test_postgres_timeout.py`. The real-Postgres load/soak
 harness also proves the observed database concurrency cap, overflow rejection,
-queued completion, and timeout cancellation under concurrent REST traffic; see
-[`docs/LOAD_TESTING.md`](docs/LOAD_TESTING.md). OAuth/JWT is implemented
-(`core/jwt_auth.py`) alongside static API keys.
+queued completion, timeout cancellation, `queue_mode=fail_fast` never
+waiting, and a caller-shortened `wait_timeout_seconds` being honored under
+concurrent REST traffic; see [`docs/LOAD_TESTING.md`](docs/LOAD_TESTING.md).
+OAuth/JWT is implemented (`core/jwt_auth.py`) alongside static API keys.
 
 For the repeatable source/package and container release gates, see
 [`docs/RELEASING.md`](docs/RELEASING.md). Historical extraction notes are

@@ -12,7 +12,7 @@ from querygate.catalog.models import RelationshipHint
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, get_registry, set_registry
 from querygate.core.config import AppConfig
-from querygate.core.exceptions import QueryValidationError
+from querygate.core.exceptions import CapacityTimeoutError, QueryValidationError
 from querygate.execution.service import (
     BatchQueryItemResult,
     ColumnCatalogEntry,
@@ -108,6 +108,83 @@ async def test_query_success(app):
     body = resp.json()
     assert body["row_count"] == 1
     assert body["rows"][0]["name"] == "Ada"
+
+
+@pytest.mark.asyncio
+async def test_query_success_includes_admission_headers(app):
+    mock_result = StructuredQueryResult(
+        rows=[{"id": 1, "name": "Ada"}],
+        row_count=1,
+        truncated=False,
+        limit=50,
+        offset=0,
+        admission_id="admission-123",
+        queue_wait_ms=7,
+    )
+    with patch(f"{_SERVICE}.execute", new_callable=AsyncMock, return_value=mock_result):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                "/api/v1/demo/query",
+                json={"from": "customers", "select": ["customers.id"], "limit": 50},
+            )
+    assert resp.status_code == 200
+    assert resp.headers["X-QueryGate-Admission-Id"] == "admission-123"
+    assert resp.headers["X-QueryGate-Admission-State"] == "completed"
+    assert resp.headers["X-QueryGate-Queue-Wait-Ms"] == "7"
+    body = resp.json()
+    assert body["admission_id"] == "admission-123"
+    assert body["queue_wait_ms"] == 7
+
+
+@pytest.mark.asyncio
+async def test_query_capacity_timeout_is_422_with_admission_headers(app):
+    exc = CapacityTimeoutError(
+        "too many concurrent 'demo' queries in flight, try again shortly",
+        admission_id="admission-456",
+        queue_wait_ms=42,
+    )
+    with patch(f"{_SERVICE}.execute", new_callable=AsyncMock, side_effect=exc):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                "/api/v1/demo/query",
+                json={"from": "customers", "select": ["customers.id"], "limit": 50},
+                params={"queue_mode": "fail_fast"},
+            )
+    assert resp.status_code == 422
+    # Existing body contract (docs/LOAD_TESTING.md) must not change.
+    assert "too many concurrent" in resp.json()["detail"]
+    assert resp.headers["X-QueryGate-Admission-Id"] == "admission-456"
+    assert resp.headers["X-QueryGate-Admission-State"] == "capacity_timeout"
+    assert resp.headers["X-QueryGate-Queue-Wait-Ms"] == "42"
+
+
+@pytest.mark.asyncio
+async def test_query_passes_queue_mode_and_wait_timeout_to_service(app):
+    mock_result = StructuredQueryResult(rows=[], row_count=0, truncated=False, limit=50, offset=0)
+    with patch(
+        f"{_SERVICE}.execute", new_callable=AsyncMock, return_value=mock_result
+    ) as mock_execute:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                "/api/v1/demo/query",
+                json={"from": "customers", "select": ["customers.id"], "limit": 50},
+                params={"queue_mode": "wait", "wait_timeout_seconds": "2.5"},
+            )
+    assert resp.status_code == 200
+    _query_arg, kwargs = mock_execute.call_args
+    assert kwargs["queue_mode"] == "wait"
+    assert kwargs["wait_timeout_seconds"] == 2.5
+
+
+@pytest.mark.asyncio
+async def test_query_rejects_invalid_queue_mode(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/demo/query",
+            json={"from": "customers", "select": ["customers.id"], "limit": 50},
+            params={"queue_mode": "not_a_real_mode"},
+        )
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -221,6 +298,26 @@ async def test_batch_query(app):
             )
     assert resp.status_code == 200
     assert resp.json()["results"][0]["row_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_query_passes_queue_mode_and_wait_timeout_to_service(app):
+    results = [
+        BatchQueryItemResult(rows=[{"id": 1}], row_count=1, truncated=False, limit=5, offset=0)
+    ]
+    with patch(
+        f"{_SERVICE}.execute_many", new_callable=AsyncMock, return_value=results
+    ) as mock_execute_many:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                "/api/v1/demo/query/batch",
+                json={"queries": [{"from": "customers", "select": ["customers.id"], "limit": 5}]},
+                params={"queue_mode": "fail_fast"},
+            )
+    assert resp.status_code == 200
+    _queries_arg, kwargs = mock_execute_many.call_args
+    assert kwargs["queue_mode"] == "fail_fast"
+    assert kwargs["wait_timeout_seconds"] is None
 
 
 @pytest.mark.asyncio

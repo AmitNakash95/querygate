@@ -6,10 +6,10 @@ StructuredQuery AST, validated against schema + policy before compilation.
 
 from __future__ import annotations
 
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 import pydantic as pyd
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from querygate.config_reload import ReloadResult, reload_config
 from querygate.connections.models import PublicConnectionInfo
@@ -18,11 +18,13 @@ from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import (
     PUBLIC_INTERNAL_ERROR,
+    CapacityTimeoutError,
     ConcurrencyLimitError,
     NotFoundError,
     PolicyViolationError,
     QueryValidationError,
 )
+from querygate.execution.admission import QueueMode
 from querygate.execution.service import (
     BatchQueryItemResult,
     ExplainResult,
@@ -61,6 +63,44 @@ def _require_connection(connection_id: str, principal: Principal) -> None:
 def _service(connection_id: str, principal: Principal) -> StructuredQueryService:
     _require_connection(connection_id, principal)
     return StructuredQueryService(connection_id=connection_id, principal=principal, surface="rest")
+
+
+# Agent-visible admission info (TODO.md item 35 phase 1) is surfaced as
+# response headers rather than in the JSON body, so the existing
+# `{"detail": "too many concurrent ..."}` 422 shape callers already parse
+# (see docs/LOAD_TESTING.md) never changes.
+_ADMISSION_ID_HEADER = "X-QueryGate-Admission-Id"
+_ADMISSION_STATE_HEADER = "X-QueryGate-Admission-State"
+_QUEUE_WAIT_HEADER = "X-QueryGate-Queue-Wait-Ms"
+
+_QUEUE_MODE_QUERY = Query(
+    default=None,
+    description=(
+        "fail_fast: don't wait for a concurrency slot at all, reject immediately if the "
+        "connection is at capacity. wait (default): wait up to wait_timeout_seconds, or the "
+        "policy's own concurrency_wait_seconds ceiling if wait_timeout_seconds is omitted."
+    ),
+)
+_WAIT_TIMEOUT_QUERY = Query(
+    default=None,
+    ge=0,
+    description=(
+        "Caller-requested wait (seconds) for a concurrency slot. Clamped to the operator's "
+        "policy concurrency_wait_seconds ceiling — a caller may request a shorter wait, "
+        "never a longer one."
+    ),
+)
+
+
+def _admission_headers(
+    *, admission_id: Optional[str], state: str, queue_wait_ms: Optional[int]
+) -> dict:
+    headers = {_ADMISSION_STATE_HEADER: state}
+    if admission_id is not None:
+        headers[_ADMISSION_ID_HEADER] = admission_id
+    if queue_wait_ms is not None:
+        headers[_QUEUE_WAIT_HEADER] = str(queue_wait_ms)
+    return headers
 
 
 def build_router(
@@ -116,11 +156,28 @@ def build_router(
 
     @router.post("/{connection}/query", response_model=StructuredQueryResult)
     async def execute_query(
-        connection: str, query: StructuredQuery, principal: Principal = Depends(get_principal)
+        connection: str,
+        query: StructuredQuery,
+        response: Response,
+        principal: Principal = Depends(get_principal),
+        queue_mode: Optional[QueueMode] = _QUEUE_MODE_QUERY,
+        wait_timeout_seconds: Optional[float] = _WAIT_TIMEOUT_QUERY,
     ):
         service = _service(connection, principal)
         try:
-            return await service.execute(query)
+            result = await service.execute(
+                query, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
+            )
+        except CapacityTimeoutError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+                headers=_admission_headers(
+                    admission_id=exc.admission_id,
+                    state="capacity_timeout",
+                    queue_wait_ms=exc.queue_wait_ms,
+                ),
+            )
         except (PolicyViolationError, QueryValidationError, ConcurrencyLimitError) as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
         except Exception:
@@ -128,17 +185,31 @@ def build_router(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=PUBLIC_INTERNAL_ERROR,
             )
+        response.headers.update(
+            _admission_headers(
+                admission_id=result.admission_id,
+                state="completed",
+                queue_wait_ms=result.queue_wait_ms,
+            )
+        )
+        return result
 
     @router.post("/{connection}/query/batch", response_model=BatchQueryResult)
     async def execute_query_batch(
-        connection: str, payload: BatchQueryRequest, principal: Principal = Depends(get_principal)
+        connection: str,
+        payload: BatchQueryRequest,
+        principal: Principal = Depends(get_principal),
+        queue_mode: Optional[QueueMode] = _QUEUE_MODE_QUERY,
+        wait_timeout_seconds: Optional[float] = _WAIT_TIMEOUT_QUERY,
     ):
         service = _service(connection, principal)
         try:
             validate_batch_size(len(payload.queries), get_policy(connection, principal=principal))
         except PolicyViolationError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
-        results = await service.execute_many(payload.queries)
+        results = await service.execute_many(
+            payload.queries, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
+        )
         return BatchQueryResult(results=results)
 
     @router.post("/admin/reload-config", response_model=ReloadResult)
