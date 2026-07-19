@@ -32,13 +32,23 @@ async def list_live_tables(connection_id: str) -> list[str]:
     """Enumerate real base tables via INFORMATION_SCHEMA — used when a
     connection has no `known_tables` seed list, so list_tables() still
     returns a real catalog before anything has been reflected yet.
+
+    Excludes system catalog schemas: Postgres's own `information_schema.tables`
+    (unlike MSSQL's) lists `pg_catalog`/`information_schema` system tables
+    (`pg_type`, `pg_aggregate`, ...) alongside real ones when queried without a
+    schema filter, which would otherwise leak internal database structure into
+    `list_tables()` for any connection without an explicit `known_tables` seed,
+    and made schema-refresh scanning (`catalog/refresh.py`) fail outright by
+    trying to reflect them under the wrong schema.
     """
     from querygate.connections.engine import session_scope
 
     async with session_scope(connection_id) as session:
         result = await session.execute(
             sa.text(
-                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'"
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                "WHERE TABLE_TYPE = 'BASE TABLE' "
+                "AND TABLE_SCHEMA NOT IN ('pg_catalog', 'information_schema', 'sys')"
             )
         )
         return [row[0] for row in result.all()]
