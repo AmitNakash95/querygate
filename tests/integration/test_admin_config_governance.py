@@ -287,6 +287,65 @@ async def test_diff_endpoint_reports_semantic_changes_without_persisting(app):
 
 
 @pytest.mark.asyncio
+async def test_blast_radius_endpoint_finds_targeted_expansion_under_an_overall_tightening(app):
+    # The default cap tightens for everyone (100 -> 50), but agent-a's own
+    # override raises its effective cap to 5000 — a targeted expansion hidden
+    # inside what looks, at the baseline, like a fleet-wide tightening.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/blast-radius",
+            json={
+                "policy_yaml": (
+                    "default:\n"
+                    "  enabled: true\n"
+                    "  max_limit: 50\n"
+                    "principals:\n"
+                    "  agent-a:\n"
+                    "    '*':\n"
+                    "      max_limit: 5000\n"
+                )
+            },
+            headers=_auth(_ADMIN_KEY),
+        )
+        versions_resp = await client.get("/api/v1/admin/config/versions", headers=_auth(_ADMIN_KEY))
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["evaluation_scope"] == "connection_baseline_plus_configured_principals"
+    baseline_change = next(c for c in body["baseline"]["changes"] if c["object"] == "max_limit")
+    assert baseline_change["direction"] == "tightening"
+    assert body["principals_configured"] == 1
+    assert body["principals_affected"] == 1
+    (impact,) = body["principal_impacts"]
+    assert impact["principal"] == "agent-a"
+    principal_change = next(c for c in impact["changes"] if c["object"] == "max_limit")
+    assert principal_change["direction"] == "loosening"
+    assert principal_change["before"] == "100" and principal_change["after"] == "5000"
+    # The targeted expansion is the highest-risk finding, scoped to agent-a —
+    # the baseline tightening is not a risk and is excluded from this view.
+    assert body["highest_risk"]
+    top = body["highest_risk"][0]
+    assert top["scope"] == "principal" and top["principal"] == "agent-a"
+    assert top["change"]["object"] == "max_limit"
+    # Blast-radius analysis persists nothing: only the bootstrapped version exists.
+    assert [v["id"] for v in versions_resp.json()] == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_blast_radius_endpoint_with_no_candidate_changes_is_empty(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/blast-radius", json={}, headers=_auth(_ADMIN_KEY)
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["baseline"]["changes"] == []
+    assert body["principal_impacts"] == []
+    assert body["principals_configured"] == 0
+
+
+@pytest.mark.asyncio
 async def test_apply_unknown_version_returns_404(app):
     async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
         resp = await client.post(

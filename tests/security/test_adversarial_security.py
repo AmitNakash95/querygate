@@ -794,6 +794,9 @@ async def test_config_governance_write_endpoints_require_write_scope():
             headers=headers,
         )
         diff_resp = await client.post("/api/v1/admin/config/diff", json={}, headers=headers)
+        blast_radius_resp = await client.post(
+            "/api/v1/admin/config/blast-radius", json={}, headers=headers
+        )
         apply_resp = await client.post("/api/v1/admin/config/versions/1/apply", headers=headers)
 
     assert stage_resp.status_code == 403
@@ -803,6 +806,9 @@ async def test_config_governance_write_endpoints_require_write_scope():
     # The semantic diff echoes resolved policy detail, so config-write alone is
     # insufficient — it also requires config-read (both, like /simulate).
     assert diff_resp.status_code == 403
+    # Blast-radius shares /diff's scope reasoning exactly (it's an aggregation
+    # over the same isolated candidate resolution).
+    assert blast_radius_resp.status_code == 403
     assert apply_resp.status_code == 403
 
 
@@ -824,6 +830,9 @@ async def test_config_governance_read_endpoints_require_read_scope():
             headers=headers,
         )
         diff_resp = await client.post("/api/v1/admin/config/diff", json={}, headers=headers)
+        blast_radius_resp = await client.post(
+            "/api/v1/admin/config/blast-radius", json={}, headers=headers
+        )
 
     assert list_resp.status_code == 403
     assert current_resp.status_code == 403
@@ -832,6 +841,7 @@ async def test_config_governance_read_endpoints_require_read_scope():
     # The semantic diff resolves caller-supplied config/secret references, so
     # config-read alone is insufficient — it also requires config-write.
     assert diff_resp.status_code == 403
+    assert blast_radius_resp.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -840,6 +850,42 @@ async def test_config_governance_endpoints_reject_unauthenticated_callers():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
         resp = await client.get("/api/v1/admin/config/current")
     assert resp.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_blast_radius_never_leaks_static_filter_values_or_yaml():
+    """The blast-radius aggregation (TODO item 41) fans a candidate diff out
+    across every configured principal — the same redaction guarantee /diff
+    already gives one resolution must still hold once it's evaluated many
+    times over. A static mandatory-filter value or raw YAML content must
+    never appear anywhere in the aggregated response, including inside a
+    per-principal impact entry.
+    """
+    app = create_app(_governance_app(scopes=["admin:config:read", "admin:config:write"]))
+    headers = {"Authorization": "Bearer governance-caller-key"}
+    marker = "tenant-secret-marker-9f2c"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        resp = await client.post(
+            "/api/v1/admin/config/blast-radius",
+            json={
+                "policy_yaml": (
+                    "default:\n"
+                    "  enabled: true\n"
+                    "  mandatory_row_filters:\n"
+                    "    - table: orders\n"
+                    "      column: tenant_id\n"
+                    f"      value: {marker}\n"
+                    "principals:\n"
+                    "  agent-a:\n"
+                    "    '*':\n"
+                    "      max_limit: 999\n"
+                )
+            },
+            headers=headers,
+        )
+
+    assert resp.status_code == 200
+    assert marker not in resp.text
 
 
 @pytest.mark.asyncio

@@ -330,6 +330,21 @@ curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/simulate 
 curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/diff \
   -d '{"policy_yaml": "default:\n  enabled: true\n  max_joins: 2\n"}'
 
+# Same candidate-document shape as /diff, but aggregated across every
+# principal configured in policy.yaml's `principals:` section, not just the
+# default/connection baseline — a syntactically tiny per-principal override
+# can matter more than a large default-policy edit, and vice versa. Ranks
+# access-expanding changes (a removed mandatory row filter ranked above a
+# newly visible table/column, ranked above a loosened guardrail) so a
+# reviewer sees the riskiest, most-affected-caller changes first, and tags
+# each one "baseline" (affects every principal without an override) or
+# "principal" (affects only that one caller). Bounded work: evaluates up to
+# 100 configured principals and reports `analysis_incomplete` with a specific
+# reason if that cap — or the top-25 highest-risk cap — is reached, rather
+# than silently omitting impact. Requires both config scopes, like diff.
+curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/blast-radius \
+  -d '{"policy_yaml": "default:\n  enabled: true\n  max_limit: 50\n"}'
+
 # Stage it as a new version (only the fields you send change; everything
 # else inherits from the current active version)
 curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions \
@@ -346,7 +361,8 @@ curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions/
 curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions/1/apply
 ```
 
-Every validate/preview/simulate/diff/stage/apply/rollback is attributed to the calling
+Every validate/preview/simulate/diff/blast-radius/stage/apply/rollback is
+attributed to the calling
 principal and recorded in the same audit trail as query execution (a
 `config.governance` event — action, version id, outcome, actor — never the
 YAML content itself, which stays only in the version store). The first call to
@@ -355,10 +371,11 @@ any `/admin/config/*` endpoint bootstraps version `"1"` from whatever
 "current active version" always means something. Gated behind two scopes,
 matching the read/write split most admin APIs use: `admin:config:read`
 (list/inspect versions) and `admin:config:write` (validate/preview/stage/
-apply/rollback). `simulate` and `diff` each require *both* scopes at once — they echo back
+apply/rollback). `simulate`, `diff`, and `blast-radius` each require *both*
+scopes at once — they echo back
 semantic policy detail like a read endpoint, but also resolve caller-supplied
 config/secret references like a write endpoint, so a read-only principal can't
-turn either into a secret-existence oracle. Both load the candidate
+turn any of them into a secret-existence oracle. All three load the candidate
 documents into an isolated, temporary registry/policy/catalog context (reusing
 the real loaders and validation logic) and never touch the live
 registry/policy singletons or the version store, so concurrent production
@@ -369,8 +386,13 @@ table/column access, mandatory-filter requirements, and join groups — rather
 than leaving a reviewer to mentally execute the default→connection policy merge
 from a YAML line diff. It resolves the default and per-connection layers at the
 connection baseline; when a change lives purely in a `principals:` override it
-is flagged as `analysis_incomplete` (per-principal resolution is a later
-phase) rather than silently omitted.
+is flagged as `analysis_incomplete` (per-principal resolution is `blast-radius`,
+below) rather than silently omitted. `blast-radius` builds directly on `diff`'s
+own change classification — same categories, same tightening/loosening/neutral
+taxonomy — evaluated once at the connection baseline and once more per
+explicitly configured principal, then ranks the access-expanding results so a
+reviewer sees whether a change is fleet-wide or targeted at a specific caller
+before it's staged.
 
 ### Browser admin control plane
 
@@ -994,10 +1016,17 @@ Being upfront about what's not done yet:
 - **Config-governance has no approval workflow yet** — a caller with
   `admin:config:write` can stage and immediately apply a version in one
   session; there's no second-approver/four-eyes requirement or scheduled
-  apply. `POST /admin/config/diff` now reports a resolved-access semantic diff
-  (typed tightening/loosening/neutral changes, not just a YAML line diff), but
-  only at the connection baseline — per-principal resolution and blast-radius
-  impact analysis are later phases. The preview reports changed/unchanged only
+  apply. `POST /admin/config/diff` reports a resolved-access semantic diff
+  (typed tightening/loosening/neutral changes, not just a YAML line diff) at
+  the connection baseline, and `POST /admin/config/blast-radius` aggregates
+  that same diff across every principal explicitly configured in
+  `policy.yaml`'s `principals:` section — ranking access-expanding changes so
+  a reviewer can tell a targeted change from a fleet-wide one — but it is
+  bounded to the principals a deployment actually configured (up to 100) and
+  reports `analysis_incomplete` rather than resolving every conceivable
+  subject; blast-radius impact analysis beyond that bound (e.g. asynchronous
+  or paginated evaluation for very large principal counts) is a later phase.
+  The preview reports changed/unchanged only
   with read scope; write-only callers see submitted/inherited so write scope
   cannot become read scope. No admin UI either — the governance mutation API
   is REST-only for now.

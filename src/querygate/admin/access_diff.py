@@ -7,13 +7,18 @@ classification logic pure lets it be unit-tested directly against constructed
 registries/policy stores.
 
 Phase 1 scope (`SemanticAccessDiff.evaluation_scope == "connection_baseline"`):
-the default and per-connection policy layers are resolved with no principal
-applied. A change that lives purely in a per-principal override is detected but
-not itemized — `analysis_incomplete` is set instead — because resolving every
-configured principal is TODO.md item 40 phase 2 (and feeds item 41's
-blast-radius aggregation). The diff compares *resolved behavior*, never YAML
-text, and never places a static filter value, resolved secret, or predicate
-value into its output.
+called with no `principal` argument (the default), the default and
+per-connection policy layers are resolved with no principal applied. A change
+that lives purely in a per-principal override is detected but not itemized —
+`analysis_incomplete` is set instead. The diff compares *resolved behavior*,
+never YAML text, and never places a static filter value, resolved secret, or
+predicate value into its output.
+
+`compute_access_diff` also accepts an explicit `principal`, which resolves
+every layer (default/connection/principal) for that one caller instead of the
+connection baseline — this is the primitive `admin/blast_radius.py` (item 41)
+reuses per configured principal rather than re-implementing the same
+classification logic against a different resolution.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from querygate.admin.models import (
     SemanticDiffSummary,
 )
 from querygate.connections.models import ConnectionProfile
+from querygate.core.auth import Principal
 from querygate.policy.models import CostEstimationMode, Policy
 
 if TYPE_CHECKING:
@@ -358,14 +364,17 @@ def _diff_connection(
     connection: str,
     active: "LoadedConfigContext",
     candidate: "LoadedConfigContext",
+    principal: Optional[Principal],
 ) -> None:
     active_present = connection in active.registry.all_ids()
     candidate_present = connection in candidate.registry.all_ids()
 
     a_profile = active.registry.get(connection) if active_present else None
     c_profile = candidate.registry.get(connection) if candidate_present else None
-    a_policy = active.policy_store.get(connection) if active_present else None
-    c_policy = candidate.policy_store.get(connection) if candidate_present else None
+    a_policy = active.policy_store.get(connection, principal=principal) if active_present else None
+    c_policy = (
+        candidate.policy_store.get(connection, principal=principal) if candidate_present else None
+    )
 
     a_visible = _baseline_visible(a_profile, a_policy) if a_profile and a_policy else False
     c_visible = _baseline_visible(c_profile, c_policy) if c_profile and c_policy else False
@@ -445,23 +454,25 @@ def compute_access_diff(
     active: "LoadedConfigContext",
     candidate: "LoadedConfigContext",
     *,
+    principal: Optional[Principal] = None,
     max_changes: int = DEFAULT_MAX_CHANGES,
 ) -> SemanticAccessDiff:
     diff = _Diff(max_changes=max_changes)
 
-    if (
+    if principal is None and (
         active.policy_store.principal_override_map()
         != candidate.policy_store.principal_override_map()
     ):
         diff.note(
-            "Per-principal policy overrides changed; per-principal impact is resolved in a "
-            "later phase (TODO item 40 phase 2 / item 41). Only the default and "
-            "per-connection layers are analyzed here."
+            "Per-principal policy overrides changed; per-principal impact is resolved "
+            "separately by the blast-radius endpoint (TODO item 41), which evaluates each "
+            "configured principal individually. Only the default and per-connection layers "
+            "are analyzed here."
         )
 
     connections = sorted(set(active.registry.all_ids()) | set(candidate.registry.all_ids()))
     for connection in connections:
-        _diff_connection(diff, connection, active, candidate)
+        _diff_connection(diff, connection, active, candidate, principal)
 
     # Loosening first (most security-relevant), so that if the list is
     # truncated the highest-risk changes survive.
