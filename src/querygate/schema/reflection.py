@@ -31,11 +31,12 @@ def sanitize_table_name(table_name: str) -> str:
 def is_schema_cached(connection_id: str) -> bool:
     """Whether any table has been reflected+cached for this connection yet.
 
-    Cheap and side-effect-free (never triggers reflection): the admin
-    connection-status API (TODO.md item 43) reports this so an operator can see
-    whether schema discovery has warmed for a connection. `get_metadata`
-    lazily creates an empty `MetaData` for an unseen connection, so an
-    un-reflected connection correctly reads as not cached.
+    Cheap and never triggers reflection: the admin connection-status API
+    (TODO.md item 43) reports this so an operator can see whether schema
+    discovery has warmed for a connection. `get_metadata` lazily creates an
+    (empty) `MetaData` for an unseen connection — the same object normal
+    reflection would have created — so an un-reflected connection correctly
+    reads as not cached.
     """
     from querygate.connections.engine import get_metadata
 
