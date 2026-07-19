@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock
 
+import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from querygate.connections.dialects import (
@@ -24,7 +25,33 @@ from querygate.connections.dialects import (
     build_engine_url,
     register_query_timeout,
 )
-from querygate.connections.models import ConnectionProfile
+from querygate.connections.models import ConnectionProfile, DatabaseDialect
+
+
+def test_database_dialect_equals_its_plain_string_value():
+    """`DatabaseDialect` is a `StrEnum` specifically so every existing
+    `dialect == "postgresql"`-shaped comparison, YAML-loaded plain string,
+    and log line keeps working unchanged — this pins that behavior down
+    (a hand-rolled `class X(str, Enum)` would NOT get this for free in
+    Python 3.11: only `StrEnum`'s `__str__`/`__format__` resolve to the
+    plain value; a plain `str, Enum` mixin prints "DatabaseDialect.X").
+    """
+    assert DatabaseDialect.POSTGRESQL == "postgresql"
+    assert DatabaseDialect.MSSQL == "mssql"
+    assert str(DatabaseDialect.POSTGRESQL) == "postgresql"
+    assert f"{DatabaseDialect.MSSQL}" == "mssql"
+
+
+def test_connection_profile_accepts_a_plain_yaml_string_for_dialect():
+    profile = ConnectionProfile(
+        id="demo", dialect="postgresql", connection_string="postgresql+asyncpg://u:p@h/db"
+    )
+    assert profile.dialect == DatabaseDialect.POSTGRESQL
+
+
+def test_connection_profile_rejects_an_unsupported_dialect():
+    with pytest.raises(Exception):
+        ConnectionProfile(id="demo", dialect="oracle", connection_string="x://u:p@h/db")
 
 
 def _mssql_profile() -> ConnectionProfile:

@@ -24,6 +24,7 @@ from querygate.catalog.models import (
 )
 from querygate.compiler.sqlalchemy_compiler import compile_structured_query
 from querygate.connections.engine import get_engine, get_metadata, session_scope
+from querygate.connections.models import DatabaseDialect
 from querygate.connections.registry import get_registry
 from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.auth import Principal
@@ -242,7 +243,7 @@ class StructuredQueryService:
                 sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
 
                 async with session_scope(self._connection_id, policy=policy) as session:
-                    if policy.cost_estimation_enabled and dialect == "postgresql":
+                    if policy.cost_estimation_enabled and dialect == DatabaseDialect.POSTGRESQL:
                         estimate = await estimate_postgres_query_cost(session, stmt)
                         if estimate is not None:
                             enforce_cost_estimate(estimate, policy)

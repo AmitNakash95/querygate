@@ -11,21 +11,21 @@ import sqlalchemy as sa
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from querygate.connections.models import ConnectionProfile
+from querygate.connections.models import ConnectionProfile, DatabaseDialect
 from querygate.core.config import config as app_config
 
 
 def build_engine_url(profile: ConnectionProfile) -> str:
-    if profile.dialect == "postgresql":
+    if profile.dialect == DatabaseDialect.POSTGRESQL:
         return profile.connection_string
-    if profile.dialect == "mssql":
+    if profile.dialect == DatabaseDialect.MSSQL:
         cert = "&TrustServerCertificate=Yes" if app_config.db_trust_server_certificate else ""
         return f"{profile.connection_string}?driver={app_config.odbc_driver}{cert}"
     raise ValueError(f"Unsupported dialect: {profile.dialect}")
 
 
 def build_connect_args(profile: ConnectionProfile, timeout_seconds: int) -> dict:
-    if profile.dialect == "mssql":
+    if profile.dialect == DatabaseDialect.MSSQL:
         # This is pyodbc's *login* timeout (SQL_ATTR_LOGIN_TIMEOUT) — despite
         # its name, `timeout=` in pyodbc.connect() does NOT bound query
         # execution (confirmed against a live server: a WAITFOR DELAY well
@@ -54,7 +54,9 @@ def _raw_pyodbc_connection(dbapi_connection):
     return getattr(inner, "_conn", None) or inner or dbapi_connection
 
 
-def register_query_timeout(engine: AsyncEngine, dialect: str, timeout_seconds: int) -> None:
+def register_query_timeout(
+    engine: AsyncEngine, dialect: DatabaseDialect, timeout_seconds: int
+) -> None:
     """Bind pyodbc's actual query-execution timeout (SQL_ATTR_QUERY_TIMEOUT).
 
     Must be set as an attribute on the raw DBAPI connection after it's
@@ -64,7 +66,7 @@ def register_query_timeout(engine: AsyncEngine, dialect: str, timeout_seconds: i
     first) gets it applied, since the pool can silently create new
     connections later (e.g. after one is recycled or dropped).
     """
-    if dialect != "mssql":
+    if dialect != DatabaseDialect.MSSQL:
         return
 
     @event.listens_for(engine.sync_engine, "connect")
@@ -74,17 +76,17 @@ def register_query_timeout(engine: AsyncEngine, dialect: str, timeout_seconds: i
 
 async def apply_session_guardrails(
     session: AsyncSession,
-    dialect: str,
+    dialect: DatabaseDialect,
     *,
     lock_timeout_seconds: int,
     statement_timeout_seconds: int,
 ) -> None:
-    if dialect == "postgresql":
+    if dialect == DatabaseDialect.POSTGRESQL:
         await session.execute(sa.text(f"SET LOCAL lock_timeout = '{lock_timeout_seconds}s'"))
         await session.execute(
             sa.text(f"SET LOCAL statement_timeout = '{statement_timeout_seconds}s'")
         )
-    elif dialect == "mssql":
+    elif dialect == DatabaseDialect.MSSQL:
         # LOCK_TIMEOUT is in milliseconds.
         await session.execute(sa.text(f"SET LOCK_TIMEOUT {lock_timeout_seconds * 1000}"))
         await session.execute(sa.text("SET XACT_ABORT ON"))

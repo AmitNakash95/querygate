@@ -8,18 +8,40 @@ agent/client-facing uses `PublicConnectionInfo` instead.
 from __future__ import annotations
 
 import re
-from typing import Literal, Optional
+from enum import StrEnum
+from typing import Optional
 
 import pydantic as pyd
 
-Dialect = Literal["postgresql", "mssql"]
+
+class DatabaseDialect(StrEnum):
+    """The only dialects `ConnectionRegistry` accepts — enforced everywhere
+    a dialect is compared instead of a literal string (connections/dialects.py,
+    compiler/sqlalchemy_compiler.py, execution/service.py). `StrEnum` (not a
+    hand-rolled `str, Enum` mixin) so f-strings, `==` against a plain string,
+    YAML/JSON round-tripping, and pydantic validation all behave exactly like
+    a plain string — every existing `dialect == "postgresql"`-shaped
+    comparison and log line keeps working unchanged, just without the magic
+    string.
+
+    SQLite is deliberately not a member: per CLAUDE.md, it's used internally
+    for tests/examples by monkeypatching `connections.engine.get_engine`/
+    `session_scope` directly, never through the registry — see
+    `execution/service.py`'s `dialect` (derived from the live SQLAlchemy
+    engine, not `ConnectionProfile.dialect`) for where that string can still
+    legitimately be `"sqlite"` and stays a plain `str`.
+    """
+
+    POSTGRESQL = "postgresql"
+    MSSQL = "mssql"
+
 
 _VALID_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]*$")
 
 
 class ConnectionProfile(pyd.BaseModel):
     id: str
-    dialect: Dialect
+    dialect: DatabaseDialect
     connection_string: str = pyd.Field(repr=False)
     enabled: bool = True
     description: Optional[str] = None
@@ -51,7 +73,7 @@ class PublicConnectionInfo(pyd.BaseModel):
     """Credential-free projection of a ConnectionProfile — safe for MCP/REST responses."""
 
     id: str
-    dialect: Dialect
+    dialect: DatabaseDialect
     enabled: bool
     description: Optional[str] = None
 
