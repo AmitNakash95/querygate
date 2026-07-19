@@ -320,3 +320,80 @@ class SemanticAccessDiff(pyd.BaseModel):
     )
 
     model_config = pyd.ConfigDict(extra="forbid")
+
+
+class BlastRadiusPrincipalImpact(pyd.BaseModel):
+    """The resolved-access diff for one explicitly configured principal.
+
+    Built with the exact same classification logic as `SemanticAccessDiff`
+    (`admin/access_diff.compute_access_diff`, called with that principal
+    resolved instead of the connection baseline) — only the resolution layer
+    differs, never the change taxonomy.
+    """
+
+    principal: str
+    changes: list[SemanticAccessChange] = pyd.Field(default_factory=list)
+    summary: SemanticDiffSummary = pyd.Field(default_factory=SemanticDiffSummary)
+    analysis_incomplete: bool = False
+    incomplete_reasons: list[str] = pyd.Field(default_factory=list)
+    truncated: bool = False
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class RankedBlastRadiusChange(pyd.BaseModel):
+    """One access-expanding change, ranked by risk, with the scope it applies
+    at: `"baseline"` means every principal without an override is affected
+    (fleet-wide); `"principal"` means only the named principal is affected.
+    """
+
+    scope: Literal["baseline", "principal"]
+    principal: Optional[str] = None
+    change: SemanticAccessChange
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class PolicyBlastRadiusReport(pyd.BaseModel):
+    """Aggregates the resolved-access diff across the default/connection
+    baseline plus every principal with an explicit `principals:` override, so
+    a reviewer can tell a targeted change from a fleet-wide access expansion
+    or guardrail relaxation before staging it (TODO item 41).
+
+    Every principal *not* itemized in `principal_impacts` behaves exactly
+    like `baseline` — they inherit the default/connection layers unmodified
+    by any principal override — stated explicitly rather than left for a
+    reviewer to infer from an empty list. `highest_risk` ranks only
+    access-expanding changes (mandatory-row-filter removal ranked above newly
+    visible connections/tables/columns, ranked above loosened guardrails),
+    since a syntactically tiny change can matter far more than a large one —
+    tightening/neutral changes remain visible in full in `baseline` and each
+    principal's own `changes` list, just not in this risk-priority view. Work
+    is bounded: at most `principals_evaluated` (of `principals_configured`)
+    principals are individually diffed, and each principal's own change list
+    is separately capped — either cap being reached sets
+    `analysis_incomplete` with a specific reason rather than silently
+    omitting impact.
+    """
+
+    baseline: SemanticAccessDiff
+    principal_impacts: list[BlastRadiusPrincipalImpact] = pyd.Field(default_factory=list)
+    principals_configured: int = 0
+    principals_evaluated: int = 0
+    principals_affected: int = 0
+    highest_risk: list[RankedBlastRadiusChange] = pyd.Field(default_factory=list)
+    analysis_incomplete: bool = False
+    incomplete_reasons: list[str] = pyd.Field(default_factory=list)
+    evaluation_scope: Literal["connection_baseline_plus_configured_principals"] = (
+        "connection_baseline_plus_configured_principals"
+    )
+    redactions: list[str] = pyd.Field(
+        default_factory=lambda: [
+            "candidate configuration documents and raw YAML",
+            "connection strings, resolved secret values, and secret references",
+            "static mandatory-filter values and supplied claim values",
+            "query predicate values and compiled SQL",
+        ]
+    )
+
+    model_config = pyd.ConfigDict(extra="forbid")

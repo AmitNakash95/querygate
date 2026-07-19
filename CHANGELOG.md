@@ -6,6 +6,27 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- Policy-change blast-radius analysis, phase 1 (TODO.md item 41).
+  `POST /api/v1/admin/config/blast-radius` (`admin/blast_radius.py`,
+  `admin.service.compute_blast_radius`) aggregates item 40's semantic access
+  diff across the connection baseline and every principal explicitly
+  configured in `policy.yaml`'s `principals:` section, so a reviewer can tell
+  a targeted access expansion from a fleet-wide one before staging a
+  candidate. `admin/access_diff.compute_access_diff` gained an optional
+  `principal` argument reused for this, rather than a parallel resolution
+  path. Findings are ranked by risk — a removed mandatory row filter above a
+  newly visible connection/table/column, above a loosened guardrail — and
+  each is tagged `baseline` (affects every principal without an override) or
+  `principal` (affects only that caller). Bounded work on every axis
+  (at most 100 configured principals individually evaluated, a capped
+  per-principal change list, a capped 25-entry `highest_risk` list), each
+  with an honest `analysis_incomplete` reason rather than silent
+  under-reporting. Shares `/diff`'s isolated-context loading, redaction
+  posture, `admin:config:read` + `admin:config:write` scope requirement, and
+  audit trail (new `"blast_radius"` action). Documented as QG-22 in
+  `docs/THREAT_MODEL.md`. Phase 2 (async/paginated evaluation for deployments
+  with more configured principals than the bounded pass can cover in one
+  request) is not started.
 - Admin connection-operations status API, phase 1 (TODO.md item 43).
   `GET /api/v1/admin/connections` (`api/admin_connections_routes.py`) returns a
   credential-free, per-connection operational status built from the same

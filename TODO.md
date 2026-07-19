@@ -70,7 +70,7 @@ order-of-magnitude, not commitments.
 | 38 | ✅ Admin UI catalog-governance workspace (phase 1: core review/approve/reject/publish/rollback loop; phase 2: bulk ops, export/import UI, generation triggers not started) | L | 27, 31, 32B |
 | 39 | ✅ Draft-aware policy simulation before staging | M–L | 6, 17, 25, 31 |
 | 40 | ✅ Semantic access diff for config changes (phase 1: connection-baseline diff + REST; phase 2: per-principal resolution not started) | L | 6, 25, 31, 39 |
-| 41 | Policy-change blast-radius analysis | M–L | 22, 25, 31, 40 |
+| 41 | ✅ Policy-change blast-radius analysis (phase 1: bounded synchronous aggregation + ranking; phase 2: async/paginated evaluation for very large principal counts not started) | M–L | 22, 25, 31, 40 |
 | 42 | Four-eyes config approval and separation of duties | XL | 10, 23, 25, 31 |
 | 43 | ✅ Admin connection-operations and health workspace (phase 1: admin connection-status API; phase 2: "test now" probe + browser workspace not started) | L | 7, 12, 31 |
 | 44 | Admin observability and rejection-trend dashboard | L | 12, 23, 31, 35 |
@@ -2886,23 +2886,87 @@ the UI and CI/CD review tooling.
 
 ### 41. Policy-change blast-radius analysis
 
-**Effort: M–L (2–5 days).** This builds on item 40's semantic diff but adds
-aggregation, prioritization, and potentially large principal-by-connection
-evaluation. The high end applies when deployments have enough configured
-principals and objects to require asynchronous or paginated analysis.
+**Phase 1 (bounded, synchronous aggregation) ✅ DONE.** **Phase 2
+(asynchronous/paginated evaluation for deployments with enough configured
+principals to exceed phase 1's bound) not started — split out below because
+it needs a different execution shape (background job plus polling or a
+paginated response), not just a larger cap.**
+
+**Phase 1 shipped:** `POST /api/v1/admin/config/blast-radius`
+(`api/admin_config_routes.py`) reuses item 40's semantic diff
+(`admin/access_diff.compute_access_diff`) rather than a parallel resolution
+path — that function gained an optional `principal` argument so the exact
+same per-connection classification logic (guardrails, table/column access,
+mandatory filters, join group, connection visibility) can be evaluated once
+at the connection baseline (unchanged behavior, `principal=None`) and again
+for one specific caller. `admin/blast_radius.py`'s
+`compute_blast_radius_report()` calls it once for the baseline, then once
+more for every principal with an explicit `principals:` entry in either the
+active or candidate policy — a principal *without* an override is identical
+to the baseline by construction, so it is never separately evaluated or
+listed, closing the loop item 40's own diff left open
+(`analysis_incomplete` when "per-principal impact is resolved in a later
+phase").
+
+Findings are ranked, not just listed: `highest_risk` includes only
+access-*expanding* (loosening) changes — a removed mandatory row filter
+ranked above a newly visible connection/table/column, ranked above a
+loosened guardrail cap — with each entry tagged `scope: "baseline"` (affects
+every principal without an override; fleet-wide) or `scope: "principal"`
+(affects only that named caller; targeted), so a reviewer can immediately
+tell a small YAML edit with a fleet-wide blast radius from a large edit that
+only touches one agent's override — exactly the scenario this item's own
+"why it matters" describes. Tightening/neutral changes are never hidden;
+they remain in full in `baseline.changes` and each principal's own
+`principal_impacts[].changes`, just excluded from the risk-priority view.
+
+Work is bounded on every axis, each with its own cap and an honest
+`analysis_incomplete` state (with a specific human-readable reason) rather
+than silent under-reporting when a cap is hit: at most 100 configured
+principals are individually evaluated (`principals_evaluated` vs.
+`principals_configured` in the response); each principal's own change list
+is capped like item 40's diff already was; and `highest_risk` itself is
+capped at 25 entries. `compute_blast_radius` (`admin/service.py`) shares
+`diff_candidate_access`'s isolated-context loading, redaction posture, scope
+requirement (`admin:config:read` **and** `admin:config:write` together, for
+the same read-detail-plus-write-resolution reasoning as `diff`/`simulate`),
+and audit trail (`config.governance` event, new `"blast_radius"` action) —
+never a second candidate-loading or audit path.
+
+Covered by `tests/unit/test_blast_radius.py` (pure aggregation/ranking logic:
+fleet-wide vs. targeted scoping, a principal shielded from a base-policy
+change by its own override, mandatory-filter-removal ranked above
+table/column access ranked above guardrails, tightening changes excluded
+from `highest_risk`, both bounds triggering `analysis_incomplete`),
+`tests/unit/test_admin_service.py` (isolation from live singletons and the
+governance store, audit events, invalid-candidate masking), a REST
+integration test proving a targeted per-principal expansion surfaces as the
+top `highest_risk` finding even while the connection baseline itself
+tightens, and adversarial security tests (both config scopes independently
+required, matching `/diff`; a static mandatory-filter value never appears
+anywhere in the aggregated response, including inside a per-principal
+impact entry). See `docs/THREAT_MODEL.md`'s new QG-22 entry.
+
+**Explicitly out of scope for this pass** (matches this item's own "high end
+applies when... asynchronous or paginated analysis" framing): no
+async/background evaluation and no paginated response — a deployment with
+more than 100 configured principals gets `analysis_incomplete` with a count
+of how many were skipped, not a way to page through the rest. No admin UI
+panel either, matching item 40 phase 1's own scope (the admin UI's existing
+"Change preview" panel is a client-side line diff, not wired to either
+semantic endpoint).
 
 **Why it matters:** A syntactically tiny default-policy change can affect every
 principal and connection, while a large YAML edit may affect only one agent.
 Without an impact summary, reviewers cannot distinguish a targeted change from
 a fleet-wide access expansion or guardrail relaxation before activation.
 
-**What to do:** Summarize affected principals, connections, tables, columns,
-mandatory filters, and relaxed/tightened caps before staging. Rank access
-expansions and removed row filters as highest risk; show exact, paginated
-details only to callers authorized to inspect the underlying configuration.
-Use bounded work/output, make wildcard/default-layer fan-out explicit, and
-include an “analysis incomplete” state rather than silently omitting impacts
-when a configured cap is reached.
+**What to do (phase 2):** Add an asynchronous or paginated evaluation path
+for deployments with more configured principals than phase 1's bounded,
+synchronous pass can cover in one request — a background job with a
+pollable status/result, or a paginated `principal_impacts` response —
+without changing phase 1's response shape for the common case that already
+fits under the bound.
 
 ### 42. Four-eyes config approval and separation of duties
 
