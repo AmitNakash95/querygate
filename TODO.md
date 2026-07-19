@@ -67,11 +67,21 @@ order-of-magnitude, not commitments.
 | 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
 | 36 | Extensive production-grade QA project / edge-case test suite | L | 15, 28 |
 | 37 | Automated end-to-end proof of adaptive semantic learning | M–L | 23, 25, 27, 28, 32B, 32C |
+| 38 | Admin UI catalog-governance workspace | L | 27, 31, 32B |
+| 39 | Draft-aware policy simulation before staging | M–L | 6, 17, 25, 31 |
+| 40 | Semantic access diff for config changes | L | 6, 25, 31, 39 |
+| 41 | Policy-change blast-radius analysis | M–L | 22, 25, 31, 40 |
+| 42 | Four-eyes config approval and separation of duties | XL | 10, 23, 25, 31 |
+| 43 | Admin connection-operations and health workspace | L | 7, 12, 31 |
+| 44 | Admin observability and rejection-trend dashboard | L | 12, 23, 31, 35 |
+| 45 | Dedicated non-admin “My access” portal | M | 22, 31, 33 |
+| 46 | Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
+| 47 | Safe draft recovery plus config export/import UX | M | 13, 25, 31 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
 
-Items 21–37 are the next quality tranche from the current repo scan: mostly
+Items 21–47 are the next quality tranche from the current repo scan: mostly
 security consistency, enterprise operability, and product polish — the
 areas that move QueryGate from "strong engineering prototype" toward a
 credible 10/10 commercial infrastructure product.
@@ -2458,6 +2468,221 @@ row access; fail on any learned-content auto-publication or policy disclosure;
 and report baseline-versus-learned correctness, discovery-call reduction,
 stale detection, duplicate proposals, and security violations. Do not make a
 "self-learning" product claim until this test and the adversarial suite pass.
+
+### 38. Admin UI catalog-governance workspace
+
+**Effort: L (3–5 days).** The governed backend, scopes, proposal state
+machine, version history, and REST routes already exist from item 32B, so
+this is primarily a substantial UI workflow rather than a new persistence
+subsystem. The effort is in presenting conflicts, provenance, and state
+transitions accurately and covering every authorization boundary.
+
+**Why it matters:** Item 31's UI can edit the published catalog YAML as part
+of a config snapshot, but it does not expose item 32B's safer proposal-based
+workflow. An administrator currently has to use REST or
+`querygate-semantic-memory` to review generated/learned drafts, compare them
+with verified content, approve or reject them, publish them, and roll them
+back. That leaves one of QueryGate's most differentiated governance features
+outside its primary human interface.
+
+**What to do:** Add a catalog workspace with connection/status/source filters,
+a bounded proposal queue, side-by-side proposed-versus-published fields,
+provenance and schema-freshness indicators, edit/reject/approve actions,
+publish conflict explanations, bulk operations, and catalog version rollback.
+Call only the existing item-32B routes and honor their least-privilege scopes;
+the UI must never collapse review, approval, and publication into an automatic
+transition or reveal proposal content to callers with only agent-facing
+catalog access.
+
+### 39. Draft-aware policy simulation before staging
+
+**Effort: M–L (2–5 days).** The current active-policy simulator is small, but
+evaluating an uncommitted candidate safely needs an isolated candidate
+registry/policy/catalog context. It must reuse the real loaders and validation
+logic without swapping process-global runtime state or opening a second,
+behaviorally different policy engine.
+
+**Why it matters:** Item 31's “test as principal” deliberately evaluates only
+the active policy. That proves current behavior, but it cannot answer the most
+important pre-change question: “Will this draft allow or deny the intended
+principal after activation?” Requiring an administrator to activate first and
+test afterward weakens the value of dry-run governance.
+
+**What to do:** Extend config preview with a read-only candidate simulation
+endpoint that accepts the draft documents plus a target principal, scalar
+claims, connection, table, columns, and optionally a structured-query shape.
+Load and cross-validate the candidate in an isolated context, then run the same
+policy/visibility checks production execution uses. Return a typed allow/deny
+decision, effective guardrails, mandatory-filter claim readiness, and safe
+reasons—never resolved secret values, static row-filter values, compiled SQL
+literals, or hidden identifiers. Prove simulation persists nothing and cannot
+alter live request behavior even under concurrent use.
+
+### 40. Semantic access diff for config changes
+
+**Effort: L (3–5 days).** A trustworthy diff must compare resolved behavior,
+not YAML syntax. It needs a typed diff model, policy resolution across default,
+connection, and principal layers, bounded output/redaction rules, REST wiring,
+and cross-checks proving its decisions match the enforcement path.
+
+**Why it matters:** A line diff can show that `allowed_tables` changed, but not
+whether the change grants access after inherited defaults, connection
+overrides, principal overrides, and deny-wins rules are resolved. Reviewers
+need statements such as “reporting-agent gains `orders.total`” or “the default
+row limit rises from 100 to 500,” not an expectation that they mentally execute
+the merge algorithm from YAML.
+
+**What to do:** Build a server-derived, authorization-aware semantic diff
+between the active and candidate snapshots. Report typed additions/removals for
+connection visibility, tables, columns, mandatory-filter requirements, join
+groups, and every guardrail; classify each as tightening, loosening, or neutral.
+Keep raw values out of filter diffs, distinguish explicit rules from inherited
+effects, cap result size, and provide stable machine-readable output for both
+the UI and CI/CD review tooling.
+
+### 41. Policy-change blast-radius analysis
+
+**Effort: M–L (2–5 days).** This builds on item 40's semantic diff but adds
+aggregation, prioritization, and potentially large principal-by-connection
+evaluation. The high end applies when deployments have enough configured
+principals and objects to require asynchronous or paginated analysis.
+
+**Why it matters:** A syntactically tiny default-policy change can affect every
+principal and connection, while a large YAML edit may affect only one agent.
+Without an impact summary, reviewers cannot distinguish a targeted change from
+a fleet-wide access expansion or guardrail relaxation before activation.
+
+**What to do:** Summarize affected principals, connections, tables, columns,
+mandatory filters, and relaxed/tightened caps before staging. Rank access
+expansions and removed row filters as highest risk; show exact, paginated
+details only to callers authorized to inspect the underlying configuration.
+Use bounded work/output, make wildcard/default-layer fan-out explicit, and
+include an “analysis incomplete” state rather than silently omitting impacts
+when a configured cap is reached.
+
+### 42. Four-eyes config approval and separation of duties
+
+**Effort: XL (1–3+ weeks).** This is a governance-model and authorization
+change, not a confirmation-dialog feature: it needs new durable states,
+reviewer records, scopes, invariants, audit actions, concurrency handling,
+REST/CLI/UI flows, and migration/backward-compatibility decisions for existing
+staged versions.
+
+**Why it matters:** Item 31 currently implements an explicit validate → diff →
+stage → typed-confirmation activate sequence, but one `admin:config:write`
+principal can perform every step. Regulated and higher-risk customers often
+need proof that the author of an access change could not approve and activate
+their own proposal.
+
+**What to do:** Add separate propose/review/approve/activate capabilities and a
+durable approval record bound to an immutable version fingerprint. Enforce
+author ≠ approver, invalidate approval if content changes, support rejection
+with bounded review notes, prevent activation without the required approvals,
+and audit every transition without YAML content. Keep a documented single-
+administrator mode for smaller deployments, but never simulate four-eyes in
+the browser while the server still permits self-approval.
+
+### 43. Admin connection-operations and health workspace
+
+**Effort: L (3–5 days).** The aggregate readiness monitor already exists, but
+an admin surface needs a separately authorized detailed health model, safe
+error classification, refresh/test operations, and UI states across healthy,
+degraded, disabled, and never-checked connections.
+
+**Why it matters:** The public `/health` endpoint intentionally returns only
+aggregate counts so it cannot disclose database topology. Administrators still
+need to know which configured connection is failing, when it last succeeded,
+whether schema reflection is stale, and whether a new credential or network
+change works—without searching process logs or exposing a driver exception.
+
+**What to do:** Add an admin-scoped, credential-free connection status API and
+workspace showing dialect, enabled state, last check/success, bounded latency,
+schema-cache/refresh state, and stable redacted failure categories. Provide a
+rate-limited “test now” action that uses the same engine/timeout/TLS settings as
+normal operation, never returns connection strings or raw driver text, and
+audits manual probes without turning them into query access.
+
+### 44. Admin observability and rejection-trend dashboard
+
+**Effort: L (3–5 days).** Current Prometheus metrics and JSONL events provide
+the raw signals, but a useful dashboard needs safe aggregation, time-window
+semantics, cardinality controls, pagination, and a decision about behavior when
+no durable time-series backend is configured.
+
+**Why it matters:** Item 31 can browse individual audit events, but it cannot
+answer operational questions such as “Which policies reject the most
+requests?”, “Is queue pressure rising?”, “Did cost-estimation availability
+regress?”, or “Which connection changed after the last rollout?” Those trends
+are what let an administrator tune policy and capacity proactively.
+
+**What to do:** Add overview cards and time-window charts for query volume,
+success/rejection categories, queue wait/depth, concurrency saturation,
+timeouts, cost-estimation unavailable/would-reject rates, and config/catalog
+changes. Prefer querying an operator-configured metrics backend when available;
+otherwise expose an honest current-process snapshot and label it as such—do
+not imply durable history. Keep labels low-cardinality and require admin scope
+for any principal-, connection-, table-, or policy-specific breakdown.
+
+### 45. Dedicated non-admin “My access” portal
+
+**Effort: M (2–3 days).** The required access-summary and policy-filtered
+schema APIs already exist, so this is mainly a focused UI/IA split plus tests
+proving the user route never imports admin-only data or actions.
+
+**Why it matters:** Regular authenticated users can open `/admin/` and inspect
+their visible connections/schema, but the surrounding control-plane navigation
+is misleading and fills the page with disabled actions. A reporting agent
+owner or analyst needs a clear explanation of their own access and limits, not
+an administrator console they mostly cannot use.
+
+**What to do:** Add a separate `/access/` experience showing the caller's
+identity/auth method, visible connections, policy-filtered schema/catalog,
+effective query limits, mandatory-claim requirements, and safe explanations of
+recent personal denials where the audit authorization model permits it. Never
+show raw YAML, other principals, global audit history, version controls, or
+admin navigation; keep `/admin/` explicitly scoped and worded for operators.
+
+### 46. Validated policy templates and safe-start presets
+
+**Effort: M (2–3 days).** Rendering a form is small; the real work is defining
+versioned presets, parameter schemas, secure merge semantics, documentation,
+and tests that prevent a template from silently broadening an existing policy.
+
+**Why it matters:** Common policies—deny-by-default, reporting-only,
+customer-support, tenant-isolated, and bounded analytics—currently require
+admins to know every relevant YAML field. Templates can shorten setup and
+reduce omission errors, especially for mandatory filters and response/capacity
+guardrails.
+
+**What to do:** Ship a small, versioned set of code-reviewed presets with
+explicit parameters and an educational preview of every resulting rule. Apply
+them only to the local draft, run normal config validation plus item 39's
+candidate simulation, and show item 40's semantic diff before staging. Default
+to restrictive values, never infer table/column grants from names, never embed
+credentials or tenant values, and keep generated YAML fully editable/exportable
+for infrastructure-as-code users.
+
+### 47. Safe draft recovery plus config export/import UX
+
+**Effort: M (2–3 days).** Basic download/upload is small, but safe recovery
+must handle sensitive connection documents, version/fingerprint metadata,
+schema validation, stale-base conflicts, size limits, and browser-storage
+rules without creating an ungoverned shadow config store.
+
+**Why it matters:** Item 31 warns before abandoning an in-memory draft, but a
+tab crash or browser restart still loses work. Administrators also need a
+convenient way to move a reviewed change between environments while preserving
+the YAML/CLI path rather than copying text fields by hand.
+
+**What to do:** Add bounded download/upload of a versioned change-set bundle
+containing only the submitted document deltas, base-version fingerprint, and
+description; validate it before preview/stage and surface stale-base conflicts.
+Allow tab-scoped recovery for policy-only drafts, but do **not** persist
+connections YAML, literal credentials, secret references, or bearer tokens in
+`localStorage`/IndexedDB. Full-config recovery should use an explicitly
+downloaded file or a server-side, authorized, encrypted-at-rest draft store
+with retention/deletion controls and audit events—not invisible browser
+persistence.
 
 ---
 
