@@ -7,11 +7,14 @@ import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+from typing import Optional
+
 from fastapi import HTTPException
 from pydantic import BaseModel
 
 from querygate.core.exceptions import (
     AuthorizationError,
+    CapacityTimeoutError,
     ConcurrencyLimitError,
     NotFoundError,
     PolicyViolationError,
@@ -25,6 +28,13 @@ class MCPErrorResult(BaseModel):
     success: bool = False
     error_code: str
     error_message: str
+    # Agent-visible admission info (TODO.md item 35 phase 1) — populated only
+    # when the failure was a CapacityTimeoutError, so a caller can tell "too
+    # many concurrent queries" apart from an ordinary validation error and
+    # correlate it with metrics/audit events via admission_id.
+    admission_id: Optional[str] = None
+    admission_state: Optional[str] = None
+    queue_wait_ms: Optional[int] = None
 
 
 def _error_code_from_exception(exc: Exception) -> tuple[str, str]:
@@ -39,6 +49,16 @@ def _error_code_from_exception(exc: Exception) -> tuple[str, str]:
     if isinstance(exc, (PolicyViolationError, QueryValidationError, ConcurrencyLimitError)):
         return "VALIDATION", public_error_message(exc)
     return "INTERNAL", public_error_message(exc)
+
+
+def _admission_fields_from_exception(exc: Exception) -> dict:
+    if not isinstance(exc, CapacityTimeoutError):
+        return {}
+    return {
+        "admission_id": exc.admission_id,
+        "admission_state": "capacity_timeout",
+        "queue_wait_ms": exc.queue_wait_ms,
+    }
 
 
 def safe_mcp_tool(
@@ -65,6 +85,10 @@ def safe_mcp_tool(
                     log.exception("mcp.tool.unexpected_error", duration_ms=duration_ms)
                 else:
                     log.error("mcp.tool.app_error", error_code=error_code, duration_ms=duration_ms)
-                return MCPErrorResult(error_code=error_code, error_message=error_message)
+                return MCPErrorResult(
+                    error_code=error_code,
+                    error_message=error_message,
+                    **_admission_fields_from_exception(exc),
+                )
 
     return wrapper

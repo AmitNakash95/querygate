@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import sqlalchemy as sa
 
+import asyncio
+
 from querygate.audit.events import AuditEvent, normalize_query_shape
 from querygate.audit.logger import audit_query
 from querygate.audit.sinks import (
@@ -23,8 +25,12 @@ from querygate.api.app import create_app
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.logging import ContextLogger, context_logger
+from querygate.execution import concurrency as cc
 from querygate.execution import service as svc
+from querygate.execution.admission import QueueMode
 from querygate.execution.service import StructuredQueryService
+from querygate.policy.loader import PolicyStore, set_policy_store
+from querygate.policy.models import Policy
 from querygate.query_ast.models import Predicate, StructuredQuery
 
 
@@ -130,6 +136,9 @@ async def test_service_persists_redacted_event_with_identity_surface_and_request
     assert "executive request" not in raw
     assert "sql" not in event
     assert "params" not in event
+    assert event["admission_id"]
+    assert event["queue_wait_ms"] is not None
+    assert event["admission_state"] == "completed"
 
 
 def test_sink_failure_is_logged_but_does_not_raise():
@@ -168,6 +177,31 @@ async def test_rejected_event_has_category_without_exception_or_literals(tmp_pat
     assert event["error_category"] == "schema"
     assert "secret@example.com" not in raw
     assert "secret failure" not in raw
+
+
+@pytest.mark.asyncio
+async def test_capacity_timeout_event_carries_admission_fields(tmp_path):
+    path = tmp_path / "capacity.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    set_policy_store(
+        PolicyStore(default=Policy(max_concurrency=1, concurrency_wait_seconds=5), overrides={})
+    )
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+
+    query = _query_with_sensitive_literals()
+    service = StructuredQueryService(connection_id="demo")
+    with pytest.raises(ValueError, match="too many concurrent"):
+        await service.execute(query, queue_mode=QueueMode.FAIL_FAST)
+
+    raw = path.read_text()
+    event = json.loads(raw)
+    assert event["outcome"] == "rejected"
+    assert event["error_category"] == "concurrency"
+    assert event["admission_id"]
+    assert event["queue_wait_ms"] is not None
+    assert event["admission_state"] == "capacity_timeout"
+    assert "secret@example.com" not in raw
 
 
 @pytest.mark.asyncio

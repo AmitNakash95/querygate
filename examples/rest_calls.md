@@ -54,6 +54,30 @@ curl -X POST http://localhost:8000/api/v1/demo/query \
   }'
 ```
 
+## Capacity waiting (queue_mode / wait_timeout_seconds)
+
+Optional query params, outside the request body — see the README's
+"Agent-visible capacity waiting" section for the full contract:
+
+```bash
+# Reject immediately if the connection is at its concurrency cap, instead of
+# waiting up to the policy's concurrency_wait_seconds.
+curl -X POST "http://localhost:8000/api/v1/demo/query?queue_mode=fail_fast" \
+  -H "Content-Type: application/json" \
+  -d '{"from": "orders", "select": ["orders.id"], "limit": 10}'
+
+# Wait up to 2 seconds for a slot — shorter than (or equal to) the policy's
+# own ceiling; a longer request is clamped down, never extended.
+curl -X POST "http://localhost:8000/api/v1/demo/query?queue_mode=wait&wait_timeout_seconds=2" \
+  -H "Content-Type: application/json" \
+  -d '{"from": "orders", "select": ["orders.id"], "limit": 10}'
+```
+
+Every response — success or a `422` capacity rejection — carries
+`X-QueryGate-Admission-Id`, `X-QueryGate-Admission-State`
+(`completed`/`capacity_timeout`), and `X-QueryGate-Queue-Wait-Ms` headers. A
+successful body also carries `admission_id`/`queue_wait_ms` fields directly.
+
 ## Batch queries
 
 ```bash

@@ -64,7 +64,7 @@ order-of-magnitude, not commitments.
 | 32 | Governed adaptive semantic memory for agents | XL | 23, 25, 27, 28 |
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
-| 35 | Agent-visible capacity waiting, progress, and cancellation | L | 9, 12, 15, 20 |
+| 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: progress notifications, REST 202+cancel, Redis-backed admission state not started) | L | 9, 12, 15, 20 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
@@ -1645,21 +1645,67 @@ and the page is explicitly labeled as an illustrative mocked experience.
 
 ### 35. Agent-visible capacity waiting, progress, and cancellation
 
-**Current behavior already shipped:** `concurrency_slot()` waits for up to the
-policy's `concurrency_wait_seconds`; if another request releases capacity in
-that window, the waiting request acquires the slot and executes. If the window
-expires, REST/MCP receives `ConcurrencyLimitError` (REST currently maps it to
-an actionable `422`). Item 15's real-Postgres load harness proves both paths:
-six over-cap requests queue in waves and succeed with a long wait, while a
-short wait admits two of eight and rejects the other six. Cancellation of the
-calling coroutine naturally unwinds the semaphore/Redis polling code, but it
-is not exposed as a supported, observable agent-facing workflow.
+**Phase 1 shipped:** `concurrency_slot()` already waited for up to the
+policy's `concurrency_wait_seconds` and raised `ConcurrencyLimitError`
+(REST `422`) when that window expired — proven under real load by item 15's
+harness. Phase 1 makes that existing wait-then-fail-fast path agent-visible
+and caller-tunable, without yet building the asynchronous/cross-replica
+machinery below:
 
-**Effort: L (3–5 days for a bounded first version).** Waiting itself already
-works. The cost is designing one safe contract across REST and MCP, reporting
-progress without pretending QueryGate controls the host agent's UI, adding a
-cancellation handle that works across replicas, and preventing an unbounded
-waiting queue from becoming its own denial-of-service vector.
+- `execution/admission.py` — `QueueMode` (`fail_fast`/`wait`) and
+  `resolve_wait_seconds()`, the single clamp that lets a caller shorten the
+  operator's `concurrency_wait_seconds` ceiling (or skip waiting entirely via
+  `fail_fast`) but never lengthen it. `queue_mode`/`wait_timeout_seconds` are
+  request-level options outside the `StructuredQuery` AST — REST query
+  params on `POST .../query` and `.../query/batch`, extra MCP tool
+  arguments on `execute_structured_query`/`execute_structured_queries`.
+  Omitting both preserves the exact pre-item-35 default.
+- Every `execute()` call gets a stable `admission_id` (UUID) and
+  `queue_wait_ms`, added as optional fields on `StructuredQueryResult`/
+  `BatchQueryItemResult` (REST/MCP) and surfaced as REST response headers
+  (`X-QueryGate-Admission-Id`, `X-QueryGate-Admission-State`,
+  `X-QueryGate-Queue-Wait-Ms`) rather than folded into the existing `422`
+  `{"detail": "too many concurrent..."}` body, so that documented string
+  contract (`docs/LOAD_TESTING.md`) never changes. MCP's `MCPErrorResult`
+  gains the same three fields for a capacity rejection.
+  `core/exceptions.CapacityTimeoutError` (subclasses `ConcurrencyLimitError`)
+  carries the id/elapsed-wait without touching any existing
+  `isinstance`/`except ConcurrencyLimitError` call site.
+  Terminal states this phase: `completed` and `capacity_timeout` — `queued`/
+  `running`/`cancelled` need the asynchronous contract below.
+- New metrics: `querygate_queue_depth` (callers currently waiting for a slot,
+  single-process visibility) and `querygate_queue_wait_seconds` (histogram,
+  labeled by outcome). `AuditEvent` gained matching `admission_id`/
+  `queue_wait_ms`/`admission_state` fields (schema_version unchanged, same as
+  every prior additive field).
+- Proven under real Postgres load
+  (`tests/integration/test_postgres_load_guardrails.py`): `fail_fast` never
+  waits even though capacity frees up moments later; a caller-selected wait
+  shorter than the policy ceiling is honored; a caller-selected wait that
+  outlasts the occupiers still queues and succeeds; successful responses
+  carry the documented admission headers. Security regression
+  (`test_caller_cannot_extend_the_operators_concurrency_wait_ceiling`) proves
+  a caller cannot use `wait_timeout_seconds` to wait longer than the operator
+  configured.
+
+**Explicitly deferred to phase 2** (each needs its own careful design and is
+independently useful once the synchronous contract above exists and is
+proven under load — this is not a gap, it's the next slice):
+
+- MCP progress notifications for a client that advertises support.
+- A REST asynchronous contract (`202` + status/cancel endpoints, or a
+  documented streaming endpoint) — a normal pending HTTP response can't
+  notify a caller mid-wait.
+- Idempotent mid-queue cancellation, including whether cancellation is
+  queue-only or must invoke and verify dialect-specific database
+  cancellation before reporting `cancelled`.
+- Redis-backed admission state so `queued`/cancellation are visible and safe
+  across multiple QueryGate replicas (today's `querygate_queue_depth` is
+  single-process only, like `querygate_concurrency_in_use`), plus a
+  queue-depth limit and per-principal pressure controls so an unbounded
+  waiting queue can't become its own denial-of-service vector.
+- Evaluate `429` + `Retry-After` for REST capacity responses without
+  breaking clients that currently handle `422`.
 
 **Why it matters:** Today a caller sees either a slow pending tool call, a
 final result, or a final capacity error. It cannot ask to fail fast or wait for
@@ -1667,54 +1713,8 @@ a caller-selected period, cannot distinguish "queued behind two queries" from
 "the database is slow," and cannot present a supported cancel action while it
 waits. An interactive agent should be able to say that QueryGate is at
 capacity, keep waiting within an operator-approved bound, and let the user
-cancel rather than appearing hung or retrying blindly.
-
-**What to do:** Add an agent-aware admission workflow without weakening the
-operator's policy ceiling.
-
-- Add request-level execution options outside the `StructuredQuery` AST, such
-  as `queue_mode: fail_fast | wait` and `wait_timeout_seconds`. Clamp a
-  caller's requested wait to `Policy.concurrency_wait_seconds`; callers may
-  choose a shorter wait or fail fast, never a longer one. Keep the existing
-  synchronous behavior as the compatibility default.
-- Return a stable request/admission id and machine-readable states such as
-  `queued`, `running`, `completed`, `capacity_timeout`, and `cancelled`.
-  Include elapsed queue time and a bounded retry hint, but do not promise an
-  exact start time: database duration and Redis polling make that estimate
-  inherently unreliable.
-- Use MCP progress notifications when the client advertises support. For
-  REST, design an explicit asynchronous contract (`202` + status/cancel
-  endpoints, or a documented streaming endpoint) rather than claiming a
-  normal pending HTTP response can notify a user. QueryGate supplies progress
-  events; the agent/client integration remains responsible for showing them
-  and asking the user whether to continue.
-- Support idempotent cancellation while queued, ensuring a cancelled waiter
-  can never consume a later slot. Define the running-query boundary
-  explicitly: either cancellation is queue-only in the first version, or it
-  must invoke and verify dialect-specific database cancellation before
-  reporting `cancelled`.
-- Make the workflow safe under multiple QueryGate replicas. Store admission
-  state/cancellation in Redis when the distributed limiter is selected, add a
-  queue-depth limit and per-principal pressure controls, expire abandoned
-  admission records, and avoid leaking other principals' queue identities or
-  query details.
-- Add queue-depth, queue-wait, capacity-timeout, and cancellation metrics plus
-  redaction-safe audit events. Prefer a versioned/machine-readable capacity
-  response (and evaluate `429` + `Retry-After` for REST) without silently
-  breaking clients that currently handle `422`.
-- Extend the load harness to prove: capacity released before the caller's
-  deadline starts the request; capacity released after the deadline does not;
-  cancellation while queued leaves no slot/Redis lease behind; queue limits
-  hold under a burst; and progress/cancel behavior is consistent for both the
-  in-process and Redis-backed paths.
-
-**Definition of done:** An agent can choose fail-fast or a policy-bounded wait,
-receive enough structured progress to tell the user it is queued, cancel a
-queued request reliably, and proceed automatically if capacity becomes
-available before its deadline. No caller can extend the deployment's maximum
-wait, observe another principal's work, leak a capacity slot, or grow the
-waiting queue without bound; real-database load tests verify every terminal
-state.
+cancel rather than appearing hung or retrying blindly. Phase 1 answers the
+first two; phase 2 answers the rest.
 
 ### 32. Governed adaptive semantic memory for agents
 

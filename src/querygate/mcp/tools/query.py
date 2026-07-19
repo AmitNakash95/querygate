@@ -8,6 +8,7 @@ from typing import Annotated, Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
+from querygate.execution.admission import QueueMode
 from querygate.execution.service import StructuredQueryService
 from querygate.mcp.auth import get_mcp_caller
 from querygate.mcp.exceptions import MCPErrorResult, safe_mcp_tool
@@ -17,6 +18,23 @@ from querygate.query_ast.models import StructuredQuery
 from querygate.validation.policy_validation import validate_batch_size
 
 _CONNECTION_FIELD = Field(description="Connection id from list_connections.")
+_QUEUE_MODE_FIELD = Field(
+    default=None,
+    description=(
+        "fail_fast: don't wait for a concurrency slot at all, reject immediately if the "
+        "connection is at capacity. wait (default): wait up to wait_timeout_seconds, or the "
+        "policy's own concurrency_wait_seconds ceiling if wait_timeout_seconds is omitted."
+    ),
+)
+_WAIT_TIMEOUT_FIELD = Field(
+    default=None,
+    ge=0,
+    description=(
+        "Caller-requested wait (seconds) for a concurrency slot. Clamped to the operator's "
+        "policy concurrency_wait_seconds ceiling — a caller may request a shorter wait, "
+        "never a longer one."
+    ),
+)
 
 
 def _service(connection: str) -> StructuredQueryService:
@@ -30,6 +48,8 @@ class StructuredQueryToolResult(BaseModel):
     truncated: bool
     limit: int
     offset: int
+    admission_id: Optional[str] = None
+    queue_wait_ms: Optional[int] = None
 
 
 class ExplainToolResult(BaseModel):
@@ -45,6 +65,8 @@ class BatchQueryItemToolResult(BaseModel):
     truncated: Optional[bool] = None
     limit: Optional[int] = None
     offset: Optional[int] = None
+    admission_id: Optional[str] = None
+    queue_wait_ms: Optional[int] = None
     error: Optional[str] = None
 
 
@@ -78,18 +100,26 @@ class BatchQueryToolResult(BaseModel):
         "with the compiled SQL for audit, never returned to the caller. "
         "Use explain_structured_query first to sanity-check an expensive-looking query. "
         "Queries run under a server-side execution timeout and a per-connection "
-        "concurrency cap — a 'too many concurrent queries' error means wait briefly and "
-        "retry once, not retry in a tight loop. Use list_tables and describe_table to "
-        "discover valid identifiers first."
+        "concurrency cap — a 'too many concurrent queries' error (VALIDATION, with "
+        "admission_state 'capacity_timeout') means wait briefly and retry once, not retry "
+        "in a tight loop. Use queue_mode='fail_fast' to reject immediately instead of "
+        "waiting for capacity, or wait_timeout_seconds to request a shorter wait than the "
+        "deployment's default (it can only be shortened, never lengthened). Every call "
+        "returns an admission_id and queue_wait_ms for correlating with logs/metrics. Use "
+        "list_tables and describe_table to discover valid identifiers first."
     )
 )
 @safe_mcp_tool
 async def execute_structured_query(
     connection: Annotated[str, _CONNECTION_FIELD],
     query: Annotated[StructuredQuery, Field(description="Structured query AST")],
+    queue_mode: Annotated[Optional[QueueMode], _QUEUE_MODE_FIELD] = None,
+    wait_timeout_seconds: Annotated[Optional[float], _WAIT_TIMEOUT_FIELD] = None,
 ) -> Union[StructuredQueryToolResult, MCPErrorResult]:
     service = _service(connection)
-    result = await service.execute(query)
+    result = await service.execute(
+        query, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
+    )
     return StructuredQueryToolResult(**result.model_dump())
 
 
@@ -135,11 +165,15 @@ async def execute_structured_queries(
         List[StructuredQuery],
         Field(description="List of structured query ASTs to run in one call"),
     ],
+    queue_mode: Annotated[Optional[QueueMode], _QUEUE_MODE_FIELD] = None,
+    wait_timeout_seconds: Annotated[Optional[float], _WAIT_TIMEOUT_FIELD] = None,
 ) -> Union[BatchQueryToolResult, MCPErrorResult]:
     caller = get_mcp_caller()
     validate_batch_size(len(queries), get_policy(connection, principal=caller))
     service = _service(connection)
-    results = await service.execute_many(queries)
+    results = await service.execute_many(
+        queries, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
+    )
     return BatchQueryToolResult(
         results=[BatchQueryItemToolResult(**r.model_dump()) for r in results]
     )

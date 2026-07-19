@@ -29,12 +29,15 @@ from querygate.connections.registry import get_registry
 from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.auth import Principal
 from querygate.core.exceptions import (
+    CapacityTimeoutError,
+    ConcurrencyLimitError,
     NotFoundError,
     PolicyViolationError,
     QueryValidationError,
     public_error_message,
 )
 from querygate.core.logging import get_logger, log_execution
+from querygate.execution.admission import QueueMode, new_admission_id, resolve_wait_seconds
 from querygate.execution.concurrency import concurrency_slot
 from querygate.execution.cost_estimation import (
     QueryCostEstimate,
@@ -47,6 +50,7 @@ from querygate.metrics import (
     QUERIES_REJECTED_TOTAL,
     QUERIES_TOTAL,
     QUERY_DURATION_SECONDS,
+    QUEUE_WAIT_SECONDS,
     classify_rejection,
 )
 from querygate.policy.models import CostEstimationMode, Policy
@@ -92,6 +96,11 @@ class StructuredQueryResult(pyd.BaseModel):
     truncated: bool
     limit: int
     offset: int
+    # Agent-visible admission info (TODO.md item 35 phase 1). Optional so
+    # existing direct-construction call sites (tests, `execute_many`'s error
+    # path) don't need to supply them.
+    admission_id: Optional[str] = None
+    queue_wait_ms: Optional[int] = None
 
 
 class ExplainResult(pyd.BaseModel):
@@ -107,6 +116,8 @@ class BatchQueryItemResult(pyd.BaseModel):
     truncated: Optional[bool] = None
     limit: Optional[int] = None
     offset: Optional[int] = None
+    admission_id: Optional[str] = None
+    queue_wait_ms: Optional[int] = None
     error: Optional[str] = None
 
 
@@ -252,67 +263,99 @@ class StructuredQueryService:
         )
 
     @log_execution
-    async def execute(self, query: StructuredQuery) -> StructuredQueryResult:
+    async def execute(
+        self,
+        query: StructuredQuery,
+        *,
+        queue_mode: Optional[QueueMode] = None,
+        wait_timeout_seconds: Optional[float] = None,
+    ) -> StructuredQueryResult:
         start = time.monotonic()
+        admission_id = new_admission_id()
         query_shape = normalize_query_shape(query)
         sql = ""
         params: Optional[str] = None
         policy_validated = False
+        queue_wait_ms: Optional[int] = None
         try:
             policy = self._get_policy()
-            async with concurrency_slot(
-                self._connection_id, policy.max_concurrency, policy.concurrency_wait_seconds
-            ):
-                stmt, limit, _tables, dialect = await self._validate_and_compile(query)
-                policy_validated = True
-                sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
+            wait_seconds = resolve_wait_seconds(
+                queue_mode=queue_mode,
+                requested_wait_seconds=wait_timeout_seconds,
+                policy_ceiling_seconds=policy.concurrency_wait_seconds,
+            )
+            queue_start = time.monotonic()
+            try:
+                async with concurrency_slot(
+                    self._connection_id, policy.max_concurrency, wait_seconds
+                ):
+                    queue_wait_ms = int((time.monotonic() - queue_start) * 1000)
+                    stmt, limit, _tables, dialect = await self._validate_and_compile(query)
+                    policy_validated = True
+                    sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
 
-                async with session_scope(self._connection_id, policy=policy) as session:
-                    if policy.cost_estimation_enabled and dialect == DatabaseDialect.POSTGRESQL:
-                        estimate = await estimate_postgres_query_cost(
-                            session, stmt, connection_id=self._connection_id
-                        )
-                        if estimate is not None:
-                            if policy.cost_estimation_mode == CostEstimationMode.ENFORCE:
-                                enforce_cost_estimate(estimate, policy)
-                            else:
-                                self._observe_cost_estimate(estimate, policy)
-                    result = await session.execute(stmt)
-                    raw_rows = [dict(r) for r in result.mappings().all()]
+                    async with session_scope(self._connection_id, policy=policy) as session:
+                        if policy.cost_estimation_enabled and dialect == DatabaseDialect.POSTGRESQL:
+                            estimate = await estimate_postgres_query_cost(
+                                session, stmt, connection_id=self._connection_id
+                            )
+                            if estimate is not None:
+                                if policy.cost_estimation_mode == CostEstimationMode.ENFORCE:
+                                    enforce_cost_estimate(estimate, policy)
+                                else:
+                                    self._observe_cost_estimate(estimate, policy)
+                        result = await session.execute(stmt)
+                        raw_rows = [dict(r) for r in result.mappings().all()]
 
-                rows = [_clean_row_values(r) for r in raw_rows]
-                row_limit_hit = len(rows) >= limit
-                rows, byte_cap_hit = _cap_response_bytes(rows, policy.max_response_bytes)
-                truncated = row_limit_hit or byte_cap_hit
-                response_bytes = len(json.dumps(rows, default=str).encode("utf-8"))
-                elapsed_seconds = time.monotonic() - start
-                audit_query(
-                    connection_id=self._connection_id,
-                    sql=sql,
-                    params=params,
-                    intent=query.intent,
-                    row_count=len(rows),
-                    duration_ms=int(elapsed_seconds * 1000),
-                    principal=self._principal_subject,
-                    principal_scopes=self._principal_scopes,
-                    auth_method=self._auth_method,
-                    surface=self._surface,
-                    query_shape=query_shape,
-                    response_bytes=response_bytes,
-                    truncated=truncated,
-                    policy_decision="allowed",
-                )
-                QUERIES_TOTAL.labels(connection=self._connection_id, status="success").inc()
-                QUERY_DURATION_SECONDS.labels(connection=self._connection_id).observe(
-                    elapsed_seconds
-                )
-                return StructuredQueryResult(
-                    rows=rows,
-                    row_count=len(rows),
-                    truncated=truncated,
-                    limit=limit,
-                    offset=query.offset,
-                )
+                    rows = [_clean_row_values(r) for r in raw_rows]
+                    row_limit_hit = len(rows) >= limit
+                    rows, byte_cap_hit = _cap_response_bytes(rows, policy.max_response_bytes)
+                    truncated = row_limit_hit or byte_cap_hit
+                    response_bytes = len(json.dumps(rows, default=str).encode("utf-8"))
+                    elapsed_seconds = time.monotonic() - start
+                    QUEUE_WAIT_SECONDS.labels(
+                        connection=self._connection_id, outcome="completed"
+                    ).observe(queue_wait_ms / 1000)
+                    audit_query(
+                        connection_id=self._connection_id,
+                        sql=sql,
+                        params=params,
+                        intent=query.intent,
+                        row_count=len(rows),
+                        duration_ms=int(elapsed_seconds * 1000),
+                        principal=self._principal_subject,
+                        principal_scopes=self._principal_scopes,
+                        auth_method=self._auth_method,
+                        surface=self._surface,
+                        query_shape=query_shape,
+                        response_bytes=response_bytes,
+                        truncated=truncated,
+                        policy_decision="allowed",
+                        admission_id=admission_id,
+                        queue_wait_ms=queue_wait_ms,
+                        admission_state="completed",
+                    )
+                    QUERIES_TOTAL.labels(connection=self._connection_id, status="success").inc()
+                    QUERY_DURATION_SECONDS.labels(connection=self._connection_id).observe(
+                        elapsed_seconds
+                    )
+                    return StructuredQueryResult(
+                        rows=rows,
+                        row_count=len(rows),
+                        truncated=truncated,
+                        limit=limit,
+                        offset=query.offset,
+                        admission_id=admission_id,
+                        queue_wait_ms=queue_wait_ms,
+                    )
+            except ConcurrencyLimitError as exc:
+                queue_wait_ms = int((time.monotonic() - queue_start) * 1000)
+                QUEUE_WAIT_SECONDS.labels(
+                    connection=self._connection_id, outcome="capacity_timeout"
+                ).observe(queue_wait_ms / 1000)
+                raise CapacityTimeoutError(
+                    str(exc), admission_id=admission_id, queue_wait_ms=queue_wait_ms
+                ) from exc
         except Exception as exc:
             error_category = (
                 "not_found" if isinstance(exc, NotFoundError) else classify_rejection(exc)
@@ -340,6 +383,11 @@ class StructuredQueryService:
                 ),
                 rejected=True,
                 rejection_reason=str(exc),
+                admission_id=admission_id,
+                queue_wait_ms=queue_wait_ms,
+                admission_state=(
+                    "capacity_timeout" if isinstance(exc, CapacityTimeoutError) else None
+                ),
             )
             QUERIES_TOTAL.labels(connection=self._connection_id, status="rejected").inc()
             QUERIES_REJECTED_TOTAL.labels(
@@ -347,15 +395,29 @@ class StructuredQueryService:
             ).inc()
             raise
 
-    async def execute_many(self, queries: List[StructuredQuery]) -> List[BatchQueryItemResult]:
+    async def execute_many(
+        self,
+        queries: List[StructuredQuery],
+        *,
+        queue_mode: Optional[QueueMode] = None,
+        wait_timeout_seconds: Optional[float] = None,
+    ) -> List[BatchQueryItemResult]:
         """Run each query independently; one failure doesn't drop the rest of the batch."""
         results: List[BatchQueryItemResult] = []
         for query in queries:
             try:
-                result = await self.execute(query)
+                result = await self.execute(
+                    query, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
+                )
                 results.append(BatchQueryItemResult(**result.model_dump()))
             except Exception as exc:
-                results.append(BatchQueryItemResult(error=public_error_message(exc)))
+                results.append(
+                    BatchQueryItemResult(
+                        error=public_error_message(exc),
+                        admission_id=getattr(exc, "admission_id", None),
+                        queue_wait_ms=getattr(exc, "queue_wait_ms", None),
+                    )
+                )
         return results
 
     @log_execution

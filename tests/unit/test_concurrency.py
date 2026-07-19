@@ -68,6 +68,37 @@ async def test_concurrency_caps_are_independent_per_connection():
 
 
 @pytest.mark.asyncio
+async def test_concurrency_slot_tracks_queue_depth_while_waiting():
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    assert _gauge("querygate_queue_depth", {"connection": "demo"}) == 0.0
+
+    async def _waiter():
+        async with cc.concurrency_slot("demo", max_concurrency=1, wait_seconds=1):
+            pass
+
+    task = asyncio.create_task(_waiter())
+    await asyncio.sleep(0.02)  # let the waiter actually start blocking on acquire
+    assert _gauge("querygate_queue_depth", {"connection": "demo"}) == 1.0
+
+    cc.SEMAPHORES["demo"].release()  # frees the slot the waiter is queued behind
+    await task
+    assert _gauge("querygate_queue_depth", {"connection": "demo"}) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_concurrency_slot_releases_queue_depth_after_a_capacity_timeout():
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+
+    with pytest.raises(ValueError, match="too many concurrent"):
+        async with cc.concurrency_slot("demo", max_concurrency=1, wait_seconds=0.05):
+            pass  # pragma: no cover
+    # Depth must be released even though the acquire ultimately timed out.
+    assert _gauge("querygate_queue_depth", {"connection": "demo"}) == 0.0
+
+
+@pytest.mark.asyncio
 async def test_concurrency_slot_dispatches_to_redis_limiter_when_configured():
     limiter = RedisConcurrencyLimiter(fakeredis.aioredis.FakeRedis(), lease_seconds=30)
     cc.init_redis_limiter(limiter)

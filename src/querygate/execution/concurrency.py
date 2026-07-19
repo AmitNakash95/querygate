@@ -22,7 +22,7 @@ from typing import Any, AsyncGenerator, Optional
 
 from querygate.core.exceptions import ConcurrencyLimitError
 from querygate.execution.redis_concurrency import RedisConcurrencyLimiter
-from querygate.metrics import CONCURRENCY_IN_USE, CONCURRENCY_MAX
+from querygate.metrics import CONCURRENCY_IN_USE, CONCURRENCY_MAX, QUEUE_DEPTH
 
 SEMAPHORES: dict[str, asyncio.Semaphore] = {}
 
@@ -72,7 +72,11 @@ async def concurrency_slot(
     connection_id: str, max_concurrency: int, wait_seconds: float
 ) -> AsyncGenerator[None, None]:
     CONCURRENCY_MAX.labels(connection=connection_id).set(max_concurrency)
-    token = await _acquire(connection_id, max_concurrency, wait_seconds)
+    QUEUE_DEPTH.labels(connection=connection_id).inc()
+    try:
+        token = await _acquire(connection_id, max_concurrency, wait_seconds)
+    finally:
+        QUEUE_DEPTH.labels(connection=connection_id).dec()
     CONCURRENCY_IN_USE.labels(connection=connection_id).inc()
     try:
         yield

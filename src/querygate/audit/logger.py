@@ -42,6 +42,9 @@ def audit_query(
     policy_decision: Optional[AuditDecision] = None,
     rejected: bool = False,
     rejection_reason: Optional[str] = None,
+    admission_id: Optional[str] = None,
+    queue_wait_ms: Optional[int] = None,
+    admission_state: Optional[str] = None,
 ) -> None:
     log = get_logger()
     event = AuditEvent(
@@ -60,6 +63,9 @@ def audit_query(
         response_bytes=response_bytes,
         truncated=truncated,
         error_category=error_category,
+        admission_id=admission_id,
+        queue_wait_ms=queue_wait_ms,
+        admission_state=admission_state,
     )
     log.info(
         "audit.query",
@@ -78,6 +84,9 @@ def audit_query(
         rejected=rejected,
         error_category=error_category,
         rejection_reason=rejection_reason,
+        admission_id=admission_id,
+        queue_wait_ms=queue_wait_ms,
+        admission_state=admission_state,
     )
     try:
         get_audit_sink().emit(event)

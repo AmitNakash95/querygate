@@ -27,6 +27,15 @@ burst uses a four-second database query under a one-second policy timeout: two r
 must be cancelled near one second, two must be rejected by the concurrency cap, and no
 probe query may remain active afterward.
 
+The same harness also proves the agent-visible admission controls (TODO.md item 35
+phase 1) against real Postgres: `queue_mode=fail_fast` never waits even though capacity
+frees up moments later; a caller-selected `wait_timeout_seconds` shorter than the policy's
+own `concurrency_wait_seconds` is honored, rejecting around the caller's own deadline
+rather than the operator's longer ceiling; a caller-selected wait that outlasts the
+occupying queries still queues and succeeds; and a successful response carries the
+documented `X-QueryGate-Admission-Id`/`X-QueryGate-Admission-State`/
+`X-QueryGate-Queue-Wait-Ms` headers.
+
 ## Soak gate
 
 Run the same machine-checked scenarios repeatedly:

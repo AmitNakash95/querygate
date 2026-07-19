@@ -28,6 +28,22 @@ class ConcurrencyLimitError(ValueError):
     """
 
 
+class CapacityTimeoutError(ConcurrencyLimitError):
+    """`ConcurrencyLimitError` enriched with an admission id and elapsed
+    queue-wait time (TODO.md item 35 phase 1). Subclasses
+    `ConcurrencyLimitError` so every existing `isinstance`/`except` site
+    (REST/MCP error mapping, `metrics.classify_rejection`) keeps working
+    unchanged; the extra attributes let REST/MCP additionally surface a
+    stable, machine-readable `capacity_timeout` state without changing the
+    existing string message contract callers already parse.
+    """
+
+    def __init__(self, message: str, *, admission_id: str, queue_wait_ms: int) -> None:
+        super().__init__(message)
+        self.admission_id = admission_id
+        self.queue_wait_ms = queue_wait_ms
+
+
 class CostEstimateExceededError(PolicyViolationError):
     """Raised when a Postgres EXPLAIN-based pre-execution cost estimate
     exceeds `Policy.max_estimated_rows`/`max_estimated_cost` (see
