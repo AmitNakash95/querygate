@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101216">
+  <meta name="robots" content="noindex,nofollow">
+  <title>QueryGate Control Plane</title>
+  <meta name="description" content="Review schema, design policies, validate changes, and roll back QueryGate configuration.">
+  <link rel="stylesheet" href="/admin/app.css">
+  <script src="/admin/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#workspace">Skip to workspace</a>
+
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span><strong>QueryGate</strong><small>Control plane</small></span>
+      </div>
+
+      <nav class="nav-list">
+        <button class="nav-item active" type="button" data-view-target="overview">
+          <span class="nav-glyph">01</span><span>Overview</span>
+        </button>
+        <button class="nav-item" type="button" data-view-target="connections">
+          <span class="nav-glyph">02</span><span>Schema review</span>
+        </button>
+        <button class="nav-item" type="button" data-view-target="policy">
+          <span class="nav-glyph">03</span><span>Policy designer</span>
+        </button>
+        <button class="nav-item" type="button" data-view-target="changes">
+          <span class="nav-glyph">04</span><span>Change set</span><span id="draft-dot" class="draft-dot" hidden></span>
+        </button>
+        <button class="nav-item" type="button" data-view-target="history">
+          <span class="nav-glyph">05</span><span>Versions</span>
+        </button>
+        <button class="nav-item" type="button" data-view-target="audit">
+          <span class="nav-glyph">06</span><span>Audit trail</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="boundary-note">
+          <span class="status-light" aria-hidden="true"></span>
+          <span><strong>Policy boundary</strong><small>No raw SQL surface</small></span>
+        </div>
+        <button id="disconnect-button" class="text-button" type="button">Disconnect session</button>
+      </div>
+    </aside>
+
+    <main id="workspace" class="workspace" tabindex="-1">
+      <header class="topbar">
+        <button id="menu-button" class="icon-button mobile-only" type="button" aria-label="Open navigation" aria-expanded="false">Menu</button>
+        <div>
+          <p id="view-kicker" class="kicker">Control plane / Overview</p>
+          <h1 id="view-title">Access policy at a glance</h1>
+        </div>
+        <div class="session-summary">
+          <span id="session-state" class="status-chip neutral">Disconnected</span>
+          <span id="session-principal" class="principal-chip">No principal</span>
+        </div>
+      </header>
+
+      <div id="global-banner" class="banner" role="status" hidden></div>
+
+      <section id="view-overview" class="view active" data-view="overview">
+        <div class="hero-grid">
+          <article class="hero-card">
+            <p class="eyebrow">Active governance state</p>
+            <h2>Change access with a clear path back.</h2>
+            <p>Review what agents can discover, test a principal before rollout, validate every document, then stage and activate one immutable version.</p>
+            <div class="hero-actions">
+              <button class="button primary" type="button" data-go-view="policy">Design policy</button>
+              <button class="button secondary" type="button" data-go-view="changes">Open change set</button>
+            </div>
+            <div class="version-line">
+              <span>ACTIVE VERSION</span>
+              <strong id="overview-version">—</strong>
+              <small id="overview-version-time">Connect to load governance state</small>
+            </div>
+          </article>
+          <article class="boundary-card">
+            <div class="boundary-head">
+              <span>ENFORCEMENT PATH</span><span class="status-chip good">Guarded</span>
+            </div>
+            <ol class="boundary-flow">
+              <li><span>1</span><div><strong>Principal</strong><small>Identity + claims</small></div></li>
+              <li><span>2</span><div><strong>Policy</strong><small>Table, column + row rules</small></div></li>
+              <li><span>3</span><div><strong>Guardrails</strong><small>Shape, cost + capacity</small></div></li>
+              <li><span>4</span><div><strong>Read-only query</strong><small>Compiled by QueryGate</small></div></li>
+            </ol>
+          </article>
+        </div>
+
+        <div class="stats-grid" aria-label="Deployment summary">
+          <article class="stat-card"><span>Visible connections</span><strong id="stat-connections">—</strong><small id="stat-connections-note">for this principal</small></article>
+          <article class="stat-card"><span>Policy overrides</span><strong id="stat-overrides">—</strong><small>connection-specific</small></article>
+          <article class="stat-card"><span>Principal layers</span><strong id="stat-principals">—</strong><small>configured identities</small></article>
+          <article class="stat-card"><span>Staged versions</span><strong id="stat-staged">—</strong><small>awaiting activation</small></article>
+        </div>
+
+        <div class="two-column lower-grid">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">Release workflow</p><h3>Safe change sequence</h3></div></div>
+            <ol class="release-steps">
+              <li class="complete"><span></span><div><strong>Edit locally</strong><small>Visual policy builder or YAML</small></div></li>
+              <li><span></span><div><strong>Dry-run validation</strong><small>Nothing is persisted</small></div></li>
+              <li><span></span><div><strong>Review change set</strong><small>Compare documents before staging</small></div></li>
+              <li><span></span><div><strong>Stage &amp; activate</strong><small>Immutable history preserves rollback</small></div></li>
+            </ol>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">Your session</p><h3>Control-plane capabilities</h3></div></div>
+            <div id="capability-list" class="capability-list">
+              <p class="empty-state">Connect with an administrator bearer token to inspect capabilities.</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="view-connections" class="view" data-view="connections" hidden>
+        <div class="section-intro">
+          <div><p class="eyebrow">Schema browser</p><h2>Review only what this principal can discover.</h2><p>Schema requests use the same visibility and policy path as agent calls. Hidden resources remain indistinguishable from unknown resources.</p></div>
+          <button id="refresh-connections" class="button secondary" type="button">Refresh schema</button>
+        </div>
+        <div class="schema-layout">
+          <aside class="connection-rail" aria-label="Connections">
+            <label class="search-field"><span>Filter connections</span><input id="connection-search" type="search" placeholder="Search by name or dialect"></label>
+            <div id="connection-list" class="connection-list"><p class="empty-state">Connect to list visible connections.</p></div>
+          </aside>
+          <div class="schema-workbench">
+            <div id="schema-empty" class="large-empty">
+              <span class="empty-glyph">DB</span><h3>Select a connection</h3><p>Choose a visible connection to review its policy-filtered tables and columns.</p>
+            </div>
+            <div id="schema-content" hidden>
+              <div class="schema-title-row"><div><p id="schema-dialect" class="kicker">—</p><h3 id="schema-connection-title">—</h3><p id="schema-description">—</p></div><span id="schema-table-count" class="status-chip neutral">0 tables</span></div>
+              <div class="schema-columns">
+                <div><div class="subhead"><h4>Tables</h4><label><span class="sr-only">Filter tables</span><input id="table-search" type="search" placeholder="Filter tables"></label></div><div id="table-list" class="table-list"></div></div>
+                <div><div class="subhead"><h4 id="table-detail-title">Columns</h4><span id="table-sensitivity" class="status-chip neutral" hidden></span></div><div id="column-list" class="column-list"><p class="empty-state">Select a table to inspect its columns.</p></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-policy" class="view" data-view="policy" hidden>
+        <div class="section-intro">
+          <div><p class="eyebrow">Visual policy designer</p><h2>Shape the boundary, then prove it.</h2><p>Edit a selected policy layer without memorizing field names. Applying the builder updates only the local change set; validation and staging remain explicit.</p></div>
+          <div class="button-row"><button id="reset-designer" class="button secondary" type="button">Reset layer</button><button id="apply-designer" class="button primary" type="button">Apply to draft</button></div>
+        </div>
+
+        <div class="policy-grid">
+          <aside class="panel layer-panel">
+            <p class="eyebrow">Policy layer</p>
+            <fieldset class="segmented" aria-label="Policy layer type">
+              <label><input type="radio" name="policy-layer" value="default" checked><span>Default</span></label>
+              <label><input type="radio" name="policy-layer" value="connection"><span>Connection</span></label>
+              <label><input type="radio" name="policy-layer" value="principal"><span>Principal</span></label>
+            </fieldset>
+            <label id="designer-connection-wrap" hidden><span>Connection</span><select id="designer-connection"></select></label>
+            <label id="designer-principal-wrap" hidden><span>Principal subject</span><input id="designer-principal" type="text" placeholder="reporting-agent"></label>
+            <label id="designer-principal-connection-wrap" hidden><span>Applies to</span><select id="designer-principal-connection"></select></label>
+            <div class="layer-explainer"><strong id="layer-title">Default policy</strong><p id="layer-description">Baseline for every connection before connection and principal overrides are merged.</p></div>
+            <button id="remove-policy-layer" class="text-button danger" type="button" hidden>Remove this override</button>
+          </aside>
+
+          <div class="designer-stack">
+            <article class="panel">
+              <div class="panel-head"><div><p class="eyebrow">Discovery boundary</p><h3>Connection, table and column access</h3></div><label class="compact-field"><span>Access state</span><select id="policy-enabled"><option value="">Inherit</option><option value="true">Enabled</option><option value="false">Disabled</option></select></label></div>
+              <div class="form-grid">
+                <label class="span-2"><span>Allowed tables <small>empty means unrestricted</small></span><textarea id="policy-allowed-tables" rows="2" placeholder="customers, orders, order_items"></textarea></label>
+                <label class="span-2"><span>Denied tables <small>deny always wins</small></span><textarea id="policy-denied-tables" rows="2" placeholder="employees, payroll"></textarea></label>
+                <label><span>Column rule table</span><input id="policy-column-table" type="text" placeholder="customers or *"></label>
+                <label><span>Allowed columns</span><input id="policy-allowed-columns" type="text" placeholder="id, name, created_at"></label>
+                <label class="span-2"><span>Denied columns</span><input id="policy-denied-columns" type="text" placeholder="email, ssn, salary"></label>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head"><div><p class="eyebrow">Query guardrails</p><h3>Bound cost, shape and output</h3></div><span class="status-chip neutral">Resolved at request time</span></div>
+              <div class="guardrail-grid">
+                <label><span>Row limit</span><input id="guard-max-limit" type="number" min="1"><small>max_limit</small></label>
+                <label><span>Aggregate limit</span><input id="guard-max-limit-aggregate" type="number" min="1"><small>max_limit_aggregate</small></label>
+                <label><span>Maximum joins</span><input id="guard-max-joins" type="number" min="0"><small>max_joins</small></label>
+                <label><span>Select columns</span><input id="guard-max-select-columns" type="number" min="1"><small>max_select_columns</small></label>
+                <label><span>Timeout</span><div class="input-suffix"><input id="guard-timeout-seconds" type="number" min="1"><span>sec</span></div><small>timeout_seconds</small></label>
+                <label><span>Concurrency</span><input id="guard-max-concurrency" type="number" min="1"><small>max_concurrency</small></label>
+                <label><span>Queue depth</span><input id="guard-max-queue-depth" type="number" min="0" placeholder="Unlimited"><small>max_queue_depth</small></label>
+                <label><span>Response bytes</span><input id="guard-max-response-bytes" type="number" min="1"><small>max_response_bytes</small></label>
+              </div>
+            </article>
+
+            <article class="panel test-panel">
+              <div class="panel-head"><div><p class="eyebrow">Test as principal</p><h3>Simulate active policy access</h3></div><span class="status-chip neutral">Read-only</span></div>
+              <p class="panel-copy">This check evaluates the currently active policy. Stage and activate a draft before expecting it here.</p>
+              <form id="policy-test-form" class="form-grid">
+                <label><span>Principal subject</span><input id="test-principal" required type="text" placeholder="reporting-agent"></label>
+                <label><span>Connection</span><select id="test-connection" required></select></label>
+                <label><span>Table <small>optional</small></span><input id="test-table" type="text" placeholder="orders"></label>
+                <label><span>Columns <small>comma-separated</small></span><input id="test-columns" type="text" placeholder="id, total, customer_email"></label>
+                <label class="span-2"><span>Claims <small>JSON, scalar values only</small></span><input id="test-claims" type="text" value="{}" spellcheck="false"></label>
+                <div class="span-2 form-actions"><button class="button secondary" type="submit">Run policy check</button></div>
+              </form>
+              <div id="policy-test-result" class="decision-result" hidden></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-changes" class="view" data-view="changes" hidden>
+        <div class="section-intro">
+          <div><p class="eyebrow">Draft configuration</p><h2>Inspect the exact documents before staging.</h2><p>The editor begins from the active immutable version. Validation is a dry run; staging persists a new version but does not activate it.</p></div>
+          <div class="button-row"><button id="discard-draft" class="button secondary" type="button">Discard draft</button><button id="validate-draft" class="button primary" type="button">Validate draft</button></div>
+        </div>
+        <div class="document-tabs" role="tablist" aria-label="Configuration documents">
+          <button class="document-tab active" type="button" data-document="policy" role="tab" aria-selected="true">policy.yaml <span id="policy-change-mark"></span></button>
+          <button class="document-tab" type="button" data-document="connections" role="tab" aria-selected="false">connections.yaml <span id="connections-change-mark"></span></button>
+          <button class="document-tab" type="button" data-document="catalog" role="tab" aria-selected="false">catalog.yaml <span id="catalog-change-mark"></span></button>
+        </div>
+        <div class="editor-grid">
+          <article class="editor-panel">
+            <div class="editor-head"><div><strong id="editor-file-name">policy.yaml</strong><span id="editor-line-count">0 lines</span></div><button id="copy-document" class="text-button" type="button">Copy</button></div>
+            <textarea id="document-editor" class="code-editor" aria-label="Configuration document editor" spellcheck="false"></textarea>
+          </article>
+          <article class="diff-panel">
+            <div class="editor-head"><div><strong>Change preview</strong><span>Active → draft</span></div><span id="diff-summary" class="status-chip neutral">Unchanged</span></div>
+            <div id="document-diff" class="document-diff"><p class="empty-state">Edit this document to see a line-level preview.</p></div>
+          </article>
+        </div>
+        <div class="stage-grid">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">Dry-run result</p><h3>Validation &amp; document preview</h3></div><span id="validation-status" class="status-chip neutral">Not validated</span></div>
+            <div id="validation-result" class="validation-result"><p class="empty-state">Run validation before staging. All submitted documents are checked together.</p></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">Stage change</p><h3>Create an immutable version</h3></div></div>
+            <label><span>Change description</span><textarea id="stage-description" rows="3" placeholder="Why this access change is needed, who reviewed it, and the rollout context."></textarea></label>
+            <div class="stage-actions"><small>Staging does not activate the version.</small><button id="stage-draft" class="button primary" type="button" disabled>Stage version</button></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="view-history" class="view" data-view="history" hidden>
+        <div class="section-intro"><div><p class="eyebrow">Immutable history</p><h2>Activate deliberately. Roll back cleanly.</h2><p>Every version is a complete snapshot. Reactivating an inactive version moves the active pointer without rewriting history.</p></div><button id="refresh-history" class="button secondary" type="button">Refresh versions</button></div>
+        <div class="history-summary"><div><span>Current</span><strong id="history-current">—</strong></div><div><span>Total versions</span><strong id="history-total">—</strong></div><div><span>Staged</span><strong id="history-staged">—</strong></div></div>
+        <div class="table-wrap"><table class="history-table"><thead><tr><th>Version</th><th>Status</th><th>Description</th><th>Created</th><th>Activated</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="history-body"><tr><td colspan="6" class="empty-cell">Connect to load version history.</td></tr></tbody></table></div>
+      </section>
+
+      <section id="view-audit" class="view" data-view="audit" hidden>
+        <div class="section-intro"><div><p class="eyebrow">Redaction-safe audit trail</p><h2>Trace access and governance decisions.</h2><p>Persisted events exclude SQL parameters, predicate values, returned rows, raw YAML, and secrets.</p></div><button id="refresh-audit" class="button secondary" type="button">Refresh events</button></div>
+        <form id="audit-filters" class="filter-bar">
+          <label><span>Event type</span><select id="audit-event-type"><option value="">All events</option><option value="query.execution">Query execution</option><option value="config.governance">Config governance</option><option value="catalog.governance">Catalog governance</option></select></label>
+          <label><span>Outcome</span><select id="audit-outcome"><option value="">Any outcome</option><option value="success">Success</option><option value="rejected">Rejected</option></select></label>
+          <label><span>Principal</span><input id="audit-principal" type="search" placeholder="Exact subject"></label>
+          <label><span>Connection</span><input id="audit-connection" type="search" placeholder="Exact id"></label>
+          <button class="button secondary" type="submit">Apply filters</button>
+        </form>
+        <div class="audit-meta"><p id="audit-count">No events loaded</p><p id="audit-source"></p></div>
+        <div id="audit-list" class="audit-list"><p class="empty-state">Connect to browse persisted events.</p></div>
+        <div class="load-more"><button id="audit-more" class="button secondary" type="button" hidden>Load older events</button></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="auth-dialog" class="auth-dialog" aria-labelledby="auth-title">
+    <form id="auth-form" method="dialog">
+      <div class="dialog-brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>QueryGate</span></div>
+      <p class="eyebrow">Administrator session</p>
+      <h2 id="auth-title">Connect to the control plane</h2>
+      <p>Use a bearer token with <code>admin:config:read</code> to inspect and simulate, and <code>admin:config:write</code> to edit, validate, stage, and activate changes.</p>
+      <label><span>Bearer token</span><input id="auth-token" type="password" autocomplete="off" required placeholder="Paste token"></label>
+      <label class="checkbox-row"><input id="remember-token" type="checkbox"><span>Keep token for this browser tab</span></label>
+      <p id="auth-error" class="form-error" role="alert" hidden></p>
+      <button class="button primary wide" type="submit">Connect securely</button>
+      <small>The token is sent only in the Authorization header. It is never written into a configuration document.</small>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <p class="eyebrow">Confirm control-plane action</p>
+      <h2 id="confirm-title">Activate version?</h2>
+      <p id="confirm-message"></p>
+      <label id="confirm-phrase-wrap" hidden><span>Type the confirmation phrase</span><input id="confirm-phrase-input" type="text" autocomplete="off"></label>
+      <div class="dialog-actions"><button id="confirm-cancel" class="button secondary" value="cancel">Cancel</button><button id="confirm-accept" class="button danger-button" value="confirm">Confirm</button></div>
+    </form>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

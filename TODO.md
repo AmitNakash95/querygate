@@ -60,7 +60,7 @@ order-of-magnitude, not commitments.
 | 28 | ✅ Threat model + adversarial security test suite | M | 1, 6, 8, 10, 11 |
 | 29 | ✅ Production deployment reference stack | M | 4, 9, 12, 13, 14 |
 | 30 | ✅ Distribution, SBOM, and signed release artifacts (phase 1: SBOM + audit; phase 2: publishing + signing not started) | M | 4, 14 |
-| 31 | Admin UI / policy designer | XL | 25 |
+| 31 | ✅ Admin UI / policy designer | XL | 25 |
 | 32 | Governed adaptive semantic memory for agents (32A ✅; 32B ✅; 32C not started) | XL | 23, 25, 27, 28 |
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
@@ -2453,7 +2453,43 @@ tool-calling loop.
 necessarily) showing QueryGate's MCP tools registered in one or two popular
 agent frameworks, to shorten time-to-first-query for adopters.
 
-### 31. Admin UI / policy designer
+### 31. Admin UI / policy designer ✅ DONE
+
+**Shipped:** an integrated, dependency-free control plane at `/admin/`,
+served by the existing FastAPI process rather than deployed as a second
+service. It uses item 25's config-governance routes as the only mutation
+path: the UI loads the immutable active snapshot, supports visual and raw
+YAML editing, runs the existing dry-run validation/preview, stages a complete
+version, and activates or rolls back through the same re-validating apply
+endpoint as REST users. The CLI/YAML infrastructure-as-code workflow is
+unchanged and remains fully supported.
+
+The UI includes the full prioritized surface: policy-filtered connection and
+schema review; a layered default/connection/principal policy designer for
+table/column boundaries and query guardrails; line-level active-versus-draft
+document previews; explicit validation and staging; version history with
+typed-confirmation activation/rollback; active-policy test-as-principal
+simulation (including mandatory-claim readiness, while redacting configured
+filter values); and newest-first filtering/pagination over the persisted,
+redaction-safe JSONL audit stream. The browser shell never receives a token
+through a URL, uses same-origin APIs only, and is served with a restrictive
+Content Security Policy, no-referrer/nosniff headers, and no-store HTML.
+
+`api/admin_ui_routes.py` adds only the capabilities the existing API lacked:
+validated policy parse/render for the visual designer, read-only principal
+simulation, and memory-bounded audit browsing. It reuses
+`admin:config:read` for inspection/simulation/audit and
+`admin:config:write` for rendering/mutations, preserving item 25's existing
+read/write separation rather than inventing an all-powerful UI scope. See
+`tests/integration/test_admin_ui.py` for static-shell/security-header,
+scope, policy round-trip/simulation, row-filter redaction, and audit
+pagination/filtering coverage.
+
+**Deliberate boundary:** “approval” in this version is an explicit
+validate → review diff → stage → typed-confirmation activate workflow, not a
+server-enforced two-person/four-eyes state machine. Adding reviewer identity,
+separation-of-duties rules, scheduled activation, or SSO session exchange
+would be a governance-model/API change beyond item 25, not UI-only work.
 
 **Effort: XL (2–4+ weeks).** This should come after item 25 establishes the
 admin API and governance model. Building UI first would risk encoding the
