@@ -21,6 +21,7 @@ from querygate.api.help_routes import build_help_router
 from querygate.api.routes import build_router
 from querygate.audit.sinks import configure_audit_sink, reset_audit_sink
 from querygate.catalog.refresh import CatalogRefreshMonitor
+from querygate.catalog.usage import CatalogUsageLearningMonitor
 from querygate.core.config import AppConfig, ConcurrencyBackend
 from querygate.core.config import config as default_config
 from querygate.core.logging import ContextLogger, context_logger, get_logger
@@ -58,6 +59,15 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             )
             await catalog_refresh_monitor.start()
         app.state.catalog_refresh_monitor = catalog_refresh_monitor
+
+        catalog_usage_learning_monitor: Optional[CatalogUsageLearningMonitor] = None
+        if conf.semantic_memory_learning_enabled:
+            catalog_usage_learning_monitor = CatalogUsageLearningMonitor(
+                catalog_file=conf.catalog_file or "",
+                interval_seconds=conf.semantic_memory_learning_interval_seconds,
+            )
+            await catalog_usage_learning_monitor.start()
+        app.state.catalog_usage_learning_monitor = catalog_usage_learning_monitor
 
         redis_client = None
         if conf.concurrency_backend == ConcurrencyBackend.REDIS:
@@ -98,6 +108,8 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 await mcp_task
             if catalog_refresh_monitor is not None:
                 await catalog_refresh_monitor.stop()
+            if catalog_usage_learning_monitor is not None:
+                await catalog_usage_learning_monitor.stop()
             await health_monitor.stop()
             reset_audit_sink()
             if redis_client is not None:

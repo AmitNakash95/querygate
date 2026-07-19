@@ -22,6 +22,7 @@ AuditSurface = Literal["rest", "mcp", "internal"]
 ConfigChangeAction = Literal["validate", "preview", "stage", "apply", "rollback"]
 CatalogGovernanceAction = Literal[
     "generate",
+    "learn",
     "edit",
     "approve",
     "reject",

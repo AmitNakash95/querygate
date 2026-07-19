@@ -17,6 +17,9 @@ from querygate.audit.events import AuditSurface, normalize_query_shape
 from querygate.audit.logger import audit_query
 from querygate.catalog.loader import get_catalog_store
 from querygate.catalog.models import (
+    CatalogDraftObjectType,
+    CatalogDraftTarget,
+    CatalogUsageSignalKind,
     SensitivityClass,
     agent_visible,
     visible_relationships,
@@ -30,12 +33,14 @@ from querygate.catalog.retrieval import (
     policy_safe_catalog_text,
     search_catalog,
 )
+from querygate.catalog.usage import build_usage_signal, enqueue_usage_signal, should_emit_signal
 from querygate.compiler.sqlalchemy_compiler import compile_structured_query
 from querygate.connections.engine import get_engine, get_metadata, session_scope
 from querygate.connections.models import DatabaseDialect
 from querygate.connections.registry import get_registry
 from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.auth import Principal
+from querygate.core.config import config as app_config
 from querygate.core.exceptions import (
     CapacityTimeoutError,
     ConcurrencyLimitError,
@@ -289,6 +294,94 @@ class StructuredQueryService:
             estimated_total_cost=estimate.estimated_total_cost,
         )
 
+    def _usage_signal_targets(
+        self, query: StructuredQuery
+    ) -> List[Tuple[CatalogUsageSignalKind, CatalogDraftTarget]]:
+        """Relationship targets use JoinSpec.on's own documented convention
+        (``[LeftTable.Col, RightTable.Col]``) to decide which side is
+        ``table``/``column`` vs. ``to_table``/``to_column`` — the same
+        ordering the AST author already committed to, not a new inference.
+        Cross-connection joins (``join.connection`` set) are skipped: their
+        target table lives in a different connection's catalog.
+        """
+
+        targets: List[Tuple[CatalogUsageSignalKind, CatalogDraftTarget]] = [
+            (
+                CatalogUsageSignalKind.TABLE_USED,
+                CatalogDraftTarget(
+                    connection_id=self._connection_id,
+                    object_type=CatalogDraftObjectType.TABLE,
+                    table=query.from_table,
+                ),
+            )
+        ]
+        tables_seen = {query.from_table}
+        for join in query.joins:
+            if join.connection is not None:
+                continue
+            if join.table not in tables_seen:
+                targets.append(
+                    (
+                        CatalogUsageSignalKind.TABLE_USED,
+                        CatalogDraftTarget(
+                            connection_id=self._connection_id,
+                            object_type=CatalogDraftObjectType.TABLE,
+                            table=join.table,
+                        ),
+                    )
+                )
+                tables_seen.add(join.table)
+            left, right = join.on
+            if "." not in left or "." not in right:
+                continue
+            left_table, left_column = left.split(".", 1)
+            right_table, right_column = right.split(".", 1)
+            targets.append(
+                (
+                    CatalogUsageSignalKind.RELATIONSHIP_USED,
+                    CatalogDraftTarget(
+                        connection_id=self._connection_id,
+                        object_type=CatalogDraftObjectType.RELATIONSHIP,
+                        table=left_table,
+                        column=left_column,
+                        to_table=right_table,
+                        to_column=right_column,
+                    ),
+                )
+            )
+        return targets
+
+    def _emit_usage_signals(self, query: StructuredQuery, *, admission_id: str) -> None:
+        """Best-effort, non-blocking (TODO item 32C). Never raises into the
+        response path: signal emission only touches an in-process buffer
+        (``catalog.usage.enqueue_usage_signal``), never the catalog file
+        lock — a background monitor does that batching separately.
+        """
+
+        if not app_config.semantic_memory_usage_signals_enabled or not app_config.catalog_file:
+            return
+        try:
+            store = get_catalog_store()
+            snapshot = store.get_schema_snapshot(self._connection_id)
+            if snapshot is None:
+                return
+            for kind, target in self._usage_signal_targets(query):
+                if not should_emit_signal(store, connection_id=self._connection_id, target=target):
+                    continue
+                signal = build_usage_signal(
+                    connection_id=self._connection_id,
+                    principal_subject=self._principal_subject,
+                    target=target,
+                    kind=kind,
+                    schema_fingerprint=snapshot.fingerprint,
+                    evidence_reference=f"admission:{admission_id}",
+                )
+                enqueue_usage_signal(signal)
+        except Exception as exc:
+            get_logger().bind(func="execute").warning(
+                "semantic_memory.usage_signal_emit_failed", error_type=type(exc).__name__
+            )
+
     @log_execution
     async def execute(
         self,
@@ -367,6 +460,7 @@ class StructuredQueryService:
                         queue_wait_ms=queue_wait_ms,
                         admission_state="completed",
                     )
+                    self._emit_usage_signals(query, admission_id=admission_id)
                     QUERIES_TOTAL.labels(connection=self._connection_id, status="success").inc()
                     QUERY_DURATION_SECONDS.labels(connection=self._connection_id).observe(
                         elapsed_seconds

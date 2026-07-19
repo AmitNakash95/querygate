@@ -440,8 +440,11 @@ class CatalogDraftProposal(pyd.BaseModel):
     def _quarantine_inferred_content(self) -> "CatalogDraftProposal":
         if self.provenance.entry_id != self.proposal_id:
             raise ValueError("draft proposal_id must equal its provenance entry_id")
-        if self.provenance.source_class != KnowledgeSourceClass.INFERRED:
-            raise ValueError("generated catalog proposals must remain inferred")
+        if self.provenance.source_class not in {
+            KnowledgeSourceClass.INFERRED,
+            KnowledgeSourceClass.LEARNED,
+        }:
+            raise ValueError("generated catalog proposals must remain inferred or learned")
         if self.provenance.status not in {
             CatalogEntryStatus.DRAFT,
             CatalogEntryStatus.STALE,
@@ -547,7 +550,7 @@ class CatalogGenerationRecord(pyd.BaseModel):
 
     generation_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=120)]
     connection_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=100)]
-    provider_mode: Literal["manual"] = "manual"
+    provider_mode: Literal["manual", "usage-learner"] = "manual"
     provider_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=160)]
     prompt_template_version: Annotated[str, pyd.StringConstraints(min_length=1, max_length=80)]
     schema_fingerprint: Annotated[str, pyd.StringConstraints(min_length=1, max_length=80)]
@@ -573,6 +576,69 @@ class CatalogGenerationRecord(pyd.BaseModel):
     def _proposal_ids_are_unique(self) -> "CatalogGenerationRecord":
         if len(self.proposal_ids) != len(set(self.proposal_ids)):
             raise ValueError("generation proposal ids must be unique")
+        return self
+
+
+class CatalogUsageSignalKind(StrEnum):
+    """TODO item 32C's typed usage-signal contract. Only ``RELATIONSHIP_USED``
+    currently feeds the learner (``catalog/learning.py``) — the other two
+    kinds are recorded/observable now so the signal contract does not need
+    to change if a later phase teaches the learner to act on them too.
+    """
+
+    TABLE_USED = "table_used"
+    COLUMN_USED = "column_used"
+    RELATIONSHIP_USED = "relationship_used"
+
+
+_OBJECT_TYPE_FOR_SIGNAL_KIND = {
+    CatalogUsageSignalKind.TABLE_USED: CatalogDraftObjectType.TABLE,
+    CatalogUsageSignalKind.COLUMN_USED: CatalogDraftObjectType.COLUMN,
+    CatalogUsageSignalKind.RELATIONSHIP_USED: CatalogDraftObjectType.RELATIONSHIP,
+}
+
+
+class CatalogUsageSignal(pyd.BaseModel):
+    """A single redaction-safe, typed observation that one successfully
+    executed, already policy-validated query used a table/column/
+    relationship — the only kind of evidence TODO item 32C's learner may
+    act on. Structurally cannot carry row values, query literals,
+    natural-language history, or a raw principal identity:
+    ``principal_partition`` is always a stable hash (see
+    ``catalog.usage.hash_principal_partition``), never the caller's real
+    subject, so a durable catalog file never stores caller identity.
+    """
+
+    signal_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=160)]
+    connection_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=100)]
+    principal_partition: Annotated[str, pyd.StringConstraints(min_length=1, max_length=80)]
+    target: CatalogDraftTarget
+    kind: CatalogUsageSignalKind
+    schema_fingerprint: Annotated[str, pyd.StringConstraints(min_length=1, max_length=80)]
+    observed_at: pyd.AwareDatetime
+    evidence: CatalogEvidence
+
+    model_config = pyd.ConfigDict(extra="forbid", frozen=True)
+
+    @pyd.field_validator("principal_partition")
+    @classmethod
+    def _hashed_partition(cls, value: str) -> str:
+        if not value.startswith("sha256:") or any(
+            character not in "0123456789abcdef" for character in value[7:]
+        ):
+            raise ValueError("usage signal principal_partition must be a lowercase SHA-256 digest")
+        return value
+
+    @pyd.model_validator(mode="after")
+    def _target_matches_kind(self) -> "CatalogUsageSignal":
+        if self.target.connection_id != self.connection_id:
+            raise ValueError("usage signal target must match its own connection_id")
+        if self.target.object_type != _OBJECT_TYPE_FOR_SIGNAL_KIND[self.kind]:
+            raise ValueError(
+                f"usage signal kind {self.kind.value!r} requires a matching target object_type"
+            )
+        if self.evidence.kind != CatalogEvidenceKind.USAGE:
+            raise ValueError("usage signal evidence must use the 'usage' evidence kind")
         return self
 
 
@@ -628,17 +694,28 @@ class SchemaCatalog(pyd.BaseModel):
     draft_proposals: list[CatalogDraftProposal] = pyd.Field(default_factory=list)
     generation_records: list[CatalogGenerationRecord] = pyd.Field(default_factory=list)
     version_history: list[CatalogVersionRecord] = pyd.Field(default_factory=list, max_length=2000)
+    # TODO item 32C: bounded, pre-decision usage evidence — never exported/
+    # imported (see CatalogExportBundle), never a query-execution or row-
+    # value path, and pruned FIFO at the cap by catalog.usage.record_usage_signal
+    # rather than growing unboundedly.
+    usage_signals: list[CatalogUsageSignal] = pyd.Field(default_factory=list, max_length=50_000)
 
     model_config = pyd.ConfigDict(extra="forbid")
 
     @pyd.model_validator(mode="after")
     def _snapshot_keys_match_connections(self) -> "SchemaCatalog":
         if self.version == 1 and (
-            self.schema_snapshots or self.draft_proposals or self.generation_records
+            self.schema_snapshots
+            or self.draft_proposals
+            or self.generation_records
+            or self.usage_signals
         ):
             raise ValueError(
                 "schema snapshots and semantic-memory records require catalog version 2"
             )
+        signal_ids = [signal.signal_id for signal in self.usage_signals]
+        if len(signal_ids) != len(set(signal_ids)):
+            raise ValueError("catalog usage signal ids must be unique")
         for connection_id, snapshot in self.schema_snapshots.items():
             if connection_id != snapshot.connection_id:
                 raise ValueError(

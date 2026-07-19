@@ -94,6 +94,16 @@ class AppConfig(BaseSettings):
     semantic_memory_refresh_interval_seconds: float = pyd.Field(default=300, gt=0)
     semantic_memory_refresh_max_tables: int = pyd.Field(default=500, ge=1, le=5000)
 
+    # TODO item 32C: redaction-safe usage signals + background usage
+    # learning. Both are opt-in and off by default, mirroring refresh above.
+    # Signal *recording* into the in-process buffer is best-effort and never
+    # touches the catalog file lock on the query path; only the background
+    # monitor below batches buffered signals into the catalog file.
+    semantic_memory_usage_signals_enabled: bool = pyd.Field(default=False)
+    semantic_memory_usage_signal_buffer_size: int = pyd.Field(default=5000, ge=1, le=100_000)
+    semantic_memory_learning_enabled: bool = pyd.Field(default=False)
+    semantic_memory_learning_interval_seconds: float = pyd.Field(default=3600, gt=0)
+
     # REST and MCP share one API-key authenticator (see core/auth.py). Both
     # allow an anonymous dev-bypass outside production when no keys are set.
     api_keys: list[str] = pyd.Field(
@@ -230,6 +240,12 @@ class AppConfig(BaseSettings):
             raise ValueError("VAULT_TOKEN must be set when VAULT_ENABLED=true")
         if self.semantic_memory_refresh_enabled and not self.catalog_file:
             raise ValueError("CATALOG_FILE must be set when SEMANTIC_MEMORY_REFRESH_ENABLED=true")
+        if self.semantic_memory_usage_signals_enabled and not self.catalog_file:
+            raise ValueError(
+                "CATALOG_FILE must be set when SEMANTIC_MEMORY_USAGE_SIGNALS_ENABLED=true"
+            )
+        if self.semantic_memory_learning_enabled and not self.catalog_file:
+            raise ValueError("CATALOG_FILE must be set when SEMANTIC_MEMORY_LEARNING_ENABLED=true")
         return self
 
     @property

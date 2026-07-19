@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse
 from querygate.audit.logger import audit_catalog_governance
 from querygate.catalog import governance
 from querygate.catalog.generation import generate_catalog_drafts
+from querygate.catalog.learning import generate_learned_relationship_proposals
 from querygate.catalog.loader import get_catalog_store
 from querygate.catalog.models import (
     CatalogDraftContent,
@@ -43,6 +44,7 @@ from querygate.catalog.providers import (
     SemanticGenerationRequest,
 )
 from querygate.catalog.repository import CatalogFileRepository, CatalogFileUpdate
+from querygate.catalog.usage import UsageSignalSummary, summarize_usage_signals
 from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
@@ -148,6 +150,41 @@ class GenerateDraftsResult(pyd.BaseModel):
     generation_id: str
     outcome: str
     added_proposal_count: int
+
+
+class UsageSignalSummaryItem(pyd.BaseModel):
+    """Bounded, aggregated-by-target projection (TODO item 32C) — never a
+    raw per-signal dump, same "metadata projection" posture as
+    ``CatalogVersionSummary``.
+    """
+
+    kind: str
+    object_type: str
+    table: str
+    column: Optional[str] = None
+    to_table: Optional[str] = None
+    to_column: Optional[str] = None
+    support: int
+    signal_count: int
+    first_observed_at: datetime
+    last_observed_at: datetime
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    @classmethod
+    def from_summary(cls, summary: UsageSignalSummary) -> "UsageSignalSummaryItem":
+        return cls(
+            kind=summary.kind.value,
+            object_type=summary.target.object_type.value,
+            table=summary.target.table,
+            column=summary.target.column,
+            to_table=summary.target.to_table,
+            to_column=summary.target.to_column,
+            support=summary.support,
+            signal_count=summary.signal_count,
+            first_observed_at=summary.first_observed_at,
+            last_observed_at=summary.last_observed_at,
+        )
 
 
 class BulkProposalRequest(pyd.BaseModel):
@@ -337,6 +374,69 @@ def build_catalog_governance_router(
             outcome=update.outcome,
             added_proposal_count=update.added_count,
         )
+
+    @router.post(
+        "/{connection}/learn",
+        response_model=GenerateDraftsResult,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def learn_endpoint(connection: str, principal: Principal = Depends(get_principal)):
+        """Turn accumulated usage evidence (TODO item 32C) into quarantined
+        `learned` proposals — reuses `catalog:generate` since this is
+        generation, just from a different evidence source than
+        generate-drafts' manual/model batch.
+        """
+
+        _require_scope(principal, CATALOG_GENERATE_SCOPE)
+        _require_known_connection(connection)
+        start = time.monotonic()
+        repository = _repository(cfg)
+
+        def _learn(store):
+            return generate_learned_relationship_proposals(store, connection_id=connection)
+
+        try:
+            update = await _apply(repository, _learn)
+        except (ValueError, CatalogGovernanceError) as exc:
+            audit_catalog_governance(
+                action="learn",
+                outcome="rejected",
+                principal=principal.subject,
+                principal_scopes=sorted(principal.scopes),
+                auth_method=principal.auth_method,
+                connection_id=connection,
+                error_category="validation",
+                duration_ms=int((time.monotonic() - start) * 1000),
+            )
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+        audit_catalog_governance(
+            action="learn",
+            outcome="success",
+            principal=principal.subject,
+            principal_scopes=sorted(principal.scopes),
+            auth_method=principal.auth_method,
+            connection_id=connection,
+            proposal_count=update.added_count,
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        return GenerateDraftsResult(
+            generation_id=update.generation_id,
+            outcome=update.outcome,
+            added_proposal_count=update.added_count,
+        )
+
+    @router.get("/{connection}/usage-signals", response_model=List[UsageSignalSummaryItem])
+    async def list_usage_signals_endpoint(
+        connection: str, principal: Principal = Depends(get_principal)
+    ):
+        _require_scope(principal, CATALOG_REVIEW_SCOPE)
+        _require_known_connection(connection)
+        store = get_catalog_store()
+        return [
+            UsageSignalSummaryItem.from_summary(summary)
+            for summary in summarize_usage_signals(store, connection)
+        ]
 
     @router.get("/{connection}/proposals", response_model=List[ProposalListItem])
     async def list_proposals_endpoint(

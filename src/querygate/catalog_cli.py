@@ -15,11 +15,13 @@ import yaml
 from querygate.catalog import governance
 from querygate.catalog.benchmark import evaluate_benchmark, load_benchmark
 from querygate.catalog.generation import CatalogGenerationUpdate, generate_catalog_drafts
+from querygate.catalog.learning import generate_learned_relationship_proposals
 from querygate.catalog.loader import CatalogStore
 from querygate.catalog.models import (
     CatalogDraftContent,
     CatalogDraftProposal,
     CatalogExportBundle,
+    CatalogUsageSignal,
     CatalogVersionRecord,
 )
 from querygate.catalog.providers import (
@@ -34,6 +36,7 @@ from querygate.catalog.refresh import (
     scan_connection_schema,
 )
 from querygate.catalog.repository import CatalogFileRepository, CatalogFileUpdate
+from querygate.catalog.usage import record_usage_signals, summarize_usage_signals
 from querygate.core.exceptions import NotFoundError
 
 
@@ -300,6 +303,48 @@ def delete_version(*, catalog_file: str, connection_id: str, version_id: str, ac
     return {"outcome": update.outcome, "version_id": update.version_id}
 
 
+def learn(*, catalog_file: str, connection_id: str) -> dict:
+    repository = CatalogFileRepository(catalog_file)
+
+    def _apply(store: CatalogStore) -> CatalogFileUpdate[CatalogGenerationUpdate]:
+        update = generate_learned_relationship_proposals(store, connection_id=connection_id)
+        return CatalogFileUpdate(update.store, update)
+
+    update = repository.update(_apply)
+    return {
+        "generation_id": update.generation_id,
+        "outcome": update.outcome,
+        "added_proposal_count": update.added_count,
+    }
+
+
+def list_usage_signals(*, catalog_file: str, connection_id: str) -> list[dict]:
+    store = CatalogStore.from_file(catalog_file)
+    return [summary.as_dict() for summary in summarize_usage_signals(store, connection_id)]
+
+
+def submit_usage_signals(*, catalog_file: str, input_file: str) -> dict:
+    """Operator/test-harness path for seeding usage evidence without a live
+    server (TODO item 32C) — mirrors generate-drafts' manual batch-file
+    import, going through the same CatalogFileRepository lock.
+    """
+
+    raw = yaml.safe_load(Path(input_file).read_text()) or []
+    signals = [CatalogUsageSignal.model_validate(item) for item in raw]
+    repository = CatalogFileRepository(catalog_file)
+
+    def _apply(store: CatalogStore):
+        update = record_usage_signals(store, signals=signals)
+        return CatalogFileUpdate(update.store, update)
+
+    update = repository.update(_apply)
+    return {
+        "outcome": update.outcome,
+        "recorded_count": len(update.recorded_signal_ids),
+        "duplicate_count": len(update.duplicate_signal_ids),
+    }
+
+
 def _catalog_path(argument: Optional[str], configured: Optional[str]) -> str:
     path = argument or configured
     if not path:
@@ -412,6 +457,18 @@ def main() -> None:
     delete_version_parser.add_argument("--connection", required=True)
     delete_version_parser.add_argument("--version-id", required=True)
     delete_version_parser.add_argument("--actor", required=True)
+
+    learn_parser = subparsers.add_parser("learn")
+    learn_parser.add_argument("--catalog-file")
+    learn_parser.add_argument("--connection", required=True)
+
+    list_usage_signals_parser = subparsers.add_parser("list-usage-signals")
+    list_usage_signals_parser.add_argument("--catalog-file")
+    list_usage_signals_parser.add_argument("--connection", required=True)
+
+    submit_usage_signals_parser = subparsers.add_parser("submit-usage-signals")
+    submit_usage_signals_parser.add_argument("--catalog-file")
+    submit_usage_signals_parser.add_argument("--input-file", required=True)
 
     args = parser.parse_args()
     from querygate.core.config import config
@@ -640,6 +697,29 @@ def main() -> None:
                         version_id=args.version_id,
                         actor=args.actor,
                     ),
+                    indent=2,
+                )
+            )
+            return
+        if args.command == "learn":
+            print(
+                json.dumps(
+                    learn(catalog_file=catalog_file, connection_id=args.connection), indent=2
+                )
+            )
+            return
+        if args.command == "list-usage-signals":
+            print(
+                json.dumps(
+                    list_usage_signals(catalog_file=catalog_file, connection_id=args.connection),
+                    indent=2,
+                )
+            )
+            return
+        if args.command == "submit-usage-signals":
+            print(
+                json.dumps(
+                    submit_usage_signals(catalog_file=catalog_file, input_file=args.input_file),
                     indent=2,
                 )
             )

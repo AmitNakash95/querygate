@@ -23,6 +23,11 @@ import hvac.exceptions
 from querygate.api.app import create_app
 from querygate.catalog.generation import generate_catalog_drafts
 from querygate.catalog.loader import CatalogStore, set_catalog_store
+from querygate.catalog.models import (
+    CatalogDraftObjectType,
+    CatalogDraftTarget,
+    CatalogUsageSignalKind,
+)
 from querygate.catalog.providers import (
     ManualDraftBatch,
     ManualSemanticMemoryProvider,
@@ -31,8 +36,10 @@ from querygate.catalog.providers import (
 from querygate.catalog.refresh import CatalogRefreshMonitor
 from querygate.catalog.retrieval import search_catalog
 from querygate.catalog.schema_memory import ObservedSchemaSnapshot
+from querygate.catalog.usage import build_usage_signal
 from querygate.compiler.sqlalchemy_compiler import compile_structured_query
-from querygate.connections.registry import get_registry
+from querygate.connections.models import ConnectionProfile
+from querygate.connections.registry import ConnectionRegistry, get_registry, set_registry
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import (
@@ -1129,3 +1136,210 @@ async def test_catalog_export_scope_alone_cannot_delete(tmp_path, monkeypatch):
 
     assert delete_proposal_resp.status_code == 403
     assert delete_version_resp.status_code == 403
+
+
+# --- TODO item 32C: usage-signal / usage-learning REST boundary -------------
+
+
+def _relationship_target(connection_id: str = "demo") -> CatalogDraftTarget:
+    return CatalogDraftTarget(
+        connection_id=connection_id,
+        object_type=CatalogDraftObjectType.RELATIONSHIP,
+        table="orders",
+        column="customer_id",
+        to_table="customers",
+        to_column="id",
+    )
+
+
+def _orders_snapshot(connection_id: str) -> ObservedSchemaSnapshot:
+    metadata = sa.MetaData()
+    customers = sa.Table("customers", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    orders = sa.Table(
+        "orders",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("customer_id", sa.Integer, sa.ForeignKey("customers.id")),
+    )
+    return ObservedSchemaSnapshot.from_tables(connection_id, [customers, orders])
+
+
+def _usage_learning_app(
+    tmp_path, *, scopes: list[str], monkeypatch, connections=("demo",)
+) -> AppConfig:
+    """A minimal app wired for usage-signal/usage-learning REST tests: one
+    or more connections, each with a persisted schema snapshot and enough
+    independent RELATIONSHIP_USED evidence to clear the learner's
+    support/confidence thresholds on its own.
+    """
+
+    monkeypatch.setenv("QG32C_USAGE_DB_URL", "postgresql+asyncpg://user:pass@localhost/x")
+    connections_file = tmp_path / "connections.yaml"
+    connections_file.write_text(
+        "connections:\n"
+        + "\n".join(
+            f"  - id: {connection_id}\n"
+            f"    dialect: postgresql\n"
+            f"    connection_string: ${{QG32C_USAGE_DB_URL}}\n"
+            f"    known_tables: [customers, orders]\n"
+            for connection_id in connections
+        )
+    )
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("default:\n  enabled: true\n")
+
+    schema_snapshots = {}
+    usage_signals = []
+    for connection_id in connections:
+        snapshot = _orders_snapshot(connection_id)
+        schema_snapshots[connection_id] = snapshot.model_dump(mode="json")
+        target = _relationship_target(connection_id)
+        for i in range(5):
+            signal = build_usage_signal(
+                connection_id=connection_id,
+                principal_subject=f"{connection_id}-user-{i}",
+                target=target,
+                kind=CatalogUsageSignalKind.RELATIONSHIP_USED,
+                schema_fingerprint=snapshot.fingerprint,
+                evidence_reference=f"admission:{connection_id}:{i}",
+            )
+            usage_signals.append(signal.model_dump(mode="json", exclude_none=True))
+
+    catalog_file = tmp_path / "catalog.yaml"
+    catalog_file.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "connections": {cid: {"tables": {}} for cid in connections},
+                "schema_snapshots": schema_snapshots,
+                "usage_signals": usage_signals,
+            }
+        )
+    )
+    return AppConfig(
+        environment="localhost",
+        mcp_enabled=False,
+        audit_sink_backend="none",
+        connections_file=str(connections_file),
+        policy_file=str(policy_file),
+        catalog_file=str(catalog_file),
+        api_keys=["usage-learning-caller-key"],
+        api_key_scopes=scopes,
+    )
+
+
+@pytest.mark.asyncio
+async def test_learn_endpoint_requires_generate_scope_review_alone_is_insufficient(
+    tmp_path, monkeypatch
+):
+    app = create_app(
+        _usage_learning_app(tmp_path, scopes=["catalog:review"], monkeypatch=monkeypatch)
+    )
+    headers = {"Authorization": "Bearer usage-learning-caller-key"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        resp = await client.post("/api/v1/admin/catalog/demo/learn", headers=headers)
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_usage_signals_endpoint_requires_review_scope_generate_alone_is_insufficient(
+    tmp_path, monkeypatch
+):
+    app = create_app(
+        _usage_learning_app(tmp_path, scopes=["catalog:generate"], monkeypatch=monkeypatch)
+    )
+    headers = {"Authorization": "Bearer usage-learning-caller-key"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        resp = await client.get("/api/v1/admin/catalog/demo/usage-signals", headers=headers)
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_usage_learning_endpoints_reject_unauthenticated_callers(tmp_path, monkeypatch):
+    app = create_app(_usage_learning_app(tmp_path, scopes=[], monkeypatch=monkeypatch))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        learn_resp = await client.post("/api/v1/admin/catalog/demo/learn")
+        signals_resp = await client.get("/api/v1/admin/catalog/demo/usage-signals")
+    assert learn_resp.status_code in (401, 403)
+    assert signals_resp.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_usage_evidence_from_one_connection_never_contributes_to_another(
+    tmp_path, monkeypatch
+):
+    """Each connection has its own 5-principal-strong evidence for the same
+    relationship shape (orders.customer_id -> customers.id). If evidence
+    ever leaked across connections, this would still cross the support
+    threshold either way and the test would not catch a regression — so
+    instead this proves the two connections' learned outputs are computed
+    independently by publishing one and confirming the other still has its
+    own independent, unpublished pending proposal untouched by the other's
+    review-state transition.
+    """
+    app_config = _usage_learning_app(
+        tmp_path,
+        scopes=[
+            "catalog:generate",
+            "catalog:review",
+            "catalog:approve",
+            "catalog:publish",
+        ],
+        monkeypatch=monkeypatch,
+        connections=("demo", "demo2"),
+    )
+    # get_registry()/get_catalog_store() are process-wide singletons the
+    # autouse conftest fixture resets to a "demo"-only registry/empty store
+    # before every test — this test needs both "demo" and "demo2" known and
+    # the catalog file's seeded evidence actually loaded.
+    set_registry(
+        ConnectionRegistry(
+            {
+                connection_id: ConnectionProfile(
+                    id=connection_id,
+                    dialect="postgresql",
+                    connection_string="postgresql+asyncpg://user:pass@localhost/x",
+                    known_tables=["customers", "orders"],
+                )
+                for connection_id in ("demo", "demo2")
+            }
+        )
+    )
+    app = create_app(app_config)
+    set_catalog_store(CatalogStore.from_file(app_config.catalog_file))
+    headers = {"Authorization": "Bearer usage-learning-caller-key"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        learn_demo = await client.post("/api/v1/admin/catalog/demo/learn", headers=headers)
+        learn_demo2 = await client.post("/api/v1/admin/catalog/demo2/learn", headers=headers)
+        assert learn_demo.status_code == 201
+        assert learn_demo2.status_code == 201
+        assert learn_demo.json()["added_proposal_count"] == 1
+        assert learn_demo2.json()["added_proposal_count"] == 1
+
+        demo_proposals = (
+            await client.get("/api/v1/admin/catalog/demo/proposals", headers=headers)
+        ).json()
+        demo2_proposals = (
+            await client.get("/api/v1/admin/catalog/demo2/proposals", headers=headers)
+        ).json()
+        assert len(demo_proposals) == 1
+        assert len(demo2_proposals) == 1
+        demo_proposal_id = demo_proposals[0]["proposal_id"]
+        demo2_proposal_id = demo2_proposals[0]["proposal_id"]
+        assert demo_proposal_id != demo2_proposal_id
+
+        await client.post(
+            f"/api/v1/admin/catalog/demo/proposals/{demo_proposal_id}/approve", headers=headers
+        )
+        await client.post(
+            f"/api/v1/admin/catalog/demo/proposals/{demo_proposal_id}/publish", headers=headers
+        )
+
+        # Publishing "demo"'s proposal must not affect "demo2"'s independent,
+        # still-pending proposal for the structurally-identical relationship.
+        demo2_after = (
+            await client.get(
+                f"/api/v1/admin/catalog/demo2/proposals/{demo2_proposal_id}", headers=headers
+            )
+        ).json()
+        assert demo2_after["review_status"] == "pending"

@@ -10,8 +10,14 @@ import yaml
 
 from querygate.catalog.benchmark import evaluate_benchmark, load_benchmark
 from querygate.catalog.loader import CatalogStore
+from querygate.catalog.models import (
+    CatalogDraftObjectType,
+    CatalogDraftTarget,
+    CatalogUsageSignalKind,
+)
 from querygate.catalog.providers import ManualDraftBatch, SemanticMemoryProviderMode
 from querygate.catalog.schema_memory import ObservedSchemaSnapshot
+from querygate.catalog.usage import build_usage_signal
 from querygate.catalog_cli import (
     approve_proposal,
     default_benchmark_path,
@@ -21,13 +27,16 @@ from querygate.catalog_cli import (
     export_connection,
     generate_manual_drafts_file,
     import_connection,
+    learn,
     list_proposals,
+    list_usage_signals,
     list_versions,
     publish_proposal,
     reject_proposal,
     rollback_version,
     show_proposal,
     show_version,
+    submit_usage_signals,
 )
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import CatalogGovernanceError, NotFoundError
@@ -350,8 +359,179 @@ def test_semantic_memory_configuration_is_safe_by_default_and_rejects_live_mode(
     config = AppConfig()
     assert config.semantic_memory_provider == SemanticMemoryProviderMode.DISABLED
     assert config.semantic_memory_refresh_enabled is False
+    assert config.semantic_memory_usage_signals_enabled is False
+    assert config.semantic_memory_learning_enabled is False
 
     with pytest.raises(Exception):
         AppConfig(semantic_memory_provider="hosted")
     with pytest.raises(Exception, match="CATALOG_FILE"):
         AppConfig(semantic_memory_refresh_enabled=True, catalog_file=None)
+    with pytest.raises(Exception, match="CATALOG_FILE"):
+        AppConfig(semantic_memory_usage_signals_enabled=True, catalog_file=None)
+    with pytest.raises(Exception, match="CATALOG_FILE"):
+        AppConfig(semantic_memory_learning_enabled=True, catalog_file=None)
+
+
+# --- TODO item 32C: usage-signal / usage-learning CLI subcommands -----------
+
+
+def _catalog_with_orders(tmp_path: Path) -> tuple[Path, ObservedSchemaSnapshot]:
+    metadata = sa.MetaData()
+    customers = sa.Table("customers", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    orders = sa.Table(
+        "orders",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("customer_id", sa.Integer, sa.ForeignKey("customers.id")),
+    )
+    snapshot = ObservedSchemaSnapshot.from_tables("demo", [customers, orders])
+    path = tmp_path / "catalog.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 2,
+                "connections": {"demo": {"tables": {}}},
+                "schema_snapshots": {"demo": snapshot.model_dump(mode="json")},
+            },
+            sort_keys=False,
+        )
+    )
+    return path, snapshot
+
+
+def _relationship_target() -> CatalogDraftTarget:
+    return CatalogDraftTarget(
+        connection_id="demo",
+        object_type=CatalogDraftObjectType.RELATIONSHIP,
+        table="orders",
+        column="customer_id",
+        to_table="customers",
+        to_column="id",
+    )
+
+
+def test_submit_usage_signals_is_idempotent_and_records_via_the_file_lock(tmp_path):
+    catalog_path, snapshot = _catalog_with_orders(tmp_path)
+    target = _relationship_target()
+    signals = [
+        build_usage_signal(
+            connection_id="demo",
+            principal_subject=f"user-{i}",
+            target=target,
+            kind=CatalogUsageSignalKind.RELATIONSHIP_USED,
+            schema_fingerprint=snapshot.fingerprint,
+            evidence_reference=f"admission:{i}",
+        )
+        for i in range(5)
+    ]
+    input_path = tmp_path / "signals.yaml"
+    input_path.write_text(
+        yaml.safe_dump(
+            [signal.model_dump(mode="json", exclude_none=True) for signal in signals],
+            sort_keys=False,
+        )
+    )
+
+    first = submit_usage_signals(catalog_file=str(catalog_path), input_file=str(input_path))
+    assert first["outcome"] == "recorded"
+    assert first["recorded_count"] == 5
+    assert first["duplicate_count"] == 0
+
+    second = submit_usage_signals(catalog_file=str(catalog_path), input_file=str(input_path))
+    assert second["outcome"] == "no_op"
+    assert second["duplicate_count"] == 5
+
+    assert len(list(CatalogStore.from_file(str(catalog_path)).iter_usage_signals("demo"))) == 5
+
+
+def test_list_usage_signals_reports_aggregated_support(tmp_path):
+    catalog_path, snapshot = _catalog_with_orders(tmp_path)
+    target = _relationship_target()
+    signals = [
+        build_usage_signal(
+            connection_id="demo",
+            principal_subject=f"user-{i}",
+            target=target,
+            kind=CatalogUsageSignalKind.RELATIONSHIP_USED,
+            schema_fingerprint=snapshot.fingerprint,
+            evidence_reference=f"admission:{i}",
+        )
+        for i in range(5)
+    ]
+    input_path = tmp_path / "signals.yaml"
+    input_path.write_text(
+        yaml.safe_dump(
+            [signal.model_dump(mode="json", exclude_none=True) for signal in signals],
+            sort_keys=False,
+        )
+    )
+    submit_usage_signals(catalog_file=str(catalog_path), input_file=str(input_path))
+
+    summaries = list_usage_signals(catalog_file=str(catalog_path), connection_id="demo")
+    assert len(summaries) == 1
+    assert summaries[0]["kind"] == "relationship_used"
+    assert summaries[0]["support"] == 5
+    assert summaries[0]["table"] == "orders"
+    assert summaries[0]["to_table"] == "customers"
+
+
+def test_learn_generates_a_proposal_that_flows_through_the_normal_review_lifecycle(tmp_path):
+    catalog_path, snapshot = _catalog_with_orders(tmp_path)
+    target = _relationship_target()
+    signals = [
+        build_usage_signal(
+            connection_id="demo",
+            principal_subject=f"user-{i}",
+            target=target,
+            kind=CatalogUsageSignalKind.RELATIONSHIP_USED,
+            schema_fingerprint=snapshot.fingerprint,
+            evidence_reference=f"admission:{i}",
+        )
+        for i in range(5)
+    ]
+    input_path = tmp_path / "signals.yaml"
+    input_path.write_text(
+        yaml.safe_dump(
+            [signal.model_dump(mode="json", exclude_none=True) for signal in signals],
+            sort_keys=False,
+        )
+    )
+    submit_usage_signals(catalog_file=str(catalog_path), input_file=str(input_path))
+
+    result = learn(catalog_file=str(catalog_path), connection_id="demo")
+    assert result["outcome"] == "generated"
+    assert result["added_proposal_count"] == 1
+
+    proposal_id = list(CatalogStore.from_file(str(catalog_path)).iter_draft_proposals("demo"))[
+        0
+    ].proposal_id
+    proposal = show_proposal(
+        catalog_file=str(catalog_path), connection_id="demo", proposal_id=proposal_id
+    )
+    assert proposal["review_status"] == "pending"
+
+    approve_proposal(
+        catalog_file=str(catalog_path),
+        connection_id="demo",
+        proposal_id=proposal_id,
+        actor="reviewer",
+    )
+    publish_result = publish_proposal(
+        catalog_file=str(catalog_path),
+        connection_id="demo",
+        proposal_id=proposal_id,
+        actor="publisher",
+    )
+    assert publish_result["outcome"] == "published"
+
+    reloaded = CatalogStore.from_file(str(catalog_path))
+    published_table = reloaded.get_table("demo", "orders")
+    relationship = next(r for r in published_table.relationships if r.column == "customer_id")
+    assert relationship.provenance.source_class.value == "verified"
+
+
+def test_learn_without_a_schema_snapshot_raises_value_error(tmp_path):
+    catalog_path = tmp_path / "catalog.yaml"
+    catalog_path.write_text(yaml.safe_dump({"version": 2, "connections": {}}))
+    with pytest.raises(ValueError, match="schema snapshot"):
+        learn(catalog_file=str(catalog_path), connection_id="demo")

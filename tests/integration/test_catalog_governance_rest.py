@@ -11,7 +11,14 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from querygate.api.app import create_app
+from querygate.catalog.loader import CatalogStore, set_catalog_store
+from querygate.catalog.models import (
+    CatalogDraftObjectType,
+    CatalogDraftTarget,
+    CatalogUsageSignalKind,
+)
 from querygate.catalog.schema_memory import ObservedSchemaSnapshot
+from querygate.catalog.usage import build_usage_signal
 from querygate.core.config import AppConfig
 
 pytestmark = pytest.mark.integration
@@ -341,3 +348,173 @@ async def test_delete_and_bulk_delete_via_rest(sources):
 
         list_resp = await client.get("/api/v1/admin/catalog/demo/proposals", headers=_auth())
         assert list_resp.json() == []
+
+
+# --- TODO item 32C: usage-based learning REST surface -----------------------
+
+
+def _snapshot_with_orders() -> ObservedSchemaSnapshot:
+    metadata = sa.MetaData()
+    customers = sa.Table("customers", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    orders = sa.Table(
+        "orders",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("customer_id", sa.Integer, sa.ForeignKey("customers.id")),
+    )
+    return ObservedSchemaSnapshot.from_tables("demo", [customers, orders])
+
+
+def _relationship_target() -> CatalogDraftTarget:
+    return CatalogDraftTarget(
+        connection_id="demo",
+        object_type=CatalogDraftObjectType.RELATIONSHIP,
+        table="orders",
+        column="customer_id",
+        to_table="customers",
+        to_column="id",
+    )
+
+
+def _write_source_files_with_usage_signals(tmp_path, *, support: int = 5):
+    connections_file = tmp_path / "connections.yaml"
+    connections_file.write_text(
+        """
+connections:
+  - id: demo
+    dialect: postgresql
+    connection_string: ${CATALOG_GOV_TEST_DB_URL}
+    known_tables: [customers, orders]
+"""
+    )
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("default:\n  enabled: true\n")
+
+    snapshot = _snapshot_with_orders()
+    target = _relationship_target()
+    signals = [
+        build_usage_signal(
+            connection_id="demo",
+            principal_subject=f"user-{i}",
+            target=target,
+            kind=CatalogUsageSignalKind.RELATIONSHIP_USED,
+            schema_fingerprint=snapshot.fingerprint,
+            evidence_reference=f"admission:{i}",
+        )
+        for i in range(support)
+    ]
+    catalog_file = tmp_path / "catalog.yaml"
+    catalog_file.write_text(
+        yaml.safe_dump(
+            {
+                "version": 2,
+                "connections": {"demo": {"tables": {}}},
+                "schema_snapshots": {"demo": snapshot.model_dump(mode="json")},
+                "usage_signals": [
+                    signal.model_dump(mode="json", exclude_none=True) for signal in signals
+                ],
+            },
+            sort_keys=False,
+        )
+    )
+    return str(connections_file), str(policy_file), str(catalog_file), snapshot
+
+
+@pytest.fixture
+def usage_sources(tmp_path, monkeypatch):
+    monkeypatch.setenv("CATALOG_GOV_TEST_DB_URL", "postgresql+asyncpg://user:pass@localhost/x")
+    return _write_source_files_with_usage_signals(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_learn_endpoint_generates_and_can_be_approved_and_published(usage_sources):
+    connections_file, policy_file, catalog_file, _snapshot = usage_sources
+    app = create_app(
+        _settings(connections_file, policy_file, catalog_file, scopes=_ALL_CATALOG_SCOPES)
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        learn_resp = await client.post("/api/v1/admin/catalog/demo/learn", headers=_auth())
+        assert learn_resp.status_code == 201
+        assert learn_resp.json()["outcome"] == "generated"
+        assert learn_resp.json()["added_proposal_count"] == 1
+
+        list_resp = await client.get("/api/v1/admin/catalog/demo/proposals", headers=_auth())
+        proposals = list_resp.json()
+        assert len(proposals) == 1
+        proposal_id = proposals[0]["proposal_id"]
+        assert proposals[0]["review_status"] == "pending"
+
+        # A learned proposal cannot publish itself.
+        early_publish = await client.post(
+            f"/api/v1/admin/catalog/demo/proposals/{proposal_id}/publish", headers=_auth()
+        )
+        assert early_publish.status_code == 409
+
+        approve_resp = await client.post(
+            f"/api/v1/admin/catalog/demo/proposals/{proposal_id}/approve", headers=_auth()
+        )
+        assert approve_resp.status_code == 200
+        publish_resp = await client.post(
+            f"/api/v1/admin/catalog/demo/proposals/{proposal_id}/publish", headers=_auth()
+        )
+        assert publish_resp.status_code == 200
+
+        # A second /learn call against the same evidence must not resurrect
+        # a duplicate proposal for the now-published relationship.
+        second_learn = await client.post("/api/v1/admin/catalog/demo/learn", headers=_auth())
+        assert second_learn.status_code == 201
+        assert second_learn.json()["added_proposal_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_learn_requires_generate_scope(usage_sources):
+    connections_file, policy_file, catalog_file, _snapshot = usage_sources
+    app = create_app(
+        _settings(connections_file, policy_file, catalog_file, scopes=["catalog:review"])
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post("/api/v1/admin/catalog/demo/learn", headers=_auth())
+        assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_learn_unknown_connection_returns_404(usage_sources):
+    connections_file, policy_file, catalog_file, _snapshot = usage_sources
+    app = create_app(
+        _settings(connections_file, policy_file, catalog_file, scopes=_ALL_CATALOG_SCOPES)
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post("/api/v1/admin/catalog/does-not-exist/learn", headers=_auth())
+        assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_usage_signals_endpoint_reports_aggregated_support(usage_sources):
+    connections_file, policy_file, catalog_file, _snapshot = usage_sources
+    app = create_app(
+        _settings(connections_file, policy_file, catalog_file, scopes=_ALL_CATALOG_SCOPES)
+    )
+    # get_catalog_store() only lazy-loads once per process; the autouse
+    # conftest fixture already reset it to an empty store this test, so a
+    # fresh app must be told to read this test's own catalog file, exactly
+    # like conftest's own use of set_catalog_store (a "tests and
+    # programmatic setup" API per catalog/loader.py's docstring).
+    set_catalog_store(CatalogStore.from_file(catalog_file))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.get("/api/v1/admin/catalog/demo/usage-signals", headers=_auth())
+        assert resp.status_code == 200
+        summaries = resp.json()
+        assert len(summaries) == 1
+        assert summaries[0]["kind"] == "relationship_used"
+        assert summaries[0]["support"] == 5
+        assert summaries[0]["table"] == "orders"
+        assert summaries[0]["to_table"] == "customers"
+
+
+@pytest.mark.asyncio
+async def test_usage_signals_endpoint_requires_review_scope(usage_sources):
+    connections_file, policy_file, catalog_file, _snapshot = usage_sources
+    app = create_app(_settings(connections_file, policy_file, catalog_file, scopes=[]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.get("/api/v1/admin/catalog/demo/usage-signals", headers=_auth())
+        assert resp.status_code == 403

@@ -139,6 +139,44 @@ COST_ESTIMATION_WOULD_REJECT_TOTAL = Counter(
 )
 
 
+USAGE_SIGNALS_BUFFERED_TOTAL = Counter(
+    "querygate_usage_signals_buffered_total",
+    "Redaction-safe usage signals (TODO.md item 32C) enqueued into the "
+    "in-process buffer by successful query execution, by connection and "
+    "kind. Buffering never touches the catalog file lock — see "
+    "querygate_usage_signals_recorded_total for the batched flush outcome.",
+    ["connection", "kind"],
+    registry=REGISTRY,
+)
+
+USAGE_SIGNAL_BUFFER_DROPPED_TOTAL = Counter(
+    "querygate_usage_signal_buffer_dropped_total",
+    "Usage signals dropped because a connection's in-process buffer was at "
+    "capacity (SEMANTIC_MEMORY_USAGE_SIGNAL_BUFFER_SIZE) before the next "
+    "background flush — a sustained non-zero rate means the flush interval "
+    "is too long for this connection's query volume.",
+    ["connection"],
+    registry=REGISTRY,
+)
+
+USAGE_SIGNALS_RECORDED_TOTAL = Counter(
+    "querygate_usage_signals_recorded_total",
+    "Usage signals persisted into the catalog file by the batched "
+    "background flush, by connection and outcome (recorded vs. a replayed "
+    "duplicate signal_id that was a no-op).",
+    ["connection", "outcome"],  # outcome: recorded | duplicate
+    registry=REGISTRY,
+)
+
+LEARNED_PROPOSALS_GENERATED_TOTAL = Counter(
+    "querygate_learned_proposals_generated_total",
+    "Background usage-learner runs, by connection and outcome (generated | "
+    "idempotent | no evidence crossed the support/confidence threshold).",
+    ["connection", "outcome"],
+    registry=REGISTRY,
+)
+
+
 def classify_rejection(exc: BaseException) -> str:
     if isinstance(exc, QueueFullError):
         return "queue_full"
@@ -170,6 +208,10 @@ __all__ = [
     "COST_ESTIMATION_ATTEMPTS_TOTAL",
     "COST_ESTIMATION_UNAVAILABLE_TOTAL",
     "COST_ESTIMATION_WOULD_REJECT_TOTAL",
+    "USAGE_SIGNALS_BUFFERED_TOTAL",
+    "USAGE_SIGNAL_BUFFER_DROPPED_TOTAL",
+    "USAGE_SIGNALS_RECORDED_TOTAL",
+    "LEARNED_PROPOSALS_GENERATED_TOTAL",
     "classify_rejection",
     "render_latest",
 ]
