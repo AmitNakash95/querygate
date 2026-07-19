@@ -17,6 +17,7 @@ import yaml
 from querygate.catalog.models import (
     CatalogDraftProposal,
     CatalogGenerationRecord,
+    CatalogUsageSignal,
     CatalogVersionRecord,
     SchemaCatalog,
     TableCatalogEntry,
@@ -170,6 +171,11 @@ class CatalogStore:
                 return record
         return None
 
+    def iter_usage_signals(self, connection_id: str) -> Iterator[CatalogUsageSignal]:
+        for signal in self._catalog.usage_signals:
+            if signal.connection_id == connection_id:
+                yield signal
+
     def to_dict(self) -> dict[str, Any]:
         """Return the complete privileged durable record, never an API projection."""
 
@@ -199,6 +205,7 @@ class CatalogStore:
             | set(self._catalog.schema_snapshots.keys())
             | {proposal.target.connection_id for proposal in self._catalog.draft_proposals}
             | {record.connection_id for record in self._catalog.generation_records}
+            | {signal.connection_id for signal in self._catalog.usage_signals}
         )
 
 

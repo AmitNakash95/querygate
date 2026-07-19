@@ -1129,3 +1129,173 @@ async def test_execute_max_queue_depth_per_principal_does_not_affect_other_princ
         cc.SEMAPHORES["demo"].release()
         await noisy_task
         await other_task
+
+
+# --- TODO item 32C: best-effort usage-signal emission on the execute() path -
+
+
+def _orders_and_customers() -> tuple[sa.Table, sa.Table]:
+    metadata = sa.MetaData()
+    customers = sa.Table("customers", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    orders = sa.Table(
+        "orders",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("customer_id", sa.Integer),
+    )
+    return orders, customers
+
+
+async def _execute_join_query(*, principal=None):
+    from querygate.catalog.schema_memory import ObservedSchemaSnapshot
+
+    orders, customers = _orders_and_customers()
+    snapshot = ObservedSchemaSnapshot.from_tables("demo", [orders, customers])
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {"version": 2, "schema_snapshots": {"demo": snapshot.model_dump(mode="json")}}
+        )
+    )
+
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        joins=[{"table": "customers", "on": ["orders.customer_id", "customers.id"]}],
+        limit=10,
+    )
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    with (
+        patch.object(
+            svc,
+            "validate_schema",
+            AsyncMock(return_value={"orders": orders, "customers": customers}),
+        ),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo", principal=principal)
+        await service.execute(query)
+
+
+@pytest.mark.asyncio
+async def test_execute_emits_table_and_relationship_usage_signals_when_enabled(monkeypatch):
+    from querygate.catalog.usage import get_usage_signal_buffer
+
+    monkeypatch.setattr(svc.app_config, "semantic_memory_usage_signals_enabled", True)
+    monkeypatch.setattr(svc.app_config, "catalog_file", "catalog.yaml")
+
+    await _execute_join_query(principal=Principal(subject="alice"))
+
+    signals = get_usage_signal_buffer().drain("demo")
+    kinds = {signal.kind.value for signal in signals}
+    assert kinds == {"table_used", "relationship_used"}
+    relationship_signal = next(s for s in signals if s.kind.value == "relationship_used")
+    assert relationship_signal.target.table == "orders"
+    assert relationship_signal.target.column == "customer_id"
+    assert relationship_signal.target.to_table == "customers"
+    assert relationship_signal.target.to_column == "id"
+    # Never the raw principal subject.
+    assert "alice" not in relationship_signal.principal_partition
+
+
+@pytest.mark.asyncio
+async def test_execute_emits_no_usage_signals_when_disabled_by_default(monkeypatch):
+    from querygate.catalog.usage import get_usage_signal_buffer
+
+    assert svc.app_config.semantic_memory_usage_signals_enabled is False
+    await _execute_join_query()
+    assert get_usage_signal_buffer().drain("demo") == []
+
+
+@pytest.mark.asyncio
+async def test_execute_suppresses_usage_signal_for_an_unverified_catalog_guess(monkeypatch):
+    """Anti-feedback-loop rule: if the only catalog knowledge behind a table
+    is our own unreviewed draft/stale guess, using it must not be recorded
+    as validating evidence for that guess.
+    """
+    from querygate.catalog.usage import get_usage_signal_buffer
+
+    monkeypatch.setattr(svc.app_config, "semantic_memory_usage_signals_enabled", True)
+    monkeypatch.setattr(svc.app_config, "catalog_file", "catalog.yaml")
+
+    from querygate.catalog.schema_memory import ObservedSchemaSnapshot
+
+    orders, customers = _orders_and_customers()
+    snapshot = ObservedSchemaSnapshot.from_tables("demo", [orders, customers])
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "version": 2,
+                "schema_snapshots": {"demo": snapshot.model_dump(mode="json")},
+                "connections": {
+                    "demo": {
+                        "tables": {
+                            "orders": {
+                                "description": "unreviewed guess",
+                                "provenance": {
+                                    "status": "draft",
+                                    "source_class": "inferred",
+                                    "confidence": 0.4,
+                                },
+                            }
+                        }
+                    }
+                },
+            }
+        )
+    )
+
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        joins=[{"table": "customers", "on": ["orders.customer_id", "customers.id"]}],
+        limit=10,
+    )
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    with (
+        patch.object(
+            svc,
+            "validate_schema",
+            AsyncMock(return_value={"orders": orders, "customers": customers}),
+        ),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query)
+
+    signals = get_usage_signal_buffer().drain("demo")
+    # "orders" (table_used) is suppressed (unverified guess); "customers"
+    # (table_used, no catalog entry at all) and the relationship (no
+    # relationship entry exists) are still organic, legitimate evidence.
+    orders_table_signals = [
+        s for s in signals if s.kind.value == "table_used" and s.target.table == "orders"
+    ]
+    assert orders_table_signals == []
+    assert any(s.kind.value == "table_used" and s.target.table == "customers" for s in signals)
+    assert any(s.kind.value == "relationship_used" for s in signals)
+
+
+@pytest.mark.asyncio
+async def test_execute_usage_signal_emission_never_raises_on_failure(monkeypatch):
+    """Best-effort by construction: an internal failure while building/
+    enqueuing usage signals must never surface as a query failure.
+    """
+    monkeypatch.setattr(svc.app_config, "semantic_memory_usage_signals_enabled", True)
+    monkeypatch.setattr(svc.app_config, "catalog_file", "catalog.yaml")
+    with patch.object(svc, "get_catalog_store", side_effect=RuntimeError("boom")):
+        await _execute_join_query()  # must not raise

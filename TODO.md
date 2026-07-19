@@ -61,7 +61,7 @@ order-of-magnitude, not commitments.
 | 29 | ✅ Production deployment reference stack | M | 4, 9, 12, 13, 14 |
 | 30 | ✅ Distribution, SBOM, and signed release artifacts (phase 1: SBOM + audit; phase 2: publishing + signing not started) | M | 4, 14 |
 | 31 | ✅ Admin UI / policy designer | XL | 25 |
-| 32 | Governed adaptive semantic memory for agents (32A ✅; 32B ✅; 32C not started) | XL | 23, 25, 27, 28 |
+| 32 | Governed adaptive semantic memory for agents (32A ✅; 32B ✅; 32C ✅) | XL | 23, 25, 27, 28 |
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
 | 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
@@ -2007,6 +2007,96 @@ atomic persistence, monitor, CLI, packaged-corpus, benchmark-regression, and
 adversarial quarantine/error-redaction tests. 32B review/publication/history/
 rollback and 32C adaptive usage learning/hardening remain explicitly out of
 scope; generated content stays opt-in and unpublished until 32B.
+
+**32C shipped — redaction-safe usage signals, a usage-based learner, and
+background-job resilience.** Completes item 32 on top of 32A's provenance
+model (`KnowledgeSourceClass.LEARNED`, `CatalogPrecedence.LEARNED`, and
+`CatalogEvidenceKind.USAGE` already existed unused in `catalog/models.py`
+from 32A) and 32B's unmodified governance state machine — no second catalog
+file, mutation path, or review workflow was added:
+
+- `catalog/models.py`'s `CatalogUsageSignal` is a typed, frozen, redaction-
+  safe observation (connection id, a hashed `principal_partition` — never
+  the raw principal subject — a `CatalogDraftTarget`, a `table_used`/
+  `column_used`/`relationship_used` kind validated against the target's own
+  object type, a schema fingerprint, and a single bounded `usage` evidence
+  pointer). `SchemaCatalog.usage_signals` is bounded (50k, FIFO-pruned) and
+  excluded from `CatalogExportBundle`/import — it is pre-decision evidence,
+  not governed content.
+- The query execution hot path (`execution/service.py`'s `execute()`) never
+  takes the catalog file's cross-process lock: a successful, already
+  policy-validated query's `from_table`/joins are turned into signals and
+  pushed into a bounded, per-connection-partitioned **in-process** buffer
+  (`catalog/usage.py`'s `InProcessUsageSignalBuffer`), best-effort and
+  exception-swallowed by construction. Emission is gated on a per-object
+  **anti-feedback-loop rule** (`should_emit_signal`): a signal is only
+  recorded when the target's current catalog knowledge is absent (organic
+  discovery) or `verified` (human-confirmed) — never when the only reason
+  an agent chose it was the system's own unreviewed `draft`/`stale` guess,
+  so the learner can never "confirm" its own unpublished suggestions.
+  Recording is opt-in (`SEMANTIC_MEMORY_USAGE_SIGNALS_ENABLED`, off by
+  default) and requires `CATALOG_FILE`.
+- `catalog/learning.py`'s `generate_learned_relationship_proposals` only
+  turns `relationship_used` evidence into proposals — usage alone can
+  honestly support "these tables are frequently joined this way", not a
+  table/column description. Compiled, non-fixture-tunable thresholds gate
+  it: minimum distinct-principal support, a minimum confidence derived from
+  support, a 30-day evidence decay window, and a conflict rule (two
+  competing join targets for the same source column are both skipped
+  unless one leads the other by a required margin). A relationship already
+  `verified`, or already covered by a pending/approved proposal, is never
+  relearned or duplicated. The generation id is itself derived from the
+  qualifying evidence snapshot, so replay against unchanged evidence — or a
+  second concurrent worker — is always idempotent, independent of whatever
+  review-state a prior run's proposal is currently in.
+- Learned proposals are ordinary `CatalogDraftProposal`s
+  (`source_class=learned`, lower precedence than `inferred`) persisted
+  through the same `draft_proposals`/`generation_records` lists 32A-2's
+  manual generation already uses (`provider_mode="usage-learner"`) — every
+  32B review/edit/approve/reject/publish/rollback/export/delete code path
+  applies to a learned proposal completely unchanged, including that it can
+  never publish itself.
+- `CatalogUsageLearningMonitor` (mirrors `CatalogRefreshMonitor`) is an
+  opt-in (`SEMANTIC_MEMORY_LEARNING_ENABLED`, off by default) per-connection
+  background job: each cycle, it drains that connection's buffered signals
+  into one batched, lock-guarded write, then separately runs the learner —
+  two independent writes, so a learner failure can never lose
+  already-drained evidence; fail-open with exception-type-only logging,
+  identical posture to schema refresh.
+- New REST surface reuses existing least-privilege scopes rather than
+  minting new ones: `POST /api/v1/admin/catalog/{connection}/learn`
+  (`catalog:generate` — this is generation, just from a different evidence
+  source) and `GET .../usage-signals` (`catalog:review`, a bounded
+  aggregated-by-target summary, never a raw per-signal dump). New
+  `querygate-semantic-memory` CLI subcommands: `learn`,
+  `list-usage-signals`, and `submit-usage-signals` (the operator/test-
+  harness path for seeding signals without a live server, mirroring manual
+  draft import). New Prometheus counters
+  (`querygate_usage_signals_buffered_total`,
+  `querygate_usage_signal_buffer_dropped_total`,
+  `querygate_usage_signals_recorded_total`,
+  `querygate_learned_proposals_generated_total`) cover observability; a new
+  `catalog.governance` audit action (`learn`) covers the generation step
+  itself, matching `generate-drafts`'s existing audit posture.
+
+Covered by `tests/unit/test_catalog_usage.py` (signal shape/kind-target
+validation, idempotent recording with bounded FIFO eviction, the in-process
+buffer's per-connection partitioning and overflow handling, the
+anti-feedback-loop gate, and the monitor's drain-then-learn sequencing),
+`tests/unit/test_catalog_learning.py` (support/confidence gating, decay,
+schema-drift exclusion, the conflict rule, idempotent replay, dedup against
+verified/open content, cross-connection and repeated-single-principal
+isolation, and a learned proposal flowing through the unmodified
+approve/publish state machine), `tests/unit/test_service.py` (real
+emission on the execute() path, default-disabled, anti-feedback-loop
+suppression, and that a failure while emitting signals never surfaces as a
+query failure), `tests/integration/test_catalog_governance_rest.py` (the
+full learn → approve → publish REST flow and scope/404 checks), new
+`tests/unit/test_catalog_cli.py` cases, and new adversarial tests in
+`tests/security/test_adversarial_security.py` (`catalog:generate`/
+`catalog:review` remain independent for the new endpoints, unauthenticated
+callers are rejected, and one connection's usage evidence and review-state
+transitions never affect another's).
 
 **Effort: XL (4–8+ weeks after item 27).** A useful prototype can be built
 faster, but a production-grade version needs a durable knowledge model,

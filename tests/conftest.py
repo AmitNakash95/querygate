@@ -14,6 +14,7 @@ import pytest
 from querygate.admin.store import ConfigVersionStore, set_config_version_store
 from querygate.audit.sinks import reset_audit_sink
 from querygate.catalog.loader import CatalogStore, set_catalog_store
+from querygate.catalog.usage import reset_usage_signal_buffer
 from querygate.connections.engine import reset_engines
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
@@ -54,9 +55,11 @@ def reset_state(tmp_path):
     SEMAPHORES.clear()
     clear_redis_limiter()
     clear_local_queue_state()
+    reset_usage_signal_buffer()
     yield
     reset_audit_sink()
     reset_engines()
     SEMAPHORES.clear()
     clear_redis_limiter()
     clear_local_queue_state()
+    reset_usage_signal_buffer()
