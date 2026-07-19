@@ -303,21 +303,30 @@ def _diff_mandatory_filters(diff: _Diff, connection: str, before: Policy, after:
                     detail=f"Mandatory row-filter on {a.table}.{a.column} was added.",
                 )
             )
-        elif b is not None and a is not None and _filter_source(b) != _filter_source(a):
-            diff.add(
-                SemanticAccessChange(
-                    category="mandatory_filter",
-                    connection=connection,
-                    object=f"{a.table}.{a.column}",
-                    change_type="modified",
-                    direction="neutral",
-                    before=_filter_source(b),
-                    after=_filter_source(a),
-                    detail=(
-                        f"Mandatory row-filter on {a.table}.{a.column} changed its value " "source."
-                    ),
+        elif b is not None and a is not None:
+            source_changed = _filter_source(b) != _filter_source(a)
+            # A static-value change (e.g. tenant_id 42 -> 99) re-scopes which
+            # rows every caller sees, so it must be reported — but the values
+            # themselves are compared only server-side and never emitted.
+            value_changed = b.from_claim is None and a.from_claim is None and b.value != a.value
+            if source_changed or value_changed:
+                detail = (
+                    f"Mandatory row-filter on {a.table}.{a.column} changed its value source."
+                    if source_changed
+                    else f"Mandatory row-filter on {a.table}.{a.column} changed its scoping value."
                 )
-            )
+                diff.add(
+                    SemanticAccessChange(
+                        category="mandatory_filter",
+                        connection=connection,
+                        object=f"{a.table}.{a.column}",
+                        change_type="modified",
+                        direction="neutral",
+                        before=_filter_source(b),
+                        after=_filter_source(a),
+                        detail=detail,
+                    )
+                )
 
 
 def _diff_join_group(

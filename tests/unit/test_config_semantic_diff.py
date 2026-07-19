@@ -170,6 +170,20 @@ def test_mandatory_filter_source_change_is_neutral_and_shows_claim_name_not_valu
     assert "42" not in diff.model_dump_json()
 
 
+def test_mandatory_filter_static_value_change_is_reported_without_the_value():
+    before = MandatoryRowFilter(table="orders", column="tenant_id", value=42)
+    after = MandatoryRowFilter(table="orders", column="tenant_id", value=99)
+    diff = compute_access_diff(
+        _ctx(Policy(mandatory_row_filters=[before])),
+        _ctx(Policy(mandatory_row_filters=[after])),
+    )
+    (change,) = _changes_by(diff, "mandatory_filter")
+    assert change.change_type == "modified" and change.direction == "neutral"
+    assert "scoping value" in change.detail
+    serialized = diff.model_dump_json()
+    assert "42" not in serialized and "99" not in serialized
+
+
 def test_join_group_change_is_neutral():
     diff = compute_access_diff(
         _ctx(profiles={"demo": _profile(join_group=None)}),
