@@ -576,3 +576,64 @@ async def test_mcp_execute_fail_fast_reports_capacity_timeout_with_admission_fie
     assert result["admission_state"] == "capacity_timeout"
     assert result["admission_id"]
     assert result["queue_wait_ms"] is not None
+
+
+@pytest.mark.asyncio
+async def test_mcp_execute_reports_queue_full_when_max_queue_depth_is_met():
+    """TODO.md item 35 phase 2: Policy.max_queue_depth caps how many callers
+    may be *waiting* for a slot at once, distinct from max_concurrency
+    (which caps how many may *run*). A caller rejected by this cap gets a
+    distinct queue_full admission_state, not a generic VALIDATION error
+    indistinguishable from a genuine wait-timeout.
+    """
+    set_policy_store(
+        PolicyStore(
+            default=Policy(max_concurrency=1, concurrency_wait_seconds=5, max_queue_depth=1),
+            overrides={},
+        )
+    )
+    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
+    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_keys=[], concurrency_backend="in_process")
+    app = create_app(settings)
+
+    def _wait_call(call_id: int) -> dict:
+        return {
+            "jsonrpc": "2.0",
+            "id": call_id,
+            "method": "tools/call",
+            "params": {
+                "name": "execute_structured_query",
+                "arguments": {
+                    "connection": "demo",
+                    "query": {"from": "customers", "select": ["customers.id"], "limit": 5},
+                    "queue_mode": "wait",
+                    "wait_timeout_seconds": 5,
+                },
+            },
+        }
+
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(
+            transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+        ) as client,
+    ):
+        first_task = asyncio.create_task(
+            client.post("/mcp/", json=_wait_call(7), headers=_HEADERS_JSON)
+        )
+        await asyncio.sleep(0.05)  # let it actually start waiting (queue depth == 1)
+
+        resp = await client.post("/mcp/", json=_wait_call(8), headers=_HEADERS_JSON)
+        assert resp.status_code == 200
+        payload = _parse_mcp_response(resp)
+        result = payload["result"]["structuredContent"]["result"]
+        assert result["success"] is False
+        assert result["admission_state"] == "queue_full"
+        assert result["admission_id"]
+        assert result["queue_wait_ms"] == 0
+
+        cc.SEMAPHORES["demo"].release()
+        await first_task

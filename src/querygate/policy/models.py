@@ -114,6 +114,20 @@ class Policy(pyd.BaseModel):
     max_concurrency: int = pyd.Field(default=8)
     concurrency_wait_seconds: float = pyd.Field(default=10)
 
+    # Queue-depth pressure controls (TODO.md item 35 phase 2). Unset/None
+    # (both defaults) means unlimited — identical to pre-phase-2 behavior.
+    # max_concurrency bounds *running* queries; these bound *waiting* ones,
+    # so a `queue_mode=wait` caller pile-up can't itself become a resource-
+    # exhaustion vector. A caller whose admission would exceed either cap is
+    # rejected immediately (before it starts waiting at all), the same way a
+    # `queue_mode=fail_fast` caller is, but with a distinct `queue_full`
+    # admission_state so it can be told apart from a genuine wait-timeout.
+    max_queue_depth: Optional[int] = pyd.Field(default=None, ge=0)
+    # Same idea, scoped to one principal on one connection — stops a single
+    # noisy caller from exhausting the whole connection's queue budget even
+    # when max_queue_depth still has headroom.
+    max_queue_depth_per_principal: Optional[int] = pyd.Field(default=None, ge=0)
+
     # Pre-execution cost estimation (execution/cost_estimation.py, TODO.md
     # item 26 phase 1). Unset (None, the default for both) means disabled —
     # existing deployments behave identically. When set, `execute()` asks

@@ -125,7 +125,7 @@ CI/CD, and secrets-management controls.
 | QG-05 | Cross-principal or cross-tenant confusion | Immutable request-local `Principal`; per-principal policy resolution; claim-derived mandatory row filters; MCP caller stored in a reset `ContextVar` | Security principal-isolation and aggregate row-filter tests; policy-loader and MCP tests |
 | QG-06 | Authentication spoofing or token confusion | Constant-time API-key comparison; JWT signature, algorithm, issuer, audience, expiry, required subject, and configured JWKS verification; anonymous bypass only in local/development when no real authenticator is configured | `test_auth.py`, `test_jwt_auth.py`, REST/MCP authentication integration tests |
 | QG-07 | Credential, row, predicate, or backend-detail leakage | Public connection DTO has no credential field; unexpected REST/MCP/batch errors are generic; persisted audit schema excludes SQL, params, intent, exception text, and rows; explain/audit SQL is parameterized by default | `test_credential_redaction.py`, `test_audit.py`, security public-error tests |
-| QG-08 | Oversized or abusive requests/results | AST depth/width/join/top-N/batch caps; server-side row limits; hard serialized-row byte ceiling, including a single oversized row; database timeout; per-connection concurrency, including a caller-selected `queue_mode`/`wait_timeout_seconds` that can only shorten the operator's `concurrency_wait_seconds` ceiling, never lengthen it; optional Postgres pre-execution `EXPLAIN`-based row/cost estimate rejection before a likely full scan or join explosion runs | Policy/service tests, real timeout tests, security oversized-row test, `test_postgres_cost_estimation.py`, `test_caller_cannot_extend_the_operators_concurrency_wait_ceiling` |
+| QG-08 | Oversized or abusive requests/results | AST depth/width/join/top-N/batch caps; server-side row limits; hard serialized-row byte ceiling, including a single oversized row; database timeout; per-connection concurrency, including a caller-selected `queue_mode`/`wait_timeout_seconds` that can only shorten the operator's `concurrency_wait_seconds` ceiling, never lengthen it; `max_queue_depth`/`max_queue_depth_per_principal` bounding how many callers may wait at once (cross-replica when `concurrency_backend: redis`), so an unbounded waiting queue can't itself become a resource-exhaustion vector; optional Postgres pre-execution `EXPLAIN`-based row/cost estimate rejection before a likely full scan or join explosion runs | Policy/service tests, real timeout tests, security oversized-row test, `test_postgres_cost_estimation.py`, `test_caller_cannot_extend_the_operators_concurrency_wait_ceiling`, `test_unbounded_waiting_queue_is_capped_not_a_dos_vector`, `test_max_queue_depth_per_principal_prevents_one_caller_starving_another` |
 | QG-09 | Cross-connection access | Both connections must be visible to the principal and share the resolved `join_group`; the join uses the primary engine and declared physical database mapping | Cross-connection schema tests, including hidden-connection denial |
 | QG-10 | Unauthorized configuration changes | `/admin/reload-config` requires `admin:reload-config`; the config-governance API (`/admin/config/*`) separately requires `admin:config:write` for validate/preview/stage/apply/rollback and `admin:config:read` for history/inspection; every path fully validates new content before atomic registry/policy replacement | REST reload scope tests, config-reload tests, `test_config_governance_write_endpoints_require_write_scope`, `test_config_governance_read_endpoints_require_read_scope` |
 | QG-11 | Browser-driven DNS rebinding against local MCP | MCP validates `Host` and, when present, `Origin`; protection is enabled by default with loopback hosts allowlisted | Security test `test_mcp_rejects_unapproved_host_header` |
@@ -239,15 +239,16 @@ defaults.
   subject and scopes. Use JWT for per-human/per-agent identity and expiry.
 - **Concurrency fail-open:** Redis-backed concurrency can intentionally fail
   open. This improves availability but temporarily removes the distributed cap.
-- **Queue-depth is not yet bounded or cross-replica (TODO item 35 phase 2):**
-  a caller may request `queue_mode=wait` up to the operator's own
-  `concurrency_wait_seconds` ceiling (never longer — see QG-08), but there is
-  no separate cap on how many callers may wait simultaneously, and
-  `querygate_queue_depth` is single-process visibility only, like
-  `querygate_concurrency_in_use`. This is the same pre-existing exposure the
-  concurrency wait already had; phase 1 makes the wait caller-tunable, it
-  does not change the operator's effective ceiling or add new unbounded
-  waiting capacity.
+- **Capacity waiting still has no cancellation or async contract (TODO item
+  35 phase 3):** a caller may request `queue_mode=wait` up to the operator's
+  own `concurrency_wait_seconds` ceiling (never longer — see QG-08), and
+  `max_queue_depth`/`max_queue_depth_per_principal` now bound how many
+  callers may wait at once (cross-replica when `concurrency_backend: redis`
+  is selected — see QG-08), but there is still no MCP progress notification,
+  REST `202`-plus-cancel contract, or way for a caller to actually cancel a
+  query it's already waiting on/running. The in-process (non-Redis)
+  `querygate_queue_depth` gauge remains single-process visibility only, like
+  `querygate_concurrency_in_use`.
 - **Audit durability:** JSONL is not WORM storage, has no built-in retention or
   search, and sink failures do not fail an already-executed database query.
 - **Operator compromise:** a host/config administrator can change policy,

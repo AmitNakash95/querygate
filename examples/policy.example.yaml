@@ -32,6 +32,17 @@ default:
   max_concurrency: 8
   concurrency_wait_seconds: 10
 
+  # Queue-depth pressure controls (TODO.md item 35 phase 2). Unset by
+  # default: no limit on how many callers may wait for a slot at once, same
+  # as before this existed. max_concurrency bounds how many queries may
+  # *run*; these bound how many may *wait* — without a cap, a burst of
+  # queue_mode=wait callers against a saturated connection can itself become
+  # a resource-exhaustion vector. Uncomment to bound it: a caller past
+  # either cap is rejected immediately (queue_wait_ms: 0, admission_state
+  # "queue_full"), not queued indefinitely.
+  # max_queue_depth: 50
+  # max_queue_depth_per_principal: 5
+
   # Pre-execution cost estimation (Postgres only — see
   # execution/cost_estimation.py, TODO.md item 26). Unset by default: no
   # extra EXPLAIN round-trip, no behavior change. Uncomment to have

@@ -12,7 +12,7 @@ from querygate.catalog.models import RelationshipHint
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, get_registry, set_registry
 from querygate.core.config import AppConfig
-from querygate.core.exceptions import CapacityTimeoutError, QueryValidationError
+from querygate.core.exceptions import CapacityTimeoutError, QueryValidationError, QueueFullError
 from querygate.execution.service import (
     BatchQueryItemResult,
     ColumnCatalogEntry,
@@ -156,6 +156,26 @@ async def test_query_capacity_timeout_is_422_with_admission_headers(app):
     assert resp.headers["X-QueryGate-Admission-Id"] == "admission-456"
     assert resp.headers["X-QueryGate-Admission-State"] == "capacity_timeout"
     assert resp.headers["X-QueryGate-Queue-Wait-Ms"] == "42"
+
+
+@pytest.mark.asyncio
+async def test_query_queue_full_is_422_with_queue_full_admission_state(app):
+    exc = QueueFullError(
+        "connection 'demo' queue is already at its configured depth, try again shortly",
+        admission_id="admission-789",
+    )
+    with patch(f"{_SERVICE}.execute", new_callable=AsyncMock, side_effect=exc):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                "/api/v1/demo/query",
+                json={"from": "customers", "select": ["customers.id"], "limit": 50},
+            )
+    assert resp.status_code == 422
+    # Existing body contract (docs/LOAD_TESTING.md) must not change.
+    assert "queue" in resp.json()["detail"]
+    assert resp.headers["X-QueryGate-Admission-Id"] == "admission-789"
+    assert resp.headers["X-QueryGate-Admission-State"] == "queue_full"
+    assert resp.headers["X-QueryGate-Queue-Wait-Ms"] == "0"
 
 
 @pytest.mark.asyncio

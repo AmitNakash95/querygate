@@ -17,7 +17,11 @@ from querygate.catalog.loader import CatalogStore, set_catalog_store
 from querygate.connections.engine import reset_engines
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
-from querygate.execution.concurrency import SEMAPHORES, clear_redis_limiter
+from querygate.execution.concurrency import (
+    SEMAPHORES,
+    clear_local_queue_state,
+    clear_redis_limiter,
+)
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
 
@@ -49,8 +53,10 @@ def reset_state(tmp_path):
     # loop" (or, worse, look permanently "locked") if reused here.
     SEMAPHORES.clear()
     clear_redis_limiter()
+    clear_local_queue_state()
     yield
     reset_audit_sink()
     reset_engines()
     SEMAPHORES.clear()
     clear_redis_limiter()
+    clear_local_queue_state()

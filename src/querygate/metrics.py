@@ -26,6 +26,7 @@ from querygate.core.exceptions import (
     ConcurrencyLimitError,
     CostEstimateExceededError,
     PolicyViolationError,
+    QueueFullError,
 )
 
 REGISTRY = CollectorRegistry()
@@ -41,13 +42,18 @@ QUERIES_REJECTED_TOTAL = Counter(
     "querygate_queries_rejected_total",
     "Rejected structured queries, by connection and reason.",
     # policy: denied table/column/cap. schema: unknown table/column/malformed
-    # query. concurrency: too many in-flight queries for this connection.
-    # cost_estimate: rejected by a pre-execution Postgres EXPLAIN cost check
-    # (TODO.md item 26) — broken out from the coarser `policy` bucket so
-    # operators can tell threshold tuning apart from allow/deny rules.
-    # db_error: everything else, including genuine query timeouts — see
-    # TODO.md item 3, which hasn't yet established a reliable, dialect-
-    # verified way to distinguish a timeout from any other DB-layer failure.
+    # query. concurrency: too many in-flight queries for this connection (a
+    # genuine wait-timeout). queue_full: rejected before waiting at all
+    # because Policy.max_queue_depth/max_queue_depth_per_principal was
+    # already met (TODO.md item 35 phase 2) — broken out from `concurrency`
+    # so operators can tell "the queue's own pressure control tripped" apart
+    # from "waited and ran out of time". cost_estimate: rejected by a
+    # pre-execution Postgres EXPLAIN cost check (TODO.md item 26) — broken
+    # out from the coarser `policy` bucket so operators can tell threshold
+    # tuning apart from allow/deny rules. db_error: everything else,
+    # including genuine query timeouts — see TODO.md item 3, which hasn't
+    # yet established a reliable, dialect-verified way to distinguish a
+    # timeout from any other DB-layer failure.
     ["connection", "reason"],
     registry=REGISTRY,
 )
@@ -76,11 +82,13 @@ CONCURRENCY_MAX = Gauge(
 
 QUEUE_DEPTH = Gauge(
     "querygate_queue_depth",
-    "Callers currently waiting for a concurrency slot on this process, by "
-    "connection (TODO.md item 35 phase 1). Single-process visibility only — "
-    "like querygate_concurrency_in_use, it does not aggregate across "
-    "replicas even when the Redis concurrency backend is selected; "
-    "cross-replica admission state is item 35 phase 2.",
+    "Callers currently waiting for a concurrency slot, by connection "
+    "(TODO.md item 35). Single-process visibility only when the default "
+    "in-process concurrency backend is used — like querygate_concurrency_in_use, "
+    "it doesn't aggregate across replicas. When concurrency_backend=redis is "
+    "selected, this gauge instead reports the true cross-replica queue depth "
+    "(item 35 phase 2), computed from the same Redis the concurrency slots "
+    "themselves use, so it reads the same on every replica.",
     ["connection"],
     registry=REGISTRY,
 )
@@ -88,9 +96,9 @@ QUEUE_DEPTH = Gauge(
 QUEUE_WAIT_SECONDS = Histogram(
     "querygate_queue_wait_seconds",
     "Time a structured query spent waiting for a concurrency slot before "
-    "running or hitting a capacity timeout, by connection and outcome "
-    "(TODO.md item 35 phase 1).",
-    ["connection", "outcome"],  # outcome: completed | capacity_timeout
+    "running, hitting a capacity timeout, or being rejected for an "
+    "already-full queue, by connection and outcome (TODO.md item 35).",
+    ["connection", "outcome"],  # outcome: completed | capacity_timeout | queue_full
     registry=REGISTRY,
 )
 
@@ -132,6 +140,8 @@ COST_ESTIMATION_WOULD_REJECT_TOTAL = Counter(
 
 
 def classify_rejection(exc: BaseException) -> str:
+    if isinstance(exc, QueueFullError):
+        return "queue_full"
     if isinstance(exc, ConcurrencyLimitError):
         return "concurrency"
     if isinstance(exc, CostEstimateExceededError):

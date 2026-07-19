@@ -122,3 +122,128 @@ async def test_release_failure_is_swallowed_not_raised(redis_client):
     token = await limiter.acquire("demo", max_concurrency=1, wait_seconds=1)
     with patch.object(redis_client, "zrem", AsyncMock(side_effect=RedisConnectionError("down"))):
         await limiter.release("demo", token)  # must not raise
+
+
+# --- Queue-depth tracking (TODO.md item 35 phase 2) -------------------------
+
+
+@pytest.mark.asyncio
+async def test_enter_queue_and_leave_queue_within_capacity(redis_client):
+    limiter = RedisConcurrencyLimiter(redis_client, lease_seconds=30)
+    entered = await limiter.enter_queue(
+        "demo", principal_subject=None, max_queue_depth=2, max_queue_depth_per_principal=None
+    )
+    assert entered is not None
+    token, depth = entered
+    assert depth == 1
+    depth_after = await limiter.leave_queue("demo", principal_subject=None, token=token)
+    assert depth_after == 0
+
+
+@pytest.mark.asyncio
+async def test_enter_queue_rejects_once_max_queue_depth_is_met(redis_client):
+    limiter = RedisConcurrencyLimiter(redis_client, lease_seconds=30)
+    first = await limiter.enter_queue(
+        "demo", principal_subject=None, max_queue_depth=1, max_queue_depth_per_principal=None
+    )
+    assert first is not None
+
+    second = await limiter.enter_queue(
+        "demo", principal_subject=None, max_queue_depth=1, max_queue_depth_per_principal=None
+    )
+    assert second is None  # queue already at its cap of 1
+
+
+@pytest.mark.asyncio
+async def test_enter_queue_enforces_cap_across_separate_limiter_instances(redis_client):
+    limiter_a = RedisConcurrencyLimiter(redis_client, lease_seconds=30)
+    limiter_b = RedisConcurrencyLimiter(redis_client, lease_seconds=30)
+
+    first = await limiter_a.enter_queue(
+        "demo", principal_subject=None, max_queue_depth=1, max_queue_depth_per_principal=None
+    )
+    assert first is not None
+
+    second = await limiter_b.enter_queue(
+        "demo", principal_subject=None, max_queue_depth=1, max_queue_depth_per_principal=None
+    )
+    assert second is None
+
+
+@pytest.mark.asyncio
+async def test_enter_queue_none_caps_are_unlimited(redis_client):
+    limiter = RedisConcurrencyLimiter(redis_client, lease_seconds=30)
+    for _ in range(5):
+        entered = await limiter.enter_queue(
+            "demo",
+            principal_subject=None,
+            max_queue_depth=None,
+            max_queue_depth_per_principal=None,
+        )
+        assert entered is not None
+
+
+@pytest.mark.asyncio
+async def test_max_queue_depth_per_principal_is_isolated_from_other_principals(redis_client):
+    limiter = RedisConcurrencyLimiter(redis_client, lease_seconds=30)
+    first = await limiter.enter_queue(
+        "demo",
+        principal_subject="noisy-agent",
+        max_queue_depth=None,
+        max_queue_depth_per_principal=1,
+    )
+    assert first is not None
+
+    same_principal_again = await limiter.enter_queue(
+        "demo",
+        principal_subject="noisy-agent",
+        max_queue_depth=None,
+        max_queue_depth_per_principal=1,
+    )
+    assert same_principal_again is None  # noisy-agent already has 1 queued
+
+    other_principal = await limiter.enter_queue(
+        "demo",
+        principal_subject="other-agent",
+        max_queue_depth=None,
+        max_queue_depth_per_principal=1,
+    )
+    assert other_principal is not None  # a different principal is unaffected
+
+
+@pytest.mark.asyncio
+async def test_leave_queue_frees_capacity_for_a_new_waiter(redis_client):
+    limiter = RedisConcurrencyLimiter(redis_client, lease_seconds=30)
+    entered = await limiter.enter_queue(
+        "demo", principal_subject=None, max_queue_depth=1, max_queue_depth_per_principal=None
+    )
+    assert entered is not None
+    token, _ = entered
+
+    await limiter.leave_queue("demo", principal_subject=None, token=token)
+
+    reentered = await limiter.enter_queue(
+        "demo", principal_subject=None, max_queue_depth=1, max_queue_depth_per_principal=None
+    )
+    assert reentered is not None
+
+
+@pytest.mark.asyncio
+async def test_enter_queue_fail_open_returns_sentinel_when_redis_unreachable():
+    limiter = RedisConcurrencyLimiter(_BrokenRedisClient(), fail_open=True)
+    entered = await limiter.enter_queue(
+        "demo", principal_subject=None, max_queue_depth=1, max_queue_depth_per_principal=None
+    )
+    assert entered is not None
+    token, depth = entered
+    assert depth == -1  # unknown — Redis was unreachable, don't trust this as a real count
+    await limiter.leave_queue("demo", principal_subject=None, token=token)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_enter_queue_fail_closed_raises_when_redis_unreachable():
+    limiter = RedisConcurrencyLimiter(_BrokenRedisClient(), fail_open=False)
+    with pytest.raises(RedisConnectionError):
+        await limiter.enter_queue(
+            "demo", principal_subject=None, max_queue_depth=1, max_queue_depth_per_principal=None
+        )
