@@ -407,9 +407,50 @@ Version 2 can also persist row-free observed-schema snapshots. The
 deterministic fingerprint/diff engine covers tables, columns/types/
 nullability, primary keys, foreign keys, indexes, and hashed (never raw)
 database comments; possible renames are reported as candidates rather than
-silently asserted. Automatic refresh/invalidation, manual-only generated
-drafts, and the deterministic evaluation benchmark are the explicit 32A-2
-follow-up.
+silently asserted. Phase 32A-2 adds an opt-in background scanner that updates
+those snapshots and marks only affected catalog entries and draft proposals
+stale. Unaffected active entries are rebound to the new fingerprint, and a
+same-schema retry is a no-op. Persistence uses an adjacent cross-process lock
+and atomic replacement; refresh failure does not block schema discovery or
+query execution.
+
+Semantic-memory enrichment is disabled by default. The only provider modes
+shipped in 32A are `disabled` and `manual`; neither has a network adapter or
+model call. Manual structured input produces separate inferred draft
+proposals, never edits/publishes the verified table/column/relationship entry,
+and is not indexed or returned to agents. Proposal content structurally cannot
+contain policy, mandatory-filter, sensitivity, or sampling fields. Enable the
+operator workflow explicitly:
+
+```bash
+export CATALOG_FILE=/config/catalog.yaml
+export SEMANTIC_MEMORY_PROVIDER=manual              # required for generate-drafts
+export SEMANTIC_MEMORY_REFRESH_ENABLED=true         # optional background scanning
+export SEMANTIC_MEMORY_REFRESH_INTERVAL_SECONDS=300
+export SEMANTIC_MEMORY_REFRESH_MAX_TABLES=500
+
+querygate-semantic-memory refresh --connection demo
+querygate-semantic-memory generate-drafts \
+  --input-file examples/catalog_drafts.example.yaml
+querygate-semantic-memory evaluate
+```
+
+The manual batch must cite the exact current schema fingerprint. Generation
+IDs are durable idempotency keys: an identical retry adds nothing; reuse with
+different content is rejected. See `examples/catalog_drafts.example.yaml`.
+The packaged version-1 benchmark fixes thresholds in code before evaluation
+(>=0.85 expected-hit recall, >=0.80 relationship recall, 1.0 stale detection,
+>=0.50 discovery-call reduction, zero policy violations). Its deterministic
+current result is 1.0/1.0/1.0/0.75/0 and the command exits non-zero on a
+regression.
+
+Automatic refresh requires `CATALOG_FILE` to be writable and persistent. If
+several QueryGate replicas refresh the same catalog they must share that file
+and its adjacent `.lock`; read-only ConfigMap mounts should keep refresh
+disabled and run the explicit refresh CLI against a governed writable copy.
+The atomic writer emits canonical YAML and does not preserve YAML comments;
+keep operational guidance in catalog fields and retain the file in normal
+versioned backup/config-governance workflows.
 
 The catalog remains reloadable without a restart through the same
 `POST /api/v1/admin/reload-config` endpoint used for connections/policy and is
@@ -764,11 +805,13 @@ Being upfront about what's not done yet:
   `429`+`Retry-After` evaluation (TODO item 35 phase 3). The in-process
   (non-Redis) `querygate_queue_depth` gauge remains single-process
   visibility only, like `querygate_concurrency_in_use`.
-- **Semantic memory is at 32A-1** — durable catalog provenance, deterministic
-  schema fingerprints/diffs, and policy-first compact retrieval are shipped.
-  Manual-only generated drafts, automatic schema refresh/invalidation, and
-  the deterministic evaluation baseline remain 32A-2; there is no model call
-  or autonomous learning/publishing path yet.
+- **Semantic memory phase 32A is complete, not item 32 overall** — durable
+  provenance, deterministic schema refresh/diffs, selective staleness,
+  policy-first retrieval, disabled/manual-only quarantined drafts, and a fixed
+  benchmark are shipped. There is still no hosted/local model adapter,
+  approval/publication/history/rollback workflow (32B), embedding index, or
+  adaptive usage-learning loop (32C). Drafts never reach agents until a future
+  authorized review/publish path exists.
 - **Security review is first-party** — the repository includes a maintained
   threat model and adversarial regression suite, but has not yet undergone an
   independent penetration test or formal compliance certification.

@@ -25,6 +25,16 @@ needs `helm upgrade` (which recreates pods with the new ConfigMap mounted)
 before this reload has anything new to pick up; a Compose `config/` file
 edit takes effect on the next reload immediately, no restart needed.
 
+The reference Compose/Helm config mounts are read-only, so semantic-memory
+automatic refresh remains disabled there by default. To enable it, place
+`CATALOG_FILE` on a writable persistent mount (one shared file plus its
+adjacent `.lock` for every replica), then set
+`SEMANTIC_MEMORY_REFRESH_ENABLED=true`. The refresh transaction serializes
+live scan/diff/write work and rewrites canonical YAML, so YAML comments are
+not preserved. Alternatively, keep Git/ConfigMap as the source of truth and
+run `querygate-semantic-memory refresh` against a governed writable copy
+before applying it through Path A or B.
+
 **Path B — submit through the governance API.** For validated, versioned,
 audited, and roll-back-able changes without touching files on disk or
 redeploying:

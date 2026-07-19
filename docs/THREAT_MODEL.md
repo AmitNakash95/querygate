@@ -6,7 +6,8 @@
 validation, query compilation and execution, Redis concurrency coordination,
 configuration reload, the config-governance version store, secret
 resolution, versioned semantic-catalog provenance/schema fingerprints,
-policy-first catalog retrieval, and audit/log outputs in this repository.
+manual-only draft quarantine, automatic schema refresh, policy-first catalog
+retrieval, and audit/log outputs in this repository.
 
 This document explains what QueryGate is designed to defend, which controls
 exist in code, and which risks remain with the operator. It is not an external
@@ -76,6 +77,13 @@ Authenticated agent catalog search
         +-----> resolve principal policy (connection/table/column)
         +-----> filter catalog entries + relationship endpoints
         +-----> tokenize/rank/count/budget the already-authorized view only
+
+Operator semantic-memory pipeline (disabled by default)
+        |
+        +-----> bounded row-free schema reflection -> hashed snapshot/diff
+        +-----> atomic catalog refresh -> selective stale marking
+        +-----> strict offline manual batch -> quarantined inferred drafts
+        +-----> no model network adapter and no automatic publication
 ```
 
 The agent/client, all request fields, natural-language intent, JWTs, API keys
@@ -94,7 +102,8 @@ trusted to return client-safe error messages.
 - Curated schema-catalog metadata (descriptions, relationship hints,
   sensitivity labels) layered on top of reflected schema.
 - Semantic-catalog provenance, verification state, schema fingerprints/diffs,
-  and the confidentiality of policy-hidden entries during retrieval.
+  quarantined draft proposals/generation records, and the confidentiality of
+  policy-hidden entries during retrieval.
 - Principal identity, claims, scopes, and per-principal policy decisions.
 - Availability of QueryGate and the databases behind it.
 - Configuration integrity, particularly connection and policy changes.
@@ -142,7 +151,7 @@ CI/CD, and secrets-management controls.
 | QG-14 | Secret-backend failure or misconfiguration discloses a Vault token or backend response text | `SecretResolver.resolve` errors carry only the reference being looked up and the exception type, never the configured token or the backend's own error/response text; a resolved secret value is never returned by any REST/MCP response, matching the existing credential-redaction guarantee | `test_vault_resolver_error_never_leaks_token_or_backend_response_text`, `test_vault_resolved_secret_never_appears_in_connection_listing_or_errors` |
 | QG-15 | A config-governance version that stops validating (e.g. an env var/Vault path it depends on disappears between staging and applying) gets silently activated anyway | `apply` re-validates a version's content immediately before activating it, regardless of whether it validated when staged; a failed re-validation leaves the active version and pointer untouched and is recorded as a rejected audit event | `test_apply_rejects_a_version_that_no_longer_validates`, `test_invalid_staged_version_is_rejected_not_silently_applied` |
 | QG-16 | Product-guide search, diagnostics, or caching disclose another principal's connections, policies, secret references, or hidden schema identifiers | Static search indexes only packaged public topics; live access context is authorized and assembled separately for each request; no live context cache exists; admin inspection requires `admin:config:read` and reconstructs an allowlisted redacted projection rather than filtering raw YAML afterward | `test_product_guide_security.py`, `test_redacted_configuration_excludes_secrets_policy_names_and_other_principals`, REST/MCP guide integration tests |
-| QG-17 | Semantic catalog poisoning, stale guidance, or search/ranking/count/relationship traversal discloses a policy-hidden table or column | Every table/column/relationship entry has stable provenance, explicit status/confidence/schema freshness, and server-derived precedence; rejected/archived content is excluded and stale/draft content is labeled; verified entries cannot be overwritten by lower-precedence proposals and semantic merging cannot change sensitivity; principal policy filters candidates and both relationship columns before tokenization, ranking, counting, or byte budgeting, and removes free-form fields that echo an exact hidden identifier; public citations hash evidence references and omit actor/model identities; schema snapshots contain structure and comment hashes, never row values or raw comments | `test_catalog_retrieval.py`, `test_schema_memory.py`, `test_precedence_never_allows_inferred_overwrite_of_verified_or_sensitivity`, `test_catalog_search_filters_before_ranking_counts_and_relationship_traversal`, REST/MCP catalog-search integration tests |
+| QG-17 | Semantic catalog poisoning, provider output, stale guidance, or search/ranking/count/relationship traversal discloses a policy-hidden table/column or changes enforcement | Every published entry has stable provenance, explicit status/confidence/schema freshness, and server-derived precedence; rejected/archived content is excluded and stale content is labeled; verified entries cannot be overwritten by lower-precedence proposals and merging cannot change sensitivity. Provider mode defaults to disabled and only strict offline manual imports exist: their schema-bound output is stored in a separate inferred-draft queue whose model has no policy/sensitivity/sampling fields and which retrieval never indexes. Row-free refresh atomically stales only affected entries/proposals, rebinds unaffected entries, and logs only failure types. Principal policy filters published candidates and both relationship columns before tokenization, ranking, counting, or byte budgeting, removing free-form fields that echo exact hidden identifiers; public citations hash evidence references and omit actor/model identities; schema snapshots contain structure and comment hashes, never rows or raw comments | `test_catalog_retrieval.py`, `test_schema_memory.py`, `test_catalog_generation.py`, `test_catalog_refresh.py`, `test_semantic_memory_benchmark.py`, `test_manual_provider_output_cannot_publish_itself_or_change_verified_content`, `test_schema_refresh_failure_log_never_copies_raw_driver_error`, REST/MCP catalog-search integration tests |
 
 ## 6. Error and data-disclosure policy
 
@@ -261,15 +270,15 @@ defaults.
   `querygate_concurrency_in_use`.
 - **Audit durability:** JSONL is not WORM storage, has no built-in retention or
   search, and sink failures do not fail an already-executed database query.
-- **Semantic memory is only phase 32A-1:** catalog provenance, row-free schema
-  fingerprints/diffs, and deterministic policy-first retrieval are present,
-  but there is no automatic refresh/invalidation job, provider execution,
-  generated-draft flow, benchmark report, approval workflow, embedding index,
-  or usage-learning loop yet. Schema freshness is explicitly `untracked`
-  unless a version-2 snapshot is persisted, and a fingerprint mismatch is
-  returned as `stale`; neither state changes access or blocks ordinary schema/
-  query operations. Database comments are represented only by SHA-256 hashes
-  in snapshots, limiting prompt-injection persistence in this phase.
+- **Semantic memory phase 32A is complete, but 32B/32C are not:** provenance,
+  row-free automatic refresh/diffs, selective staleness, deterministic policy-
+  first retrieval, disabled/manual-only quarantined drafts, and the fixed
+  benchmark are present. There is no hosted/local model adapter, approval/
+  publication/history/rollback workflow, embedding index, or usage-learning
+  loop. Drafts therefore remain privileged unpublished records and cannot
+  reach agents. Schema freshness is `untracked` until a version-2 snapshot is
+  persisted; stale state never changes access or blocks ordinary schema/query
+  operations. Database comments remain only SHA-256 hashes in snapshots.
 - **Operator compromise:** a host/config administrator can change policy,
   secrets, logs, or the running process; QueryGate does not defend against a
   fully compromised control plane.

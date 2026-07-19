@@ -13,6 +13,7 @@ dynamic = ["dependencies"]
 [project.scripts]
 querygate = "querygate.run:main"
 querygate-validate-config = "querygate.cli:main"
+querygate-semantic-memory = "querygate.catalog_cli:main"
 
 [project.urls]
 Repository = "https://github.com/AGitmit/QueryGate"

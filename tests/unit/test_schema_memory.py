@@ -84,3 +84,13 @@ def test_schema_diff_rejects_cross_connection_comparison():
 
     with pytest.raises(ValueError, match="same connection"):
         diff_schema_snapshots(before, after)
+
+
+def test_loaded_snapshot_rejects_ambiguous_duplicate_identifiers():
+    snapshot = ObservedSchemaSnapshot.from_tables("demo", _schema())
+    raw = snapshot.model_dump(mode="json")
+    raw["fingerprint"] = ""
+    raw["tables"].append(raw["tables"][0] | {"name": "CUSTOMERS"})
+
+    with pytest.raises(Exception, match="table names must be unique"):
+        ObservedSchemaSnapshot.model_validate(raw)

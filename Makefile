@@ -41,6 +41,10 @@ seed-demo-db: ## Generate an optional SQLite fixture for tests/inspection (not a
 validate-config: ## Validate connections.yaml/policy.yaml (CONNECTIONS_FILE / POLICY_FILE env vars, or pass ARGS="--connections-file ... --policy-file ...")
 	poetry run querygate-validate-config $(ARGS)
 
+.PHONY: semantic-memory-evaluate
+semantic-memory-evaluate: ## Run the fixed offline semantic-memory 32A benchmark
+	poetry run python -m querygate.catalog_cli evaluate
+
 # ─── Tests ────────────────────────────────────────────────────────────────────
 .PHONY: test
 test: ## Run the full test suite
@@ -117,6 +121,7 @@ release-check: ## Run deterministic source/package release gates and build artif
 	$(MAKE) test
 	QUERYGATE_DEMO_DB_URL=postgresql+asyncpg://user:pass@localhost/demo \
 		poetry run querygate-validate-config
+	poetry run python -m querygate.catalog_cli evaluate
 	poetry build
 	poetry run python scripts/check_release_artifacts.py
 	$(MAKE) sbom

@@ -16,6 +16,7 @@ from querygate.api.auth import build_principal_dependency
 from querygate.api.help_routes import build_help_router
 from querygate.api.routes import build_router
 from querygate.audit.sinks import configure_audit_sink, reset_audit_sink
+from querygate.catalog.refresh import CatalogRefreshMonitor
 from querygate.core.config import AppConfig, ConcurrencyBackend
 from querygate.core.config import config as default_config
 from querygate.core.logging import ContextLogger, context_logger, get_logger
@@ -43,6 +44,16 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         health_monitor = HealthMonitor(conf.health_check_interval_seconds)
         await health_monitor.start()
         app.state.health_monitor = health_monitor
+
+        catalog_refresh_monitor: Optional[CatalogRefreshMonitor] = None
+        if conf.semantic_memory_refresh_enabled:
+            catalog_refresh_monitor = CatalogRefreshMonitor(
+                catalog_file=conf.catalog_file or "",
+                interval_seconds=conf.semantic_memory_refresh_interval_seconds,
+                max_tables=conf.semantic_memory_refresh_max_tables,
+            )
+            await catalog_refresh_monitor.start()
+        app.state.catalog_refresh_monitor = catalog_refresh_monitor
 
         redis_client = None
         if conf.concurrency_backend == ConcurrencyBackend.REDIS:
@@ -81,6 +92,8 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             if mcp_task is not None:
                 app.state._mcp_stop.set()
                 await mcp_task
+            if catalog_refresh_monitor is not None:
+                await catalog_refresh_monitor.stop()
             await health_monitor.stop()
             reset_audit_sink()
             if redis_client is not None:

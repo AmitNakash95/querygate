@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -9,6 +10,7 @@ import pytest
 
 from querygate import config_reload as reload_module
 from querygate.catalog.loader import get_catalog_store
+from querygate.catalog.repository import catalog_process_lock
 from querygate.config_reload import reload_config
 from querygate.connections.registry import get_registry
 from querygate.execution.concurrency import SEMAPHORES
@@ -23,6 +25,37 @@ def _write(tmp_path: Path, name: str, content: str) -> str:
 
 
 _POLICY_YAML = "default:\n  enabled: true\n"
+
+
+@pytest.mark.asyncio
+async def test_reload_waits_for_an_in_process_catalog_refresh_transaction(tmp_path):
+    connections_file = _write(
+        tmp_path,
+        "connections.yaml",
+        """
+connections:
+  - id: demo
+    dialect: postgresql
+    connection_string: postgresql+asyncpg://user:pass@localhost/demo
+""",
+    )
+    policy_file = _write(tmp_path, "policy.yaml", _POLICY_YAML)
+    lock = catalog_process_lock()
+    await lock.acquire()
+    try:
+        with patch.object(reload_module, "dispose_engine", new_callable=AsyncMock):
+            task = asyncio.create_task(
+                reload_config(
+                    connections_file=connections_file,
+                    policy_file=policy_file,
+                )
+            )
+            await asyncio.sleep(0.01)
+            assert not task.done()
+    finally:
+        lock.release()
+
+    await task
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,39 @@
+# Offline/manual structured suggestions for:
+#   SEMANTIC_MEMORY_PROVIDER=manual querygate-semantic-memory generate-drafts \
+#     --catalog-file /config/catalog.yaml --input-file this-file.yaml
+#
+# Replace schema_fingerprint with the exact current fingerprint produced by
+# `querygate-semantic-memory refresh --connection demo`. This format has no
+# fields for policy, sensitivity, sampling, credentials, rows, query literals,
+# or raw prompt/provider payloads. Imported suggestions remain quarantined
+# drafts.
+
+format_version: 1
+generation_id: demo-onboarding-2026-01
+connection_id: demo
+schema_fingerprint: sha256:0000000000000000000000000000000000000000000000000000000000000000
+provider_id: manual-only
+prompt_template_version: manual-v1
+created_by: data-governance
+
+suggestions:
+  - target:
+      connection_id: demo
+      object_type: table
+      table: orders
+    content:
+      description: One row per customer order.
+      aliases: [purchases]
+      default_aggregation: sum(orders.total_amount)
+    confidence: 0.85
+
+  - target:
+      connection_id: demo
+      object_type: relationship
+      table: orders
+      column: customer_id
+      to_table: customers
+      to_column: id
+    content:
+      description: Candidate customer owning the order.
+    confidence: 0.75

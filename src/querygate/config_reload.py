@@ -14,6 +14,7 @@ from typing import List, Optional
 import pydantic as pyd
 
 from querygate.catalog.loader import CatalogStore, set_catalog_store
+from querygate.catalog.repository import catalog_process_lock
 from querygate.connections.engine import dispose_engine
 from querygate.connections.registry import ConnectionRegistry, get_registry, set_registry
 from querygate.core.logging import get_logger
@@ -30,6 +31,24 @@ class ReloadResult(pyd.BaseModel):
 
 
 async def reload_config(
+    *,
+    connections_file: str,
+    policy_file: str,
+    catalog_file: Optional[str] = None,
+    resolver_registry: Optional[SecretResolverRegistry] = None,
+) -> ReloadResult:
+    """Serialize a full config swap against in-process catalog refresh."""
+
+    async with catalog_process_lock():
+        return await _reload_config_unlocked(
+            connections_file=connections_file,
+            policy_file=policy_file,
+            catalog_file=catalog_file,
+            resolver_registry=resolver_registry,
+        )
+
+
+async def _reload_config_unlocked(
     *,
     connections_file: str,
     policy_file: str,

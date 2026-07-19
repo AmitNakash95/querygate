@@ -1,0 +1,83 @@
+# Packaged deterministic 32A-2 semantic-memory MVP corpus. Thresholds are
+# compiled into querygate.catalog.benchmark and cannot be lowered here.
+version: 1
+threshold_version: 32a-2-mvp-1
+
+catalog:
+  version: 2
+  connections:
+    benchmark:
+      tables:
+        purchase_facts:
+          description: Recognized purchase revenue by account.
+          aliases: [purchases, revenue]
+          relationships:
+            - column: account_id
+              to_table: account_dim
+              to_column: id
+              description: Preferred customer-account join.
+          columns:
+            account_id:
+              description: Owning customer account key.
+            net_amount:
+              description: Recognized net revenue amount.
+        account_dim:
+          description: Customer account dimension.
+          aliases: [customers, accounts]
+          columns:
+            id:
+              description: Customer account identifier.
+            email:
+              description: Contact address.
+        analytics_events:
+          description: Product activity mirrored from payroll_private.
+          aliases: [telemetry]
+          columns:
+            event_id:
+              description: Product event identifier.
+        payroll_private:
+          description: Confidential salary ledger.
+          columns:
+            salary:
+              description: Employee salary.
+        legacy_sessions:
+          description: Historical application sessions.
+          aliases: [sessions]
+          provenance:
+            source_class: verified
+            status: stale
+            confidence: 1.0
+            source_evidence:
+              - {kind: manual, reference: benchmark.yaml}
+
+cases:
+  - case_id: revenue-table-selection
+    query: recognized revenue purchases
+    baseline_discovery_calls: 4
+    expected_hits:
+      - {object_type: table, table: purchase_facts}
+
+  - case_id: preferred-customer-join
+    query: preferred customer account join
+    baseline_discovery_calls: 5
+    expected_hits:
+      - object_type: relationship
+        table: purchase_facts
+        column: account_id
+        to_table: account_dim
+        to_column: id
+
+  - case_id: stale-guidance-detection
+    query: legacy sessions
+    baseline_discovery_calls: 3
+    expected_hits:
+      - {object_type: table, table: legacy_sessions, freshness: stale}
+
+  - case_id: policy-hidden-adversarial-object
+    query: salary telemetry
+    baseline_discovery_calls: 4
+    policy:
+      denied_tables: [payroll_private]
+    forbidden_identifiers: [payroll_private, salary]
+    expected_hits:
+      - {object_type: table, table: analytics_events}

@@ -1,8 +1,8 @@
 ---
 id: configuration.catalog
 title: Add a semantic schema catalog
-summary: A versioned catalog adds business metadata, durable provenance, schema fingerprints, and policy-first compact retrieval.
-tags: [configuration, catalog.yaml, metadata, provenance, fingerprints, retrieval, sensitivity, pii, descriptions, relationships]
+summary: A versioned catalog adds business metadata, provenance, safe retrieval, selective refresh, and quarantined manual drafts.
+tags: [configuration, catalog.yaml, metadata, provenance, fingerprints, retrieval, refresh, drafts, benchmark, sensitivity, pii, descriptions, relationships]
 next_actions:
   - Add catalog entries only after connection and policy configuration validate successfully.
 ---
@@ -28,8 +28,19 @@ and model identities. Those fields remain in the privileged catalog record for
 future governed review without becoming another principal-disclosure surface.
 
 Version 2 may persist a row-free schema snapshot. The fingerprint/diff covers
-schema structure and hashes rather than stores raw database comments. Automatic
-refresh/invalidation and manual-only generated drafts are not part of 32A-1.
+schema structure and hashes rather than stores raw database comments. An
+opt-in background refresh atomically updates snapshots, marks only affected
+entries and dependent relationships/proposals stale, and rebinds unaffected
+active entries. It remains off the query path and disabled by default.
+
+The semantic-memory provider defaults to `disabled`; the only other shipped
+mode is offline `manual`. Strict structured imports tied to the current schema
+fingerprint create separate inferred draft proposals with deterministic IDs.
+They cannot contain policy/sensitivity/sampling fields, never overwrite
+verified entries, and are not agent-searchable. Use
+`querygate-semantic-memory refresh`, `generate-drafts`, and `evaluate`; the
+packaged deterministic benchmark has fixed release thresholds and no network
+dependency. Approval/publication is not part of phase 32A.
 
 The catalog is validated against the configured connection IDs and reloads
 with connections and policy. Treat descriptions as administrator-curated
