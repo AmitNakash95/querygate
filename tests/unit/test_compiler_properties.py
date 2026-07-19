@@ -1,0 +1,274 @@
+"""Property-based fuzzing of the SQLAlchemy compiler (TODO.md item 36 phase 1).
+
+`test_compiler.py` proves the compiler handles a fixed set of hand-written
+AST shapes correctly. Nothing previously proved the compiler is robust
+against the *combinatorics* of `StructuredQuery` — random but valid
+combinations of select/join/where/order_by/group_by/top_n that hand-written
+cases don't happen to construct. This uses Hypothesis to generate many such
+combinations and asserts only the crash-freedom/well-formedness property:
+every syntactically valid, in-cap `StructuredQuery` compiles to a renderable
+`sqlalchemy.Select`, never raises, and always returns a `limit >= 1`.
+
+This is deliberately scoped to what item 36 calls "phase 1": boundary/property
+coverage of the compiler and policy caps. Cross-dialect differential testing
+(same AST against Postgres and MSSQL) and malformed-input fuzzing at the
+REST/MCP JSON boundary are explicitly deferred — see TODO.md item 36.
+"""
+
+from __future__ import annotations
+
+from typing import Dict
+
+import sqlalchemy as sa
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
+
+from querygate.compiler.sqlalchemy_compiler import compile_structured_query
+from querygate.policy.models import Policy
+from querygate.query_ast.models import (
+    AggregateSelectItem,
+    JoinSpec,
+    OrderBySpec,
+    Predicate,
+    StructuredQuery,
+    TopNSpec,
+    WhereGroup,
+)
+
+_SLOW_SETTINGS = settings(
+    max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+)
+
+
+def _tables() -> Dict[str, sa.Table]:
+    metadata = sa.MetaData()
+    customers = sa.Table(
+        "customers",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("name", sa.String(100)),
+        sa.Column("country", sa.String(2)),
+    )
+    orders = sa.Table(
+        "orders",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("customer_id", sa.Integer),
+        sa.Column("status", sa.String(20)),
+        sa.Column("total_amount", sa.Numeric(10, 2)),
+    )
+    return {"customers": customers, "orders": orders}
+
+
+_ORDER_COLUMNS = ["orders.id", "orders.customer_id", "orders.status", "orders.total_amount"]
+_CUSTOMER_COLUMNS = ["customers.id", "customers.name", "customers.country"]
+
+_STRING_VALUES = st.sampled_from(["completed", "pending", "", "O'Brien", "a" * 200, "unicode-é中"])
+_NUMERIC_VALUES = st.one_of(
+    st.integers(min_value=-1000, max_value=1000),
+    st.floats(allow_nan=False, allow_infinity=False, min_value=-1000, max_value=1000),
+)
+
+_PREDICATE_SPECS = st.one_of(
+    st.tuples(st.just("orders.status"), st.just("eq"), _STRING_VALUES),
+    st.tuples(
+        st.just("orders.total_amount"),
+        st.sampled_from(["gt", "lt", "gte", "lte", "eq"]),
+        _NUMERIC_VALUES,
+    ),
+    st.tuples(
+        st.just("orders.id"),
+        st.sampled_from(["eq", "gt", "lt"]),
+        st.integers(min_value=1, max_value=10_000),
+    ),
+)
+
+
+@st.composite
+def _predicates(draw, max_count=3):
+    n = draw(st.integers(min_value=1, max_value=max_count))
+    preds = []
+    for _ in range(n):
+        col, op, value = draw(_PREDICATE_SPECS)
+        preds.append(Predicate(col=col, op=op, value=value))
+    return preds
+
+
+@st.composite
+def _where_clauses(draw):
+    preds = draw(_predicates())
+    if len(preds) == 1:
+        return draw(st.one_of(st.just(preds[0]), st.just(WhereGroup(and_terms=preds))))
+    boolean = draw(st.sampled_from(["and", "or"]))
+    return WhereGroup(and_terms=preds) if boolean == "and" else WhereGroup(or_terms=preds)
+
+
+@st.composite
+def _row_select_queries(draw):
+    """Random plain (non-aggregate) row-select shapes: optional join, select
+    width, an optional where tree, order_by, and limit.
+    """
+    include_join = draw(st.booleans())
+    order_by_pool = _ORDER_COLUMNS + (_CUSTOMER_COLUMNS if include_join else [])
+
+    select_cols = draw(
+        st.lists(st.sampled_from(_ORDER_COLUMNS), min_size=1, max_size=4, unique=True)
+    )
+    if include_join:
+        select_cols = select_cols + draw(
+            st.lists(st.sampled_from(_CUSTOMER_COLUMNS), min_size=0, max_size=2, unique=True)
+        )
+    joins = (
+        [
+            JoinSpec(
+                table="customers",
+                type=draw(st.sampled_from(["inner", "left"])),
+                on=["orders.customer_id", "customers.id"],
+            )
+        ]
+        if include_join
+        else []
+    )
+    where = draw(st.one_of(st.none(), _where_clauses()))
+    order_by = draw(
+        st.lists(
+            st.builds(
+                OrderBySpec,
+                col=st.sampled_from(order_by_pool),
+                dir=st.sampled_from(["asc", "desc"]),
+            ),
+            max_size=2,
+        )
+    )
+    limit = draw(st.one_of(st.none(), st.integers(min_value=1, max_value=500)))
+    return StructuredQuery(
+        from_table="orders",
+        select=select_cols,
+        joins=joins,
+        where=where,
+        order_by=order_by,
+        limit=limit,
+    )
+
+
+@st.composite
+def _aggregate_queries(draw):
+    """Random GROUP BY + aggregate + HAVING shapes."""
+    agg_fn = draw(st.sampled_from(["count", "sum", "avg", "min", "max"]))
+    agg_col = "*" if agg_fn == "count" and draw(st.booleans()) else "orders.total_amount"
+    select = [
+        "orders.status",
+        AggregateSelectItem(fn=agg_fn, col=agg_col, alias="agg_value"),
+    ]
+    having = draw(
+        st.lists(
+            st.builds(
+                Predicate,
+                col=st.just("agg_value"),
+                op=st.sampled_from(["gt", "gte", "lt", "eq"]),
+                value=st.integers(min_value=0, max_value=1000),
+            ),
+            max_size=2,
+        )
+    )
+    order_by = draw(
+        st.lists(
+            st.builds(OrderBySpec, col=st.just("agg_value"), dir=st.sampled_from(["asc", "desc"])),
+            max_size=1,
+        )
+    )
+    return StructuredQuery(
+        from_table="orders",
+        select=select,
+        group_by=["orders.status"],
+        having=having,
+        order_by=order_by,
+        limit=draw(st.integers(min_value=1, max_value=500)),
+    )
+
+
+@st.composite
+def _top_n_queries(draw):
+    """Random top_n (per-partition ranking) shapes, with or without an
+    aggregate/group_by base query underneath.
+    """
+    is_aggregate = draw(st.booleans())
+    partition_by = draw(st.lists(st.just("orders.status"), max_size=1))
+    rank_order = st.builds(
+        OrderBySpec,
+        col=(
+            st.just("agg_value")
+            if is_aggregate
+            else st.sampled_from(["orders.id", "orders.total_amount"])
+        ),
+        dir=st.sampled_from(["asc", "desc"]),
+    )
+    top_n = TopNSpec(
+        partition_by=partition_by,
+        order_by=draw(st.lists(rank_order, min_size=1, max_size=2)),
+        n=draw(st.integers(min_value=1, max_value=20)),
+        fn=draw(st.sampled_from(["row_number", "rank", "dense_rank"])),
+    )
+    if is_aggregate:
+        select = ["orders.status", AggregateSelectItem(fn="count", col="*", alias="agg_value")]
+        group_by = ["orders.status"]
+    else:
+        select = ["orders.id", "orders.status", "orders.total_amount"]
+        group_by = []
+    return StructuredQuery(
+        from_table="orders", select=select, group_by=group_by, top_n=top_n, limit=50
+    )
+
+
+@_SLOW_SETTINGS
+@given(query=_row_select_queries())
+def test_compiler_never_crashes_on_row_select_shapes(query):
+    tables = _tables()
+    stmt, limit = compile_structured_query(query, tables, Policy())
+    compiled_text = str(stmt.compile())
+    assert "orders" in compiled_text.lower()
+    assert isinstance(limit, int) and limit >= 1
+    # Must also render with literal binds (the audit/explain path's fallback
+    # rendering) without raising.
+    str(stmt.compile(compile_kwargs={"literal_binds": True}))
+
+
+@_SLOW_SETTINGS
+@given(query=_aggregate_queries())
+def test_compiler_never_crashes_on_aggregate_group_by_shapes(query):
+    tables = _tables()
+    stmt, limit = compile_structured_query(query, tables, Policy())
+    compiled_text = str(stmt.compile()).upper()
+    assert "GROUP BY" in compiled_text
+    assert isinstance(limit, int) and limit >= 1
+
+
+@_SLOW_SETTINGS
+@given(query=_top_n_queries())
+def test_compiler_never_crashes_on_top_n_shapes(query):
+    tables = _tables()
+    stmt, limit = compile_structured_query(query, tables, Policy())
+    compiled_text = str(stmt.compile()).upper()
+    assert "OVER" in compiled_text
+    assert isinstance(limit, int) and limit >= 1
+
+
+@_SLOW_SETTINGS
+@given(query=st.one_of(_row_select_queries(), _aggregate_queries(), _top_n_queries()))
+def test_compiler_respects_mandatory_row_filter_across_random_shapes(query):
+    """A mandatory row filter on the `from_table` must survive every random
+    shape — it is the multi-tenant isolation guarantee (policy/models.py's
+    MandatoryRowFilter), so it must never be silently dropped for any AST
+    combination the compiler accepts.
+    """
+    from querygate.policy.models import MandatoryRowFilter
+
+    tables = _tables()
+    policy = Policy(
+        mandatory_row_filters=[
+            MandatoryRowFilter(table="orders", column="status", value="__tenant_marker__")
+        ]
+    )
+    stmt, _ = compile_structured_query(query, tables, policy)
+    compiled_text = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "__tenant_marker__" in compiled_text
