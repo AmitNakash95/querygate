@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import sqlalchemy as sa
 
+from querygate.connections.models import DatabaseDialect
 from querygate.core.auth import Principal
 from querygate.core.exceptions import QueryValidationError
 from querygate.policy.models import Policy
@@ -117,9 +118,9 @@ def _date_bucket_expr(col: Any, granularity: str, dialect: str) -> Any:
     "quarter" directly); MSSQL has no DATE_TRUNC, so it uses the DATEADD/
     DATEDIFF truncation idiom instead; SQLite (examples/tests) uses strftime.
     """
-    if dialect == "postgresql":
+    if dialect == DatabaseDialect.POSTGRESQL:
         return sa.func.date_trunc(granularity, col)
-    if dialect == "mssql":
+    if dialect == DatabaseDialect.MSSQL:
         part = sa.literal_column(granularity)
         zero = sa.literal_column("0")
         return sa.func.dateadd(part, sa.func.datediff(part, zero, col), zero)
@@ -296,7 +297,13 @@ def compile_structured_query(
     query: StructuredQuery,
     tables: Dict[str, sa.Table],
     policy: Policy,
-    dialect: str = "postgresql",
+    # Not typed DatabaseDialect: the caller (execution/service.py) derives
+    # this from the live SQLAlchemy engine's own dialect.name, which is a
+    # wider domain than the registry's supported dialects — it's legitimately
+    # "sqlite" for the internal-only SQLite test/example path (see
+    # DatabaseDialect's docstring). _date_bucket_expr compares this against
+    # DatabaseDialect members and falls back to SQLite bucketing otherwise.
+    dialect: str = DatabaseDialect.POSTGRESQL,
     principal: Optional[Principal] = None,
 ) -> Tuple[sa.Select, int]:
     """Compile AST + reflected tables + policy into a Select.
