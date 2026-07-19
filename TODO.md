@@ -66,7 +66,7 @@ order-of-magnitude, not commitments.
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
 | 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
 | 36 | Extensive production-grade QA project / edge-case test suite | L | 15, 28 |
-| 37 | Automated end-to-end proof of adaptive semantic learning | M–L | 23, 25, 27, 28, 32B, 32C |
+| 37 | ✅ Automated end-to-end proof of adaptive semantic learning | M–L | 23, 25, 27, 28, 32B, 32C |
 | 38 | Admin UI catalog-governance workspace | L | 27, 31, 32B |
 | 39 | Draft-aware policy simulation before staging | M–L | 6, 17, 25, 31 |
 | 40 | Semantic access diff for config changes | L | 6, 25, 31, 39 |
@@ -2415,8 +2415,82 @@ line coverage alone doesn't prove edge cases were exercised.
 
 ### 37. Automated end-to-end proof of adaptive semantic learning
 
-**Status: not started; blocked on item 32B's governed publication workflow and
-32C's usage-signal learner. Effort: M–L (3–5 days once those phases exist).**
+**Shipped.** `querygate/catalog/adaptive_learning_benchmark.py` plus the
+packaged fixture `querygate/catalog/benchmark_data/adaptive_learning_v1.yaml`
+drive the real persisted components — `CatalogStore`/`CatalogFileRepository`,
+`catalog.usage.record_usage_signals`/`should_emit_signal`,
+`catalog.learning.generate_learned_relationship_proposals`,
+`catalog.governance`'s unmodified review/publish/rollback state machine,
+`catalog.retrieval.search_catalog`, `catalog.refresh.refresh_catalog_schema`,
+`validation.policy_validation.validate_policy`, and a real (mocked-session)
+`StructuredQueryService` — through the complete lifecycle, exactly matching
+the six-step "what to build" list below:
+
+1. The fixture's initial catalog has no relationship hint for
+   `orders.customer_id -> customers.id` at all; the task query
+   deterministically fails before learning (`baseline_correct=False`),
+   proving the fixture was not pre-seeded with the answer.
+2. Usage evidence uses fixed evidence-reference ids and a single fake-clock
+   timestamp (`_FAKE_CLOCK`, never `datetime.now()`), and covers every
+   required control: below-threshold support, a conflicting pair (two
+   competing targets for the same source column, tied under the conflict
+   margin), repeated-single-principal (20 signals, one principal, must not
+   inflate support), cross-connection (the same relationship recorded under
+   a second connection id), a denied-object query (proven to raise
+   `PolicyViolationError` before any execution — so no signal for it can
+   ever exist), and an unreviewed-guidance target (proven via the real
+   `should_emit_signal` gate returning `False`).
+3. The real learner produces exactly one `learned` proposal for the
+   expected relationship and none for any control; a direct replay against
+   byte-identical evidence resolves to `"idempotent"` through the
+   deterministic generation-id path specifically (not merely avoiding a
+   visible duplicate via the separate open-proposal dedup guard); two
+   independent `CatalogFileRepository` handles racing the same file
+   ("two-worker" execution) still serialize to exactly one proposal.
+4. The pending proposal is proven not agent-visible
+   (`search_catalog` still fails the task). A disposable copy of the store
+   is rejected by a named reviewer actor and proven to leave behavior
+   unchanged; the main store is then approved and published by a
+   *different* actor than the learner, and the published entry's
+   provenance/version record is checked for actor attribution rather than
+   self-publication.
+5. After publication, a fresh reload (`CatalogStore.from_file`, not the
+   in-memory object) finds the relationship with `freshness=current`, and
+   discovery-call reduction (`1 - 1/baseline_discovery_calls`) is checked
+   against a compiled, non-fixture-tunable threshold. Principal-safe
+   filtering is proven on the same published content: visible under the
+   default policy, hidden under a policy denying the relationship's target
+   table.
+6. A real schema change (dropping the referenced column) is run through
+   `refresh_catalog_schema` and proven to stale only the affected
+   relationship while a separate manually-verified, unrelated entry stays
+   `verified`. A real rollback reverts the publish and the task
+   demonstrably regresses to the baseline again. A genuine learner failure
+   (a store missing its schema snapshot) is proven not to block a real
+   `StructuredQueryService.execute()` call. Every post-rollback assertion is
+   repeated against one final fresh reload, not just in-memory state.
+
+Every check was adversarially verified during development by deliberately
+breaking one real invariant at a time (the anti-feedback-loop gate, the
+conflict margin, the support threshold, rollback, policy enforcement,
+cross-connection isolation, and query execution itself) and confirming the
+report's `security_violations`/`rollback_correct`/
+`ordinary_query_unaffected_by_learner_failure` fields actually flip — this
+is not a checker that always reports success. Covered by
+`tests/integration/test_adaptive_learning_benchmark.py`, including seven
+tests that each break one real invariant and assert the checker notices.
+
+**Acceptance gate — met:** `make adaptive-learning-test` (wrapping
+`poetry run python -m querygate.catalog_cli adaptive-learning-test`) is a
+single deterministic command, wired into `make release-check` right after
+the 32A `evaluate` benchmark. It runs with no live model, external network,
+wall-clock sleep (every timestamp is the fixed `_FAKE_CLOCK` constant), or
+production row access, and exits non-zero on failure. Thresholds
+(`MIN_DISCOVERY_CALL_REDUCTION`, `MAX_DUPLICATE_PROPOSALS`,
+`MAX_SECURITY_VIOLATIONS`) are compiled constants in
+`adaptive_learning_benchmark.py`, not fixture fields.
+
+**Original scope (for reference — see above for what actually shipped):**
 
 **Why it matters:** The shipped `semantic_memory_v1.yaml` benchmark is a
 deterministic test of retrieval from a static catalog. It does not feed usage

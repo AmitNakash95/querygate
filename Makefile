@@ -45,6 +45,10 @@ validate-config: ## Validate connections.yaml/policy.yaml (CONNECTIONS_FILE / PO
 semantic-memory-evaluate: ## Run the fixed offline semantic-memory 32A benchmark
 	poetry run python -m querygate.catalog_cli evaluate
 
+.PHONY: adaptive-learning-test
+adaptive-learning-test: ## Run the end-to-end usage-learning lifecycle proof (item 37): baseline -> evidence -> learn -> review -> publish -> improved re-run -> staleness/rollback/restart
+	poetry run python -m querygate.catalog_cli adaptive-learning-test
+
 # ─── Tests ────────────────────────────────────────────────────────────────────
 .PHONY: test
 test: ## Run the full test suite
@@ -122,6 +126,7 @@ release-check: ## Run deterministic source/package release gates and build artif
 	QUERYGATE_DEMO_DB_URL=postgresql+asyncpg://user:pass@localhost/demo \
 		poetry run querygate-validate-config
 	poetry run python -m querygate.catalog_cli evaluate
+	poetry run python -m querygate.catalog_cli adaptive-learning-test
 	poetry build
 	poetry run python scripts/check_release_artifacts.py
 	$(MAKE) sbom

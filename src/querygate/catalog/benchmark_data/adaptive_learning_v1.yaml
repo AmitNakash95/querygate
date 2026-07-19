@@ -1,0 +1,90 @@
+# TODO.md item 37: versioned, network-free scenario fixture proving the
+# complete usage-learning lifecycle (32C) end to end — not just retrieval
+# from a static catalog (see semantic_memory_v1.yaml for that, item 32A's
+# benchmark). Thresholds/pass criteria live in
+# querygate/catalog/adaptive_learning_benchmark.py, never in this file.
+version: 1
+threshold_version: "37-mvp-1"
+
+connection_id: adaptive_bench
+cross_connection_id: adaptive_bench_cross
+
+tables:
+  - name: customers
+    columns: [id]
+  - name: orders
+    columns: [id, customer_id]
+  - name: shipments
+    columns: [id, order_customer_ref]
+  - name: invoices
+    columns: [id, bill_to_customer_id]
+  - name: archived_customers
+    columns: [id]
+  - name: refunds
+    columns: [id, customer_ref]
+  - name: promotions
+    columns: [id, customer_id]
+  - name: restricted_ledger
+    columns: [id, customer_id]
+
+# A table a caller's policy denies outright — used to prove a query
+# touching it can never even succeed, so no usage signal for it can ever
+# exist (the strongest form of "must not contribute").
+denied_table: restricted_ledger
+
+# An already-present, unreviewed (draft/inferred) relationship guess — used
+# to prove the anti-feedback-loop gate (catalog.usage.should_emit_signal)
+# refuses to treat usage of it as validating evidence.
+unreviewed_guidance_relationship:
+  table: promotions
+  column: customer_id
+  to_table: customers
+  to_column: id
+
+# A manually verified entry unrelated to the learned relationship, used to
+# prove a later schema change stales only the affected entry, not this one.
+verified_control_table: customers
+verified_control_description: "Customer master data."
+
+# The "unfamiliar task": the initial catalog has no relationship hint for
+# this join at all, so it must fail before learning and succeed only after
+# real learn -> approve -> publish.
+task:
+  # Keyword-style, matching catalog_search's own tokenization (identifiers
+  # like "customer_id" are a single token) — same phrasing convention as
+  # semantic_memory_v1.yaml's own cases, not a full natural-language sentence.
+  query: "orders customer_id customers"
+  expected_relationship:
+    table: orders
+    column: customer_id
+    to_table: customers
+    to_column: id
+  baseline_discovery_calls: 4
+
+# Real usage evidence plus every control TODO item 37 requires: below-
+# threshold, conflicting (two competing targets for one source column),
+# repeated-single-principal (must not inflate support), and cross-connection
+# (must not contribute to this connection's learning).
+evidence_groups:
+  - label: real
+    target: {table: orders, column: customer_id, to_table: customers, to_column: id}
+    principals: [user-1, user-2, user-3, user-4, user-5]
+  - label: below_threshold
+    target: {table: shipments, column: order_customer_ref, to_table: customers, to_column: id}
+    principals: [user-1, user-2, user-3, user-4]
+  - label: conflicting_a
+    target: {table: invoices, column: bill_to_customer_id, to_table: customers, to_column: id}
+    principals: [user-1, user-2, user-3, user-4, user-5]
+  - label: conflicting_b
+    target: {table: invoices, column: bill_to_customer_id, to_table: archived_customers, to_column: id}
+    principals: [user-6, user-7, user-8, user-9, user-10]
+  - label: cross_principal_repeat
+    target: {table: refunds, column: customer_ref, to_table: customers, to_column: id}
+    principals: [repeat-user, repeat-user, repeat-user, repeat-user, repeat-user,
+                 repeat-user, repeat-user, repeat-user, repeat-user, repeat-user,
+                 repeat-user, repeat-user, repeat-user, repeat-user, repeat-user,
+                 repeat-user, repeat-user, repeat-user, repeat-user, repeat-user]
+  - label: cross_connection
+    connection: cross
+    target: {table: orders, column: customer_id, to_table: customers, to_column: id}
+    principals: [other-user-1, other-user-2, other-user-3, other-user-4, other-user-5]
