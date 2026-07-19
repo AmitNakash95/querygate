@@ -254,6 +254,39 @@ async def test_stage_with_invalid_content_returns_422(app):
 
 
 @pytest.mark.asyncio
+async def test_diff_endpoint_reports_semantic_changes_without_persisting(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/diff",
+            # Active default max_joins is 5; tighten it and add a mandatory filter.
+            json={
+                "policy_yaml": (
+                    "default:\n"
+                    "  enabled: true\n"
+                    "  max_joins: 2\n"
+                    "  mandatory_row_filters:\n"
+                    "    - table: foo\n"
+                    "      column: tenant_id\n"
+                    "      value: 99\n"
+                )
+            },
+            headers=_auth(_ADMIN_KEY),
+        )
+        versions_resp = await client.get("/api/v1/admin/config/versions", headers=_auth(_ADMIN_KEY))
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["evaluation_scope"] == "connection_baseline"
+    kinds = {(c["category"], c["object"], c["direction"]) for c in body["changes"]}
+    assert ("guardrail", "max_joins", "tightening") in kinds
+    assert ("mandatory_filter", "foo.tenant_id", "tightening") in kinds
+    # The static filter value must never appear in the response.
+    assert "99" not in resp.text
+    # Diff persists nothing: only the bootstrapped version 1 exists.
+    assert [v["id"] for v in versions_resp.json()] == ["1"]
+
+
+@pytest.mark.asyncio
 async def test_apply_unknown_version_returns_404(app):
     async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
         resp = await client.post(

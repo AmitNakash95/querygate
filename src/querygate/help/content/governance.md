@@ -16,7 +16,15 @@ Callers need `admin:config:write` to validate, preview, stage, apply, or roll
 back. A preview is non-persistent and content-free: a caller with read and
 write scope receives a document-level changed/unchanged comparison, while a
 write-only caller receives submitted/inherited so the endpoint cannot become
-an equality oracle. Secret values and references are never included. Staging
+an equality oracle. A semantic access diff goes further than the document-level
+preview: it reports the candidate's *resolved* access changes — typed
+tightening/loosening/neutral changes to connection visibility, guardrail caps,
+table/column access, mandatory-filter requirements, and join groups at the
+connection baseline — rather than a YAML line diff. Like policy simulation, the
+diff requires both `admin:config:read` and `admin:config:write` (it echoes
+resolved policy detail while resolving caller-supplied config/secret
+references) and never includes static filter values, secrets, predicate values,
+or raw YAML. Secret values and references are never included. Staging
 validates again, records the actor, and creates a new version without
 activating it. Applying validates once more, reloads the version through the
 normal configuration path, changes the active pointer, and emits an audit
