@@ -118,7 +118,7 @@ def audit_config_change(
     duration_ms: Optional[int] = None,
     error_category: Optional[str] = None,
 ) -> None:
-    """Record a config-governance action (validate/preview/simulate/stage/apply/rollback) —
+    """Record a config-governance action (validate/preview/simulate/diff/stage/apply/rollback) —
     same durable sink as `audit_query`, so a customer's audit trail covers
     both query attempts and who changed access to a database, when.
     """
