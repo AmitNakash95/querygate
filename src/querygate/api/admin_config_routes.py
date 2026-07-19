@@ -22,7 +22,9 @@ from querygate.admin.models import (
     CandidatePolicySimulation,
     CandidatePolicySimulationRequest,
     ConfigPreview,
+    ConfigSemanticDiffRequest,
     ConfigVersion,
+    SemanticAccessDiff,
 )
 from querygate.config_reload import ReloadResult
 from querygate.core.auth import Principal
@@ -105,6 +107,24 @@ def build_admin_config_router(
         try:
             return await run_in_threadpool(
                 governance.simulate_candidate_policy, cfg, principal, request
+            )
+        except ConfigValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    @router.post("/diff", response_model=SemanticAccessDiff)
+    async def diff_endpoint(
+        request: ConfigSemanticDiffRequest,
+        principal: Principal = Depends(get_principal),
+    ):
+        # Like /simulate, the semantic diff returns resolved policy detail
+        # (config-read) while resolving caller-supplied config/secret references
+        # (config-write). Requiring both prevents a read-only principal from
+        # using a candidate document as a secret-existence oracle.
+        _require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        try:
+            return await run_in_threadpool(
+                governance.diff_candidate_access, cfg, principal, request
             )
         except ConfigValidationError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))

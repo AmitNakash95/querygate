@@ -69,7 +69,7 @@ order-of-magnitude, not commitments.
 | 37 | ✅ Automated end-to-end proof of adaptive semantic learning | M–L | 23, 25, 27, 28, 32B, 32C |
 | 38 | ✅ Admin UI catalog-governance workspace (phase 1: core review/approve/reject/publish/rollback loop; phase 2: bulk ops, export/import UI, generation triggers not started) | L | 27, 31, 32B |
 | 39 | ✅ Draft-aware policy simulation before staging | M–L | 6, 17, 25, 31 |
-| 40 | Semantic access diff for config changes | L | 6, 25, 31, 39 |
+| 40 | ✅ Semantic access diff for config changes (phase 1: connection-baseline diff + REST; phase 2: per-principal resolution not started) | L | 6, 25, 31, 39 |
 | 41 | Policy-change blast-radius analysis | M–L | 22, 25, 31, 40 |
 | 42 | Four-eyes config approval and separation of duties | XL | 10, 23, 25, 31 |
 | 43 | ✅ Admin connection-operations and health workspace (phase 1: admin connection-status API; phase 2: "test now" probe + browser workspace not started) | L | 7, 12, 31 |
@@ -2620,20 +2620,37 @@ real but separable value-add matching this item's own "bulk operations"
 callout, deferred rather than rushed into the same slice as the core
 workflow.
 
-**Unrelated bug found during verification, not fixed here:** the background
-schema-refresh scanner (`SEMANTIC_MEMORY_REFRESH_ENABLED=true`,
-`catalog/refresh.py`'s `scan_connection_schema`) raised `NoSuchTableError`
-against a real live demo Postgres even for tables confirmed to exist via
-`psql` and reflected successfully by the ordinary `describe_table`/
-`list_tables` path (which shares `schema/reflection.py`'s
-`get_table_schema`). Worked around for this item's verification by building
-an `ObservedSchemaSnapshot` directly from a real reflected `sa.MetaData`
-instead of the scanner. Reproducible outside this item's own code
-(`catalog_governance_routes.py`, `admin_ui/`) — worth a dedicated
-investigation, since it means the *documented* `SEMANTIC_MEMORY_REFRESH_ENABLED`
-background-scanning path may not currently work against Postgres at all;
-the explicit `querygate-semantic-memory refresh` CLI path was not itself
-exercised successfully either, only bypassed.
+**Two real bugs found and fixed as follow-ups, not silently left broken:**
+
+1. **UI panel closing on approve/reject/publish.** `selectProposal()` looked
+   the open proposal up in the currently *filtered* proposal list. Approving
+   a proposal moves it out of the default "pending" filter, so the
+   post-action refresh (which reloads that filtered list) could no longer
+   find it — the panel silently reset to its empty state and the
+   newly-available Publish button never appeared, breaking the very
+   review-→-approve-→-publish flow this workspace exists for. Fixed by
+   decoupling the open detail panel from the filtered queue: it now renders
+   from a proposal fetched directly (`GET .../proposals/{id}`) after every
+   mutation, regardless of whether that proposal still matches the active
+   filter. Verified with a headless jsdom harness driving the real served
+   `admin_ui` against a live server (still no browser tool available in this
+   environment) through the full approve → preview → publish sequence.
+2. **`list_live_tables()` leaked Postgres system catalog tables**
+   (`schema/reflection.py`) — found via the background schema-refresh
+   scanner (`SEMANTIC_MEMORY_REFRESH_ENABLED=true`,
+   `catalog/refresh.py`'s `scan_connection_schema`) raising `NoSuchTableError`
+   against a real live demo Postgres for tables confirmed to exist via
+   `psql`. Root cause: Postgres's own `information_schema.tables` lists
+   `pg_catalog`/`information_schema` system tables (`pg_type`,
+   `pg_aggregate`, ...) alongside real ones when queried without a schema
+   filter, unlike MSSQL's INFORMATION_SCHEMA. This is shared, foundational
+   code — the same bug also leaked system table names into agent-facing
+   `list_tables()`/MCP discovery for any Postgres connection without a
+   `known_tables` seed, not just the catalog scanner. Fixed with a
+   `TABLE_SCHEMA NOT IN ('pg_catalog', 'information_schema', 'sys')` filter;
+   regression-tested against real Postgres in
+   `tests/integration/test_postgres_schema_discovery.py`
+   (`make test-postgres-live`).
 
 **Original scope (for reference — see above for what actually shipped):**
 
@@ -2750,6 +2767,66 @@ literals, or hidden identifiers. Prove simulation persists nothing and cannot
 alter live request behavior even under concurrent use.
 
 ### 40. Semantic access diff for config changes
+
+**Phase 1 shipped (connection-baseline layer); phase 2 (per-principal
+resolution) not started.**
+
+`POST /api/v1/admin/config/diff` (`api/admin_config_routes.py` →
+`admin.service.diff_candidate_access` → `admin/access_diff.py`) returns a
+server-derived, authorization-aware diff of *resolved* access — not a line
+diff of YAML — between the active config-governance version (or the deployment
+files before governance has been bootstrapped) and a caller-supplied candidate
+(unset documents inherit from active, exactly like `/validate` and `/versions`).
+
+- **Evaluation scope (phase 1):** `evaluation_scope="connection_baseline"`.
+  Both snapshots are loaded through the same isolated candidate-context path
+  item 39's `/simulate` uses (`_load_isolated_candidate_context`), so the live
+  registry/policy/catalog singletons and any concurrent request are provably
+  untouched. For every connection present in either snapshot, the default and
+  per-connection policy layers are resolved with **no principal applied** and
+  compared. Reported `SemanticAccessChange` items cover connection visibility,
+  every guardrail cap, table access, column access, mandatory-filter
+  requirements, and join groups, each classified `tightening`/`loosening`/
+  `neutral` (guardrail direction is derived from a single permissiveness
+  comparator, with an unset optional cap treated as "unlimited"). A
+  `SemanticDiffSummary` counts each direction; changes are ordered loosening-
+  first so a truncated list keeps the highest-risk entries.
+- **Authorization:** like `/simulate`, `/diff` requires **both**
+  `admin:config:read` and `admin:config:write` — it echoes resolved policy
+  detail (read-like) while resolving caller-supplied config/secret references
+  (write-like), so neither scope alone can turn it into a secret-existence
+  oracle.
+- **Redaction:** `before`/`after` only ever carry non-sensitive resolved
+  values (a guardrail number, `visible`/`hidden`/`absent`, a join-group name,
+  or a mandatory-filter *source kind* and claim *name*). Static
+  mandatory-filter values, resolved secrets, connection strings, query
+  predicate values, and raw YAML are structurally never placed in the output.
+- **Honest incompleteness:** `analysis_incomplete` is set with a
+  human-readable reason rather than silently under-reporting when the
+  per-principal override layer itself changed (phase 2), when an allow-list
+  toggled between restricted and unrestricted (objects the policy never names
+  may also be affected and can't be enumerated without live schema
+  reflection), or when the change list was truncated at its cap.
+- **Threat-model control:** documented as QG-20 in `docs/THREAT_MODEL.md`.
+
+Covered by `tests/unit/test_config_semantic_diff.py` (the pure classification
+engine), `tests/unit/test_admin_service.py` (isolation, audit, safe
+invalid-candidate masking), `tests/integration/test_admin_config_governance.py`
+(the REST surface, redaction, and non-persistence), and
+`tests/security/test_adversarial_security.py` (both-scope enforcement).
+
+**Phase 2 (not started) — per-principal resolution.** Phase 1 resolves the
+default and per-connection layers only; a change that lives purely in a
+`principals:` override is detected and flagged as incomplete but not itemized.
+Phase 2 resolves each explicitly *configured* principal (bounded by the policy
+file, not by runtime traffic) so the diff can state "reporting-agent gains
+`orders.total`", applying the same per-principal denied-table redaction
+`/simulate` already uses. That per-principal fan-out is also the input item 41
+(policy-change blast-radius) aggregates, ranks, and paginates — so phase 2 is
+split out both because it is a distinct, independently useful slice and because
+it is the natural foundation item 41 builds on.
+
+**Original scope (for reference — see above for what shipped in phase 1):**
 
 **Effort: L (3–5 days).** A trustworthy diff must compare resolved behavior,
 not YAML syntax. It needs a typed diff model, policy resolution across default,
