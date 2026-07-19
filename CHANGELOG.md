@@ -6,6 +6,21 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- Admin connection-operations status API, phase 1 (TODO.md item 43).
+  `GET /api/v1/admin/connections` (`api/admin_connections_routes.py`) returns a
+  credential-free, per-connection operational status built from the same
+  `HealthMonitor` snapshot `/health` already maintains, gated by a new
+  least-privilege `admin:connections:read` scope. Each entry reports dialect,
+  enabled, a derived status (healthy/degraded/disabled/unknown), last-checked,
+  last-success (persisted across a later failure), latency, schema-reflected
+  state, and a stable redacted `failure_category`
+  (authentication/unreachable/timeout/error). `HealthMonitor` now tracks
+  last-success/latency and classifies failures **by exception type, never
+  message**, so a raw driver error embedding a host/username/password never
+  leaks through the API — it stays in stdout logs only, matching `/health`'s
+  existing non-disclosure of database topology. Documented as QG-21 in
+  `docs/THREAT_MODEL.md`. Phase 2 (a rate-limited "test now" probe action and
+  the browser workspace that renders this view) is not started.
 - Semantic access diff for config changes, phase 1 (TODO.md item 40).
   `POST /api/v1/admin/config/diff` (`admin/access_diff.py`,
   `admin.service.diff_candidate_access`) returns a server-derived,

@@ -416,6 +416,35 @@ write-only principal can validate and stage submitted content but cannot use
 the UI to read the active documents; normal operation therefore grants both
 config scopes to the human admin role.
 
+### Admin connection-status API
+
+The public `GET /health` returns only aggregate healthy/unhealthy/unknown
+counts, so it can't disclose database topology to an unauthenticated
+orchestrator probe. Administrators still need to know *which* connection is
+failing and since when — without reading process logs or seeing a raw driver
+error (which can embed the host, port, database, or username). `GET
+/api/v1/admin/connections`, gated by a dedicated `admin:connections:read`
+scope, returns a credential-free per-connection view built from the same
+background `HealthMonitor` the readiness probe already uses:
+
+```bash
+curl -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/connections
+# -> [{"connection_id": "demo", "dialect": "postgresql", "enabled": true,
+#      "status": "healthy", "last_checked": 1752960000.0,
+#      "last_success": 1752960000.0, "latency_ms": 1.25,
+#      "schema_reflected": true, "failure_category": null}, ...]
+```
+
+`status` is `healthy`/`degraded`/`disabled`/`unknown`; a failure surfaces only
+as a stable `failure_category` (`authentication`/`unreachable`/`timeout`/
+`error`) classified from the exception *type*, never its message — the raw
+driver error stays in stdout logs only, and no connection string is ever
+returned. `admin:connections:read` is intentionally separate from the config
+scopes: seeing whether a database is reachable is a different privilege from
+reading or changing what QueryGate connects to. The rate-limited "test now"
+re-check and a browser workspace that renders this view are TODO item 43
+phase 2.
+
 ## Example schema catalog (optional)
 
 Raw reflection tells an agent that `customers.email` exists and is a

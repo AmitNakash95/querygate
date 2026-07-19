@@ -843,6 +843,30 @@ async def test_config_governance_endpoints_reject_unauthenticated_callers():
 
 
 @pytest.mark.asyncio
+async def test_admin_connections_status_requires_its_own_scope():
+    """The operational connection-status view (item 43) is gated by
+    admin:connections:read specifically — another admin scope does not grant it,
+    and an anonymous caller cannot read it. Seeing which database is failing is
+    a distinct privilege from reading/changing configuration.
+    """
+    wrong = create_app(_governance_app(scopes=["admin:config:read", "admin:config:write"]))
+    right = create_app(_governance_app(scopes=["admin:connections:read"]))
+    headers = {"Authorization": "Bearer governance-caller-key"}
+    async with AsyncClient(
+        transport=ASGITransport(app=wrong), base_url="http://localhost"
+    ) as client:
+        wrong_resp = await client.get("/api/v1/admin/connections", headers=headers)
+    async with AsyncClient(
+        transport=ASGITransport(app=right), base_url="http://localhost"
+    ) as client:
+        right_resp = await client.get("/api/v1/admin/connections", headers=headers)
+        unauth_resp = await client.get("/api/v1/admin/connections")
+    assert wrong_resp.status_code == 403
+    assert right_resp.status_code == 200
+    assert unauth_resp.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
 async def test_invalid_staged_version_is_rejected_not_silently_applied():
     """A candidate that fails validation must never become a persisted,
     applicable version — an admin caller retrying a broken submission

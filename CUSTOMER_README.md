@@ -247,9 +247,12 @@ per-user identity.
 Administrative actions use explicit scopes:
 
 - `admin:reload-config` reloads customer-managed configuration files;
-- `admin:config:read` inspects versioned configuration history; and
+- `admin:config:read` inspects versioned configuration history;
 - `admin:config:write` validates, stages, applies, and rolls back versioned
-  configuration.
+  configuration; and
+- `admin:connections:read` returns credential-free per-connection operational
+  health (which connection is reachable, when it last succeeded, and a redacted
+  failure category — never a connection string or raw driver error).
 
 These privileges should be separated from ordinary query identities. In
 production, authentication is mandatory. Anonymous access is limited to a

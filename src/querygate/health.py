@@ -25,11 +25,88 @@ from querygate.connections.registry import get_registry
 from querygate.core.logging import get_logger
 
 
+# Stable, credential-free failure categories exposed by the admin
+# connection-status API (TODO.md item 43). Deliberately coarse: the raw driver
+# exception can contain the host, port, database name, or username being
+# connected to, so it is only ever logged to stdout — never surfaced through an
+# API. A category is derived from the exception *type*, never its message text.
+FAILURE_CATEGORY_AUTHENTICATION = "authentication"
+FAILURE_CATEGORY_UNREACHABLE = "unreachable"
+FAILURE_CATEGORY_TIMEOUT = "timeout"
+FAILURE_CATEGORY_ERROR = "error"
+
+
+def _iter_exception_chain(exc: BaseException):
+    """Yield exc and every wrapped/chained exception under it, once each.
+
+    SQLAlchemy wraps a driver error in `OperationalError`/`InterfaceError`
+    (a `DBAPIError`, with the original DBAPI exception on `.orig` and in
+    `__cause__`), so the outermost type a ping failure raises is usually the
+    generic wrapper, not the specific asyncpg/pyodbc error. Walking the chain
+    lets classification see the real cause.
+    """
+    seen: set[int] = set()
+    stack: list[Optional[BaseException]] = [exc]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        stack.append(getattr(current, "orig", None))
+        stack.append(current.__cause__)
+        stack.append(current.__context__)
+
+
+def _classify_one(exc: BaseException) -> Optional[str]:
+    """Category for a single exception by type only, or None if unrecognized."""
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return FAILURE_CATEGORY_TIMEOUT
+    if isinstance(exc, (ConnectionRefusedError, ConnectionError, OSError)):
+        # OSError covers refused connections, DNS failures (socket.gaierror),
+        # and network-unreachable — all "can't reach the server".
+        return FAILURE_CATEGORY_UNREACHABLE
+    type_name = type(exc).__name__.lower()
+    if any(token in type_name for token in ("password", "authoriz", "auth", "login")):
+        return FAILURE_CATEGORY_AUTHENTICATION
+    if "timeout" in type_name:
+        return FAILURE_CATEGORY_TIMEOUT
+    if any(token in type_name for token in ("connect", "network", "unreach", "dns")):
+        return FAILURE_CATEGORY_UNREACHABLE
+    return None
+
+
+def classify_failure(exc: BaseException) -> str:
+    """Map a ping failure to a stable, redaction-safe category.
+
+    Classification uses the exception type (stdlib isinstance plus driver
+    class-name matching) across the whole wrapped/chained exception tree, never
+    the message, so a driver error that embeds a hostname/username/password can
+    never leak through the category while still being classified correctly even
+    when SQLAlchemy has wrapped it in a generic `OperationalError`.
+    """
+    for current in _iter_exception_chain(exc):
+        category = _classify_one(current)
+        if category is not None:
+            return category
+    return FAILURE_CATEGORY_ERROR
+
+
 @dataclass(frozen=True)
 class ConnectionHealth:
     connection_id: str
     healthy: Optional[bool]  # None: not checked yet (e.g. right after startup)
     last_checked: Optional[float]  # time.time(), or None if never checked
+    # Wall-clock time of the last *successful* ping — persists across a later
+    # failure so an operator can see "reachable until 3 minutes ago".
+    last_success: Optional[float] = None
+    # Round-trip latency of the last successful ping, in milliseconds.
+    latency_ms: Optional[float] = None
+    # Stable, redaction-safe failure category (see classify_failure); None while
+    # healthy or not-yet-checked.
+    failure_category: Optional[str] = None
+    # Raw driver error — for stdout logging only. NEVER returned by any API; the
+    # admin status endpoint exposes failure_category instead.
     error: Optional[str] = None
 
 
@@ -88,6 +165,8 @@ class HealthMonitor:
             await self._check_once(connection_id)
 
     async def _check_once(self, connection_id: str) -> None:
+        previous = self._status.get(connection_id)
+        started = time.perf_counter()
         try:
             await _ping(connection_id)
         except asyncio.CancelledError:
@@ -97,10 +176,20 @@ class HealthMonitor:
                 connection_id=connection_id,
                 healthy=False,
                 last_checked=time.time(),
+                # Preserve the last known-good timestamp/latency across a failure
+                # so the admin view can show "reachable until <time>".
+                last_success=previous.last_success if previous else None,
+                latency_ms=previous.latency_ms if previous else None,
+                failure_category=classify_failure(exc),
                 error=str(exc),
             )
             get_logger().warning("health.check.failed", connection=connection_id, error=str(exc))
         else:
+            now = time.time()
             self._status[connection_id] = ConnectionHealth(
-                connection_id=connection_id, healthy=True, last_checked=time.time()
+                connection_id=connection_id,
+                healthy=True,
+                last_checked=now,
+                last_success=now,
+                latency_ms=round((time.perf_counter() - started) * 1000, 3),
             )

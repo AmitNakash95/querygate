@@ -72,7 +72,7 @@ order-of-magnitude, not commitments.
 | 40 | ✅ Semantic access diff for config changes (phase 1: connection-baseline diff + REST; phase 2: per-principal resolution not started) | L | 6, 25, 31, 39 |
 | 41 | Policy-change blast-radius analysis | M–L | 22, 25, 31, 40 |
 | 42 | Four-eyes config approval and separation of duties | XL | 10, 23, 25, 31 |
-| 43 | Admin connection-operations and health workspace | L | 7, 12, 31 |
+| 43 | ✅ Admin connection-operations and health workspace (phase 1: admin connection-status API; phase 2: "test now" probe + browser workspace not started) | L | 7, 12, 31 |
 | 44 | Admin observability and rejection-trend dashboard | L | 12, 23, 31, 35 |
 | 45 | Dedicated non-admin “My access” portal | M | 22, 31, 33 |
 | 46 | Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
@@ -2927,6 +2927,38 @@ administrator mode for smaller deployments, but never simulate four-eyes in
 the browser while the server still permits self-approval.
 
 ### 43. Admin connection-operations and health workspace
+
+**Phase 1 shipped (admin connection-status API); phase 2 (rate-limited
+"test now" probe + browser workspace) not started.**
+
+`GET /api/v1/admin/connections` (`api/admin_connections_routes.py`) returns a
+credential-free, per-connection operational status built from the same
+`HealthMonitor` snapshot `/health` already maintains, gated by a new
+least-privilege `admin:connections:read` scope (distinct from the config
+scopes — seeing whether a connection is reachable is a different privilege from
+reading/changing what QueryGate connects to). Each entry reports `dialect`,
+`enabled`, a derived `status` (`healthy`/`degraded`/`disabled`/`unknown`),
+`last_checked`, `last_success` (persisted across a later failure), `latency_ms`,
+`schema_reflected`, and a stable redacted `failure_category`
+(`authentication`/`unreachable`/`timeout`/`error`). `HealthMonitor` was extended
+to track last-success/latency and to classify failures **by exception type,
+never message**, so a driver error embedding a host/username/password can never
+leak through the API — the raw error stays in stdout logs only, exactly like
+`/health`'s existing non-disclosure posture. Documented as QG-21 in
+`docs/THREAT_MODEL.md`. Covered by `tests/unit/test_health.py` (classification,
+latency/last-success tracking, message non-leakage),
+`tests/integration/test_admin_connections.py` (status derivation, sorting,
+raw-error/credential redaction, monitor-absent robustness), and
+`tests/security/test_adversarial_security.py` (scope enforcement).
+
+**Phase 2 (not started):** the rate-limited "test now" probe action (a manual,
+audited re-check using the same engine/timeout/TLS settings, still returning no
+connection string or raw driver text) and the browser workspace that renders
+this status view. Split out because the read API is independently useful
+(operators/monitoring can consume it directly) and the probe action introduces
+a new mutation-ish surface with its own rate-limiting and audit requirements.
+
+**Original scope (for reference — see above for what shipped in phase 1):**
 
 **Effort: L (3–5 days).** The aggregate readiness monitor already exists, but
 an admin surface needs a separately authorized detailed health model, safe
