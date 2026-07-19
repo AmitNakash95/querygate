@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette import status
 
 from querygate.api.admin_config_routes import build_admin_config_router
+from querygate.api.admin_ui_routes import build_admin_ui_router
 from querygate.api.auth import build_principal_dependency
 from querygate.api.catalog_governance_routes import build_catalog_governance_router
 from querygate.api.help_routes import build_help_router
@@ -128,6 +131,12 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
     application.include_router(
         build_catalog_governance_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
     )
+    application.include_router(
+        build_admin_ui_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
+    )
+
+    admin_ui_dir = Path(__file__).resolve().parent.parent / "admin_ui"
+    application.mount("/admin", StaticFiles(directory=admin_ui_dir, html=True), name="admin-ui")
 
     @application.middleware("http")
     async def inject_request_context(request: Request, call_next):
@@ -143,6 +152,16 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         finally:
             context_logger.reset(token)
         response.headers["X-Request-ID"] = request_id
+        if request.url.path == "/admin" or request.url.path.startswith("/admin/"):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self'; style-src 'self'; "
+                "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+                "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+            )
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            if request.url.path in {"/admin", "/admin/"}:
+                response.headers["Cache-Control"] = "no-store"
         return response
 
     @application.get("/health", tags=["health"])

@@ -6,6 +6,17 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- Browser admin control plane (TODO item 31) at `/admin/`, served by the
+  QueryGate process with no separate frontend runtime. It adds policy-filtered
+  schema review, a layered visual policy designer and active-policy
+  test-as-principal simulation, raw YAML editing with active/draft line diffs,
+  dry-run validation, immutable staging, typed-confirmation activation and
+  rollback, plus filtered/paginated browsing of the redaction-safe JSONL audit
+  stream. All config mutations reuse `/api/v1/admin/config/*`; the CLI/YAML
+  infrastructure-as-code path remains unchanged. New support APIs are gated by
+  the existing `admin:config:read`/`admin:config:write` split, mandatory-filter
+  values stay redacted, audit reads are memory-bounded, and the browser shell is
+  protected by a same-origin-only Content Security Policy and no-store HTML.
 - Governed semantic memory phase 32B-2, completing item 32B: connection-
   scoped export/import (`governance.export_connection`/`import_connection`,
   gated by one bidirectional `catalog:export` scope) serving both data

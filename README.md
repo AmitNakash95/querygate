@@ -339,6 +339,34 @@ version" always means something. Gated behind two scopes, matching the
 read/write split most admin APIs use: `admin:config:read` (list/inspect
 versions) and `admin:config:write` (validate/preview/stage/apply/rollback).
 
+### Browser admin control plane
+
+Start QueryGate and open [`http://localhost:8000/admin/`](http://localhost:8000/admin/).
+The page is served by the same process and talks only to same-origin QueryGate
+APIs; there is no separate frontend service or app-owned database. Authenticate
+with a bearer token carrying `admin:config:read` to inspect versions, browse the
+redaction-safe audit stream, and test the active policy as another principal.
+Add `admin:config:write` to edit policy/config documents, dry-run validation,
+stage a version, and activate or roll it back.
+
+The control plane provides:
+
+- policy-filtered connection, table, column, and catalog-sensitivity review;
+- a visual default/connection/principal policy designer plus raw YAML editing;
+- active-policy simulation for a target principal, table, columns, and scalar
+  claims, without executing a query or returning mandatory-filter values;
+- active-versus-draft document diffs, dry-run validation and redacted preview;
+- immutable version history with explicit activation and rollback confirmation;
+- filtered, newest-first browsing of persisted JSONL query/config/catalog audit
+  events (when `AUDIT_SINK_BACKEND=jsonl`).
+
+The UI does not create a second configuration path: every stage/apply/rollback
+still goes through the config-governance API described above, and
+`querygate-validate-config` plus file-based reloads remain supported for
+infrastructure-as-code deployments. A write-only principal can validate and
+stage submitted content but cannot use the UI to read the active documents;
+normal operation therefore grants both config scopes to the human admin role.
+
 ## Example schema catalog (optional)
 
 Raw reflection tells an agent that `customers.email` exists and is a
@@ -762,6 +790,9 @@ Agent (MCP) / Client (REST)
 - **`admin/`** — config-governance version store and orchestration: staging,
   applying, and rolling back connections/policy/catalog versions on top of
   `config_reload.py`'s existing swap mechanism.
+- **`admin_ui/`** — same-origin browser control plane for schema review, visual
+  policy design/simulation, config diffs, version activation/rollback, and
+  redaction-safe audit browsing; all mutations reuse `admin/`'s API workflow.
 - **`help/`** — packaged, versioned technical guide; deterministic offline
   search; config-field reference; caller-scoped access explanation; and
   redacted admin configuration summaries shared by REST and MCP.
