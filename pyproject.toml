@@ -58,6 +58,7 @@ pytest-cov = "6.0.0"
 cyclonedx-bom = "^7.3.0"
 pip-audit = "^2.10.1"
 aiosqlite = "^0.22.1"
+hypothesis = "^6.157.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

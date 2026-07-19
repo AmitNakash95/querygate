@@ -65,7 +65,7 @@ order-of-magnitude, not commitments.
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
 | 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
-| 36 | Extensive production-grade QA project / edge-case test suite | L | 15, 28 |
+| 36 | ✅ Extensive production-grade QA project / edge-case test suite (phase 1: policy-cap boundary tests + Hypothesis property-based compiler fuzzing; phase 2: cross-dialect differential tests + REST/MCP malformed-input fuzzing not started) | L | 15, 28 |
 | 37 | ✅ Automated end-to-end proof of adaptive semantic learning | M–L | 23, 25, 27, 28, 32B, 32C |
 | 38 | ✅ Admin UI catalog-governance workspace (phase 1: core review/approve/reject/publish/rollback loop; phase 2: bulk ops, export/import UI, generation triggers not started) | L | 27, 31, 32B |
 | 39 | ✅ Draft-aware policy simulation before staging | M–L | 6, 17, 25, 31 |
@@ -2398,7 +2398,43 @@ authorized it.
 
 ### 36. Extensive production-grade QA project / edge-case test suite
 
-**Effort: L (3–5 days).** Not a new subsystem, but a wide sweep across the
+**Phase 1 (policy-cap boundary tests + property-based compiler fuzzing) ✅
+DONE.** **Phase 2 (cross-dialect differential tests + REST/MCP
+malformed-input fuzzing) not started — split out below because it needs a
+live/mocked second-dialect comparison harness and a JSON-boundary fuzzing
+setup, not just more Hypothesis strategies on the existing compiler tests.**
+
+**Phase 1 shipped:** `tests/unit/test_policy_boundaries.py` proves the
+sharper boundary claim `tests/unit/test_policy_validation.py` didn't: for
+every cap `validate_policy` enforces (`max_joins`, `max_select_columns`,
+`max_group_by`, `max_where_depth`, `top_n.n`/`max_top_n`,
+`top_n.partition_by`/`max_partition_by`, `max_batch_size`), a query at
+exactly the configured limit passes and one unit past it is rejected — not
+just "some over-cap value fails." `max_top_n` and `max_partition_by` had no
+coverage at all before this file.
+
+`tests/unit/test_compiler_properties.py` adds Hypothesis property-based
+fuzzing of `compiler/sqlalchemy_compiler.py`: generated strategies produce
+many random-but-valid `StructuredQuery` combinations across three shapes
+(plain row-select with optional join/where/order_by, aggregate
+GROUP BY/HAVING, and `top_n` per-partition ranking over either shape) and
+assert the compiler never raises, always renders to valid SQL text (both the
+normal bind-parameterized form and the `literal_binds=True` form the
+audit/explain path uses), and always returns `limit >= 1`. A fourth property
+test proves a `MandatoryRowFilter` on the `from_table` survives every random
+shape — the multi-tenant isolation guarantee must never silently drop out
+for an AST combination hand-written tests didn't happen to construct. Added
+`hypothesis` as a dev dependency (`pyproject.toml`/`poetry.lock`).
+
+**Explicitly out of scope for this pass, tracked as phase 2:**
+cross-dialect differential tests (same AST compiled against Postgres and
+MSSQL, asserting equivalent semantics where the AST doesn't invoke
+dialect-specific behavior) and malformed-input fuzzing at the REST/MCP JSON
+boundary (wrong types, extra fields, deeply nested `where`, huge string
+literals — proving schema validation rejects cleanly rather than 500ing).
+
+**Effort: L (3–5 days) for the full item; phase 1 above was closer to a
+focused 1-day slice.** Not a new subsystem, but a wide sweep across the
 whole request pipeline: it touches `tests/unit/`, `tests/integration/`, and
 `tests/security/` all at once, plus potentially a new `tests/property/` or
 `tests/fuzz/` directory. Sizing is closer to item 15/28 (dedicated test
