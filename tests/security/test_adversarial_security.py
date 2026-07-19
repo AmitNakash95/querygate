@@ -854,3 +854,196 @@ def test_config_change_audit_event_never_carries_yaml_content_or_secrets():
         set(ConfigChangeEvent.model_fields) & {"connections_yaml", "policy_yaml", "catalog_yaml"}
         == set()
     )
+
+
+def _catalog_governance_app(tmp_path, *, scopes: list[str], monkeypatch) -> AppConfig:
+    """A minimal app wired for catalog-governance REST tests: a real
+    `demo` connection (for `_require_known_connection`) and a catalog file
+    with a persisted schema snapshot (so draft generation is possible).
+    """
+    monkeypatch.setenv("QG17_CATALOG_GOV_DB_URL", "postgresql+asyncpg://user:pass@localhost/x")
+    connections_file = tmp_path / "connections.yaml"
+    connections_file.write_text(
+        "connections:\n"
+        "  - id: demo\n"
+        "    dialect: postgresql\n"
+        "    connection_string: ${QG17_CATALOG_GOV_DB_URL}\n"
+        "    known_tables: [customers]\n"
+    )
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("default:\n  enabled: true\n")
+
+    metadata = sa.MetaData()
+    customers = sa.Table("customers", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    snapshot = ObservedSchemaSnapshot.from_tables("demo", [customers])
+    catalog_file = tmp_path / "catalog.yaml"
+    catalog_file.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "connections": {"demo": {"tables": {}}},
+                "schema_snapshots": {"demo": snapshot.model_dump(mode="json")},
+            }
+        )
+    )
+    return AppConfig(
+        environment="localhost",
+        mcp_enabled=False,
+        audit_sink_backend="none",
+        connections_file=str(connections_file),
+        policy_file=str(policy_file),
+        catalog_file=str(catalog_file),
+        api_keys=["catalog-governance-caller-key"],
+        api_key_scopes=scopes,
+    )
+
+
+@pytest.mark.asyncio
+async def test_catalog_governance_write_scopes_are_independent(tmp_path, monkeypatch):
+    """`catalog:review` alone must not let a caller edit, approve, reject,
+    publish, or roll back — each mutation requires its own least-privilege
+    scope, not a broad "catalog admin" grant.
+    """
+    app = create_app(
+        _catalog_governance_app(tmp_path, scopes=["catalog:review"], monkeypatch=monkeypatch)
+    )
+    headers = {"Authorization": "Bearer catalog-governance-caller-key"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        generate_resp = await client.post(
+            "/api/v1/admin/catalog/demo/generate-drafts",
+            json={
+                "batch": {
+                    "generation_id": "qg17-1",
+                    "connection_id": "demo",
+                    "schema_fingerprint": "sha256:" + "0" * 64,
+                    "suggestions": [
+                        {
+                            "target": {
+                                "connection_id": "demo",
+                                "object_type": "table",
+                                "table": "customers",
+                            },
+                            "content": {"description": "x"},
+                            "confidence": 0.5,
+                        }
+                    ],
+                }
+            },
+            headers=headers,
+        )
+        edit_resp = await client.patch(
+            "/api/v1/admin/catalog/demo/proposals/anything",
+            json={"content": {"description": "x"}},
+            headers=headers,
+        )
+        approve_resp = await client.post(
+            "/api/v1/admin/catalog/demo/proposals/anything/approve", headers=headers
+        )
+        reject_resp = await client.post(
+            "/api/v1/admin/catalog/demo/proposals/anything/reject",
+            json={"reason": "x"},
+            headers=headers,
+        )
+        publish_resp = await client.post(
+            "/api/v1/admin/catalog/demo/proposals/anything/publish", headers=headers
+        )
+        rollback_resp = await client.post(
+            "/api/v1/admin/catalog/demo/versions/1/rollback", headers=headers
+        )
+
+    assert generate_resp.status_code == 403
+    assert edit_resp.status_code == 403
+    assert approve_resp.status_code == 403
+    assert reject_resp.status_code == 403
+    assert publish_resp.status_code == 403
+    assert rollback_resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_catalog_governance_review_endpoints_require_review_scope(tmp_path, monkeypatch):
+    """A caller with only `catalog:publish` must not be able to browse the
+    review queue or version history — mutation privilege is not visibility.
+    """
+    app = create_app(
+        _catalog_governance_app(tmp_path, scopes=["catalog:publish"], monkeypatch=monkeypatch)
+    )
+    headers = {"Authorization": "Bearer catalog-governance-caller-key"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        list_resp = await client.get("/api/v1/admin/catalog/demo/proposals", headers=headers)
+        get_resp = await client.get("/api/v1/admin/catalog/demo/proposals/x", headers=headers)
+        versions_resp = await client.get("/api/v1/admin/catalog/demo/versions", headers=headers)
+        preview_resp = await client.get(
+            "/api/v1/admin/catalog/demo/proposals/x/preview",
+            params={"principal_subject": "s"},
+            headers=headers,
+        )
+
+    assert list_resp.status_code == 403
+    assert get_resp.status_code == 403
+    assert versions_resp.status_code == 403
+    assert preview_resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_catalog_governance_endpoints_reject_unauthenticated_callers(tmp_path, monkeypatch):
+    app = create_app(_catalog_governance_app(tmp_path, scopes=[], monkeypatch=monkeypatch))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        resp = await client.get("/api/v1/admin/catalog/demo/proposals")
+    assert resp.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_a_draft_proposal_cannot_publish_itself(tmp_path, monkeypatch):
+    """QG-17: only a proposal an authorized reviewer has explicitly approved
+    can be published — approve and publish are always two separate,
+    actor-attributed calls, never implicit in generation or review.
+    """
+    app = create_app(
+        _catalog_governance_app(
+            tmp_path,
+            scopes=["catalog:generate", "catalog:review", "catalog:publish"],
+            monkeypatch=monkeypatch,
+        )
+    )
+    headers = {"Authorization": "Bearer catalog-governance-caller-key"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        from querygate.catalog.schema_memory import ObservedSchemaSnapshot as _Snapshot
+
+        metadata = sa.MetaData()
+        customers = sa.Table("customers", metadata, sa.Column("id", sa.Integer, primary_key=True))
+        snapshot = _Snapshot.from_tables("demo", [customers])
+        gen_resp = await client.post(
+            "/api/v1/admin/catalog/demo/generate-drafts",
+            json={
+                "batch": {
+                    "generation_id": "qg17-2",
+                    "connection_id": "demo",
+                    "schema_fingerprint": snapshot.fingerprint,
+                    "suggestions": [
+                        {
+                            "target": {
+                                "connection_id": "demo",
+                                "object_type": "table",
+                                "table": "customers",
+                            },
+                            "content": {"description": "Never auto-verified."},
+                            "confidence": 0.5,
+                        }
+                    ],
+                }
+            },
+            headers=headers,
+        )
+        assert gen_resp.status_code == 201
+        list_resp = await client.get("/api/v1/admin/catalog/demo/proposals", headers=headers)
+        proposal_id = list_resp.json()[0]["proposal_id"]
+
+        publish_resp = await client.post(
+            f"/api/v1/admin/catalog/demo/proposals/{proposal_id}/publish", headers=headers
+        )
+        assert publish_resp.status_code == 409
+
+        search_resp = await client.get(
+            "/api/v1/demo/catalog/search", params={"q": "never auto-verified"}, headers=headers
+        )
+        assert search_resp.json()["results"] == []

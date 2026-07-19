@@ -7,7 +7,8 @@ validation, query compilation and execution, Redis concurrency coordination,
 configuration reload, the config-governance version store, secret
 resolution, versioned semantic-catalog provenance/schema fingerprints,
 manual-only draft quarantine, automatic schema refresh, policy-first catalog
-retrieval, and audit/log outputs in this repository.
+retrieval, the catalog-governance review/publish/rollback workflow, and
+audit/log outputs in this repository.
 
 This document explains what QueryGate is designed to defend, which controls
 exist in code, and which risks remain with the operator. It is not an external
@@ -78,6 +79,14 @@ Authenticated agent catalog search
         +-----> filter catalog entries + relationship endpoints
         +-----> tokenize/rank/count/budget the already-authorized view only
 
+Catalog-governance reviewer (catalog:review/edit/approve/reject/publish/rollback)
+        |
+        v
+catalog/governance.py — edit/approve/reject/publish/rollback state machine
+        |
+        +-----> catalog/repository.py (same CatalogFileRepository lock 32A uses)
+        +-----> audit trail (catalog.governance events)
+
 Operator semantic-memory pipeline (disabled by default)
         |
         +-----> bounded row-free schema reflection -> hashed snapshot/diff
@@ -104,6 +113,9 @@ trusted to return client-safe error messages.
 - Semantic-catalog provenance, verification state, schema fingerprints/diffs,
   quarantined draft proposals/generation records, and the confidentiality of
   policy-hidden entries during retrieval.
+- Catalog-governance review state and version history — every proposal's
+  review status/transitions and every publish/rollback's actor attribution
+  and durable record.
 - Principal identity, claims, scopes, and per-principal policy decisions.
 - Availability of QueryGate and the databases behind it.
 - Configuration integrity, particularly connection and policy changes.
@@ -152,6 +164,7 @@ CI/CD, and secrets-management controls.
 | QG-15 | A config-governance version that stops validating (e.g. an env var/Vault path it depends on disappears between staging and applying) gets silently activated anyway | `apply` re-validates a version's content immediately before activating it, regardless of whether it validated when staged; a failed re-validation leaves the active version and pointer untouched and is recorded as a rejected audit event | `test_apply_rejects_a_version_that_no_longer_validates`, `test_invalid_staged_version_is_rejected_not_silently_applied` |
 | QG-16 | Product-guide search, diagnostics, or caching disclose another principal's connections, policies, secret references, or hidden schema identifiers | Static search indexes only packaged public topics; live access context is authorized and assembled separately for each request; no live context cache exists; admin inspection requires `admin:config:read` and reconstructs an allowlisted redacted projection rather than filtering raw YAML afterward | `test_product_guide_security.py`, `test_redacted_configuration_excludes_secrets_policy_names_and_other_principals`, REST/MCP guide integration tests |
 | QG-17 | Semantic catalog poisoning, provider output, stale guidance, or search/ranking/count/relationship traversal discloses a policy-hidden table/column or changes enforcement | Every published entry has stable provenance, explicit status/confidence/schema freshness, and server-derived precedence; rejected/archived content is excluded and stale content is labeled; verified entries cannot be overwritten by lower-precedence proposals and merging cannot change sensitivity. Provider mode defaults to disabled and only strict offline manual imports exist: their schema-bound output is stored in a separate inferred-draft queue whose model has no policy/sensitivity/sampling fields and which retrieval never indexes. Row-free refresh atomically stales only affected entries/proposals, rebinds unaffected entries, and logs only failure types. Principal policy filters published candidates and both relationship columns before tokenization, ranking, counting, or byte budgeting, removing free-form fields that echo exact hidden identifiers; public citations hash evidence references and omit actor/model identities; schema snapshots contain structure and comment hashes, never rows or raw comments | `test_catalog_retrieval.py`, `test_schema_memory.py`, `test_catalog_generation.py`, `test_catalog_refresh.py`, `test_semantic_memory_benchmark.py`, `test_manual_provider_output_cannot_publish_itself_or_change_verified_content`, `test_schema_refresh_failure_log_never_copies_raw_driver_error`, REST/MCP catalog-search integration tests |
+| QG-18 | A caller with partial catalog-governance privilege publishes without authorized approval, silently overwrites already-verified content, or a rollback discards a change made after the one it targets (TODO item 32B-1) | Seven independent least-privilege scopes (`catalog:generate/review/edit/approve/reject/publish/rollback`) gate every mutation; none is implied by another. A proposal's `review_status` starts `pending` and can only reach `published` through a separate, actor-attributed `approved` transition — a draft can never publish itself, and repeated/out-of-order/invalid transitions fail with no partial mutation. Publishing an approved proposal onto a table/column/relationship that already carries different, human-verified content for the same field is always rejected as a reviewable conflict, never silently overwritten; a draft's content model has no sensitivity/sampling/policy/mandatory-filter field, so publication cannot touch any of those regardless of what is approved. Rollback is idempotent, refuses if the entry has changed since the targeted publish, and refuses a table-creation rollback while later publishes still depend on it. Every generation and state transition is a redaction-safe `catalog.governance` audit event (ids/actor/outcome only, never draft text or raw YAML) | `test_catalog_governance.py`, `test_catalog_governance_rest.py`, `test_catalog_governance_write_scopes_are_independent`, `test_catalog_governance_review_endpoints_require_review_scope`, `test_catalog_governance_endpoints_reject_unauthenticated_callers`, `test_a_draft_proposal_cannot_publish_itself` |
 
 ## 6. Error and data-disclosure policy
 
@@ -270,15 +283,21 @@ defaults.
   `querygate_concurrency_in_use`.
 - **Audit durability:** JSONL is not WORM storage, has no built-in retention or
   search, and sink failures do not fail an already-executed database query.
-- **Semantic memory phase 32A is complete, but 32B/32C are not:** provenance,
-  row-free automatic refresh/diffs, selective staleness, deterministic policy-
-  first retrieval, disabled/manual-only quarantined drafts, and the fixed
-  benchmark are present. There is no hosted/local model adapter, approval/
-  publication/history/rollback workflow, embedding index, or usage-learning
-  loop. Drafts therefore remain privileged unpublished records and cannot
-  reach agents. Schema freshness is `untracked` until a version-2 snapshot is
-  persisted; stale state never changes access or blocks ordinary schema/query
-  operations. Database comments remain only SHA-256 hashes in snapshots.
+- **Semantic memory phases 32A and 32B-1 are complete; 32B-2 and 32C are
+  not:** provenance, row-free automatic refresh/diffs, selective staleness,
+  deterministic policy-first retrieval, disabled/manual-only quarantined
+  drafts, the fixed benchmark, and a governed review/edit/approve/reject/
+  publish/rollback workflow with audit events and durable version history
+  are present. There is still no hosted/local model adapter, catalog
+  export/import/backup/restore/retention (32B-2), embedding index, or
+  usage-learning loop (32C). An unpublished draft remains a privileged,
+  non-agent-visible record regardless of review status; only an explicitly
+  published entry becomes agent-visible, and it is then filtered by policy
+  like every other catalog entry. Schema freshness is `untracked` until a
+  version-2 snapshot is persisted; stale state never changes access or
+  blocks ordinary schema/query operations. Database comments remain only
+  SHA-256 hashes in snapshots. Catalog version history has no retention/
+  deletion policy yet beyond a 2000-entry bound (32B-2).
 - **Operator compromise:** a host/config administrator can change policy,
   secrets, logs, or the running process; QueryGate does not defend against a
   fully compromised control plane.

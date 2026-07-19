@@ -6,6 +6,37 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- Governed semantic memory phase 32B-1: a deny-by-default review/publish/
+  rollback workflow for the quarantined inferred draft proposals 32A-2
+  generates. New `querygate/catalog/governance.py` implements an
+  actor-attributed proposal state machine (pending → approved/rejected,
+  approved → published), field-level edits while pending, bounded atomic
+  bulk approve/reject (max 50), and a test-as-principal publish preview that
+  never mutates the catalog. Publishing merges an approved proposal into a
+  real table/column/relationship entry using the 32A-1 precedence gate: an
+  existing verified field that would change is always a reviewable conflict
+  and blocks the entire publish, never silently overwritten, and a draft's
+  content model structurally cannot carry sensitivity, sampling, policy, or
+  mandatory-filter fields, so publishing can never touch any of those. Every
+  publish creates a durable, catalog-file-scoped version-history record
+  (metadata-only diffs on the list view, full before/after on request);
+  rollback reactivates a prior state and refuses if the entry has changed
+  since publish or a table-creation rollback would collaterally remove
+  columns/relationships added since. New REST surface under
+  `/api/v1/admin/catalog/{connection}/...` and `querygate-semantic-memory`
+  CLI subcommands (`list-proposals`, `show-proposal`, `edit-proposal`,
+  `approve-proposal`, `reject-proposal`, `publish-proposal`,
+  `preview-publish`, `list-versions`, `show-version`, `rollback-version`)
+  give both a privileged workflow without an admin UI, gated by seven new
+  least-privilege scopes (`catalog:generate/review/edit/approve/reject/
+  publish/rollback`). Every generation and state transition emits a
+  redaction-safe `catalog.governance` audit event (stable ids/actor/outcome
+  only, never draft text or raw YAML). All governance mutations go through
+  the same `CatalogFileRepository` lock and atomic write 32A already uses —
+  there is no second catalog file or mutation path. Export/import,
+  backup/restore, retention/deletion, and their `catalog:export`/
+  `catalog:delete` scopes are phase 32B-2, not yet started; 32C's adaptive
+  usage-learning loop has not begun.
 - Governed semantic memory phase 32A-1, extending the existing schema catalog
   to format version 2 with deterministic stable IDs and durable provenance on
   every table, column, and relationship. Provenance carries explicit source/

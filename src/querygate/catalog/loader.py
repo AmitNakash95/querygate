@@ -17,13 +17,22 @@ import yaml
 from querygate.catalog.models import (
     CatalogDraftProposal,
     CatalogGenerationRecord,
+    CatalogVersionRecord,
     SchemaCatalog,
     TableCatalogEntry,
 )
 from querygate.catalog.schema_memory import ObservedSchemaSnapshot
 
 
-def _stable_entry_id(*parts: str) -> str:
+def stable_entry_id(*parts: str) -> str:
+    """Deterministic id for a table/column/relationship catalog entry.
+
+    Public because `catalog/governance.py`'s publish step must mint the same
+    id shape a legacy-upgraded or freshly-created entry would get, so a
+    published entry and one authored directly in catalog.yaml are
+    indistinguishable to callers.
+    """
+
     identity = "\x1f".join(part.casefold() for part in parts)
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
     return f"urn:querygate:catalog:{digest}"
@@ -53,14 +62,14 @@ def _normalize_catalog(raw: dict) -> dict:
         for table_name, table in (connection.get("tables", {}) or {}).items():
             _bind_provenance(
                 table,
-                entry_id=_stable_entry_id(connection_id, "table", table_name),
+                entry_id=stable_entry_id(connection_id, "table", table_name),
                 catalog_version=version,
                 schema_fingerprint=schema_fingerprint,
             )
             for column_name, column in (table.get("columns", {}) or {}).items():
                 _bind_provenance(
                     column,
-                    entry_id=_stable_entry_id(
+                    entry_id=stable_entry_id(
                         connection_id, "table", table_name, "column", column_name
                     ),
                     catalog_version=version,
@@ -69,7 +78,7 @@ def _normalize_catalog(raw: dict) -> dict:
             for relationship in table.get("relationships", []) or []:
                 _bind_provenance(
                     relationship,
-                    entry_id=_stable_entry_id(
+                    entry_id=stable_entry_id(
                         connection_id,
                         "table",
                         table_name,
@@ -129,6 +138,35 @@ class CatalogStore:
     def get_generation_record(self, generation_id: str) -> Optional[CatalogGenerationRecord]:
         for record in self._catalog.generation_records:
             if record.generation_id == generation_id:
+                return record
+        return None
+
+    def get_draft_proposal(self, proposal_id: str) -> Optional[CatalogDraftProposal]:
+        for proposal in self._catalog.draft_proposals:
+            if proposal.proposal_id == proposal_id:
+                return proposal
+        return None
+
+    def iter_version_history(self, connection_id: str) -> Iterator[CatalogVersionRecord]:
+        """Newest-first version history for proposals published on this connection."""
+
+        proposal_connections = {
+            proposal.proposal_id: proposal.target.connection_id
+            for proposal in self._catalog.draft_proposals
+        }
+        for record in reversed(self._catalog.version_history):
+            source_proposal_id = record.proposal_id
+            if source_proposal_id is None and record.rolled_back_version_id is not None:
+                rolled_back = self.get_version_record(record.rolled_back_version_id)
+                source_proposal_id = rolled_back.proposal_id if rolled_back is not None else None
+            if source_proposal_id is None:
+                continue
+            if proposal_connections.get(source_proposal_id) == connection_id:
+                yield record
+
+    def get_version_record(self, version_id: str) -> Optional[CatalogVersionRecord]:
+        for record in self._catalog.version_history:
+            if record.version_id == version_id:
                 return record
         return None
 

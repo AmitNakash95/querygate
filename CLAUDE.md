@@ -93,11 +93,25 @@ schema-only fingerprints/diffs, compact policy-first retrieval, quarantined
 manual draft proposals, and opt-in schema refresh. Catalog search must filter
 tables, columns, and both relationship endpoints before tokenization/ranking/
 counting. Draft proposals stay separate from published entries and must never
-be indexed or merged without the later 32B review gate. Only `disabled` and
-offline `manual` provider modes exist; do not add network/provider execution
-to 32A. Refresh persists atomically and must stale only affected entries while
-remaining independent of query execution. The catalog is descriptive and
-must never become a query execution or row-value search path.
+be indexed or merged without going through the 32B-1 review gate
+(`catalog/governance.py`). Only `disabled` and offline `manual` provider
+modes exist; do not add network/provider execution to 32A. Refresh persists
+atomically and must stale only affected entries while remaining independent
+of query execution. The catalog is descriptive and must never become a
+query execution or row-value search path.
+
+32B-1 (governed review/edit/approve/reject/publish/rollback) is shipped —
+see TODO.md item 32 for the exact scope and `catalog/governance.py`'s
+module docstring. All governance mutations go through the same
+`CatalogFileRepository` lock as refresh/generation; do not add a second
+catalog file, database, or mutation path (in particular, do not route
+catalog content through `admin/store.ConfigVersionStore` — that store
+snapshots its own copy of catalog.yaml in `var/config_versions/`, which
+would silently diverge from the live `CATALOG_FILE` refresh/generate-drafts
+already write to). 32B-2 (export/import, backup/restore, retention/
+deletion) and 32C (adaptive usage learning) have not started; do not begin
+32C work until 32B-2 is either shipped or explicitly deferred again with
+the same rationale documented in TODO.md.
 
 **Security invariant**: `connections/models.py` splits `ConnectionProfile`
 (carries the real connection string, resolved from `${ENV_VAR}` in the YAML

@@ -61,7 +61,7 @@ order-of-magnitude, not commitments.
 | 29 | ✅ Production deployment reference stack | M | 4, 9, 12, 13, 14 |
 | 30 | ✅ Distribution, SBOM, and signed release artifacts (phase 1: SBOM + audit; phase 2: publishing + signing not started) | M | 4, 14 |
 | 31 | Admin UI / policy designer | XL | 25 |
-| 32 | Governed adaptive semantic memory for agents (32A ✅; 32B/32C not started) | XL | 23, 25, 27, 28 |
+| 32 | Governed adaptive semantic memory for agents (32A ✅; 32B-1 ✅; 32B-2/32C not started) | XL | 23, 25, 27, 28 |
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
 | 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
@@ -1775,6 +1775,99 @@ phase 3 answers the rest.
 
 ### 32. Governed adaptive semantic memory for agents
 
+**32B-1 shipped — governed review, edit, approve/reject, publish, and
+rollback.** This is the first independently deployable slice of 32B, built
+entirely on 32A's existing `querygate/catalog/` models, `CatalogStore`, and
+`CatalogFileRepository` — no second catalog file, database, or mutation
+path:
+
+- `catalog/governance.py` implements a deny-by-default proposal state
+  machine (`pending` → `approved`/`rejected`, `approved` → `published`)
+  with actor attribution, timestamps, and a full per-proposal
+  `review_history`. Every transition is validated against the proposal's
+  current state; invalid, repeated, or out-of-order transitions (approving
+  twice, rejecting a published proposal, editing after approval) fail with
+  a `CatalogGovernanceError` and mutate nothing. Rejection requires a
+  non-empty reason. Bulk approve/bulk-reject are bounded to 50 ids per call
+  and validate every id before mutating any of them — a single invalid id
+  fails the whole batch atomically.
+- Publishing merges an *approved* proposal's content into a real table/
+  column/relationship catalog entry using 32A-1's own precedence gate
+  (`replacement_decision`), plus one additional 32B-specific rule:
+  publication never silently overwrites a field that already carries
+  human-verified content and differs from the proposal — that is always a
+  reviewable conflict, and the entire publish is rejected with the
+  conflicting field names, mutating nothing. A draft's content model
+  (`CatalogDraftContent`) has no `sensitivity`/`allow_samples`/policy/
+  mandatory-filter field at all, so publication structurally cannot touch
+  connection access, mandatory row filters, or sensitivity labels regardless
+  of what a reviewer approves. A stale proposal (schema drift since
+  generation, per 32A-2's refresh) cannot be approved or published.
+- `governance.preview_publish` is a read-only, test-as-principal dry run:
+  it resolves the target table/column/relationship's visibility under a
+  given principal's policy exactly like `describe_table` does, and reports
+  whether the object would even be visible and whether publishing would
+  conflict — without persisting anything.
+- Every publish creates a durable `CatalogVersionRecord` inside the same
+  catalog store (`SchemaCatalog.version_history`, bounded to 2000 entries):
+  actor, timestamp, the proposal that produced it, and a metadata-only
+  change description (which table/column/relationship, which field names
+  changed) with full before/after content available on request. Rollback
+  reactivates a prior version — restoring changed fields to their prior
+  value, or removing an entry this publish created — and is authorized,
+  idempotent (a version can't be rolled back twice), and safety-checked: it
+  refuses if the entry has changed since this publish (someone else
+  changed it in the meantime) or if rolling back a table's *creation* would
+  collaterally remove columns/relationships a *later* publish added to that
+  same table. Rollback never restores or exposes secrets, row data,
+  provider payloads, or query literals — the version record structurally
+  cannot contain any of those, the same way a draft proposal can't.
+- New REST surface, `api/catalog_governance_routes.py`, under
+  `/api/v1/admin/catalog/{connection}/...`: generate-drafts (a REST
+  equivalent of the CLI's manual batch import), list/get/edit/approve/
+  reject/publish/preview proposals, bulk-approve/bulk-reject, and list/get/
+  rollback versions. Seven new least-privilege scopes gate it —
+  `catalog:generate`, `catalog:review` (read), `catalog:edit`,
+  `catalog:approve`, `catalog:reject`, `catalog:publish`,
+  `catalog:rollback` — none of them implied by any other, matching the
+  read/write scope-separation pattern item 25's config-governance API
+  already established. Agent-facing catalog retrieval (`GET
+  /{connection}/catalog/search`, `describe_table`) is entirely unchanged by
+  this item: proposals are never indexed or returned to agents regardless
+  of review status, only a `published` entry (which is now a real, verified
+  catalog entry) becomes visible, filtered by the same policy as everything
+  else.
+- `querygate-semantic-memory` gained matching CLI subcommands
+  (`list-proposals`, `show-proposal`, `edit-proposal`, `approve-proposal`,
+  `reject-proposal`, `publish-proposal`, `preview-publish`, `list-versions`,
+  `show-version`, `rollback-version`), so the full workflow works without
+  an admin UI over either surface.
+- Every generation and state transition emits a new redaction-safe
+  `catalog.governance` audit event (`audit/events.py`'s
+  `CatalogGovernanceEvent`, persisted through the same sink as query and
+  config-governance events) — action, connection/proposal/version ids,
+  actor, scopes, outcome, duration; never draft text, descriptions,
+  aliases, or raw catalog YAML.
+
+Covered by `tests/unit/test_catalog_governance.py` (state machine, merge/
+conflict detection, staleness gating, rollback safety checks, and a
+full generate→approve→publish→rollback lifecycle through the real
+`CatalogFileRepository` lock), `tests/unit/test_catalog_cli.py` (CLI
+lifecycle + error mapping), `tests/integration/test_catalog_governance_rest.py`
+(full REST lifecycle, bulk-reject atomicity, unknown connection/proposal
+404s), and new adversarial tests in
+`tests/security/test_adversarial_security.py` (each write scope is
+independent of every other; `catalog:review` alone cannot mutate anything;
+unauthenticated callers are rejected; a proposal cannot publish itself
+before an explicit, separately-scoped approval).
+
+**Explicitly out of scope for this pass, and not silently dropped — see
+32B-2 below:** export/import, backup/restore, retention/deletion of catalog
+governance records, and their `catalog:export`/`catalog:delete` scopes.
+32C's adaptive usage-learning loop has not started, and 32C must not begin
+until 32B-2 either ships or is deliberately deferred with the same
+explicitness as this note.
+
 **32A-1 shipped — durable provenance, schema fingerprints/diffs, and
 policy-first retrieval.** This is an independently deployable first slice of
 32A, deliberately built by versioning/extending item 27's existing
@@ -2070,15 +2163,23 @@ injecting an ever-growing document into every prompt.
    manual-only provider contract, quarantined generated drafts, bounded opt-in
    schema refresh with selective stale marking, and a fixed-threshold versioned
    benchmark. No hosted/live provider integration or publication path.
-3. **32B — Governed publishing:** integrate item 25's scopes, review/publish/
-   reject workflows, version history, rollback, audit events, provider privacy
-   controls, and schema-change invalidation.
-4. **32C — Adaptive learning and hardening:** add redaction-safe usage signals,
-   feedback/correction proposals, confidence/decay/conflict rules, background-
-   job resilience, full observability, adversarial coverage, and load tests.
+3. **32B-1 — Governed review, edit, approve/reject, publish, and rollback
+   ✅ DONE:** deny-by-default proposal state machine, precedence-gated
+   publish with reviewable-conflict detection, durable version history +
+   authorized rollback, REST + CLI surfaces, seven least-privilege scopes,
+   and redaction-safe audit events. See the shipped note above.
+4. **32B-2 — Catalog-governance lifecycle (not started):** export/import,
+   backup/restore, retention/deletion of proposals and version history, and
+   the `catalog:export`/`catalog:delete` scopes 32B-1 deliberately left
+   unimplemented rather than half-built.
+5. **32C — Adaptive learning and hardening (not started, blocked on 32B-2):**
+   add redaction-safe usage signals, feedback/correction proposals,
+   confidence/decay/conflict rules, background-job resilience, full
+   observability, adversarial coverage, and load tests.
 
 Each phase must be independently deployable and fail safely. Generated or
-learned content remains opt-in until 32B governance exists.
+learned content remains opt-in until its governed publish path (32B-1) has
+authorized it.
 
 #### Definition of done
 
