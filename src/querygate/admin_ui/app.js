@@ -53,6 +53,7 @@
     catalogProposals: [],
     catalogVersions: [],
     selectedProposalId: null,
+    currentProposal: null,
     publishedComparison: null,
   };
 
@@ -731,7 +732,7 @@
   }
 
   function selectedProposal() {
-    return state.catalogProposals.find((item) => item.proposal_id === state.selectedProposalId) || null;
+    return state.currentProposal;
   }
 
   function proposalTargetLabel(target) {
@@ -757,19 +758,27 @@
 
   function resetProposalSelection() {
     state.selectedProposalId = null;
+    state.currentProposal = null;
     state.publishedComparison = null;
     $("#proposal-empty").hidden = false;
     $("#proposal-content").hidden = true;
   }
 
   async function loadCatalogProposals() {
+    // Deliberately does not reset the open detail panel — the currently
+    // selected proposal may no longer match the status filter after a
+    // mutation (e.g. it moves from pending to approved) without that being
+    // a reason to close the panel out from under the reviewer mid-review.
+    // Callers that want a reset (switching connection/filter) call
+    // resetProposalSelection() themselves first.
     const connection = $("#catalog-connection").value;
-    resetProposalSelection();
     if (!connection) {
+      state.catalogProposals = [];
       $("#proposal-list").innerHTML = '<p class="empty-state">Select a connection to load proposals.</p>';
       return;
     }
     if (!hasScope("catalog:review")) {
+      state.catalogProposals = [];
       $("#proposal-list").innerHTML = '<p class="empty-state">Connect with catalog:review to load proposals.</p>';
       return;
     }
@@ -840,11 +849,14 @@
     }
   }
 
-  function selectProposal(proposalId) {
-    state.selectedProposalId = proposalId;
-    const proposal = selectedProposal();
-    if (!proposal) return;
-    renderProposalList();
+  function renderProposalDetail(proposal) {
+    // Renders from a proposal object directly rather than looking it up in
+    // state.catalogProposals — a proposal legitimately stops matching the
+    // current status/source/object-type filter the moment its own review
+    // action changes it (e.g. approve moves it out of a "pending" filter),
+    // and that must not close the panel the reviewer is actively using.
+    state.currentProposal = proposal;
+    state.selectedProposalId = proposal.proposal_id;
     $("#proposal-empty").hidden = true;
     $("#proposal-content").hidden = false;
     $("#proposal-kicker").textContent = `${proposal.target.connection_id} / ${proposal.target.object_type}`;
@@ -879,11 +891,29 @@
     loadPublishedComparison(proposal);
   }
 
+  function selectProposal(proposalId) {
+    const proposal = state.catalogProposals.find((item) => item.proposal_id === proposalId);
+    if (!proposal) return;
+    renderProposalDetail(proposal);
+    renderProposalList();
+  }
+
   async function refreshSelectedProposalAfterMutation() {
+    const connection = $("#catalog-connection").value;
     const previouslySelected = state.selectedProposalId;
     await loadCatalogProposals();
-    if (previouslySelected && state.catalogProposals.some((p) => p.proposal_id === previouslySelected)) {
-      selectProposal(previouslySelected);
+    if (!previouslySelected) return;
+    try {
+      const proposal = await api(
+        `/admin/catalog/${encodeURIComponent(connection)}/proposals/${encodeURIComponent(previouslySelected)}`
+      );
+      renderProposalDetail(proposal);
+      renderProposalList();
+    } catch (error) {
+      // The proposal was deleted, or the connection changed underneath the
+      // panel — fall back to closing it rather than showing stale content.
+      resetProposalSelection();
+      toast(error.message, "bad");
     }
   }
 
@@ -1211,8 +1241,8 @@
     $("#audit-filters").addEventListener("submit", (event) => { event.preventDefault(); loadAudit(false); });
     $("#refresh-audit").addEventListener("click", () => loadAudit(false));
     $("#audit-more").addEventListener("click", () => loadAudit(true));
-    $("#catalog-connection").addEventListener("change", () => { loadCatalogProposals(); loadCatalogVersions(); });
-    $("#catalog-status-filter").addEventListener("change", loadCatalogProposals);
+    $("#catalog-connection").addEventListener("change", () => { resetProposalSelection(); loadCatalogProposals(); loadCatalogVersions(); });
+    $("#catalog-status-filter").addEventListener("change", () => { resetProposalSelection(); loadCatalogProposals(); });
     $("#catalog-source-filter").addEventListener("change", renderProposalList);
     $("#catalog-object-filter").addEventListener("change", renderProposalList);
     $("#catalog-filters").addEventListener("submit", (event) => event.preventDefault());
