@@ -4,30 +4,32 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Iterable, Literal, Optional
+from typing import Annotated, Any, Iterable, Literal, Optional
 
 import pydantic as pyd
 import sqlalchemy as sa
 
 
 class ObservedForeignKey(pyd.BaseModel):
-    column: str
-    to_table: str
-    to_column: str
+    column: Annotated[str, pyd.StringConstraints(min_length=1, max_length=256)]
+    to_table: Annotated[str, pyd.StringConstraints(min_length=1, max_length=256)]
+    to_column: Annotated[str, pyd.StringConstraints(min_length=1, max_length=256)]
 
     model_config = pyd.ConfigDict(extra="forbid", frozen=True)
 
 
 class ObservedIndex(pyd.BaseModel):
-    columns: tuple[str, ...]
+    columns: tuple[Annotated[str, pyd.StringConstraints(min_length=1, max_length=256)], ...] = (
+        pyd.Field(min_length=1, max_length=2000)
+    )
     unique: bool = False
 
     model_config = pyd.ConfigDict(extra="forbid", frozen=True)
 
 
 class ObservedColumn(pyd.BaseModel):
-    name: str
-    data_type: str
+    name: Annotated[str, pyd.StringConstraints(min_length=1, max_length=256)]
+    data_type: Annotated[str, pyd.StringConstraints(min_length=1, max_length=1000)]
     nullable: bool
     primary_key: bool = False
     comment_fingerprint: Optional[str] = None
@@ -36,13 +38,20 @@ class ObservedColumn(pyd.BaseModel):
 
 
 class ObservedTable(pyd.BaseModel):
-    name: str
-    columns: tuple[ObservedColumn, ...]
-    foreign_keys: tuple[ObservedForeignKey, ...] = ()
-    indexes: tuple[ObservedIndex, ...] = ()
+    name: Annotated[str, pyd.StringConstraints(min_length=1, max_length=256)]
+    columns: tuple[ObservedColumn, ...] = pyd.Field(max_length=2000)
+    foreign_keys: tuple[ObservedForeignKey, ...] = pyd.Field(default=(), max_length=4000)
+    indexes: tuple[ObservedIndex, ...] = pyd.Field(default=(), max_length=2000)
     comment_fingerprint: Optional[str] = None
 
     model_config = pyd.ConfigDict(extra="forbid", frozen=True)
+
+    @pyd.model_validator(mode="after")
+    def _identities_are_unique(self) -> "ObservedTable":
+        column_names = [column.name.casefold() for column in self.columns]
+        if len(column_names) != len(set(column_names)):
+            raise ValueError("observed column names must be unique case-insensitively")
+        return self
 
 
 def _text_fingerprint(value: Optional[str]) -> Optional[str]:
@@ -68,14 +77,17 @@ class ObservedSchemaSnapshot(pyd.BaseModel):
     """A durable schema-only snapshot. Comments are retained only as hashes."""
 
     format_version: Literal[1] = 1
-    connection_id: str
-    tables: tuple[ObservedTable, ...] = ()
+    connection_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=100)]
+    tables: tuple[ObservedTable, ...] = pyd.Field(default=(), max_length=5000)
     fingerprint: str = ""
 
     model_config = pyd.ConfigDict(extra="forbid", frozen=True)
 
     @pyd.model_validator(mode="after")
     def _verify_fingerprint(self) -> "ObservedSchemaSnapshot":
+        table_names = [table.name.casefold() for table in self.tables]
+        if len(table_names) != len(set(table_names)):
+            raise ValueError("observed table names must be unique case-insensitively")
         expected = _payload_fingerprint(_canonical_payload(self.connection_id, self.tables))
         if self.fingerprint and self.fingerprint != expected:
             raise ValueError("schema snapshot fingerprint does not match its canonical content")

@@ -43,6 +43,12 @@ class CatalogEntryStatus(StrEnum):
     ARCHIVED = "archived"
 
 
+class CatalogDraftObjectType(StrEnum):
+    TABLE = "table"
+    COLUMN = "column"
+    RELATIONSHIP = "relationship"
+
+
 class CatalogEvidenceKind(StrEnum):
     MANUAL = "manual"
     SCHEMA = "schema"
@@ -176,13 +182,13 @@ def replacement_decision(
     field_name: str,
     value_changes: bool = True,
 ) -> ReplacementDecision:
-    """Return the deterministic gate a future regeneration merge must use.
+    """Return the deterministic gate a governed publication merge must use.
 
-    This phase has no generator and performs no automatic merge.  Defining
-    and testing the gate now prevents the later provider work from inventing
-    ad-hoc rules that can overwrite verified fields.  Sensitivity labels are
-    immutable through this gate regardless of source precedence; changing one
-    remains an explicit manually governed catalog edit.
+    Generated proposals are stored separately and never call this gate on
+    their own.  A later review/publish workflow must use it rather than
+    inventing ad-hoc rules that can overwrite verified fields. Sensitivity
+    labels are immutable through this gate regardless of source precedence;
+    changing one remains an explicit manually governed catalog edit.
     """
 
     if not value_changes:
@@ -320,19 +326,140 @@ class ConnectionCatalog(pyd.BaseModel):
         return None
 
 
+class CatalogDraftTarget(pyd.BaseModel):
+    """Exact schema object a quarantined proposal describes."""
+
+    connection_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=100)]
+    object_type: CatalogDraftObjectType
+    table: Annotated[str, pyd.StringConstraints(min_length=1, max_length=128)]
+    column: Optional[Annotated[str, pyd.StringConstraints(min_length=1, max_length=128)]] = None
+    to_table: Optional[Annotated[str, pyd.StringConstraints(min_length=1, max_length=128)]] = None
+    to_column: Optional[Annotated[str, pyd.StringConstraints(min_length=1, max_length=128)]] = None
+
+    model_config = pyd.ConfigDict(extra="forbid", frozen=True)
+
+    @pyd.model_validator(mode="after")
+    def _validate_target_shape(self) -> "CatalogDraftTarget":
+        if self.object_type == CatalogDraftObjectType.TABLE:
+            if any((self.column, self.to_table, self.to_column)):
+                raise ValueError("table draft targets cannot include column or relationship fields")
+        elif self.object_type == CatalogDraftObjectType.COLUMN:
+            if self.column is None or self.to_table is not None or self.to_column is not None:
+                raise ValueError("column draft targets require only column")
+        elif self.column is None or self.to_table is None or self.to_column is None:
+            raise ValueError("relationship draft targets require column, to_table, and to_column")
+        return self
+
+
+_DraftText = Annotated[str, pyd.StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+class CatalogDraftContent(pyd.BaseModel):
+    """Semantic fields a provider may propose; enforcement fields are absent."""
+
+    description: Optional[Annotated[_DraftText, pyd.StringConstraints(max_length=2000)]] = None
+    aliases: list[Annotated[_DraftText, pyd.StringConstraints(max_length=100)]] = pyd.Field(
+        default_factory=list, max_length=20
+    )
+    default_aggregation: Optional[Annotated[_DraftText, pyd.StringConstraints(max_length=500)]] = (
+        None
+    )
+
+    model_config = pyd.ConfigDict(extra="forbid", frozen=True)
+
+    @pyd.model_validator(mode="after")
+    def _not_empty(self) -> "CatalogDraftContent":
+        if self.description is None and not self.aliases and self.default_aggregation is None:
+            raise ValueError("catalog draft content must propose at least one semantic field")
+        if len({alias.casefold() for alias in self.aliases}) != len(self.aliases):
+            raise ValueError("catalog draft aliases must be unique case-insensitively")
+        return self
+
+
+class CatalogDraftProposal(pyd.BaseModel):
+    """A durable, non-agent-visible proposal awaiting future 32B review."""
+
+    proposal_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=160)]
+    generation_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=120)]
+    target: CatalogDraftTarget
+    content: CatalogDraftContent
+    provenance: CatalogEntryProvenance
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _quarantine_inferred_content(self) -> "CatalogDraftProposal":
+        if self.provenance.entry_id != self.proposal_id:
+            raise ValueError("draft proposal_id must equal its provenance entry_id")
+        if self.provenance.source_class != KnowledgeSourceClass.INFERRED:
+            raise ValueError("generated catalog proposals must remain inferred")
+        if self.provenance.status not in {
+            CatalogEntryStatus.DRAFT,
+            CatalogEntryStatus.STALE,
+        }:
+            raise ValueError("generated catalog proposals must remain draft or stale")
+        if self.target.object_type != CatalogDraftObjectType.TABLE and (
+            self.content.default_aggregation is not None
+        ):
+            raise ValueError("default_aggregation may only be proposed for a table")
+        if self.target.object_type == CatalogDraftObjectType.RELATIONSHIP and self.content.aliases:
+            raise ValueError("relationship proposals cannot define aliases")
+        return self
+
+
+class CatalogGenerationRecord(pyd.BaseModel):
+    """Idempotency/provenance record without provider payload or draft text."""
+
+    generation_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=120)]
+    connection_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=100)]
+    provider_mode: Literal["manual"] = "manual"
+    provider_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=160)]
+    prompt_template_version: Annotated[str, pyd.StringConstraints(min_length=1, max_length=80)]
+    schema_fingerprint: Annotated[str, pyd.StringConstraints(min_length=1, max_length=80)]
+    input_fingerprint: Annotated[str, pyd.StringConstraints(min_length=71, max_length=71)]
+    proposal_ids: list[Annotated[str, pyd.StringConstraints(min_length=1, max_length=160)]] = (
+        pyd.Field(default_factory=list, max_length=200)
+    )
+    created_by: Optional[Annotated[str, pyd.StringConstraints(min_length=1, max_length=160)]] = None
+    created_at: Optional[pyd.AwareDatetime] = None
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    @pyd.field_validator("input_fingerprint")
+    @classmethod
+    def _sha256_fingerprint(cls, value: str) -> str:
+        if not value.startswith("sha256:") or any(
+            character not in "0123456789abcdef" for character in value[7:]
+        ):
+            raise ValueError("generation input_fingerprint must be a lowercase SHA-256 digest")
+        return value
+
+    @pyd.model_validator(mode="after")
+    def _proposal_ids_are_unique(self) -> "CatalogGenerationRecord":
+        if len(self.proposal_ids) != len(set(self.proposal_ids)):
+            raise ValueError("generation proposal ids must be unique")
+        return self
+
+
 class SchemaCatalog(pyd.BaseModel):
     # Version 1 remains accepted.  CatalogStore upgrades its entries in
     # memory with deterministic provenance; new files should use version 2.
     version: Literal[1, 2] = 2
     connections: dict[str, ConnectionCatalog] = pyd.Field(default_factory=dict)
     schema_snapshots: dict[str, ObservedSchemaSnapshot] = pyd.Field(default_factory=dict)
+    draft_proposals: list[CatalogDraftProposal] = pyd.Field(default_factory=list)
+    generation_records: list[CatalogGenerationRecord] = pyd.Field(default_factory=list)
 
     model_config = pyd.ConfigDict(extra="forbid")
 
     @pyd.model_validator(mode="after")
     def _snapshot_keys_match_connections(self) -> "SchemaCatalog":
-        if self.version == 1 and self.schema_snapshots:
-            raise ValueError("schema_snapshots require catalog version 2")
+        if self.version == 1 and (
+            self.schema_snapshots or self.draft_proposals or self.generation_records
+        ):
+            raise ValueError(
+                "schema snapshots and semantic-memory records require catalog version 2"
+            )
         for connection_id, snapshot in self.schema_snapshots.items():
             if connection_id != snapshot.connection_id:
                 raise ValueError(
@@ -347,11 +474,35 @@ class SchemaCatalog(pyd.BaseModel):
                 entry_ids.extend(
                     relationship.provenance.entry_id for relationship in table.relationships
                 )
+        entry_ids.extend(proposal.provenance.entry_id for proposal in self.draft_proposals)
         bound_ids = [
             entry_id for entry_id in entry_ids if entry_id != "urn:querygate:catalog:unbound"
         ]
         if len(bound_ids) != len(set(bound_ids)):
             raise ValueError("catalog entry ids must be unique")
+        proposal_ids = [proposal.proposal_id for proposal in self.draft_proposals]
+        if len(proposal_ids) != len(set(proposal_ids)):
+            raise ValueError("catalog draft proposal ids must be unique")
+        generation_ids = [record.generation_id for record in self.generation_records]
+        if len(generation_ids) != len(set(generation_ids)):
+            raise ValueError("catalog generation ids must be unique")
+        proposal_id_set = set(proposal_ids)
+        proposals_by_id = {proposal.proposal_id: proposal for proposal in self.draft_proposals}
+        for record in self.generation_records:
+            if not set(record.proposal_ids).issubset(proposal_id_set):
+                raise ValueError("catalog generation records must reference existing proposals")
+            if any(
+                proposals_by_id[proposal_id].generation_id != record.generation_id
+                for proposal_id in record.proposal_ids
+            ):
+                raise ValueError("catalog generation records cannot claim another run's proposal")
+        generation_id_set = set(generation_ids)
+        records_by_id = {record.generation_id: record for record in self.generation_records}
+        for proposal in self.draft_proposals:
+            if proposal.generation_id not in generation_id_set:
+                raise ValueError("catalog draft proposals require a generation record")
+            if proposal.proposal_id not in records_by_id[proposal.generation_id].proposal_ids:
+                raise ValueError("catalog generation record must include each of its proposals")
         return self
 
 

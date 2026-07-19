@@ -44,9 +44,10 @@ make release-check
 
 It verifies the lock file and release metadata, rejects generated or legacy product files,
 checks formatting, runs the default test suite, validates bundled configuration from the
-installed CLI path, builds both wheel and source distribution into `dist/`, inspects
-their members for generated, secret, archived, or test-only files, and generates a
-software bill of materials and dependency vulnerability report (below).
+installed CLI path, runs the fixed-threshold offline semantic-memory benchmark, builds
+both wheel and source distribution into `dist/`, inspects their members for generated,
+secret, archived, or test-only files, and generates a software bill of materials and
+dependency vulnerability report (below).
 
 Then run the container/infrastructure gate:
 

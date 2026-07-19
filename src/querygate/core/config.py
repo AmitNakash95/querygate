@@ -16,6 +16,7 @@ import pydantic as pyd
 from pydantic_settings import BaseSettings
 
 from querygate import __version__
+from querygate.catalog.providers import SemanticMemoryProviderMode
 
 
 class ConcurrencyBackend(str, Enum):
@@ -81,6 +82,17 @@ class AppConfig(BaseSettings):
     # into describe_table. Unset by default: a deployment with no curated
     # catalog behaves identically, just without the extra `catalog` field.
     catalog_file: Optional[str] = pyd.Field(default=None)
+
+    # Governed semantic-memory enrichment (catalog/). Provider execution is
+    # deliberately limited to disabled/manual-only in 32A-2; no networked
+    # provider implementation is shipped. Row-free schema refresh is a
+    # separate opt-in background task and never runs on the query path.
+    semantic_memory_provider: SemanticMemoryProviderMode = pyd.Field(
+        default=SemanticMemoryProviderMode.DISABLED
+    )
+    semantic_memory_refresh_enabled: bool = pyd.Field(default=False)
+    semantic_memory_refresh_interval_seconds: float = pyd.Field(default=300, gt=0)
+    semantic_memory_refresh_max_tables: int = pyd.Field(default=500, ge=1, le=5000)
 
     # REST and MCP share one API-key authenticator (see core/auth.py). Both
     # allow an anonymous dev-bypass outside production when no keys are set.
@@ -216,6 +228,8 @@ class AppConfig(BaseSettings):
             raise ValueError("VAULT_ADDR must be set when VAULT_ENABLED=true")
         if self.vault_enabled and not self.vault_token:
             raise ValueError("VAULT_TOKEN must be set when VAULT_ENABLED=true")
+        if self.semantic_memory_refresh_enabled and not self.catalog_file:
+            raise ValueError("CATALOG_FILE must be set when SEMANTIC_MEMORY_REFRESH_ENABLED=true")
         return self
 
     @property

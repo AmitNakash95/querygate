@@ -19,6 +19,11 @@
 # manually verified catalog.yaml content; the loader fills stable ids and the
 # catalog version. The explicit block below shows the shape. Version-1 files
 # remain valid.
+#
+# With SEMANTIC_MEMORY_REFRESH_ENABLED=true this file must be writable and
+# persistent. QueryGate atomically maintains `schema_snapshots`, quarantined
+# `draft_proposals`, and metadata-only `generation_records`; do not copy draft
+# fields into published table/column entries to bypass future review.
 
 version: 2
 

@@ -47,6 +47,7 @@ def main() -> None:
         "examples/connections.example.yaml",
         "examples/policy.example.yaml",
         "examples/catalog.example.yaml",
+        "examples/catalog_drafts.example.yaml",
         "querygate/help/content/manifest.yaml",
         "querygate/help/content/architecture.md",
         "querygate/help/content/authentication.md",
@@ -58,6 +59,7 @@ def main() -> None:
         "querygate/help/content/observability.md",
         "querygate/help/content/troubleshooting.md",
         "querygate/help/content/upgrades.md",
+        "querygate/catalog/benchmark_data/semantic_memory_v1.yaml",
     }
     absent = sorted(required_wheel - set(wheel_members))
     if absent:

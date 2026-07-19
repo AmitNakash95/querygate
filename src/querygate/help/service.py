@@ -84,6 +84,20 @@ _FIELD_DESCRIPTIONS = {
     ("app", "config_governance_dir"): (
         "Directory containing immutable staged configuration versions and the active pointer."
     ),
+    ("app", "semantic_memory_provider"): (
+        "Semantic draft provider mode. Defaults to disabled; 32A also supports only strict "
+        "offline manual imports and has no networked model adapter."
+    ),
+    ("app", "semantic_memory_refresh_enabled"): (
+        "Starts opt-in background row-free schema refresh. Requires a writable persistent "
+        "catalog file and never runs on the query request path."
+    ),
+    ("app", "semantic_memory_refresh_interval_seconds"): (
+        "Seconds between schema refresh scans for each enabled connection."
+    ),
+    ("app", "semantic_memory_refresh_max_tables"): (
+        "Hard per-connection table bound for one schema refresh scan."
+    ),
 }
 
 _SENSITIVE_FIELDS = {

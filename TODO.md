@@ -61,7 +61,7 @@ order-of-magnitude, not commitments.
 | 29 | ✅ Production deployment reference stack | M | 4, 9, 12, 13, 14 |
 | 30 | ✅ Distribution, SBOM, and signed release artifacts (phase 1: SBOM + audit; phase 2: publishing + signing not started) | M | 4, 14 |
 | 31 | Admin UI / policy designer | XL | 25 |
-| 32 | Governed adaptive semantic memory for agents (32A-1 ✅; 32A-2/32B/32C not started) | XL | 23, 25, 27, 28 |
+| 32 | Governed adaptive semantic memory for agents (32A ✅; 32B/32C not started) | XL | 23, 25, 27, 28 |
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
 | 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
@@ -1788,9 +1788,10 @@ policy-first retrieval.** This is an independently deployable first slice of
 - The documented/tested replacement gate orders verified > observed >
   inferred > learned, prevents a non-verified source from replacing verified
   knowledge, excludes non-publishable states, and makes sensitivity labels
-  immutable through semantic-memory merging. This phase has no automatic
-  merge or generated-content path, so it cannot change access, mandatory row
-  filters, or sensitivity.
+  immutable through semantic-memory merging. 32A-1 had no generated-content
+  path; 32A-2 adds only quarantined proposals, never automatic publication,
+  so generation still cannot change access, mandatory row filters, or
+  sensitivity.
 - `catalog/schema_memory.py` produces canonical row-free schema snapshots,
   SHA-256 fingerprints, and structured diffs for tables, columns/types/
   nullability/primary keys, foreign keys, and indexes. Database comments are
@@ -1817,15 +1818,48 @@ policy-first retrieval.** This is an independently deployable first slice of
 Covered by focused catalog/provenance, fingerprint/diff, REST/MCP integration,
 and multi-principal adversarial tests, plus QG-17 in `docs/THREAT_MODEL.md`.
 
-**32A-2 not started — explicit reasoned split:** manual/disabled provider
-contract, generated drafts, automatic schema refresh and affected-entry stale
-marking, and the deterministic evaluation baseline remain one follow-up slice.
-Combining them with the versioned storage/retrieval security boundary would
-not fit this session's conservative capacity after reserving time for full
-release checks, documentation, diff review, and the required commit. No live
-LLM provider is to be added in 32A-2: provider execution remains disabled/
-manual-only so provider selection cannot enter the critical path. The
-benchmark must define thresholds before evaluating generated output.
+**32A-2 shipped — manual-only drafts, automatic refresh/invalidation, and a
+predefined deterministic baseline.** This completes phase 32A without adding
+a live model or a publication path:
+
+- `catalog/providers.py` defines a provider protocol with only `disabled` and
+  `manual` implementations. Disabled mode is the default and does not even
+  parse provider input. Manual mode imports a strict structured batch tied to
+  the current connection/schema fingerprint; there is no HTTP client, hosted
+  provider adapter, prompt execution, credential, row, query-literal, or raw-
+  comment field in the contract.
+- `catalog/generation.py` stores output as separate inferred `draft_proposals`
+  plus metadata-only `generation_records`. Proposal IDs and input fingerprints
+  are deterministic; retrying the same generation is idempotent and reusing
+  its key with different input is rejected. Draft content cannot carry policy,
+  mandatory-filter, sensitivity, or sampling fields and is never indexed by
+  `search_catalog`, merged into verified entries, or returned by agent-facing
+  REST/MCP surfaces. Generation records retain provider/prompt/schema/actor
+  provenance without retaining a prompt or provider payload.
+- `catalog/refresh.py` provides a bounded row-free scanner and an opt-in
+  background monitor (`SEMANTIC_MEMORY_REFRESH_ENABLED`, disabled by default).
+  It atomically persists through an adjacent cross-process file lock. The
+  structured diff marks removed/changed table/column targets and dependent
+  relationship/draft targets stale while rebinding unaffected active entries
+  to the new fingerprint, so unrelated verified context remains current.
+  Same-snapshot retries are no-ops. Scan/provider failures stay off the query
+  path and logs retain only their exception type, not raw driver text.
+- `querygate-semantic-memory refresh|generate-drafts|evaluate` supplies the
+  operator workflow. Manual generation additionally requires
+  `SEMANTIC_MEMORY_PROVIDER=manual`; `disabled` remains the kill switch.
+- The versioned `semantic_memory_v1.yaml` corpus covers unfamiliar table and
+  relationship selection, stale guidance, and a policy-hidden adversarial
+  object. Release thresholds are compiled constants, not fixture-tunable:
+  expected-hit recall >= 0.85, relationship recall >= 0.80, stale detection =
+  1.0, discovery-call reduction >= 0.50, and zero policy violations. The
+  deterministic current report is 1.0/1.0/1.0/0.75/0 respectively and fails
+  the command if a threshold regresses.
+
+Covered by provider-contract, generation/idempotency, selective schema-drift,
+atomic persistence, monitor, CLI, packaged-corpus, benchmark-regression, and
+adversarial quarantine/error-redaction tests. 32B review/publication/history/
+rollback and 32C adaptive usage learning/hardening remain explicitly out of
+scope; generated content stays opt-in and unpublished until 32B.
 
 **Effort: XL (4–8+ weeks after item 27).** A useful prototype can be built
 faster, but a production-grade version needs a durable knowledge model,
@@ -2031,10 +2065,10 @@ injecting an ever-growing document into every prompt.
    durable version-2 provenance on item 27's catalog, row-free schema
    fingerprints/diffs, and compact policy-first REST/MCP retrieval. See the
    shipped note above.
-2. **32A-2 — Manual generation and deterministic baseline (not started):** add
-   the disabled/manual-only provider contract, generated drafts, automatic
-   snapshot refresh/affected-entry stale marking, and the predefined
-   deterministic evaluation benchmark. No hosted/live provider integration.
+2. **32A-2 — Manual generation and deterministic baseline ✅ DONE:** disabled/
+   manual-only provider contract, quarantined generated drafts, bounded opt-in
+   schema refresh with selective stale marking, and a fixed-threshold versioned
+   benchmark. No hosted/live provider integration or publication path.
 3. **32B — Governed publishing:** integrate item 25's scopes, review/publish/
    reject workflows, version history, rollback, audit events, provider privacy
    controls, and schema-change invalidation.

@@ -41,6 +41,7 @@ poetry run black src/ tests/            # or: make format
 docker compose up -d                    # starts querygate-demo-db on localhost:5433, auto-seeded
 make release-check                      # source, package, formatting, tests, config
 make release-smoke                      # image + real structured Postgres query
+poetry run querygate-semantic-memory evaluate  # fixed offline 32A benchmark
 ```
 
 The default suite excludes tests marked `real_db`; CI also runs dedicated
@@ -88,10 +89,15 @@ configuration database yet. See `examples/connections.example.yaml` and
 `examples/catalog.example.yaml` for the optional versioned semantic overlay.
 
 Catalog version 2 extends item 27 in place with stable provenance,
-schema-only fingerprints/diffs, and compact policy-first retrieval. Catalog
-search must filter tables, columns, and both relationship endpoints before
-tokenization/ranking/counting. It is descriptive and must never become a
-query execution or row-value search path.
+schema-only fingerprints/diffs, compact policy-first retrieval, quarantined
+manual draft proposals, and opt-in schema refresh. Catalog search must filter
+tables, columns, and both relationship endpoints before tokenization/ranking/
+counting. Draft proposals stay separate from published entries and must never
+be indexed or merged without the later 32B review gate. Only `disabled` and
+offline `manual` provider modes exist; do not add network/provider execution
+to 32A. Refresh persists atomically and must stale only affected entries while
+remaining independent of query execution. The catalog is descriptive and
+must never become a query execution or row-value search path.
 
 **Security invariant**: `connections/models.py` splits `ConnectionProfile`
 (carries the real connection string, resolved from `${ENV_VAR}` in the YAML

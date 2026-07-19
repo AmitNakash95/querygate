@@ -10,11 +10,16 @@ from __future__ import annotations
 import copy
 import hashlib
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 import yaml
 
-from querygate.catalog.models import SchemaCatalog, TableCatalogEntry
+from querygate.catalog.models import (
+    CatalogDraftProposal,
+    CatalogGenerationRecord,
+    SchemaCatalog,
+    TableCatalogEntry,
+)
 from querygate.catalog.schema_memory import ObservedSchemaSnapshot
 
 
@@ -114,6 +119,33 @@ class CatalogStore:
     def get_schema_snapshot(self, connection_id: str) -> Optional[ObservedSchemaSnapshot]:
         return self._catalog.schema_snapshots.get(connection_id)
 
+    def iter_draft_proposals(
+        self, connection_id: Optional[str] = None
+    ) -> Iterator[CatalogDraftProposal]:
+        for proposal in self._catalog.draft_proposals:
+            if connection_id is None or proposal.target.connection_id == connection_id:
+                yield proposal
+
+    def get_generation_record(self, generation_id: str) -> Optional[CatalogGenerationRecord]:
+        for record in self._catalog.generation_records:
+            if record.generation_id == generation_id:
+                return record
+        return None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the complete privileged durable record, never an API projection."""
+
+        # ``round_trip`` omits computed fields such as server-derived
+        # precedence, so a serialized catalog cannot feed them back as input.
+        return self._catalog.model_dump(mode="json", exclude_none=True, round_trip=True)
+
+    def replace(self, raw: dict[str, Any]) -> "CatalogStore":
+        """Build a validated replacement using this store's catalog version."""
+
+        replacement = copy.deepcopy(raw)
+        replacement.setdefault("version", self.version)
+        return CatalogStore.from_dict(replacement)
+
     @property
     def version(self) -> int:
         return self._catalog.version
@@ -125,7 +157,10 @@ class CatalogStore:
         PolicyStore.override_connection_ids.
         """
         return sorted(
-            set(self._catalog.connections.keys()) | set(self._catalog.schema_snapshots.keys())
+            set(self._catalog.connections.keys())
+            | set(self._catalog.schema_snapshots.keys())
+            | {proposal.target.connection_id for proposal in self._catalog.draft_proposals}
+            | {record.connection_id for record in self._catalog.generation_records}
         )
 
 
