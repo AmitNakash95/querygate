@@ -4,6 +4,12 @@ ADMIN_RELOAD_CONFIG_SCOPE = "admin:reload-config"
 ADMIN_CONFIG_READ_SCOPE = "admin:config:read"
 ADMIN_CONFIG_WRITE_SCOPE = "admin:config:write"
 
+# Admin connection-operations (TODO.md item 43) — read-only operational health
+# of configured connections. Separate from the config scopes: seeing whether a
+# connection is reachable is a distinct privilege from reading/changing what
+# QueryGate connects to.
+ADMIN_CONNECTIONS_READ_SCOPE = "admin:connections:read"
+
 # Catalog governance (TODO.md item 32B) — least-privilege, split by
 # operation rather than one broad "catalog admin" scope.
 CATALOG_GENERATE_SCOPE = "catalog:generate"
