@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from querygate.admin.access_diff import compute_access_diff
 from querygate.admin.models import (
     CandidateColumnDecision,
     CandidatePolicySimulation,
@@ -21,10 +22,12 @@ from querygate.admin.models import (
     CandidateSimulationReason,
     ConfigDocumentPreview,
     ConfigPreview,
+    ConfigSemanticDiffRequest,
     ConfigVersion,
     ConfigVersionStatus,
     EffectiveGuardrails,
     MandatoryFilterReadiness,
+    SemanticAccessDiff,
 )
 from querygate.admin.store import ConfigVersionStore, get_config_version_store
 from querygate.audit.logger import audit_config_change
@@ -342,6 +345,66 @@ def simulate_candidate_policy(
     )
     audit_config_change(
         action="simulate",
+        outcome="success",
+        principal=actor.subject,
+        principal_scopes=sorted(actor.scopes),
+        auth_method=actor.auth_method,
+        duration_ms=int((time.monotonic() - start) * 1000),
+    )
+    return result
+
+
+def diff_candidate_access(
+    cfg: AppConfig,
+    actor: Principal,
+    request: ConfigSemanticDiffRequest,
+) -> SemanticAccessDiff:
+    """Diff *resolved* access between the active version and an uncommitted
+    candidate, without mutating live config state.
+
+    Both snapshots are loaded through the same isolated candidate-context path
+    item 39 uses for simulation, so the live registry/policy/catalog singletons
+    and any concurrent request are provably untouched. Like `/simulate`, this
+    resolves caller-supplied config/secret references (write-like) while
+    echoing back semantic policy detail (read-like), so the route requires both
+    config scopes.
+    """
+    start = time.monotonic()
+    store = get_config_version_store()
+    try:
+        active_connections, active_policy, active_catalog = _resolve_candidate_without_persisting(
+            cfg, store, connections_yaml=None, policy_yaml=None, catalog_yaml=None
+        )
+        candidate_connections, candidate_policy, candidate_catalog = (
+            _resolve_candidate_without_persisting(
+                cfg,
+                store,
+                connections_yaml=request.connections_yaml,
+                policy_yaml=request.policy_yaml,
+                catalog_yaml=request.catalog_yaml,
+            )
+        )
+        active_context = _load_isolated_candidate_context(
+            cfg, active_connections, active_policy, active_catalog
+        )
+        candidate_context = _load_isolated_candidate_context(
+            cfg, candidate_connections, candidate_policy, candidate_catalog
+        )
+    except ConfigValidationError:
+        audit_config_change(
+            action="diff",
+            outcome="rejected",
+            principal=actor.subject,
+            principal_scopes=sorted(actor.scopes),
+            auth_method=actor.auth_method,
+            error_category="validation",
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        raise
+
+    result = compute_access_diff(active_context, candidate_context)
+    audit_config_change(
+        action="diff",
         outcome="success",
         principal=actor.subject,
         principal_scopes=sorted(actor.scopes),

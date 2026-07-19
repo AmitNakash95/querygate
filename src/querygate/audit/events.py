@@ -19,7 +19,9 @@ from querygate.query_ast.models import (
 
 AuditDecision = Literal["allowed", "denied", "unknown"]
 AuditSurface = Literal["rest", "mcp", "internal"]
-ConfigChangeAction = Literal["validate", "preview", "simulate", "stage", "apply", "rollback"]
+ConfigChangeAction = Literal[
+    "validate", "preview", "simulate", "diff", "stage", "apply", "rollback"
+]
 CatalogGovernanceAction = Literal[
     "generate",
     "learn",

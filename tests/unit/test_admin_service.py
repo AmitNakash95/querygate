@@ -7,7 +7,11 @@ import json
 import pytest
 
 from querygate.admin import service as governance
-from querygate.admin.models import CandidatePolicySimulationRequest, ConfigVersionStatus
+from querygate.admin.models import (
+    CandidatePolicySimulationRequest,
+    ConfigSemanticDiffRequest,
+    ConfigVersionStatus,
+)
 from querygate.admin.store import (
     ConfigVersionStore,
     get_config_version_store,
@@ -344,6 +348,94 @@ default:
     assert marker not in audit_path.read_text()
     event = json.loads(audit_path.read_text())
     assert event["action"] == "simulate"
+    assert event["outcome"] == "rejected"
+    assert get_config_version_store().list_versions() == []
+
+
+def _diff_actor() -> Principal:
+    return Principal(
+        subject="admin-a", scopes=frozenset({"admin:config:read", "admin:config:write"})
+    )
+
+
+def test_diff_reports_guardrail_change_without_mutating_live_state(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    live_registry = get_registry()
+    live_policy_store = get_policy_store()
+
+    result = governance.diff_candidate_access(
+        cfg,
+        _diff_actor(),
+        # Active default max_joins is 5; the candidate tightens it to 2.
+        ConfigSemanticDiffRequest(policy_yaml="default:\n  enabled: true\n  max_joins: 2\n"),
+    )
+
+    guardrails = [c for c in result.changes if c.category == "guardrail"]
+    assert any(c.object == "max_joins" and c.direction == "tightening" for c in guardrails)
+    assert result.evaluation_scope == "connection_baseline"
+    # The isolated diff must not touch the live singletons or governance store.
+    assert get_registry() is live_registry
+    assert get_policy_store() is live_policy_store
+    assert get_config_version_store().list_versions() == []
+
+
+def test_diff_with_no_candidate_changes_is_empty(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+
+    result = governance.diff_candidate_access(cfg, _diff_actor(), ConfigSemanticDiffRequest())
+
+    assert result.changes == []
+    assert result.summary.total == 0
+
+
+def test_diff_emits_success_audit_event(tmp_path, monkeypatch):
+    audit_path = tmp_path / "diff-audit.jsonl"
+    set_audit_sink(JsonlAuditSink(str(audit_path)))
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+
+    governance.diff_candidate_access(
+        cfg,
+        _diff_actor(),
+        ConfigSemanticDiffRequest(policy_yaml="default:\n  enabled: true\n  max_limit: 5\n"),
+    )
+
+    event = json.loads(audit_path.read_text())
+    assert event["action"] == "diff"
+    assert event["outcome"] == "success"
+
+
+@pytest.mark.security
+def test_diff_masks_invalid_candidate_and_audits_rejection(tmp_path, monkeypatch):
+    audit_path = tmp_path / "diff-audit.jsonl"
+    set_audit_sink(JsonlAuditSink(str(audit_path)))
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    marker = "static-filter-value-must-not-leak"
+
+    with pytest.raises(ConfigValidationError) as exc_info:
+        governance.diff_candidate_access(
+            cfg,
+            _diff_actor(),
+            ConfigSemanticDiffRequest(
+                policy_yaml=f"""
+default:
+  enabled: true
+  mandatory_row_filters:
+    - table: orders
+      column: tenant_id
+      value: {marker}
+      unsupported_field: true
+"""
+            ),
+        )
+
+    assert marker not in str(exc_info.value)
+    assert marker not in audit_path.read_text()
+    event = json.loads(audit_path.read_text())
+    assert event["action"] == "diff"
     assert event["outcome"] == "rejected"
     assert get_config_version_store().list_versions() == []
 
