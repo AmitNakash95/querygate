@@ -65,6 +65,7 @@ order-of-magnitude, not commitments.
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
 | 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
+| 36 | Extensive production-grade QA project / edge-case test suite | L | 15, 28 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
@@ -2079,6 +2080,47 @@ learned content remains opt-in until 32B governance exists.
 - Sending production metadata to a QueryGate-operated cloud service unless a
   separately designed hosted product, customer contract, and privacy boundary
   explicitly introduce that capability.
+
+### 36. Extensive production-grade QA project / edge-case test suite
+
+**Effort: L (3–5 days).** Not a new subsystem, but a wide sweep across the
+whole request pipeline: it touches `tests/unit/`, `tests/integration/`, and
+`tests/security/` all at once, plus potentially a new `tests/property/` or
+`tests/fuzz/` directory. Sizing is closer to item 15/28 (dedicated test
+tranches) than to a single-module fix — the work is breadth, not depth in
+any one file.
+
+**Why it matters:** Existing suites are strong but each targets one concern
+— `tests/security/test_adversarial_security.py` (item 28) covers
+authz/policy-bypass attack shapes, `tests/integration/test_postgres_load_guardrails.py`
+(item 15) covers concurrency/timeout under load, and the per-module unit
+suites cover correctness of one component at a time. Nothing currently
+sweeps the `StructuredQuery` AST's own input space systematically — deeply
+nested boolean `where` trees at/past `Policy.max_where_depth`, every
+`join`/`group_by`/`top_n` combination at its cap boundary, Unicode/NULL/
+empty-string/extreme-numeric literal values, empty result sets, single-row
+vs. maximum-row responses, and malformed-but-schema-valid AST shapes that
+existing tests haven't happened to construct. A gateway whose entire safety
+argument rests on "callers can only submit a validated AST" needs the
+validator itself proven against the full shape of that AST, not just the
+shapes today's tests happened to write.
+
+**What to do:** Audit `tests/unit/`, `tests/integration/`, and
+`tests/security/` for gaps against the full `StructuredQuery`/`Policy` model
+(`compiler/ast.py`, `policy/models.py`) rather than assuming coverage
+percentage implies scenario coverage — a query that never exercises a cap
+boundary can still hit a line of code. Concretely: boundary values for every
+`Policy` cap (max joins/select/where-depth/group-by/top_n, batch size,
+response bytes) both just-under and just-over; property-based testing
+(e.g. `hypothesis`) generating random valid `StructuredQuery` ASTs to catch
+compiler crashes or SQL-generation bugs that hand-written cases miss;
+cross-dialect differential tests (same AST against Postgres and MSSQL,
+asserting equivalent results where the AST doesn't invoke dialect-specific
+behavior); and malformed-input fuzzing at the REST/MCP JSON boundary (wrong
+types, extra fields, deeply nested `where`, huge string literals) to prove
+schema validation rejects cleanly rather than 500ing. Track coverage
+gaps explicitly rather than chasing a single aggregate `--cov` number, since
+line coverage alone doesn't prove edge cases were exercised.
 
 ---
 
