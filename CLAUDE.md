@@ -100,18 +100,26 @@ atomically and must stale only affected entries while remaining independent
 of query execution. The catalog is descriptive and must never become a
 query execution or row-value search path.
 
-32B-1 (governed review/edit/approve/reject/publish/rollback) is shipped —
-see TODO.md item 32 for the exact scope and `catalog/governance.py`'s
-module docstring. All governance mutations go through the same
+32B is fully shipped — governed review/edit/approve/reject/publish/rollback
+(32B-1) plus export/import (backup/restore) and retention/deletion (32B-2).
+See TODO.md item 32 for the exact scope and `catalog/governance.py`'s module
+docstring. All governance mutations go through the same
 `CatalogFileRepository` lock as refresh/generation; do not add a second
 catalog file, database, or mutation path (in particular, do not route
 catalog content through `admin/store.ConfigVersionStore` — that store
 snapshots its own copy of catalog.yaml in `var/config_versions/`, which
 would silently diverge from the live `CATALOG_FILE` refresh/generate-drafts
-already write to). 32B-2 (export/import, backup/restore, retention/
-deletion) and 32C (adaptive usage learning) have not started; do not begin
-32C work until 32B-2 is either shipped or explicitly deferred again with
-the same rationale documented in TODO.md.
+already write to). `version_id` and `generation_id` are file-global, not
+per-connection — `import_connection` must keep remapping them against the
+target catalog's current content; do not "simplify" that away, it exists
+specifically to stop one connection's import from corrupting another
+connection's history. 32C (adaptive usage learning) has not started; its
+governance boundary (32B) is now complete, so it may begin, but stay bounded
+by the explicit 32C acceptance criteria in TODO.md item 32 (typed
+redaction-safe signals only, per-customer/connection partitioning, no
+feedback loops, learned content must go through the existing 32B review
+path and can never publish itself) — do not add a live LLM call, embedding
+index, or autonomous policy edit as a side effect of that work.
 
 **Security invariant**: `connections/models.py` splits `ConnectionProfile`
 (carries the real connection string, resolved from `${ENV_VAR}` in the YAML

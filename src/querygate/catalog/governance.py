@@ -1,4 +1,5 @@
-"""32B-1 governed review, edit, approve/reject, publish, and rollback.
+"""32B governed review, edit, approve/reject, publish, rollback (32B-1), and
+export/import, backup/restore, retention/deletion (32B-2).
 
 Every function here is a pure transformation `(CatalogStore) -> CatalogStore`
 (wrapped in a `CatalogGovernanceUpdate`), driven through the same
@@ -15,6 +16,22 @@ non-verified source overwrite human-verified knowledge. A draft's content
 model (`CatalogDraftContent`) structurally has no `sensitivity`,
 `allow_samples`, policy, or mandatory-filter field, so publishing cannot
 touch any of those regardless of what a reviewer approves.
+
+32B-2's `export_connection`/`import_connection` are one bidirectional
+"data portability" capability (gated by `catalog:export`): export produces a
+self-contained, connection-scoped bundle (published entries, quarantined
+proposals with their full review history, generation records, version
+history, and the schema snapshot); import is a full, destructive replace of
+that connection's governed content from a bundle — serving both migration
+between environments and disaster-recovery restore from a saved export.
+32B-2's `delete_proposal`/`delete_version_record`/`bulk_delete_proposals`
+(gated by `catalog:delete`) prune terminal-state records only: a rejected
+proposal, or a published-and-since-rolled-back proposal together with its
+now-reverted publish record, or a rollback record on its own. A proposal
+that is still `pending`/`approved`, or `published` with its publish still
+live, can never be deleted — only rejected or rolled back first — so
+deletion can never destroy the only record of why current catalog content
+exists.
 """
 
 from __future__ import annotations
@@ -33,8 +50,11 @@ from querygate.catalog.models import (
     CatalogDraftTarget,
     CatalogEntryProvenance,
     CatalogEntryStatus,
+    CatalogExportBundle,
+    CatalogVersionAction,
     CatalogVersionChange,
     CatalogVersionRecord,
+    CatalogVersionStatus,
     ProposalReviewStatus,
     replacement_decision,
 )
@@ -733,4 +753,311 @@ def rollback_version(
         outcome="rolled_back",
         version_id=new_version_id,
         rolled_back_version_id=version_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 32B-2: export/import (backup/restore) and retention/deletion
+# ---------------------------------------------------------------------------
+
+
+def export_connection(
+    store: CatalogStore, *, connection_id: str, now: Optional[datetime] = None
+) -> CatalogExportBundle:
+    """Read-only, connection-scoped snapshot. Never mutates the store."""
+
+    now = now or _utcnow()
+    proposals = list(store.iter_draft_proposals(connection_id))
+    generation_ids = {proposal.generation_id for proposal in proposals}
+    generation_records = [
+        record
+        for record in (store.get_generation_record(gid) for gid in generation_ids)
+        if record is not None
+    ]
+    return CatalogExportBundle(
+        connection_id=connection_id,
+        exported_at=now,
+        catalog_version=store.version,
+        tables=dict(store.iter_tables(connection_id)),
+        schema_snapshot=store.get_schema_snapshot(connection_id),
+        draft_proposals=proposals,
+        generation_records=generation_records,
+        version_history=list(store.iter_version_history(connection_id)),
+    )
+
+
+def import_connection(
+    store: CatalogStore,
+    *,
+    bundle: CatalogExportBundle,
+    connection_id: str,
+    actor: str,
+    now: Optional[datetime] = None,
+) -> CatalogGovernanceUpdate:
+    """Destructively replace one connection's governed catalog content with
+    a previously exported bundle (restore from backup, or migrate governed
+    state between environments). Every other connection's content, and any
+    live database access this catalog is descriptive of, is untouched.
+
+    Version ids and generation ids inside the bundle are re-numbered/
+    de-duplicated against this catalog file's current content (both id
+    spaces are file-global, not per-connection — two independently-numbered
+    source files can easily reuse the same version id or an operator-chosen
+    generation id like "onboarding-1") so importing can never collide with —
+    or silently corrupt — another connection's history. Internal
+    cross-references (`rolled_back_version_id`, a proposal's
+    `published_version_id`/`generation_id`) are remapped consistently.
+    """
+
+    now = now or _utcnow()
+    if bundle.connection_id != connection_id:
+        raise CatalogGovernanceError(
+            f"export bundle connection_id {bundle.connection_id!r} does not match the "
+            f"import target {connection_id!r}"
+        )
+
+    raw = store.to_dict()
+    surviving_generation_records = [
+        record_raw
+        for record_raw in raw.get("generation_records", [])
+        if record_raw["connection_id"] != connection_id
+    ]
+    surviving_generation_ids = {
+        record_raw["generation_id"] for record_raw in surviving_generation_records
+    }
+
+    generation_id_map: dict[str, str] = {}
+    for record in bundle.generation_records:
+        new_id = record.generation_id
+        suffix = 0
+        while new_id in surviving_generation_ids or new_id in generation_id_map.values():
+            suffix += 1
+            new_id = f"{record.generation_id}:imported-{suffix}"
+        generation_id_map[record.generation_id] = new_id
+
+    existing_version_count = len(raw.get("version_history", []))
+    version_id_map = {
+        record.version_id: str(existing_version_count + offset)
+        for offset, record in enumerate(bundle.version_history, start=1)
+    }
+
+    remapped_generation_records = [
+        record.model_copy(update={"generation_id": generation_id_map[record.generation_id]})
+        for record in bundle.generation_records
+    ]
+    remapped_versions = [
+        record.model_copy(
+            update={
+                "version_id": version_id_map[record.version_id],
+                "rolled_back_version_id": (
+                    version_id_map.get(record.rolled_back_version_id, record.rolled_back_version_id)
+                    if record.rolled_back_version_id is not None
+                    else None
+                ),
+            }
+        )
+        for record in bundle.version_history
+    ]
+    remapped_proposals = [
+        proposal.model_copy(
+            update={
+                "generation_id": generation_id_map.get(
+                    proposal.generation_id, proposal.generation_id
+                ),
+                "published_version_id": (
+                    version_id_map.get(proposal.published_version_id, proposal.published_version_id)
+                    if proposal.published_version_id is not None
+                    else None
+                ),
+            }
+        )
+        for proposal in bundle.draft_proposals
+    ]
+
+    raw.setdefault("connections", {})[connection_id] = {
+        "tables": {
+            name: entry.model_dump(mode="json", exclude_none=True, round_trip=True)
+            for name, entry in bundle.tables.items()
+        }
+    }
+    if bundle.schema_snapshot is not None:
+        raw.setdefault("schema_snapshots", {})[connection_id] = bundle.schema_snapshot.model_dump(
+            mode="json"
+        )
+    else:
+        raw.get("schema_snapshots", {}).pop(connection_id, None)
+
+    raw["draft_proposals"] = [
+        proposal_raw
+        for proposal_raw in raw.get("draft_proposals", [])
+        if proposal_raw["target"]["connection_id"] != connection_id
+    ] + [
+        proposal.model_dump(mode="json", exclude_none=True, round_trip=True)
+        for proposal in remapped_proposals
+    ]
+    raw["generation_records"] = surviving_generation_records + [
+        record.model_dump(mode="json", exclude_none=True) for record in remapped_generation_records
+    ]
+    raw["version_history"] = [
+        record_raw
+        for record_raw in raw.get("version_history", [])
+        if record_raw["changes"][0]["target"]["connection_id"] != connection_id
+    ] + [record.model_dump(mode="json", exclude_none=True) for record in remapped_versions]
+
+    return CatalogGovernanceUpdate(store=store.replace(raw), outcome="imported")
+
+
+def _require_deletable_proposal(
+    store: CatalogStore, proposal: CatalogDraftProposal, proposal_id: str
+) -> frozenset[str]:
+    """Return the version_ids to remove alongside a deletable proposal
+    (empty for a rejected proposal), or raise if not deletable.
+
+    A published-and-reverted proposal's paired publish record is removed
+    together with any rollback record that reverted it — a rollback record
+    always requires `rolled_back_version_id` to resolve to an existing
+    version, so once the publish record it targeted is gone, so must it be;
+    the rollback event's own actor/timestamp/change summary is otherwise
+    lost with no dangling reference left behind either way.
+    """
+
+    if proposal.review_status == ProposalReviewStatus.REJECTED:
+        return frozenset()
+    if proposal.review_status == ProposalReviewStatus.PUBLISHED:
+        version = (
+            store.get_version_record(proposal.published_version_id)
+            if proposal.published_version_id
+            else None
+        )
+        if version is None or version.status != CatalogVersionStatus.REVERTED:
+            raise CatalogGovernanceError(
+                f"proposal {proposal_id!r} is published and its publish is still live; "
+                "roll it back before it can be deleted"
+            )
+        cascaded = {
+            record.version_id
+            for record in store.iter_version_history(proposal.target.connection_id)
+            if record.rolled_back_version_id == proposal.published_version_id
+        }
+        return frozenset({proposal.published_version_id}) | cascaded
+    raise CatalogGovernanceError(
+        f"proposal {proposal_id!r} cannot be deleted from status "
+        f"{proposal.review_status.value!r}; reject it, or roll back its publish, first"
+    )
+
+
+def delete_proposal(
+    store: CatalogStore,
+    *,
+    proposal_id: str,
+    connection_id: str,
+    actor: str,
+    now: Optional[datetime] = None,
+) -> CatalogGovernanceUpdate:
+    now = now or _utcnow()
+    proposal = _require_proposal(store, proposal_id, connection_id)
+    version_ids_to_remove = _require_deletable_proposal(store, proposal, proposal_id)
+
+    raw = store.to_dict()
+    raw["draft_proposals"] = [
+        proposal_raw
+        for proposal_raw in raw.get("draft_proposals", [])
+        if proposal_raw["proposal_id"] != proposal_id
+    ]
+    if version_ids_to_remove:
+        raw["version_history"] = [
+            record_raw
+            for record_raw in raw.get("version_history", [])
+            if record_raw["version_id"] not in version_ids_to_remove
+        ]
+    for record_raw in raw.get("generation_records", []):
+        if proposal_id in record_raw.get("proposal_ids", []):
+            record_raw["proposal_ids"] = [
+                pid for pid in record_raw["proposal_ids"] if pid != proposal_id
+            ]
+
+    return CatalogGovernanceUpdate(
+        store=store.replace(raw), outcome="deleted", proposal_id=proposal_id
+    )
+
+
+def bulk_delete_proposals(
+    store: CatalogStore,
+    *,
+    proposal_ids: tuple[str, ...],
+    connection_id: str,
+    actor: str,
+    now: Optional[datetime] = None,
+) -> CatalogGovernanceUpdate:
+    now = now or _utcnow()
+    if not proposal_ids:
+        raise CatalogGovernanceError("bulk delete requires at least one proposal id")
+    if len(proposal_ids) > _BULK_LIMIT:
+        raise CatalogGovernanceError(f"bulk delete is limited to {_BULK_LIMIT} proposals per call")
+    if len(set(proposal_ids)) != len(proposal_ids):
+        raise CatalogGovernanceError("bulk delete proposal ids must be unique")
+
+    version_ids_to_remove: set[str] = set()
+    for proposal_id in proposal_ids:
+        proposal = _require_proposal(store, proposal_id, connection_id)
+        version_ids_to_remove |= _require_deletable_proposal(store, proposal, proposal_id)
+
+    raw = store.to_dict()
+    proposal_id_set = set(proposal_ids)
+    raw["draft_proposals"] = [
+        proposal_raw
+        for proposal_raw in raw.get("draft_proposals", [])
+        if proposal_raw["proposal_id"] not in proposal_id_set
+    ]
+    if version_ids_to_remove:
+        raw["version_history"] = [
+            record_raw
+            for record_raw in raw.get("version_history", [])
+            if record_raw["version_id"] not in version_ids_to_remove
+        ]
+    for record_raw in raw.get("generation_records", []):
+        if any(pid in proposal_id_set for pid in record_raw.get("proposal_ids", [])):
+            record_raw["proposal_ids"] = [
+                pid for pid in record_raw["proposal_ids"] if pid not in proposal_id_set
+            ]
+
+    return CatalogGovernanceUpdate(
+        store=store.replace(raw), outcome="bulk_deleted", proposal_ids=proposal_ids
+    )
+
+
+def delete_version_record(
+    store: CatalogStore,
+    *,
+    version_id: str,
+    connection_id: str,
+    actor: str,
+    now: Optional[datetime] = None,
+) -> CatalogGovernanceUpdate:
+    """Delete a standalone rollback record. A publish record is only ever
+    deletable together with its proposal via `delete_proposal` — nothing
+    else in the model ever references a rollback record's own id, but a
+    proposal's `published_version_id` always references its publish record
+    for that proposal's entire lifetime, so a publish record can never be
+    orphaned from its proposal.
+    """
+
+    now = now or _utcnow()
+    record = store.get_version_record(version_id)
+    if record is None or record.changes[0].target.connection_id != connection_id:
+        raise NotFoundError(f"Unknown catalog version: {version_id!r}")
+    if record.action != CatalogVersionAction.ROLLBACK:
+        raise CatalogGovernanceError(
+            "only a rollback record can be deleted directly; delete its paired proposal "
+            "(after rollback) to remove a publish record"
+        )
+
+    raw = store.to_dict()
+    raw["version_history"] = [
+        record_raw
+        for record_raw in raw.get("version_history", [])
+        if record_raw["version_id"] != version_id
+    ]
+    return CatalogGovernanceUpdate(
+        store=store.replace(raw), outcome="deleted", version_id=version_id
     )

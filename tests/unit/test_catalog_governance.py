@@ -22,7 +22,7 @@ from querygate.policy.models import Policy
 _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def _snapshot() -> ObservedSchemaSnapshot:
+def _snapshot(connection_id: str = "demo") -> ObservedSchemaSnapshot:
     metadata = sa.MetaData()
     customers = sa.Table(
         "customers",
@@ -36,35 +36,40 @@ def _snapshot() -> ObservedSchemaSnapshot:
         sa.Column("id", sa.Integer, primary_key=True),
         sa.Column("customer_id", sa.Integer, sa.ForeignKey("customers.id")),
     )
-    return ObservedSchemaSnapshot.from_tables("demo", [customers, orders])
+    return ObservedSchemaSnapshot.from_tables(connection_id, [customers, orders])
 
 
 def _base_store(
-    *, verified_description: str | None = "Verified customer accounts."
+    *, verified_description: str | None = "Verified customer accounts.", connection_id: str = "demo"
 ) -> CatalogStore:
-    snapshot = _snapshot()
+    snapshot = _snapshot(connection_id)
     tables = {"customers": {"description": verified_description}} if verified_description else {}
     return CatalogStore.from_dict(
         {
             "version": 2,
-            "schema_snapshots": {"demo": snapshot.model_dump(mode="json")},
-            "connections": {"demo": {"tables": tables}},
+            "schema_snapshots": {connection_id: snapshot.model_dump(mode="json")},
+            "connections": {connection_id: {"tables": tables}},
         }
     )
 
 
-def _batch(*, generation_id: str = "onboarding-1", table_description: str = "Customer entity."):
-    snapshot = _snapshot()
+def _batch(
+    *,
+    generation_id: str = "onboarding-1",
+    table_description: str = "Customer entity.",
+    connection_id: str = "demo",
+):
+    snapshot = _snapshot(connection_id)
     return ManualDraftBatch.model_validate(
         {
             "generation_id": generation_id,
-            "connection_id": "demo",
+            "connection_id": connection_id,
             "schema_fingerprint": snapshot.fingerprint,
             "created_by": "offline-operator",
             "suggestions": [
                 {
                     "target": {
-                        "connection_id": "demo",
+                        "connection_id": connection_id,
                         "object_type": "table",
                         "table": "customers",
                     },
@@ -73,7 +78,7 @@ def _batch(*, generation_id: str = "onboarding-1", table_description: str = "Cus
                 },
                 {
                     "target": {
-                        "connection_id": "demo",
+                        "connection_id": connection_id,
                         "object_type": "column",
                         "table": "customers",
                         "column": "email",
@@ -86,33 +91,64 @@ def _batch(*, generation_id: str = "onboarding-1", table_description: str = "Cus
     )
 
 
-def _store_with_pending_proposals(**batch_kwargs) -> CatalogStore:
-    store = _base_store()
+def _store_with_pending_proposals(*, connection_id: str = "demo", **batch_kwargs) -> CatalogStore:
+    store = _base_store(connection_id=connection_id)
     request = SemanticGenerationRequest(
         generation_id=batch_kwargs.get("generation_id", "onboarding-1"),
-        connection_id="demo",
-        snapshot=_snapshot(),
+        connection_id=connection_id,
+        snapshot=_snapshot(connection_id),
     )
     update = generate_catalog_drafts(
-        store, request=request, provider=ManualSemanticMemoryProvider(_batch(**batch_kwargs))
+        store,
+        request=request,
+        provider=ManualSemanticMemoryProvider(_batch(connection_id=connection_id, **batch_kwargs)),
     )
     return update.store
 
 
-def _table_proposal_id(store: CatalogStore) -> str:
+def _table_proposal_id(store: CatalogStore, connection_id: str = "demo") -> str:
     return next(
         p.proposal_id
-        for p in store.iter_draft_proposals("demo")
+        for p in store.iter_draft_proposals(connection_id)
         if p.target.object_type.value == "table"
     )
 
 
-def _column_proposal_id(store: CatalogStore) -> str:
+def _column_proposal_id(store: CatalogStore, connection_id: str = "demo") -> str:
     return next(
         p.proposal_id
-        for p in store.iter_draft_proposals("demo")
+        for p in store.iter_draft_proposals(connection_id)
         if p.target.object_type.value == "column"
     )
+
+
+def _published_store(*, connection_id: str = "demo") -> tuple[CatalogStore, str, str]:
+    """A store with both the table and column proposals approved+published."""
+
+    store = _base_store(verified_description=None, connection_id=connection_id)
+    request = SemanticGenerationRequest(
+        generation_id="onboarding-1", connection_id=connection_id, snapshot=_snapshot(connection_id)
+    )
+    store = generate_catalog_drafts(
+        store,
+        request=request,
+        provider=ManualSemanticMemoryProvider(_batch(connection_id=connection_id)),
+    ).store
+    table_id = _table_proposal_id(store, connection_id)
+    column_id = _column_proposal_id(store, connection_id)
+    store = governance.approve_proposal(
+        store, proposal_id=table_id, connection_id=connection_id, actor="reviewer", now=_NOW
+    ).store
+    store = governance.publish_proposal(
+        store, proposal_id=table_id, connection_id=connection_id, actor="publisher", now=_NOW
+    ).store
+    store = governance.approve_proposal(
+        store, proposal_id=column_id, connection_id=connection_id, actor="reviewer", now=_NOW
+    ).store
+    store = governance.publish_proposal(
+        store, proposal_id=column_id, connection_id=connection_id, actor="publisher", now=_NOW
+    ).store
+    return store, table_id, column_id
 
 
 # ---------------------------------------------------------------------------
@@ -639,3 +675,246 @@ def test_full_lifecycle_persists_through_the_catalog_file_repository(tmp_path):
     reloaded = CatalogStore.from_file(str(catalog_path))
     assert reloaded.get_table("demo", "customers").description == "Customer entity."
     assert reloaded.get_draft_proposal(table_id).review_status == ProposalReviewStatus.PUBLISHED
+
+
+# ---------------------------------------------------------------------------
+# 32B-2: export / import (backup / restore)
+# ---------------------------------------------------------------------------
+
+
+def test_export_connection_returns_a_self_contained_bundle():
+    store, table_id, column_id = _published_store()
+    bundle = governance.export_connection(store, connection_id="demo", now=_NOW)
+
+    assert bundle.connection_id == "demo"
+    assert set(bundle.tables) == {"customers"}
+    assert bundle.tables["customers"].column("email") is not None
+    assert {p.proposal_id for p in bundle.draft_proposals} == {table_id, column_id}
+    assert len(bundle.version_history) == 2
+    assert bundle.schema_snapshot is not None
+    assert len(bundle.generation_records) == 1
+    assert bundle.exported_at == _NOW
+
+
+def test_export_does_not_mutate_the_store():
+    store, _table_id, _column_id = _published_store()
+    before = store.to_dict()
+    governance.export_connection(store, connection_id="demo", now=_NOW)
+    assert store.to_dict() == before
+
+
+def test_import_reproduces_published_content_in_a_fresh_store():
+    store, table_id, column_id = _published_store()
+    bundle = governance.export_connection(store, connection_id="demo", now=_NOW)
+
+    update = governance.import_connection(
+        CatalogStore.empty(), bundle=bundle, connection_id="demo", actor="operator", now=_NOW
+    )
+    imported = update.store
+
+    table = imported.get_table("demo", "customers")
+    assert table.description == "Customer entity."
+    assert table.column("email").description == "Customer email address."
+    assert imported.get_draft_proposal(table_id).review_status == ProposalReviewStatus.PUBLISHED
+    assert imported.get_draft_proposal(column_id).review_status == ProposalReviewStatus.PUBLISHED
+    assert len(list(imported.iter_version_history("demo"))) == 2
+
+
+def test_import_requires_matching_connection_id():
+    store, _table_id, _column_id = _published_store()
+    bundle = governance.export_connection(store, connection_id="demo", now=_NOW)
+    with pytest.raises(CatalogGovernanceError, match="does not match"):
+        governance.import_connection(
+            CatalogStore.empty(), bundle=bundle, connection_id="other", actor="operator", now=_NOW
+        )
+
+
+def test_import_remaps_version_ids_and_cross_references_to_avoid_collision():
+    # "other" already has its own independently-numbered publish history —
+    # simulating a target catalog file that was never involved in producing
+    # the "demo" bundle being imported.
+    other_store, _other_table_id, _other_column_id = _published_store(connection_id="other")
+    assert {r.version_id for r in other_store.iter_version_history("other")} == {"1", "2"}
+
+    demo_store, table_id, column_id = _published_store(connection_id="demo")
+    bundle = governance.export_connection(demo_store, connection_id="demo", now=_NOW)
+    assert {r.version_id for r in bundle.version_history} == {"1", "2"}
+
+    imported = governance.import_connection(
+        other_store, bundle=bundle, connection_id="demo", actor="operator", now=_NOW
+    ).store
+
+    # "other" connection's own history is untouched.
+    other_versions = {r.version_id for r in imported.iter_version_history("other")}
+    assert other_versions == {"1", "2"}
+    # "demo"'s imported history was renumbered to avoid colliding with it.
+    demo_versions = {r.version_id for r in imported.iter_version_history("demo")}
+    assert demo_versions == {"3", "4"}
+    assert demo_versions.isdisjoint(other_versions)
+    # Every imported proposal's published_version_id was remapped consistently.
+    for proposal_id in (table_id, column_id):
+        proposal = imported.get_draft_proposal(proposal_id)
+        assert proposal.published_version_id in demo_versions
+
+
+def test_import_only_replaces_the_target_connection():
+    other_store, other_table_id, _other_column_id = _published_store(connection_id="other")
+    demo_store, _table_id, _column_id = _published_store(connection_id="demo")
+    bundle = governance.export_connection(demo_store, connection_id="demo", now=_NOW)
+
+    imported = governance.import_connection(
+        other_store, bundle=bundle, connection_id="demo", actor="operator", now=_NOW
+    ).store
+
+    # "other" connection's published table is untouched by importing "demo".
+    assert imported.get_table("other", "customers").description == "Customer entity."
+    assert (
+        imported.get_draft_proposal(other_table_id).review_status == ProposalReviewStatus.PUBLISHED
+    )
+
+
+def test_import_is_destructive_replace_of_prior_target_connection_content():
+    # Import twice with different content the second time — the first
+    # import's content must be fully replaced, not merged/duplicated.
+    store, table_id, _column_id = _published_store()
+    bundle = governance.export_connection(store, connection_id="demo", now=_NOW)
+    target = CatalogStore.empty()
+    target = governance.import_connection(
+        target, bundle=bundle, connection_id="demo", actor="operator", now=_NOW
+    ).store
+    assert len(list(target.iter_draft_proposals("demo"))) == 2
+
+    empty_bundle = bundle.model_copy(
+        update={
+            "tables": {},
+            "draft_proposals": [],
+            "generation_records": [],
+            "version_history": [],
+        }
+    )
+    target = governance.import_connection(
+        target, bundle=empty_bundle, connection_id="demo", actor="operator", now=_NOW
+    ).store
+    assert list(target.iter_draft_proposals("demo")) == []
+    assert target.get_table("demo", "customers") is None
+
+
+# ---------------------------------------------------------------------------
+# 32B-2: retention / deletion
+# ---------------------------------------------------------------------------
+
+
+def test_delete_proposal_refuses_pending_or_approved():
+    store = _store_with_pending_proposals()
+    table_id = _table_proposal_id(store)
+    with pytest.raises(CatalogGovernanceError, match="pending"):
+        governance.delete_proposal(
+            store, proposal_id=table_id, connection_id="demo", actor="operator", now=_NOW
+        )
+
+    approved = governance.approve_proposal(
+        store, proposal_id=table_id, connection_id="demo", actor="reviewer", now=_NOW
+    ).store
+    with pytest.raises(CatalogGovernanceError, match="approved"):
+        governance.delete_proposal(
+            approved, proposal_id=table_id, connection_id="demo", actor="operator", now=_NOW
+        )
+
+
+def test_delete_rejected_proposal_removes_it_and_updates_generation_record():
+    store = _store_with_pending_proposals()
+    table_id = _table_proposal_id(store)
+    column_id = _column_proposal_id(store)
+    rejected = governance.reject_proposal(
+        store,
+        proposal_id=table_id,
+        connection_id="demo",
+        actor="reviewer",
+        reason="not needed",
+        now=_NOW,
+    ).store
+
+    deleted = governance.delete_proposal(
+        rejected, proposal_id=table_id, connection_id="demo", actor="operator", now=_NOW
+    ).store
+    assert deleted.get_draft_proposal(table_id) is None
+    # The other proposal from the same generation batch is untouched.
+    assert deleted.get_draft_proposal(column_id) is not None
+    generation_record = deleted.get_generation_record("onboarding-1")
+    assert table_id not in generation_record.proposal_ids
+    assert column_id in generation_record.proposal_ids
+
+
+def test_delete_published_proposal_requires_rollback_first():
+    # The column publish (version "2") has no dependents, unlike the table
+    # publish ("1"), which the column itself now depends on — a clean
+    # target for this test's rollback-then-delete flow.
+    store, _table_id, column_id = _published_store()
+    with pytest.raises(CatalogGovernanceError, match="still live"):
+        governance.delete_proposal(
+            store, proposal_id=column_id, connection_id="demo", actor="operator", now=_NOW
+        )
+
+    rolled_back = governance.rollback_version(
+        store, version_id="2", connection_id="demo", actor="operator", now=_NOW
+    ).store
+    deleted = governance.delete_proposal(
+        rolled_back, proposal_id=column_id, connection_id="demo", actor="operator", now=_NOW
+    ).store
+    assert deleted.get_draft_proposal(column_id) is None
+    # The proposal, its now-reverted publish record, and the rollback record
+    # that reverted it (which would otherwise dangle-reference the deleted
+    # publish record) are all removed together.
+    assert deleted.get_version_record("2") is None
+    assert deleted.get_version_record("3") is None
+
+
+def test_bulk_delete_proposals_is_atomic():
+    store = _store_with_pending_proposals()
+    table_id = _table_proposal_id(store)
+    column_id = _column_proposal_id(store)
+    rejected = governance.bulk_reject_proposals(
+        store,
+        proposal_ids=(table_id, column_id),
+        connection_id="demo",
+        actor="reviewer",
+        reason="cleanup",
+        now=_NOW,
+    ).store
+
+    with pytest.raises(NotFoundError):
+        governance.bulk_delete_proposals(
+            store=rejected,
+            proposal_ids=(table_id, "unknown-id"),
+            connection_id="demo",
+            actor="operator",
+            now=_NOW,
+        )
+    assert rejected.get_draft_proposal(table_id) is not None  # no partial mutation
+
+    deleted = governance.bulk_delete_proposals(
+        store=rejected,
+        proposal_ids=(table_id, column_id),
+        connection_id="demo",
+        actor="operator",
+        now=_NOW,
+    ).store
+    assert list(deleted.iter_draft_proposals("demo")) == []
+
+
+def test_delete_version_record_only_allows_rollback_records():
+    store, _table_id, _column_id = _published_store()
+    with pytest.raises(CatalogGovernanceError, match="rollback record"):
+        governance.delete_version_record(
+            store, version_id="2", connection_id="demo", actor="operator", now=_NOW
+        )
+
+    rolled_back = governance.rollback_version(
+        store, version_id="2", connection_id="demo", actor="operator", now=_NOW
+    ).store
+    deleted = governance.delete_version_record(
+        rolled_back, version_id="3", connection_id="demo", actor="operator", now=_NOW
+    ).store
+    assert deleted.get_version_record("3") is None
+    # The (reverted) publish record it reverted is untouched by this delete.
+    assert deleted.get_version_record("2") is not None
