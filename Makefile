@@ -105,6 +105,10 @@ format-check: ## Check formatting without making changes
 lint: format-check ## Alias for format-check (extend with ruff/mypy when added)
 
 # ─── Release ──────────────────────────────────────────────────────────────────
+.PHONY: sbom
+sbom: ## Generate a CycloneDX SBOM, dependency vulnerability report, and SHA256SUMS from dist/ (run `poetry build` first)
+	poetry run python scripts/generate_sbom.py
+
 .PHONY: release-check
 release-check: ## Run deterministic source/package release gates and build artifacts
 	poetry check --lock
@@ -115,6 +119,7 @@ release-check: ## Run deterministic source/package release gates and build artif
 		poetry run querygate-validate-config
 	poetry build
 	poetry run python scripts/check_release_artifacts.py
+	$(MAKE) sbom
 
 .PHONY: release-smoke
 release-smoke: ## Build the image and execute a real structured query against Postgres

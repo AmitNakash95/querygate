@@ -521,6 +521,13 @@ Agent (MCP) / Client (REST)
   cannot enter an implicit `FROM`; unexpected backend errors are masked; and
   MCP rejects unapproved Host headers. See [the threat model](docs/THREAT_MODEL.md)
   and run `make test-security`.
+- **Supply-chain transparency for the exact dependency set shipped** — every
+  `make release-check` generates a CycloneDX SBOM and a `pip-audit`
+  vulnerability report scoped to `poetry.lock`'s locked `main` group (not an
+  unpinned resolve), plus SHA-256 checksums for the built artifacts. Any known
+  vulnerability without a reviewed, justified entry in
+  `security/dependency-audit-allowlist.json` fails the release
+  (deny-by-default). See [`docs/RELEASING.md`](docs/RELEASING.md#software-bill-of-materials-and-dependency-audit).
 
 ## Built-in product guide
 

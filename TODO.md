@@ -59,7 +59,7 @@ order-of-magnitude, not commitments.
 | 27 | ✅ Semantic schema catalog and sensitivity metadata | L | 6, 16 |
 | 28 | ✅ Threat model + adversarial security test suite | M | 1, 6, 8, 10, 11 |
 | 29 | ✅ Production deployment reference stack | M | 4, 9, 12, 13, 14 |
-| 30 | Distribution, SBOM, and signed release artifacts | M | 4, 14 |
+| 30 | ✅ Distribution, SBOM, and signed release artifacts (phase 1: SBOM + audit; phase 2: publishing + signing not started) | M | 4, 14 |
 | 31 | Admin UI / policy designer | XL | 25 |
 | 32 | Governed adaptive semantic memory for agents | XL | 23, 25, 27, 28 |
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
@@ -1222,8 +1222,72 @@ probes, and a short runbook for config reloads, rotations, and rollback.
 
 ### 30. Distribution, SBOM, and signed release artifacts
 
-**Effort: M (2–3 days).** Straightforward release engineering once the
-package boundary is settled.
+**Phase 1 (SBOM + dependency audit + checksums) ✅ DONE.** **Phase 2
+(publishing to a real registry/index + cryptographic signing) not started —
+split out below because it needs infrastructure and credentials this
+environment does not have and this project does not yet operate.**
+
+**Phase 1 shipped:** `scripts/generate_sbom.py`, run as the last step of
+`make release-check` (and as its own `make sbom` target). It reads
+`poetry.lock`'s `main` dependency group — the exact locked set QueryGate
+ships, filtered by platform markers, not whatever an unpinned `pip install`
+would resolve today — installs those pins `--no-deps` plus the built wheel
+into a throwaway venv (so the repo's own dev-tooling dependencies never
+pollute the SBOM or the audit), and produces three artifacts in `dist/`:
+a CycloneDX 1.6 SBOM (`querygate-<version>.cdx.json`), a `pip-audit`
+vulnerability report (`querygate-<version>.vuln-report.json`), and a
+`SHA256SUMS` checksum manifest covering the wheel, sdist, and SBOM.
+
+The dependency audit is a real, deny-by-default release gate, not a report
+nobody reads: any known vulnerability in the locked production dependency
+set fails `make release-check` unless it has a reviewed entry in
+`security/dependency-audit-allowlist.json`, keyed by advisory id, recording
+the affected package and — verified against this repository's actual code,
+not assumed — a specific reason the finding doesn't reach a real QueryGate
+code path (e.g. a deprecated transport QueryGate never mounts, a function
+QueryGate never calls, a header QueryGate never uses for authorization).
+
+Running this on `poetry.lock`'s locked versions today surfaced 13 real,
+currently-unpatched advisories across 5 production-reachable dependencies —
+`click`, `idna`, `mcp`, `python-dotenv`, `starlette` — each reviewed and
+allowlisted with its specific non-applicability reason (see the file). One
+is worth calling out explicitly: `mcp` 1.12.4 (PYSEC-2026-1617) doesn't
+enable DNS-rebinding protection by default, but `mcp/server.py` already
+enables it independently at the application layer (`TransportSecuritySettings(
+enable_dns_rebinding_protection=True, ...)`, also covered by item 28's
+adversarial suite) — a real compensating control, not just a documentation
+note. `setuptools`/`pip`/`wheel` findings are excluded everywhere: they're
+bootstrapped into every fresh virtualenv by `ensurepip`, not a package
+QueryGate's `poetry.lock` `main` group actually declares.
+
+**Explicitly out of scope for phase 1, tracked as phase 2:**
+
+- **Publishing to a registry.** No package (PyPI/private index) or container
+  registry has been chosen or configured; `docs/RELEASING.md` still describes
+  local-only artifacts, and pushing/publishing requires explicit maintainer
+  approval before it can happen at all.
+- **Cryptographic signing (e.g. Sigstore/cosign keyless signing).** Signing
+  is only meaningful once there's a real published artifact and registry to
+  attach the signature and transparency-log entry to — building it against
+  nothing to sign would be security theater, not a control.
+- **Remediating the 13 allowlisted findings** — i.e. actually upgrading
+  `click`/`idna`/`mcp`/`python-dotenv`/`starlette` past their locked versions.
+  `mcp` in particular is a core protocol dependency threaded through every
+  `mcp/tools/*.py` module and the FastMCP forward-reference-resolution
+  behavior this codebase already works around (see this file's testing
+  gotchas in `CLAUDE.md`) — bumping it needs its own dedicated regression
+  pass against the full MCP surface, not a drive-by version bump alongside
+  unrelated SBOM tooling.
+- **Container-image-level SBOM** (e.g. `anchore/sbom-action` against the
+  built Docker image) — phase 1 covers the Python package's dependency
+  closure, which is where `poetry.lock` gives precise, lockfile-driven
+  answers; the base OS image's own package inventory is a separate, later
+  addition.
+
+**Effort: M (2–3 days) for phase 1 (done); phase 2 (registry publishing +
+signing) is realistically its own S–M slice once a registry is chosen, plus
+whatever time the dependency remediation above needs — that's a security
+regression-testing task, not a packaging one.**
 
 **Why it matters:** To be taken seriously by security teams, QueryGate
 should ship with repeatable artifacts and supply-chain metadata: versioned
@@ -1231,10 +1295,14 @@ Python package, container image tags, lockfile discipline, SBOM, and ideally
 signed images/releases. This is not glamorous, but it creates a lot of
 buyer confidence.
 
-**What to do:** Define the release process for PyPI/private registry and
-container images. Generate an SBOM in CI, pin and review dependencies,
-publish immutable version tags, and document verification steps. Add a
-release checklist so every version is cut the same way.
+**What to do (phase 2):** Choose and configure a package/container registry,
+wire publishing into a release workflow gated on explicit maintainer
+approval (never automatic), add Sigstore/cosign keyless signing of published
+images once there's something real to sign, and — separately — work through
+`security/dependency-audit-allowlist.json`'s current entries, upgrading each
+dependency and removing its allowlist entry once a real regression pass
+against the affected surface (MCP tools for `mcp`, ASGI routing for
+`starlette`) confirms nothing breaks.
 
 ### 33. Permission-aware QueryGate product guide and configuration assistant ✅ DONE
 
