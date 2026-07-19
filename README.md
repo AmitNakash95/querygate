@@ -938,16 +938,14 @@ Being upfront about what's not done yet:
   `429`+`Retry-After` evaluation (TODO item 35 phase 3). The in-process
   (non-Redis) `querygate_queue_depth` gauge remains single-process
   visibility only, like `querygate_concurrency_in_use`.
-- **Semantic memory phases 32A and 32B are complete, not item 32
-  overall** — durable provenance, deterministic schema refresh/diffs,
-  selective staleness, policy-first retrieval, disabled/manual-only
-  quarantined drafts, a fixed benchmark, a governed review/edit/
-  approve/reject/publish/rollback workflow (with durable version history
-  and audit events), and connection-scoped export/import (backup/restore)
-  and retention/deletion are all shipped. There is still no embedding
-  index or adaptive usage-learning loop (32C). A draft never reaches
-  agents until it is explicitly approved and published by an authorized
-  reviewer through the workflow below.
+- **Semantic memory enrichment is opt-in and relationship-learning only** —
+  item 32's governed adaptive loop is complete, including redaction-safe usage
+  signals, confidence/decay/conflict-gated learned relationship proposals,
+  background processing, and the existing review/publish/rollback workflow.
+  There is still no embedding index or live model provider, and usage alone
+  does not generate free-form table or column descriptions. Learned proposals
+  remain hidden from agents until explicitly approved and published by an
+  authorized reviewer through the workflow above.
 - **Security review is first-party** — the repository includes a maintained
   threat model and adversarial regression suite, but has not yet undergone an
   independent penetration test or formal compliance certification.
