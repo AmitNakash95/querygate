@@ -6,6 +6,7 @@ validate_schema; policy validation runs for real against a permissive Policy.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -749,6 +750,7 @@ async def test_describe_table_merges_catalog_metadata():
                             "customers": {
                                 "description": "One row per customer.",
                                 "sensitivity": "internal",
+                                "provenance": {"created_by": "private-admin-subject"},
                                 "relationships": [
                                     {
                                         "to_table": "orders",
@@ -776,11 +778,14 @@ async def test_describe_table_merges_catalog_metadata():
     assert desc.catalog.description == "One row per customer."
     assert desc.catalog.sensitivity == "internal"
     assert desc.catalog.relationships[0].to_table == "orders"
+    assert desc.catalog.provenance.status == "verified"
+    assert desc.catalog.provenance.freshness == "untracked"
     email_col = next(c for c in desc.columns if c.name == "email")
     assert email_col.catalog.description == "Email"
     assert email_col.catalog.sensitivity == "pii"
     id_col = next(c for c in desc.columns if c.name == "id")
     assert id_col.catalog is None  # no catalog entry for this column
+    assert "private-admin-subject" not in json.dumps(desc.model_dump(mode="json"))
 
 
 @pytest.mark.asyncio

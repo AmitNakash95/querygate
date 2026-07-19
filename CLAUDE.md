@@ -81,10 +81,17 @@ in order, for `execute`/`explain`:
 
 ### Connections and policy are file-configured, not code-configured
 
-`connections/registry.py` and `policy/loader.py` load YAML into process-wide
+`connections/registry.py`, `policy/loader.py`, and `catalog/loader.py` load YAML into process-wide
 stores and support an authorized, atomic hot reload. There is no app-owned
 configuration database yet. See `examples/connections.example.yaml` and
-`examples/policy.example.yaml` for the shape.
+`examples/policy.example.yaml` for the enforcement shape and
+`examples/catalog.example.yaml` for the optional versioned semantic overlay.
+
+Catalog version 2 extends item 27 in place with stable provenance,
+schema-only fingerprints/diffs, and compact policy-first retrieval. Catalog
+search must filter tables, columns, and both relationship endpoints before
+tokenization/ranking/counting. It is descriptive and must never become a
+query execution or row-value search path.
 
 **Security invariant**: `connections/models.py` splits `ConnectionProfile`
 (carries the real connection string, resolved from `${ENV_VAR}` in the YAML

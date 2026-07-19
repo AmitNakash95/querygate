@@ -7,12 +7,76 @@ returns `catalog: null` for every table/column.
 
 from __future__ import annotations
 
+import copy
+import hashlib
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 import yaml
 
 from querygate.catalog.models import SchemaCatalog, TableCatalogEntry
+from querygate.catalog.schema_memory import ObservedSchemaSnapshot
+
+
+def _stable_entry_id(*parts: str) -> str:
+    identity = "\x1f".join(part.casefold() for part in parts)
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+    return f"urn:querygate:catalog:{digest}"
+
+
+def _bind_provenance(
+    raw_entry: dict, *, entry_id: str, catalog_version: int, schema_fingerprint: str
+) -> None:
+    provenance = raw_entry.setdefault("provenance", {})
+    provenance.setdefault("entry_id", entry_id)
+    provenance.setdefault("catalog_version", catalog_version)
+    provenance.setdefault("schema_fingerprint", schema_fingerprint)
+
+
+def _normalize_catalog(raw: dict) -> dict:
+    """Upgrade legacy catalog content without mutating the caller's object."""
+
+    normalized = copy.deepcopy(raw)
+    version = normalized.setdefault("version", 2)
+    connections = normalized.get("connections", {}) or {}
+    snapshots = normalized.get("schema_snapshots", {}) or {}
+    for connection_id, connection in connections.items():
+        snapshot = snapshots.get(connection_id) or {}
+        schema_fingerprint = (
+            ObservedSchemaSnapshot.model_validate(snapshot).fingerprint if snapshot else "untracked"
+        )
+        for table_name, table in (connection.get("tables", {}) or {}).items():
+            _bind_provenance(
+                table,
+                entry_id=_stable_entry_id(connection_id, "table", table_name),
+                catalog_version=version,
+                schema_fingerprint=schema_fingerprint,
+            )
+            for column_name, column in (table.get("columns", {}) or {}).items():
+                _bind_provenance(
+                    column,
+                    entry_id=_stable_entry_id(
+                        connection_id, "table", table_name, "column", column_name
+                    ),
+                    catalog_version=version,
+                    schema_fingerprint=schema_fingerprint,
+                )
+            for relationship in table.get("relationships", []) or []:
+                _bind_provenance(
+                    relationship,
+                    entry_id=_stable_entry_id(
+                        connection_id,
+                        "table",
+                        table_name,
+                        "relationship",
+                        relationship.get("column", ""),
+                        relationship.get("to_table", ""),
+                        relationship.get("to_column", ""),
+                    ),
+                    catalog_version=version,
+                    schema_fingerprint=schema_fingerprint,
+                )
+    return normalized
 
 
 class CatalogStore:
@@ -33,7 +97,7 @@ class CatalogStore:
 
     @classmethod
     def from_dict(cls, raw: dict) -> "CatalogStore":
-        return cls(SchemaCatalog.model_validate(raw))
+        return cls(SchemaCatalog.model_validate(_normalize_catalog(raw)))
 
     def get_table(self, connection_id: str, table_name: str) -> Optional[TableCatalogEntry]:
         connection_catalog = self._catalog.connections.get(connection_id)
@@ -41,13 +105,28 @@ class CatalogStore:
             return None
         return connection_catalog.table(table_name)
 
+    def iter_tables(self, connection_id: str) -> Iterator[tuple[str, TableCatalogEntry]]:
+        connection_catalog = self._catalog.connections.get(connection_id)
+        if connection_catalog is None:
+            return
+        yield from connection_catalog.tables.items()
+
+    def get_schema_snapshot(self, connection_id: str) -> Optional[ObservedSchemaSnapshot]:
+        return self._catalog.schema_snapshots.get(connection_id)
+
+    @property
+    def version(self) -> int:
+        return self._catalog.version
+
     def connection_ids(self) -> list[str]:
         """Connection ids referenced in the catalog file — used to cross-check
         against the connections file's real ids (see querygate/cli.py's
         validate-config command), mirroring
         PolicyStore.override_connection_ids.
         """
-        return sorted(self._catalog.connections.keys())
+        return sorted(
+            set(self._catalog.connections.keys()) | set(self._catalog.schema_snapshots.keys())
+        )
 
 
 _store: Optional[CatalogStore] = None

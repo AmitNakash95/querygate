@@ -348,13 +348,19 @@ gap:
 
 ```yaml
 # examples/catalog.example.yaml
-version: 1
+version: 2
 connections:
   demo:
     tables:
       customers:
         description: "One row per registered customer."
         aliases: ["clients", "accounts"]
+        provenance:
+          source_class: verified
+          status: verified
+          source_evidence:
+            - {kind: manual, reference: "catalog.yaml"}
+          created_by: "data-governance"
         default_aggregation: "count(customers.id)"
         relationships:
           - to_table: orders
@@ -375,12 +381,41 @@ table and per column when configured, `null` otherwise. It is purely
 descriptive: the catalog never affects query validation, compilation, or
 execution, and it is filtered by the same policy as everything else —
 denied columns never reach catalog lookup at all (they're already excluded
-from the response), and a relationship hint pointing at a table the caller's
-resolved policy denies is dropped, so curated metadata can never disclose
-more than ordinary schema discovery already allows. Reloadable without a
-restart via the same `POST /api/v1/admin/reload-config` endpoint used for
-connections/policy; validated by `querygate-validate-config --catalog-file
-...` alongside the other two files.
+from the response), and a relationship hint pointing at a denied table—or
+using a denied join column on either end—is dropped.
+
+Catalog format version 2 adds deterministic stable entry IDs and durable
+provenance to every table, column, and relationship: source class/evidence,
+`draft`/`verified`/`rejected`/`stale`/`archived` status, confidence, catalog
+and schema version, freshness, actors/timestamps, and server-derived
+precedence. Legacy version-1 files still load; omitted provenance is upgraded
+in memory as manually verified content. Verified content outranks observed,
+inferred, and learned proposals, and semantic-memory merging can never change
+a sensitivity label.
+
+`GET /api/v1/{connection}/catalog/search?q=customer+revenue` and the MCP
+`search_catalog` tool return compact deterministic matches with those
+citations. QueryGate applies the requesting principal's policy before
+candidate text is tokenized, ranked, counted, traversed, or byte-limited.
+Rejected/archived entries are not searchable; stale and draft entries are
+labeled explicitly. Search is metadata-only, bounded to at most 20 hits and
+16 KiB, and never touches database rows. Public citations hash evidence
+references and omit creator/approver/model identities; the durable catalog
+retains those privileged provenance fields for later governed review.
+
+Version 2 can also persist row-free observed-schema snapshots. The
+deterministic fingerprint/diff engine covers tables, columns/types/
+nullability, primary keys, foreign keys, indexes, and hashed (never raw)
+database comments; possible renames are reported as candidates rather than
+silently asserted. Automatic refresh/invalidation, manual-only generated
+drafts, and the deterministic evaluation benchmark are the explicit 32A-2
+follow-up.
+
+The catalog remains reloadable without a restart through the same
+`POST /api/v1/admin/reload-config` endpoint used for connections/policy and is
+validated by `querygate-validate-config --catalog-file ...` alongside the
+other two files. Empty/disabled semantic memory does not affect ordinary
+schema validation or query execution.
 
 ## Example StructuredQuery payload
 
@@ -428,7 +463,7 @@ items, and `top_n` per-partition ranking (top-N-per-group).
 ```
 
 POST this to `/mcp` (Streamable HTTP) with `MCP_ENABLED=true`. Tools:
-`list_connections`, `list_tables`, `describe_table`,
+`list_connections`, `list_tables`, `describe_table`, `search_catalog`,
 `explain_structured_query`, `execute_structured_query`,
 `execute_structured_queries` (batch), plus the product-guide and access tools
 described below. More examples in
@@ -567,9 +602,10 @@ Agent (MCP) / Client (REST)
   entire agent-facing input surface.
 - **`policy/`** — `Policy` model + YAML loader (default + per-connection
   overrides).
-- **`catalog/`** — optional curated schema-catalog overlay (descriptions,
-  aliases, relationship hints, sensitivity labels) merged into
-  `describe_table`, filtered by the same policy as everything else.
+- **`catalog/`** — versioned semantic-catalog overlay (descriptions, aliases,
+  relationship hints, sensitivity labels, durable provenance, schema
+  fingerprints/diffs, and compact retrieval) merged into `describe_table`
+  and filtered before search/ranking by the same policy as everything else.
 - **`validation/`** — schema-truth checks (does this table/column exist?)
   and policy checks (is it allowed? within caps?) — deliberately separate
   modules, run in that order, both before compilation.
@@ -610,6 +646,9 @@ Agent (MCP) / Client (REST)
   catalog (business descriptions, relationship hints, sensitivity labels)
   never affects query enforcement, and never discloses a table/column a
   denied caller couldn't already see through ordinary schema discovery.
+  Semantic search filters candidates—including both relationship columns—
+  before ranking or counting and returns provenance/status/freshness on every
+  hit.
 - **Bounded execution** — every query runs under a per-connection
   concurrency semaphore and a policy-configured timeout; row counts are
   clamped server-side (tiered: lower for row selects, higher for
@@ -725,6 +764,11 @@ Being upfront about what's not done yet:
   `429`+`Retry-After` evaluation (TODO item 35 phase 3). The in-process
   (non-Redis) `querygate_queue_depth` gauge remains single-process
   visibility only, like `querygate_concurrency_in_use`.
+- **Semantic memory is at 32A-1** — durable catalog provenance, deterministic
+  schema fingerprints/diffs, and policy-first compact retrieval are shipped.
+  Manual-only generated drafts, automatic schema refresh/invalidation, and
+  the deterministic evaluation baseline remain 32A-2; there is no model call
+  or autonomous learning/publishing path yet.
 - **Security review is first-party** — the repository includes a maintained
   threat model and adversarial regression suite, but has not yet undergone an
   independent penetration test or formal compliance certification.

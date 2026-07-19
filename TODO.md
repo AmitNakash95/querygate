@@ -61,7 +61,7 @@ order-of-magnitude, not commitments.
 | 29 | ✅ Production deployment reference stack | M | 4, 9, 12, 13, 14 |
 | 30 | ✅ Distribution, SBOM, and signed release artifacts (phase 1: SBOM + audit; phase 2: publishing + signing not started) | M | 4, 14 |
 | 31 | Admin UI / policy designer | XL | 25 |
-| 32 | Governed adaptive semantic memory for agents | XL | 23, 25, 27, 28 |
+| 32 | Governed adaptive semantic memory for agents (32A-1 ✅; 32A-2/32B/32C not started) | XL | 23, 25, 27, 28 |
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
 | 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
@@ -1773,6 +1773,59 @@ phase 3 answers the rest.
 
 ### 32. Governed adaptive semantic memory for agents
 
+**32A-1 shipped — durable provenance, schema fingerprints/diffs, and
+policy-first retrieval.** This is an independently deployable first slice of
+32A, deliberately built by versioning/extending item 27's existing
+`querygate/catalog/` YAML/store rather than adding a parallel catalog:
+
+- Catalog format version 2 gives every table, column, and relationship entry a
+  deterministic stable id, catalog/schema version, source class and redaction-
+  safe evidence pointers, confidence, status (`draft`, `verified`, `rejected`,
+  `stale`, or `archived`), actor/timestamps, optional model/prompt identifiers,
+  and server-derived precedence. Version-1 catalogs remain valid and are
+  upgraded in memory as manually verified entries with deterministic ids.
+- The documented/tested replacement gate orders verified > observed >
+  inferred > learned, prevents a non-verified source from replacing verified
+  knowledge, excludes non-publishable states, and makes sensitivity labels
+  immutable through semantic-memory merging. This phase has no automatic
+  merge or generated-content path, so it cannot change access, mandatory row
+  filters, or sensitivity.
+- `catalog/schema_memory.py` produces canonical row-free schema snapshots,
+  SHA-256 fingerprints, and structured diffs for tables, columns/types/
+  nullability/primary keys, foreign keys, and indexes. Database comments are
+  stored only as hashes (not prompt-injectable raw text). Unique structural
+  matches are reported as *possible* renames rather than asserted as truth;
+  tampered snapshots are rejected.
+- `catalog/retrieval.py`, `StructuredQueryService.search_catalog`, `GET
+  /api/v1/{connection}/catalog/search`, and MCP `search_catalog` provide
+  bounded deterministic lexical retrieval (1–20 results, 16 KiB). The
+  requesting principal's policy is applied before tokenization, scoring,
+  result counts, relationship traversal, or byte budgeting—including both
+  join columns and the relationship target table. Every hit cites entry id,
+  source plus hashed evidence references, status, confidence, precedence,
+  catalog version, schema fingerprint, and `current`/`stale`/`untracked`
+  freshness. Creator/approver/model identities stay in the privileged durable
+  record rather than agent responses. Rejected/archived entries never enter
+  search; stale/draft results are never presented without their state.
+- Retrieval is metadata-only and independent of the database execution path:
+  it stores/searches no rows, credentials, query literals, raw exceptions, or
+  unrestricted natural-language history; an empty catalog or memory failure
+  cannot weaken or block item-27 discovery, policy/schema validation, or
+  ordinary structured query execution.
+
+Covered by focused catalog/provenance, fingerprint/diff, REST/MCP integration,
+and multi-principal adversarial tests, plus QG-17 in `docs/THREAT_MODEL.md`.
+
+**32A-2 not started — explicit reasoned split:** manual/disabled provider
+contract, generated drafts, automatic schema refresh and affected-entry stale
+marking, and the deterministic evaluation baseline remain one follow-up slice.
+Combining them with the versioned storage/retrieval security boundary would
+not fit this session's conservative capacity after reserving time for full
+release checks, documentation, diff review, and the required commit. No live
+LLM provider is to be added in 32A-2: provider execution remains disabled/
+manual-only so provider selection cannot enter the critical path. The
+benchmark must define thresholds before evaluating generated output.
+
 **Effort: XL (4–8+ weeks after item 27).** A useful prototype can be built
 faster, but a production-grade version needs a durable knowledge model,
 principal-safe retrieval, schema-change invalidation, provider isolation,
@@ -1973,13 +2026,18 @@ injecting an ever-growing document into every prompt.
 
 #### Phased delivery
 
-1. **32A — Semantic memory MVP:** after item 27, add the durable provenance
-   model, schema fingerprints/diffs, manual provider, generated drafts, compact
-   policy-filtered retrieval, and deterministic evaluation baseline.
-2. **32B — Governed publishing:** integrate item 25's scopes, review/publish/
+1. **32A-1 — Provenance, schema drift primitives, and safe retrieval ✅ DONE:**
+   durable version-2 provenance on item 27's catalog, row-free schema
+   fingerprints/diffs, and compact policy-first REST/MCP retrieval. See the
+   shipped note above.
+2. **32A-2 — Manual generation and deterministic baseline (not started):** add
+   the disabled/manual-only provider contract, generated drafts, automatic
+   snapshot refresh/affected-entry stale marking, and the predefined
+   deterministic evaluation benchmark. No hosted/live provider integration.
+3. **32B — Governed publishing:** integrate item 25's scopes, review/publish/
    reject workflows, version history, rollback, audit events, provider privacy
    controls, and schema-change invalidation.
-3. **32C — Adaptive learning and hardening:** add redaction-safe usage signals,
+4. **32C — Adaptive learning and hardening:** add redaction-safe usage signals,
    feedback/correction proposals, confidence/decay/conflict rules, background-
    job resilience, full observability, adversarial coverage, and load tests.
 

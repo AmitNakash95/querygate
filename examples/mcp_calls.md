@@ -48,6 +48,26 @@ text/event-stream`, plus `Authorization: Bearer <key>` once
 }
 ```
 
+## Search the semantic catalog
+
+This searches only policy-visible metadata, never database row values:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 31,
+  "method": "tools/call",
+  "params": {
+    "name": "search_catalog",
+    "arguments": {
+      "connection": "demo",
+      "query": "customer revenue",
+      "limit": 5
+    }
+  }
+}
+```
+
 ## Execute a structured query
 
 ```json

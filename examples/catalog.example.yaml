@@ -9,9 +9,18 @@
 # metadata can never disclose more than ordinary schema discovery already
 # allows: a relationship hint pointing at a table the caller's policy denies
 # is dropped, and a denied column never reaches catalog lookup at all because
-# it's already excluded from the response.
+# it's already excluded from the response. search_catalog (MCP) and
+# GET /api/v1/{connection}/catalog/search apply the same filtering before
+# ranking or counting candidates and never inspect database rows.
+#
+# Version 2 attaches deterministic stable ids, status, source evidence,
+# confidence, catalog/schema version, freshness, and server-derived precedence
+# to every table, column, and relationship. Omitted provenance defaults to
+# manually verified catalog.yaml content; the loader fills stable ids and the
+# catalog version. The explicit block below shows the shape. Version-1 files
+# remain valid.
 
-version: 1
+version: 2
 
 connections:
   demo:
@@ -19,6 +28,14 @@ connections:
       customers:
         description: "One row per registered customer."
         aliases: ["clients", "accounts"]
+        provenance:
+          source_class: verified
+          status: verified
+          confidence: 1.0
+          source_evidence:
+            - kind: manual
+              reference: catalog.yaml
+          created_by: data-governance
         default_aggregation: "count(customers.id)"
         relationships:
           - to_table: orders

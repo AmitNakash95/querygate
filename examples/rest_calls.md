@@ -22,6 +22,15 @@ curl http://localhost:8000/api/v1/demo/tables
 curl http://localhost:8000/api/v1/demo/tables/orders
 ```
 
+## Search the semantic catalog
+
+Metadata-only and policy-filtered before ranking/counting; each compact hit
+includes provenance, verification state, schema fingerprint, and freshness:
+
+```bash
+curl "http://localhost:8000/api/v1/demo/catalog/search?q=customer+revenue&limit=5"
+```
+
 ## Explain a query (compile without executing)
 
 ```bash
