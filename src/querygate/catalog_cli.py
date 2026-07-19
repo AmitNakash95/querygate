@@ -13,6 +13,11 @@ from typing import Optional
 import yaml
 
 from querygate.catalog import governance
+from querygate.catalog.adaptive_learning_benchmark import (
+    default_adaptive_learning_benchmark_path,
+    load_adaptive_learning_benchmark,
+    run_adaptive_learning_benchmark,
+)
 from querygate.catalog.benchmark import evaluate_benchmark, load_benchmark
 from querygate.catalog.generation import CatalogGenerationUpdate, generate_catalog_drafts
 from querygate.catalog.learning import generate_learned_relationship_proposals
@@ -375,6 +380,11 @@ def main() -> None:
     evaluate_parser = subparsers.add_parser("evaluate")
     evaluate_parser.add_argument("--benchmark", default=default_benchmark_path())
 
+    adaptive_learning_test_parser = subparsers.add_parser("adaptive-learning-test")
+    adaptive_learning_test_parser.add_argument(
+        "--benchmark", default=default_adaptive_learning_benchmark_path()
+    )
+
     list_proposals_parser = subparsers.add_parser("list-proposals")
     list_proposals_parser.add_argument("--catalog-file")
     list_proposals_parser.add_argument("--connection", required=True)
@@ -476,6 +486,18 @@ def main() -> None:
     try:
         if args.command == "evaluate":
             report = evaluate_benchmark(load_benchmark(args.benchmark))
+            print(report.model_dump_json(indent=2))
+            if not report.passed:
+                sys.exit(1)
+            return
+
+        if args.command == "adaptive-learning-test":
+            # Self-contained (TODO.md item 37): builds its own temporary
+            # catalog file and registry/policy, so it needs neither
+            # --catalog-file nor CATALOG_FILE.
+            report = run_adaptive_learning_benchmark(
+                load_adaptive_learning_benchmark(args.benchmark)
+            )
             print(report.model_dump_json(indent=2))
             if not report.passed:
                 sys.exit(1)
