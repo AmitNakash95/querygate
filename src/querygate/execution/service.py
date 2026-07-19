@@ -34,16 +34,22 @@ from querygate.core.exceptions import (
     QueryValidationError,
     public_error_message,
 )
-from querygate.core.logging import log_execution
+from querygate.core.logging import get_logger, log_execution
 from querygate.execution.concurrency import concurrency_slot
-from querygate.execution.cost_estimation import enforce_cost_estimate, estimate_postgres_query_cost
+from querygate.execution.cost_estimation import (
+    QueryCostEstimate,
+    cost_estimate_violations,
+    enforce_cost_estimate,
+    estimate_postgres_query_cost,
+)
 from querygate.metrics import (
+    COST_ESTIMATION_WOULD_REJECT_TOTAL,
     QUERIES_REJECTED_TOTAL,
     QUERIES_TOTAL,
     QUERY_DURATION_SECONDS,
     classify_rejection,
 )
-from querygate.policy.models import Policy
+from querygate.policy.models import CostEstimationMode, Policy
 from querygate.query_ast.models import StructuredQuery
 from querygate.schema.reflection import get_table_schema, list_live_tables, sanitize_table_name
 from querygate.validation.policy_validation import validate_policy
@@ -226,6 +232,25 @@ class StructuredQueryService:
         )
         return stmt, limit, tables, dialect
 
+    def _observe_cost_estimate(self, estimate: QueryCostEstimate, policy: Policy) -> None:
+        """`CostEstimationMode.OBSERVE`: record what *would* have been
+        rejected without blocking the query — lets an operator calibrate
+        max_estimated_rows/max_estimated_cost against real traffic before
+        switching a connection over to ENFORCE (see CostEstimationMode's
+        docstring in policy/models.py).
+        """
+        violations = cost_estimate_violations(estimate, policy)
+        if not violations:
+            return
+        COST_ESTIMATION_WOULD_REJECT_TOTAL.labels(connection=self._connection_id).inc()
+        get_logger().bind(func="execute").warning(
+            "cost_estimation.observed_would_reject",
+            connection=self._connection_id,
+            violations=violations,
+            estimated_rows=estimate.estimated_rows,
+            estimated_total_cost=estimate.estimated_total_cost,
+        )
+
     @log_execution
     async def execute(self, query: StructuredQuery) -> StructuredQueryResult:
         start = time.monotonic()
@@ -244,9 +269,14 @@ class StructuredQueryService:
 
                 async with session_scope(self._connection_id, policy=policy) as session:
                     if policy.cost_estimation_enabled and dialect == DatabaseDialect.POSTGRESQL:
-                        estimate = await estimate_postgres_query_cost(session, stmt)
+                        estimate = await estimate_postgres_query_cost(
+                            session, stmt, connection_id=self._connection_id
+                        )
                         if estimate is not None:
-                            enforce_cost_estimate(estimate, policy)
+                            if policy.cost_estimation_mode == CostEstimationMode.ENFORCE:
+                                enforce_cost_estimate(estimate, policy)
+                            else:
+                                self._observe_cost_estimate(estimate, policy)
                     result = await session.execute(stmt)
                     raw_rows = [dict(r) for r in result.mappings().all()]
 

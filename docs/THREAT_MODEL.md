@@ -208,7 +208,13 @@ defaults.
   scan or join explosion before it executes (TODO item 26 phase 1). MSSQL has
   no equivalent yet (item 26 phase 2), and the check is fail-open: an EXPLAIN
   failure degrades to "not enforced for this query" rather than blocking it,
-  so it is a complement to the reactive guardrails, not a replacement.
+  so it is a complement to the reactive guardrails, not a replacement. The
+  fail-open path is observable, not silent —
+  `querygate_cost_estimation_unavailable_total{reason}` — and
+  `Policy.cost_estimation_mode: observe` lets an operator measure what a
+  threshold would reject against real traffic before switching a connection
+  to `enforce`, since Postgres's planner-cost units aren't portable across
+  schemas/hardware.
 - **Large values in process memory:** the output byte cap prevents an oversized
   row from leaving QueryGate, but the database driver must first receive that
   row. Database-side statement limits and denial of large/blob columns remain

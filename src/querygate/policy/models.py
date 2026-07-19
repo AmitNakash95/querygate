@@ -6,6 +6,7 @@ validation/policy_validation.py before a query is ever compiled or executed.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import TYPE_CHECKING, Optional
 
 import pydantic as pyd
@@ -14,6 +15,25 @@ from querygate.core.exceptions import PolicyViolationError
 
 if TYPE_CHECKING:
     from querygate.core.auth import Principal
+
+
+class CostEstimationMode(StrEnum):
+    """How `Policy.max_estimated_rows`/`max_estimated_cost` are applied once
+    cost estimation is enabled (see `Policy.cost_estimation_enabled`).
+
+    ENFORCE (default) rejects a query whose Postgres EXPLAIN estimate
+    exceeds the configured threshold — the original TODO.md item 26 phase 1
+    behavior, unchanged. OBSERVE records what *would* have been rejected
+    (a `cost_estimation.observed_would_reject` log line plus
+    `querygate_cost_estimation_would_reject_total`) without blocking the
+    query — use it to calibrate thresholds against real traffic before
+    switching a connection over to ENFORCE, since Postgres's planner-cost
+    units aren't portable across schemas/hardware and a threshold copied
+    from documentation is a guess, not a measurement.
+    """
+
+    ENFORCE = "enforce"
+    OBSERVE = "observe"
 
 
 class MandatoryRowFilter(pyd.BaseModel):
@@ -107,9 +127,12 @@ class Policy(pyd.BaseModel):
     # one without them. `max_estimated_cost` is in Postgres's own arbitrary
     # planner-cost units (not seconds or bytes) — treat it as a relative
     # complexity signal to tune per deployment/hardware, not a portable
-    # absolute number.
+    # absolute number. `cost_estimation_mode` decides whether an over-threshold
+    # estimate actually rejects the query (ENFORCE, the default) or is only
+    # observed (OBSERVE) — see CostEstimationMode's docstring.
     max_estimated_rows: Optional[int] = pyd.Field(default=None)
     max_estimated_cost: Optional[float] = pyd.Field(default=None)
+    cost_estimation_mode: CostEstimationMode = pyd.Field(default=CostEstimationMode.ENFORCE)
 
     # Audit/explain SQL rendering. Default is safe-by-default: SQL text uses
     # bind placeholders and parameter values are redacted, so a WHERE-clause

@@ -235,6 +235,7 @@ agent to narrow the query rather than just "denied":
 default:
   max_estimated_rows: 1000000
   max_estimated_cost: 100000   # Postgres's own arbitrary planner-cost units
+  cost_estimation_mode: enforce   # or "observe" — see below
 ```
 
 This is Postgres-only for now. MSSQL's estimated-plan equivalent
@@ -246,6 +247,27 @@ item 26). `explain_structured_query` (MCP) and `POST .../query/explain`
 (REST) never open a database session at all (by design — it stays a pure,
 always-cheap compile preview), so this check runs only on
 `execute_structured_query`/`POST .../query`, not `explain`.
+
+Because Postgres's planner-cost units aren't portable across schemas or
+hardware, a threshold copied from documentation is a guess, not a
+measurement. `cost_estimation_mode: observe` (default `enforce`) lets you
+calibrate first: the estimate is still computed and compared against the
+threshold, but a would-be rejection is only recorded — as a
+`cost_estimation.observed_would_reject` structured log line and the
+`querygate_cost_estimation_would_reject_total{connection}` counter — never
+raised, so real traffic keeps flowing while you watch what the threshold
+would actually do. Switch the connection to `enforce` once you're confident
+in the number.
+
+The gate is also fail-open and observable about it: an EXPLAIN that can't be
+compiled, executed, or parsed degrades to "not enforced for this query"
+rather than blocking traffic on an edge case, and every such case increments
+`querygate_cost_estimation_unavailable_total{connection,reason}`
+(`compile_failed` / `explain_failed` / `plan_parse_failed`) alongside a
+warning log line — alert on that counter climbing, since it means the gate
+has silently stopped evaluating queries on that connection.
+`querygate_cost_estimation_attempts_total{connection}` is the matching
+denominator for computing a fail-open rate.
 
 For production, the safest connection-discovery posture is deny by default:
 

@@ -450,6 +450,7 @@ _GUARDRAIL_FIELDS = (
     "log_query_literals",
     "max_estimated_rows",
     "max_estimated_cost",
+    "cost_estimation_mode",
 )
 
 
