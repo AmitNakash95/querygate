@@ -78,6 +78,18 @@ order-of-magnitude, not commitments.
 | 46 | Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
 | 47 | Safe draft recovery plus config export/import UX | M | 13, 25, 31 |
 | 48 | Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) | L | 6, 22, 25, 32B |
+| 49 | Column-value masking/tokenization (not just allow/deny) | L | 6, 27 |
+| 50 | Per-principal rate limits / query quotas over time | M | 9, 25 |
+| 51 | Typed client-side query-builder SDK (Python + TypeScript) | M (per language) | 20 |
+| 52 | Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI) | S (per framework) | 20 |
+| 53 | Independent third-party security audit + published report | S* | 28 |
+| 54 | Compliance control mapping (SOC 2 / ISO 27001 readiness) | L | 23, 25, 28 |
+| 55 | Inference/transitive-exposure adversarial test suite | M | 28 |
+| 56 | HA / multi-region reference deployment + DR runbook | L | 29 |
+| 57 | Pluggable dialect-adapter architecture | L | 2, 19 |
+| 58 | Published adversarial benchmark vs. raw-SQL agent and Google Toolbox | M | 28, 36 |
+| 59 | Read-only behavioral anomaly surfacing on the audit stream | M | 32C, 44 |
+| 60 | Bug bounty / responsible disclosure program | S | 53 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
@@ -86,6 +98,16 @@ Items 21–47 are the next quality tranche from the current repo scan: mostly
 security consistency, enterprise operability, and product polish — the
 areas that move QueryGate from "strong engineering prototype" toward a
 credible 10/10 commercial infrastructure product.
+
+Items 49–60 are proposed, not yet triaged into a priority tranche — added
+from an explicit competitive-gap analysis against Google's Gen AI Toolbox,
+Hasura, and Immuta/Privacera-class governance products. They live in their
+own "P4" section below until reviewed and pulled forward into P2/P3.
+
+\*\* item 53's effort is engineering coordination and remediation only; the
+audit itself is an external vendor engagement and calendar-time cost, not
+solo-engineer effort — same caveat as item 14's footnote below, for a
+different reason.
 
 \* item 14's estimate assumes the Dockerfile mostly works; the MSSQL ODBC
 apt-install step is the likeliest place for it to balloon past the estimate
@@ -3004,3 +3026,253 @@ major product differentiator.
 connections, schema review, policy editing, dry-run validation,
 test-as-principal checks, audit browsing, and config version rollback. Keep
 the CLI/YAML path fully supported for infrastructure-as-code users.
+
+---
+
+## P4 — proposed: competitive parity (not yet triaged)
+
+Items 49–60 come from an explicit gap analysis against the strongest
+adjacent products (Google's Gen AI Toolbox for Databases, Hasura, and
+Immuta/Privacera-class data-governance platforms), not from a repo scan.
+None of them are a gap in v1's own stated scope — they're additive ground
+to close QueryGate's remaining deficits in masking granularity, cost/quota
+governance, ecosystem reach, and external trust signals. Triage into P2/P3
+(or drop) once prioritized; until then this section is a holding area.
+
+### 49. Column-value masking/tokenization (not just allow/deny)
+
+**Effort: L (3–5 days).** The policy/compiler pipeline already resolves
+every column reference before compilation (`validation/policy_validation.py`,
+`compiler/sqlalchemy_compiler.py`); masking adds a transform stage between
+"column is permitted" and "column is selected as-is," not a new enforcement
+point.
+
+**Why it matters:** Column policy today is binary — a principal either sees
+a column's real value or cannot reference it at all. Any principal who
+needs partial visibility (last-4-digits of a card number, a hashed customer
+id, a bucketed salary range) currently has no option short of full access.
+This is the single largest remaining gap against Immuta/Privacera-class
+governance, which treat masking as a first-class policy primitive, not an
+afterthought.
+
+**What to do:** Add a `column_mask` policy primitive (hash, null,
+truncate/last-N, bucket/round) resolvable per principal/column alongside
+the existing allow/deny check. Apply the transform in the compiled `Select`
+(e.g. a SQLAlchemy `func` wrapper) so the database itself never returns the
+raw value to a masked caller — masking must happen in the query, not by
+redacting the response after the fact. Audit which columns were masked
+(never the pre-mask value) so operators can distinguish "denied" from
+"masked" access in the same audit stream item 23 already provides.
+
+### 50. Per-principal rate limits / query quotas over time
+
+**Effort: M (2–3 days).** Reuses the Redis-backed cross-instance state item
+9 already introduced for the concurrency limiter; this is a second counter
+(a rolling window or token bucket keyed by principal) alongside it, not a
+new distributed-state mechanism.
+
+**Why it matters:** The concurrency semaphore (item 9) bounds how many
+queries a principal can have *in flight at once*, not how many it can run
+*over time*. A well-behaved agent that never exceeds its concurrency limit
+can still issue tens of thousands of sequential queries an hour, exhausting
+DB capacity or a customer's cost budget — the multi-tenant cost-governance
+story enterprise buyers in `docs/business/GO_TO_MARKET.md`'s target segment
+will ask for directly.
+
+**What to do:** Add a per-principal (and optionally per-connection)
+request-count and byte-count quota over a configurable rolling window,
+enforced before execution alongside the existing concurrency guard. Return
+a distinct, policy-shaped rejection (not a raw 429 with no context) and
+audit quota rejections the same way other policy denials are audited today.
+
+### 51. Typed client-side query-builder SDK (Python + TypeScript)
+
+**Effort: M per language.** A thin, generated-or-hand-written typed
+wrapper around the existing `StructuredQuery` Pydantic schema — no
+server-side change; it mirrors a contract that already exists.
+
+**Why it matters:** Adopters today either hand-write `StructuredQuery` JSON
+or read `examples/rest_calls.md` / `examples/mcp_calls.md`'s raw JSON-RPC
+and curl examples. Google's Toolbox and most competing frameworks ship
+typed SDKs in multiple languages with autocomplete and client-side
+validation. This is the single largest lever on integration friction and
+the most concrete ecosystem gap identified against Google's Toolbox.
+
+**What to do:** Generate (or hand-maintain, kept in sync via a schema test)
+a typed builder for `StructuredQuery` in Python and TypeScript — table/
+column references, filters, joins, and aggregations as typed method calls
+rather than raw dict/JSON construction. Ship as an installable package, not
+just an example script, and keep it a pure client-side convenience: it must
+not bypass or duplicate any server-side validation.
+
+### 52. Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI function-calling)
+
+**Effort: S per framework.** Same shape as item 20's existing Claude Agent
+SDK example — a runnable script registering QueryGate's MCP tools and
+asking a natural-language question against the demo data.
+
+**Why it matters:** Item 20 deliberately scoped to one framework to avoid
+scope creep. With the core product now stable, closing this gap directly
+addresses the ecosystem-breadth deficit against Google's Toolbox, which
+documents integration with most major agent frameworks out of the box.
+
+**What to do:** Add one example per additional framework, following item
+20's existing verification bar (mechanically verify what can be verified
+without a live model call; state plainly what wasn't exercised). Resist
+adding a maintained framework-specific SDK layer beyond the example
+itself — that risk was already called out in item 20.
+
+### 53. Independent third-party security audit + published report
+
+**Effort: S (engineering coordination and remediation only). The audit
+itself is an external vendor engagement and calendar-time cost, not
+solo-engineer effort.**
+
+**Why it matters:** `docs/business/GO_TO_MARKET.md` already lists
+"independent threat-model review, formal certification, or external
+penetration testing" under things not safe to claim yet. No amount of
+internal adversarial testing (item 28) substitutes for third-party
+validation, and it is the highest-leverage trust signal for the
+fintech/healthcare buyers the business brief names as the ideal customer.
+
+**What to do:** Commission an external audit/pentest scoped to the
+structured-query pipeline, auth boundary, and admin/config governance
+surface once items 28 and 36 are complete. Remediate findings, then publish
+a redacted summary report as a sales asset per the business brief's "core
+sales assets" list.
+
+### 54. Compliance control mapping (SOC 2 / ISO 27001 readiness)
+
+**Effort: L (mostly documentation and gap analysis; some control-filling
+code, e.g. formalized retention/access-review evidence).**
+
+**Why it matters:** Regulated-industry buyers will ask "where's your SOC 2"
+as a gating question in a security review, before they evaluate
+architecture. QueryGate already has most of the underlying controls
+(redaction-safe audit trail from item 23, governed config change management
+from item 25, adversarial test suite from item 28) — this item is mapping
+what's already built to a recognized framework's control list, not building
+new security features from scratch.
+
+**What to do:** Produce a control-mapping document against SOC 2 (or ISO
+27001) trust-service criteria, identify genuine gaps (e.g. formal
+access-review cadence, incident-response runbook), and close only the gaps
+that are real rather than adding process theater around controls that
+already exist.
+
+### 55. Inference/transitive-exposure adversarial test suite
+
+**Effort: M (2–3 days).** Extends item 28's existing adversarial suite with
+a new attack category rather than a new enforcement mechanism.
+
+**Why it matters:** Column allow/deny stops a query from directly selecting
+a denied column, but does not provably stop a caller from reconstructing a
+denied value indirectly — e.g. inferring a denied `salary` through a
+permitted bucketed join key, or through a computed expression built
+entirely from permitted columns that happens to correlate with a denied
+one. This is a distinct security category (inference attacks) that item
+28's threat model may not yet enumerate.
+
+**What to do:** Write a design note enumerating known inference-attack
+shapes against this AST model, then add adversarial regression cases for
+each to item 28's suite. Where a real gap is found (rather than a
+theoretical one), decide explicitly whether it's closed by policy (e.g.
+restricting join keys derived from sensitive columns) or documented as an
+accepted residual risk — don't leave it silently unaddressed either way.
+
+### 56. HA / multi-region reference deployment + DR runbook
+
+**Effort: L (3–5 days).** Builds on item 29's reference stack and item 9's
+cross-instance concurrency state; the new work is failover behavior and a
+documented recovery procedure, not a new deployment topology from scratch.
+
+**Why it matters:** `docs/business/GO_TO_MARKET.md` explicitly says not to
+claim "a production Helm/Kubernetes reference deployment" yet. Item 29's
+reference stack is not the same claim as proven multi-instance failover —
+enterprise buyers evaluating this for production traffic will ask for an
+HA/DR story specifically, not just a docker-compose file or a single Helm
+chart.
+
+**What to do:** Document (and test) a multi-replica deployment with the
+Redis-backed concurrency/rate-limit state from items 9 and 50 shared
+correctly across instances, a rolling-restart/zero-downtime config-reload
+path building on item 5, and a written disaster-recovery runbook
+(backup/restore for the config-governance store, recovery time
+expectations).
+
+### 57. Pluggable dialect-adapter architecture
+
+**Effort: L (interface design); each subsequent dialect then becomes
+independent M-effort work rather than a bespoke project.**
+
+**Why it matters:** Item 19 treats every new dialect as M–XL bespoke work
+gated on core-team bandwidth — the actual long-term bottleneck behind
+QueryGate's biggest competitive gap (database breadth against Google's
+Toolbox and Hasura). `connections/dialects.py` and the compiler's dialect
+dispatch (the 3-way branch in `_date_bucket_expr`) already isolate
+dialect-specific behavior; formalizing that isolation into a stable adapter
+interface is what would let dialect support scale without linearly scaling
+core-team effort.
+
+**What to do:** Extract a formal `DialectAdapter` interface (session
+guardrails, date-bucketing, cost-estimation hook from item 26) from the
+existing 2-dialect implementation, verify it holds by porting Postgres and
+MSSQL onto it with no behavior change, and only then treat additional
+dialects (item 19) as adapter implementations rather than core-pipeline
+changes.
+
+### 58. Published adversarial benchmark vs. raw-SQL agent and Google Toolbox
+
+**Effort: M (2–3 days).** Packaging existing adversarial cases (item 28)
+and QA scenarios (item 36) into a repeatable, publishable comparison, not
+new attack development.
+
+**Why it matters:** `docs/business/GO_TO_MARKET.md`'s adversarial
+five-minute demo is currently a sales narrative performed live. Turning it
+into a repeatable, published benchmark (attack corpus, catch rate, latency
+overhead versus a raw-SQL agent baseline and Google's Toolbox where a fair
+comparison is possible) converts an internal QA asset into external
+technical credibility — the artifact that actually wins a "why not just use
+Toolbox" conversation instead of asserting it.
+
+**What to do:** Define a fixed, versioned attack/question corpus, run it
+against QueryGate, a naive raw-SQL LLM-agent baseline, and (where feasible)
+a comparably configured Google Toolbox setup, and publish catch-rate and
+overhead numbers. Keep the comparison factual and reproducible — per this
+file's own external-market-reference instruction to never misrepresent a
+competitor's documented capabilities.
+
+### 59. Read-only behavioral anomaly surfacing on the audit stream
+
+**Effort: M (2–3 days).** A read-only aggregation over the existing
+persisted audit sink (item 23) surfaced in item 44's dashboard — no new
+execution-path or policy-mutation code.
+
+**Why it matters:** Item 44 covers rejection-trend dashboards — denied
+queries. This is distinct: surfacing unusual volume or shape even among
+*allowed* queries per principal (e.g. a sudden order-of-magnitude spike) as
+a passive alert. Must stay strictly within the 32C boundary already fixed
+in `CLAUDE.md`: a read-only signal for a human admin to look at, never an
+autonomous policy edit or a feedback loop back into enforcement.
+
+**What to do:** Add a bounded, per-principal volume/shape baseline computed
+from the persisted redaction-safe audit stream, surface deviations as a
+dashboard signal in item 44's admin workspace, and explicitly do not wire
+it into any automatic policy change, throttle, or block — that would cross
+the 32C boundary this file already treats as a hard line.
+
+### 60. Bug bounty / responsible disclosure program
+
+**Effort: S (process and policy, not engineering).** Pairs with item 53 —
+stand this up once an initial third-party audit has cleared the obvious
+issues, not before.
+
+**Why it matters:** A public disclosure process is a cheap, durable trust
+signal for security-conscious buyers, and closes the gap where currently
+there is no external channel for a researcher to report an issue
+responsibly.
+
+**What to do:** Publish a `SECURITY.md` disclosure policy and scope, decide
+on a bounty/recognition structure appropriate to the project's current
+stage, and route incoming reports through the same remediation process
+established for item 53's audit findings.
