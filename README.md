@@ -458,6 +458,68 @@ validated by `querygate-validate-config --catalog-file ...` alongside the
 other two files. Empty/disabled semantic memory does not affect ordinary
 schema validation or query execution.
 
+### Governed catalog review, publish, and rollback
+
+A generated draft proposal (above) is a privileged, non-agent-visible record
+until an authorized reviewer moves it through a deny-by-default state
+machine: `pending` → `approved` (or `rejected`, with a required reason) →
+`published`. A draft can never publish itself — approval and publication are
+always two separate, actor-attributed calls. Publishing merges the proposal's
+description/aliases/default_aggregation into a real catalog entry using the
+same precedence gate 32A-1 uses for legacy content: if the target already
+carries different, human-verified content for the same field, publication is
+refused as a reviewable conflict rather than silently overwritten. A draft's
+content model has no sensitivity, sampling, policy, or mandatory-filter
+field at all, so publishing can never touch connection access, row filters,
+or sensitivity labels.
+
+```bash
+# List this connection's proposals awaiting review
+curl -H "Authorization: Bearer $KEY" \
+  "$HOST/api/v1/admin/catalog/demo/proposals?review_status=pending"
+
+# Preview what publishing would look like for a specific principal, without
+# persisting anything
+curl -H "Authorization: Bearer $KEY" \
+  "$HOST/api/v1/admin/catalog/demo/proposals/$PROPOSAL_ID/preview?principal_subject=reporting-agent"
+
+# Approve, then publish — two separate, actor-attributed calls
+curl -X POST -H "Authorization: Bearer $KEY" \
+  "$HOST/api/v1/admin/catalog/demo/proposals/$PROPOSAL_ID/approve"
+curl -X POST -H "Authorization: Bearer $KEY" \
+  "$HOST/api/v1/admin/catalog/demo/proposals/$PROPOSAL_ID/publish"
+# -> {"outcome": "published", "version_id": "1", "entry_id": "urn:querygate:catalog:..."}
+
+# Roll back a publish — restores the prior field values (or removes an
+# entry this publish created), refusing if the entry changed since
+curl -X POST -H "Authorization: Bearer $KEY" \
+  "$HOST/api/v1/admin/catalog/demo/versions/1/rollback"
+```
+
+The same workflow is available without any REST client via
+`querygate-semantic-memory`: `list-proposals`, `show-proposal`,
+`edit-proposal`, `approve-proposal`, `reject-proposal`, `publish-proposal`,
+`preview-publish`, `list-versions`, `show-version`, and `rollback-version`.
+Seven independent least-privilege scopes gate the surface —
+`catalog:generate`, `catalog:review` (read), `catalog:edit`,
+`catalog:approve`, `catalog:reject`, `catalog:publish`, and
+`catalog:rollback` — none implied by another, matching the read/write
+separation the config-governance API above already uses. Every generation
+and state transition is recorded as a redaction-safe `catalog.governance`
+audit event through the same sink as query execution and config governance:
+stable ids, actor, outcome, and duration — never draft text, descriptions,
+or raw catalog YAML. Publishing creates a durable, catalog-file-scoped
+version-history record; `GET .../versions` reports a metadata-only diff
+(which field names changed), and `GET .../versions/{id}` returns the full
+before/after content to a `catalog:review`-scoped caller.
+
+Bulk approve/reject are bounded to 50 proposal ids per call and validate
+every id before mutating any of them, so a single invalid id in a batch
+fails the whole call rather than partially applying it. Catalog export/
+import, backup/restore, and retention/deletion remain a later phase (TODO.md
+item 32B-2); this workflow's version history is otherwise bounded to 2000
+entries per catalog file.
+
 ## Example StructuredQuery payload
 
 ```json
@@ -647,6 +709,10 @@ Agent (MCP) / Client (REST)
   relationship hints, sensitivity labels, durable provenance, schema
   fingerprints/diffs, and compact retrieval) merged into `describe_table`
   and filtered before search/ranking by the same policy as everything else.
+  `governance.py` implements the deny-by-default draft review/edit/approve/
+  reject/publish/rollback state machine, publish-time conflict detection
+  against verified content, and durable version history, all through the
+  same `CatalogFileRepository` lock as schema refresh and draft generation.
 - **`validation/`** — schema-truth checks (does this table/column exist?)
   and policy checks (is it allowed? within caps?) — deliberately separate
   modules, run in that order, both before compilation.
@@ -805,13 +871,16 @@ Being upfront about what's not done yet:
   `429`+`Retry-After` evaluation (TODO item 35 phase 3). The in-process
   (non-Redis) `querygate_queue_depth` gauge remains single-process
   visibility only, like `querygate_concurrency_in_use`.
-- **Semantic memory phase 32A is complete, not item 32 overall** — durable
-  provenance, deterministic schema refresh/diffs, selective staleness,
-  policy-first retrieval, disabled/manual-only quarantined drafts, and a fixed
-  benchmark are shipped. There is still no hosted/local model adapter,
-  approval/publication/history/rollback workflow (32B), embedding index, or
-  adaptive usage-learning loop (32C). Drafts never reach agents until a future
-  authorized review/publish path exists.
+- **Semantic memory phases 32A and 32B-1 are complete, not item 32
+  overall** — durable provenance, deterministic schema refresh/diffs,
+  selective staleness, policy-first retrieval, disabled/manual-only
+  quarantined drafts, a fixed benchmark, and a governed review/edit/
+  approve/reject/publish/rollback workflow (with durable version history
+  and audit events) are shipped. There is still no catalog export/import/
+  backup/restore/retention (32B-2), embedding index, or adaptive
+  usage-learning loop (32C). A draft never reaches agents until it is
+  explicitly approved and published by an authorized reviewer through the
+  workflow below.
 - **Security review is first-party** — the repository includes a maintained
   threat model and adversarial regression suite, but has not yet undergone an
   independent penetration test or formal compliance certification.

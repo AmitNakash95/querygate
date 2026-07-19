@@ -20,6 +20,16 @@ from querygate.query_ast.models import (
 AuditDecision = Literal["allowed", "denied", "unknown"]
 AuditSurface = Literal["rest", "mcp", "internal"]
 ConfigChangeAction = Literal["validate", "preview", "stage", "apply", "rollback"]
+CatalogGovernanceAction = Literal[
+    "generate",
+    "edit",
+    "approve",
+    "reject",
+    "bulk_approve",
+    "bulk_reject",
+    "publish",
+    "rollback",
+]
 
 
 class AuditEvent(pyd.BaseModel):
@@ -92,10 +102,41 @@ class ConfigChangeEvent(pyd.BaseModel):
     model_config = pyd.ConfigDict(extra="forbid")
 
 
-# Sinks (see audit/sinks.py) persist either kind of event through the same
-# configured backend — one durable audit trail for both query attempts and
-# config-governance actions.
-PersistableEvent = Union[AuditEvent, ConfigChangeEvent]
+class CatalogGovernanceEvent(pyd.BaseModel):
+    """Versioned event for catalog governance (querygate/catalog/governance.py):
+    generating, editing, approving, rejecting, publishing, or rolling back a
+    draft proposal. Deliberately excludes draft/proposal text, descriptions,
+    aliases, and raw catalog YAML — only stable ids, the connection/table/
+    column identifiers involved, and the outcome are recorded, the same
+    redaction posture as ``ConfigChangeEvent``.
+    """
+
+    schema_version: str = "1"
+    event_id: str = pyd.Field(default_factory=lambda: str(uuid.uuid4()))
+    occurred_at: datetime = pyd.Field(default_factory=lambda: datetime.now(timezone.utc))
+    event_type: Literal["catalog.governance"] = "catalog.governance"
+    correlation_id: Optional[str] = None
+    surface: AuditSurface = "internal"
+    action: CatalogGovernanceAction
+    principal_id: Optional[str] = None
+    auth_method: str = "unknown"
+    principal_scopes: List[str] = pyd.Field(default_factory=list)
+    connection_id: Optional[str] = None
+    proposal_id: Optional[str] = None
+    proposal_count: Optional[int] = pyd.Field(default=None, ge=0)
+    version_id: Optional[str] = None
+    entry_id: Optional[str] = None
+    outcome: Literal["success", "rejected"]
+    error_category: Optional[str] = None
+    duration_ms: int = pyd.Field(default=0, ge=0)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+# Sinks (see audit/sinks.py) persist every kind of event through the same
+# configured backend — one durable audit trail for query attempts,
+# config-governance actions, and catalog-governance actions.
+PersistableEvent = Union[AuditEvent, ConfigChangeEvent, CatalogGovernanceEvent]
 
 
 def _select_shape(item: object) -> Dict[str, Any]:

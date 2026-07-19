@@ -13,6 +13,7 @@ from starlette import status
 
 from querygate.api.admin_config_routes import build_admin_config_router
 from querygate.api.auth import build_principal_dependency
+from querygate.api.catalog_governance_routes import build_catalog_governance_router
 from querygate.api.help_routes import build_help_router
 from querygate.api.routes import build_router
 from querygate.audit.sinks import configure_audit_sink, reset_audit_sink
@@ -123,6 +124,9 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
     application.include_router(build_router(principal_dependency, conf, prefix=conf.api_v1_prefix))
     application.include_router(
         build_admin_config_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
+    )
+    application.include_router(
+        build_catalog_governance_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
     )
 
     @application.middleware("http")

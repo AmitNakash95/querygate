@@ -114,6 +114,18 @@ class ConfigValidationError(ValueError):
     """
 
 
+class CatalogGovernanceError(ValueError):
+    """A catalog governance operation (edit/approve/reject/publish/rollback)
+    was requested from an invalid state, or a publish would conflict with
+    already-verified content.
+
+    Client-actionable for the same reason as ConfigValidationError — a
+    reviewer needs to see exactly why a transition was refused (wrong
+    status, stale schema, a field conflict with verified content), not a
+    masked internal error.
+    """
+
+
 class AuthorizationError(Exception):
     """The authenticated caller lacks an explicit operation scope."""
 
@@ -137,6 +149,7 @@ def public_error_message(exc: Exception) -> str:
             ConcurrencyLimitError,
             QueryValidationError,
             ConfigValidationError,
+            CatalogGovernanceError,
             AuthorizationError,
         ),
     ):

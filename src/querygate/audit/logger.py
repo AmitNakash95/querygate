@@ -15,6 +15,8 @@ from querygate.audit.events import (
     AuditDecision,
     AuditEvent,
     AuditSurface,
+    CatalogGovernanceAction,
+    CatalogGovernanceEvent,
     ConfigChangeAction,
     ConfigChangeEvent,
 )
@@ -141,6 +143,67 @@ def audit_config_change(
         action=action,
         version_id=version_id,
         previous_version_id=previous_version_id,
+        principal=principal,
+        principal_scopes=principal_scopes,
+        auth_method=auth_method,
+        surface=surface,
+        outcome=event.outcome,
+        error_category=error_category,
+    )
+    try:
+        get_audit_sink().emit(event)
+    except Exception as exc:
+        log.error(
+            "audit.sink.write_failed",
+            audit_event_id=event.event_id,
+            sink_type=type(get_audit_sink()).__name__,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+def audit_catalog_governance(
+    *,
+    action: CatalogGovernanceAction,
+    outcome: str,
+    principal: Optional[str] = None,
+    principal_scopes: Optional[List[str]] = None,
+    auth_method: str = "unknown",
+    surface: AuditSurface = "internal",
+    connection_id: Optional[str] = None,
+    proposal_id: Optional[str] = None,
+    proposal_count: Optional[int] = None,
+    version_id: Optional[str] = None,
+    entry_id: Optional[str] = None,
+    duration_ms: Optional[int] = None,
+    error_category: Optional[str] = None,
+) -> None:
+    """Record a catalog-governance action — same durable sink as
+    `audit_query`/`audit_config_change`, never draft/proposal text.
+    """
+    log = get_logger()
+    event = CatalogGovernanceEvent(
+        correlation_id=log.extra.get("request_id"),
+        surface=surface,
+        action=action,
+        principal_id=principal,
+        auth_method=auth_method,
+        principal_scopes=principal_scopes or [],
+        connection_id=connection_id,
+        proposal_id=proposal_id,
+        proposal_count=proposal_count,
+        version_id=version_id,
+        entry_id=entry_id,
+        outcome="success" if outcome == "success" else "rejected",
+        error_category=error_category,
+        duration_ms=max(duration_ms or 0, 0),
+    )
+    log.info(
+        "audit.catalog_governance",
+        audit_event_id=event.event_id,
+        action=action,
+        connection_id=connection_id,
+        proposal_id=proposal_id,
+        version_id=version_id,
         principal=principal,
         principal_scopes=principal_scopes,
         auth_method=auth_method,

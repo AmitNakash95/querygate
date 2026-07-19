@@ -376,14 +376,63 @@ class CatalogDraftContent(pyd.BaseModel):
         return self
 
 
+class ProposalReviewStatus(StrEnum):
+    """Deny-by-default review state for a quarantined draft proposal.
+
+    ``PENDING`` is the only state a freshly generated proposal may start in.
+    Every other state is reached only through an explicit, validated
+    transition in ``catalog/governance.py`` — there is no path that lets a
+    draft publish itself.
+    """
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    PUBLISHED = "published"
+
+
+class ProposalReviewAction(StrEnum):
+    EDITED = "edited"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    PUBLISHED = "published"
+    ROLLED_BACK = "rolled_back"
+
+
+class ProposalReviewEvent(pyd.BaseModel):
+    """One durable, actor-attributed transition in a proposal's review history."""
+
+    action: ProposalReviewAction
+    actor: Annotated[str, pyd.StringConstraints(min_length=1, max_length=160)]
+    occurred_at: pyd.AwareDatetime
+    reason: Optional[Annotated[str, pyd.StringConstraints(min_length=1, max_length=500)]] = None
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
 class CatalogDraftProposal(pyd.BaseModel):
-    """A durable, non-agent-visible proposal awaiting future 32B review."""
+    """A durable, non-agent-visible proposal working through 32B review.
+
+    ``review_status``/``review_history`` are orthogonal to ``provenance``:
+    ``provenance.status`` tracks the underlying schema-freshness lifecycle
+    (draft/stale), while ``review_status`` tracks the human governance
+    workflow (pending/approved/rejected/published). A proposal is never
+    agent-visible or indexed regardless of either status.
+    """
 
     proposal_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=160)]
     generation_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=120)]
     target: CatalogDraftTarget
     content: CatalogDraftContent
     provenance: CatalogEntryProvenance
+    review_status: ProposalReviewStatus = ProposalReviewStatus.PENDING
+    review_history: list[ProposalReviewEvent] = pyd.Field(default_factory=list, max_length=50)
+    published_entry_id: Optional[
+        Annotated[str, pyd.StringConstraints(min_length=1, max_length=160)]
+    ] = None
+    published_version_id: Optional[
+        Annotated[str, pyd.StringConstraints(min_length=1, max_length=40)]
+    ] = None
 
     model_config = pyd.ConfigDict(extra="forbid")
 
@@ -404,6 +453,92 @@ class CatalogDraftProposal(pyd.BaseModel):
             raise ValueError("default_aggregation may only be proposed for a table")
         if self.target.object_type == CatalogDraftObjectType.RELATIONSHIP and self.content.aliases:
             raise ValueError("relationship proposals cannot define aliases")
+        return self
+
+    @pyd.model_validator(mode="after")
+    def _review_state_shape(self) -> "CatalogDraftProposal":
+        if self.review_status == ProposalReviewStatus.PUBLISHED and (
+            self.published_entry_id is None or self.published_version_id is None
+        ):
+            raise ValueError("a published proposal requires published_entry_id and version_id")
+        if self.review_status != ProposalReviewStatus.PUBLISHED and (
+            self.published_entry_id is not None or self.published_version_id is not None
+        ):
+            raise ValueError("only a published proposal may carry published_entry_id/version_id")
+        if self.review_status == ProposalReviewStatus.REJECTED and not any(
+            event.action == ProposalReviewAction.REJECTED and event.reason
+            for event in self.review_history
+        ):
+            raise ValueError("a rejected proposal requires a rejection reason in review_history")
+        return self
+
+
+class CatalogVersionAction(StrEnum):
+    PUBLISH = "publish"
+    ROLLBACK = "rollback"
+
+
+class CatalogVersionStatus(StrEnum):
+    ACTIVE = "active"
+    REVERTED = "reverted"
+
+
+class CatalogVersionChange(pyd.BaseModel):
+    """A single entry's before/after content — business metadata only, never
+    row data, credentials, or query literals, since draft content itself
+    structurally cannot carry those fields (see ``CatalogDraftContent``).
+    """
+
+    target: CatalogDraftTarget
+    change: Literal["created", "updated", "removed"]
+    before: Optional[CatalogDraftContent] = None
+    after: Optional[CatalogDraftContent] = None
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _shape_matches_change_kind(self) -> "CatalogVersionChange":
+        # "updated" deliberately has no before/after shape constraint beyond
+        # what "created"/"removed" forbid below: the entity itself keeps
+        # existing, but any individual touched field may have had no prior
+        # value (before=None) or may be cleared entirely (after=None) —
+        # both are legitimate field-level states, not entity lifecycle
+        # changes.
+        if self.change == "created" and (self.before is not None or self.after is None):
+            raise ValueError("a 'created' change requires 'after' and no 'before'")
+        if self.change == "removed" and (self.before is None or self.after is not None):
+            raise ValueError("a 'removed' change requires 'before' and no 'after'")
+        return self
+
+
+class CatalogVersionRecord(pyd.BaseModel):
+    """Durable, append-only history entry for a publish or rollback action.
+
+    Stored inside the same catalog file/lock as everything else in this
+    module — there is no separate catalog-governance database or file.
+    """
+
+    version_id: Annotated[str, pyd.StringConstraints(min_length=1, max_length=40)]
+    action: CatalogVersionAction
+    status: CatalogVersionStatus = CatalogVersionStatus.ACTIVE
+    actor: Annotated[str, pyd.StringConstraints(min_length=1, max_length=160)]
+    occurred_at: pyd.AwareDatetime
+    proposal_id: Optional[Annotated[str, pyd.StringConstraints(min_length=1, max_length=160)]] = (
+        None
+    )
+    rolled_back_version_id: Optional[
+        Annotated[str, pyd.StringConstraints(min_length=1, max_length=40)]
+    ] = None
+    changes: list[CatalogVersionChange] = pyd.Field(min_length=1, max_length=1)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _action_shape(self) -> "CatalogVersionRecord":
+        if self.action == CatalogVersionAction.PUBLISH and self.proposal_id is None:
+            raise ValueError("a publish version record requires proposal_id")
+        if self.action == CatalogVersionAction.ROLLBACK and self.rolled_back_version_id is None:
+            raise ValueError("a rollback version record requires rolled_back_version_id")
         return self
 
 
@@ -449,6 +584,7 @@ class SchemaCatalog(pyd.BaseModel):
     schema_snapshots: dict[str, ObservedSchemaSnapshot] = pyd.Field(default_factory=dict)
     draft_proposals: list[CatalogDraftProposal] = pyd.Field(default_factory=list)
     generation_records: list[CatalogGenerationRecord] = pyd.Field(default_factory=list)
+    version_history: list[CatalogVersionRecord] = pyd.Field(default_factory=list, max_length=2000)
 
     model_config = pyd.ConfigDict(extra="forbid")
 
@@ -503,6 +639,24 @@ class SchemaCatalog(pyd.BaseModel):
                 raise ValueError("catalog draft proposals require a generation record")
             if proposal.proposal_id not in records_by_id[proposal.generation_id].proposal_ids:
                 raise ValueError("catalog generation record must include each of its proposals")
+            if proposal.published_version_id is not None and not any(
+                record.version_id == proposal.published_version_id
+                for record in self.version_history
+            ):
+                raise ValueError("a published proposal must reference an existing version record")
+
+        version_ids = [record.version_id for record in self.version_history]
+        if len(version_ids) != len(set(version_ids)):
+            raise ValueError("catalog version history ids must be unique")
+        version_id_set = set(version_ids)
+        for record in self.version_history:
+            if record.proposal_id is not None and record.proposal_id not in proposal_id_set:
+                raise ValueError("a publish version record must reference an existing proposal")
+            if (
+                record.rolled_back_version_id is not None
+                and record.rolled_back_version_id not in version_id_set
+            ):
+                raise ValueError("a rollback version record must reference an existing version")
         return self
 
 
