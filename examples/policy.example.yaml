@@ -32,6 +32,17 @@ default:
   max_concurrency: 8
   concurrency_wait_seconds: 10
 
+  # Pre-execution cost estimation (Postgres only — see
+  # execution/cost_estimation.py, TODO.md item 26). Unset by default: no
+  # extra EXPLAIN round-trip, no behavior change. Uncomment to have
+  # execute() plan (never run) the compiled query with Postgres's own
+  # planner first and reject it before it touches real data if the
+  # estimate is past either threshold. max_estimated_cost is in Postgres's
+  # own arbitrary planner-cost units, not seconds — tune it against your
+  # own schema/hardware rather than copying this number directly.
+  # max_estimated_rows: 1000000
+  # max_estimated_cost: 100000
+
 connections:
   demo:
     # Only these tables are queryable at all — anything else is rejected

@@ -448,6 +448,8 @@ _GUARDRAIL_FIELDS = (
     "max_concurrency",
     "concurrency_wait_seconds",
     "log_query_literals",
+    "max_estimated_rows",
+    "max_estimated_cost",
 )
 
 

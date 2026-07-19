@@ -13,8 +13,9 @@ import sqlalchemy as sa
 
 from querygate.catalog.loader import CatalogStore, set_catalog_store
 from querygate.core.auth import Principal
-from querygate.core.exceptions import QueryValidationError
+from querygate.core.exceptions import CostEstimateExceededError, QueryValidationError
 from querygate.execution import service as svc
+from querygate.execution.cost_estimation import QueryCostEstimate
 from querygate.execution.service import (
     StructuredQueryResult,
     StructuredQueryService,
@@ -265,6 +266,120 @@ async def test_execute_logs_principal_scopes_on_rejection():
     assert mock_audit.call_args.kwargs["principal"] == "agent-a"
     assert mock_audit.call_args.kwargs["principal_scopes"] == ["read:orders"]
     assert mock_audit.call_args.kwargs["rejected"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_skips_cost_estimation_when_disabled_by_default():
+    """Policy() leaves max_estimated_rows/max_estimated_cost unset — must be
+    zero behavior change: no EXPLAIN round-trip at all.
+    """
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+        patch.object(svc, "estimate_postgres_query_cost", AsyncMock()) as mock_estimate,
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query)
+
+    mock_estimate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_execute_allows_query_within_cost_estimate_threshold():
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    set_policy_store(PolicyStore(default=Policy(max_estimated_rows=1000), overrides={}))
+    estimate = QueryCostEstimate(estimated_rows=10, estimated_total_cost=None)
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+        patch.object(svc, "estimate_postgres_query_cost", AsyncMock(return_value=estimate)),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        result = await service.execute(query)
+
+    assert result.row_count == 1
+    mock_session.execute.assert_awaited_once()  # the real query still ran
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_query_over_cost_estimate_threshold():
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+    mock_session = AsyncMock()
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    set_policy_store(PolicyStore(default=Policy(max_estimated_rows=1000), overrides={}))
+    estimate = QueryCostEstimate(estimated_rows=999_999, estimated_total_cost=None)
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+        patch.object(svc, "estimate_postgres_query_cost", AsyncMock(return_value=estimate)),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        with pytest.raises(CostEstimateExceededError, match="estimated rows"):
+            await service.execute(query)
+
+    mock_session.execute.assert_not_called()  # rejected before the real query ran
+
+
+@pytest.mark.asyncio
+async def test_execute_skips_cost_estimation_for_non_postgres_dialect():
+    """max_estimated_rows/max_estimated_cost are accepted for any dialect
+    but only enforced for Postgres — see TODO.md item 26 phase 2 for MSSQL.
+    """
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    mock_engine = MagicMock()
+    mock_engine.dialect.name = "mssql"
+
+    set_policy_store(PolicyStore(default=Policy(max_estimated_rows=1), overrides={}))
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+        patch.object(svc, "get_engine", return_value=mock_engine),
+        patch.object(svc, "estimate_postgres_query_cost", AsyncMock()) as mock_estimate,
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        result = await service.execute(query)
+
+    mock_estimate.assert_not_called()
+    assert result.row_count == 1
 
 
 def test_cap_response_bytes_keeps_all_rows_under_cap():

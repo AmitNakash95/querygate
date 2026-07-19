@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from querygate.core.exceptions import ConcurrencyLimitError, PolicyViolationError
+from querygate.core.exceptions import (
+    ConcurrencyLimitError,
+    CostEstimateExceededError,
+    PolicyViolationError,
+)
 from querygate.metrics import classify_rejection, render_latest
 
 
@@ -12,6 +16,14 @@ def test_classify_concurrency_limit_error():
 
 def test_classify_policy_violation_error():
     assert classify_rejection(PolicyViolationError("denied")) == "policy"
+
+
+def test_classify_cost_estimate_exceeded_error_as_its_own_reason():
+    """CostEstimateExceededError subclasses PolicyViolationError but must
+    report its own `cost_estimate` reason, not fall into the coarser
+    `policy` bucket — see TODO.md item 26.
+    """
+    assert classify_rejection(CostEstimateExceededError("too expensive")) == "cost_estimate"
 
 
 def test_classify_plain_value_error_as_schema():

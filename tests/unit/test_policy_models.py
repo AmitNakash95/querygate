@@ -1,5 +1,5 @@
-"""Unit tests for policy/models.py's MandatoryRowFilter — static value vs
-per-principal from_claim resolution.
+"""Unit tests for policy/models.py: MandatoryRowFilter's static value vs
+per-principal from_claim resolution, and Policy's cost-estimation opt-in.
 """
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ import pytest
 
 from querygate.core.auth import Principal
 from querygate.core.exceptions import PolicyViolationError
-from querygate.policy.models import MandatoryRowFilter
+from querygate.policy.models import MandatoryRowFilter, Policy
 
 
 def test_requires_value_or_from_claim():
@@ -39,3 +39,15 @@ def test_from_claim_missing_from_principal_raises():
     principal = Principal(subject="agent-a", claims={"other_claim": "x"})
     with pytest.raises(PolicyViolationError, match="tenant_id"):
         row_filter.resolve(principal)
+
+
+def test_cost_estimation_disabled_by_default():
+    assert Policy().cost_estimation_enabled is False
+
+
+def test_cost_estimation_enabled_by_max_estimated_rows_alone():
+    assert Policy(max_estimated_rows=1000).cost_estimation_enabled is True
+
+
+def test_cost_estimation_enabled_by_max_estimated_cost_alone():
+    assert Policy(max_estimated_cost=1000.0).cost_estimation_enabled is True

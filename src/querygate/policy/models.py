@@ -94,6 +94,23 @@ class Policy(pyd.BaseModel):
     max_concurrency: int = pyd.Field(default=8)
     concurrency_wait_seconds: float = pyd.Field(default=10)
 
+    # Pre-execution cost estimation (execution/cost_estimation.py, TODO.md
+    # item 26 phase 1). Unset (None, the default for both) means disabled —
+    # existing deployments behave identically. When set, `execute()` asks
+    # Postgres to plan (never run) the compiled query via
+    # `EXPLAIN (FORMAT JSON)` before it actually executes, and rejects the
+    # query if the planner's row-count/cost estimate exceeds the configured
+    # threshold. Postgres only for this first pass — MSSQL's estimated-plan
+    # equivalent needs its own connection lifecycle (see
+    # execution/cost_estimation.py's module docstring) and silently has no
+    # effect here, so an MSSQL connection with these set behaves the same as
+    # one without them. `max_estimated_cost` is in Postgres's own arbitrary
+    # planner-cost units (not seconds or bytes) — treat it as a relative
+    # complexity signal to tune per deployment/hardware, not a portable
+    # absolute number.
+    max_estimated_rows: Optional[int] = pyd.Field(default=None)
+    max_estimated_cost: Optional[float] = pyd.Field(default=None)
+
     # Audit/explain SQL rendering. Default is safe-by-default: SQL text uses
     # bind placeholders and parameter values are redacted, so a WHERE-clause
     # literal (an email, an SSN) never ends up verbatim in the audit log or
@@ -109,6 +126,10 @@ class Policy(pyd.BaseModel):
     mandatory_row_filters: list[MandatoryRowFilter] = pyd.Field(default_factory=list)
 
     model_config = pyd.ConfigDict(extra="forbid")
+
+    @property
+    def cost_estimation_enabled(self) -> bool:
+        return self.max_estimated_rows is not None or self.max_estimated_cost is not None
 
     def table_allowed(self, table_name: str) -> bool:
         name = table_name.lower()

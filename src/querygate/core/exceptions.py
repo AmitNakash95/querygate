@@ -28,6 +28,18 @@ class ConcurrencyLimitError(ValueError):
     """
 
 
+class CostEstimateExceededError(PolicyViolationError):
+    """Raised when a Postgres EXPLAIN-based pre-execution cost estimate
+    exceeds `Policy.max_estimated_rows`/`max_estimated_cost` (see
+    execution/cost_estimation.py). Subclasses PolicyViolationError so
+    existing `except ValueError`/`except PolicyViolationError` handling
+    still applies unchanged, and exists as its own type — same rationale as
+    ConcurrencyLimitError — so metrics classification (see
+    metrics.classify_rejection) can report a dedicated `cost_estimate`
+    rejection reason instead of folding it into the coarser `policy` bucket.
+    """
+
+
 class QueryValidationError(ValueError):
     """Client-actionable query/schema validation failure.
 

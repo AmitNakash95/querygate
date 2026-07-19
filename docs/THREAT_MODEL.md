@@ -125,7 +125,7 @@ CI/CD, and secrets-management controls.
 | QG-05 | Cross-principal or cross-tenant confusion | Immutable request-local `Principal`; per-principal policy resolution; claim-derived mandatory row filters; MCP caller stored in a reset `ContextVar` | Security principal-isolation and aggregate row-filter tests; policy-loader and MCP tests |
 | QG-06 | Authentication spoofing or token confusion | Constant-time API-key comparison; JWT signature, algorithm, issuer, audience, expiry, required subject, and configured JWKS verification; anonymous bypass only in local/development when no real authenticator is configured | `test_auth.py`, `test_jwt_auth.py`, REST/MCP authentication integration tests |
 | QG-07 | Credential, row, predicate, or backend-detail leakage | Public connection DTO has no credential field; unexpected REST/MCP/batch errors are generic; persisted audit schema excludes SQL, params, intent, exception text, and rows; explain/audit SQL is parameterized by default | `test_credential_redaction.py`, `test_audit.py`, security public-error tests |
-| QG-08 | Oversized or abusive requests/results | AST depth/width/join/top-N/batch caps; server-side row limits; hard serialized-row byte ceiling, including a single oversized row; database timeout; per-connection concurrency | Policy/service tests, real timeout tests, security oversized-row test |
+| QG-08 | Oversized or abusive requests/results | AST depth/width/join/top-N/batch caps; server-side row limits; hard serialized-row byte ceiling, including a single oversized row; database timeout; per-connection concurrency; optional Postgres pre-execution `EXPLAIN`-based row/cost estimate rejection before a likely full scan or join explosion runs | Policy/service tests, real timeout tests, security oversized-row test, `test_postgres_cost_estimation.py` |
 | QG-09 | Cross-connection access | Both connections must be visible to the principal and share the resolved `join_group`; the join uses the primary engine and declared physical database mapping | Cross-connection schema tests, including hidden-connection denial |
 | QG-10 | Unauthorized configuration changes | `/admin/reload-config` requires `admin:reload-config`; the config-governance API (`/admin/config/*`) separately requires `admin:config:write` for validate/preview/stage/apply/rollback and `admin:config:read` for history/inspection; every path fully validates new content before atomic registry/policy replacement | REST reload scope tests, config-reload tests, `test_config_governance_write_endpoints_require_write_scope`, `test_config_governance_read_endpoints_require_read_scope` |
 | QG-11 | Browser-driven DNS rebinding against local MCP | MCP validates `Host` and, when present, `Origin`; protection is enabled by default with loopback hosts allowlisted | Security test `test_mcp_rejects_unapproved_host_header` |
@@ -202,9 +202,13 @@ defaults.
   authorized for an aggregate can still infer facts from permitted counts and
   narrow filters. Minimum-group-size, differential-privacy, and query-history
   controls are not implemented.
-- **Pre-execution cost:** limits and timeouts are primarily reactive. QueryGate
-  does not yet estimate a plan and reject likely full scans or join explosions
-  before execution (TODO item 26).
+- **Pre-execution cost:** limits and timeouts are primarily reactive, but an
+  optional Postgres `EXPLAIN`-based check (`Policy.max_estimated_rows`/
+  `max_estimated_cost`, unset/disabled by default) can reject a likely full
+  scan or join explosion before it executes (TODO item 26 phase 1). MSSQL has
+  no equivalent yet (item 26 phase 2), and the check is fail-open: an EXPLAIN
+  failure degrades to "not enforced for this query" rather than blocking it,
+  so it is a complement to the reactive guardrails, not a replacement.
 - **Large values in process memory:** the output byte cap prevents an oversized
   row from leaving QueryGate, but the database driver must first receive that
   row. Database-side statement limits and denial of large/blob columns remain
