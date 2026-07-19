@@ -35,6 +35,7 @@ from querygate.core.exceptions import (
 )
 from querygate.core.logging import log_execution
 from querygate.execution.concurrency import concurrency_slot
+from querygate.execution.cost_estimation import enforce_cost_estimate, estimate_postgres_query_cost
 from querygate.metrics import (
     QUERIES_REJECTED_TOTAL,
     QUERIES_TOTAL,
@@ -205,7 +206,9 @@ class StructuredQueryService:
         )
         return policy
 
-    async def _validate_and_compile(self, query: StructuredQuery) -> Tuple[sa.Select, int, dict]:
+    async def _validate_and_compile(
+        self, query: StructuredQuery
+    ) -> Tuple[sa.Select, int, dict, str]:
         policy = self._get_policy()
         validate_policy(query, policy, connection_id=self._connection_id)
         tables = await validate_schema(
@@ -220,7 +223,7 @@ class StructuredQueryService:
         stmt, limit = compile_structured_query(
             query, tables, policy, dialect=dialect, principal=self._principal
         )
-        return stmt, limit, tables
+        return stmt, limit, tables, dialect
 
     @log_execution
     async def execute(self, query: StructuredQuery) -> StructuredQueryResult:
@@ -234,11 +237,15 @@ class StructuredQueryService:
             async with concurrency_slot(
                 self._connection_id, policy.max_concurrency, policy.concurrency_wait_seconds
             ):
-                stmt, limit, _tables = await self._validate_and_compile(query)
+                stmt, limit, _tables, dialect = await self._validate_and_compile(query)
                 policy_validated = True
                 sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
 
                 async with session_scope(self._connection_id, policy=policy) as session:
+                    if policy.cost_estimation_enabled and dialect == "postgresql":
+                        estimate = await estimate_postgres_query_cost(session, stmt)
+                        if estimate is not None:
+                            enforce_cost_estimate(estimate, policy)
                     result = await session.execute(stmt)
                     raw_rows = [dict(r) for r in result.mappings().all()]
 
@@ -322,12 +329,21 @@ class StructuredQueryService:
 
     @log_execution
     async def explain(self, query: StructuredQuery) -> ExplainResult:
-        """Validate + compile without executing; returns the SQL that would run."""
+        """Validate + compile without executing; returns the SQL that would run.
+
+        Deliberately never opens a DB session (see
+        test_explain_does_not_open_a_db_session), so — unlike `execute()` —
+        this does not run the `max_estimated_rows`/`max_estimated_cost`
+        pre-execution cost check either: that check needs a live EXPLAIN
+        round-trip against Postgres, which would make "explain" a
+        DB-touching operation with its own concurrency/availability
+        footprint instead of a pure, always-cheap compile preview.
+        """
         policy = self._get_policy()
         async with concurrency_slot(
             self._connection_id, policy.max_concurrency, policy.concurrency_wait_seconds
         ):
-            stmt, limit, tables = await self._validate_and_compile(query)
+            stmt, limit, tables, _dialect = await self._validate_and_compile(query)
             sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
             return ExplainResult(sql=sql, params=params, tables=sorted(tables), limit=limit)
 

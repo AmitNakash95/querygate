@@ -55,7 +55,7 @@ order-of-magnitude, not commitments.
 | 23 | ✅ Persisted audit/event sink | M | 1, 12 |
 | 24 | ✅ Release hygiene and reproducible v0.1.0 cut | S–M | 4, 14, 17 |
 | 25 | ✅ Admin/config governance plane | L | 5, 6, 10, 13 |
-| 26 | Query-cost estimation before execution | L | 2, 3, 15 |
+| 26 | ✅ Query-cost estimation before execution (phase 1: Postgres EXPLAIN; phase 2: MSSQL not started) | L | 2, 3, 15 |
 | 27 | ✅ Semantic schema catalog and sensitivity metadata | L | 6, 16 |
 | 28 | ✅ Threat model + adversarial security test suite | M | 1, 6, 8, 10, 11 |
 | 29 | ✅ Production deployment reference stack | M | 4, 9, 12, 13, 14 |
@@ -1035,6 +1035,74 @@ id — runnable in CI/CD before a config change ships.
 
 ### 26. Query-cost estimation before execution
 
+**Phase 1 (Postgres `EXPLAIN`-based estimation) ✅ DONE.** **Phase 2 (MSSQL
+estimated-plan equivalent) not started — split out below because it needs a
+different connection-lifecycle shape than phase 1's, not just more test
+coverage.**
+
+**Phase 1 shipped:** `execution/cost_estimation.py`'s
+`estimate_postgres_query_cost()` plans (never runs) the already-validated,
+already-compiled `Select` with `EXPLAIN (FORMAT JSON)` — the statement is
+rendered once with `literal_binds=True` (the same fallback-on-failure
+pattern `execution/service.py`'s `_compile_to_text` already uses) so the
+whole EXPLAIN is one self-contained string; no data is exposed by doing this
+since EXPLAIN never executes the statement. It reads the root plan node's
+`Plan Rows`/`Total Cost` and hands them to `enforce_cost_estimate()`, which
+raises a new `CostEstimateExceededError` (subclasses `PolicyViolationError`,
+mirroring `ConcurrencyLimitError`'s rationale — same client-error handling,
+but its own metrics reason: `querygate_queries_rejected_total{reason="cost_estimate"}`,
+broken out from the coarser `policy` bucket) with a message that tells the
+agent what to do next ("narrow the query with additional filters, a smaller
+limit/top_n, or a more selective time range"), not just that it was denied.
+
+New `Policy.max_estimated_rows`/`max_estimated_cost` (both `Optional`,
+default `None` — unset means fully disabled, zero behavior change for
+existing deployments) gate this in `StructuredQueryService.execute()`,
+inside the same session/transaction already opened for the real query — one
+extra round-trip, not a second connection. Deliberately **not** wired into
+`explain_structured_query`: that call has an existing, tested invariant
+(`test_explain_does_not_open_a_db_session`) that it never touches the
+database at all, staying a pure, always-cheap compile preview; adding a live
+EXPLAIN round-trip there would break that contract for a feature explicitly
+scoped to gating `execute()`.
+
+**Fail-open by design, not fail-closed:** if EXPLAIN can't be obtained or
+parsed for a given query (an unusual construct that can't render with
+literal binds, an unexpected plan shape), `estimate_postgres_query_cost()`
+logs a warning and returns `None` rather than raising — the query proceeds
+and is still bounded by every existing reactive guardrail (row caps,
+timeout, concurrency, response-byte cap). This is a deliberate trade-off:
+the feature adds proactive rejection of *likely* full scans/join
+explosions without becoming a new way to accidentally block legitimate
+traffic on an EXPLAIN edge case.
+
+MSSQL is explicitly a no-op, not an error: a policy with these fields set on
+an MSSQL connection is valid and simply has no effect there (see the phase 2
+write-up below for why). Covered by `tests/unit/test_cost_estimation.py`
+(estimator parsing success/failure/fail-open paths, `enforce_cost_estimate`
+threshold combinations), the wiring tests in `tests/unit/test_service.py`
+(estimation disabled by default, MSSQL no-op, execute rejects over threshold
+while explain never opens a session), and
+`tests/integration/test_postgres_cost_estimation.py` against a real
+Postgres — a genuinely large sequential-scan-shaped query is rejected under
+a small `max_estimated_rows`, a selective indexed query passes under the
+same policy, and disabling the gate (the default) never issues an EXPLAIN at
+all. `docs/THREAT_MODEL.md`'s QG-08 row and residual-risk section were
+updated; `help/service.py`'s redacted policy summary now reports the two new
+guardrail values like every other numeric cap.
+
+**Phase 2 — MSSQL estimated-plan equivalent, not started:** SQL Server's
+`SET SHOWPLAN_XML ON` can't be prefixed onto an already-compiled statement
+the way Postgres's inline `EXPLAIN (FORMAT JSON) <query>` can — once
+SHOWPLAN mode is set, it must be the *only* statement in its batch (the
+query being planned can't run in the same batch as the `SET`), so getting an
+estimated MSSQL plan needs a dedicated connection/session lifecycle (open a
+connection, `SET SHOWPLAN_XML ON`, run the query text to get its plan
+without execution, then discard that connection rather than reusing it for
+the real query) rather than one extra statement inside the existing session.
+That's a genuinely different code shape, not a bigger version of phase 1's
+approach — tracked here as its own follow-up.
+
 **Effort: L (3–5 days for one dialect, longer cross-dialect).** The hard
 part is not calling `EXPLAIN`; it is turning dialect-specific plan output
 into a conservative, understandable policy decision without blocking safe
@@ -1046,11 +1114,12 @@ queries that are likely to full-scan huge tables, explode joins, or stress a
 production database before they run. This is a differentiator against
 generic MCP database connectors.
 
-**What to do:** Add an optional policy gate that compiles the structured
-query, runs a dialect-specific dry plan (`EXPLAIN`/estimated plan), extracts
-estimated rows/cost where available, and rejects queries above configured
-thresholds. Start with Postgres, document MSSQL differences, and include
-clear denial messages that help the agent narrow the query safely.
+**What to do (phase 2):** Add an MSSQL estimated-plan path with its own
+connection lifecycle (`SET SHOWPLAN_XML ON` in a dedicated session), extract
+comparable row/cost signals from the returned plan XML, and reuse the same
+`Policy.max_estimated_rows`/`max_estimated_cost` gate and
+`CostEstimateExceededError` phase 1 already established rather than
+inventing a parallel mechanism.
 
 ### 27. Semantic schema catalog and sensitivity metadata ✅ DONE
 

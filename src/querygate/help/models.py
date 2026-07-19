@@ -156,7 +156,7 @@ class PolicyRuleCounts(pyd.BaseModel):
     model_config = pyd.ConfigDict(extra="forbid")
 
 
-GuardrailValue = Union[int, float, bool, str]
+GuardrailValue = Union[int, float, bool, str, None]
 
 
 class RedactedPolicySummary(pyd.BaseModel):

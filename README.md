@@ -220,6 +220,33 @@ where, group_by, having, order_by, top_n — is checked against this policy
 *before* compilation. A denied column can't be used to filter or sort on
 even if it's never selected.
 
+### Pre-execution cost estimation (Postgres)
+
+Row limits, timeouts, and concurrency caps are all reactive — they bound a
+query only once it's already running. `Policy.max_estimated_rows` /
+`max_estimated_cost` (both unset/disabled by default) add a proactive check
+in front of that: when set, `execute()` asks Postgres's own planner to plan
+— never run — the compiled query via `EXPLAIN (FORMAT JSON)`, and rejects
+the query before it touches real data if the planner's row-count or cost
+estimate is past the configured threshold, with a message that tells the
+agent to narrow the query rather than just "denied":
+
+```yaml
+default:
+  max_estimated_rows: 1000000
+  max_estimated_cost: 100000   # Postgres's own arbitrary planner-cost units
+```
+
+This is Postgres-only for now. MSSQL's estimated-plan equivalent
+(`SET SHOWPLAN_XML ON`) can't be composed as a prefix on an already-compiled
+statement the way Postgres's `EXPLAIN` can — it needs its own dedicated
+connection lifecycle — so setting these fields on an MSSQL connection is
+accepted but has no effect (see `execution/cost_estimation.py` and TODO.md
+item 26). `explain_structured_query` (MCP) and `POST .../query/explain`
+(REST) never open a database session at all (by design — it stays a pure,
+always-cheap compile preview), so this check runs only on
+`execute_structured_query`/`POST .../query`, not `explain`.
+
 For production, the safest connection-discovery posture is deny by default:
 
 ```yaml
@@ -498,6 +525,11 @@ Agent (MCP) / Client (REST)
   concurrency semaphore and a policy-configured timeout; row counts are
   clamped server-side (tiered: lower for row selects, higher for
   aggregates), not left to the caller's `limit`.
+- **Proactive cost estimation, not just reactive caps (Postgres)** — an
+  optional `max_estimated_rows`/`max_estimated_cost` policy gate plans the
+  compiled query with Postgres's own `EXPLAIN` before running it, and
+  rejects likely full scans or join explosions before they ever touch real
+  data instead of only bounding them once already running.
 - **Auth is pluggable.** `core/auth.py` defines an `Authenticator` interface;
   static API keys and JWKS-verified OAuth/JWT bearer tokens are shared by REST
   and MCP without transport-specific authorization logic.
@@ -588,6 +620,10 @@ Being upfront about what's not done yet:
   is REST-only for now.
 - **No write operations** — by design. QueryGate is read-only; there is no
   insert/update/delete path anywhere in the AST or compiler.
+- **Pre-execution cost estimation is Postgres-only** — `max_estimated_rows`/
+  `max_estimated_cost` (above) have no effect on an MSSQL connection yet;
+  MSSQL's estimated-plan mechanism needs its own connection lifecycle that
+  hasn't been built (TODO item 26 phase 2).
 - **Distributed concurrency enforcement (Redis-backed) is opt-in** — the
   default is an in-process semaphore, correct for a single instance only;
   set `concurrency_backend: redis` for multi-instance deployments.

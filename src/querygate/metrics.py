@@ -22,7 +22,11 @@ from prometheus_client import (
     generate_latest,
 )
 
-from querygate.core.exceptions import ConcurrencyLimitError, PolicyViolationError
+from querygate.core.exceptions import (
+    ConcurrencyLimitError,
+    CostEstimateExceededError,
+    PolicyViolationError,
+)
 
 REGISTRY = CollectorRegistry()
 
@@ -38,6 +42,9 @@ QUERIES_REJECTED_TOTAL = Counter(
     "Rejected structured queries, by connection and reason.",
     # policy: denied table/column/cap. schema: unknown table/column/malformed
     # query. concurrency: too many in-flight queries for this connection.
+    # cost_estimate: rejected by a pre-execution Postgres EXPLAIN cost check
+    # (TODO.md item 26) — broken out from the coarser `policy` bucket so
+    # operators can tell threshold tuning apart from allow/deny rules.
     # db_error: everything else, including genuine query timeouts — see
     # TODO.md item 3, which hasn't yet established a reliable, dialect-
     # verified way to distinguish a timeout from any other DB-layer failure.
@@ -71,6 +78,8 @@ CONCURRENCY_MAX = Gauge(
 def classify_rejection(exc: BaseException) -> str:
     if isinstance(exc, ConcurrencyLimitError):
         return "concurrency"
+    if isinstance(exc, CostEstimateExceededError):
+        return "cost_estimate"
     if isinstance(exc, PolicyViolationError):
         return "policy"
     if isinstance(exc, ValueError):
