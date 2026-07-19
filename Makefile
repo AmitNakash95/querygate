@@ -28,7 +28,7 @@ run: ## Start the app (uses poetry run → uvicorn via querygate.run)
 
 .PHONY: run-dev
 run-dev: ## Start with auto-reload (development mode)
-	poetry run uvicorn querygate.api.app:app --host 0.0.0.0 --port 8000 --reload
+	poetry run uvicorn querygate.api.app:app --host 0.0.0.0 --port 8010 --reload
 
 .PHONY: dev
 dev: run-dev ## Alias for run-dev
