@@ -225,3 +225,98 @@ class CandidatePolicySimulation(pyd.BaseModel):
     )
 
     model_config = pyd.ConfigDict(extra="forbid")
+
+
+class ConfigSemanticDiffRequest(pyd.BaseModel):
+    """A semantic (resolved-behavior) diff of a candidate against the active version.
+
+    Unset documents inherit unchanged from the active governance version (or
+    directly from the deployment files before governance has been
+    bootstrapped) — send only the file(s) that actually change, exactly like
+    the staging/validate requests. There is no target principal: this diff
+    resolves the default and per-connection policy layers at the connection
+    baseline (see `SemanticAccessDiff.evaluation_scope`).
+    """
+
+    connections_yaml: Optional[str] = None
+    policy_yaml: Optional[str] = None
+    catalog_yaml: Optional[str] = None
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+SemanticChangeCategory = Literal[
+    "connection_visibility",
+    "guardrail",
+    "table_access",
+    "column_access",
+    "mandatory_filter",
+    "join_group",
+]
+
+SemanticChangeDirection = Literal["tightening", "loosening", "neutral"]
+
+SemanticChangeType = Literal["added", "removed", "modified"]
+
+
+class SemanticAccessChange(pyd.BaseModel):
+    """One resolved-behavior change between the active and candidate configs.
+
+    `before`/`after` only ever carry non-sensitive resolved values — a
+    guardrail number, a visibility state (`visible`/`hidden`/`absent`), a join
+    group name, or a mandatory-filter source kind. Static mandatory-filter
+    values, resolved secrets, connection strings, and query predicate values
+    are structurally never placed here (see `SemanticAccessDiff.redactions`).
+    """
+
+    category: SemanticChangeCategory
+    connection: str
+    # Table name, `Table.Column`, guardrail field name, mandatory-filter
+    # `Table.Column`, or None for a whole-connection visibility change.
+    object: Optional[str] = None
+    change_type: SemanticChangeType
+    direction: SemanticChangeDirection
+    before: Optional[str] = None
+    after: Optional[str] = None
+    detail: str
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class SemanticDiffSummary(pyd.BaseModel):
+    total: int = 0
+    loosening: int = 0
+    tightening: int = 0
+    neutral: int = 0
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class SemanticAccessDiff(pyd.BaseModel):
+    """Server-derived, authorization-aware diff of *resolved* access — not a
+    line diff of YAML — between the active config version and a candidate.
+
+    Phase 1 (`evaluation_scope="connection_baseline"`) resolves the default
+    and per-connection policy layers with no principal applied. When the
+    per-principal override layer itself changes, or an allow-list toggles
+    between "restricted" and "unrestricted" (so objects the policy never names
+    may also be affected), or the change list is truncated, `analysis_incomplete`
+    is set with a human-readable reason rather than silently under-reporting.
+    """
+
+    changes: list[SemanticAccessChange] = pyd.Field(default_factory=list)
+    summary: SemanticDiffSummary = pyd.Field(default_factory=SemanticDiffSummary)
+    analysis_incomplete: bool = False
+    incomplete_reasons: list[str] = pyd.Field(default_factory=list)
+    truncated: bool = False
+    evaluation_scope: Literal["connection_baseline"] = "connection_baseline"
+    redactions: list[str] = pyd.Field(
+        default_factory=lambda: [
+            "candidate configuration documents and raw YAML",
+            "connection strings, resolved secret values, and secret references",
+            "static mandatory-filter values and supplied claim values",
+            "query predicate values and compiled SQL",
+        ]
+    )
+
+    model_config = pyd.ConfigDict(extra="forbid")

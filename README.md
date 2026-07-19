@@ -322,6 +322,14 @@ curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/simulate 
   -d '{"policy_yaml": "default:\n  enabled: true\n  max_joins: 2\n",
        "principal": "reporting-agent", "connection": "analytics", "table": "orders"}'
 
+# See what a draft would actually change about resolved access — not a YAML
+# line diff, but typed tightening/loosening/neutral changes to connection
+# visibility, guardrail caps, table/column access, mandatory-filter
+# requirements, and join groups. Static filter values, secrets, and predicate
+# values are never included. Requires both config scopes, like simulate.
+curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/diff \
+  -d '{"policy_yaml": "default:\n  enabled: true\n  max_joins: 2\n"}'
+
 # Stage it as a new version (only the fields you send change; everything
 # else inherits from the current active version)
 curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions \
@@ -338,7 +346,7 @@ curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions/
 curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions/1/apply
 ```
 
-Every validate/preview/simulate/stage/apply/rollback is attributed to the calling
+Every validate/preview/simulate/diff/stage/apply/rollback is attributed to the calling
 principal and recorded in the same audit trail as query execution (a
 `config.governance` event — action, version id, outcome, actor — never the
 YAML content itself, which stays only in the version store). The first call to
@@ -347,14 +355,22 @@ any `/admin/config/*` endpoint bootstraps version `"1"` from whatever
 "current active version" always means something. Gated behind two scopes,
 matching the read/write split most admin APIs use: `admin:config:read`
 (list/inspect versions) and `admin:config:write` (validate/preview/stage/
-apply/rollback). `simulate` requires *both* scopes at once — it echoes back
-semantic policy detail like a read endpoint, but also resolves caller-supplied
+apply/rollback). `simulate` and `diff` each require *both* scopes at once — they echo back
+semantic policy detail like a read endpoint, but also resolve caller-supplied
 config/secret references like a write endpoint, so a read-only principal can't
-turn it into a secret-existence oracle. `simulate` loads the candidate
+turn either into a secret-existence oracle. Both load the candidate
 documents into an isolated, temporary registry/policy/catalog context (reusing
-the real loaders and validation logic) and never touches the live
+the real loaders and validation logic) and never touch the live
 registry/policy singletons or the version store, so concurrent production
-requests and other simulations can't see or affect it.
+requests and other simulations can't see or affect them. `diff` reports what a
+candidate would actually *change* about resolved access — typed
+tightening/loosening/neutral changes to connection visibility, guardrail caps,
+table/column access, mandatory-filter requirements, and join groups — rather
+than leaving a reviewer to mentally execute the default→connection policy merge
+from a YAML line diff. It resolves the default and per-connection layers at the
+connection baseline; when a change lives purely in a `principals:` override it
+is flagged as `analysis_incomplete` (per-principal resolution is a later
+phase) rather than silently omitted.
 
 ### Browser admin control plane
 
@@ -948,8 +964,11 @@ Being upfront about what's not done yet:
   retention scheduler, search UI, or built-in SIEM exporter yet.
 - **Config-governance has no approval workflow yet** — a caller with
   `admin:config:write` can stage and immediately apply a version in one
-  session; there's no second-approver/four-eyes requirement, scheduled
-  apply, or detailed semantic diff. The preview reports changed/unchanged only
+  session; there's no second-approver/four-eyes requirement or scheduled
+  apply. `POST /admin/config/diff` now reports a resolved-access semantic diff
+  (typed tightening/loosening/neutral changes, not just a YAML line diff), but
+  only at the connection baseline — per-principal resolution and blast-radius
+  impact analysis are later phases. The preview reports changed/unchanged only
   with read scope; write-only callers see submitted/inherited so write scope
   cannot become read scope. No admin UI either — the governance mutation API
   is REST-only for now.

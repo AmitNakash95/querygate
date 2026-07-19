@@ -86,6 +86,22 @@ class PolicyStore:
         """
         return sorted(self._overrides.keys())
 
+    def principal_override_map(self) -> PrincipalOverrides:
+        """A copy of the per-principal override map (subject -> connection ->
+        partial policy dict).
+
+        The semantic-access diff (admin/service.py) compares this between the
+        active and candidate snapshots so it can honestly flag that the
+        per-principal layer changed — connection-baseline diffing resolves the
+        default/connection layers only, so a change that lives purely in a
+        principal override would otherwise be reported as "no change."
+        Returned as a deep-ish copy so callers can't mutate the store's state.
+        """
+        return {
+            subject: {conn: dict(entry) for conn, entry in per_connection.items()}
+            for subject, per_connection in self._principal_overrides.items()
+        }
+
 
 _store: Optional[PolicyStore] = None
 
