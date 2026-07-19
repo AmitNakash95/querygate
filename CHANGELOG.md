@@ -6,6 +6,27 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- Supply-chain SBOM and dependency vulnerability audit (`scripts/generate_sbom.py`,
+  TODO.md item 30 phase 1), run as the final step of `make release-check` and available
+  standalone via `make sbom`. Builds a throwaway virtual environment from exactly
+  `poetry.lock`'s `main` dependency group (not an unpinned resolve), generates a
+  CycloneDX 1.6 SBOM and a `pip-audit` vulnerability report scoped to that locked set, and
+  writes SHA-256 checksums for the wheel, sdist, and SBOM to `dist/SHA256SUMS`. Any known
+  vulnerability without a reviewed entry in `security/dependency-audit-allowlist.json`
+  fails the release (deny-by-default) — publishing to a registry and cryptographic
+  signing remain phase 2, deferred until this project has a real publishing pipeline.
+
+### Known issues
+
+- The dependency audit above currently allowlists 13 known advisories across `click`,
+  `idna`, `mcp`, `python-dotenv`, and `starlette` at their `poetry.lock`-pinned versions —
+  see `security/dependency-audit-allowlist.json` for the specific, code-verified reason
+  each doesn't reach a real QueryGate code path, and TODO.md item 30 phase 2 for the
+  tracked remediation. Notably, `mcp`'s DNS-rebinding advisory (PYSEC-2026-1617) is already
+  mitigated independently at the application layer — `mcp/server.py` enables
+  `TransportSecuritySettings(enable_dns_rebinding_protection=True, ...)` regardless of the
+  SDK's own default, and this is covered by `make test-security`.
+
 - A repeatable real-PostgreSQL load/soak harness for execution guardrails. Concurrent REST
   bursts are checked against PostgreSQL's observed active-query count, covering strict
   `max_concurrency` enforcement, overflow rejection, queued completion, and statement

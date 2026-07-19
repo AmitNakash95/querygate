@@ -1,0 +1,93 @@
+[
+  {
+    "id": "PYSEC-2026-2132",
+    "package": "click",
+    "reason": "Command injection in click.edit() (interactive $EDITOR launch). QueryGate never calls click.edit() or exposes an interactive CLI editor path — click is present only as uvicorn's transitive CLI dependency.",
+    "added": "2026-07-19",
+    "tracking": "TODO.md item 30 phase 2 (dependency remediation)"
+  },
+  {
+    "id": "PYSEC-2026-215",
+    "package": "idna",
+    "reason": "IDNA label-decoding denial-of-service on adversarial hostnames. QueryGate does not parse caller-supplied hostnames; idna is a transitive dependency of httpx/anyio used only for outbound connections to operator-configured hosts (databases, JWKS, Vault).",
+    "added": "2026-07-19",
+    "tracking": "TODO.md item 30 phase 2 (dependency remediation)"
+  },
+  {
+    "id": "PYSEC-2026-1617",
+    "package": "mcp",
+    "reason": "MCP Python SDK does not enable DNS rebinding protection by default for HTTP transports. QueryGate's own mcp/server.py enables Host/Origin validation by default independent of the SDK default (see docs/THREAT_MODEL.md QG entries and make test-security) as a compensating control at the application layer.",
+    "added": "2026-07-19",
+    "tracking": "TODO.md item 30 phase 2 (dependency remediation)"
+  },
+  {
+    "id": "CVE-2026-52869",
+    "package": "mcp",
+    "reason": "SSE/Streamable HTTP session routing keyed on session id alone. QueryGate authenticates every REST/MCP call independently via core/auth.py before any tool executes, so a routed request still cannot act as a different principal; upgrading the pinned SDK version needs its own regression pass against mcp/tools/* before this is closed.",
+    "added": "2026-07-19",
+    "tracking": "TODO.md item 30 phase 2 (dependency remediation)"
+  },
+  {
+    "id": "CVE-2026-59950",
+    "package": "mcp",
+    "reason": "Deprecated mcp.server.websocket.websocket_server transport accepts handshakes without origin validation. QueryGate does not use the SDK's websocket transport (Streamable HTTP only, see mcp/server.py) — this code path is not reachable in this deployment.",
+    "added": "2026-07-19",
+    "tracking": "TODO.md item 30 phase 2 (dependency remediation)"
+  },
+  {
+    "id": "PYSEC-2026-2270",
+    "package": "python-dotenv",
+    "reason": "set_key()/unset_key() can follow a symlink outside the intended .env file. QueryGate only reads .env values via dotenv_values() (secrets/resolvers.py) and pydantic-settings' env_file loading — both read-only; set_key()/unset_key() are never called.",
+    "added": "2026-07-19",
+    "tracking": "TODO.md item 30 phase 2 (dependency remediation)"
+  },
+  {
+    "id": "PYSEC-2026-161",
+    "package": "starlette",
+    "reason": "Unvalidated Host header used to reconstruct request.url. QueryGate does not derive authorization or query behavior from request.url; the actual Host-based DNS-rebinding defense for MCP is QueryGate's own configurable allowlist, not Starlette's routing.",
+    "added": "2026-07-19",
+    "tracking": "TODO.md item 30 phase 2 (dependency remediation)"
+  },
+  {
+    "id": "PYSEC-2026-248",
+    "package": "starlette",
+    "reason": "Unvalidated request path used to reconstruct request.url, same class as PYSEC-2026-161. Not used for authorization decisions anywhere in api/ or mcp/.",
+    "added": "2026-07-19",
+    "tracking": "TODO.md item 30 phase 2 (dependency remediation)"
+  },
+  {
+    "id": "PYSEC-2026-249",
+    "package": "starlette",
+    "reason": "request.form() resource bounds (max_fields/max_part_size) not enforced in this version. QueryGate's REST surface is JSON-body StructuredQuery only (see api/routes.py) — no endpoint parses multipart form data.",
+    "added": "2026-07-19",
+    "tracking": "TODO.md item 30 phase 2 (dependency remediation)"
+  },
+  {
+    "id": "PYSEC-2026-1942",
+    "package": "starlette",
+    "reason": "Quadratic-time HTTP Range header parsing in FileResponse. QueryGate serves no FileResponse anywhere in api/ — there is no static file or download endpoint.",
+    "added": "2026-07-19",
+    "tracking": "TODO.md item 30 phase 2 (dependency remediation)"
+  },
+  {
+    "id": "PYSEC-2026-1941",
+    "package": "starlette",
+    "reason": "Large multipart file uploads can exceed intended max spool size. QueryGate's REST surface accepts only JSON bodies; no multipart upload endpoint exists.",
+    "added": "2026-07-19",
+    "tracking": "TODO.md item 30 phase 2 (dependency remediation)"
+  },
+  {
+    "id": "PYSEC-2026-2281",
+    "package": "starlette",
+    "reason": "StaticFiles is vulnerable to SSRF via UNC paths on Windows. QueryGate mounts no StarletteStaticFiles route and deploys on Linux containers only (see Dockerfile, deploy/).",
+    "added": "2026-07-19",
+    "tracking": "TODO.md item 30 phase 2 (dependency remediation)"
+  },
+  {
+    "id": "PYSEC-2026-2280",
+    "package": "starlette",
+    "reason": "HTTPEndpoint selects a handler by lowercasing the HTTP method, allowing a mismatched-case verb to reach an unintended handler. QueryGate's routes are plain FastAPI path operations (api/routes.py), not starlette.endpoints.HTTPEndpoint subclasses.",
+    "added": "2026-07-19",
+    "tracking": "TODO.md item 30 phase 2 (dependency remediation)"
+  }
+]

@@ -50,6 +50,16 @@ jobs:
           poetry build
           poetry run python scripts/check_release_artifacts.py
 
+      # SBOM + dependency vulnerability audit (TODO.md item 30 phase 1), scoped
+      # to poetry.lock's `main` group — the exact locked set QueryGate ships,
+      # not whatever a fresh unpinned resolve would pick. Fails on any known
+      # vulnerability without a reviewed entry in
+      # security/dependency-audit-allowlist.json (deny-by-default); needs
+      # network access to query the vulnerability database, same as
+      # `poetry install` above.
+      - name: Generate SBOM and audit locked dependencies
+        run: poetry run python scripts/generate_sbom.py
+
       - name: Validate deploy/ reference stacks (TODO.md item 29)
         run: |
           cp deploy/docker-compose/.env.production.example deploy/docker-compose/.env.production
