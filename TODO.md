@@ -77,6 +77,7 @@ order-of-magnitude, not commitments.
 | 45 | Dedicated non-admin “My access” portal | M | 22, 31, 33 |
 | 46 | Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
 | 47 | Safe draft recovery plus config export/import UX | M | 13, 25, 31 |
+| 48 | Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) | L | 6, 22, 25, 32B |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
@@ -2823,6 +2824,49 @@ connections YAML, literal credentials, secret references, or bearer tokens in
 downloaded file or a server-side, authorized, encrypted-at-rest draft store
 with retention/deletion controls and audit events—not invisible browser
 persistence.
+
+### 48. Pre-defined, admin-approved query templates ("Toolbox"-style curated tools)
+
+**Effort: L (3–5 days).** Not a new execution path — the resolved query still
+runs through the full existing pipeline (policy, schema, compiler,
+concurrency, audit). The work is the template model itself (typed parameter
+slots bound into a stored `StructuredQuery` AST), reusing 32B's governance
+state machine for review/approve/publish/rollback, and new discovery/
+invocation surface on REST and MCP.
+
+**Why it matters:** Google's Gen AI Toolbox for Databases popularized a
+pattern this project's own model is a natural fit for: instead of (or in
+addition to) letting an agent compose an arbitrary `StructuredQuery` within
+policy caps, an admin pre-defines a fixed set of named, parameterized
+queries — "get_orders_for_customer(customer_id)", "top_n_products(n,
+category)" — and agents only ever call one of *those* by name with typed
+parameters. This shrinks the effective attack/error surface to a reviewed,
+finite set of query shapes, gives non-technical stakeholders something
+concrete to sign off on ("these are the 12 things this agent can ask"), and
+matches how teams already think about tool-calling for agents. Critically,
+this is additive to QueryGate's existing guarantee, not a new one: there is
+still no raw-SQL field anywhere — a template is just a stored, named,
+parameterized `StructuredQuery` AST, so it inherits every validation and
+guardrail already built for ad-hoc queries.
+
+**What to do:** Add a `QueryTemplate` model (id, description, target
+connection, a `StructuredQuery` AST containing named parameter
+placeholders, and typed/validated parameter slots — type, required,
+min/max, allow-list) stored via the same file-backed, versioned mechanism
+already used for the catalog/config (do not add a second store or mutation
+path, per this file's standing rule for catalog/config governance). Route
+create/edit/approve/publish/rollback through 32B's existing governance gate
+— a template must never publish itself or skip review, same as a catalog
+draft. At invocation time, bind the caller's parameters into the stored AST
+and run the *resulting* `StructuredQuery` through the unchanged
+`StructuredQueryService` pipeline — parameters get no special exemption
+from policy caps, allow/deny lists, or mandatory row filters. Expose
+published templates as individually discoverable/named MCP tools (e.g.
+`list_query_templates`, `run_query_template(id, params)`) and a REST
+endpoint, filtered per-principal the same way item 22 scopes connection
+visibility. Audit template invocations distinctly (template id + param
+shape, never param values or SQL) so operators can see curated-tool usage
+separately from ad-hoc structured-query usage in the same audit stream.
 
 ---
 
