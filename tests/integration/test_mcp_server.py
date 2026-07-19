@@ -33,6 +33,7 @@ _EXPECTED_TOOLS = {
     "list_connections",
     "list_tables",
     "describe_table",
+    "search_catalog",
     "explain_structured_query",
     "execute_structured_query",
     "execute_structured_queries",
@@ -476,6 +477,55 @@ async def test_mcp_describe_table_includes_catalog_metadata_when_configured():
     assert result["catalog"]["description"] == "One row per customer."
     email_column = next(c for c in result["columns"] if c["name"] == "email")
     assert email_column["catalog"]["sensitivity"] == "pii"
+
+
+@pytest.mark.asyncio
+async def test_mcp_catalog_search_is_compact_policy_filtered_and_cited():
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "version": 2,
+                "connections": {
+                    "demo": {
+                        "tables": {
+                            "orders": {
+                                "description": "Purchases and recognized revenue.",
+                                "aliases": ["sales"],
+                            }
+                        }
+                    }
+                },
+            }
+        )
+    )
+    _reset_mcp_session_manager()
+    app = create_app(_mcp_settings(mcp_api_keys=[]))
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(
+            transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+        ) as client,
+    ):
+        resp = await client.post(
+            "/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": 23,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_catalog",
+                    "arguments": {"connection": "demo", "query": "sales revenue", "limit": 2},
+                },
+            },
+            headers=_HEADERS_JSON,
+        )
+
+    assert resp.status_code == 200
+    result = _parse_mcp_response(resp)["result"]["structuredContent"]["result"]
+    assert result["result_count"] == 1
+    assert result["results"][0]["table"] == "orders"
+    assert result["results"][0]["citation"]["source_class"] == "verified"
+    assert result["results"][0]["citation"]["schema_fingerprint"] == "untracked"
 
 
 @pytest.mark.asyncio

@@ -8,15 +8,17 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from querygate.api.app import create_app
-from querygate.catalog.models import RelationshipHint
+from querygate.catalog.loader import CatalogStore, set_catalog_store
+from querygate.catalog.retrieval import CatalogCitation
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, get_registry, set_registry
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import CapacityTimeoutError, QueryValidationError, QueueFullError
 from querygate.execution.service import (
     BatchQueryItemResult,
-    ColumnCatalogEntry,
+    ColumnCatalogInfo,
     ColumnInfo,
+    RelationshipCatalogInfo,
     StructuredQueryResult,
     TableCatalogInfo,
     TableDescription,
@@ -27,6 +29,25 @@ pytestmark = pytest.mark.integration
 
 _BASE_URL = "http://localhost"
 _SERVICE = "querygate.api.routes.StructuredQueryService"
+
+
+def _catalog_citation() -> CatalogCitation:
+    return CatalogCitation(
+        entry_id="urn:querygate:catalog:test",
+        source_class="verified",
+        source_evidence=[
+            {
+                "kind": "manual",
+                "reference_fingerprint": "sha256:" + ("0" * 64),
+            }
+        ],
+        status="verified",
+        confidence=1.0,
+        precedence=400,
+        catalog_version=2,
+        schema_fingerprint="untracked",
+        freshness="untracked",
+    )
 
 
 def _settings(**overrides) -> AppConfig:
@@ -271,14 +292,24 @@ async def test_describe_table_includes_catalog_metadata_when_configured(app):
                 name="email",
                 type="VARCHAR",
                 nullable=True,
-                catalog=ColumnCatalogEntry(description="Customer email", sensitivity="pii"),
+                catalog=ColumnCatalogInfo(
+                    description="Customer email",
+                    sensitivity="pii",
+                    provenance=_catalog_citation(),
+                ),
             )
         ],
         catalog=TableCatalogInfo(
             description="One row per customer.",
             relationships=[
-                RelationshipHint(to_table="orders", column="id", to_column="customer_id")
+                RelationshipCatalogInfo(
+                    to_table="orders",
+                    column="id",
+                    to_column="customer_id",
+                    provenance=_catalog_citation(),
+                )
             ],
+            provenance=_catalog_citation(),
         ),
     )
     with patch(f"{_SERVICE}.describe_table", new_callable=AsyncMock, return_value=desc):
@@ -303,6 +334,47 @@ async def test_describe_table_catalog_is_null_when_not_configured(app):
     body = resp.json()
     assert body["catalog"] is None
     assert body["columns"][0]["catalog"] is None
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_returns_policy_filtered_provenance_without_database_access(app):
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "version": 2,
+                "connections": {
+                    "demo": {
+                        "tables": {
+                            "orders": {
+                                "description": "Customer purchases and revenue.",
+                                "aliases": ["sales"],
+                            },
+                            "internal_finance": {
+                                "description": "Restricted profit planning.",
+                            },
+                        }
+                    }
+                },
+            }
+        )
+    )
+    set_policy_store(PolicyStore.from_dict({"default": {"denied_tables": ["internal_finance"]}}))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        visible = await client.get(
+            "/api/v1/demo/catalog/search", params={"q": "sales revenue", "limit": 3}
+        )
+        hidden = await client.get("/api/v1/demo/catalog/search", params={"q": "profit planning"})
+
+    assert visible.status_code == 200
+    assert visible.json()["results"][0]["table"] == "orders"
+    citation = visible.json()["results"][0]["citation"]
+    assert citation["entry_id"].startswith("urn:querygate:catalog:")
+    assert citation["status"] == "verified"
+    assert citation["freshness"] == "untracked"
+    assert hidden.status_code == 200
+    assert hidden.json()["result_count"] == 0
+    assert hidden.json()["results"] == []
 
 
 @pytest.mark.asyncio

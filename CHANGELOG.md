@@ -6,6 +6,20 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- Governed semantic memory phase 32A-1, extending the existing schema catalog
+  to format version 2 with deterministic stable IDs and durable provenance on
+  every table, column, and relationship. Provenance carries explicit source/
+  evidence, status, confidence, catalog/schema version, freshness, actors, and
+  server-derived precedence; legacy version-1 catalogs load as manually
+  verified content. A row-free schema fingerprint/diff engine stores raw
+  database comments only as hashes. New REST
+  (`GET /api/v1/{connection}/catalog/search`) and MCP (`search_catalog`)
+  retrieval is deterministic, result/byte bounded, and filters table/column/
+  relationship candidates by principal policy before tokenization, ranking,
+  counting, or traversal. Generated drafts, automatic refresh/invalidation,
+  the disabled/manual provider contract, and the deterministic benchmark are
+  explicitly deferred to 32A-2; this phase makes no model call and cannot
+  alter policy, mandatory filters, sensitivity labels, or query execution.
 - Queue-depth pressure controls and cross-replica admission state for capacity waiting
   (TODO.md item 35 phase 2). `Policy.max_queue_depth`/`max_queue_depth_per_principal`
   (both optional, unset/unlimited by default) cap how many callers may be *waiting* for a

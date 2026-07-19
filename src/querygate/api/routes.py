@@ -12,6 +12,7 @@ import pydantic as pyd
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from querygate.config_reload import ReloadResult, reload_config
+from querygate.catalog.retrieval import CatalogSearchResponse
 from querygate.connections.models import PublicConnectionInfo
 from querygate.connections.visibility import list_visible_connections, resolve_visible_connection
 from querygate.core.auth import Principal
@@ -132,6 +133,24 @@ def build_router(
         try:
             return await service.describe_table(table)
         except (PolicyViolationError, QueryValidationError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=PUBLIC_INTERNAL_ERROR,
+            )
+
+    @router.get("/{connection}/catalog/search", response_model=CatalogSearchResponse)
+    async def search_catalog(
+        connection: str,
+        q: str = Query(min_length=1, max_length=256),
+        limit: int = Query(default=5, ge=1, le=20),
+        principal: Principal = Depends(get_principal),
+    ):
+        service = _service(connection, principal)
+        try:
+            return await service.search_catalog(q, max_results=limit)
+        except QueryValidationError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
         except Exception:
             raise HTTPException(

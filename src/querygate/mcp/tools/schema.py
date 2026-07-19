@@ -32,6 +32,15 @@ class TableDescribeToolResult(BaseModel):
     catalog: Optional[Dict[str, Any]] = None
 
 
+class CatalogSearchToolResult(BaseModel):
+    query: str
+    results: List[Dict[str, Any]]
+    result_count: int
+    truncated: bool
+    max_results: int
+    max_response_bytes: int
+
+
 @mcp_server.tool(
     description=(
         "List known table names for the given connection (reflected metadata + any "
@@ -73,4 +82,38 @@ async def describe_table(
         columns=[c.model_dump() for c in description.columns],
         description=description.description,
         catalog=description.catalog.model_dump() if description.catalog else None,
+    )
+
+
+@mcp_server.tool(
+    description=(
+        "Search compact business metadata in one connection's semantic catalog. Policy is "
+        "applied before search and ranking, so denied tables, columns, and relationship "
+        "endpoints cannot influence hits or counts. Every hit includes stable provenance, "
+        "verification state, confidence, catalog/schema version, and freshness. This reads "
+        "metadata only; it never searches database rows or executes SQL."
+    )
+)
+@safe_mcp_tool
+async def search_catalog(
+    connection: Annotated[str, _CONNECTION_FIELD],
+    query: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=256,
+            description="Business term, table/column alias, or relationship concept.",
+        ),
+    ],
+    limit: Annotated[int, Field(ge=1, le=20, description="Maximum compact hits.")] = 5,
+) -> Union[CatalogSearchToolResult, MCPErrorResult]:
+    service = _service(connection)
+    response = await service.search_catalog(query, max_results=limit)
+    return CatalogSearchToolResult(
+        query=response.query,
+        results=[result.model_dump(mode="json") for result in response.results],
+        result_count=response.result_count,
+        truncated=response.truncated,
+        max_results=response.max_results,
+        max_response_bytes=response.max_response_bytes,
     )

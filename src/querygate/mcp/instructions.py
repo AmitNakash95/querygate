@@ -23,7 +23,12 @@ all changes stay in the validate/preview/stage/apply governance workflow.
 ## Tool workflow (required order for unfamiliar schemas)
 1. list_connections() — see which connections this deployment exposes.
 2. list_tables(connection) — discover candidate tables for one connection.
-3. describe_table(connection, table_name) — learn columns/types/descriptions
+3. search_catalog(connection, query) — when a semantic catalog is configured,
+   retrieve compact business terms/aliases/relationships before describing
+   candidates. Results are policy-filtered before ranking and cite provenance,
+   verification state, confidence, schema version, and freshness; no result can
+   imply access and the tool never searches row values.
+4. describe_table(connection, table_name) — learn columns/types/descriptions
    for each table you will use. When the deployment has a curated schema
    catalog configured, the table and each column may carry an extra
    `catalog` object (business description, aliases, sensitivity, and —
@@ -31,9 +36,9 @@ all changes stay in the validate/preview/stage/apply governance workflow.
    tables); it's descriptive context only and never grants or implies
    access beyond what policy already allows — `catalog: null` just means no
    curated entry exists for that table/column.
-4. explain_structured_query(connection, query) — optional; sanity-check an
+5. explain_structured_query(connection, query) — optional; sanity-check an
    expensive-looking query's compiled SQL before running it.
-5. execute_structured_query(connection, query) — run one StructuredQuery
+6. execute_structured_query(connection, query) — run one StructuredQuery
    JSON AST (or execute_structured_queries to run several against the same
    connection in one call).
 

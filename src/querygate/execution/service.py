@@ -17,10 +17,18 @@ from querygate.audit.events import AuditSurface, normalize_query_shape
 from querygate.audit.logger import audit_query
 from querygate.catalog.loader import get_catalog_store
 from querygate.catalog.models import (
-    ColumnCatalogEntry,
-    RelationshipHint,
     SensitivityClass,
+    agent_visible,
     visible_relationships,
+)
+from querygate.catalog.retrieval import (
+    CatalogCitation,
+    CatalogSearchResponse,
+    catalog_citation,
+    policy_hidden_identifier_tokens,
+    policy_safe_catalog_aliases,
+    policy_safe_catalog_text,
+    search_catalog,
 )
 from querygate.compiler.sqlalchemy_compiler import compile_structured_query
 from querygate.connections.engine import get_engine, get_metadata, session_scope
@@ -74,7 +82,24 @@ class TableCatalogInfo(pyd.BaseModel):
     sensitivity: SensitivityClass = SensitivityClass.NONE
     default_aggregation: Optional[str] = None
     allow_samples: bool = False
-    relationships: List[RelationshipHint] = pyd.Field(default_factory=list)
+    relationships: List["RelationshipCatalogInfo"] = pyd.Field(default_factory=list)
+    provenance: CatalogCitation
+
+
+class RelationshipCatalogInfo(pyd.BaseModel):
+    to_table: str
+    column: str
+    to_column: str
+    description: Optional[str] = None
+    provenance: CatalogCitation
+
+
+class ColumnCatalogInfo(pyd.BaseModel):
+    description: Optional[str] = None
+    aliases: List[str] = pyd.Field(default_factory=list)
+    sensitivity: SensitivityClass = SensitivityClass.NONE
+    allow_samples: bool = False
+    provenance: CatalogCitation
 
 
 class ColumnInfo(pyd.BaseModel):
@@ -82,7 +107,7 @@ class ColumnInfo(pyd.BaseModel):
     type: str
     nullable: bool
     description: Optional[str] = None
-    catalog: Optional[ColumnCatalogEntry] = None
+    catalog: Optional[ColumnCatalogInfo] = None
 
 
 class TableDescription(pyd.BaseModel):
@@ -469,6 +494,28 @@ class StructuredQueryService:
         return sorted(name for name in names if policy.table_allowed(name))
 
     @log_execution
+    async def search_catalog(self, query: str, *, max_results: int = 5) -> CatalogSearchResponse:
+        """Retrieve compact semantic context without touching the database.
+
+        The catalog retrieval layer applies this principal's resolved policy
+        before it tokenizes or ranks candidates. It is deliberately separate
+        from query validation/execution: a missing or empty catalog returns no
+        results and can never weaken or block ordinary structured queries.
+        """
+
+        policy = self._get_policy()
+        try:
+            return search_catalog(
+                get_catalog_store(),
+                connection_id=self._connection_id,
+                policy=policy,
+                query=query,
+                max_results=max_results,
+            )
+        except ValueError as exc:
+            raise QueryValidationError(str(exc)) from exc
+
+    @log_execution
     async def describe_table(self, table_name: str) -> TableDescription:
         policy = self._get_policy()
         try:
@@ -484,28 +531,76 @@ class StructuredQueryService:
         # Denied columns are already excluded from `columns` below, so their
         # catalog entries never get looked up in the first place — no
         # separate column-level filtering is needed here.
-        catalog_entry = get_catalog_store().get_table(self._connection_id, table_name)
+        catalog_store = get_catalog_store()
+        catalog_entry = catalog_store.get_table(self._connection_id, table_name)
+        schema_snapshot = catalog_store.get_schema_snapshot(self._connection_id)
+        current_schema_fingerprint = (
+            schema_snapshot.fingerprint if schema_snapshot is not None else None
+        )
+        hidden_identifier_tokens = policy_hidden_identifier_tokens(
+            catalog_store, connection_id=self._connection_id, policy=policy
+        )
+
+        def column_catalog(column_name: str) -> Optional[ColumnCatalogInfo]:
+            if catalog_entry is None:
+                return None
+            entry = catalog_entry.column(column_name)
+            if entry is None or not agent_visible(entry.provenance):
+                return None
+            return ColumnCatalogInfo(
+                description=policy_safe_catalog_text(entry.description, hidden_identifier_tokens),
+                aliases=policy_safe_catalog_aliases(entry.aliases, hidden_identifier_tokens),
+                sensitivity=entry.sensitivity,
+                allow_samples=entry.allow_samples,
+                provenance=catalog_citation(entry.provenance, current_schema_fingerprint),
+            )
+
         columns = [
             ColumnInfo(
                 name=col.name,
                 type=_render_column_type(col.type),
                 nullable=bool(col.nullable),
                 description=col.comment,
-                catalog=(catalog_entry.column(col.name) if catalog_entry else None),
+                catalog=column_catalog(col.name),
             )
             for col in table.columns
             if policy.column_allowed(table_name, col.name)
         ]
+        visible_relationship_entries = (
+            visible_relationships(catalog_entry, policy, from_table=table_name)
+            if catalog_entry is not None
+            else []
+        )
         table_catalog = (
             TableCatalogInfo(
-                description=catalog_entry.description,
-                aliases=catalog_entry.aliases,
+                description=policy_safe_catalog_text(
+                    catalog_entry.description, hidden_identifier_tokens
+                ),
+                aliases=policy_safe_catalog_aliases(
+                    catalog_entry.aliases, hidden_identifier_tokens
+                ),
                 sensitivity=catalog_entry.sensitivity,
-                default_aggregation=catalog_entry.default_aggregation,
+                default_aggregation=policy_safe_catalog_text(
+                    catalog_entry.default_aggregation, hidden_identifier_tokens
+                ),
                 allow_samples=catalog_entry.allow_samples,
-                relationships=visible_relationships(catalog_entry, policy),
+                relationships=[
+                    RelationshipCatalogInfo(
+                        to_table=relationship.to_table,
+                        column=relationship.column,
+                        to_column=relationship.to_column,
+                        description=policy_safe_catalog_text(
+                            relationship.description, hidden_identifier_tokens
+                        ),
+                        provenance=catalog_citation(
+                            relationship.provenance, current_schema_fingerprint
+                        ),
+                    )
+                    for relationship in visible_relationship_entries
+                ],
+                provenance=catalog_citation(catalog_entry.provenance, current_schema_fingerprint),
             )
-            if catalog_entry
+            if catalog_entry and agent_visible(catalog_entry.provenance)
             else None
         )
         return TableDescription(

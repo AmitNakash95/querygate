@@ -8,6 +8,7 @@ _EXPECTED_TOOLS = {
     "list_connections",
     "list_tables",
     "describe_table",
+    "search_catalog",
     "explain_structured_query",
     "execute_structured_query",
     "execute_structured_queries",

@@ -247,6 +247,98 @@ async def test_catalog_relationship_hint_cannot_disclose_a_denied_table():
     assert "customers" not in json.dumps(description.model_dump())
 
 
+@pytest.mark.asyncio
+async def test_catalog_search_filters_before_ranking_counts_and_relationship_traversal():
+    """Semantic retrieval must not become a second schema-discovery oracle.
+
+    A restricted principal searching exact hidden names gets the same empty
+    result shape as a nonexistent term; hidden entries cannot affect visible
+    hit ordering/counts, and a relationship cannot traverse into a denied
+    table or either denied join column.
+    """
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "version": 2,
+                "connections": {
+                    "demo": {
+                        "tables": {
+                            "orders": {
+                                "description": (
+                                    "Purchase facts linked to internal_payroll.secret_bonus."
+                                ),
+                                "relationships": [
+                                    {
+                                        "to_table": "internal_payroll",
+                                        "column": "employee_id",
+                                        "to_column": "employee_id",
+                                        "description": "Hidden payroll ownership join.",
+                                    }
+                                ],
+                            },
+                            "internal_payroll": {
+                                "description": "Highly restricted compensation planning.",
+                                "columns": {
+                                    "secret_bonus": {
+                                        "description": "Private executive bonus amount."
+                                    }
+                                },
+                            },
+                        }
+                    }
+                },
+            }
+        )
+    )
+    set_policy_store(
+        PolicyStore.from_dict(
+            {
+                "default": {},
+                "principals": {
+                    "restricted-agent": {"demo": {"denied_tables": ["internal_payroll"]}}
+                },
+            }
+        )
+    )
+
+    restricted = StructuredQueryService(
+        connection_id="demo", principal=Principal(subject="restricted-agent")
+    )
+    standard = StructuredQueryService(
+        connection_id="demo", principal=Principal(subject="standard-agent")
+    )
+
+    hidden = await restricted.search_catalog("secret_bonus")
+    nonexistent = await restricted.search_catalog("does_not_exist_anywhere")
+    relationship = await restricted.search_catalog("payroll ownership join")
+    allowed = await standard.search_catalog("secret_bonus")
+
+    orders_table = sa.Table(
+        "orders",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("employee_id", sa.Integer),
+    )
+    with (
+        patch.object(svc, "get_engine", return_value=MagicMock()),
+        patch.object(svc, "get_table_schema", AsyncMock(return_value=orders_table)),
+    ):
+        described = await restricted.describe_table("orders")
+
+    assert hidden.result_count == nonexistent.result_count == 0
+    assert hidden.results == nonexistent.results == []
+    assert relationship.result_count == 0
+    assert allowed.result_count >= 1
+    assert any(
+        result.table == "internal_payroll" and result.column == "secret_bonus"
+        for result in allowed.results
+    )
+    assert described.catalog.description is None
+    assert described.catalog.relationships == []
+    assert "internal_payroll" not in json.dumps(described.model_dump(mode="json"))
+    assert "secret_bonus" not in json.dumps(described.model_dump(mode="json"))
+
+
 def test_vault_resolver_error_never_leaks_token_or_backend_response_text():
     """A Vault failure (bad token, revoked lease, network blip) must surface
     as a clear operator-facing failure without ever echoing the configured
