@@ -28,6 +28,20 @@ def sanitize_table_name(table_name: str) -> str:
     return table_name
 
 
+def is_schema_cached(connection_id: str) -> bool:
+    """Whether any table has been reflected+cached for this connection yet.
+
+    Cheap and side-effect-free (never triggers reflection): the admin
+    connection-status API (TODO.md item 43) reports this so an operator can see
+    whether schema discovery has warmed for a connection. `get_metadata`
+    lazily creates an empty `MetaData` for an unseen connection, so an
+    un-reflected connection correctly reads as not cached.
+    """
+    from querygate.connections.engine import get_metadata
+
+    return bool(get_metadata(connection_id).tables)
+
+
 async def list_live_tables(connection_id: str) -> list[str]:
     """Enumerate real base tables via INFORMATION_SCHEMA — used when a
     connection has no `known_tables` seed list, so list_tables() still

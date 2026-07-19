@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette import status
 
 from querygate.api.admin_config_routes import build_admin_config_router
+from querygate.api.admin_connections_routes import build_admin_connections_router
 from querygate.api.admin_ui_routes import build_admin_ui_router
 from querygate.api.auth import build_principal_dependency
 from querygate.api.catalog_governance_routes import build_catalog_governance_router
@@ -139,6 +140,9 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
     application.include_router(build_router(principal_dependency, conf, prefix=conf.api_v1_prefix))
     application.include_router(
         build_admin_config_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
+    )
+    application.include_router(
+        build_admin_connections_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
     )
     application.include_router(
         build_catalog_governance_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
