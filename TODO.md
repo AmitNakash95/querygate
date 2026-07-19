@@ -61,7 +61,7 @@ order-of-magnitude, not commitments.
 | 29 | ✅ Production deployment reference stack | M | 4, 9, 12, 13, 14 |
 | 30 | ✅ Distribution, SBOM, and signed release artifacts (phase 1: SBOM + audit; phase 2: publishing + signing not started) | M | 4, 14 |
 | 31 | ✅ Admin UI / policy designer | XL | 25 |
-| 32 | Governed adaptive semantic memory for agents (32A ✅; 32B ✅; 32C ✅) | XL | 23, 25, 27, 28 |
+| 32 | ✅ Governed adaptive semantic memory for agents (32A ✅; 32B ✅; 32C ✅) | XL | 23, 25, 27, 28 |
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
 | 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
@@ -1783,7 +1783,7 @@ cancel rather than appearing hung or retrying blindly. Phase 1 answers the
 first two; phase 2 makes the waiting itself bounded and cross-replica-safe;
 phase 3 answers the rest.
 
-### 32. Governed adaptive semantic memory for agents
+### 32. Governed adaptive semantic memory for agents ✅ DONE
 
 **32B-1 shipped — governed review, edit, approve/reject, publish, and
 rollback.** This is the first independently deployable slice of 32B, built
@@ -2014,9 +2014,10 @@ a live model or a publication path:
 
 Covered by provider-contract, generation/idempotency, selective schema-drift,
 atomic persistence, monitor, CLI, packaged-corpus, benchmark-regression, and
-adversarial quarantine/error-redaction tests. 32B review/publication/history/
-rollback and 32C adaptive usage learning/hardening remain explicitly out of
-scope; generated content stays opt-in and unpublished until 32B.
+adversarial quarantine/error-redaction tests. At the time 32A-2 shipped, 32B
+review/publication/history/rollback and 32C adaptive usage learning/hardening
+remained explicitly out of scope; both have since shipped as described above
+and below.
 
 **32C shipped — redaction-safe usage signals, a usage-based learner, and
 background-job resilience.** Completes item 32 on top of 32A's provenance
@@ -2326,11 +2327,11 @@ injecting an ever-growing document into every prompt.
    file-global id remapping) and retention/deletion (`catalog:delete`,
    cascade-safe against every referential-integrity rule the state machine
    established). See the shipped note above. All nine 32B scopes now exist.
-5. **32C — Adaptive learning and hardening (not started, 32B's governance
-   boundary is now complete):** add redaction-safe usage signals,
-   feedback/correction proposals, confidence/decay/conflict rules,
-   background-job resilience, full observability, adversarial coverage, and
-   load tests.
+5. **32C — Adaptive learning and hardening ✅ DONE:** redaction-safe usage
+   signals, confidence/decay/conflict-gated relationship proposals,
+   background-job resilience, metrics and audit observability, and
+   adversarial coverage. See the shipped note above; item 37 provides the
+   deterministic end-to-end proof of the complete learning lifecycle.
 
 Each phase must be independently deployable and fail safely. Generated or
 learned content remains opt-in until its governed publish path (32B) has
