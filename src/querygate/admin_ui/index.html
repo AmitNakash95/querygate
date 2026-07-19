@@ -7,6 +7,7 @@
   <meta name="robots" content="noindex,nofollow">
   <title>QueryGate Control Plane</title>
   <meta name="description" content="Review schema, design policies, validate changes, and roll back QueryGate configuration.">
+  <link rel="icon" type="image/svg+xml" href="/admin/favicon.svg">
   <link rel="stylesheet" href="/admin/app.css">
   <script src="/admin/app.js" defer></script>
 </head>
@@ -16,8 +17,7 @@
   <div class="app-shell">
     <aside class="sidebar" aria-label="Primary navigation">
       <div class="brand-lockup">
-        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span><strong>QueryGate</strong><small>Control plane</small></span>
+        <span class="brand-identity"><img class="brand-wordmark" src="/admin/logo-wordmark.svg" alt="QueryGate;"><small>Control plane</small></span>
       </div>
 
       <nav class="nav-list">
@@ -266,7 +266,7 @@
 
   <dialog id="auth-dialog" class="auth-dialog" aria-labelledby="auth-title">
     <form id="auth-form" method="dialog">
-      <div class="dialog-brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>QueryGate</span></div>
+      <div class="dialog-brand"><img class="brand-wordmark" src="/admin/logo-wordmark.svg" alt="QueryGate;"></div>
       <p class="eyebrow">Administrator session</p>
       <h2 id="auth-title">Connect to the control plane</h2>
       <p>Use a bearer token with <code>admin:config:read</code> to inspect and simulate, and <code>admin:config:write</code> to edit, validate, stage, and activate changes.</p>
