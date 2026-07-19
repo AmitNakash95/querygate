@@ -11,11 +11,28 @@ from querygate.core.config import AppConfig
 pytestmark = pytest.mark.integration
 
 
+def _settings(**overrides) -> AppConfig:
+    """Build auth-isolated settings that never inherit a developer's .env.
+
+    These tests assert exact scope boundaries, so allowing API_KEY_SCOPES or
+    JWT settings from the checkout's local environment would change the
+    principal under test rather than exercise the fixture declared here.
+    """
+    values = {
+        "environment": "localhost",
+        "api_keys": [],
+        "api_key_subject": "test-client",
+        "api_key_scopes": [],
+        "jwt_enabled": False,
+        "mcp_enabled": False,
+    }
+    values.update(overrides)
+    return AppConfig(_env_file=None, **values)
+
+
 @pytest.mark.asyncio
 async def test_static_guide_is_available_without_credentials_when_api_auth_is_configured():
-    app = create_app(
-        AppConfig(environment="localhost", api_keys=["required-key"], mcp_enabled=False)
-    )
+    app = create_app(_settings(api_keys=["required-key"]))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
         response = await client.get("/api/v1/help/search", params={"q": "configure policy"})
 
@@ -26,12 +43,10 @@ async def test_static_guide_is_available_without_credentials_when_api_auth_is_co
 @pytest.mark.asyncio
 async def test_my_access_requires_auth_and_returns_only_caller_capabilities():
     app = create_app(
-        AppConfig(
-            environment="localhost",
+        _settings(
             api_keys=["reader-key"],
             api_key_subject="reader",
             api_key_scopes=["admin:config:read"],
-            mcp_enabled=False,
         )
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
@@ -51,15 +66,11 @@ async def test_my_access_requires_auth_and_returns_only_caller_capabilities():
 
 @pytest.mark.asyncio
 async def test_configuration_summary_is_scope_gated_and_never_returns_raw_yaml():
-    without_scope = create_app(
-        AppConfig(environment="localhost", api_keys=["plain-key"], mcp_enabled=False)
-    )
+    without_scope = create_app(_settings(api_keys=["plain-key"]))
     with_scope = create_app(
-        AppConfig(
-            environment="localhost",
+        _settings(
             api_keys=["reader-key"],
             api_key_scopes=["admin:config:read"],
-            mcp_enabled=False,
         )
     )
     async with AsyncClient(
