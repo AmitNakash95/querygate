@@ -66,11 +66,12 @@ order-of-magnitude, not commitments.
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
 | 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
 | 36 | Extensive production-grade QA project / edge-case test suite | L | 15, 28 |
+| 37 | Automated end-to-end proof of adaptive semantic learning | M–L | 23, 25, 27, 28, 32B, 32C |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
 
-Items 21–35 are the next quality tranche from the current repo scan: mostly
+Items 21–37 are the next quality tranche from the current repo scan: mostly
 security consistency, enterprise operability, and product polish — the
 areas that move QueryGate from "strong engineering prototype" toward a
 credible 10/10 commercial infrastructure product.
@@ -2155,6 +2156,62 @@ types, extra fields, deeply nested `where`, huge string literals) to prove
 schema validation rejects cleanly rather than 500ing. Track coverage
 gaps explicitly rather than chasing a single aggregate `--cov` number, since
 line coverage alone doesn't prove edge cases were exercised.
+
+### 37. Automated end-to-end proof of adaptive semantic learning
+
+**Status: not started; blocked on item 32B's governed publication workflow and
+32C's usage-signal learner. Effort: M–L (3–5 days once those phases exist).**
+
+**Why it matters:** The shipped `semantic_memory_v1.yaml` benchmark is a
+deterministic test of retrieval from a static catalog. It does not feed usage
+signals, produce a learned proposal, exercise human approval/publication, or
+prove that a later request benefits from earlier safe usage. It therefore must
+not be cited as an automated test of "self learning." A real test needs to
+prove the state transition and the behavioral improvement while also proving
+that the learning path cannot become an authorization or data-exfiltration
+path.
+
+**What to build:** Add a versioned, network-free scenario fixture (for example
+`benchmarks/adaptive_learning_v1.yaml`) and an integration test/runner that
+drives the real persisted components through the complete lifecycle:
+
+1. Start from a catalog that demonstrably lacks the expected business term or
+   preferred relationship, then run the unfamiliar task with learning disabled
+   and record the deterministic baseline result and discovery-call count.
+2. Submit only typed, redaction-safe normalized usage events with fixed ids and
+   a fake clock. Include enough independent successful evidence to cross the
+   predeclared support/confidence threshold, plus below-threshold, conflicting,
+   repeated-generated-guidance, denied-object, cross-principal, and
+   cross-connection controls that must not contribute.
+3. Run the real learner and assert that it creates exactly one `learned` draft
+   with bounded evidence summaries, support/confidence, provenance, and no row
+   values, credentials, query literals, natural-language history, raw errors,
+   or policy-hidden identifiers. Replay and two-worker execution must be
+   idempotent and must not double-count evidence or duplicate the proposal.
+4. Prove the proposal is not agent-visible and cannot alter access, mandatory
+   filters, sensitivity, or query execution before review. Exercise item 32B's
+   authorized review/publish path as a separate test actor; rejection must
+   leave behavior unchanged, while approval must retain provenance and an
+   auditable transition rather than allowing the learner to publish itself.
+5. Repeat the original task after approved publication and require the correct
+   table/relationship outcome with a predeclared material reduction in
+   discovery calls versus the baseline. Citations must identify the governed
+   catalog version and freshness. A control run with learning disabled or
+   insufficient support must show no improvement, proving the fixture was not
+   simply pre-seeded with the answer.
+6. Change the relevant schema and policy and assert selective staleness,
+   principal-safe filtering, rollback behavior, and unchanged ordinary query
+   availability when the learner fails. Restart/reload the persisted state and
+   repeat the assertions so the test is not only an in-memory happy path.
+
+**Acceptance gate:** expose one deterministic command such as
+`make adaptive-learning-test`, run it from `make release-check` once 32C is
+shipped, and keep its thresholds in source rather than fixture-tunable. It must
+run without a live model, external network, wall-clock sleeps, or production
+row access; fail on any learned-content auto-publication or policy disclosure;
+and report baseline-versus-learned correctness, discovery-call reduction,
+stale detection, duplicate proposals, and security violations. Do not make a
+"self-learning" product claim until this test and the adversarial suite pass.
 
 ---
 
