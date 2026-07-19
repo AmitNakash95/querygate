@@ -10,7 +10,7 @@ from typing import Iterator, Set
 
 from querygate.core.exceptions import PolicyViolationError
 from querygate.policy.models import Policy
-from querygate.query_ast.models import AggregateSelectItem, Predicate, StructuredQuery, WhereNode
+from querygate.query_ast.models import Predicate, StructuredQuery, WhereNode
 from querygate.validation.schema_validation import parse_column_ref, where_depth
 
 
