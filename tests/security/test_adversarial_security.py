@@ -564,8 +564,9 @@ async def test_caller_cannot_extend_the_operators_concurrency_wait_ceiling():
     set_policy_store(
         PolicyStore(default=Policy(max_concurrency=1, concurrency_wait_seconds=0.1), overrides={})
     )
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot, never released
+    await cc.in_process_limiter().semaphore(
+        "demo", 1
+    ).acquire()  # occupy the only slot, never released
 
     service = StructuredQueryService(connection_id="demo")
     query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
@@ -596,8 +597,9 @@ async def test_unbounded_waiting_queue_is_capped_not_a_dos_vector():
             overrides={},
         )
     )
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot, never released
+    await cc.in_process_limiter().semaphore(
+        "demo", 1
+    ).acquire()  # occupy the only slot, never released
 
     service = StructuredQueryService(connection_id="demo")
     query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
@@ -642,8 +644,9 @@ async def test_max_queue_depth_per_principal_prevents_one_caller_starving_anothe
             overrides={},
         )
     )
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot, never released
+    await cc.in_process_limiter().semaphore(
+        "demo", 1
+    ).acquire()  # occupy the only slot, never released
 
     noisy = StructuredQueryService(connection_id="demo", principal=Principal(subject="noisy-agent"))
     victim = StructuredQueryService(

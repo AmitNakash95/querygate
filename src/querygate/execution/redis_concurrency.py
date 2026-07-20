@@ -1,12 +1,15 @@
 """Redis-backed distributed concurrency limiter.
 
-`execution/concurrency.py`'s default `SEMAPHORES` dict is an in-process
+`execution/concurrency.py`'s default `InProcessConcurrencyLimiter` keeps one
 `asyncio.Semaphore` per connection id — run N instances behind a load
 balancer with `max_concurrency: 8` and the real ceiling against that
 database is `8 * N`, not 8, silently defeating the configured guardrail at
 exactly the moment it matters (a traffic burst that triggers autoscaling).
 `RedisConcurrencyLimiter` enforces one shared budget per connection id
-across every instance that points at the same Redis.
+across every instance that points at the same Redis. Implements the same
+`ConcurrencyLimiter` shape `InProcessConcurrencyLimiter` does (CLAUDE.md's
+"Composable single-purpose interfaces" section) — no changes needed here
+when that Protocol was introduced.
 
 Design: each held slot is a member of a per-connection Redis sorted set,
 scored by acquisition time. Acquiring is a single Lua script (atomic —

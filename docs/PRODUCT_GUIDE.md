@@ -2004,6 +2004,33 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-20 — `execution/concurrency.py`'s semaphore-vs-Redis dispatch
+  refactored into a `ConcurrencyLimiter` Protocol, choosing full
+  encapsulation over a lower-risk hybrid once the real blast radius was
+  known.** An architecture audit (prompted by formalizing CLAUDE.md's
+  "Composable single-purpose interfaces" principle) found the concurrency
+  module was the one genuine gap versus `SecretResolver`/`DialectAdapter`/
+  `Authenticator`/`AuditSink`'s established Protocol-plus-registry shape: an
+  `if _REDIS_LIMITER is not None` check duplicated across four functions,
+  with no shared interface even though `RedisConcurrencyLimiter` was already
+  class-shaped. Investigation before implementing surfaced a much bigger
+  surface than expected: the module-level `SEMAPHORES` dict was directly,
+  externally mutated by 25+ call sites across 7 test files and by production
+  code (`config_reload.py`'s hot-reload semaphore invalidation) — not just
+  an internal implementation detail. Offered a lower-risk hybrid (keep the
+  module-level dicts public, only refactor the dispatch logic around them);
+  the explicit choice was full encapsulation instead — `SEMAPHORES` no
+  longer exists as a raw dict; `InProcessConcurrencyLimiter` now implements
+  the same `ConcurrencyLimiter` shape `RedisConcurrencyLimiter` already did
+  (zero changes needed to `redis_concurrency.py` or its Lua scripts, since it
+  already matched the target Protocol exactly), with a small public surface
+  (`semaphore()`, `reset_semaphore()`, `has_semaphore()`, `clear()`) replacing
+  direct dict poking everywhere it was needed. **Why accepted:** the module
+  the audit exists to fix is exactly the one place this codebase's "no inline
+  backend branching" principle wasn't followed — doing the encapsulation
+  properly (not a half-measure that left raw dict access as an escape hatch)
+  is what makes the new CLAUDE.md section true of the whole codebase, not
+  just the parts convenient to fix.
 - **2026-07-20 — `percentile_cont` rejects on MSSQL for a different reason
   than `array_agg` did, and SQLite rejects for a third reason again
   (TODO.md item 82).** Postgres's `DialectAdapter.percentile_cont` is a
