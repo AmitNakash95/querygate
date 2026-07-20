@@ -30,7 +30,7 @@ from querygate.connections.engine import ENGINES, dispose_engine, get_engine
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.config import AppConfig
-from querygate.execution.concurrency import SEMAPHORES
+from querygate.execution.concurrency import in_process_limiter
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
 from querygate.schema.reflection import get_table_schema
@@ -94,7 +94,7 @@ def _set_load_policy(*, wait_seconds: float, timeout_seconds: int) -> None:
     # Policy changes are normally applied through config_reload(), which
     # clears the cached semaphore.  The load harness swaps an in-memory store
     # directly, so mirror that part of reload semantics explicitly.
-    SEMAPHORES.clear()
+    in_process_limiter().clear()
 
 
 async def _create_probes(engine: AsyncEngine) -> None:

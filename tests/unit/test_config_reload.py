@@ -13,7 +13,7 @@ from querygate.catalog.loader import get_catalog_store
 from querygate.catalog.repository import catalog_process_lock
 from querygate.config_reload import reload_config
 from querygate.connections.registry import get_registry
-from querygate.execution.concurrency import SEMAPHORES
+from querygate.execution.concurrency import in_process_limiter
 from querygate.policy.loader import get_policy
 from querygate.secrets.resolvers import EnvSecretResolver, SecretResolverRegistry
 
@@ -152,7 +152,9 @@ connections:
 
 @pytest.mark.asyncio
 async def test_reload_resets_concurrency_semaphores(tmp_path):
-    SEMAPHORES["demo"] = object()  # sentinel standing in for a real Semaphore
+    # A real semaphore, captured by identity — proves reload actually forces
+    # a fresh one rather than just checking a key was removed.
+    before = in_process_limiter().semaphore("demo", 1)
     connections_file = _write(
         tmp_path,
         "connections.yaml",
@@ -168,7 +170,8 @@ connections:
     with patch.object(reload_module, "dispose_engine", new_callable=AsyncMock):
         await reload_config(connections_file=connections_file, policy_file=policy_file)
 
-    assert "demo" not in SEMAPHORES
+    after = in_process_limiter().semaphore("demo", 1)
+    assert after is not before
 
 
 @pytest.mark.asyncio

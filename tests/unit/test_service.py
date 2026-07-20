@@ -1010,8 +1010,7 @@ async def test_execute_fail_fast_raises_capacity_timeout_without_waiting():
     set_policy_store(
         PolicyStore(default=Policy(max_concurrency=1, concurrency_wait_seconds=5), overrides={})
     )
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    await cc.in_process_limiter().semaphore("demo", 1).acquire()  # occupy the only slot
     validate_schema = AsyncMock()
 
     with patch.object(svc, "validate_schema", validate_schema):
@@ -1035,8 +1034,9 @@ async def test_execute_wait_timeout_seconds_cannot_exceed_policy_ceiling():
     set_policy_store(
         PolicyStore(default=Policy(max_concurrency=1, concurrency_wait_seconds=0.1), overrides={})
     )
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot, never released
+    await cc.in_process_limiter().semaphore(
+        "demo", 1
+    ).acquire()  # occupy the only slot, never released
 
     service = StructuredQueryService(connection_id="demo")
     start = time.monotonic()
@@ -1054,8 +1054,7 @@ async def test_execute_capacity_timeout_is_audited_with_admission_fields():
     set_policy_store(
         PolicyStore(default=Policy(max_concurrency=1, concurrency_wait_seconds=5), overrides={})
     )
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    await cc.in_process_limiter().semaphore("demo", 1).acquire()  # occupy the only slot
 
     audit_query = MagicMock()
     with patch.object(svc, "audit_query", audit_query):
@@ -1101,8 +1100,7 @@ async def test_execute_raises_queue_full_error_once_max_queue_depth_is_met():
             overrides={},
         )
     )
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    await cc.in_process_limiter().semaphore("demo", 1).acquire()  # occupy the only slot
 
     table, _scope = _queued_execute_kwargs()
     service = StructuredQueryService(connection_id="demo")
@@ -1123,7 +1121,7 @@ async def test_execute_raises_queue_full_error_once_max_queue_depth_is_met():
         assert exc_info.value.queue_wait_ms == 0
         assert exc_info.value.admission_state == "queue_full"
 
-        cc.SEMAPHORES["demo"].release()
+        cc.in_process_limiter().semaphore("demo", 1).release()
         await task  # the first (legitimate) waiter still succeeds normally
 
 
@@ -1136,8 +1134,7 @@ async def test_execute_queue_full_is_audited_with_queue_full_admission_state():
             overrides={},
         )
     )
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    await cc.in_process_limiter().semaphore("demo", 1).acquire()  # occupy the only slot
 
     table, _scope = _queued_execute_kwargs()
     service = StructuredQueryService(connection_id="demo")
@@ -1163,7 +1160,7 @@ async def test_execute_queue_full_is_audited_with_queue_full_admission_state():
         assert kwargs["admission_state"] == "queue_full"
         assert kwargs["rejected"] is True
 
-        cc.SEMAPHORES["demo"].release()
+        cc.in_process_limiter().semaphore("demo", 1).release()
         await task
 
 
@@ -1178,8 +1175,7 @@ async def test_execute_max_queue_depth_per_principal_does_not_affect_other_princ
             overrides={},
         )
     )
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    await cc.in_process_limiter().semaphore("demo", 1).acquire()  # occupy the only slot
 
     table, _scope = _queued_execute_kwargs()
     noisy_service = StructuredQueryService(
@@ -1208,7 +1204,7 @@ async def test_execute_max_queue_depth_per_principal_does_not_affect_other_princ
         )
         await asyncio.sleep(0.02)
 
-        cc.SEMAPHORES["demo"].release()
+        cc.in_process_limiter().semaphore("demo", 1).release()
         await noisy_task
         await other_task
 
