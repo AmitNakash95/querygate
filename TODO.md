@@ -4664,3 +4664,42 @@ after the first round — the one place where "SELECT-only" was a real,
 user-visible limitation rather than a reasonable scope boundary, and it's
 now closed at no cost to the narrowness (no nesting, whitelisted functions
 only) that made the original version safe.
+
+### 78. Cross-dialect rendering verification pass for items 68–77 ✅ DONE
+
+**Scope decision, stated rather than silently assumed.** No real MSSQL
+server runs in this environment (`make test-mssql-live` needs one
+provisioned via `setup_mssql_test_db.py`), and provisioning one — an image
+pull, ODBC driver setup, a new persistent container — is a meaningfully
+heavier, longer-running action than the code changes in this round.
+`make test-mssql-live` stays available as an operator-run follow-up if
+live verification is wanted; not attempted automatically here.
+
+**What was achievable and genuinely valuable, and is what shipped:** every
+item-68–77 compiler code path that previously only had a Postgres-default
+(or single-dialect) render test now also has an explicit `dialect="mssql"`
+one, closing the gap where a feature could render fine on Postgres and be
+subtly wrong or unrenderable on MSSQL with nothing noticing —
+**exactly the class of bug items 74/75 themselves ran into** (NULLS
+FIRST/LAST silently compiling to broken T-SQL; `stddev`/`variance`
+resolving to Postgres-only function names) before their own dialect
+handling closed it. New `TestCrossDialectRendering` in `test_compiler.py`:
+DISTINCT / COUNT(DISTINCT), self-joins, NOT groups, `value_col`
+column-to-column comparisons, `lower`/`upper`/`trim`/`concat`, CASE,
+composite (`extra_on`) join keys, and predicate `col_fn` (both WHERE and
+HAVING) — 14 new tests, each asserting the MSSQL-rendered SQL text
+directly, not just that compilation didn't raise.
+
+**Honest about what this is not:** rendering-level coverage, not live
+execution — it would not have caught, say, a real SQL Server rejecting a
+function at parse time for a reason SQLAlchemy doesn't model. Stated
+explicitly rather than implying equivalence to `test-mssql-live`.
+
+**Effort: S.** Test-only; no production code changed.
+
+**Why it matters:** the two real dialect bugs items 74/75 had to design
+around were both things rendering-level testing — not assumption — caught.
+This pass applies that same check retroactively to everything shipped
+since item 68 that didn't already have it, on the theory that "renders
+fine on Postgres" was never a safe proxy for "renders correctly on MSSQL"
+in the first place.
