@@ -12,7 +12,11 @@ revealing connection identifiers. For per-connection operational detail,
 credential-free status for each configured connection — dialect, enabled state,
 healthy/degraded/disabled/unknown status, last check and last success, latency,
 schema-reflected state, and a stable redacted failure category — never a
-connection string or raw driver error. `/metrics` provides Prometheus-format
+connection string or raw driver error. `POST
+/api/v1/admin/connections/{id}/test` (its own scope, `admin:connections:test`,
+independent of the read scope) triggers an immediate re-check of one
+connection instead of waiting for the next background interval, rate-limited
+to one manual probe per connection per cooldown window. `/metrics` provides Prometheus-format
 operational metrics. Structured application logs carry request correlation
 IDs, while persisted audit events record normalized query shape, caller,
 surface, outcome, timing, and bounded result metadata without predicate

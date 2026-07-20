@@ -72,7 +72,7 @@ order-of-magnitude, not commitments.
 | 40 | ✅ Semantic access diff for config changes (phase 1: connection-baseline diff + REST; phase 2: per-principal resolution not started) | L | 6, 25, 31, 39 |
 | 41 | ✅ Policy-change blast-radius analysis (phase 1: bounded synchronous aggregation + ranking; phase 2: async/paginated evaluation for very large principal counts not started) | M–L | 22, 25, 31, 40 |
 | 42 | Four-eyes config approval and separation of duties | XL | 10, 23, 25, 31 |
-| 43 | ✅ Admin connection-operations and health workspace (phase 1: admin connection-status API; phase 2: "test now" probe + browser workspace not started) | L | 7, 12, 31 |
+| 43 | ✅ Admin connection-operations and health workspace (phase 1: admin connection-status API; phase 2a: "test now" probe; phase 2b: browser workspace not started) | L | 7, 12, 31 |
 | 44 | Admin observability and rejection-trend dashboard | L | 12, 23, 31, 35 |
 | 45 | Dedicated non-admin “My access” portal | M | 22, 31, 33 |
 | 46 | Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
@@ -2992,8 +2992,8 @@ the browser while the server still permits self-approval.
 
 ### 43. Admin connection-operations and health workspace
 
-**Phase 1 shipped (admin connection-status API); phase 2 (rate-limited
-"test now" probe + browser workspace) not started.**
+**Phase 1 shipped (admin connection-status API); phase 2a shipped (rate-limited
+"test now" probe); phase 2b (browser workspace) not started.**
 
 `GET /api/v1/admin/connections` (`api/admin_connections_routes.py`) returns a
 credential-free, per-connection operational status built from the same
@@ -3015,14 +3015,43 @@ latency/last-success tracking, message non-leakage),
 raw-error/credential redaction, monitor-absent robustness), and
 `tests/security/test_adversarial_security.py` (scope enforcement).
 
-**Phase 2 (not started):** the rate-limited "test now" probe action (a manual,
-audited re-check using the same engine/timeout/TLS settings, still returning no
-connection string or raw driver text) and the browser workspace that renders
-this status view. Split out because the read API is independently useful
-(operators/monitoring can consume it directly) and the probe action introduces
-a new mutation-ish surface with its own rate-limiting and audit requirements.
+**Phase 2a shipped:** `POST /api/v1/admin/connections/{id}/test`, gated by its
+own `admin:connections:test` scope — deliberately independent of
+`admin:connections:read`, so passive status visibility does not imply the
+ability to trigger a live probe, matching this file's established
+least-privilege pattern (e.g. `catalog:generate` vs. `catalog:review`).
+`HealthMonitor.manual_check()` reuses the exact `_check_once` ping/
+classification seam the background loop already uses and updates the shared
+cached status, so a following `GET` reflects the manual probe too. Each
+connection can be manually probed at most once per new
+`AppConfig.admin_connection_test_cooldown_seconds` (default 10s,
+single-process visibility only, the same caveat as
+`execution/concurrency.py`'s in-process semaphore) — `HealthMonitor` tracks
+the last manual-probe time per connection and a request inside the cooldown
+gets `429` with a `Retry-After` header instead of opening another real
+connection to the target database. An unknown connection is `404`; a
+deployment-disabled one is `409`; a missing/not-yet-started monitor is `503`.
+Every probe attempt — successful or rate-limited — is recorded as its own new
+`ConnectionProbeEvent`/`connection.probe` audit event
+(`audit/events.py`/`audit/logger.py`'s `audit_connection_probe`, same durable
+sink as query/config/catalog auditing) carrying the connection id, actor,
+probe result, and failure category, but never a raw driver error or
+connection string, matching `ConnectionStatus`'s existing non-disclosure
+posture. Documented as QG-23 in `docs/THREAT_MODEL.md`. Covered by
+`tests/unit/test_health.py` (`manual_check`/cooldown semantics),
+`tests/unit/test_audit.py` (redacted event content),
+`tests/integration/test_admin_connections.py` (404/409/503/429 paths, status
+update, non-disclosure, audit persistence), and
+`tests/security/test_adversarial_security.py`
+(`test_admin_connections_test_now_requires_its_own_scope`).
 
-**Original scope (for reference — see above for what shipped in phase 1):**
+**Phase 2b (not started):** the browser workspace that renders this status
+view and exposes the "test now" action. Split out because both REST pieces
+above are independently useful without any UI (operators/monitoring/CLI can
+already consume them directly), and the workspace is purely a rendering
+layer on top of an already-complete, already-tested API surface.
+
+**Original scope (for reference — see above for what shipped in phases 1 and 2a):**
 
 **Effort: L (3–5 days).** The aggregate readiness monitor already exists, but
 an admin surface needs a separately authorized detailed health model, safe

@@ -1,15 +1,19 @@
-"""Integration tests for the admin connection-status API (item 43 phase 1)
-— GET /api/v1/admin/connections."""
+"""Integration tests for the admin connection-operations API (item 43):
+GET /api/v1/admin/connections (phase 1) and
+POST /api/v1/admin/connections/{id}/test (phase 2a, the "test now" probe)."""
 
 from __future__ import annotations
 
 import time
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
 
+from querygate import health as health_module
 from querygate.api.app import create_app
+from querygate.audit.sinks import JsonlAuditSink, set_audit_sink
 from querygate.connections.engine import get_metadata
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
@@ -136,3 +140,130 @@ async def test_unknown_when_health_monitor_absent():
     by_id = {c["connection_id"]: c for c in resp.json()}
     assert by_id["demo"]["status"] == "unknown"
     assert by_id["legacy"]["status"] == "disabled"
+
+
+def _app_with_live_monitor(scopes=("admin:connections:read", "admin:connections:test")):
+    """A `HealthMonitor` that hasn't been `.start()`ed — the "test now"
+    endpoint's `manual_check` calls the same `_check_once` seam directly, so
+    patching module-level `_ping` is enough to control probe outcomes."""
+    set_registry(_registry())
+    app = create_app(_settings(scopes))
+    app.state.health_monitor = HealthMonitor(interval_seconds=1000)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_test_now_unknown_connection_returns_404():
+    app = _app_with_live_monitor()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post("/api/v1/admin/connections/ghost/test", headers=_auth(_ADMIN_KEY))
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_test_now_disabled_connection_returns_409():
+    app = _app_with_live_monitor()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post("/api/v1/admin/connections/legacy/test", headers=_auth(_ADMIN_KEY))
+    assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_test_now_health_monitor_absent_returns_503():
+    set_registry(_registry())
+    app = create_app(_settings(("admin:connections:test",)))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post("/api/v1/admin/connections/demo/test", headers=_auth(_ADMIN_KEY))
+    assert resp.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_test_now_success_updates_status_and_never_leaks_raw_error():
+    app = _app_with_live_monitor()
+    with patch.object(
+        health_module,
+        "_ping",
+        new_callable=AsyncMock,
+        side_effect=ConnectionRefusedError(_LEAKY_ERROR),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                "/api/v1/admin/connections/demo/test", headers=_auth(_ADMIN_KEY)
+            )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["connection_id"] == "demo"
+    assert body["status"] == "degraded"
+    assert body["failure_category"] == "unreachable"
+    text = resp.text
+    for leak in ("db.internal", "hunter2", "password"):
+        assert leak not in text
+
+    # The passive GET list reflects the just-run manual probe too.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        list_resp = await client.get("/api/v1/admin/connections", headers=_auth(_ADMIN_KEY))
+    by_id = {c["connection_id"]: c for c in list_resp.json()}
+    assert by_id["demo"]["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_test_now_is_rate_limited_per_connection():
+    app = _app_with_live_monitor()
+    with patch.object(health_module, "_ping", new_callable=AsyncMock):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            first = await client.post(
+                "/api/v1/admin/connections/demo/test", headers=_auth(_ADMIN_KEY)
+            )
+            second = await client.post(
+                "/api/v1/admin/connections/demo/test", headers=_auth(_ADMIN_KEY)
+            )
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert int(second.headers["Retry-After"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_test_now_rate_limit_is_per_connection_not_global():
+    app = _app_with_live_monitor()
+    with patch.object(health_module, "_ping", new_callable=AsyncMock):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            demo_resp = await client.post(
+                "/api/v1/admin/connections/demo/test", headers=_auth(_ADMIN_KEY)
+            )
+            reporting_resp = await client.post(
+                "/api/v1/admin/connections/reporting/test", headers=_auth(_ADMIN_KEY)
+            )
+    assert demo_resp.status_code == 200
+    assert reporting_resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_test_now_persists_audit_event_without_raw_error(tmp_path):
+    import json
+
+    app = _app_with_live_monitor()
+    audit_path = tmp_path / "events.jsonl"
+    set_audit_sink(JsonlAuditSink(str(audit_path)))
+    with patch.object(
+        health_module,
+        "_ping",
+        new_callable=AsyncMock,
+        side_effect=ConnectionRefusedError(_LEAKY_ERROR),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                "/api/v1/admin/connections/demo/test", headers=_auth(_ADMIN_KEY)
+            )
+    assert resp.status_code == 200
+
+    lines = audit_path.read_text().splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    assert event["event_type"] == "connection.probe"
+    assert event["connection_id"] == "demo"
+    assert event["outcome"] == "success"
+    assert event["probe_healthy"] is False
+    assert event["failure_category"] == "unreachable"
+    text = audit_path.read_text()
+    for leak in ("db.internal", "hunter2", "password"):
+        assert leak not in text

@@ -790,6 +790,24 @@ files from disk right now" REST endpoint that bypasses the versioned
 workflow entirely (useful if you edited the files directly and want the
 running process to pick them up).
 
+A related but separate admin surface, `api/admin_connections_routes.py`,
+answers a different question: not "what is QueryGate configured to connect
+to," but "is that connection actually reachable right now." `GET
+/api/v1/admin/connections` (`admin:connections:read`) exposes the same
+cached per-connection health `HealthMonitor` already computes in the
+background for `/health`'s aggregate readiness signal — dialect, enabled
+state, derived status, last check/success, latency, and a stable redacted
+`failure_category` (never a connection string or raw driver error). `POST
+.../connections/{id}/test` (its own `admin:connections:test` scope,
+independent of the read scope) triggers an immediate out-of-band re-check —
+useful right after rotating a credential — reusing that exact ping path so
+the result and its non-disclosure guarantee are identical; a per-connection
+cooldown (`AppConfig.admin_connection_test_cooldown_seconds`) keeps a caller
+from turning it into a way to hammer the target database with connection
+attempts. Both read and probe scopes are deliberately independent of each
+other and of the config scopes above — reachability is a different privilege
+from configuration.
+
 ### Why policy is per-connection, not global
 
 **File:** `src/querygate/policy/models.py`
@@ -1945,6 +1963,15 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-20 — The "test now" connection probe got its own scope,
+  separate from read.** `admin:connections:read` (item 43 phase 1) is
+  passive — it only reads `HealthMonitor`'s cached snapshot. The new "test
+  now" action (phase 2a) actively opens a real connection to a customer
+  database on demand, which is a materially different privilege (and a
+  materially different cost to the target database), so it required its own
+  `admin:connections:test` scope plus a per-connection cooldown rather than
+  being folded into the existing read scope. See
+  [The admin surface](#the-admin-surface-config-as-versioned-history-not-a-live-edited-file).
 - **2026-07-20 — Corrected a stale claim in `CLAUDE.md` about 32C.**
   `CLAUDE.md` stated adaptive usage learning (32C) "has not started."
   While researching the [Catalog / Semantic Layer](#catalog--semantic-layer)

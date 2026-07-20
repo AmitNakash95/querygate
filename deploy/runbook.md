@@ -120,6 +120,15 @@ made via the governance API, and vice versa.
   schema-reflected state, and a redacted failure category
   (`authentication`/`unreachable`/`timeout`/`error`). It never returns a
   connection string or the raw driver error — that stays in stdout logs.
+- `POST /api/v1/admin/connections/{id}/test` (its own scope,
+  `admin:connections:test`, independent of the read scope above) — after
+  rotating a credential or changing network access, use this instead of
+  waiting for the next background health-check interval; it triggers an
+  immediate re-check and returns the same credential-free status shape. At
+  most one manual probe per connection per
+  `admin_connection_test_cooldown_seconds` (default 10s) — a second request
+  inside that window gets `429`/`Retry-After` rather than opening another
+  real connection to the database.
 - `GET /metrics` — unauthenticated Prometheus text format; empty samples
   (only `# HELP`/`# TYPE` lines) until at least one query has run in the
   process's lifetime — that's expected, not a bug.

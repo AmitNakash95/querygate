@@ -155,6 +155,14 @@ class AppConfig(BaseSettings):
     # GET /health's readiness signal (see querygate/health.py).
     health_check_interval_seconds: float = pyd.Field(default=30)
 
+    # Minimum interval between two manually triggered "test now" probes
+    # (item 43 phase 2) against the same connection. A manual probe opens a
+    # real connection to the target database on demand, so this bounds how
+    # often an admin:connections:test caller can trigger one, independent of
+    # the background interval above. Single-process visibility only, the
+    # same caveat as execution/concurrency.py's in-process semaphore.
+    admin_connection_test_cooldown_seconds: float = pyd.Field(default=10)
+
     # Persisted audit events are separate from the always-on structured
     # stdout audit log. JSONL is append-only and intended for a persistent
     # volume or collection by the customer's log/SIEM agent.

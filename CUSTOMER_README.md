@@ -252,7 +252,9 @@ Administrative actions use explicit scopes:
   configuration; and
 - `admin:connections:read` returns credential-free per-connection operational
   health (which connection is reachable, when it last succeeded, and a redacted
-  failure category — never a connection string or raw driver error).
+  failure category — never a connection string or raw driver error); and
+- `admin:connections:test` (independent of the read scope above) triggers an
+  immediate, rate-limited re-check of one connection on demand.
 
 These privileges should be separated from ordinary query identities. In
 production, authentication is mandatory. Anonymous access is limited to a

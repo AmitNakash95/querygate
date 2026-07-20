@@ -40,8 +40,25 @@ All notable changes to QueryGate are documented here.
   message**, so a raw driver error embedding a host/username/password never
   leaks through the API — it stays in stdout logs only, matching `/health`'s
   existing non-disclosure of database topology. Documented as QG-21 in
-  `docs/THREAT_MODEL.md`. Phase 2 (a rate-limited "test now" probe action and
-  the browser workspace that renders this view) is not started.
+  `docs/THREAT_MODEL.md`.
+- Admin connection "test now" probe, phase 2a (TODO.md item 43).
+  `POST /api/v1/admin/connections/{id}/test` triggers an immediate,
+  out-of-band re-check of one connection, gated by its own
+  `admin:connections:test` scope (deliberately independent of
+  `admin:connections:read` — passive status visibility does not imply the
+  ability to trigger a live probe). Reuses `HealthMonitor`'s exact
+  ping/classification path and updates the shared cached status, so a
+  following `GET` reflects the manual probe too. Rate-limited to one manual
+  probe per connection per `admin_connection_test_cooldown_seconds` (new
+  `AppConfig` field, default 10s) — a request inside that window gets `429`
+  with `Retry-After` rather than opening another real connection to the
+  target database. An unknown connection is `404`; a deployment-disabled one
+  is `409`. Every probe attempt is recorded as a new redaction-safe
+  `connection.probe` audit event (`ConnectionProbeEvent`,
+  `audit_connection_probe`) — connection id, actor, probe result/failure
+  category, never a raw driver error or connection string. Documented as
+  QG-23 in `docs/THREAT_MODEL.md`. Phase 2b (the browser workspace that
+  renders this view) is not started.
 - Semantic access diff for config changes, phase 1 (TODO.md item 40).
   `POST /api/v1/admin/config/diff` (`admin/access_diff.py`,
   `admin.service.diff_candidate_access`) returns a server-derived,

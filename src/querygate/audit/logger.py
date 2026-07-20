@@ -19,6 +19,7 @@ from querygate.audit.events import (
     CatalogGovernanceEvent,
     ConfigChangeAction,
     ConfigChangeEvent,
+    ConnectionProbeEvent,
 )
 from querygate.audit.sinks import get_audit_sink
 from querygate.core.logging import get_logger
@@ -148,6 +149,64 @@ def audit_config_change(
         auth_method=auth_method,
         surface=surface,
         outcome=event.outcome,
+        error_category=error_category,
+    )
+    try:
+        get_audit_sink().emit(event)
+    except Exception as exc:
+        log.error(
+            "audit.sink.write_failed",
+            audit_event_id=event.event_id,
+            sink_type=type(get_audit_sink()).__name__,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+def audit_connection_probe(
+    *,
+    connection_id: str,
+    outcome: str,
+    principal: Optional[str] = None,
+    principal_scopes: Optional[List[str]] = None,
+    auth_method: str = "unknown",
+    surface: AuditSurface = "internal",
+    probe_healthy: Optional[bool] = None,
+    failure_category: Optional[str] = None,
+    latency_ms: Optional[float] = None,
+    duration_ms: Optional[int] = None,
+    error_category: Optional[str] = None,
+) -> None:
+    """Record a manual "test now" connection probe (TODO.md item 43 phase
+    2) — same durable sink as `audit_query`/`audit_config_change`/
+    `audit_catalog_governance`, never a raw driver error or connection
+    string.
+    """
+    log = get_logger()
+    event = ConnectionProbeEvent(
+        correlation_id=log.extra.get("request_id"),
+        surface=surface,
+        connection_id=connection_id,
+        principal_id=principal,
+        auth_method=auth_method,
+        principal_scopes=principal_scopes or [],
+        outcome="success" if outcome == "success" else "rejected",
+        probe_healthy=probe_healthy,
+        failure_category=failure_category,
+        latency_ms=latency_ms,
+        error_category=error_category,
+        duration_ms=max(duration_ms or 0, 0),
+    )
+    log.info(
+        "audit.connection_probe",
+        audit_event_id=event.event_id,
+        connection_id=connection_id,
+        principal=principal,
+        principal_scopes=principal_scopes,
+        auth_method=auth_method,
+        surface=surface,
+        outcome=event.outcome,
+        probe_healthy=probe_healthy,
+        failure_category=failure_category,
         error_category=error_category,
     )
     try:
