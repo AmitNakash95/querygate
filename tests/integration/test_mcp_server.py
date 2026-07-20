@@ -765,8 +765,7 @@ async def test_mcp_execute_fail_fast_reports_capacity_timeout_with_admission_fie
     set_policy_store(
         PolicyStore(default=Policy(max_concurrency=1, concurrency_wait_seconds=5), overrides={})
     )
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    await cc.in_process_limiter().semaphore("demo", 1).acquire()  # occupy the only slot
 
     _reset_mcp_session_manager()
     settings = _mcp_settings(mcp_api_keys=[], concurrency_backend="in_process")
@@ -821,8 +820,7 @@ async def test_mcp_execute_reports_queue_full_when_max_queue_depth_is_met():
             overrides={},
         )
     )
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    await cc.in_process_limiter().semaphore("demo", 1).acquire()  # occupy the only slot
 
     _reset_mcp_session_manager()
     settings = _mcp_settings(mcp_api_keys=[], concurrency_backend="in_process")
@@ -865,5 +863,5 @@ async def test_mcp_execute_reports_queue_full_when_max_queue_depth_is_met():
         assert result["results"][0]["admission_id"]
         assert result["results"][0]["queue_wait_ms"] == 0
 
-        cc.SEMAPHORES["demo"].release()
+        cc.in_process_limiter().semaphore("demo", 1).release()
         await first_task

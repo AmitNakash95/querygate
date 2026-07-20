@@ -32,11 +32,7 @@ from querygate.catalog.usage import reset_usage_signal_buffer
 from querygate.connections.engine import reset_engines
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
-from querygate.execution.concurrency import (
-    SEMAPHORES,
-    clear_local_queue_state,
-    clear_redis_limiter,
-)
+from querygate.execution.concurrency import clear_redis_limiter, in_process_limiter
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
 
@@ -66,14 +62,12 @@ def reset_state(tmp_path):
     # them; pytest-asyncio gives each test its own loop, so a semaphore
     # cached from a previous test would raise "bound to a different event
     # loop" (or, worse, look permanently "locked") if reused here.
-    SEMAPHORES.clear()
+    in_process_limiter().clear()
     clear_redis_limiter()
-    clear_local_queue_state()
     reset_usage_signal_buffer()
     yield
     reset_audit_sink()
     reset_engines()
-    SEMAPHORES.clear()
+    in_process_limiter().clear()
     clear_redis_limiter()
-    clear_local_queue_state()
     reset_usage_signal_buffer()

@@ -204,16 +204,52 @@ JWKS-verified JWTs can be composed for both REST and MCP; principals carry
 subject, scopes, claims, and auth method. Don't duplicate bearer-token logic
 inside either transport.
 
+### Composable single-purpose interfaces
+
+Where a piece of behavior genuinely varies by backend/dialect/strategy,
+prefer a narrow Protocol/ABC (one or two methods) with one concrete class per
+variant, dispatched through a registry (a dict keyed by string/enum, or a
+`get_x(...)` lookup function) — never `if X == ...` branching scattered
+across call sites. Established precedent: `SecretResolver`
+(`secrets/resolvers.py`), `DialectAdapter` (`compiler/dialect_adapters.py`),
+`Authenticator` (`core/auth.py`), `AuditSink` (`audit/sinks.py`),
+`ConcurrencyLimiter` (`execution/concurrency.py`). Adding a variant means
+implementing the interface once and registering it — never hunting through
+every call site for a place the old assumption leaked in.
+
+This isn't just swapping one implementation for another — composition is a
+first-class option. `core/auth.py`'s `CompositeAuthenticator` chains multiple
+`Authenticator`s together (tries API-key, then JWT) rather than picking
+exactly one at a time.
+
+**Don't over-apply this.** When a variant is a single stateless expression
+with no parameters and no internal branching, a plain dict-of-callables
+(`_SCALAR_FNS`, `_RANK_FNS`, `_ADAPTERS` in `compiler/sqlalchemy_compiler.py`/
+`dialect_adapters.py`, `_AGGREGATE_SELECT_ITEM_TYPES` in `query_ast/models.py`)
+is the right-weight version of the same idea — wrapping a one-liner in a full
+class is ceremony, not clarity.
+
+Known, deliberate exceptions to this rule, not oversights:
+`connections/dialects.py`'s inline dialect branching (its own docstring
+frames centralizing dialect-specific SQL in one module as the goal — a
+lighter-weight tradeoff, not a gap) and `execution/service.py`'s
+Postgres-only cost-estimation gate (MSSQL's estimated-plan mechanism doesn't
+exist yet — TODO.md item 26 phase 2). Don't treat either as precedent for a
+new inline branch elsewhere.
+
 ### Testing gotchas (see `tests/conftest.py`)
 
 - Every test gets a fresh in-memory "demo" `ConnectionRegistry` and a
   permissive default `Policy` via an autouse fixture — don't rely on
   `examples/*.yaml` being loaded in tests.
-- `execution/concurrency.SEMAPHORES` is a module-level dict of
-  `asyncio.Semaphore` keyed by connection id. Semaphores are bound to the
-  event loop that created them, and pytest-asyncio gives each test its own
-  loop — the conftest fixture clears this dict every test. If you add new
-  concurrency state, clear it there too.
+- `execution/concurrency.in_process_limiter()` returns the persistent
+  `InProcessConcurrencyLimiter` singleton; its `semaphore(connection_id, n)`
+  method is a public get-or-create used both by production code and by tests
+  seeding a specific scenario (e.g. pre-acquiring a slot). `asyncio.Semaphore`
+  objects are bound to the event loop that created them, and pytest-asyncio
+  gives each test its own loop — the conftest fixture calls
+  `in_process_limiter().clear()` every test. If you add new concurrency
+  state, clear it there too.
 - To unit-test `schema_validation.validate_schema` without a real database,
   patch the module-level `_load_table` function (the one seam that touches a
   connection) rather than mocking SQLAlchemy internals.
