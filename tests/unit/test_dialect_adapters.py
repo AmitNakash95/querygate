@@ -93,13 +93,16 @@ class TestOrderByTerms:
         terms = MSSQLDialectAdapter().order_by_terms(col, "desc", None)
         assert len(terms) == 1
 
-    def test_mssql_nulls_emulated_via_case_bucket_not_native_syntax(self):
+    @pytest.mark.parametrize("nulls", ["first", "last"])
+    def test_mssql_nulls_rejected_not_emulated(self, nulls):
+        # T-SQL has no NULLS FIRST/LAST syntax. Per CLAUDE.md's engine
+        # philosophy (TODO.md item 74) this is a hard rejection, not a
+        # synthesized CASE-bucket emulation — same posture as array_agg.
         col = sa.column("status")
-        terms = MSSQLDialectAdapter().order_by_terms(col, "asc", "last")
-        assert len(terms) == 2
-        rendered = _render(terms[0]).upper()
-        assert "CASE" in rendered
-        assert "NULLS" not in rendered  # never emit the syntax T-SQL doesn't support
+        with pytest.raises(
+            QueryValidationError, match="nulls first/last ordering is not supported"
+        ):
+            MSSQLDialectAdapter().order_by_terms(col, "asc", nulls)
 
     def test_sqlite_nulls_uses_native_clause(self):
         col = sa.column("status")
