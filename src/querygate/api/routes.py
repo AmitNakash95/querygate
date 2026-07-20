@@ -11,20 +11,14 @@ from typing import Callable, List, Optional
 import pydantic as pyd
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
+from querygate.api._errors import admission_headers, mask_unexpected, require_scope
 from querygate.config_reload import ReloadResult, reload_config
 from querygate.catalog.retrieval import CatalogSearchResponse
 from querygate.connections.models import PublicConnectionInfo
 from querygate.connections.visibility import list_visible_connections, resolve_visible_connection
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
-from querygate.core.exceptions import (
-    PUBLIC_INTERNAL_ERROR,
-    CapacityTimeoutError,
-    ConcurrencyLimitError,
-    NotFoundError,
-    PolicyViolationError,
-    QueryValidationError,
-)
+from querygate.core.exceptions import NotFoundError
 from querygate.execution.admission import QueueMode
 from querygate.execution.service import (
     BatchQueryItemResult,
@@ -66,14 +60,6 @@ def _service(connection_id: str, principal: Principal) -> StructuredQueryService
     return StructuredQueryService(connection_id=connection_id, principal=principal, surface="rest")
 
 
-# Agent-visible admission info (TODO.md item 35 phase 1) is surfaced as
-# response headers rather than in the JSON body, so the existing
-# `{"detail": "too many concurrent ..."}` 422 shape callers already parse
-# (see docs/LOAD_TESTING.md) never changes.
-_ADMISSION_ID_HEADER = "X-QueryGate-Admission-Id"
-_ADMISSION_STATE_HEADER = "X-QueryGate-Admission-State"
-_QUEUE_WAIT_HEADER = "X-QueryGate-Queue-Wait-Ms"
-
 _QUEUE_MODE_QUERY = Query(
     default=None,
     description=(
@@ -93,17 +79,6 @@ _WAIT_TIMEOUT_QUERY = Query(
 )
 
 
-def _admission_headers(
-    *, admission_id: Optional[str], state: str, queue_wait_ms: Optional[int]
-) -> dict:
-    headers = {_ADMISSION_STATE_HEADER: state}
-    if admission_id is not None:
-        headers[_ADMISSION_ID_HEADER] = admission_id
-    if queue_wait_ms is not None:
-        headers[_QUEUE_WAIT_HEADER] = str(queue_wait_ms)
-    return headers
-
-
 def build_router(
     get_principal: Callable[..., Principal], cfg: AppConfig, prefix: str = "/api/v1"
 ) -> APIRouter:
@@ -116,13 +91,8 @@ def build_router(
     @router.get("/{connection}/tables", response_model=TablesListResult)
     async def list_tables(connection: str, principal: Principal = Depends(get_principal)):
         service = _service(connection, principal)
-        try:
+        with mask_unexpected():
             tables = await service.list_tables()
-        except Exception:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=PUBLIC_INTERNAL_ERROR,
-            )
         return TablesListResult(tables=tables)
 
     @router.get("/{connection}/tables/{table}", response_model=TableDescription)
@@ -140,15 +110,8 @@ def build_router(
         principal: Principal = Depends(get_principal),
     ):
         service = _service(connection, principal)
-        try:
+        with mask_unexpected():
             return await service.describe_table(table, verbose_provenance=verbose_provenance)
-        except (PolicyViolationError, QueryValidationError) as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
-        except Exception:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=PUBLIC_INTERNAL_ERROR,
-            )
 
     @router.get("/{connection}/catalog/search", response_model=CatalogSearchResponse)
     async def search_catalog(
@@ -166,16 +129,9 @@ def build_router(
         principal: Principal = Depends(get_principal),
     ):
         service = _service(connection, principal)
-        try:
+        with mask_unexpected():
             return await service.search_catalog(
                 q, max_results=limit, verbose_provenance=verbose_provenance
-            )
-        except QueryValidationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
-        except Exception:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=PUBLIC_INTERNAL_ERROR,
             )
 
     @router.post("/{connection}/query/explain", response_model=ExplainResult)
@@ -183,15 +139,8 @@ def build_router(
         connection: str, query: StructuredQuery, principal: Principal = Depends(get_principal)
     ):
         service = _service(connection, principal)
-        try:
+        with mask_unexpected():
             return await service.explain(query)
-        except (PolicyViolationError, QueryValidationError, ConcurrencyLimitError) as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
-        except Exception:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=PUBLIC_INTERNAL_ERROR,
-            )
 
     @router.post("/{connection}/query", response_model=StructuredQueryResult)
     async def execute_query(
@@ -203,29 +152,12 @@ def build_router(
         wait_timeout_seconds: Optional[float] = _WAIT_TIMEOUT_QUERY,
     ):
         service = _service(connection, principal)
-        try:
+        with mask_unexpected():
             result = await service.execute(
                 query, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
             )
-        except CapacityTimeoutError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=str(exc),
-                headers=_admission_headers(
-                    admission_id=exc.admission_id,
-                    state=exc.admission_state,
-                    queue_wait_ms=exc.queue_wait_ms,
-                ),
-            )
-        except (PolicyViolationError, QueryValidationError, ConcurrencyLimitError) as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
-        except Exception:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=PUBLIC_INTERNAL_ERROR,
-            )
         response.headers.update(
-            _admission_headers(
+            admission_headers(
                 admission_id=result.admission_id,
                 state="completed",
                 queue_wait_ms=result.queue_wait_ms,
@@ -242,10 +174,7 @@ def build_router(
         wait_timeout_seconds: Optional[float] = _WAIT_TIMEOUT_QUERY,
     ):
         service = _service(connection, principal)
-        try:
-            validate_batch_size(len(payload.queries), get_policy(connection, principal=principal))
-        except PolicyViolationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        validate_batch_size(len(payload.queries), get_policy(connection, principal=principal))
         results = await service.execute_many(
             payload.queries, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
         )
@@ -253,11 +182,7 @@ def build_router(
 
     @router.post("/admin/reload-config", response_model=ReloadResult)
     async def reload_config_endpoint(principal: Principal = Depends(get_principal)):
-        if ADMIN_RELOAD_CONFIG_SCOPE not in principal.scopes:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Missing required scope: {ADMIN_RELOAD_CONFIG_SCOPE!r}",
-            )
+        require_scope(principal, ADMIN_RELOAD_CONFIG_SCOPE)
         try:
             return await reload_config(
                 connections_file=cfg.connections_file,

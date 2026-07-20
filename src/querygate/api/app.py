@@ -16,6 +16,7 @@ from starlette import status
 from querygate.api.admin_config_routes import build_admin_config_router
 from querygate.api.admin_connections_routes import build_admin_connections_router
 from querygate.api.admin_ui_routes import build_admin_ui_router
+from querygate.api._errors import install_exception_handlers
 from querygate.api.auth import build_principal_dependency
 from querygate.api.catalog_governance_routes import build_catalog_governance_router
 from querygate.api.help_routes import build_help_router
@@ -127,6 +128,8 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         docs_url=f"{conf.api_v1_prefix}/docs" if conf.is_local else None,
         redoc_url=f"{conf.api_v1_prefix}/redoc" if conf.is_local else None,
     )
+
+    install_exception_handlers(application)
 
     if conf.mcp_enabled:
         from querygate.mcp.server import setup_mcp
