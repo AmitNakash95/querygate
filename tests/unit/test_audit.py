@@ -32,6 +32,7 @@ from querygate.execution.service import StructuredQueryService
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
+    ArrayAggSelectItem,
     CaseSelectItem,
     Predicate,
     ScalarFunctionSelectItem,
@@ -80,6 +81,22 @@ def test_normalized_query_shape_handles_string_agg_select_item():
     serialized = json.dumps(shape)
     assert "customers.email" in serialized
     assert '"kind": "string_agg"' in serialized
+
+
+def test_normalized_query_shape_handles_array_agg_select_item():
+    query = StructuredQuery(
+        from_table="customers",
+        select=[
+            "customers.country",
+            ArrayAggSelectItem(col="customers.email", alias="emails"),
+        ],
+        group_by=["customers.country"],
+        limit=10,
+    )
+    shape = normalize_query_shape(query)
+    serialized = json.dumps(shape)
+    assert "customers.email" in serialized
+    assert '"kind": "array_agg"' in serialized
 
 
 def test_normalized_query_shape_handles_scalar_function_select_item():

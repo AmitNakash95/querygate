@@ -289,6 +289,25 @@ class TestValidateSchema:
         result = await sv.validate_schema(query, connection_id="demo")
         assert result is not None
 
+    async def test_having_allowed_with_array_agg_and_no_group_by(self, monkeypatch):
+        """A select-only array_agg (no group_by, no AggregateSelectItem)
+        must count as an aggregate for the having-requires-aggregate rule —
+        this only passes if ArrayAggSelectItem is recognized alongside
+        AggregateSelectItem/StringAggSelectItem in _validate_group_by's
+        has_aggregate check."""
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                {"col": "orders.status", "as": "statuses"},
+            ],
+            having=[Predicate(col="statuses", op="neq", value="")],
+            limit=5,
+        )
+        result = await sv.validate_schema(query, connection_id="demo")
+        assert result is not None
+
 
 @pytest.mark.asyncio
 class TestCrossConnectionJoins:

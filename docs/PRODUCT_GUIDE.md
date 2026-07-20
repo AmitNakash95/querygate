@@ -248,15 +248,21 @@ native `date_trunc()` that handles every granularity directly, MSSQL has
 no equivalent so it's built from `DATEADD`/`DATEDIFF` (the standard MSSQL
 truncation idiom), SQLite (test/example path only) uses `strftime()`
 string formatting. The interface also defines `order_by_terms`, `stat_fn`,
-and `string_agg` for three dialect-sensitive features (NULLS FIRST/LAST
-ordering, `stddev`/`variance` aggregates, and the `string_agg` aggregate —
-see the corresponding TODO.md items). `string_agg` is the one case where
-the internal SQLite adapter does real work instead of raising: SQLite's
-`group_concat(expr, sep)` happens to share the exact `(expr, separator)`
-shape as Postgres's `string_agg`/MSSQL's `STRING_AGG`, unlike stddev/
-variance (SQLite has no such functions at all), so it's a genuine mapping
-rather than a stub — the only adapter method with a real SQLite
-implementation today.
+`string_agg`, and `array_agg` for four dialect-sensitive features (NULLS
+FIRST/LAST ordering, `stddev`/`variance` aggregates, the `string_agg`
+aggregate, and the `array_agg` aggregate — see the corresponding TODO.md
+items). `string_agg` is the one case where the internal SQLite adapter
+does real work instead of raising: SQLite's `group_concat(expr, sep)`
+happens to share the exact `(expr, separator)` shape as Postgres's
+`string_agg`/MSSQL's `STRING_AGG`, unlike stddev/variance (SQLite has no
+such functions at all), so it's a genuine mapping rather than a stub — the
+only adapter method with a real SQLite implementation today. `array_agg`
+goes the other way: Postgres gets a real `array_agg(...)` implementation,
+but both MSSQL (no array/collection type in T-SQL at all) and SQLite
+(`json_group_array()` returns a JSON string, not a real array) raise
+`QueryValidationError` rather than faking one — the first time a real,
+supported registry dialect (MSSQL), not just the internal-only SQLite
+path, rejects a capability outright.
 
 Adding a real third dialect (item 19) means implementing one new
 `DialectAdapter` subclass, not a hunt through the compiler for
@@ -1988,6 +1994,30 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-20 — `array_agg` rejects outright on MSSQL and SQLite instead
+  of emulating an array (TODO.md item 81).** Postgres's `DialectAdapter.
+  array_agg` is a real implementation (`array_agg(...)`, a native
+  Postgres primitive). MSSQL has no array/collection type in T-SQL at
+  all, so `MSSQLDialectAdapter.array_agg` raises `QueryValidationError`
+  naming that gap — the first time a real, supported registry dialect,
+  not just the internal-only SQLite path, has had a `DialectAdapter`
+  method reject a capability outright. SQLite's adapter also raises,
+  deliberately *not* mirroring `string_agg`'s SQLite mapping
+  (`group_concat`): SQLite's `json_group_array()` returns a JSON-encoded
+  string, not a real array value, so mapping it would be the exact
+  forced-parity emulation CLAUDE.md's "Engine philosophy: expose
+  primitives, don't spoon-feed the agent" section rules out — there is no
+  lucky shape match here the way `group_concat(expr, sep)` happened to
+  match `string_agg`/`STRING_AGG`'s `(expr, separator)` signature.
+  **Why accepted:** the alternative (e.g. faking an array via
+  `STRING_AGG`-as-CSV or a JSON-aggregation trick) would mean the engine
+  silently deciding what an agent's `array_agg` call "really meant" on a
+  dialect that has no such concept — precisely the kind of
+  unrequested-structure synthesis the engine-philosophy section was
+  written to rule out. A calling agent that needs array-like behavior on
+  MSSQL can compose its own workaround with primitives QueryGate already
+  exposes (e.g. `string_agg` plus client-side splitting), the same way a
+  human SQL author would.
 - **2026-07-20 — SQLite's `DialectAdapter.string_agg` maps to a real
   function (`group_concat`) instead of raising, unlike every other
   internal-only-dialect adapter method (TODO.md item 80).** Every other

@@ -28,6 +28,7 @@ from querygate.compiler.sqlalchemy_compiler import compile_structured_query
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
+    ArrayAggSelectItem,
     CaseSelectItem,
     CaseWhen,
     ColArg,
@@ -231,13 +232,19 @@ def _row_select_queries(draw):
 @st.composite
 def _aggregate_queries(draw):
     """Random GROUP BY + aggregate + HAVING shapes."""
-    # item 80: string_agg mixed into the aggregate pool alongside the plain
-    # AggregateSelectItem shapes, alias kept "agg_value" so the having/
-    # order_by strategies below keep working unchanged either way — same
-    # "fold into the existing strategy" approach item 75 used for
-    # stddev/variance rather than a new composite strategy.
-    if draw(st.booleans()):
+    # item 80/81: string_agg and array_agg mixed into the aggregate pool
+    # alongside the plain AggregateSelectItem shapes, alias kept
+    # "agg_value" so the having/order_by strategies below keep working
+    # unchanged either way — same "fold into the existing strategy"
+    # approach item 75 used for stddev/variance rather than a new
+    # composite strategy. Always compiled at the default (Postgres)
+    # dialect below, never dialect="mssql", so ArrayAggSelectItem never
+    # hits its deliberate MSSQL rejection here.
+    agg_kind = draw(st.sampled_from(["string_agg", "array_agg", "aggregate"]))
+    if agg_kind == "string_agg":
         agg_item = StringAggSelectItem(col="orders.status", delimiter=", ", alias="agg_value")
+    elif agg_kind == "array_agg":
+        agg_item = ArrayAggSelectItem(col="orders.status", alias="agg_value")
     else:
         # item 75: stddev/variance mixed into the aggregate function pool.
         agg_fn = draw(st.sampled_from(["count", "sum", "avg", "min", "max", "stddev", "variance"]))
