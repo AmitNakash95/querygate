@@ -2004,6 +2004,26 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-20 — MSSQL now *rejects* `nulls first/last` ordering instead of
+  emulating it with a synthesized CASE bucket (TODO.md item 74, reversing that
+  item's original shipped behavior).** T-SQL has no `NULLS FIRST/LAST` syntax.
+  Item 74 originally made `MSSQLDialectAdapter.order_by_terms` inject an extra
+  leading `CASE WHEN col IS NULL THEN 0/1` sort column to place nulls where the
+  caller asked. That predated the "expose primitives, don't spoon-feed the
+  agent" section of CLAUDE.md; measured against it, the emulation is the engine
+  synthesizing query structure the AST never expressed — solving the agent's
+  composition problem for it. `order_by_terms` now raises `QueryValidationError`
+  when `nulls` is set on MSSQL, at both the main `order_by` and the `top_n`
+  rank-ordering call sites. Postgres/SQLite keep their native
+  `.nulls_first()/.nulls_last()`. **Why accepted:** it makes the missing-keyword
+  gap resolve the same way as `array_agg` (item 81) and `percentile_cont`
+  (item 82) — reject and name the gap, never emulate — and the capability isn't
+  lost: an agent composes null placement directly from primitives QueryGate
+  already exposes (a `CaseSelectItem` 0/1 "is null" bucket plus a leading
+  `OrderBySpec` on it), exactly the workaround a human T-SQL author writes by
+  hand. This was the one "still-open" dialect question the earlier Decision Log
+  entries flagged; it is now settled and is the reference precedent for how a
+  dialect's missing-keyword gap is handled.
 - **2026-07-20 — `execution/concurrency.py`'s semaphore-vs-Redis dispatch
   refactored into a `ConcurrencyLimiter` Protocol, choosing full
   encapsulation over a lower-risk hybrid once the real blast radius was
@@ -2056,7 +2076,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   at the adapter boundary, would be exactly the "renders fine, breaks
   live" trap CLAUDE.md's engine philosophy and item 75's own investigation
   both warn about. Documenting all three rejections (item 74's MSSQL
-  `nulls` CASE-bucket aside, which is a separate, still-open discussion)
+  `nulls` handling since resolved the same way — see the newest entry above)
   side by side here is deliberate: it shows the no-forced-parity principle
   produces differentiated reasoning per actual capability gap, not one
   boilerplate justification reused three times.
