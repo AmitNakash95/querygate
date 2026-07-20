@@ -240,6 +240,30 @@ All notable changes to QueryGate are documented here.
   fails the release (deny-by-default) — publishing to a registry and cryptographic
   signing remain phase 2, deferred until this project has a real publishing pipeline.
 
+### Fixed
+
+- Query-template REST run endpoint returned HTTP 500 on every call (a merge
+  regression, never in a release). `POST /api/v1/query-templates/{id}/run`
+  (TODO.md item 48) was authored with its own inline `try/except` error
+  mapping. It landed on `main` alongside the REST error-mapping
+  centralization refactor, which moved every domain-exception → HTTP-status
+  mapping into app-level handlers (`api/_errors.py`), renamed the admission
+  header helper `_admission_headers` → `admission_headers`, and dropped
+  routes.py's now-unused `CapacityTimeoutError` import. The merge converted
+  the sibling `execute_query` route to the new minimal style but left
+  `run_query_template` on the old one, so its `except CapacityTimeoutError`
+  clause and `_admission_headers(...)` calls referenced names no longer in
+  the module — raising `NameError` on *every* code path (success, capacity
+  timeout, and even parameter-validation failures that should return 422).
+  Fixed by aligning `run_query_template` to the same pattern as
+  `execute_query`: bind + execute inside `with mask_unexpected():` and let
+  the centralized handlers map the same exceptions to the same statuses and
+  admission headers as before — identical externally-visible behavior, one
+  mapping source instead of a stale duplicate. The five
+  `test_query_template_api.py` integration cases now exercise the real route
+  again. (The MCP tools and the `GET /query-templates` list endpoint were
+  unaffected; only the REST run route regressed.)
+
 ### Known issues
 
 - The dependency audit above currently allowlists 13 known advisories across `click`,
