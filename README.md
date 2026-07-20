@@ -444,6 +444,30 @@ write-only principal can validate and stage submitted content but cannot use
 the UI to read the active documents; normal operation therefore grants both
 config scopes to the human admin role.
 
+### Non-admin "my access" portal
+
+`/admin/` is built for operators — it needs an admin scope to see anything
+useful and fills the page with controls a regular caller cannot use.
+[`http://localhost:8000/access/`](http://localhost:8000/access/) is a
+separate, dependency-free, read-only page any authenticated principal can
+open to answer "what can I actually query?" without an admin scope:
+identity/auth method/scopes, visible connections, effective per-connection
+query guardrails (`max_joins`, `max_limit`, `timeout_seconds`, ...),
+mandatory row-filter claim readiness, and a policy-filtered schema browser.
+It calls the same `GET /api/v1/help/my-access` and `list_tables`/
+`describe_table` endpoints any caller already has, so it discloses nothing
+beyond what that principal's own policy already allows — never a filter or
+claim *value*, another principal, raw YAML, version history, or audit
+browsing; those stay `/admin/`-only. Served same-origin with the same
+restrictive Content Security Policy, no-referrer/nosniff headers, and
+no-store HTML as `/admin/`.
+
+Recent-personal-denial history (e.g. "here's what was rejected for you this
+week") is intentionally not included in this first pass — there is no
+principal-scoped audit-read path today (existing audit browsing is
+`admin:config:read`-gated and global), and building one safely is
+independent scope, tracked as TODO item 45 phase 2.
+
 ### Admin connection-status API
 
 The public `GET /health` returns only aggregate healthy/unhealthy/unknown

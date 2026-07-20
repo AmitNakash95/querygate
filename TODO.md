@@ -74,7 +74,7 @@ order-of-magnitude, not commitments.
 | 42 | Four-eyes config approval and separation of duties | XL | 10, 23, 25, 31 |
 | 43 | ✅ Admin connection-operations and health workspace (phase 1: admin connection-status API; phase 2a: "test now" probe; phase 2b: browser workspace) | L | 7, 12, 31 |
 | 44 | Admin observability and rejection-trend dashboard | L | 12, 23, 31, 35 |
-| 45 | Dedicated non-admin “My access” portal | M | 22, 31, 33 |
+| 45 | ✅ Dedicated non-admin "My access" portal (phase 1: identity, guardrails, mandatory-filter readiness, schema browser; phase 2: personal denial history not started) | M | 22, 31, 33 |
 | 46 | Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
 | 47 | Safe draft recovery plus config export/import UX | M | 13, 25, 31 |
 | 48 | Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) | L | 6, 22, 25, 32B |
@@ -3142,7 +3142,48 @@ otherwise expose an honest current-process snapshot and label it as such—do
 not imply durable history. Keep labels low-cardinality and require admin scope
 for any principal-, connection-, table-, or policy-specific breakdown.
 
-### 45. Dedicated non-admin “My access” portal
+### 45. Dedicated non-admin "My access" portal ✅ DONE (phase 1)
+
+**Shipped:** A separate, dependency-free `/access/` static page
+(`querygate/access_ui/`), mounted and CSP/security-header-protected the same
+way `/admin/` is (`api/app.py`), showing the caller's identity/auth method/
+scopes/capabilities, visible connections, effective per-connection query
+guardrails, and mandatory row-filter claim readiness — plus a policy-filtered
+schema browser reusing the existing `list_tables`/`describe_table` REST
+endpoints unchanged. No new query/schema code path: the page authenticates
+with the caller's own token and calls the same principal-scoped endpoints
+that caller already has.
+
+The one new backend surface is additive to the existing `AccessSummary`
+model/`GET /api/v1/help/my-access` endpoint (also the MCP
+`describe_my_querygate_access` tool, which returns the same model): a new
+`connection_access` field lists, per visible connection, `EffectiveGuardrails`
+and `MandatoryFilterReadiness` — reusing the exact typed models item 39's
+candidate-policy simulation already built, now applied to the caller's own
+active policy instead of an uncommitted candidate, and across every
+mandatory filter on a policy-visible table rather than one requested table.
+Never a filter/claim *value* — only table/column/claim-name/source/
+readiness, matching that existing redaction posture. A mandatory filter on a
+table the caller's policy denies is excluded entirely (mirrors QG-19's
+"don't leak hidden-table filter metadata" reasoning).
+
+Verified per-principal, not just for one caller: two JWTs with different
+`sub` claims and a `principals:` policy override see different effective
+`max_joins` and different mandatory-filter claim readiness through the same
+`GET /help/my-access` call. See `tests/unit/test_product_guide.py`,
+`tests/integration/test_product_guide_api.py`, and the new
+`tests/integration/test_access_ui.py` (static-shell security headers, plus an
+explicit assertion that no admin-only nav/action/endpoint string ever
+appears in the shipped shell or script).
+
+**Deliberately deferred (phase 2, not a gap in this pass):** "safe
+explanations of recent personal denials." There is no principal-scoped
+audit-read path today — existing audit browsing
+(`api/admin_ui_routes.py`'s audit endpoints) requires `admin:config:read`
+and is global, not filtered to the caller's own events. Building one safely
+(bounded, redaction-safe, provably incapable of leaking another principal's
+rejection detail) is independent scope deserving its own review, not a UI
+bolt-on onto this pass.
 
 **Effort: M (2–3 days).** The required access-summary and policy-filtered
 schema APIs already exist, so this is mainly a focused UI/IA split plus tests

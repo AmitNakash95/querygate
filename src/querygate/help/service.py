@@ -13,12 +13,13 @@ from pydantic_core import PydanticUndefined
 
 from querygate import __version__
 from querygate.admin import service as governance
+from querygate.admin.models import EffectiveGuardrails, MandatoryFilterReadiness
 from querygate.catalog.models import SchemaCatalog
 from querygate.connections.models import ConnectionProfile
-from querygate.connections.visibility import list_visible_connections
+from querygate.connections.visibility import list_visible_connections, resolve_visible_connection
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
-from querygate.core.exceptions import AuthorizationError, NotFoundError
+from querygate.core.exceptions import AuthorizationError, NotFoundError, PolicyViolationError
 from querygate.core.scopes import (
     ADMIN_CONFIG_READ_SCOPE,
     ADMIN_CONFIG_WRITE_SCOPE,
@@ -30,6 +31,7 @@ from querygate.help.models import (
     CallerCapabilities,
     ConfigFieldExplanation,
     ConfigVersionSummary,
+    ConnectionAccessDetail,
     ErrorExplanation,
     GuideCitation,
     GuideSearchHit,
@@ -358,6 +360,7 @@ class GuideService:
                 reload_configuration=ADMIN_RELOAD_CONFIG_SCOPE in principal.scopes,
             ),
             visible_connections=connections,
+            connection_access=_connection_access_details(principal),
             guidance=(
                 "Use only the connections returned here. A resource that is absent may not "
                 "exist or may not be visible under your effective policy."
@@ -427,6 +430,49 @@ class GuideService:
             ],
             citation=self._citation(topic),
         )
+
+
+def _connection_access_details(principal: Optional[Principal]) -> list[ConnectionAccessDetail]:
+    """Effective guardrails and mandatory-filter claim readiness per visible
+    connection, for the item 45 "my access" portal.
+
+    Mirrors item 39's `simulate_candidate_policy` redaction posture (never a
+    filter/claim *value*, only table/column/source/readiness) but against the
+    caller's own already-active policy rather than an uncommitted candidate,
+    and across every mandatory filter on the connection rather than a single
+    requested table.
+    """
+    details: list[ConnectionAccessDetail] = []
+    for info in list_visible_connections(principal):
+        _, policy = resolve_visible_connection(info.id, principal=principal)
+        guardrails = EffectiveGuardrails.model_validate(
+            policy.model_dump(include=set(EffectiveGuardrails.model_fields))
+        )
+        filters: list[MandatoryFilterReadiness] = []
+        for row_filter in policy.mandatory_row_filters:
+            if not policy.table_allowed(row_filter.table):
+                continue
+            ready = True
+            if row_filter.from_claim is not None:
+                try:
+                    row_filter.resolve(principal)
+                except PolicyViolationError:
+                    ready = False
+            filters.append(
+                MandatoryFilterReadiness(
+                    table=row_filter.table,
+                    column=row_filter.column,
+                    source="claim" if row_filter.from_claim is not None else "configured_literal",
+                    claim=row_filter.from_claim,
+                    ready=ready,
+                )
+            )
+        details.append(
+            ConnectionAccessDetail(
+                connection=info.id, guardrails=guardrails, mandatory_filters=filters
+            )
+        )
+    return details
 
 
 def _annotation_name(annotation: Any) -> str:
