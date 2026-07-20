@@ -8,7 +8,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from querygate.api.app import create_app
-from querygate.audit.events import AuditEvent, ConfigChangeEvent
+from querygate.audit.events import AuditEvent, ConfigChangeEvent, ConnectionProbeEvent
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.policy.loader import PolicyStore, set_policy_store
@@ -224,6 +224,48 @@ async def test_audit_browser_is_filtered_newest_first_and_redaction_safe(tmp_pat
     assert older.json()["events"][0]["event_id"] == "query-1"
     assert "params" not in json.dumps(page.json())
     assert "rows" not in json.dumps(page.json())
+
+
+@pytest.mark.asyncio
+async def test_audit_browser_accepts_connection_probe_event_type(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit.jsonl"
+    events = [
+        AuditEvent(
+            event_id="query-1",
+            connection_id="demo",
+            principal_id="agent-a",
+            policy_decision="allowed",
+            outcome="success",
+            query_shape={"from": "orders"},
+            duration_ms=4,
+        ),
+        ConnectionProbeEvent(
+            event_id="probe-1",
+            connection_id="demo",
+            principal_id="admin-a",
+            outcome="success",
+            probe_healthy=True,
+        ),
+    ]
+    audit_path.write_text(
+        "\n".join(event.model_dump_json(exclude_none=True) for event in events) + "\n"
+    )
+    app = create_app(_settings(tmp_path, monkeypatch, audit_path=audit_path))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        page = await client.get(
+            "/api/v1/admin/ui/audit/events?event_type=connection.probe",
+            headers=_auth(),
+        )
+        unsupported = await client.get(
+            "/api/v1/admin/ui/audit/events?event_type=not.a.real.type",
+            headers=_auth(),
+        )
+
+    assert page.status_code == 200
+    assert page.json()["total"] == 1
+    assert page.json()["events"][0]["event_id"] == "probe-1"
+    assert page.json()["events"][0]["event_type"] == "connection.probe"
+    assert unsupported.status_code == 422
 
 
 @pytest.mark.asyncio

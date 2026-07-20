@@ -424,8 +424,13 @@ The control plane provides:
   edit/approve/reject/publish actions gated on their own least-privilege scopes
   and only shown when the proposal's status makes that action legal, a
   publish-conflict preview, and connection-scoped catalog version rollback;
-- filtered, newest-first browsing of persisted JSONL query/config/catalog audit
-  events (when `AUDIT_SINK_BACKEND=jsonl`).
+- filtered, newest-first browsing of persisted JSONL query/config/catalog/
+  connection-probe audit events (when `AUDIT_SINK_BACKEND=jsonl`);
+- a connection health workspace — the same credential-free per-connection
+  status the admin API above returns, plus a "Test now" button per
+  connection (gated on the separate `admin:connections:test` scope) that
+  triggers an immediate, rate-limited re-check and updates that row in
+  place.
 
 The UI does not create a second configuration path: every stage/apply/rollback
 still goes through the config-governance API described above, and
@@ -486,7 +491,8 @@ instead of opening another real connection to the target database. Every
 probe — successful or rate-limited — is recorded as its own redaction-safe
 `connection.probe` audit event (connection id, actor, probe result/failure
 category, never a raw driver error or connection string). The browser
-workspace that renders this view remains TODO item 43 phase 2b.
+control plane's "Connection health" tab (below) renders this same status
+view and exposes "Test now" as a button, per connection.
 
 ## Example schema catalog (optional)
 

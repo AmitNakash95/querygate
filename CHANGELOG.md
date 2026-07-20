@@ -57,8 +57,25 @@ All notable changes to QueryGate are documented here.
   `connection.probe` audit event (`ConnectionProbeEvent`,
   `audit_connection_probe`) — connection id, actor, probe result/failure
   category, never a raw driver error or connection string. Documented as
-  QG-23 in `docs/THREAT_MODEL.md`. Phase 2b (the browser workspace that
-  renders this view) is not started.
+  QG-23 in `docs/THREAT_MODEL.md`.
+- Admin connection health browser workspace, phase 2b (TODO.md item 43) —
+  completing the item. A new "Connection health" tab in the existing admin
+  control plane (`admin_ui/index.html`, `admin_ui/app.js`) renders phase 1's
+  status list (dialect, status chip, last checked/success, latency,
+  schema-reflected state, failure category) and gives each connection its
+  own "Test now" button calling phase 2a's endpoint, updating that row in
+  place from the response. No new backend endpoint or logic — a rendering
+  layer over the already-tested REST surface, gated client-side on
+  `admin:connections:test` (disabled with an explanatory `title` otherwise)
+  and the connection's `enabled` flag. Verified against a real running app
+  and real Postgres with a headless-browser driver, which surfaced and fixed
+  two real pre-existing gaps: `admin_ui/app.js`'s audit-event renderer only
+  special-cased two event types and silently mislabeled everything else
+  (including the new `connection.probe` type, and latently
+  `catalog.governance` too) as `Catalog ${action}`; and
+  `api/admin_ui_routes.py`'s audit `event_type` filter allowlist didn't
+  include `"connection.probe"`, so filtering the audit browser down to just
+  probe events would have 422'd. Both fixed generically.
 - Semantic access diff for config changes, phase 1 (TODO.md item 40).
   `POST /api/v1/admin/config/diff` (`admin/access_diff.py`,
   `admin.service.diff_candidate_access`) returns a server-derived,

@@ -42,6 +42,9 @@
         <button class="nav-item" type="button" data-view-target="catalog">
           <span class="nav-glyph">07</span><span>Catalog review</span><span id="catalog-pending-dot" class="draft-dot" hidden></span>
         </button>
+        <button class="nav-item" type="button" data-view-target="health">
+          <span class="nav-glyph">08</span><span>Connection health</span>
+        </button>
       </nav>
 
       <div class="sidebar-foot">
@@ -254,7 +257,7 @@
       <section id="view-audit" class="view" data-view="audit" hidden>
         <div class="section-intro"><div><p class="eyebrow">Redaction-safe audit trail</p><h2>Trace access and governance decisions.</h2><p>Persisted events exclude SQL parameters, predicate values, returned rows, raw YAML, and secrets.</p></div><button id="refresh-audit" class="button secondary" type="button">Refresh events</button></div>
         <form id="audit-filters" class="filter-bar">
-          <label><span>Event type</span><select id="audit-event-type"><option value="">All events</option><option value="query.execution">Query execution</option><option value="config.governance">Config governance</option><option value="catalog.governance">Catalog governance</option></select></label>
+          <label><span>Event type</span><select id="audit-event-type"><option value="">All events</option><option value="query.execution">Query execution</option><option value="config.governance">Config governance</option><option value="catalog.governance">Catalog governance</option><option value="connection.probe">Connection probe</option></select></label>
           <label><span>Outcome</span><select id="audit-outcome"><option value="">Any outcome</option><option value="success">Success</option><option value="rejected">Rejected</option></select></label>
           <label><span>Principal</span><input id="audit-principal" type="search" placeholder="Exact subject"></label>
           <label><span>Connection</span><input id="audit-connection" type="search" placeholder="Exact id"></label>
@@ -365,6 +368,19 @@
 
         <div class="section-intro catalog-history-head"><div><p class="eyebrow">Catalog version history</p><h2>Every publish and rollback, connection-scoped.</h2></div><button id="refresh-catalog-versions" class="button secondary" type="button">Refresh versions</button></div>
         <div class="table-wrap"><table class="history-table"><thead><tr><th>Version</th><th>Action</th><th>Target</th><th>Fields changed</th><th>Actor</th><th>When</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="catalog-history-body"><tr><td colspan="7" class="empty-cell">Select a connection to load catalog version history.</td></tr></tbody></table></div>
+      </section>
+
+      <section id="view-health" class="view" data-view="health" hidden>
+        <div class="section-intro">
+          <div><p class="eyebrow">Operational status</p><h2>See which database is reachable, credential-free.</h2><p>Status is a cached background probe on an interval. "Test now" triggers one real, rate-limited connection attempt and is recorded as its own audit event — never a raw driver error or connection string.</p></div>
+          <button id="refresh-health" class="button secondary" type="button">Refresh status</button>
+        </div>
+        <div class="table-wrap">
+          <table class="history-table">
+            <thead><tr><th>Connection</th><th>Dialect</th><th>Status</th><th>Last checked</th><th>Last success</th><th>Latency</th><th>Schema</th><th><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody id="health-body"><tr><td colspan="8" class="empty-cell">Connect with admin:connections:read to load connection health.</td></tr></tbody>
+          </table>
+        </div>
       </section>
     </main>
   </div>
