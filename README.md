@@ -395,6 +395,45 @@ explicitly configured principal, then ranks the access-expanding results so a
 reviewer sees whether a change is fleet-wide or targeted at a specific caller
 before it's staged.
 
+### Validated policy templates and safe-start presets
+
+Common access shapes — deny-by-default, reporting-only, customer-support,
+tenant-isolated, bounded-analytics — otherwise require an admin to know every
+relevant `policy.yaml` field. A small, fixed, code-reviewed set of templates
+renders one of those shapes from a few typed parameters and merges it into
+the caller's own local draft — never a live mutation, and never inferred
+from live schema/table names or embedding credentials/tenant values:
+
+```bash
+# List the shipped templates and their typed parameters
+curl -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/templates
+
+# Render one against the caller's current draft (nothing persisted)
+curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/templates/render \
+  -d '{"template_id": "reporting-only",
+       "params": {"connection": "demo", "allowed_tables": ["orders"], "max_limit": 20},
+       "policy_yaml": "<the caller'"'"'s current draft policy.yaml, or omit for a fresh one>"}'
+# -> {"policy_yaml": "...", "rules": ["Joins capped at 2, ...", ...], "warnings": []}
+```
+
+The merge is monotonically restrictive: applying a template can only add a
+new restriction or tighten one already in the draft (a stricter existing
+`max_joins`, a narrower existing `allowed_tables`, an existing
+`mandatory_row_filters` entry) — it can never loosen or remove one, so a
+template is safe to apply on top of policy an administrator has already
+hand-edited. `rules` is a plain-English preview of every rule the merged
+document now enforces, including when the merge kept an existing, stricter
+value instead of the template's own. The rendered document is not a special
+code path — it is plain `policy_yaml` text that goes through the exact same
+`/validate`, `/simulate`, `/diff`, and `/versions` (stage) endpoints as a
+hand-edited draft. `GET /templates` requires `admin:config:read`;
+`POST /templates/render` requires `admin:config:write`, matching `/validate`
+and `/preview` — it also resolves caller-supplied content and is meant to be
+staged. The browser control plane's Policy designer exposes this as a
+"Safe-start templates" panel: pick a template, fill in its parameters,
+preview the resulting rules, and apply the rendered document to the local
+draft with one click.
+
 ### Browser admin control plane
 
 Start QueryGate and open [`http://localhost:8000/admin/`](http://localhost:8000/admin/).

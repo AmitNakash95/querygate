@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from starlette.concurrency import run_in_threadpool
 
 from querygate.admin import service as governance
+from querygate.admin import templates as policy_templates
 from querygate.admin.models import (
     CandidatePolicySimulation,
     CandidatePolicySimulationRequest,
@@ -25,6 +26,9 @@ from querygate.admin.models import (
     ConfigSemanticDiffRequest,
     ConfigVersion,
     PolicyBlastRadiusReport,
+    PolicyTemplateRenderRequest,
+    PolicyTemplateRenderResult,
+    PolicyTemplateSummary,
     SemanticAccessDiff,
 )
 from querygate.config_reload import ReloadResult
@@ -143,6 +147,27 @@ def build_admin_config_router(
         _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
         try:
             return await run_in_threadpool(governance.compute_blast_radius, cfg, principal, request)
+        except ConfigValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    @router.get("/templates", response_model=List[PolicyTemplateSummary])
+    async def list_templates_endpoint(principal: Principal = Depends(get_principal)):
+        _require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        return policy_templates.list_templates()
+
+    @router.post("/templates/render", response_model=PolicyTemplateRenderResult)
+    async def render_template_endpoint(
+        request: PolicyTemplateRenderRequest, principal: Principal = Depends(get_principal)
+    ):
+        # Renders a patch into the caller's own supplied draft only — it never
+        # touches the live registry/policy singletons or the version store —
+        # but the result is meant to be staged, so this requires write scope
+        # like /validate and /preview rather than read scope like /templates.
+        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        try:
+            return policy_templates.render_template(
+                request.template_id, request.params, request.policy_yaml
+            )
         except ConfigValidationError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
