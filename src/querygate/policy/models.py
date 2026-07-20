@@ -151,8 +151,8 @@ class Policy(pyd.BaseModel):
     # Audit/explain SQL rendering. Default is safe-by-default: SQL text uses
     # bind placeholders and parameter values are redacted, so a WHERE-clause
     # literal (an email, an SSN) never ends up verbatim in the audit log or
-    # in explain_structured_query's response. Set true only for deployments
-    # that intentionally want full literal SQL for debugging.
+    # in run_structured_queries(mode="explain")'s response. Set true only
+    # for deployments that intentionally want full literal SQL for debugging.
     log_query_literals: bool = pyd.Field(default=False)
 
     # Cross-connection joins: two connections may be joined in one query only

@@ -23,85 +23,64 @@ all changes stay in the validate/preview/stage/apply governance workflow.
 ## Tool workflow (required order for unfamiliar schemas)
 1. list_connections() — see which connections this deployment exposes.
 2. list_tables(connection) — discover candidate tables for one connection.
-3. search_catalog(connection, query) — when a semantic catalog is configured,
-   retrieve compact business terms/aliases/relationships before describing
-   candidates. Results are policy-filtered before ranking and cite provenance,
-   verification state, confidence, schema version, and freshness; no result can
-   imply access and the tool never searches row values.
+3. search_catalog(connection, query) — when a semantic catalog is
+   configured, retrieve compact business terms/aliases/relationships before
+   describing candidates (see the tool's own description for what each hit
+   includes and its provenance detail).
 4. describe_table(connection, table_name) — learn columns/types/descriptions
-   for each table you will use. When the deployment has a curated schema
-   catalog configured, the table and each column may carry an extra
-   `catalog` object (business description, aliases, sensitivity, and —
-   table-level only — default_aggregation and relationship hints to other
-   tables); it's descriptive context only and never grants or implies
-   access beyond what policy already allows — `catalog: null` just means no
-   curated entry exists for that table/column.
-5. explain_structured_query(connection, query) — optional; sanity-check an
-   expensive-looking query's compiled SQL before running it.
-6. execute_structured_query(connection, query) — run one StructuredQuery
-   JSON AST (or execute_structured_queries to run several against the same
-   connection in one call).
+   for each table you will use (see the tool's own description for the
+   optional `catalog` object it may attach; `catalog: null` just means no
+   curated entry exists for that table/column).
+5. run_structured_queries(connection, queries=[...], mode="explain") —
+   optional; sanity-check an expensive-looking query's compiled SQL before
+   running it.
+6. run_structured_queries(connection, queries=[...]) — run one or more
+   StructuredQuery JSON ASTs against the same connection in one call
+   (mode="execute" is the default).
 
 ## StructuredQuery rules
-- Pass a StructuredQuery object: from/select/joins/where/group_by/having/
-  order_by/limit/offset/top_n/intent.
-- Column refs MUST be Table.Column (e.g. Customer.Name).
-- Raw SQL strings are FORBIDDEN and will be rejected.
-- order_by is a list of {col, dir} objects — dir must be the exact string
-  "asc" or "desc" (any other spelling — direction, sort, a boolean desc
-  flag — is rejected with a validation error, not silently ignored).
-- Select items may be a Table.Column string, an aggregate
-  ({fn: count|sum|avg|min|max, col, as}), or a date_bucket
-  ({col, granularity: day|week|month|quarter|year, as}) for time-bucketed
-  trends — group_by/order_by may reference a date_bucket's alias.
-- Always set intent to a short plain-language summary of what the user
-  asked for. It is logged alongside the compiled SQL for audit/debugging —
-  it is never returned to the caller and has no effect on query results.
+Pass a StructuredQuery object: from/select/joins/where/group_by/having/
+order_by/limit/offset/top_n/intent. Column refs MUST be Table.Column (e.g.
+Customer.Name). Raw SQL strings are FORBIDDEN and will be rejected. Each
+field's own schema description covers its exact contract (order_by.dir's
+strict enum, intent's audit-only purpose, a join's cross-connection
+`connection` field, and so on) — read it rather than guessing.
 
 ## Cross-connection joins
-A join's own `connection` field targets a DIFFERENT connection than the
-query's primary `connection` argument — only permitted when both
-connections belong to the same policy-declared join_group (an
-operator/policy concept; ask the operator which connections are grouped, or
-infer it by trying a join and reading the error). A join across connections
-in different groups fails validation immediately with a "cross-connection"
-error — split into separate per-connection calls and merge results
-yourself, rather than retrying.
+A join across connections only validates within one policy-declared
+join_group (ask the operator which connections are grouped, or infer it by
+trying a join and reading the error — see JoinSpec.connection's own field
+description for the mechanic). A join across ungrouped connections fails
+validation immediately — split into separate per-connection calls and merge
+results yourself, rather than retrying.
 
 ## Top-N per group (ranking within a partition)
 Use top_n when the ask is "top/bottom N rows per group" (e.g. top 5
-customers by spend within each region):
-- top_n = {partition_by: [Table.Col,...], order_by: [{col, dir}], n, fn}
-- fn is row_number (default), rank, or dense_rank.
-- Without group_by/aggregates: partition_by/order_by may reference any
-  Table.Col in the query graph, or a date_bucket select alias — they do
-  NOT need to be in select.
-- WITH group_by/aggregates (ranking runs over the grouped/aggregated
-  result, one row per group): partition_by/order_by must reference either
-  a group_by column or a select alias (aggregate or date_bucket) — NOT a
-  raw table column, since per-row values no longer exist after grouping.
+customers by spend within each region) — see TopNSpec's own field schema
+for the partition_by/order_by/n/fn shape and the group_by-interaction rule
+(what partition_by/order_by may reference changes once the query has
+group_by/aggregates).
 
 ## Dry-run before an expensive query
-Call explain_structured_query with the same StructuredQuery you're about to
-run to see the compiled SQL (and bind params) without spending a real query
-— use it when a query looks wide (many joins, weak filters) or when you're
-unsure whether it will validate.
+Call run_structured_queries with mode="explain" and the same queries you're
+about to run to see the compiled SQL (and bind params) without spending a
+real query — use it when a query looks wide (many joins, weak filters) or
+when you're unsure whether it will validate.
 
-## Batching multiple queries in one call
-If you already know an ask needs several queries against the SAME
-connection, pass them all to execute_structured_queries in one call instead
-of making N separate execute_structured_query calls. Each item runs
-independently — one failing query doesn't drop the others; check each
-result's error field. There is a per-connection max batch size (set by
-policy); if exceeded, split into multiple batch calls.
+## Running one or several queries in one call
+queries is always a list — pass one query for a single ask, or several when
+you already know an ask needs multiple queries against the SAME connection.
+results is always a list in the same order; each item runs independently —
+one failing query doesn't drop the others, check each result's error field.
+There is a per-connection max batch size (set by policy); if exceeded,
+split into multiple calls.
 
 ## Time-bucketed trends (date bucketing)
 Use a date_bucket select item to group by a truncated date instead of a
-raw timestamp: {col: Table.Col, granularity: day|week|month|quarter|year,
-as: alias}. Reference the bucket by its alias (default
-bucket_<Column>_<granularity> if you omit `as`) in group_by and order_by —
-grouping by the raw column instead gives one bucket per exact timestamp,
-not a real trend.
+raw timestamp (see the field schema for the granularity options; group_by/
+order_by may reference its alias — default bucket_<Column>_<granularity>
+if you omit `as`). Grouping by the raw column instead of the alias gives
+one bucket per exact timestamp, not a real trend.
 
 ## Guardrails + multi-query decomposition (REQUIRED)
 Every connection has a policy enforcing caps on joins, where-nesting depth,
@@ -111,18 +90,14 @@ when the query has group_by or an aggregate select item (grouped results
 are bounded by group cardinality, not raw row count). Validator errors
 citing these maxima are hard stops — do NOT retry the same oversized AST.
 
-Every query also runs under a server-side execution timeout (a genuinely
-expensive query is aborted with an error, not left to hang — narrow the
-query rather than retrying it unchanged) and a per-connection concurrency
-cap shared by all callers. A "too many concurrent queries" error means wait
-a moment and retry once — do NOT retry in a tight loop, that only makes
-the contention worse.
+Every mode="execute" query also runs under a server-side execution timeout
+and a per-connection concurrency cap shared by all callers — see
+run_structured_queries's own description for the capacity-error and
+queue_mode contract.
 
 When the user's ask needs more tables/columns/rows than one call allows,
 OR when a tool returns truncated=true / hits a cap:
-1. Split into multiple smaller queries — either separate
-   execute_structured_query calls, or one execute_structured_queries batch
-   call if you already know you need several.
+1. Split into multiple smaller queries (queries is a list — see above).
 2. Prefer vertical slices (one concern / one fact constellation per query)
    over one mega-join.
 3. Prefer narrow selects; fetch join keys in call A, then filter with

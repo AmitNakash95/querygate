@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 
 import pytest
 import pytest_asyncio
@@ -34,9 +35,7 @@ _EXPECTED_TOOLS = {
     "list_tables",
     "describe_table",
     "search_catalog",
-    "explain_structured_query",
-    "execute_structured_query",
-    "execute_structured_queries",
+    "run_structured_queries",
     "search_querygate_guide",
     "get_querygate_guide_topic",
     "get_querygate_setup_checklist",
@@ -97,11 +96,16 @@ async def test_mcp_disabled_returns_404():
 
 @pytest.mark.asyncio
 async def test_mcp_dev_bypass_lists_tools(mcp_dev_client):
+    # TODO.md item 63: the dev-bypass anonymous principal has no scopes, so
+    # the admin-only inspect_querygate_configuration tool is filtered out of
+    # tools/list — it would only ever reject that principal at call time
+    # anyway (see test_mcp_tools_list_omits_scope_gated_tool_without_scope).
     resp = await mcp_dev_client.post("/mcp/", json=_TOOLS_LIST, headers=_HEADERS_JSON)
     assert resp.status_code == 200
     payload = _parse_mcp_response(resp)
     tool_names = {tool["name"] for tool in payload["result"]["tools"]}
-    assert _EXPECTED_TOOLS.issubset(tool_names)
+    assert (_EXPECTED_TOOLS - {"inspect_querygate_configuration"}).issubset(tool_names)
+    assert "inspect_querygate_configuration" not in tool_names
 
 
 @pytest.mark.asyncio
@@ -153,6 +157,55 @@ async def test_mcp_configuration_inspection_requires_config_read_scope():
     assert result["success"] is False
     assert result["error_code"] == "FORBIDDEN"
     assert result["error_message"] == "Missing required scope: 'admin:config:read'"
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_list_omits_scope_gated_tool_without_scope():
+    """TODO.md item 63: inspect_querygate_configuration's ~6KB schema is not
+    sent to a session that can never call it — visibility only, the real
+    boundary stays the call-time scope check proven by the test above. A
+    non-admin-scoped session still sees every other tool.
+    """
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_key_scopes=[])
+    app = create_app(settings)
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(
+            transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+        ) as client,
+    ):
+        resp = await client.post(
+            "/mcp/",
+            json=_TOOLS_LIST,
+            headers={**_HEADERS_JSON, "Authorization": f"Bearer {_TEST_API_KEY}"},
+        )
+
+    tool_names = {tool["name"] for tool in _parse_mcp_response(resp)["result"]["tools"]}
+    assert "inspect_querygate_configuration" not in tool_names
+    assert (_EXPECTED_TOOLS - {"inspect_querygate_configuration"}).issubset(tool_names)
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_list_includes_scope_gated_tool_with_scope():
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_key_scopes=["admin:config:read"])
+    app = create_app(settings)
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(
+            transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+        ) as client,
+    ):
+        resp = await client.post(
+            "/mcp/",
+            json=_TOOLS_LIST,
+            headers={**_HEADERS_JSON, "Authorization": f"Bearer {_TEST_API_KEY}"},
+        )
+
+    tool_names = {tool["name"] for tool in _parse_mcp_response(resp)["result"]["tools"]}
+    assert "inspect_querygate_configuration" in tool_names
+    assert _EXPECTED_TOOLS.issubset(tool_names)
 
 
 @pytest.mark.asyncio
@@ -514,7 +567,12 @@ async def test_mcp_catalog_search_is_compact_policy_filtered_and_cited():
                 "method": "tools/call",
                 "params": {
                     "name": "search_catalog",
-                    "arguments": {"connection": "demo", "query": "sales revenue", "limit": 2},
+                    "arguments": {
+                        "connection": "demo",
+                        "query": "sales revenue",
+                        "limit": 2,
+                        "verbose_provenance": True,
+                    },
                 },
             },
             headers=_HEADERS_JSON,
@@ -554,7 +612,7 @@ async def test_mcp_batch_uses_per_principal_max_batch_size():
                 "id": 5,
                 "method": "tools/call",
                 "params": {
-                    "name": "execute_structured_queries",
+                    "name": "run_structured_queries",
                     "arguments": {
                         "connection": "demo",
                         "queries": [
@@ -576,6 +634,125 @@ async def test_mcp_batch_uses_per_principal_max_batch_size():
     assert result["success"] is False
     assert result["error_code"] == "VALIDATION"
     assert "max of 1" in result["error_message"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_run_structured_queries_explain_mode_never_executes():
+    """TODO.md item 61: run_structured_queries(mode="explain") replaces the
+    old explain_structured_query tool — must still never open a DB session
+    or touch the concurrency limiter, only compile.
+    """
+    customers = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("name", sa.String(100)),
+    )
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_keys=[])
+    app = create_app(settings)
+    with (
+        patch("querygate.execution.service.get_engine", return_value=MagicMock()),
+        patch(
+            "querygate.validation.schema_validation.get_table_schema",
+            AsyncMock(return_value=customers),
+        ),
+        patch("querygate.execution.service.session_scope") as mock_scope,
+    ):
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post(
+                "/mcp/",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "run_structured_queries",
+                        "arguments": {
+                            "connection": "demo",
+                            "queries": [
+                                {"from": "customers", "select": ["customers.id"], "limit": 5}
+                            ],
+                            "mode": "explain",
+                        },
+                    },
+                },
+                headers=_HEADERS_JSON,
+            )
+    mock_scope.assert_not_called()
+    assert resp.status_code == 200
+    result = _parse_mcp_response(resp)["result"]["structuredContent"]["result"]
+    assert "customers" in result["results"][0]["sql"]
+    assert result["results"][0]["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_run_structured_queries_isolates_per_item_failure():
+    """One invalid query in the list must not fail the others (default
+    mode="execute") — same batch semantics the old execute_structured_queries
+    tool had, now the only way to call this tool.
+    """
+    customers = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+    )
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_keys=[])
+    app = create_app(settings)
+    with (
+        patch("querygate.execution.service.get_engine", return_value=MagicMock()),
+        patch(
+            "querygate.validation.schema_validation.get_table_schema",
+            AsyncMock(return_value=customers),
+        ),
+        patch("querygate.execution.service.session_scope", _scope),
+    ):
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post(
+                "/mcp/",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 10,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "run_structured_queries",
+                        "arguments": {
+                            "connection": "demo",
+                            "queries": [
+                                {"from": "customers", "select": ["customers.id"], "limit": 5},
+                                {"from": "not_a_real_table", "select": ["x.id"], "limit": 5},
+                            ],
+                        },
+                    },
+                },
+                headers=_HEADERS_JSON,
+            )
+    assert resp.status_code == 200
+    result = _parse_mcp_response(resp)["result"]["structuredContent"]["result"]
+    assert len(result["results"]) == 2
+    assert result["results"][0]["error"] is None
+    assert result["results"][0]["row_count"] == 1
+    assert result["results"][1]["error"] is not None
 
 
 @pytest.mark.asyncio
@@ -607,10 +784,10 @@ async def test_mcp_execute_fail_fast_reports_capacity_timeout_with_admission_fie
                 "id": 6,
                 "method": "tools/call",
                 "params": {
-                    "name": "execute_structured_query",
+                    "name": "run_structured_queries",
                     "arguments": {
                         "connection": "demo",
-                        "query": {"from": "customers", "select": ["customers.id"], "limit": 5},
+                        "queries": [{"from": "customers", "select": ["customers.id"], "limit": 5}],
                         "queue_mode": "fail_fast",
                     },
                 },
@@ -620,12 +797,14 @@ async def test_mcp_execute_fail_fast_reports_capacity_timeout_with_admission_fie
     assert resp.status_code == 200
     payload = _parse_mcp_response(resp)
     result = payload["result"]["structuredContent"]["result"]
-    assert result["success"] is False
-    assert result["error_code"] == "VALIDATION"
-    assert "too many concurrent" in result["error_message"]
-    assert result["admission_state"] == "capacity_timeout"
-    assert result["admission_id"]
-    assert result["queue_wait_ms"] is not None
+    # A single query is a batch of one — a capacity timeout on one query in
+    # the batch is a per-item error, not a top-level tool failure (the tool
+    # call itself succeeded; see TODO.md item 61's merge).
+    assert result["results"][0]["error"] is not None
+    assert "too many concurrent" in result["results"][0]["error"]
+    assert result["results"][0]["admission_state"] == "capacity_timeout"
+    assert result["results"][0]["admission_id"]
+    assert result["results"][0]["queue_wait_ms"] is not None
 
 
 @pytest.mark.asyncio
@@ -655,10 +834,10 @@ async def test_mcp_execute_reports_queue_full_when_max_queue_depth_is_met():
             "id": call_id,
             "method": "tools/call",
             "params": {
-                "name": "execute_structured_query",
+                "name": "run_structured_queries",
                 "arguments": {
                     "connection": "demo",
-                    "query": {"from": "customers", "select": ["customers.id"], "limit": 5},
+                    "queries": [{"from": "customers", "select": ["customers.id"], "limit": 5}],
                     "queue_mode": "wait",
                     "wait_timeout_seconds": 5,
                 },
@@ -680,10 +859,11 @@ async def test_mcp_execute_reports_queue_full_when_max_queue_depth_is_met():
         assert resp.status_code == 200
         payload = _parse_mcp_response(resp)
         result = payload["result"]["structuredContent"]["result"]
-        assert result["success"] is False
-        assert result["admission_state"] == "queue_full"
-        assert result["admission_id"]
-        assert result["queue_wait_ms"] == 0
+        # Single query = batch of one; a queue-full rejection is a per-item
+        # error, not a top-level tool failure (see TODO.md item 61's merge).
+        assert result["results"][0]["admission_state"] == "queue_full"
+        assert result["results"][0]["admission_id"]
+        assert result["results"][0]["queue_wait_ms"] == 0
 
         cc.SEMAPHORES["demo"].release()
         await first_task

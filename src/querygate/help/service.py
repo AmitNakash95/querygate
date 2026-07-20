@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from functools import lru_cache
 from typing import Any, Literal, Optional, Type
@@ -214,9 +215,11 @@ class GuideService:
             querygate_version=self.version, query=query.strip(), results=hits
         )
 
-    def topic(self, topic_id: str) -> GuideTopicResponse:
+    def topic(self, topic_id: str, *, max_response_bytes: int = 16_384) -> GuideTopicResponse:
+        if max_response_bytes < 512:
+            raise ValueError("guide topic max_response_bytes must be at least 512")
         topic = self._corpus.get(topic_id)
-        return GuideTopicResponse(
+        response = GuideTopicResponse(
             querygate_version=self.version,
             topic_id=topic.id,
             title=topic.title,
@@ -224,7 +227,22 @@ class GuideService:
             content=topic.body,
             citation=self._citation(topic),
             next_actions=topic.next_actions,
+            max_response_bytes=max_response_bytes,
         )
+        full_bytes = len(json.dumps(response.model_dump(mode="json")).encode("utf-8"))
+        if full_bytes <= max_response_bytes:
+            return response
+        # Measure the envelope with empty content to find how much of the
+        # budget is left for the body text, then truncate to fit exactly —
+        # same incremental-measurement approach as search_catalog's
+        # max_response_bytes (catalog/retrieval.py).
+        envelope = response.model_copy(update={"content": "", "truncated": True})
+        envelope_bytes = len(json.dumps(envelope.model_dump(mode="json")).encode("utf-8"))
+        budget_for_content = max(max_response_bytes - envelope_bytes, 0)
+        truncated_content = topic.body.encode("utf-8")[:budget_for_content].decode(
+            "utf-8", errors="ignore"
+        )
+        return envelope.model_copy(update={"content": truncated_content})
 
     def setup_checklist(
         self, profile: Literal["local", "container", "production"] = "local"

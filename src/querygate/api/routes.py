@@ -127,11 +127,21 @@ def build_router(
 
     @router.get("/{connection}/tables/{table}", response_model=TableDescription)
     async def describe_table(
-        connection: str, table: str, principal: Principal = Depends(get_principal)
+        connection: str,
+        table: str,
+        verbose_provenance: bool = Query(
+            default=False,
+            description=(
+                "False (default): each catalog citation is compact (status + precedence "
+                "only). True: full citation (entry id, evidence, confidence, catalog/schema "
+                "version, freshness)."
+            ),
+        ),
+        principal: Principal = Depends(get_principal),
     ):
         service = _service(connection, principal)
         try:
-            return await service.describe_table(table)
+            return await service.describe_table(table, verbose_provenance=verbose_provenance)
         except (PolicyViolationError, QueryValidationError) as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
         except Exception:
@@ -145,11 +155,21 @@ def build_router(
         connection: str,
         q: str = Query(min_length=1, max_length=256),
         limit: int = Query(default=5, ge=1, le=20),
+        verbose_provenance: bool = Query(
+            default=False,
+            description=(
+                "False (default): each hit's citation is compact (status + precedence "
+                "only). True: full citation (entry id, evidence, confidence, catalog/schema "
+                "version, freshness)."
+            ),
+        ),
         principal: Principal = Depends(get_principal),
     ):
         service = _service(connection, principal)
         try:
-            return await service.search_catalog(q, max_results=limit)
+            return await service.search_catalog(
+                q, max_results=limit, verbose_provenance=verbose_provenance
+            )
         except QueryValidationError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
         except Exception:

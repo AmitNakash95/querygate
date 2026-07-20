@@ -68,7 +68,12 @@ This searches only policy-visible metadata, never database row values:
 }
 ```
 
-## Execute a structured query
+## Run one or more structured queries
+
+`run_structured_queries` replaces the old separate execute/explain/batch
+tools with one tool: `queries` is always a list (one item for a single
+query), `results` comes back as a list in the same order, and one failing
+query never fails the others — check each result's `error` field.
 
 ```json
 {
@@ -76,17 +81,41 @@ This searches only policy-visible metadata, never database row values:
   "id": 4,
   "method": "tools/call",
   "params": {
-    "name": "execute_structured_query",
+    "name": "run_structured_queries",
     "arguments": {
       "connection": "demo",
-      "query": {
-        "from": "orders",
-        "select": ["orders.id", "orders.status", "orders.total_amount"],
-        "where": { "col": "orders.status", "op": "eq", "value": "completed" },
-        "order_by": [{ "col": "orders.total_amount", "dir": "desc" }],
-        "limit": 10,
-        "intent": "recent completed orders, highest value first"
-      }
+      "queries": [
+        {
+          "from": "orders",
+          "select": ["orders.id", "orders.status", "orders.total_amount"],
+          "where": { "col": "orders.status", "op": "eq", "value": "completed" },
+          "order_by": [{ "col": "orders.total_amount", "dir": "desc" }],
+          "limit": 10,
+          "intent": "recent completed orders, highest value first"
+        }
+      ]
+    }
+  }
+}
+```
+
+## Dry-run before executing (mode: "explain")
+
+Validates and compiles without touching the database or the concurrency
+limiter — returns the SQL (and bind params) each query would run instead
+of rows:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 42,
+  "method": "tools/call",
+  "params": {
+    "name": "run_structured_queries",
+    "arguments": {
+      "connection": "demo",
+      "queries": [{ "from": "orders", "select": ["orders.id"], "limit": 10 }],
+      "mode": "explain"
     }
   }
 }
@@ -94,7 +123,7 @@ This searches only policy-visible metadata, never database row values:
 
 ## Capacity waiting (queue_mode / wait_timeout_seconds)
 
-Optional tool arguments, separate from `query` — see the README's
+Optional tool arguments, ignored in `mode: "explain"` — see the README's
 "Agent-visible capacity waiting" section for the full contract. Reject
 immediately instead of waiting for a concurrency slot:
 
@@ -104,20 +133,21 @@ immediately instead of waiting for a concurrency slot:
   "id": 41,
   "method": "tools/call",
   "params": {
-    "name": "execute_structured_query",
+    "name": "run_structured_queries",
     "arguments": {
       "connection": "demo",
-      "query": { "from": "orders", "select": ["orders.id"], "limit": 10 },
+      "queries": [{ "from": "orders", "select": ["orders.id"], "limit": 10 }],
       "queue_mode": "fail_fast"
     }
   }
 }
 ```
 
-A capacity rejection returns `success: false`, `error_code: "VALIDATION"`,
-and `admission_state: "capacity_timeout"` plus `admission_id`/`queue_wait_ms`
-on the `MCPErrorResult`. A successful call returns those same
-`admission_id`/`queue_wait_ms` fields on the tool result instead.
+A capacity rejection surfaces as a per-item result: that query's `error`
+is set and `admission_state: "capacity_timeout"` plus
+`admission_id`/`queue_wait_ms` are set on the same result item — the other
+queries in the same call, if any, are unaffected. A successful item carries
+the same `admission_id`/`queue_wait_ms` fields.
 
 ## Top-N per group: top 2 orders by value per customer
 
@@ -127,20 +157,22 @@ on the `MCPErrorResult`. A successful call returns those same
   "id": 5,
   "method": "tools/call",
   "params": {
-    "name": "execute_structured_query",
+    "name": "run_structured_queries",
     "arguments": {
       "connection": "demo",
-      "query": {
-        "from": "orders",
-        "select": ["orders.customer_id", "orders.id", "orders.total_amount"],
-        "top_n": {
-          "partition_by": ["orders.customer_id"],
-          "order_by": [{ "col": "orders.total_amount", "dir": "desc" }],
-          "n": 2
-        },
-        "limit": 50,
-        "intent": "top 2 highest-value orders per customer"
-      }
+      "queries": [
+        {
+          "from": "orders",
+          "select": ["orders.customer_id", "orders.id", "orders.total_amount"],
+          "top_n": {
+            "partition_by": ["orders.customer_id"],
+            "order_by": [{ "col": "orders.total_amount", "dir": "desc" }],
+            "n": 2
+          },
+          "limit": 50,
+          "intent": "top 2 highest-value orders per customer"
+        }
+      ]
     }
   }
 }

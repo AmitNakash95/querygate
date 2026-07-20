@@ -43,9 +43,16 @@ def build_help_router(
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
     @router.get("/topics/{topic_id}", response_model=GuideTopicResponse)
-    async def get_guide_topic(topic_id: str):
+    async def get_guide_topic(
+        topic_id: str,
+        max_response_bytes: int = Query(
+            default=16_384,
+            ge=512,
+            description="Byte cap on the serialized response; truncates content.",
+        ),
+    ):
         try:
-            return get_guide_service().topic(topic_id)
+            return get_guide_service().topic(topic_id, max_response_bytes=max_response_bytes)
         except NotFoundError as exc:
             raise _not_found(exc)
 

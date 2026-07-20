@@ -362,7 +362,8 @@ async def test_catalog_search_returns_policy_filtered_provenance_without_databas
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
         visible = await client.get(
-            "/api/v1/demo/catalog/search", params={"q": "sales revenue", "limit": 3}
+            "/api/v1/demo/catalog/search",
+            params={"q": "sales revenue", "limit": 3, "verbose_provenance": True},
         )
         hidden = await client.get("/api/v1/demo/catalog/search", params={"q": "profit planning"})
 
