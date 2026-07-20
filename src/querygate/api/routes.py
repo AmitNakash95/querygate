@@ -229,30 +229,18 @@ def build_router(
             template_id=template.id,
             template_param_shape=sorted(request.parameters),
         )
-        try:
+        # Bind + execute exactly like execute_query: parameter binding and the
+        # pipeline raise the same actionable domain exceptions, which the
+        # centralized app-level handlers map (CapacityTimeoutError -> 422 with
+        # admission headers, PolicyViolationError/QueryValidationError/
+        # ConcurrencyLimitError -> 422); mask_unexpected masks everything else.
+        with mask_unexpected():
             query = bind_template(template, request.parameters)
             result = await service.execute(
                 query, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
             )
-        except CapacityTimeoutError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=str(exc),
-                headers=_admission_headers(
-                    admission_id=exc.admission_id,
-                    state=exc.admission_state,
-                    queue_wait_ms=exc.queue_wait_ms,
-                ),
-            )
-        except (PolicyViolationError, QueryValidationError, ConcurrencyLimitError) as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
-        except Exception:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=PUBLIC_INTERNAL_ERROR,
-            )
         response.headers.update(
-            _admission_headers(
+            admission_headers(
                 admission_id=result.admission_id,
                 state="completed",
                 queue_wait_ms=result.queue_wait_ms,
