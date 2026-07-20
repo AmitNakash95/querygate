@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import sqlalchemy as sa
 
+from querygate.compiler.dialect_adapters import get_dialect_adapter
 from querygate.connections.models import DatabaseDialect
 from querygate.core.auth import Principal
 from querygate.core.exceptions import QueryValidationError
@@ -138,39 +139,6 @@ def _ref_output_name(ref: str, alias_map: Dict[str, Any]) -> str:
     return ref
 
 
-def _date_bucket_expr(col: Any, granularity: str, dialect: str) -> Any:
-    """Date truncation, isolated per dialect (goal: dialect-specific code stays
-    contained). Postgres has native date_trunc (which also covers "week" and
-    "quarter" directly); MSSQL has no DATE_TRUNC, so it uses the DATEADD/
-    DATEDIFF truncation idiom instead; SQLite (examples/tests) uses strftime.
-    """
-    if dialect == DatabaseDialect.POSTGRESQL:
-        return sa.func.date_trunc(granularity, col)
-    if dialect == DatabaseDialect.MSSQL:
-        part = sa.literal_column(granularity)
-        zero = sa.literal_column("0")
-        return sa.func.dateadd(part, sa.func.datediff(part, zero, col), zero)
-    return _sqlite_date_bucket_expr(col, granularity)
-
-
-def _sqlite_date_bucket_expr(col: Any, granularity: str) -> Any:
-    if granularity == "day":
-        return sa.func.date(sa.func.strftime("%Y-%m-%d", col))
-    if granularity == "month":
-        return sa.func.date(sa.func.strftime("%Y-%m-01", col))
-    if granularity == "year":
-        return sa.func.date(sa.func.strftime("%Y-01-01", col))
-    if granularity == "week":
-        return sa.func.date(col, "weekday 0", "-6 days")
-    if granularity == "quarter":
-        month = sa.cast(sa.func.strftime("%m", col), sa.Integer)
-        quarter_start_month = ((month - 1) / 3) * 3 + 1
-        return sa.func.date(
-            sa.func.strftime("%Y", col) + "-" + sa.func.printf("%02d", quarter_start_month) + "-01"
-        )
-    raise QueryValidationError(f"Unsupported date_bucket granularity: {granularity!r}")
-
-
 def _compile_where(node: WhereNode, tables: Dict[str, sa.Table], alias_map: Dict[str, Any]) -> Any:
     if isinstance(node, Predicate):
         target = _resolve_predicate_target(node, tables, alias_map)
@@ -202,7 +170,7 @@ def _build_select_columns(
 
         if isinstance(item, DateBucketSelectItem):
             col = _column(tables, item.col)
-            expr = _date_bucket_expr(col, item.granularity, dialect)
+            expr = get_dialect_adapter(dialect).date_bucket(col, item.granularity)
             alias = item.alias or f"bucket_{col.name}_{item.granularity}"
             labeled = expr.label(alias)
             columns.append(labeled)
