@@ -808,6 +808,14 @@ attempts. Both read and probe scopes are deliberately independent of each
 other and of the config scopes above — reachability is a different privilege
 from configuration.
 
+The browser control plane's "Connection health" tab is a thin rendering
+layer over exactly this API — no new endpoint or backend logic, same pattern
+as the catalog workspace being a rendering layer over item 32B's REST
+routes. Each row's "Test now" button is disabled client-side (with an
+explanatory `title`) when the caller lacks `admin:connections:test` or the
+connection is deployment-disabled, mirroring how the catalog workspace
+already gates its own action buttons per scope.
+
 ### Why policy is per-connection, not global
 
 **File:** `src/querygate/policy/models.py`

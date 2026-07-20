@@ -10,6 +10,7 @@
     history: ["Control plane / Versions", "Immutable configuration history"],
     audit: ["Control plane / Audit trail", "Decisions without sensitive payloads"],
     catalog: ["Control plane / Catalog review", "Review, approve, and publish schema-catalog proposals"],
+    health: ["Control plane / Connection health", "Reachability, credential-free"],
   };
   const documentKeys = ["policy", "connections", "catalog"];
   const guardrailFields = {
@@ -55,6 +56,7 @@
     selectedProposalId: null,
     currentProposal: null,
     publishedComparison: null,
+    connectionHealth: [],
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -140,6 +142,7 @@
       loadCatalogProposals();
       loadCatalogVersions();
     }
+    if (name === "health" && state.access && !$("#health-body [data-health-row]")) loadConnectionHealth();
   }
 
   function formatDate(value) {
@@ -697,10 +700,17 @@
   }
 
   function renderAuditEvent(event) {
-    const kind = event.event_type === "query.execution" ? "Query execution" : event.event_type === "config.governance" ? `Config ${event.action}` : `Catalog ${event.action}`;
+    const kind = event.event_type === "query.execution" ? "Query execution"
+      : event.event_type === "config.governance" ? `Config ${event.action}`
+      : event.event_type === "catalog.governance" ? `Catalog ${event.action}`
+      : event.event_type === "connection.probe" ? "Connection probe"
+      : event.event_type;
     const subject = event.principal_id || "system";
     const context = event.connection_id || event.version_id || event.operation || "—";
-    const details = event.error_category ? `Error: ${event.error_category}` : event.query_shape?.from ? `Table: ${event.query_shape.from}` : `Surface: ${event.surface || "internal"}`;
+    const details = event.error_category ? `Error: ${event.error_category}`
+      : event.query_shape?.from ? `Table: ${event.query_shape.from}`
+      : event.event_type === "connection.probe" && typeof event.probe_healthy === "boolean" ? `Probe: ${event.probe_healthy ? "healthy" : "degraded"}`
+      : `Surface: ${event.surface || "internal"}`;
     return `<article class="audit-event">
       <div><time>${escapeHtml(formatDate(event.occurred_at))}</time><span class="event-id" title="${escapeHtml(event.event_id)}">${escapeHtml(event.event_id)}</span></div>
       <div><strong>${escapeHtml(kind)}</strong><p>${escapeHtml(subject)}</p></div>
@@ -1108,6 +1118,75 @@
     }
   }
 
+  function healthStatusChipClass(status) {
+    if (status === "healthy") return "good";
+    if (status === "degraded") return "bad";
+    if (status === "disabled") return "neutral";
+    return "warning"; // unknown — never checked yet
+  }
+
+  function renderConnectionHealth() {
+    const canTest = hasScope("admin:connections:test");
+    $("#health-body").innerHTML = state.connectionHealth.length ? state.connectionHealth.map((item) => {
+      const testTitle = !canTest
+        ? "Requires the admin:connections:test scope"
+        : !item.enabled
+          ? "Connection is disabled"
+          : "Trigger an immediate re-check";
+      return `<tr data-health-row="${escapeHtml(item.connection_id)}">
+        <td>${escapeHtml(item.connection_id)}</td>
+        <td>${escapeHtml(item.dialect)}</td>
+        <td><span class="status-chip ${healthStatusChipClass(item.status)}">${escapeHtml(item.status)}</span>${item.failure_category ? `<br><small>${escapeHtml(item.failure_category)}</small>` : ""}</td>
+        <td title="${escapeHtml(formatDate(item.last_checked ? item.last_checked * 1000 : null))}">${item.last_checked ? escapeHtml(relativeDate(item.last_checked * 1000)) : "—"}</td>
+        <td title="${escapeHtml(formatDate(item.last_success ? item.last_success * 1000 : null))}">${item.last_success ? escapeHtml(relativeDate(item.last_success * 1000)) : "—"}</td>
+        <td>${item.latency_ms != null ? `${item.latency_ms.toFixed(1)} ms` : "—"}</td>
+        <td>${item.schema_reflected ? "cached" : "—"}</td>
+        <td><button class="button secondary" type="button" data-test-connection="${escapeHtml(item.connection_id)}" title="${escapeHtml(testTitle)}" ${canTest && item.enabled ? "" : "disabled"}>Test now</button></td>
+      </tr>`;
+    }).join("") : '<tr><td colspan="8" class="empty-cell">No connections configured.</td></tr>';
+  }
+
+  async function loadConnectionHealth() {
+    if (!hasScope("admin:connections:read")) {
+      state.connectionHealth = [];
+      $("#health-body").innerHTML = '<tr><td colspan="8" class="empty-cell">Connect with admin:connections:read to load connection health.</td></tr>';
+      return;
+    }
+    const button = $("#refresh-health");
+    setBusy(button, true, "Loading…");
+    try {
+      state.connectionHealth = await api("/admin/connections");
+      renderConnectionHealth();
+    } catch (error) {
+      state.connectionHealth = [];
+      $("#health-body").innerHTML = `<tr><td colspan="8" class="empty-cell">${escapeHtml(error.message)}</td></tr>`;
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function testConnectionNow(connectionId) {
+    const button = $(`[data-test-connection="${CSS.escape(connectionId)}"]`);
+    setBusy(button, true, "Testing…");
+    try {
+      const result = await api(`/admin/connections/${encodeURIComponent(connectionId)}/test`, { method: "POST" });
+      const index = state.connectionHealth.findIndex((item) => item.connection_id === connectionId);
+      if (index >= 0) state.connectionHealth[index] = result;
+      renderConnectionHealth();
+      toast(
+        `${connectionId}: ${result.status}${result.failure_category ? ` — ${result.failure_category}` : ""}.`,
+        result.status === "degraded" ? "bad" : ""
+      );
+    } catch (error) {
+      // Covers unknown (404), disabled (409), no monitor running (503), and
+      // rate-limited (429) — the backend's detail message already explains
+      // which one and, for 429, how long to wait before trying again.
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
   async function loadGovernance(preserveDraft = true) {
     if (!canRead()) return;
     const [current, versions, configuration] = await Promise.all([
@@ -1262,6 +1341,11 @@
     $("#catalog-history-body").addEventListener("click", (event) => {
       const button = event.target.closest("[data-rollback-version]");
       if (button) rollbackCatalogVersion(button.dataset.rollbackVersion);
+    });
+    $("#refresh-health").addEventListener("click", () => loadConnectionHealth());
+    $("#health-body").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-test-connection]");
+      if (button) testConnectionNow(button.dataset.testConnection);
     });
     $("#confirm-cancel").addEventListener("click", () => { $("#confirm-dialog").returnValue = "cancel"; });
     $("#confirm-accept").addEventListener("click", (event) => {

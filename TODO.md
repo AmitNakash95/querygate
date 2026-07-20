@@ -72,7 +72,7 @@ order-of-magnitude, not commitments.
 | 40 | ✅ Semantic access diff for config changes (phase 1: connection-baseline diff + REST; phase 2: per-principal resolution not started) | L | 6, 25, 31, 39 |
 | 41 | ✅ Policy-change blast-radius analysis (phase 1: bounded synchronous aggregation + ranking; phase 2: async/paginated evaluation for very large principal counts not started) | M–L | 22, 25, 31, 40 |
 | 42 | Four-eyes config approval and separation of duties | XL | 10, 23, 25, 31 |
-| 43 | ✅ Admin connection-operations and health workspace (phase 1: admin connection-status API; phase 2a: "test now" probe; phase 2b: browser workspace not started) | L | 7, 12, 31 |
+| 43 | ✅ Admin connection-operations and health workspace (phase 1: admin connection-status API; phase 2a: "test now" probe; phase 2b: browser workspace) | L | 7, 12, 31 |
 | 44 | Admin observability and rejection-trend dashboard | L | 12, 23, 31, 35 |
 | 45 | Dedicated non-admin “My access” portal | M | 22, 31, 33 |
 | 46 | Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
@@ -2990,10 +2990,11 @@ and audit every transition without YAML content. Keep a documented single-
 administrator mode for smaller deployments, but never simulate four-eyes in
 the browser while the server still permits self-approval.
 
-### 43. Admin connection-operations and health workspace
+### 43. Admin connection-operations and health workspace ✅ DONE
 
 **Phase 1 shipped (admin connection-status API); phase 2a shipped (rate-limited
-"test now" probe); phase 2b (browser workspace) not started.**
+"test now" probe); phase 2b shipped (browser workspace). All three phases
+complete.**
 
 `GET /api/v1/admin/connections` (`api/admin_connections_routes.py`) returns a
 credential-free, per-connection operational status built from the same
@@ -3045,13 +3046,43 @@ update, non-disclosure, audit persistence), and
 `tests/security/test_adversarial_security.py`
 (`test_admin_connections_test_now_requires_its_own_scope`).
 
-**Phase 2b (not started):** the browser workspace that renders this status
-view and exposes the "test now" action. Split out because both REST pieces
-above are independently useful without any UI (operators/monitoring/CLI can
-already consume them directly), and the workspace is purely a rendering
-layer on top of an already-complete, already-tested API surface.
+**Phase 2b shipped:** a new "Connection health" workspace (nav item 08) in
+the existing browser control plane (`admin_ui/index.html`, `admin_ui/app.js`),
+built entirely on the already-tested REST surface above — no new endpoint,
+no new backend logic. Lists every configured connection (dialect, status
+chip, last checked/success, latency, schema-reflected state, and failure
+category when degraded) and gives each row its own "Test now" button, gated
+client-side on `admin:connections:test` (disabled with an explanatory
+`title` otherwise, mirroring how the catalog workspace already gates its own
+action buttons on `catalog:edit`/`catalog:approve`/etc.) and on the
+connection's `enabled` flag. A click calls the phase 2a endpoint and updates
+just that row in place from the response; a `429` reuses the backend's own
+"retry in Ns" message via the existing toast mechanism rather than a new UI
+affordance. Lazy-loads the same way the audit/catalog tabs already do
+(on first visit while authenticated).
 
-**Original scope (for reference — see above for what shipped in phases 1 and 2a):**
+Verified against a real running app and a real Postgres connection with
+Playwright driving a headless browser, not just a code read: connecting,
+switching to the tab, watching the row populate with live status/latency,
+clicking "Test now" and seeing the row update and a success toast, a second
+immediate click correctly surfacing the `429`/cooldown toast, and the
+resulting `connection.probe` audit events appearing correctly in the audit
+trail tab.
+
+That last check caught two real, pre-existing gaps this item's own new
+event type exposed, both fixed here: `admin_ui/app.js`'s `renderAuditEvent()`
+only special-cased `query.execution`/`config.governance` and silently
+mislabeled everything else — including the new `connection.probe` events,
+and latently `catalog.governance` too — as `Catalog ${event.action}` (so a
+probe event rendered as "Catalog undefined"); and
+`api/admin_ui_routes.py`'s `_AUDIT_EVENT_TYPES` allowlist for the
+`event_type` filter param didn't include `"connection.probe"`, so filtering
+the audit browser down to just probe events would have 422'd. Both are fixed
+generically (explicit branches per event type; the new type added to the
+allowlist) rather than special-cased narrowly. Covered by
+`tests/integration/test_admin_ui.py::test_audit_browser_accepts_connection_probe_event_type`.
+
+**Original scope (for reference — see above for what shipped in phases 1, 2a, and 2b):**
 
 **Effort: L (3–5 days).** The aggregate readiness monitor already exists, but
 an admin surface needs a separately authorized detailed health model, safe
