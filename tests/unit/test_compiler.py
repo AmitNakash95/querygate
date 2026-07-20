@@ -685,3 +685,205 @@ class TestCompiler:
         )
         _, limit = compile_structured_query(query, tables, policy)
         assert limit == 500
+
+
+class TestCrossDialectRendering:
+    """TODO.md item 78 — every item-68-77 compiler code path that previously
+    only had a Postgres-default (or single-dialect) render test also gets a
+    dialect="mssql" one, closing the gap where a feature could render fine
+    on Postgres and be unrenderable/wrong on MSSQL without any test noticing
+    (exactly what caught the NULLS FIRST/LAST and stddev/variance naming
+    gaps items 74/75 had to work around). Rendering-level, not live
+    execution — see that item's own scope note on why.
+    """
+
+    def test_distinct_renders_on_mssql(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders", select=["orders.status"], distinct=True, limit=10
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "SELECT DISTINCT" in compiled.upper()
+
+    def test_count_distinct_renders_on_mssql(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[AggregateSelectItem(fn="count", col="orders.status", distinct=True, alias="n")],
+            limit=10,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "COUNT(DISTINCT" in compiled.upper()
+
+    def test_self_join_renders_on_mssql(self):
+        metadata = sa.MetaData()
+        employees = sa.Table(
+            "employees",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("name", sa.String(100)),
+            sa.Column("manager_id", sa.Integer),
+        )
+        tables = {"e": employees.alias("e"), "m": employees.alias("m")}
+        query = StructuredQuery(
+            from_table="employees",
+            from_alias="e",
+            select=["e.name", "m.name"],
+            joins=[JoinSpec(table="employees", alias="m", on=["e.manager_id", "m.id"])],
+            limit=10,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "JOIN" in compiled.upper()
+        assert "AS m" in compiled
+
+    def test_not_group_renders_on_mssql(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            where=WhereGroup(
+                not_terms=WhereGroup(
+                    and_terms=[
+                        Predicate(col="orders.status", op="eq", value="completed"),
+                        Predicate(col="orders.total_amount", op="gt", value=100),
+                    ]
+                )
+            ),
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "NOT" in compiled.upper()
+
+    def test_value_col_comparison_renders_on_mssql(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            where=Predicate(col="orders.total_amount", op="gt", value_col="orders.id"),
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "orders.total_amount > orders.id" in compiled
+
+    def test_lower_upper_trim_concat_render_on_mssql(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                {"fn": "lower", "args": [{"col": "orders.status"}], "as": "lc"},
+                {"fn": "upper", "args": [{"col": "orders.status"}], "as": "uc"},
+                {"fn": "trim", "args": [{"col": "orders.status"}], "as": "tc"},
+                {
+                    "fn": "concat",
+                    "args": [{"col": "orders.status"}, {"literal": "!"}],
+                    "as": "cc",
+                },
+            ],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "lower(orders.status)" in compiled
+        assert "upper(orders.status)" in compiled
+        assert "trim(orders.status)" in compiled
+        assert "concat(orders.status" in compiled
+
+    def test_case_with_else_renders_on_mssql(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                {
+                    "when": [
+                        {
+                            "when": {"col": "orders.status", "op": "eq", "value": "completed"},
+                            "then": {"literal": "Done"},
+                        }
+                    ],
+                    "else": {"literal": "Open"},
+                    "as": "label",
+                }
+            ],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "CASE WHEN" in compiled.upper()
+        assert "ELSE" in compiled.upper()
+
+    def test_composite_join_key_renders_on_mssql(self):
+        metadata = sa.MetaData()
+        orders = sa.Table(
+            "orders",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("tenant_id", sa.Integer),
+        )
+        order_items = sa.Table(
+            "order_items",
+            metadata,
+            sa.Column("order_id", sa.Integer),
+            sa.Column("tenant_id", sa.Integer),
+            sa.Column("sku", sa.String(20)),
+        )
+        tables = {"orders": orders, "order_items": order_items}
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id", "order_items.sku"],
+            joins=[
+                JoinSpec(
+                    table="order_items",
+                    on=["orders.tenant_id", "order_items.tenant_id"],
+                    extra_on=[["orders.id", "order_items.order_id"]],
+                )
+            ],
+            limit=10,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "orders.tenant_id = order_items.tenant_id" in compiled
+        assert "orders.id = order_items.order_id" in compiled
+        assert "AND" in compiled.upper()
+
+    def test_predicate_col_fn_renders_on_mssql(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            where=Predicate(
+                col_fn={"fn": "lower", "args": [{"col": "orders.status"}]},
+                op="eq",
+                value="active",
+            ),
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "lower(orders.status) = 'active'" in compiled
+
+    def test_having_predicate_col_fn_renders_on_mssql(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.status", AggregateSelectItem(fn="count", col="*", alias="n")],
+            group_by=["orders.status"],
+            having=[
+                Predicate(
+                    col_fn={
+                        "fn": "coalesce",
+                        "args": [{"col": "orders.total_amount"}, {"literal": 0}],
+                    },
+                    op="gt",
+                    value=0,
+                )
+            ],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "coalesce(orders.total_amount, 0) >" in compiled
