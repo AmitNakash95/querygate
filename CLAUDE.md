@@ -77,10 +77,13 @@ in order, for `execute`/`explain`:
    joins here (a join's own `connection` field) and enforces the
    `join_group` policy rule.
 3. **`compiler/sqlalchemy_compiler.py`** — turns the validated AST + `Policy`
-   into a SQLAlchemy Core `Select`. Dialect-specific behavior (date bucketing:
-   Postgres `date_trunc` vs MSSQL `DATEADD`/`DATEDIFF` vs SQLite `strftime`)
-   is isolated to one function here (`_date_bucket_expr`); everything else is
-   dialect-agnostic Core.
+   into a SQLAlchemy Core `Select`. Dialect-specific behavior (date bucketing,
+   `ORDER BY` nulls handling, statistical/aggregate function naming) is
+   isolated behind `compiler/dialect_adapters.py`'s `DialectAdapter`
+   interface (TODO.md item 73) — one concrete adapter class per dialect
+   (`PostgresDialectAdapter`/`MSSQLDialectAdapter`/`SQLiteDialectAdapter`),
+   never an inline `if dialect == ...` branch at a call site; everything
+   else is dialect-agnostic Core.
 4. **`execution/concurrency.py`** — guards actual execution through either a
    single-process semaphore or a Redis-backed distributed limiter.
 5. **`connections/engine.py`** — session lifecycle + dialect-specific session
@@ -89,6 +92,60 @@ in order, for `execute`/`explain`:
 6. **`audit/logger.py` / `audit/sinks.py`** — every attempt is logged and can
    be persisted as a versioned, redaction-safe JSONL event. Persisted events
    never include SQL, predicate values, rows, exceptions, or credentials.
+
+### Engine philosophy: expose primitives, don't spoon-feed the agent
+
+QueryGate's job is to expose querying that's as expressive and flexible as
+real raw SQL — CASE expressions, functions, predicates, ordering, joins,
+even multiple round-trip queries — bounded only by what a caller's schema
+and the connection's policy allow, and by what the target dialect
+*genuinely* supports. It is **not** the engine's job to pre-solve query
+construction for the calling agent. The agent is expected to bring its own
+reasoning about the user's goal, the schema, and the tools/AST surface
+exposed to it, and compose one or more `StructuredQuery`s to get the
+result it wants — the same way a human SQL author would hand-write a
+workaround using real building blocks, not expect the database to have a
+bespoke keyword for every scenario.
+
+This gives a sharper test than "does every dialect support this" alone:
+
+- **Mechanical translation of the same AST-expressed operation into each
+  dialect's native syntax is fine** — that's what a compiler is for. Date
+  bucketing (Postgres `date_trunc` vs. MSSQL's `DATEADD`/`DATEDIFF` idiom),
+  `stddev`/`variance` naming (`STDEV`/`VAR` on MSSQL), `string_agg` vs.
+  `STRING_AGG` vs. `group_concat` — every dialect answers the identical
+  semantic question in its own idiom. Every `DialectAdapter` method is this
+  shape.
+- **Do not force feature parity when a dialect genuinely lacks the
+  capability** (e.g. `array_agg` — T-SQL has no array/collection type at
+  all): implement it for real where it exists, and have the adapter method
+  on a dialect that can't raise `QueryValidationError` explaining the gap,
+  rather than inventing an emulation.
+- **Do not synthesize query structure the AST never asked for**, to paper
+  over a dialect's missing keyword — that's the engine solving the
+  agent's composition problem instead of exposing a primitive. Concretely
+  under active reconsideration: `MSSQLDialectAdapter.order_by_terms`
+  (TODO.md item 74) currently injects an *extra CASE-based sort column*
+  into the query when `OrderBySpec.nulls` is set, since T-SQL has no
+  `NULLS FIRST/LAST` syntax — structure the caller never expressed in the
+  AST. An agent can already build that exact CASE-bucket itself with
+  primitives QueryGate already exposes (`CaseSelectItem` for the bucket,
+  multiple `OrderBySpec` entries for the tie-break); whether the engine
+  should keep doing it automatically, or instead reject `nulls` on MSSQL
+  the same way `array_agg` will be rejected there, is an open question —
+  don't treat it as settled either way without asking first, and don't use
+  it as precedent for a similar shortcut elsewhere.
+
+**Exceptions are possible but must be deliberate, not assumed.** If a
+specific case seems to genuinely warrant the engine doing more than
+mechanical translation — synthesizing structure on the agent's behalf for
+a good, concrete reason — that is a design discussion to have explicitly
+(with the user, or recorded as a reasoned Decision Log entry in
+`docs/PRODUCT_GUIDE.md`) before implementing it, not a default anyone
+should reach for under time pressure or convenience. Treat this section's
+rule as the default for all new work; an exception must be justified on
+its own terms, in the open, the same way item 74's MSSQL nulls handling is
+being discussed rather than silently kept or silently reverted.
 
 ### Connections and policy are file-configured, not code-configured
 
