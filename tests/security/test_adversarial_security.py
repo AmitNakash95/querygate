@@ -913,6 +913,33 @@ async def test_admin_connections_status_requires_its_own_scope():
 
 
 @pytest.mark.asyncio
+async def test_admin_connections_test_now_requires_its_own_scope():
+    """The "test now" probe (item 43 phase 2) is gated by
+    admin:connections:test specifically — holding admin:connections:read
+    (or any config scope) must not be enough to trigger a live probe, and
+    holding only admin:connections:test must not be enough to read the
+    passive status list either. Each is its own least-privilege grant.
+    """
+    read_only = create_app(_governance_app(scopes=["admin:connections:read"]))
+    test_only = create_app(_governance_app(scopes=["admin:connections:test"]))
+    headers = {"Authorization": "Bearer governance-caller-key"}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=read_only), base_url="http://localhost"
+    ) as client:
+        probe_resp = await client.post("/api/v1/admin/connections/demo/test", headers=headers)
+        unauth_probe_resp = await client.post("/api/v1/admin/connections/demo/test")
+    async with AsyncClient(
+        transport=ASGITransport(app=test_only), base_url="http://localhost"
+    ) as client:
+        list_resp = await client.get("/api/v1/admin/connections", headers=headers)
+
+    assert probe_resp.status_code == 403
+    assert unauth_probe_resp.status_code in (401, 403)
+    assert list_resp.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_invalid_staged_version_is_rejected_not_silently_applied():
     """A candidate that fails validation must never become a persisted,
     applicable version — an admin caller retrying a broken submission

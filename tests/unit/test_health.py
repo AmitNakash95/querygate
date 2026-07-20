@@ -147,6 +147,45 @@ async def test_check_once_records_latency_and_last_success():
 
 
 @pytest.mark.asyncio
+async def test_manual_check_updates_shared_status_and_records_cooldown():
+    with patch.object(health_module, "_ping", new_callable=AsyncMock):
+        monitor = HealthMonitor(interval_seconds=1000)
+        assert monitor.seconds_until_manual_test_allowed("demo", cooldown_seconds=10) == 0.0
+
+        health = await monitor.manual_check("demo")
+
+    assert health.healthy is True
+    assert monitor.snapshot()["demo"].healthy is True
+    # A probe was just recorded, so an immediate second one is on cooldown.
+    remaining = monitor.seconds_until_manual_test_allowed("demo", cooldown_seconds=10)
+    assert 0 < remaining <= 10
+
+
+@pytest.mark.asyncio
+async def test_manual_check_cooldown_expires_and_is_per_connection():
+    with patch.object(health_module, "_ping", new_callable=AsyncMock):
+        monitor = HealthMonitor(interval_seconds=1000)
+        await monitor.manual_check("demo")
+
+    # A very short cooldown has already elapsed by the time we check again.
+    assert monitor.seconds_until_manual_test_allowed("demo", cooldown_seconds=0) == 0.0
+    # A connection that was never manually tested is never on cooldown.
+    assert monitor.seconds_until_manual_test_allowed("other", cooldown_seconds=10) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_manual_check_records_a_failure_like_the_background_loop():
+    with patch.object(
+        health_module, "_ping", new_callable=AsyncMock, side_effect=ConnectionRefusedError("no")
+    ):
+        monitor = HealthMonitor(interval_seconds=1000)
+        health = await monitor.manual_check("demo")
+
+    assert health.healthy is False
+    assert health.failure_category == "unreachable"
+
+
+@pytest.mark.asyncio
 async def test_last_success_persists_across_a_later_failure():
     with patch.object(health_module, "_ping", new_callable=AsyncMock):
         monitor = HealthMonitor(interval_seconds=1000)

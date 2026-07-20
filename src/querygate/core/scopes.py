@@ -9,6 +9,11 @@ ADMIN_CONFIG_WRITE_SCOPE = "admin:config:write"
 # connection is reachable is a distinct privilege from reading/changing what
 # QueryGate connects to.
 ADMIN_CONNECTIONS_READ_SCOPE = "admin:connections:read"
+# The "test now" probe (item 43 phase 2) triggers a real, immediate
+# connection attempt against a customer database on demand — a distinct,
+# audited action from passively reading the last cached status, so it gets
+# its own least-privilege scope rather than being implied by the read scope.
+ADMIN_CONNECTIONS_TEST_SCOPE = "admin:connections:test"
 
 # Catalog governance (TODO.md item 32B) — least-privilege, split by
 # operation rather than one broad "catalog admin" scope.
