@@ -397,3 +397,57 @@ class PolicyBlastRadiusReport(pyd.BaseModel):
     )
 
     model_config = pyd.ConfigDict(extra="forbid")
+
+
+class TemplateParameter(pyd.BaseModel):
+    """One typed input a policy template (TODO.md item 46) needs rendered.
+
+    Templates never infer parameters from live schema/table names and never
+    carry credentials or tenant values — every value here comes from the
+    caller filling in the template's own declared, reviewed parameter list.
+    """
+
+    name: str
+    label: str
+    type: Literal["string", "integer", "string_list"]
+    required: bool = True
+    default: Optional[Any] = None
+    description: str
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class PolicyTemplateSummary(pyd.BaseModel):
+    id: str
+    name: str
+    description: str
+    parameters: list[TemplateParameter] = pyd.Field(default_factory=list)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class PolicyTemplateRenderRequest(pyd.BaseModel):
+    template_id: str = pyd.Field(min_length=1, max_length=100)
+    params: Dict[str, Any] = pyd.Field(default_factory=dict, max_length=50)
+    # The caller's current local, uncommitted policy draft to merge into.
+    # Omitted/empty starts from an empty document.
+    policy_yaml: Optional[str] = pyd.Field(default=None, max_length=200_000)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class PolicyTemplateRenderResult(pyd.BaseModel):
+    """A template applied to the caller's local draft via a monotonically
+    restrictive merge: it can only add or tighten a restriction already
+    present in that draft, never loosen or remove one. `rules` is a plain-
+    English preview of every rule the merged document now enforces so an
+    administrator can review before staging — normal validation (`/validate`)
+    plus item 39's candidate simulation still run against the result exactly
+    like any other hand-edited draft; this endpoint persists nothing.
+    """
+
+    policy_yaml: str
+    rules: list[str]
+    warnings: list[str] = pyd.Field(default_factory=list)
+
+    model_config = pyd.ConfigDict(extra="forbid")
