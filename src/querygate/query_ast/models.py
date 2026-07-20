@@ -26,7 +26,8 @@ CompareOp = Literal[
     "is_null",
     "is_not_null",
 ]
-AggregateFn = Literal["count", "sum", "avg", "min", "max"]
+AggregateFn = Literal["count", "sum", "avg", "min", "max", "stddev", "variance"]
+_NO_DISTINCT_AGG_FNS = frozenset({"stddev", "variance"})
 JoinType = Literal["inner", "left"]
 SortDir = Literal["asc", "desc"]
 RankFn = Literal["row_number", "rank", "dense_rank"]
@@ -51,9 +52,15 @@ class AggregateSelectItem(pyd.BaseModel):
     model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
 
     @pyd.model_validator(mode="after")
-    def _distinct_requires_real_column(self) -> "AggregateSelectItem":
+    def _validate_distinct(self) -> "AggregateSelectItem":
         if self.distinct and self.col == "*":
             raise ValueError("distinct is not valid with count(*) — give a real column")
+        if self.distinct and self.fn in _NO_DISTINCT_AGG_FNS:
+            raise ValueError(
+                f"distinct is not valid with {self.fn} — MSSQL's STDEV/VAR don't accept "
+                "DISTINCT, so this stays rejected on every dialect rather than working on "
+                "Postgres and breaking on MSSQL"
+            )
         return self
 
 

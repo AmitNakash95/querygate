@@ -57,6 +57,18 @@ _RANK_FNS = {
     "dense_rank": sa.func.dense_rank,
 }
 
+_STAT_FNS = {"stddev", "variance"}
+
+
+def _aggregate_fn(fn_name: str, dialect: str) -> Any:
+    """count/sum/avg/min/max are dialect-universal (the flat _AGG_FNS dict).
+    stddev/variance are not (MSSQL's real functions are STDEV/VAR) — routed
+    through the DialectAdapter instead of a fourth ad hoc dialect branch.
+    """
+    if fn_name in _STAT_FNS:
+        return get_dialect_adapter(dialect).stat_fn(fn_name)
+    return _AGG_FNS[fn_name]
+
 
 def _table_by_name(tables: Dict[str, sa.Table], name: str) -> sa.Table:
     for key, table in tables.items():
@@ -207,7 +219,7 @@ def _build_select_columns(
             alias_map[item.alias] = labeled
             continue
 
-        fn = _AGG_FNS[item.fn]
+        fn = _aggregate_fn(item.fn, dialect)
         if item.col == "*":
             if item.fn != "count":
                 raise QueryValidationError("Only count(*) is allowed as a star aggregate")
