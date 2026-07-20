@@ -12,6 +12,7 @@ from typing import Dict, List, Literal, Optional, Union
 
 import pydantic as pyd
 
+from querygate.admin.models import EffectiveGuardrails, MandatoryFilterReadiness
 from querygate.connections.models import PublicConnectionInfo
 
 
@@ -109,6 +110,21 @@ class CallerCapabilities(pyd.BaseModel):
     model_config = pyd.ConfigDict(extra="forbid")
 
 
+class ConnectionAccessDetail(pyd.BaseModel):
+    """Effective, per-connection access for the authenticated caller.
+
+    Mirrors item 39's candidate-simulation redaction posture (guardrail
+    numbers and claim readiness only) applied to the caller's own, already
+    active policy rather than an uncommitted candidate.
+    """
+
+    connection: str
+    guardrails: EffectiveGuardrails
+    mandatory_filters: List[MandatoryFilterReadiness]
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
 class AccessSummary(pyd.BaseModel):
     querygate_version: str
     principal: str
@@ -116,6 +132,7 @@ class AccessSummary(pyd.BaseModel):
     scopes: List[str]
     capabilities: CallerCapabilities
     visible_connections: List[PublicConnectionInfo]
+    connection_access: List[ConnectionAccessDetail]
     guidance: str
     citation: GuideCitation
 

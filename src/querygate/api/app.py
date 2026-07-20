@@ -154,6 +154,9 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
     admin_ui_dir = Path(__file__).resolve().parent.parent / "admin_ui"
     application.mount("/admin", StaticFiles(directory=admin_ui_dir, html=True), name="admin-ui")
 
+    access_ui_dir = Path(__file__).resolve().parent.parent / "access_ui"
+    application.mount("/access", StaticFiles(directory=access_ui_dir, html=True), name="access-ui")
+
     @application.middleware("http")
     async def inject_request_context(request: Request, call_next):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
@@ -168,7 +171,9 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         finally:
             context_logger.reset(token)
         response.headers["X-Request-ID"] = request_id
-        if request.url.path == "/admin" or request.url.path.startswith("/admin/"):
+        is_admin_ui = request.url.path == "/admin" or request.url.path.startswith("/admin/")
+        is_access_ui = request.url.path == "/access" or request.url.path.startswith("/access/")
+        if is_admin_ui or is_access_ui:
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; script-src 'self'; style-src 'self'; "
                 "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
@@ -176,7 +181,7 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             )
             response.headers["Referrer-Policy"] = "no-referrer"
             response.headers["X-Content-Type-Options"] = "nosniff"
-            if request.url.path in {"/admin", "/admin/"}:
+            if request.url.path in {"/admin", "/admin/", "/access", "/access/"}:
                 response.headers["Cache-Control"] = "no-store"
         return response
 
