@@ -4528,6 +4528,18 @@ depending on which connection answered it is exactly the kind of silent
 inconsistency this project's dialect-isolation discipline exists to
 prevent.
 
+**Revised (2026-07-20) — MSSQL now rejects `nulls`, does not emulate.** The
+CASE-bucket emulation above was reconsidered against the "expose primitives,
+don't spoon-feed the agent" rule (CLAUDE.md, added after this item shipped):
+injecting an extra sort column the AST never expressed is the engine solving
+the agent's composition problem. `MSSQLDialectAdapter.order_by_terms` now
+raises `QueryValidationError` when `nulls` is set — same posture as
+`array_agg` (item 81) — at both the main `order_by` and `top_n` rank-ordering
+call sites. Postgres/SQLite keep native `.nulls_first()/.nulls_last()`. An
+agent wanting null placement on MSSQL composes it directly with primitives
+already exposed (a `CaseSelectItem` 0/1 "is null" bucket + a leading
+`OrderBySpec` on it). Recorded in `docs/PRODUCT_GUIDE.md`'s Decision Log.
+
 ### 75. `stddev`/`variance` aggregate functions ✅ DONE
 
 **Problem.** No statistical aggregates existed at all.
