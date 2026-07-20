@@ -85,6 +85,9 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     # TODO.md item 46: safe-start policy templates panel.
     assert "Safe-start templates" in response.text
     assert "/admin/config/templates/render" in script.text
+    # TODO.md item 48: read-only query-templates browse panel.
+    assert "Query templates" in response.text
+    assert "/query-templates" in script.text
 
 
 @pytest.mark.asyncio
@@ -290,3 +293,17 @@ async def test_admin_support_apis_require_config_scope(tmp_path, monkeypatch):
     assert policy_test.status_code == 403
     assert audit.status_code == 403
     assert parse.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_query_templates_endpoint_is_reachable_and_needs_no_config_scope(
+    tmp_path, monkeypatch
+):
+    """The read-only query-templates panel (item 48) calls GET /query-templates,
+    which is filtered by per-connection visibility and needs no config scope —
+    so it returns 200 (a list) even for a caller with no scopes at all."""
+    app = create_app(_settings(tmp_path, monkeypatch, scopes=[]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        response = await client.get("/api/v1/query-templates", headers=_auth())
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)

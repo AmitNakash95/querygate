@@ -288,6 +288,15 @@ input:hover, select:hover, textarea:hover { border-color: var(--line-strong); }
 .audit-event strong { display: block; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .audit-event p { overflow: hidden; margin-top: 3px; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .audit-event .status-chip { justify-self: end; }
+.template-card { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.template-card:hover { border-color: var(--line-strong); }
+.template-card > div { min-width: 0; }
+.template-card strong { display: block; font-size: 12px; }
+.template-card p { margin: 4px 0 9px; color: var(--muted); font-size: 11px; }
+.template-card .status-chip { flex: none; }
+.template-params { display: flex; flex-wrap: wrap; gap: 7px; }
+.template-param { color: var(--muted); font-size: 10px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; }
+.template-param code { font: 10px/1.5 var(--font-mono); }
 .load-more { display: flex; justify-content: center; padding-top: 20px; }
 .empty-state { padding: 22px 4px; color: var(--faint); font-size: 11px; text-align: center; }
 
