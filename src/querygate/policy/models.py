@@ -102,6 +102,16 @@ class Policy(pyd.BaseModel):
     max_partition_by: int = pyd.Field(default=5)
     max_batch_size: int = pyd.Field(default=10)
 
+    # Resource-exhaustion guardrails on WHERE/HAVING shape that the other caps
+    # above don't cover: max_where_depth bounds *nesting*, not the total
+    # number of predicate leaves, so a single-level `or` with thousands of
+    # terms passes depth checks while still compiling into a huge boolean
+    # expression. max_in_list_size separately bounds one `in`/`not_in`
+    # predicate's value list, since that's an unbounded-size field with no
+    # other cap touching it.
+    max_where_predicates: int = pyd.Field(default=100)
+    max_in_list_size: int = pyd.Field(default=1000)
+
     # `max_limit`/`max_limit_aggregate` cap row *count*; this caps response
     # *size* — a wide TEXT/JSONB/BLOB column selected across many rows is a
     # policy-compliant query that can still blow up the response body. Rows

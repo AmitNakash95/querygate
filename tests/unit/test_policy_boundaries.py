@@ -153,6 +153,46 @@ def test_max_partition_by_one_over_cap_rejected(n):
         validate_policy(query, Policy(max_partition_by=n), connection_id="demo")
 
 
+def _flat_or(n: int) -> WhereGroup:
+    return WhereGroup(
+        or_terms=[Predicate(col="orders.status", op="eq", value=f"s{i}") for i in range(n)]
+    )
+
+
+@pytest.mark.parametrize("n", [1, 5, 20])
+def test_max_where_predicates_at_cap_passes(n):
+    query = StructuredQuery(from_table="orders", select=["orders.id"], where=_flat_or(n))
+    validate_policy(query, Policy(max_where_predicates=n), connection_id="demo")
+
+
+@pytest.mark.parametrize("n", [1, 5, 20])
+def test_max_where_predicates_one_over_cap_rejected(n):
+    query = StructuredQuery(from_table="orders", select=["orders.id"], where=_flat_or(n + 1))
+    with pytest.raises(PolicyViolationError, match="where predicate count"):
+        validate_policy(query, Policy(max_where_predicates=n), connection_id="demo")
+
+
+@pytest.mark.parametrize("n", [1, 5, 20])
+def test_max_in_list_size_at_cap_passes(n):
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        where=Predicate(col="orders.status", op="in", value=[f"s{i}" for i in range(n)]),
+    )
+    validate_policy(query, Policy(max_in_list_size=n), connection_id="demo")
+
+
+@pytest.mark.parametrize("n", [1, 5, 20])
+def test_max_in_list_size_one_over_cap_rejected(n):
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        where=Predicate(col="orders.status", op="in", value=[f"s{i}" for i in range(n + 1)]),
+    )
+    with pytest.raises(PolicyViolationError, match="max_in_list_size"):
+        validate_policy(query, Policy(max_in_list_size=n), connection_id="demo")
+
+
 @pytest.mark.parametrize("n", [1, 3, 10])
 def test_max_batch_size_at_cap_passes(n):
     from querygate.validation.policy_validation import validate_batch_size
