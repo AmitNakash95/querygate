@@ -1040,6 +1040,12 @@ Agent (MCP) / Client (REST)
   export/import (backup/restore), and terminal-state-only retention/
   deletion — all through the same `CatalogFileRepository` lock as schema
   refresh and draft generation.
+- **`templates/`** — admin-defined, named, parameterized `StructuredQuery`
+  skeletons (item 48) loaded from an optional `TEMPLATES_FILE`. `bind_template`
+  type-checks the caller's parameters, substitutes them, and hands the
+  resulting `StructuredQuery` to the same `StructuredQueryService` an ad-hoc
+  query uses — a template inherits every policy/schema/guardrail check and
+  cannot exceed policy or contain raw SQL.
 - **`validation/`** — schema-truth checks (does this table/column exist?)
   and policy checks (is it allowed? within caps?) — deliberately separate
   modules, run in that order, both before compilation.

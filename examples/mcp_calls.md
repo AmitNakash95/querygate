@@ -121,6 +121,33 @@ of rows:
 }
 ```
 
+## Query templates (curated, admin-defined)
+
+`list_query_templates` returns the named, parameterized templates you may
+invoke; `run_query_template` runs one by id with typed parameters. A template is
+a stored `StructuredQuery`, not raw SQL, and enforces the same policy, schema,
+and guardrail checks as an ad-hoc query.
+
+```json
+{
+  "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+  "params": { "name": "list_query_templates", "arguments": {} }
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+  "params": {
+    "name": "run_query_template",
+    "arguments": {
+      "template_id": "orders_for_customer",
+      "parameters": { "customer_id": 1, "limit": 5 }
+    }
+  }
+}
+```
+
 ## Capacity waiting (queue_mode / wait_timeout_seconds)
 
 Optional tool arguments, ignored in `mode: "explain"` — see the README's
