@@ -90,6 +90,12 @@ order-of-magnitude, not commitments.
 | 58 | Published adversarial benchmark vs. raw-SQL agent and Google Toolbox | M | 28, 36 |
 | 59 | Read-only behavioral anomaly surfacing on the audit stream | M | 32C, 44 |
 | 60 | Bug bounty / responsible disclosure program | S | 53 |
+| 61 | Deduplicate the StructuredQuery JSON Schema across execute/explain/batch tools | S–M | — |
+| 62 | Consolidate redundant instructional prose into one source of truth | M | 61 (pairs well) |
+| 63 | Scope-gate admin-only tool schemas out of non-admin sessions | M | 8, 22 |
+| 64 | Make full catalog provenance opt-in on describe_table/search_catalog | S–M | 27 |
+| 65 | Add a response-size cap to get_querygate_guide_topic | XS–S | — |
+| 66 | CI/test guardrail on total MCP schema+instructions size | S | 61, 62, 63, 64, 65 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
@@ -103,6 +109,12 @@ Items 49–60 are proposed, not yet triaged into a priority tranche — added
 from an explicit competitive-gap analysis against Google's Gen AI Toolbox,
 Hasura, and Immuta/Privacera-class governance products. They live in their
 own "P4" section below until reviewed and pulled forward into P2/P3.
+
+Items 61–66 are proposed, not yet triaged into a priority tranche — added
+from an explicit MCP token/context-efficiency audit against DBHub
+(bytebase/dbhub) and Google's MCP Toolbox for Databases, both much leaner
+MCP surfaces. They live in their own "P5" section below until reviewed and
+pulled forward into P2/P3.
 
 \*\* item 53's effort is engineering coordination and remediation only; the
 audit itself is an external vendor engagement and calendar-time cost, not
@@ -3613,3 +3625,222 @@ responsibly.
 on a bounty/recognition structure appropriate to the project's current
 stage, and route incoming reports through the same remediation process
 established for item 53's audit findings.
+
+---
+
+## P5 — proposed: MCP token/context efficiency (not yet triaged)
+
+Items 61–66 come from an explicit MCP token/context-efficiency audit, not
+from a general repo scan. The comparators are DBHub (`bytebase/dbhub`, ~2
+tools / ~1.4k tokens of combined schema+instructions) and Google's MCP
+Toolbox for Databases — both meaningfully leaner MCP surfaces than
+QueryGate's. A verification pass (2026-07-20) instantiated the real FastMCP
+server and measured QueryGate's actual per-session fixed overhead: 14
+registered tools plus `MCP_INSTRUCTIONS` total roughly 68,600 chars
+(~17,150 tokens) sent on every session's `initialize`/`tools/list`
+exchange, regardless of which tools a caller ever uses — roughly 12x
+DBHub's footprint. About 2,880 of the ~15,076 tool-schema tokens are pure
+duplication (the identical `StructuredQuery` JSON Schema `$defs` tree
+repeated verbatim across three tools), not information a client couldn't
+already have gotten once.
+
+Every item below is a presentation/efficiency change only, per this file's
+non-negotiable constraint: none of them touch the AST-only input guarantee
+(no raw SQL, ever), the policy-before-compile enforcement order or what it
+checks, credential redaction guarantees, audit event content/redaction
+guarantees, or catalog provenance/precedence semantics. Where an item makes
+a verbose field opt-in (items 63, 64), the underlying tracking, resolution,
+and enforcement behind that field is unchanged — only its default
+*visibility* to a caller who didn't ask for it becomes configurable. No
+efficiency fix that would require cutting an actual safety or governance
+check is included here; none was found to be necessary to close a
+meaningful share of the gap.
+
+\* The audit also checked `admission_id`/`queue_wait_ms` (two small integer
+fields always present on a successful query result) and `admission_state`
+(confirmed already conditional — populated only on a `CapacityTimeoutError`,
+not unconditional bloat as originally suspected). Neither was significant
+enough to justify its own item; both are folded into item 66's baseline
+size measurement instead.
+
+### 61. Deduplicate the StructuredQuery JSON Schema across execute/explain/batch tools
+
+**Effort: S–M (1–2 days).** The duplication is in schema *generation*, not
+schema *content* — `StructuredQuery` and its nested AST types don't change;
+the fix is either sharing one `$defs` tree across tool schemas or reducing
+tool count, not touching `query_ast/models.py`'s validation.
+
+**Why it matters:** `execute_structured_query`, `explain_structured_query`,
+and `execute_structured_queries` (`mcp/tools/query.py:115,139-141,165-167`)
+each take a `StructuredQuery` (or `List[StructuredQuery]`) parameter, and
+FastMCP independently generates a full JSON Schema per tool. A live schema
+dump confirms the three `$defs.StructuredQuery` trees (plus
+`AggregateSelectItem`, `DateBucketSelectItem`, `JoinSpec`, `OrderBySpec`,
+`Predicate`, `TopNSpec`, `WhereGroup`) are byte-for-byte identical — 5,759
+chars each, 17,277 chars carried three times instead of once. That's
+~2,880 of the ~15,076 tool-schema tokens sent on every MCP session before a
+single tool is ever called, with zero information gain: a client already
+has the identical schema from whichever of the three tools it saw first in
+`tools/list`.
+
+**What to do:** Investigate whether the installed `mcp` SDK version
+supports emitting `StructuredQuery`'s schema once via a shared `$defs`
+block referenced by `$ref` across all three tool signatures, rather than
+each `@mcp_server.tool` call independently regenerating the full nested
+schema. If the SDK doesn't support cross-tool `$defs` sharing, evaluate
+collapsing `execute_structured_query`/`explain_structured_query` into one
+tool with a `mode: execute|explain` parameter instead — verify first that
+this doesn't change either tool's observable behavior, error shape, or
+response shape, and that existing callers/examples/docs referencing the
+tool names by name are updated. No change to `StructuredQuery` validation,
+the compiler, or any enforcement path — this is schema transport only.
+
+### 62. Consolidate redundant instructional prose into one source of truth
+
+**Effort: M (2–3 days).** Touches `mcp/instructions.py`, tool descriptions
+in `mcp/tools/query.py`/`schema.py`, and potentially new `help/content/*.md`
+guide topics — text-only changes, no validation or behavior change.
+
+**Why it matters:** Several concepts are restated near-verbatim across
+three layers that are *all* sent to every MCP session (the `Field`
+description in `query_ast/models.py`, the owning tool's own description,
+and `mcp/instructions.py`) — confirmed for cross-connection `join_group`
+semantics, the `intent` field, `order_by.dir` strict-enum validation, and
+`QueueMode`/`queue_mode` semantics. `mcp/instructions.py` separately
+restates its own date-bucketing section internally
+(`instructions.py:53-56` vs. `:98-104`) and its own batching section
+internally (`:90-96` vs. `:123-125`). Note: an earlier version of this
+audit assumed this prose duplicates content already available on-demand via
+`search_querygate_guide`/`get_querygate_guide_topic` — that assumption did
+not hold up under verification. None of the current 11 guide topics
+(`help/content/*.md`) contain the mechanical detail in question (the
+`top_n.fn` enum, the `date_bucket` granularity list, `queue_mode` wait
+semantics), so simply deleting the prose from `instructions.py` would leave
+that detail nowhere at all, not "elsewhere on demand."
+
+**What to do:** Pick one canonical home per concept. `query_ast/models.py`
+`Field` descriptions own the field-level contract (Pydantic needs them for
+validation-error messages regardless). Each tool's own description in
+`mcp/tools/query.py`/`schema.py` stays tool-specific framing only, not a
+restatement of field semantics. `mcp/instructions.py` shrinks to a short
+orientation/index layer; move the mechanical detail that currently has no
+other home (the `top_n.fn` enum, `date_bucket` granularity list and alias
+rule, `queue_mode`/`wait_timeout_seconds` semantics) into new or extended
+`help/content/*.md` guide topics, so `search_querygate_guide`/
+`get_querygate_guide_topic` become the genuine on-demand source the
+original design intended rather than an already-duplicated one. Fix
+`instructions.py`'s two internal duplications regardless of the broader
+restructure. No change to any validation rule or enforcement behavior —
+only where its explanation lives and how many times it's repeated.
+
+### 63. Scope-gate admin-only tool schemas out of non-admin sessions
+
+**Effort: M (2–3 days).** Requires investigating whether the installed
+FastMCP SDK exposes a per-session tool-listing hook; if not, this needs a
+thin wrapper around `list_tools()`, not a new transport.
+
+**Why it matters:** `inspect_querygate_configuration` is gated on
+`admin:config:read` at call time (`help/service.py:366-368`,
+`ADMIN_CONFIG_READ_SCOPE`), but its full ~6,200-char schema is still sent
+to every MCP session's `tools/list` response regardless of the
+authenticated principal — a non-admin caller pays the token cost for a
+tool it can only ever get `AuthorizationError` from calling. (Verification
+also checked `explain_querygate_config_field`, which looks admin-flavored
+but is intentionally *not* scope-gated per its own tool description —
+leave that one visible to everyone; only `inspect_querygate_configuration`
+is actually restricted today.)
+
+**What to do:** Filter `inspect_querygate_configuration` (and any future
+admin-scoped tool) out of the schema sent to a session whose authenticated
+principal lacks the scope it requires, mirroring the connection-visibility
+precedent item 22 already established for REST/MCP
+(`connections/visibility.py`). This is defense-in-depth and a token-savings
+measure only — the existing scope check in `help/service.py` remains the
+actual authorization boundary and must not be weakened, relaxed, or
+replaced by list-time filtering. Add a regression test proving a
+non-admin-scoped session's `tools/list` omits the tool while an
+admin-scoped session's still includes it, and that the underlying call-time
+scope check still rejects a direct call even if list-time filtering were
+ever bypassed.
+
+### 64. Make full catalog provenance opt-in on describe_table/search_catalog
+
+**Effort: S–M (1–2 days).** Response-shaping only, at the two MCP tool/
+service call sites — `catalog/governance.py`'s construction, precedence
+resolution, and storage of `CatalogCitation` do not change.
+
+**Why it matters:** `describe_table` (`execution/service.py`'s
+`column_catalog`/`table_catalog`) and `search_catalog`
+(`catalog/retrieval.py`) attach a full 9-field `CatalogCitation` (`entry_id`,
+`source_class`, `source_evidence`, `status`, `confidence`, `precedence`,
+`catalog_version`, `schema_fingerprint`, `freshness`) to every visible
+column, the table itself, every relationship, and every search hit
+unconditionally whenever a catalog is configured — with no opt-out
+parameter on either tool. A simple "what columns does `orders` have"
+lookup pays for the same governance-grade provenance payload as a caller
+specifically auditing catalog trust. This is exactly the case CLAUDE.md
+already carves out as acceptable: the catalog *data* can be gated behind an
+opt-in verbosity flag as long as the underlying tracking/enforcement is
+unchanged.
+
+**What to do:** Add an opt-in parameter (e.g. `verbose_provenance: bool =
+False`) to `describe_table` and `search_catalog`. The default response
+carries a compact citation (e.g. `status` + `precedence` only, or a single
+`catalog_verified` boolean) sufficient for an agent to know whether to
+trust a value without needing every field; the full 9-field citation
+(including the evidence list) is returned only when the caller opts in. Do
+not change `CatalogCitation`'s construction, its precedence resolution, or
+anything under `catalog/governance.py` — this touches response shaping in
+`execution/service.py`/`catalog/retrieval.py` only. Add a regression test
+proving the default response is smaller and that the full citation is
+still byte-for-byte retrievable and unchanged when a caller opts in.
+
+### 65. Add a response-size cap to get_querygate_guide_topic
+
+**Effort: XS–S (a few hours–1 day).** Mirrors an existing pattern
+(`search_catalog`'s `max_response_bytes`) rather than inventing a new one.
+
+**Why it matters:** `search_catalog` already caps and truncates its
+response via `max_response_bytes` (`catalog/retrieval.py`, default
+16,384, enforced by incremental serialize-and-measure truncation, not just
+an echoed number). `get_querygate_guide_topic` has no equivalent —
+`GuideTopicResponse` (`help/models.py`) always returns the full topic
+markdown uncapped (157–426 words across the current 11 topics in
+`help/content/*.md`), with no truncation or summary option, even though
+`mcp/instructions.py` explicitly steers callers toward this tool for
+on-demand detail — making it more, not less, exposed to token cost as
+guide content grows over time.
+
+**What to do:** Add the same `max_response_bytes`-style parameter used by
+`search_catalog` to `get_querygate_guide_topic` and `GuideTopicResponse`,
+truncating with an explicit `truncated` flag rather than silently cutting
+content off mid-sentence. Keep the default generous enough that all 11
+current topics are returned in full (the point is guarding future growth,
+not shrinking today's responses).
+
+### 66. CI/test guardrail on total MCP schema+instructions size
+
+**Effort: S (0.5–1 day).** One new test, modeled directly on an existing
+pattern in this codebase.
+
+**Why it matters:** Nothing in the codebase or CI currently measures or
+bounds the combined size of `MCP_INSTRUCTIONS` plus every registered tool's
+JSON Schema — this audit measured the current total at 14 tools / ~68,600
+chars (~17,150 tokens) sent on every session, but there is no regression
+test analogous to `tests/unit/test_credential_redaction.py` (which asserts
+against the live OpenAPI/MCP schema, not hand-maintained convention) to
+stop that number from silently growing as new fields, tools, or `Field`
+descriptions get added. Without this, items 61–65 are one-time fixes that
+will erode again the next time someone adds a verbose
+`Field(description=...)` or a new tool.
+
+**What to do:** Add a test that instantiates the real FastMCP server (same
+"assert against the live schema" pattern `test_credential_redaction.py`
+uses), calls `list_tools()`, and asserts the combined chars/estimated-token
+total for instructions plus all tool schemas stays under an explicit budget
+constant. Fail the test (not just log) when the budget is exceeded, and
+require any legitimate increase to bump the budget constant in the same
+PR, so growth is a visible review decision rather than a silent regression.
+Set the initial budget from this item's own measured baseline plus
+reasonable headroom for near-term legitimate growth (e.g. a new dialect or
+tool), not an arbitrary round number.
