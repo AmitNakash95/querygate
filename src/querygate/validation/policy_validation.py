@@ -40,6 +40,11 @@ def _where_column_refs(node: WhereNode) -> Iterator[str]:
     if isinstance(node, Predicate):
         if "." in node.col:
             yield node.col
+        if node.value_col is not None:
+            yield node.value_col
+        return
+    if node.not_terms is not None:
+        yield from _where_column_refs(node.not_terms)
         return
     for child in node.and_terms or node.or_terms or []:
         yield from _where_column_refs(child)
@@ -48,6 +53,9 @@ def _where_column_refs(node: WhereNode) -> Iterator[str]:
 def _iter_where_predicates(node: WhereNode) -> Iterator[Predicate]:
     if isinstance(node, Predicate):
         yield node
+        return
+    if node.not_terms is not None:
+        yield from _iter_where_predicates(node.not_terms)
         return
     for child in node.and_terms or node.or_terms or []:
         yield from _iter_where_predicates(child)
@@ -74,6 +82,8 @@ def _iter_column_refs(query: StructuredQuery) -> Iterator[str]:
     for pred in query.having:
         if "." in pred.col:
             yield pred.col
+        if pred.value_col is not None:
+            yield pred.value_col
     for order in query.order_by:
         if "." in order.col:
             yield order.col

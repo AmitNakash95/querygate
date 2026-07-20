@@ -112,9 +112,19 @@ class Predicate(pyd.BaseModel):
     value: Optional[Any] = pyd.Field(
         default=None,
         description=(
-            "Required for every op except is_null/is_not_null (omit value for those two). "
+            "A literal to compare col against. Exactly one of value/value_col is required "
+            "for every op except is_null/is_not_null (omit both for those two). "
             "between: two-element [low, high] list. in/not_in: non-empty list. "
-            "Everything else: a single scalar."
+            "Everything else: a single scalar. Mutually exclusive with value_col."
+        ),
+    )
+    value_col: Optional[str] = pyd.Field(
+        default=None,
+        description=(
+            "Compare col against another Table.Column instead of a literal, e.g. "
+            "OrderItem.Price > OrderItem.Cost. Only valid for eq/neq/lt/lte/gt/gte — "
+            "in/not_in/between/like need a literal list/pattern, not a column. "
+            "Mutually exclusive with value."
         ),
     )
 
@@ -123,11 +133,15 @@ class Predicate(pyd.BaseModel):
     @pyd.model_validator(mode="after")
     def _validate_value_shape(self) -> "Predicate":
         if self.op in ("is_null", "is_not_null"):
-            if self.value is not None:
-                raise ValueError(f"Operator {self.op!r} must not include a value")
+            if self.value is not None or self.value_col is not None:
+                raise ValueError(f"Operator {self.op!r} must not include a value or value_col")
             return self
-        if self.value is None:
-            raise ValueError(f"Operator {self.op!r} requires a value")
+        if self.value is not None and self.value_col is not None:
+            raise ValueError("Predicate must not set both 'value' and 'value_col'")
+        if self.value is None and self.value_col is None:
+            raise ValueError(f"Operator {self.op!r} requires a value or value_col")
+        if self.value_col is not None and self.op not in ("eq", "neq", "lt", "lte", "gt", "gte"):
+            raise ValueError(f"value_col is not valid with operator {self.op!r}")
         if self.op == "between":
             if not isinstance(self.value, (list, tuple)) or len(self.value) != 2:
                 raise ValueError("Operator 'between' requires a two-element list [low, high]")
@@ -138,9 +152,10 @@ class Predicate(pyd.BaseModel):
 
 
 class WhereGroup(pyd.BaseModel):
-    """Boolean group: set exactly one of `and`/`or` (not both, not neither) to a
-    list of terms, where each term is itself a Predicate or a nested WhereGroup
-    — nest freely to express arbitrary boolean logic.
+    """Boolean group: set exactly one of `and`/`or`/`not`. `and`/`or` take a list
+    of terms (each a Predicate or nested WhereGroup) — nest freely to express
+    arbitrary boolean logic. `not` takes a SINGLE term (a Predicate or a nested
+    WhereGroup) to negate, e.g. {"not": {"and": [...]}} for NOT (A AND B).
     """
 
     and_terms: Optional[List["WhereNode"]] = pyd.Field(
@@ -153,15 +168,19 @@ class WhereGroup(pyd.BaseModel):
         validation_alias=pyd.AliasChoices("or", "or_terms"),
         serialization_alias="or",
     )
+    not_terms: Optional["WhereNode"] = pyd.Field(
+        default=None,
+        validation_alias=pyd.AliasChoices("not", "not_terms"),
+        serialization_alias="not",
+    )
 
     model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
 
     @pyd.model_validator(mode="after")
     def _exactly_one_boolean(self) -> "WhereGroup":
-        has_and = bool(self.and_terms)
-        has_or = bool(self.or_terms)
-        if has_and == has_or:
-            raise ValueError("Where group must have exactly one of 'and' or 'or'")
+        set_count = sum([bool(self.and_terms), bool(self.or_terms), self.not_terms is not None])
+        if set_count != 1:
+            raise ValueError("Where group must have exactly one of 'and', 'or', or 'not'")
         return self
 
 

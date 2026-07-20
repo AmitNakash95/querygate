@@ -4305,3 +4305,53 @@ dedicated test, not just a happy-path check.
 (hierarchies, before/after comparisons on the same entity) that was
 previously simply unrepresentable — not capped, not restricted, entirely
 absent from the grammar.
+
+### 71. NOT groups and column-to-column WHERE comparisons ✅ DONE
+
+**Problem.** `WhereGroup` only supported `and`/`or` — there was no way to
+negate a compound condition (`NOT (A AND B)`); `neq`/`not_in` cover single
+negated predicates but not a negated group. Separately, `Predicate.value`
+was always a literal, so `WHERE OrderItem.Price > OrderItem.Cost` (compare
+two columns on the same row) was impossible to express.
+
+**Shipped.**
+- `query_ast/models.py`: `WhereGroup.not_terms` (aliased `"not"`), a single
+  child (Predicate or nested WhereGroup) to negate — `_exactly_one_boolean`
+  extended to require exactly one of and/or/not, not just and/or.
+  `Predicate.value_col: Optional[str]` — compares `col` against another
+  Table.Column instead of a literal; `_validate_value_shape` extended so
+  exactly one of value/value_col is set for every op except
+  is_null/is_not_null, and `value_col` is only accepted for
+  eq/neq/lt/lte/gt/gte (in/not_in/between/like need a literal
+  list/pattern, not a column, so those are rejected with `value_col` set).
+- `compiler/sqlalchemy_compiler.py`: `_compile_where` wraps `not_terms` in
+  `sa.not_(...)`; `_apply_predicate` now takes the reflected `tables` dict
+  and resolves `value_col` to a real column when set (falls back to
+  `pred.value` otherwise — every other op still only ever sees a literal,
+  since `value_col` is AST-rejected for them).
+- `validation/schema_validation.py`: `_where_depth`,
+  `_collect_tables_from_where`, `_validate_where_columns` all descend into
+  `not_terms`; `_validate_predicate_columns` also resolves `value_col`
+  against the reflected schema; the `having`/`needed`-table-collection loop
+  in `validate_schema` adds `value_col`'s table too, so a value_col
+  referencing a joined (not just the base) table gets correctly reflected.
+- `validation/policy_validation.py`: **critical fix, same category as item
+  70's alias fix** — `_where_column_refs` and `_iter_where_predicates` now
+  descend into `not_terms` (so `max_where_depth`/`max_where_predicates`/
+  `max_in_list_size` from item 68 still apply inside a negated group, and
+  column policy still sees predicates hidden behind a NOT), and
+  `_iter_column_refs`'s `having` loop now also yields `pred.value_col`.
+  Without the latter, a denied column could be read indirectly by putting
+  it on the right-hand side of a comparison instead of selecting or
+  filtering on it directly — proven by
+  `test_denied_column_rejected_when_only_used_as_value_col` and
+  `test_denied_column_rejected_when_only_used_in_not_group`.
+
+**Effort: M.** Two features bundled because they touch the same four files
+in the same places; each has its own AST validator, compiler path, and a
+dedicated policy-bypass test — not just a happy-path compile test.
+
+**Why it matters:** closes two ordinary expressiveness gaps (negating a
+compound condition; comparing two columns on the same row) while proving,
+not just assuming, that both stay inside the existing policy/cap
+enforcement rather than becoming a new blind spot.

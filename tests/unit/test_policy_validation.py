@@ -154,6 +154,50 @@ def test_self_join_mandatory_filter_table_still_policy_checked_via_alias():
         validate_policy(query, policy, connection_id="demo")
 
 
+def test_denied_column_rejected_when_only_used_in_not_group():
+    query = StructuredQuery(
+        from_table="customers",
+        select=["customers.id"],
+        where=WhereGroup(not_terms=Predicate(col="customers.email", op="eq", value="a@b.com")),
+    )
+    policy = Policy(denied_columns={"customers": ["email"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_denied_column_rejected_when_only_used_as_value_col():
+    """A denied column must still be caught when referenced as the RIGHT-hand
+    side of a comparison (value_col), not just the left-hand col — otherwise
+    value_col becomes a way to read a denied column's values indirectly.
+    """
+    query = StructuredQuery(
+        from_table="customers",
+        select=["customers.id"],
+        where=Predicate(col="customers.id", op="gt", value_col="customers.email"),
+    )
+    policy = Policy(denied_columns={"customers": ["email"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_where_predicate_count_counts_predicates_inside_not_group():
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        where=WhereGroup(
+            not_terms=WhereGroup(
+                or_terms=[
+                    Predicate(col="orders.status", op="eq", value="a"),
+                    Predicate(col="orders.status", op="eq", value="b"),
+                    Predicate(col="orders.status", op="eq", value="c"),
+                ]
+            )
+        ),
+    )
+    with pytest.raises(PolicyViolationError, match="where predicate count"):
+        validate_policy(query, Policy(max_where_predicates=2), connection_id="demo")
+
+
 def test_where_predicate_count_exceeded():
     query = StructuredQuery(
         from_table="orders",

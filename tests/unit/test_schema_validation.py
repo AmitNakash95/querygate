@@ -16,7 +16,7 @@ from querygate.core.auth import Principal
 from querygate.core.exceptions import NotFoundError
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
-from querygate.query_ast.models import JoinSpec, Predicate, StructuredQuery
+from querygate.query_ast.models import JoinSpec, Predicate, StructuredQuery, WhereGroup
 from querygate.validation import schema_validation as sv
 
 
@@ -118,6 +118,43 @@ class TestValidateSchema:
         assert tables["e"] is not tables["m"]
         # the physical table was only reflected once, not once per occurrence
         assert len(calls) == 1
+
+    async def test_value_col_referencing_join_table_reflects_and_resolves(self, monkeypatch):
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            joins=[JoinSpec(table="customers", on=["orders.customer_id", "customers.id"])],
+            where=Predicate(col="orders.status", op="neq", value_col="customers.name"),
+            limit=5,
+        )
+        loaded = await sv.validate_schema(query, connection_id="demo")
+        assert set(loaded) == {"orders", "customers"}
+
+    async def test_value_col_unknown_column_rejected(self, monkeypatch):
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            where=Predicate(col="orders.status", op="neq", value_col="orders.missing"),
+            limit=5,
+        )
+        with pytest.raises(ValueError, match="not found"):
+            await sv.validate_schema(query, connection_id="demo")
+
+    async def test_not_group_column_validated(self, monkeypatch):
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            where=WhereGroup(not_terms=Predicate(col="orders.missing", op="eq", value="x")),
+            limit=5,
+        )
+        with pytest.raises(ValueError, match="not found"):
+            await sv.validate_schema(query, connection_id="demo")
 
     async def test_having_requires_group_by_or_aggregate(self, monkeypatch):
         tables = _make_tables()
