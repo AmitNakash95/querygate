@@ -102,6 +102,18 @@ class TestStructuredQueryModels:
         item = AggregateSelectItem(fn="count", col="orders.status", distinct=True)
         assert item.distinct is True
 
+    def test_distinct_rejected_with_stddev(self):
+        with pytest.raises(ValueError, match="distinct is not valid with stddev"):
+            AggregateSelectItem(fn="stddev", col="orders.total_amount", distinct=True)
+
+    def test_distinct_rejected_with_variance(self):
+        with pytest.raises(ValueError, match="distinct is not valid with variance"):
+            AggregateSelectItem(fn="variance", col="orders.total_amount", distinct=True)
+
+    def test_stddev_without_distinct_accepted(self):
+        item = AggregateSelectItem(fn="stddev", col="orders.total_amount")
+        assert item.fn == "stddev"
+
     def test_query_level_distinct_defaults_false(self):
         q = StructuredQuery(from_table="orders", select=["orders.id"])
         assert q.distinct is False
