@@ -25,6 +25,7 @@ from typing import Callable, List, Optional
 import pydantic as pyd
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from querygate.api._errors import require_scope
 from querygate.audit.logger import audit_connection_probe
 from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
@@ -54,13 +55,6 @@ class ConnectionStatus(pyd.BaseModel):
     failure_category: Optional[str] = None
 
     model_config = pyd.ConfigDict(extra="forbid")
-
-
-def _require_scope(principal: Principal, scope: str) -> None:
-    if scope not in principal.scopes:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail=f"Missing required scope: {scope!r}"
-        )
 
 
 def _status_for(enabled: bool, health: Optional[ConnectionHealth]) -> ConnectionStatusValue:
@@ -98,7 +92,7 @@ def build_admin_connections_router(
     async def list_connection_status(
         request: Request, principal: Principal = Depends(get_principal)
     ):
-        _require_scope(principal, ADMIN_CONNECTIONS_READ_SCOPE)
+        require_scope(principal, ADMIN_CONNECTIONS_READ_SCOPE)
         monitor = getattr(request.app.state, "health_monitor", None)
         snapshot = monitor.snapshot() if monitor is not None else {}
 
@@ -113,7 +107,7 @@ def build_admin_connections_router(
     async def test_connection_endpoint(
         connection_id: str, request: Request, principal: Principal = Depends(get_principal)
     ):
-        _require_scope(principal, ADMIN_CONNECTIONS_TEST_SCOPE)
+        require_scope(principal, ADMIN_CONNECTIONS_TEST_SCOPE)
         info = next((i for i in get_registry().list_public() if i.id == connection_id), None)
         if info is None:
             raise HTTPException(

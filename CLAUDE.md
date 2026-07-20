@@ -123,18 +123,17 @@ This gives a sharper test than "does every dialect support this" alone:
   rather than inventing an emulation.
 - **Do not synthesize query structure the AST never asked for**, to paper
   over a dialect's missing keyword — that's the engine solving the
-  agent's composition problem instead of exposing a primitive. Concretely
-  under active reconsideration: `MSSQLDialectAdapter.order_by_terms`
-  (TODO.md item 74) currently injects an *extra CASE-based sort column*
-  into the query when `OrderBySpec.nulls` is set, since T-SQL has no
-  `NULLS FIRST/LAST` syntax — structure the caller never expressed in the
-  AST. An agent can already build that exact CASE-bucket itself with
-  primitives QueryGate already exposes (`CaseSelectItem` for the bucket,
-  multiple `OrderBySpec` entries for the tie-break); whether the engine
-  should keep doing it automatically, or instead reject `nulls` on MSSQL
-  the same way `array_agg` will be rejected there, is an open question —
-  don't treat it as settled either way without asking first, and don't use
-  it as precedent for a similar shortcut elsewhere.
+  agent's composition problem instead of exposing a primitive. Settled
+  precedent (TODO.md item 74, Decision Log): `MSSQLDialectAdapter.order_by_terms`
+  used to inject an *extra CASE-based sort column* when `OrderBySpec.nulls`
+  was set, since T-SQL has no `NULLS FIRST/LAST` syntax — structure the
+  caller never expressed in the AST. It now **rejects** `nulls` on MSSQL
+  with `QueryValidationError`, the same posture as `array_agg`, because an
+  agent can build that exact CASE-bucket itself with primitives QueryGate
+  already exposes (`CaseSelectItem` for the bucket, multiple `OrderBySpec`
+  entries for the tie-break). Use this as the reference for how a
+  missing-keyword gap is resolved — reject and point at the primitives, do
+  not emulate.
 
 **Exceptions are possible but must be deliberate, not assumed.** If a
 specific case seems to genuinely warrant the engine doing more than
@@ -144,8 +143,9 @@ a good, concrete reason — that is a design discussion to have explicitly
 `docs/PRODUCT_GUIDE.md`) before implementing it, not a default anyone
 should reach for under time pressure or convenience. Treat this section's
 rule as the default for all new work; an exception must be justified on
-its own terms, in the open, the same way item 74's MSSQL nulls handling is
-being discussed rather than silently kept or silently reverted.
+its own terms, in the open, and recorded — the same way item 74's MSSQL
+nulls handling was decided in the open (reject, not emulate) rather than
+silently kept or silently reverted.
 
 ### Connections and policy are file-configured, not code-configured
 
