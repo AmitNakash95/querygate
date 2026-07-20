@@ -13,7 +13,7 @@ import sqlalchemy as sa
 import asyncio
 
 from querygate.audit.events import AuditEvent, normalize_query_shape
-from querygate.audit.logger import audit_query
+from querygate.audit.logger import audit_connection_probe, audit_query
 from querygate.audit.sinks import (
     JsonlAuditSink,
     NullAuditSink,
@@ -78,6 +78,55 @@ def test_jsonl_sink_appends_versioned_events_with_private_file_mode(tmp_path):
     assert [json.loads(line)["connection_id"] for line in lines] == ["first", "second"]
     assert all(json.loads(line)["schema_version"] == "1" for line in lines)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_audit_connection_probe_persists_redacted_event(tmp_path):
+    path = tmp_path / "events.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    audit_connection_probe(
+        connection_id="demo",
+        outcome="success",
+        principal="agent-1",
+        principal_scopes=["admin:connections:test"],
+        auth_method="api_key",
+        probe_healthy=False,
+        failure_category="unreachable",
+        latency_ms=12.5,
+        duration_ms=42,
+    )
+
+    lines = path.read_text().splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    assert event["event_type"] == "connection.probe"
+    assert event["schema_version"] == "1"
+    assert event["connection_id"] == "demo"
+    assert event["outcome"] == "success"
+    assert event["probe_healthy"] is False
+    assert event["failure_category"] == "unreachable"
+    assert event["latency_ms"] == 12.5
+    text = path.read_text()
+    for leak in ("password", "connection_string", "hunter2"):
+        assert leak not in text
+
+
+def test_audit_connection_probe_rejected_carries_error_category_not_exception(tmp_path):
+    path = tmp_path / "events.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    audit_connection_probe(
+        connection_id="demo",
+        outcome="rejected",
+        principal="agent-1",
+        principal_scopes=[],
+        auth_method="api_key",
+        error_category="rate_limited",
+    )
+
+    event = json.loads(path.read_text().splitlines()[0])
+    assert event["outcome"] == "rejected"
+    assert event["error_category"] == "rate_limited"
+    # Fields left unset (exclude_none) rather than serialized as null.
+    assert "probe_healthy" not in event
 
 
 @pytest.mark.asyncio

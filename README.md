@@ -463,9 +463,30 @@ as a stable `failure_category` (`authentication`/`unreachable`/`timeout`/
 driver error stays in stdout logs only, and no connection string is ever
 returned. `admin:connections:read` is intentionally separate from the config
 scopes: seeing whether a database is reachable is a different privilege from
-reading or changing what QueryGate connects to. The rate-limited "test now"
-re-check and a browser workspace that renders this view are TODO item 43
-phase 2.
+reading or changing what QueryGate connects to.
+
+`POST /api/v1/admin/connections/{id}/test`, gated by its own
+`admin:connections:test` scope, triggers an immediate out-of-band re-check of
+one connection instead of waiting for the next background interval — useful
+right after rotating a credential or changing network access. It reuses the
+exact same ping/classification path (and non-disclosure posture) as the
+background monitor, updates the shared cached status so a following `GET`
+reflects it too, and returns the connection's fresh `ConnectionStatus`:
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" \
+  $HOST/api/v1/admin/connections/demo/test
+```
+
+An unknown connection is `404`; a deployment-disabled one is `409`. Each
+connection can be manually probed at most once per
+`admin_connection_test_cooldown_seconds` (default 10s, single-process only) —
+a second request inside that window gets `429` with a `Retry-After` header
+instead of opening another real connection to the target database. Every
+probe — successful or rate-limited — is recorded as its own redaction-safe
+`connection.probe` audit event (connection id, actor, probe result/failure
+category, never a raw driver error or connection string). The browser
+workspace that renders this view remains TODO item 43 phase 2b.
 
 ## Example schema catalog (optional)
 

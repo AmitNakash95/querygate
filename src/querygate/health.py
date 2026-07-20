@@ -124,9 +124,37 @@ class HealthMonitor:
         self._interval_seconds = interval_seconds
         self._status: Dict[str, ConnectionHealth] = {}
         self._tasks: list[asyncio.Task] = []
+        # Wall-clock (monotonic) time of the last manually triggered "test
+        # now" probe per connection (item 43 phase 2) — separate from the
+        # background loop's own interval, so a burst of admin-triggered
+        # probes can be rate-limited without touching the background cadence.
+        self._last_manual_test: Dict[str, float] = {}
 
     def snapshot(self) -> Dict[str, ConnectionHealth]:
         return dict(self._status)
+
+    def seconds_until_manual_test_allowed(
+        self, connection_id: str, cooldown_seconds: float
+    ) -> float:
+        """0 if a manual "test now" probe is currently allowed for this
+        connection, otherwise the remaining cooldown in seconds."""
+        last = self._last_manual_test.get(connection_id)
+        if last is None:
+            return 0.0
+        remaining = cooldown_seconds - (time.monotonic() - last)
+        return max(0.0, remaining)
+
+    async def manual_check(self, connection_id: str) -> ConnectionHealth:
+        """Run an immediate, out-of-band probe against one connection and
+        update the shared cached status so a following GET reflects it too.
+        Reuses the exact ping/classification path the background loop uses.
+        Callers are expected to check/record the cooldown via
+        `seconds_until_manual_test_allowed`/`record_manual_test` themselves —
+        this method does not enforce it.
+        """
+        self._last_manual_test[connection_id] = time.monotonic()
+        await self._check_once(connection_id)
+        return self._status[connection_id]
 
     async def start(self) -> None:
         """Prime every connection's status before returning (bounded by each

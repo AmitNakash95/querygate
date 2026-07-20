@@ -141,10 +141,45 @@ class CatalogGovernanceEvent(pyd.BaseModel):
     model_config = pyd.ConfigDict(extra="forbid")
 
 
+class ConnectionProbeEvent(pyd.BaseModel):
+    """Versioned event for the admin "test now" connection probe (TODO.md
+    item 43 phase 2) — a manually triggered, out-of-band health check
+    against one configured connection. Matches `HealthMonitor`'s own
+    non-disclosure posture: no raw driver error or connection string, only
+    the same stable `failure_category` the read-only status API already
+    exposes.
+    """
+
+    schema_version: str = "1"
+    event_id: str = pyd.Field(default_factory=lambda: str(uuid.uuid4()))
+    occurred_at: datetime = pyd.Field(default_factory=lambda: datetime.now(timezone.utc))
+    event_type: Literal["connection.probe"] = "connection.probe"
+    correlation_id: Optional[str] = None
+    surface: AuditSurface = "internal"
+    connection_id: str
+    principal_id: Optional[str] = None
+    auth_method: str = "unknown"
+    principal_scopes: List[str] = pyd.Field(default_factory=list)
+    # "success"/"rejected" describes whether the probe *ran* (auth, unknown
+    # connection, disabled connection, rate limit) — not whether the target
+    # database itself was reachable, which is `probe_healthy` below.
+    outcome: Literal["success", "rejected"]
+    probe_healthy: Optional[bool] = None
+    failure_category: Optional[str] = None
+    latency_ms: Optional[float] = None
+    error_category: Optional[str] = None
+    duration_ms: int = pyd.Field(default=0, ge=0)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
 # Sinks (see audit/sinks.py) persist every kind of event through the same
 # configured backend — one durable audit trail for query attempts,
-# config-governance actions, and catalog-governance actions.
-PersistableEvent = Union[AuditEvent, ConfigChangeEvent, CatalogGovernanceEvent]
+# config-governance actions, catalog-governance actions, and connection
+# probes.
+PersistableEvent = Union[
+    AuditEvent, ConfigChangeEvent, CatalogGovernanceEvent, ConnectionProbeEvent
+]
 
 
 def _select_shape(item: object) -> Dict[str, Any]:
