@@ -308,6 +308,26 @@ class TestValidateSchema:
         result = await sv.validate_schema(query, connection_id="demo")
         assert result is not None
 
+    async def test_having_allowed_with_percentile_cont_and_no_group_by(self, monkeypatch):
+        """A select-only percentile_cont (no group_by, no
+        AggregateSelectItem) must count as an aggregate for the
+        having-requires-aggregate rule — this only passes if
+        PercentileContSelectItem is recognized in the shared
+        _AGGREGATE_SELECT_ITEM_TYPES tuple _validate_group_by's
+        has_aggregate check uses."""
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                {"col": "orders.status", "fraction": 0.5, "as": "median"},
+            ],
+            having=[Predicate(col="median", op="gt", value=0)],
+            limit=5,
+        )
+        result = await sv.validate_schema(query, connection_id="demo")
+        assert result is not None
+
 
 @pytest.mark.asyncio
 class TestCrossConnectionJoins:

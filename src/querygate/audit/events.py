@@ -14,6 +14,7 @@ from querygate.query_ast.models import (
     CaseSelectItem,
     ColArg,
     DateBucketSelectItem,
+    PercentileContSelectItem,
     Predicate,
     ScalarFunctionSelectItem,
     StringAggSelectItem,
@@ -212,6 +213,11 @@ def _select_shape(item: object) -> Dict[str, Any]:
         return shape
     if isinstance(item, ArrayAggSelectItem):
         shape = {"kind": "array_agg", "column": item.col}
+        if item.alias is not None:
+            shape["alias"] = item.alias
+        return shape
+    if isinstance(item, PercentileContSelectItem):
+        shape = {"kind": "percentile_cont", "column": item.col, "fraction": item.fraction}
         if item.alias is not None:
             shape["alias"] = item.alias
         return shape

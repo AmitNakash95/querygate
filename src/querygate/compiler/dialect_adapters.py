@@ -59,6 +59,12 @@ class DialectAdapter(ABC):
         """Collect col_expr's grouped values into a real array,
         e.g. ARRAY_AGG(OrderItem.Sku)."""
 
+    @abstractmethod
+    def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
+        """Continuous-interpolation percentile of col_expr's grouped
+        values, e.g. PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
+        Order.TotalAmount) for the median."""
+
 
 def _direction_expr(col_expr: Any, direction: Literal["asc", "desc"]) -> Any:
     return col_expr.asc() if direction == "asc" else col_expr.desc()
@@ -88,6 +94,9 @@ class PostgresDialectAdapter(DialectAdapter):
 
     def array_agg(self, col_expr: Any) -> Any:
         return sa.func.array_agg(col_expr)
+
+    def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
+        return sa.within_group(sa.func.percentile_cont(fraction), col_expr)
 
 
 class MSSQLDialectAdapter(DialectAdapter):
@@ -136,6 +145,24 @@ class MSSQLDialectAdapter(DialectAdapter):
         raise QueryValidationError(
             "array_agg is not supported on MSSQL: T-SQL has no array/collection "
             "type to hold the result"
+        )
+
+    def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
+        # T-SQL's PERCENTILE_CONT exists only as an analytic (window)
+        # function requiring an OVER(...) clause — there is no GROUP BY-
+        # compatible aggregate form the way Postgres's percentile_cont is.
+        # Verified directly: SQLAlchemy's within_group() happily compiles
+        # identical SQL text against the mssql dialect (no dialect-level
+        # guard of its own), which would only fail at runtime against a
+        # real SQL Server — the same "renders fine, breaks live" trap
+        # item 75 flagged for stddev/variance before stat_fn existed. Per
+        # CLAUDE.md's engine philosophy, this stays a hard rejection
+        # rather than silently emitting SQL that can't actually run in
+        # the plain-aggregate shape the AST expresses.
+        raise QueryValidationError(
+            "percentile_cont is not supported on MSSQL as a GROUP BY aggregate: "
+            "T-SQL's PERCENTILE_CONT only exists as an analytic/window function "
+            "requiring an OVER(...) clause"
         )
 
 
@@ -200,6 +227,15 @@ class SQLiteDialectAdapter(DialectAdapter):
         raise QueryValidationError(
             "array_agg is not supported on the internal SQLite test/example dialect: "
             "json_group_array() returns a JSON string, not a real array"
+        )
+
+    def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
+        # SQLite has no ordered-set aggregate support at all (no
+        # PERCENTILE_CONT, no WITHIN GROUP) — a different reason from
+        # MSSQL's window-function-only restriction, but the same outcome.
+        raise QueryValidationError(
+            "percentile_cont is not supported on the internal SQLite test/example "
+            "dialect: SQLite has no ordered-set aggregate (WITHIN GROUP) support"
         )
 
 
