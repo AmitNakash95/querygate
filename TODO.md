@@ -77,7 +77,7 @@ order-of-magnitude, not commitments.
 | 45 | ✅ Dedicated non-admin "My access" portal (phase 1: identity, guardrails, mandatory-filter readiness, schema browser; phase 2: personal denial history not started) | M | 22, 31, 33 |
 | 46 | ✅ Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
 | 47 | Safe draft recovery plus config export/import UX | M | 13, 25, 31 |
-| 48 | Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) | L | 6, 22, 25, 32B |
+| 48 | ✅ Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) (phase 1: file-configured invocable templates + REST/MCP; phase 2: governed create/edit/approve/publish/rollback not started) | L | 6, 22, 25, 32B |
 | 49 | Column-value masking/tokenization (not just allow/deny) | L | 6, 27 |
 | 50 | Per-principal rate limits / query quotas over time | M | 9, 25 |
 | 51 | Typed client-side query-builder SDK (Python + TypeScript) | M (per language) | 20 |
@@ -3289,6 +3289,59 @@ with retention/deletion controls and audit events—not invisible browser
 persistence.
 
 ### 48. Pre-defined, admin-approved query templates ("Toolbox"-style curated tools)
+
+**Phase 1 shipped (file-configured, invocable templates); phase 2 (governed
+create/edit/approve/publish/rollback via 32B) not started.**
+
+A new `querygate/templates/` module adds a `QueryTemplate` model — a named,
+parameterized `StructuredQuery` *skeleton* (a raw dict with `{param: name}`
+placeholders in value positions) plus typed parameter slots
+(`type`/`required`/`default`/`min`/`max`/`max_length`/`allowed_values`/
+`is_list`) — loaded from an optional `TEMPLATES_FILE` into a `TemplateStore`
+singleton that mirrors `CatalogStore` (hot-reloadable via the existing
+config-reload; validated by `querygate-validate-config --template-file`; cross-
+checked so every template targets a real connection id). At invocation
+(`templates/binding.py`) the caller's parameters are type/constraint-checked
+against the slots, substituted into the skeleton, and the **result validated as
+a real `StructuredQuery`** and run through the *unchanged*
+`StructuredQueryService` — so a bound template inherits every policy cap,
+allow/deny list, mandatory row filter, schema check, and guardrail an ad-hoc
+query has, and a parameter can never smuggle SQL (there is no SQL) or exceed
+policy (`tests/security/test_adversarial_security.py::
+test_query_template_cannot_exceed_policy`). Surface:
+`GET /api/v1/query-templates` + `POST /api/v1/query-templates/{id}/run` (REST),
+`list_query_templates`/`run_query_template` (MCP), and a read-only "Query
+templates" browse panel in the `/admin/` control plane — all filtered
+per-principal by target-connection visibility (item 22) — an unknown template
+and one on a hidden connection return the same non-enumerating 404. Invocations
+audit distinctly (`operation="run_query_template"`, `template_id`, and the
+parameter *names* — never values, which are stripped from the query shape like
+any literal). `validate-config` also structurally validates each template's
+query skeleton (substituting typed dummy values and validating the result as a
+`StructuredQuery`), so a malformed template is caught at deploy, not only at
+first invocation. Because a bound template runs the identical pipeline, the
+same enforcement is proven through the template path: SQL-injection payloads in
+a parameter value are bound as data not SQL, a denied table/column is rejected,
+and a policy `mandatory_row_filter` is AND-ed in (see the adversarial and
+integration tests below). Documented as QG-26 in `docs/THREAT_MODEL.md`.
+Covered by `tests/unit/test_query_templates.py` (model, binding, structural
+validation), `tests/integration/test_query_template_api.py` (REST pipeline,
+visibility, mandatory-filter enforcement, redaction-safe audit),
+`tests/integration/test_admin_ui.py` (the browse panel), and the MCP
+registration + adversarial (injection/denied-table/cannot-exceed-policy)
+tests.
+
+**Phase 2 (not started):** the governed create/edit/approve/publish/rollback
+workflow. Phase 1 follows the repo's established pattern — every config
+resource (connections/policy/catalog) began file-configured, with the
+governance API layered on later (items 25/32B); file-configured templates are
+declarative config, exactly as safe as `policy.yaml` (and a template can't
+exceed policy). Phase 2 routes template authoring through 32B's existing
+proposal state machine and the same `CatalogFileRepository` lock, so a template
+must never publish itself or skip review — no second catalog file, store, or
+mutation path.
+
+**Original scope (for reference — see above for what shipped in phase 1):**
 
 **Effort: L (3–5 days).** Not a new execution path — the resolved query still
 runs through the full existing pipeline (policy, schema, compiler,

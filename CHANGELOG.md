@@ -6,6 +6,31 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- Admin-defined query templates, phase 1 (TODO.md item 48). A new
+  `querygate/templates/` module + optional `TEMPLATES_FILE` let an admin
+  pre-define named, parameterized `StructuredQuery` skeletons (typed parameter
+  slots: type/required/default/min/max/max_length/allowed_values/is_list) that
+  agents invoke *by name* instead of composing an arbitrary query — shrinking
+  the effective surface to a finite, reviewed set of query shapes. At
+  invocation the caller's parameters are type/constraint-checked, bound into the
+  skeleton, and the result validated as a real `StructuredQuery` and run through
+  the unchanged `StructuredQueryService`, so a bound template inherits every
+  policy cap, allow/deny list, mandatory row filter, and guardrail an ad-hoc
+  query has — a parameter can never smuggle SQL (a template is a stored AST, not
+  a SQL string) or exceed policy. New surface: `GET /api/v1/query-templates` +
+  `POST /api/v1/query-templates/{id}/run` (REST) and `list_query_templates` /
+  `run_query_template` (MCP), plus a read-only "Query templates" browse panel in
+  the `/admin/` control plane, all filtered per-principal by target-connection
+  visibility (an unknown template and one on a hidden connection return the same
+  non-enumerating 404). Invocations audit distinctly
+  (`operation="run_query_template"`, template id, and parameter *names* — never
+  values). Hot-reloadable via `POST /admin/reload-config` and validated by
+  `querygate-validate-config --template-file`, which structurally validates each
+  template's query skeleton (catching a malformed template at deploy, not only
+  at first invocation) in addition to cross-checking its target connection.
+  Documented as QG-26 in
+  `docs/THREAT_MODEL.md`. Phase 2 (the governed create/edit/approve/publish/
+  rollback workflow through item 32B's state machine) is not started.
 - Policy-change blast-radius analysis, phase 1 (TODO.md item 41).
   `POST /api/v1/admin/config/blast-radius` (`admin/blast_radius.py`,
   `admin.service.compute_blast_radius`) aggregates item 40's semantic access

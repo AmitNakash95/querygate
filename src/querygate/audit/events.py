@@ -83,6 +83,12 @@ class AuditEvent(pyd.BaseModel):
     admission_id: Optional[str] = None
     queue_wait_ms: Optional[int] = pyd.Field(default=None, ge=0)
     admission_state: Optional[Literal["completed", "capacity_timeout", "queue_full"]] = None
+    # Curated query-template invocation (TODO.md item 48): the template id and
+    # the parameter *names* supplied — never parameter values, which are bound
+    # into the query and stripped from `query_shape` like any other literal.
+    # Lets operators see curated-tool usage distinctly in the same audit stream.
+    template_id: Optional[str] = None
+    template_param_shape: Optional[List[str]] = None
 
     model_config = pyd.ConfigDict(extra="forbid")
 
