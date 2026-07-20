@@ -4435,3 +4435,54 @@ identified in the original review, while the select-loop rewrite it forced
 also fixed a genuine policy-bypass latent in how select items were walked
 for column-level policy — a second security-correctness fix, not just a
 feature add.
+
+### 73. `DialectAdapter` abstraction (compiler-scoped slice of item 57) ✅ DONE
+
+**Problem.** Adding NULLS FIRST/LAST ordering and `stddev`/`variance`
+aggregates (items 74/75, next) each needed real per-dialect handling —
+about to become the second and third ad hoc `if dialect == MSSQL: ... else:
+...` branch in the compiler, joining the existing one in
+`_date_bucket_expr`. Flagged directly: keep the engine dialect-agnostic at
+its core, with dialect variance isolated behind an abstraction so adding or
+dropping a dialect stays a contained, plug-in change. This is item 57
+("Pluggable dialect-adapter architecture"), already scoped in the backlog
+under P4 — this closes the compiler-scoped slice of it (not
+`connections/dialects.py`'s session guardrails or
+`execution/cost_estimation.py`'s Postgres-only EXPLAIN hook, which item 57
+also mentions but which are separate concerns left for a future pass).
+
+**Shipped.** New `compiler/dialect_adapters.py`: an `abc.ABC`
+`DialectAdapter` with three methods — `date_bucket`, `order_by_terms`,
+`stat_fn` — the only three points where two dialects render meaningfully
+different SQL for the same AST concept (count/sum/avg/min/max and
+coalesce/lower/upper/trim/concat are dialect-universal and deliberately
+NOT on this interface — keeps it focused on what actually varies, not
+padded with things that don't). `ABC` chosen over `typing.Protocol`
+specifically so an incomplete new adapter fails loudly at class-definition
+time, not with a confusing `AttributeError` mid-compile — proven by
+`test_dialect_adapters.py::TestDialectAdapterIsAbstract`. Three concrete
+adapters (`PostgresDialectAdapter`, `MSSQLDialectAdapter`,
+`SQLiteDialectAdapter` for the internal-only test/example path) plus a
+`get_dialect_adapter(dialect)` registry lookup falling back to SQLite for
+anything unrecognized, matching `_date_bucket_expr`'s pre-existing
+fallback behavior exactly.
+
+**Ported, not rewritten:** `_date_bucket_expr`'s 3-way branch and
+`_sqlite_date_bucket_expr`'s granularity switch moved into the three
+adapters' `date_bucket` verbatim; `sqlalchemy_compiler.py`'s call site
+became `get_dialect_adapter(dialect).date_bucket(col, item.granularity)`.
+Every pre-existing date-bucket test
+(`test_date_bucket_postgres_uses_date_trunc`,
+`test_date_bucket_mssql_uses_dateadd_datediff`) passed unmodified after the
+extraction — the regression check proving this was behavior-neutral before
+items 74/75 built anything new on top of it.
+
+**Effort: M.** New module + one call-site swap; the actual "no behavior
+change" claim is enforced by tests that already existed, not asserted.
+
+**Why it matters:** the third scattered dialect branch is exactly the
+point where "two dialects supported" starts costing more than linear
+effort per additional dialect (item 19) or per additional dialect-sensitive
+feature (items 74/75, immediately next). Naming and isolating the
+abstraction now, verified behavior-neutral against the one branch that
+already existed, is what keeps that cost flat going forward.
