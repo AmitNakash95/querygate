@@ -357,8 +357,7 @@ async def test_capacity_timeout_event_carries_admission_fields(tmp_path):
     set_policy_store(
         PolicyStore(default=Policy(max_concurrency=1, concurrency_wait_seconds=5), overrides={})
     )
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    await cc.in_process_limiter().semaphore("demo", 1).acquire()  # occupy the only slot
 
     query = _query_with_sensitive_literals()
     service = StructuredQueryService(connection_id="demo")
