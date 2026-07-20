@@ -177,6 +177,25 @@ comparison against config, no network call, no database round trip — so an
 over-cap or policy-violating query is rejected in microseconds, before
 QueryGate spends any effort or any database connection on it.
 
+**Column masking, not just allow/deny.** Allow/deny is binary — a caller
+either sees a column's real value or can't reference it at all. A `column_mask`
+policy entry (keyed by table like the allow/deny lists) is the middle ground:
+the column stays selectable, but the database returns a *masked* value —
+`hash` (deterministic one-way hash), `null`, `last` (reveal only the trailing N
+characters, e.g. last-4 of a card), or `bucket` (round a number down to a
+bucket width). The transform is applied **inside the compiled query** (a
+SQLAlchemy `func` wrapper — see stage 3), so the raw value never leaves the
+database for a masked caller; it is not a redaction of the response after the
+fact. Masks resolve per principal exactly like every other policy field, so
+one caller can see raw values and another sees them masked on the same
+connection. A masked column may appear **only as a bare `select` item** —
+using it in a `where`/`join`/`order_by`/`group_by` position, or nested inside a
+function/CASE/aggregate, is rejected, for the same inference reason denied
+columns are checked in every clause (see the Decision Log entry on masking
+scope). The audit event records which output columns were masked (never the
+pre-mask value), so an operator can tell "masked" from "denied" access apart in
+the same stream.
+
 ### 2. Schema validation — does this actually exist?
 
 **Files:** `src/querygate/schema/reflection.py`,
@@ -2028,6 +2047,32 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-20 — A masked column may appear only as a bare `select`
+  projection; any other use is rejected, not silently masked-in-place
+  (TODO.md item 49).** Column value masking (`hash`/`null`/`last`/`bucket`,
+  applied in the compiled `Select` so the raw value never leaves the
+  database) gives partial visibility of an otherwise-permitted column. The
+  open question was what to do when a masked column is referenced outside the
+  projection — in a `where`/`join`/`order_by`/`group_by` position, or nested
+  inside a function/CASE/aggregate. Three options: (A) reject such a query;
+  (B) mask the column *everywhere it appears*, so `where ssn = 'x'` becomes
+  `where mask(ssn) = 'x'`; (C) mask only the projection and let filters/sorts
+  use the raw column (the Immuta/Privacera default). **Why (A) accepted:**
+  option C leaves an inference exfiltration channel — a caller who can't see
+  `ssn` but can filter `where ssn = '123-45-6789'` and observe whether a row
+  comes back has read the value one guess at a time, which an untrusted agent
+  can probe at machine speed (the same side-channel the stage-1 allow/deny
+  check already walks every clause to close for *denied* columns). Option B
+  closes the channel but silently rewrites what the query means — the agent
+  asks to filter on the real value and gets a filter on the masked value with
+  no way to tell, producing wrong results rather than an error. Rejecting is
+  the only posture that closes the channel without lying about semantics, and
+  it matches the "expose primitives, don't spoon-feed the agent" philosophy
+  (reject and name the gap, as `array_agg` and item 74's MSSQL nulls do)
+  rather than the engine silently transforming a request the caller didn't
+  make. Starting strict is extensible: a deliberate masked-comparison opt-in
+  (e.g. filter on last-4 of a card) can be added later as its own recorded
+  decision; starting permissive and tightening later would break callers.
 - **2026-07-20 — Query templates bind through the unchanged
   `execute()` pipeline as a strict enforcement superset, rather than a
   separate templated-execution path (TODO.md item 48).** `bind_template`

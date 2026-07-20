@@ -112,6 +112,11 @@ format-check: ## Check formatting without making changes
 .PHONY: lint
 lint: format-check ## Alias for format-check (extend with ruff/mypy when added)
 
+# ─── Docs ─────────────────────────────────────────────────────────────────────
+.PHONY: product-guide-html
+product-guide-html: ## Render docs/PRODUCT_GUIDE.md into the browsable docs/product-guide.html
+	poetry run python scripts/generate_product_guide_html.py
+
 # ─── Release ──────────────────────────────────────────────────────────────────
 .PHONY: sbom
 sbom: ## Generate a CycloneDX SBOM, dependency vulnerability report, and SHA256SUMS from dist/ (run `poetry build` first)

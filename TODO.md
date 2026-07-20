@@ -3533,7 +3533,40 @@ to close QueryGate's remaining deficits in masking granularity, cost/quota
 governance, ecosystem reach, and external trust signals. Triage into P2/P3
 (or drop) once prioritized; until then this section is a holding area.
 
-### 49. Column-value masking/tokenization (not just allow/deny)
+### 49. Column-value masking/tokenization (not just allow/deny) ✅ DONE
+
+**Shipped:** a `column_mask` policy primitive (`policy/models.py`:
+`ColumnMask`/`ColumnMaskKind`, field `Policy.column_masks` keyed by table with
+`"*"` wildcard, resolver `Policy.column_mask`) supporting `hash`, `null`,
+`last` (reveal trailing N chars), and `bucket` (round down to a width). It
+resolves per principal through the existing `PolicyStore` merge — no loader
+change — so one caller sees raw values and another sees them masked on the
+same connection. The transform is applied **in the compiled `Select`**: the
+bare-projection branch of `_build_select_columns` wraps the column via a new
+`DialectAdapter.column_mask` method (Postgres `md5`/`right`, MSSQL
+`HASHBYTES`/`RIGHT`, SQLite `substr`; `null`/`bucket` are dialect-universal;
+SQLite `hash` rejects like `array_agg` since SQLite has no hash builtin),
+labeled with the original output name so the response shape is unchanged.
+
+**Masking scope (Decision Log, docs/PRODUCT_GUIDE.md):** a masked column may
+appear **only as a bare `select` item**. Any use in a
+`where`/`join`/`order_by`/`group_by` position, or nested inside a
+function/CASE/aggregate, is **rejected** by `policy_validation.py`
+(`_non_projection_column_refs`) — masking-in-place would silently change query
+semantics and projection-only masking would leave an inference exfiltration
+channel (`where ssn = 'guess'` + observe row presence), the same side-channel
+the allow/deny walk already closes for denied columns. This is the
+"reject and name the gap" posture, consistent with item 74 / `array_agg`.
+
+**Audit:** the success `AuditEvent` carries `masked_columns` (output names
+only, never the pre-mask value; `compiler.applied_column_masks`), so operators
+distinguish "masked" from "denied" access in the one stream (item 23).
+
+**Coverage:** `tests/unit/test_column_masking.py` (policy resolution +
+precedence + per-principal override, validation rejection in every
+non-projection position, compiler output-name preservation, per-dialect
+rendering, SQLite end-to-end for null/last/bucket, audit `masked_columns`),
+plus an example block in `examples/policy.example.yaml`.
 
 **Effort: L (3–5 days).** The policy/compiler pipeline already resolves
 every column reference before compilation (`validation/policy_validation.py`,

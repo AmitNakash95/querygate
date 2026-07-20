@@ -21,6 +21,7 @@ import sqlalchemy as sa
 
 from querygate.connections.models import DatabaseDialect
 from querygate.core.exceptions import QueryValidationError
+from querygate.policy.models import ColumnMask, ColumnMaskKind
 
 
 class DialectAdapter(ABC):
@@ -68,9 +69,23 @@ class DialectAdapter(ABC):
         values, e.g. PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
         Order.TotalAmount) for the median."""
 
+    @abstractmethod
+    def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
+        """Transform col_expr so the database itself returns a masked value
+        (TODO.md item 49). NULL/BUCKET render identically everywhere; HASH and
+        LAST use each dialect's own function idiom. A dialect with no genuine
+        equivalent for a kind raises QueryValidationError rather than emulating
+        it (see SQLiteDialectAdapter's HASH)."""
+
 
 def _direction_expr(col_expr: Any, direction: Literal["asc", "desc"]) -> Any:
     return col_expr.asc() if direction == "asc" else col_expr.desc()
+
+
+def _bucket_mask(col_expr: Any, mask: ColumnMask) -> Any:
+    """floor(col / size) * size — round a numeric value down to a bucket.
+    Dialect-universal via sa.func.floor, so every adapter shares it."""
+    return sa.func.floor(col_expr / mask.bucket_size) * mask.bucket_size
 
 
 class PostgresDialectAdapter(DialectAdapter):
@@ -100,6 +115,16 @@ class PostgresDialectAdapter(DialectAdapter):
 
     def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
         return sa.within_group(sa.func.percentile_cont(fraction), col_expr)
+
+    def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
+        if mask.kind is ColumnMaskKind.NULL:
+            return sa.null()
+        if mask.kind is ColumnMaskKind.BUCKET:
+            return _bucket_mask(col_expr, mask)
+        if mask.kind is ColumnMaskKind.LAST:
+            return sa.func.right(sa.cast(col_expr, sa.Text), mask.length)
+        # HASH — deterministic md5 of the text form.
+        return sa.func.md5(sa.cast(col_expr, sa.Text))
 
 
 class MSSQLDialectAdapter(DialectAdapter):
@@ -177,6 +202,21 @@ class MSSQLDialectAdapter(DialectAdapter):
             "requiring an OVER(...) clause"
         )
 
+    def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
+        if mask.kind is ColumnMaskKind.NULL:
+            return sa.null()
+        if mask.kind is ColumnMaskKind.BUCKET:
+            return _bucket_mask(col_expr, mask)
+        text = sa.cast(col_expr, sa.Unicode)
+        if mask.kind is ColumnMaskKind.LAST:
+            return sa.func.RIGHT(text, mask.length)
+        # HASH — CONVERT the SHA2_256 HASHBYTES digest to a hex string (style 2).
+        return sa.func.CONVERT(
+            sa.literal_column("VARCHAR(64)"),
+            sa.func.HASHBYTES(sa.literal("SHA2_256"), text),
+            sa.literal(2),
+        )
+
 
 class SQLiteDialectAdapter(DialectAdapter):
     """Internal test/example path only — SQLite is not a supported registry
@@ -248,6 +288,21 @@ class SQLiteDialectAdapter(DialectAdapter):
         raise QueryValidationError(
             "percentile_cont is not supported on the internal SQLite test/example "
             "dialect: SQLite has no ordered-set aggregate (WITHIN GROUP) support"
+        )
+
+    def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
+        if mask.kind is ColumnMaskKind.NULL:
+            return sa.null()
+        if mask.kind is ColumnMaskKind.BUCKET:
+            return _bucket_mask(col_expr, mask)
+        if mask.kind is ColumnMaskKind.LAST:
+            # SQLite substr(x, -n) returns the last n characters.
+            return sa.func.substr(sa.cast(col_expr, sa.Text), -mask.length)
+        # SQLite has no built-in hash function (no md5/HASHBYTES), so — like
+        # array_agg/percentile_cont above — reject rather than emulate.
+        raise QueryValidationError(
+            "column_mask kind 'hash' is not supported on the internal SQLite "
+            "test/example dialect: SQLite has no built-in hash function"
         )
 
 
