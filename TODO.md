@@ -4703,3 +4703,50 @@ This pass applies that same check retroactively to everything shipped
 since item 68 that didn't already have it, on the theory that "renders
 fine on Postgres" was never a safe proxy for "renders correctly on MSSQL"
 in the first place.
+
+### 79. Extend the property-based fuzzer to the item 68–77 AST surface ✅ DONE
+
+**Problem.** `tests/unit/test_compiler_properties.py` (item 36 phase 1) still
+only generated pre-item-68 shapes — everything since was covered by
+hand-written boundary tests only, never by the combinatorial fuzzer.
+Explicitly flagged as deferred, not done, when the first round shipped.
+
+**Shipped, in `test_compiler_properties.py`:**
+- `_predicates()` now draws a mix of plain literal predicates (still the
+  majority, preserving the historically covered shape), `value_col`
+  column-to-column comparisons (item 71), and `col_fn` scalar-function
+  predicates (item 77) — biased rather than uniform, so the common case
+  still dominates the generated corpus. `_where_clauses()` sometimes wraps
+  the whole tree in a `not_terms` negation (item 71).
+- `_row_select_queries()` gained: `distinct` (item 69) on the query itself;
+  a scalar-function and/or CASE select item mixed into the projection list
+  (item 72); an `extra_on` composite join-key pair on the join when one is
+  present (item 76); `nulls` on every generated `OrderBySpec` (item 74).
+- `_aggregate_queries()`'s function pool extended to include
+  `stddev`/`variance` (item 75), with `distinct` drawn only when it's valid
+  (never for `count(*)` or `stddev`/`variance` — encoded directly in the
+  generator rather than filtered post hoc with `assume()`).
+- New `_self_join_queries()` — structurally distinct from the other three
+  strategies (needs a `tables` dict keyed by alias, not physical name), so
+  it gets its own `test_compiler_never_crashes_on_self_join_shapes` and its
+  own `test_compiler_respects_mandatory_row_filter_across_self_join_shapes`
+  (proving item 70's "filter applies to every alias" guarantee — asserting
+  the mandatory-filter marker appears exactly twice — holds across random
+  self-join shapes too, not just the one hand-written case in
+  `test_compiler.py`) rather than being forced into the existing shared
+  `st.one_of(...)` mandatory-filter test, which only ever needs the
+  original physical-name-keyed `tables` dict.
+- The original `test_compiler_respects_mandatory_row_filter_across_random_shapes`
+  is otherwise unchanged and automatically re-proves the mandatory-filter
+  guarantee across the now-much-larger generated space for free, since it
+  already wraps all three original strategies.
+
+**Effort: M.** Test-only; no production code changed. All 6 property tests
+(4 original-strategy tests + 2 new self-join ones) pass at 100 examples
+each with the expanded generators.
+
+**Why it matters:** closes the last explicitly-acknowledged gap from the
+first round — hand-written tests prove specific shapes work, but only the
+fuzzer proves the compiler is robust to the *combinatorics* item 36 was
+written to cover, and that guarantee had silently stopped extending to
+anything shipped after item 67.
