@@ -117,6 +117,69 @@ def test_permitted_query_passes():
     validate_policy(query, Policy(), connection_id="demo")  # must not raise
 
 
+def test_where_predicate_count_exceeded():
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        where=WhereGroup(
+            or_terms=[
+                Predicate(col="orders.status", op="eq", value="a"),
+                Predicate(col="orders.status", op="eq", value="b"),
+                Predicate(col="orders.status", op="eq", value="c"),
+            ]
+        ),
+    )
+    with pytest.raises(PolicyViolationError, match="where predicate count"):
+        validate_policy(query, Policy(max_where_predicates=2), connection_id="demo")
+
+
+def test_where_predicate_count_at_cap_passes():
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        where=WhereGroup(
+            or_terms=[
+                Predicate(col="orders.status", op="eq", value="a"),
+                Predicate(col="orders.status", op="eq", value="b"),
+            ]
+        ),
+    )
+    validate_policy(query, Policy(max_where_predicates=2), connection_id="demo")
+
+
+def test_having_predicate_count_exceeded():
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        group_by=["orders.id"],
+        having=[
+            Predicate(col="orders.id", op="gt", value=1),
+            Predicate(col="orders.id", op="lt", value=100),
+        ],
+    )
+    with pytest.raises(PolicyViolationError, match="having predicate count"):
+        validate_policy(query, Policy(max_where_predicates=1), connection_id="demo")
+
+
+def test_in_list_size_exceeded():
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        where=Predicate(col="orders.status", op="in", value=["a", "b", "c"]),
+    )
+    with pytest.raises(PolicyViolationError, match="max_in_list_size"):
+        validate_policy(query, Policy(max_in_list_size=2), connection_id="demo")
+
+
+def test_in_list_size_at_cap_passes():
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        where=Predicate(col="orders.status", op="in", value=["a", "b"]),
+    )
+    validate_policy(query, Policy(max_in_list_size=2), connection_id="demo")
+
+
 def test_batch_size_exceeded():
     with pytest.raises(PolicyViolationError, match="batch size"):
         validate_batch_size(5, Policy(max_batch_size=3))

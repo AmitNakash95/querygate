@@ -28,6 +28,13 @@ default:
   max_top_n: 50
   max_partition_by: 5
   max_batch_size: 10
+
+  # Resource-exhaustion guardrails max_where_depth/max_joins/etc. above don't
+  # cover: a single-level `or` with thousands of terms passes depth checks,
+  # and an `in`/`not_in` predicate's value list has no other size cap.
+  max_where_predicates: 100
+  max_in_list_size: 1000
+
   timeout_seconds: 30
   max_concurrency: 8
   concurrency_wait_seconds: 10

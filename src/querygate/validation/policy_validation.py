@@ -6,7 +6,7 @@ disabled connection or an over-cap query never even touches the database.
 
 from __future__ import annotations
 
-from typing import Iterator, Set
+from typing import Iterator, List, Set
 
 from querygate.core.exceptions import PolicyViolationError
 from querygate.policy.models import Policy
@@ -35,6 +35,14 @@ def _where_column_refs(node: WhereNode) -> Iterator[str]:
         return
     for child in node.and_terms or node.or_terms or []:
         yield from _where_column_refs(child)
+
+
+def _iter_where_predicates(node: WhereNode) -> Iterator[Predicate]:
+    if isinstance(node, Predicate):
+        yield node
+        return
+    for child in node.and_terms or node.or_terms or []:
+        yield from _iter_where_predicates(child)
 
 
 def _iter_column_refs(query: StructuredQuery) -> Iterator[str]:
@@ -107,6 +115,29 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
             )
         if query.top_n.n > policy.max_top_n:
             raise PolicyViolationError(f"top_n.n exceeds max of {policy.max_top_n}")
+
+    if query.where is not None:
+        where_predicate_count = sum(1 for _ in _iter_where_predicates(query.where))
+        if where_predicate_count > policy.max_where_predicates:
+            raise PolicyViolationError(
+                f"where predicate count {where_predicate_count} exceeds max of "
+                f"{policy.max_where_predicates}"
+            )
+    if len(query.having) > policy.max_where_predicates:
+        raise PolicyViolationError(
+            f"having predicate count {len(query.having)} exceeds max of "
+            f"{policy.max_where_predicates}"
+        )
+
+    all_predicates: List[Predicate] = list(query.having)
+    if query.where is not None:
+        all_predicates.extend(_iter_where_predicates(query.where))
+    for pred in all_predicates:
+        if pred.op in ("in", "not_in") and len(pred.value) > policy.max_in_list_size:
+            raise PolicyViolationError(
+                f"{pred.op} list for {pred.col!r} exceeds max_in_list_size of "
+                f"{policy.max_in_list_size} items"
+            )
 
     column_refs = list(_iter_column_refs(query))
     tables = referenced_tables(query)
