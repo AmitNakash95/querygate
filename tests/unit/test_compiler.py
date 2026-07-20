@@ -17,6 +17,7 @@ from querygate.query_ast.models import (
     JoinSpec,
     OrderBySpec,
     Predicate,
+    StringAggSelectItem,
     StructuredQuery,
     TopNSpec,
     WhereGroup,
@@ -502,6 +503,66 @@ class TestCompiler:
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "STDEV(" in compiled
         assert "VAR(" in compiled
+
+    def test_string_agg_render_on_postgres(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                StringAggSelectItem(col="orders.status", delimiter=", ", alias="statuses"),
+            ],
+            group_by=["orders.customer_id"],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+        assert "string_agg(orders.status, ', ')" in compiled
+
+    def test_string_agg_render_on_mssql(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                StringAggSelectItem(col="orders.status", delimiter=", ", alias="statuses"),
+            ],
+            group_by=["orders.customer_id"],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "STRING_AGG(" in compiled
+
+    def test_string_agg_default_alias(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[StringAggSelectItem(col="orders.status", delimiter=", ")],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "string_agg_status" in compiled
+
+    def test_string_agg_is_treated_as_aggregate_for_having(self):
+        """A group_by + string_agg + having(on the string_agg alias) shape
+        must compile — this only works if StringAggSelectItem participates
+        in the same "is_aggregate" detection AggregateSelectItem does."""
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                StringAggSelectItem(col="orders.status", delimiter=", ", alias="statuses"),
+            ],
+            group_by=["orders.customer_id"],
+            having=[Predicate(col="statuses", op="neq", value="")],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).upper()
+        assert "HAVING" in compiled
 
     def test_order_by_nulls_last_renders_natively_on_postgres(self):
         tables = _make_tables()

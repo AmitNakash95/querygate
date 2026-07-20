@@ -24,6 +24,7 @@ from querygate.query_ast.models import (
     Predicate,
     ScalarFunctionArg,
     ScalarFunctionSelectItem,
+    StringAggSelectItem,
     StructuredQuery,
     WhereNode,
 )
@@ -205,6 +206,15 @@ def _build_select_columns(
                     if first_col is not None
                     else f"{item.fn}_result"
                 )
+            labeled = expr.label(alias)
+            columns.append(labeled)
+            alias_map[alias] = labeled
+            continue
+
+        if isinstance(item, StringAggSelectItem):
+            col = _column(tables, item.col)
+            expr = get_dialect_adapter(dialect).string_agg(col, item.delimiter)
+            alias = item.alias or f"string_agg_{col.name}"
             labeled = expr.label(alias)
             columns.append(labeled)
             alias_map[alias] = labeled
@@ -408,7 +418,7 @@ def compile_structured_query(
         stmt = stmt.having(_apply_predicate(target, pred, tables))
 
     is_aggregate = bool(query.group_by) or any(
-        isinstance(i, AggregateSelectItem) for i in query.select
+        isinstance(i, (AggregateSelectItem, StringAggSelectItem)) for i in query.select
     )
 
     allow_table_fallback = True

@@ -39,7 +39,11 @@ from querygate.mcp.server import create_mcp_server
 # Predicate.value_col, ScalarFunctionSelectItem/CaseSelectItem/ColArg/
 # LiteralArg and their Field descriptions, plus one short mcp/instructions.py
 # self-join section), not drift. New budget again keeps ~5% headroom.
-_MAX_TOTAL_CHARS = 66_500
+#
+# Bumped 2026-07-20 (item 80: string_agg aggregate function) — measured
+# 67,022 chars, from StringAggSelectItem's two new Field(description=...)
+# entries joining the SelectItem union. New budget keeps modest headroom.
+_MAX_TOTAL_CHARS = 67_600
 
 
 def _tool_schema_chars(tool: object) -> int:

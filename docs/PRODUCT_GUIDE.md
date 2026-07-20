@@ -247,10 +247,16 @@ one concrete adapter class per dialect (`PostgresDialectAdapter`,
 native `date_trunc()` that handles every granularity directly, MSSQL has
 no equivalent so it's built from `DATEADD`/`DATEDIFF` (the standard MSSQL
 truncation idiom), SQLite (test/example path only) uses `strftime()`
-string formatting. The interface also defines `order_by_terms` and
-`stat_fn` for two dialect-sensitive features landing immediately after
-this one (NULLS FIRST/LAST ordering, `stddev`/`variance` aggregates) —
-see the corresponding TODO.md items for what those wire up to once shipped.
+string formatting. The interface also defines `order_by_terms`, `stat_fn`,
+and `string_agg` for three dialect-sensitive features (NULLS FIRST/LAST
+ordering, `stddev`/`variance` aggregates, and the `string_agg` aggregate —
+see the corresponding TODO.md items). `string_agg` is the one case where
+the internal SQLite adapter does real work instead of raising: SQLite's
+`group_concat(expr, sep)` happens to share the exact `(expr, separator)`
+shape as Postgres's `string_agg`/MSSQL's `STRING_AGG`, unlike stddev/
+variance (SQLite has no such functions at all), so it's a genuine mapping
+rather than a stub — the only adapter method with a real SQLite
+implementation today.
 
 Adding a real third dialect (item 19) means implementing one new
 `DialectAdapter` subclass, not a hunt through the compiler for
@@ -1982,6 +1988,40 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-20 — SQLite's `DialectAdapter.string_agg` maps to a real
+  function (`group_concat`) instead of raising, unlike every other
+  internal-only-dialect adapter method (TODO.md item 80).** Every other
+  `DialectAdapter` method that has no real SQLite equivalent (`stat_fn`,
+  for `stddev`/`variance`) raises `QueryValidationError` rather than
+  faking one, since SQLite is explicitly the internal test/example
+  dialect, not a supported registry one. `string_agg` is the exception
+  because SQLite's `group_concat(expr, sep)` genuinely has the identical
+  `(expr, separator)` shape as Postgres's `string_agg`/MSSQL's
+  `STRING_AGG` — not a coincidence worth ignoring. **Why accepted:** it
+  turns this item's SQLite coverage from a rendering-only assertion into a
+  real end-to-end execution test (seed data, run the query, check the
+  actual concatenated output), which every other dialect-sensitive item in
+  this arc except stddev/variance has had. Concatenation order is
+  implementation-defined on every dialect without an `ORDER BY`-in-call
+  (deliberately out of v1 scope), so the test compares the *set* of
+  concatenated values, not an exact ordered string.
+- **2026-07-20 — Fixed a pre-existing crash bug in `audit/events.py`
+  discovered while implementing item 80, not introduced by it.**
+  `_select_shape`/`_predicate_shape` build the redaction-safe structural
+  summary persisted for every query attempt, called unconditionally and
+  unguarded at the very top of `StructuredQueryService.execute()` — before
+  policy validation, schema validation, or compilation even run. They only
+  recognized `str`/`AggregateSelectItem`/`DateBucketSelectItem` and raised
+  `TypeError` for anything else, meaning any real query selecting a
+  `ScalarFunctionSelectItem` or `CaseSelectItem` (items 71/72, already
+  shipped) crashed `execute()` entirely — not merely a logging gap. No
+  test exercised that path, so it went unnoticed. Fixed in the same commit
+  as `StringAggSelectItem`'s own shape (which needed the identical fix to
+  avoid repeating the bug for the new type), reusing the existing
+  `select_item_column_refs`/`predicate_column_refs` collectors from
+  `validation/schema_validation.py` as the shared source of truth for
+  which columns a select item or predicate touches, rather than
+  re-deriving that logic a third time in the audit module.
 - **2026-07-20 — Superseded: item 72's SELECT-only scalar-function
   restriction, below, no longer holds (TODO.md item 77).** The "materially
   bigger change" item 72 deferred turned out to be worth doing: rather than

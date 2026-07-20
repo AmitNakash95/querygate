@@ -72,6 +72,38 @@ async def test_join_end_to_end(sqlite_app):
 
 
 @pytest.mark.asyncio
+async def test_string_agg_end_to_end(sqlite_app):
+    """Real execution proof (not just rendered SQL) that string_agg (item
+    80) actually concatenates every grouped row's value — GB has 3 distinct
+    customers, so this also proves it isn't silently truncating to one row.
+    Concatenation order is unspecified without an ORDER BY-in-call (out of
+    scope for item 80 — see StringAggSelectItem's docstring), so this
+    compares the *set* of names, not an exact ordered string.
+    """
+    expected_names = {c["name"] for c in CUSTOMERS_DATA if c["country"] == "GB"}
+
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/demo/query",
+            json={
+                "from": "customers",
+                "select": [
+                    "customers.country",
+                    {"col": "customers.name", "delimiter": ", ", "as": "names"},
+                ],
+                "where": {"col": "customers.country", "op": "eq", "value": "GB"},
+                "group_by": ["customers.country"],
+                "limit": 5,
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["row_count"] == 1
+    got_names = set(body["rows"][0]["names"].split(", "))
+    assert got_names == expected_names
+
+
+@pytest.mark.asyncio
 async def test_rejects_unknown_column_end_to_end(sqlite_app):
     async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
         resp = await client.post(
