@@ -24,6 +24,7 @@ from querygate.query_ast.models import (
     Predicate,
     ScalarFunctionSelectItem,
     SelectItem,
+    StringAggSelectItem,
     StructuredQuery,
     WhereNode,
 )
@@ -86,7 +87,7 @@ def select_item_column_refs(item: SelectItem) -> Iterator[str]:
         if isinstance(item.else_, ColArg):
             yield item.else_.col
         return
-    # AggregateSelectItem / DateBucketSelectItem
+    # AggregateSelectItem / DateBucketSelectItem / StringAggSelectItem
     if item.col != "*":
         yield item.col
 
@@ -135,6 +136,13 @@ def _aggregate_alias(item: AggregateSelectItem) -> str:
     return f"{item.fn}_{col_name}"
 
 
+def _string_agg_alias(item: StringAggSelectItem) -> str:
+    if item.alias:
+        return item.alias
+    _, col_name = parse_column_ref(item.col)
+    return f"string_agg_{col_name}"
+
+
 def _scalar_function_alias(item: ScalarFunctionSelectItem) -> str:
     if item.alias:
         return item.alias
@@ -152,6 +160,8 @@ def _select_aliases(query: StructuredQuery, tables: Dict[str, sa.Table]) -> Set[
             aliases.add(_aggregate_alias(item))
         elif isinstance(item, DateBucketSelectItem):
             aliases.add(_date_bucket_alias(item, tables))
+        elif isinstance(item, StringAggSelectItem):
+            aliases.add(_string_agg_alias(item))
         elif isinstance(item, ScalarFunctionSelectItem):
             aliases.add(_scalar_function_alias(item))
         elif isinstance(item, CaseSelectItem):
@@ -398,7 +408,9 @@ def _validate_group_by(query: StructuredQuery, tables: Dict[str, sa.Table]) -> N
                 "date_bucket select alias"
             )
 
-    has_aggregate = any(isinstance(i, AggregateSelectItem) for i in query.select)
+    has_aggregate = any(
+        isinstance(i, (AggregateSelectItem, StringAggSelectItem)) for i in query.select
+    )
     if query.having and not has_aggregate and not query.group_by:
         raise QueryValidationError("having requires group_by or aggregate select items")
 
@@ -408,7 +420,9 @@ def _validate_top_n(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None
     if spec is None:
         return
 
-    has_aggregate = any(isinstance(i, AggregateSelectItem) for i in query.select)
+    has_aggregate = any(
+        isinstance(i, (AggregateSelectItem, StringAggSelectItem)) for i in query.select
+    )
     is_aggregated = bool(query.group_by) or has_aggregate
 
     if is_aggregated:

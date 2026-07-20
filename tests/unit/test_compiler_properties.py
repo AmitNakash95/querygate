@@ -37,6 +37,7 @@ from querygate.query_ast.models import (
     Predicate,
     ScalarFunctionCall,
     ScalarFunctionSelectItem,
+    StringAggSelectItem,
     StructuredQuery,
     TopNSpec,
     WhereGroup,
@@ -230,19 +231,27 @@ def _row_select_queries(draw):
 @st.composite
 def _aggregate_queries(draw):
     """Random GROUP BY + aggregate + HAVING shapes."""
-    # item 75: stddev/variance mixed into the aggregate function pool.
-    agg_fn = draw(st.sampled_from(["count", "sum", "avg", "min", "max", "stddev", "variance"]))
-    agg_col = "*" if agg_fn == "count" and draw(st.booleans()) else "orders.total_amount"
-    # distinct is invalid with count(*) and with stddev/variance on every
-    # dialect (see item 75) — never draw it for those rather than relying on
-    # a post-hoc filter.
-    distinct = (
-        draw(st.booleans()) if agg_col != "*" and agg_fn not in ("stddev", "variance") else False
-    )
-    select = [
-        "orders.status",
-        AggregateSelectItem(fn=agg_fn, col=agg_col, alias="agg_value", distinct=distinct),
-    ]
+    # item 80: string_agg mixed into the aggregate pool alongside the plain
+    # AggregateSelectItem shapes, alias kept "agg_value" so the having/
+    # order_by strategies below keep working unchanged either way — same
+    # "fold into the existing strategy" approach item 75 used for
+    # stddev/variance rather than a new composite strategy.
+    if draw(st.booleans()):
+        agg_item = StringAggSelectItem(col="orders.status", delimiter=", ", alias="agg_value")
+    else:
+        # item 75: stddev/variance mixed into the aggregate function pool.
+        agg_fn = draw(st.sampled_from(["count", "sum", "avg", "min", "max", "stddev", "variance"]))
+        agg_col = "*" if agg_fn == "count" and draw(st.booleans()) else "orders.total_amount"
+        # distinct is invalid with count(*) and with stddev/variance on every
+        # dialect (see item 75) — never draw it for those rather than relying
+        # on a post-hoc filter.
+        distinct = (
+            draw(st.booleans())
+            if agg_col != "*" and agg_fn not in ("stddev", "variance")
+            else False
+        )
+        agg_item = AggregateSelectItem(fn=agg_fn, col=agg_col, alias="agg_value", distinct=distinct)
+    select = ["orders.status", agg_item]
     having = draw(
         st.lists(
             st.builds(

@@ -78,6 +78,35 @@ class DateBucketSelectItem(pyd.BaseModel):
     model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
 
 
+class StringAggSelectItem(pyd.BaseModel):
+    """GROUP BY aggregate concatenating col's grouped values into one
+    delimiter-separated string, e.g. STRING_AGG(Customer.Email, ', ').
+    Its own shape (not a distinct field on AggregateSelectItem) since it
+    needs a delimiter that {fn, col} has no room for — see
+    DateBucketSelectItem/ScalarFunctionSelectItem for the same "sibling
+    type" pattern. Deliberately no ORDER BY-within-the-call (real on
+    Postgres, absent from MSSQL 2017+'s STRING_AGG) and no `distinct`
+    (Postgres supports it, T-SQL's STRING_AGG does not) — a v1 bound, not
+    an oversight (TODO.md item 80).
+    """
+
+    col: str = pyd.Field(description="Column ref (Table.Col) to concatenate.")
+    delimiter: str = pyd.Field(description="Separator string between concatenated values.")
+    alias: Optional[str] = pyd.Field(
+        default=None,
+        validation_alias=pyd.AliasChoices("as", "alias"),
+        serialization_alias="as",
+    )
+
+    model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _validate_col(self) -> "StringAggSelectItem":
+        if self.col == "*":
+            raise ValueError("string_agg requires a real column, not '*'")
+        return self
+
+
 class ColArg(pyd.BaseModel):
     """A scalar-function argument that is a column reference, not a literal."""
 
@@ -174,7 +203,12 @@ class CaseSelectItem(pyd.BaseModel):
 
 
 SelectItem = Union[
-    str, AggregateSelectItem, DateBucketSelectItem, ScalarFunctionSelectItem, CaseSelectItem
+    str,
+    AggregateSelectItem,
+    DateBucketSelectItem,
+    StringAggSelectItem,
+    ScalarFunctionSelectItem,
+    CaseSelectItem,
 ]
 
 

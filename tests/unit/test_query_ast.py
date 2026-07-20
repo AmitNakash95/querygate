@@ -12,6 +12,7 @@ from querygate.query_ast.models import (
     Predicate,
     ScalarFunctionCall,
     ScalarFunctionSelectItem,
+    StringAggSelectItem,
     StructuredQuery,
     WhereGroup,
 )
@@ -118,6 +119,20 @@ class TestStructuredQueryModels:
     def test_query_level_distinct_defaults_false(self):
         q = StructuredQuery(from_table="orders", select=["orders.id"])
         assert q.distinct is False
+
+    def test_string_agg_select_item_valid(self):
+        item = StringAggSelectItem(col="customers.email", delimiter=", ", alias="emails")
+        assert item.col == "customers.email"
+        assert item.delimiter == ", "
+        assert item.alias == "emails"
+
+    def test_string_agg_select_item_alias_optional(self):
+        item = StringAggSelectItem(col="customers.email", delimiter=", ")
+        assert item.alias is None
+
+    def test_string_agg_rejects_star(self):
+        with pytest.raises(ValueError, match="requires a real column"):
+            StringAggSelectItem(col="*", delimiter=", ")
 
     def test_self_join_without_alias_on_either_side_rejected(self):
         with pytest.raises(ValueError, match="self-join"):
