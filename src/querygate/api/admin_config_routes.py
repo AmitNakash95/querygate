@@ -17,6 +17,7 @@ import pydantic as pyd
 from fastapi import APIRouter, Depends, HTTPException, status
 from starlette.concurrency import run_in_threadpool
 
+from querygate.api._errors import require_scope
 from querygate.admin import service as governance
 from querygate.admin import templates as policy_templates
 from querygate.admin.models import (
@@ -59,13 +60,6 @@ class ApplyResult(pyd.BaseModel):
     reload: ReloadResult
 
 
-def _require_scope(principal: Principal, scope: str) -> None:
-    if scope not in principal.scopes:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail=f"Missing required scope: {scope!r}"
-        )
-
-
 def build_admin_config_router(
     get_principal: Callable[..., Principal], cfg: AppConfig, prefix: str = "/api/v1"
 ) -> APIRouter:
@@ -75,7 +69,7 @@ def build_admin_config_router(
     async def validate_endpoint(
         request: ConfigChangeRequest, principal: Principal = Depends(get_principal)
     ):
-        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
         errors = governance.validate(
             cfg,
             principal,
@@ -89,7 +83,7 @@ def build_admin_config_router(
     async def preview_endpoint(
         request: ConfigChangeRequest, principal: Principal = Depends(get_principal)
     ):
-        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
         return governance.preview(
             cfg,
             principal,
@@ -107,8 +101,8 @@ def build_admin_config_router(
         # is required. It also resolves caller-supplied config/secret
         # references, so config-write is independently required to prevent a
         # read-only principal from turning it into a secret-existence oracle.
-        _require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
-        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
         try:
             return await run_in_threadpool(
                 governance.simulate_candidate_policy, cfg, principal, request
@@ -125,8 +119,8 @@ def build_admin_config_router(
         # (config-read) while resolving caller-supplied config/secret references
         # (config-write). Requiring both prevents a read-only principal from
         # using a candidate document as a secret-existence oracle.
-        _require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
-        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
         try:
             return await run_in_threadpool(
                 governance.diff_candidate_access, cfg, principal, request
@@ -143,8 +137,8 @@ def build_admin_config_router(
         # policy detail (config-read) while resolving caller-supplied
         # config/secret references (config-write), now aggregated across every
         # configured principal rather than the connection baseline alone.
-        _require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
-        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
         try:
             return await run_in_threadpool(governance.compute_blast_radius, cfg, principal, request)
         except ConfigValidationError as exc:
@@ -152,7 +146,7 @@ def build_admin_config_router(
 
     @router.get("/templates", response_model=List[PolicyTemplateSummary])
     async def list_templates_endpoint(principal: Principal = Depends(get_principal)):
-        _require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
         return policy_templates.list_templates()
 
     @router.post("/templates/render", response_model=PolicyTemplateRenderResult)
@@ -163,7 +157,7 @@ def build_admin_config_router(
         # touches the live registry/policy singletons or the version store —
         # but the result is meant to be staged, so this requires write scope
         # like /validate and /preview rather than read scope like /templates.
-        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
         try:
             return policy_templates.render_template(
                 request.template_id, request.params, request.policy_yaml
@@ -175,7 +169,7 @@ def build_admin_config_router(
     async def stage_endpoint(
         request: ConfigChangeRequest, principal: Principal = Depends(get_principal)
     ):
-        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
         try:
             return governance.stage(
                 cfg,
@@ -190,12 +184,12 @@ def build_admin_config_router(
 
     @router.get("/versions", response_model=List[ConfigVersion])
     async def list_versions_endpoint(principal: Principal = Depends(get_principal)):
-        _require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
         return governance.list_versions(cfg)
 
     @router.get("/versions/{version_id}", response_model=ConfigVersion)
     async def get_version_endpoint(version_id: str, principal: Principal = Depends(get_principal)):
-        _require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
         try:
             return governance.get_version(version_id)
         except NotFoundError as exc:
@@ -203,12 +197,12 @@ def build_admin_config_router(
 
     @router.get("/current", response_model=ConfigVersion)
     async def current_endpoint(principal: Principal = Depends(get_principal)):
-        _require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
         return governance.get_current(cfg)
 
     @router.post("/versions/{version_id}/apply", response_model=ApplyResult)
     async def apply_endpoint(version_id: str, principal: Principal = Depends(get_principal)):
-        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
         try:
             version, reload_result = await governance.apply(cfg, principal, version_id)
         except NotFoundError as exc:
