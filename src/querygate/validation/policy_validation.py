@@ -69,6 +69,8 @@ def _iter_column_refs(query: StructuredQuery) -> Iterator[str]:
         yield from select_item_column_refs(item)
     for join in query.joins:
         yield from join.on
+        for pair in join.extra_on:
+            yield from pair
     if query.where is not None:
         yield from _where_column_refs(query.where)
     for col_ref in query.group_by:

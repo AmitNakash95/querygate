@@ -243,6 +243,16 @@ def _validate_join_graph(query: StructuredQuery) -> None:
             )
         known.add(joined_table)
 
+        for pair in join.extra_on:
+            extra_t0, _ = parse_column_ref(pair[0])
+            extra_t1, _ = parse_column_ref(pair[1])
+            if {extra_t0.lower(), extra_t1.lower()} != sides:
+                raise QueryValidationError(
+                    f"extra_on pair {pair!r} for join to {join.table!r} must reference "
+                    "the same two tables as `on` — a join's condition is always about "
+                    "the one pair of tables it joins"
+                )
+
 
 async def validate_schema(
     query: StructuredQuery, connection_id: str, principal: Optional[Principal] = None
@@ -357,7 +367,7 @@ def _validate_select_columns(query: StructuredQuery, tables: Dict[str, sa.Table]
 
 def _validate_join_columns(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None:
     for join in query.joins:
-        for side in join.on:
+        for side in [*join.on, *(ref for pair in join.extra_on for ref in pair)]:
             t, c = parse_column_ref(side)
             resolve_column(tables[t], c)
 

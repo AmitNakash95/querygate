@@ -297,6 +297,26 @@ def test_max_case_branches_at_cap_passes():
     validate_policy(query, Policy(max_case_branches=2), connection_id="demo")
 
 
+def test_denied_column_rejected_when_only_used_in_extra_on():
+    """A denied column reachable only via a composite join's extra_on pair
+    must still be caught — extra_on isn't a separate, unwalked ref site.
+    """
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        joins=[
+            JoinSpec(
+                table="customers",
+                on=["orders.customer_id", "customers.id"],
+                extra_on=[["orders.status", "customers.email"]],
+            )
+        ],
+    )
+    policy = Policy(denied_columns={"customers": ["email"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
 def test_where_predicate_count_exceeded():
     query = StructuredQuery(
         from_table="orders",
