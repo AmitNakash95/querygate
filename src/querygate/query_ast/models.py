@@ -38,6 +38,10 @@ class AggregateSelectItem(pyd.BaseModel):
 
     fn: AggregateFn
     col: str = pyd.Field(description="Column ref (Table.Col) or '*' for count")
+    distinct: bool = pyd.Field(
+        default=False,
+        description="Aggregate only over distinct values of col, e.g. COUNT(DISTINCT col).",
+    )
     alias: Optional[str] = pyd.Field(
         default=None,
         validation_alias=pyd.AliasChoices("as", "alias"),
@@ -45,6 +49,12 @@ class AggregateSelectItem(pyd.BaseModel):
     )
 
     model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _distinct_requires_real_column(self) -> "AggregateSelectItem":
+        if self.distinct and self.col == "*":
+            raise ValueError("distinct is not valid with count(*) — give a real column")
+        return self
 
 
 class DateBucketSelectItem(pyd.BaseModel):
@@ -200,6 +210,10 @@ class StructuredQuery(pyd.BaseModel):
             'Each item is EITHER a bare "Table.Column" string, OR an object: '
             "{fn, col, as} for an aggregate, or {col, granularity, as} for a date_bucket."
         ),
+    )
+    distinct: bool = pyd.Field(
+        default=False,
+        description="De-duplicate result rows (SELECT DISTINCT) across the full select list.",
     )
     joins: List[JoinSpec] = pyd.Field(default_factory=list)
     where: Optional[WhereNode] = pyd.Field(

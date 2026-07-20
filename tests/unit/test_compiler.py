@@ -254,6 +254,26 @@ class TestCompiler:
         with pytest.raises(PolicyViolationError, match="order_status"):
             compile_structured_query(query, tables, policy, principal=principal)
 
+    def test_query_level_distinct_renders(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders", select=["orders.status"], distinct=True, limit=10
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "SELECT DISTINCT" in compiled.upper()
+
+    def test_count_distinct_renders(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[AggregateSelectItem(fn="count", col="orders.status", distinct=True, alias="n")],
+            limit=10,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "COUNT(DISTINCT" in compiled.upper()
+
     def test_aggregate_query_gets_higher_limit_cap(self):
         tables = _make_tables()
         policy = Policy(default_limit=50, max_limit=100, max_limit_aggregate=1000)
