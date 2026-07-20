@@ -122,3 +122,23 @@ class TestStatFn:
     def test_sqlite_stat_fn_rejected(self):
         with pytest.raises(QueryValidationError, match="not supported"):
             SQLiteDialectAdapter().stat_fn("stddev")
+
+
+class TestStringAgg:
+    def test_postgres_renders_string_agg(self):
+        col = sa.column("email")
+        rendered = _render(PostgresDialectAdapter().string_agg(col, ", ")).lower()
+        assert "string_agg" in rendered
+
+    def test_mssql_renders_string_agg_tsql_name(self):
+        col = sa.column("email")
+        rendered = _render(MSSQLDialectAdapter().string_agg(col, ", ")).upper()
+        assert "STRING_AGG" in rendered
+
+    def test_sqlite_maps_to_group_concat(self):
+        """Unlike stat_fn, SQLite genuinely supports this (group_concat has
+        the same (expr, separator) shape) — not a raise, so this is real
+        behavior enabling end-to-end execution tests elsewhere."""
+        col = sa.column("email")
+        rendered = _render(SQLiteDialectAdapter().string_agg(col, ", ")).lower()
+        assert "group_concat" in rendered

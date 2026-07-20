@@ -208,6 +208,16 @@ def test_denied_column_rejected_inside_coalesce():
         validate_policy(query, policy, connection_id="demo")
 
 
+def test_denied_column_rejected_when_only_used_in_string_agg():
+    query = StructuredQuery(
+        from_table="customers",
+        select=[{"col": "customers.email", "delimiter": ", ", "as": "emails"}],
+    )
+    policy = Policy(denied_columns={"customers": ["email"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
 def test_denied_column_rejected_inside_case_when():
     query = StructuredQuery(
         from_table="customers",

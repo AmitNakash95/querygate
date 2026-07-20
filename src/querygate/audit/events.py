@@ -10,12 +10,17 @@ import pydantic as pyd
 
 from querygate.query_ast.models import (
     AggregateSelectItem,
+    CaseSelectItem,
+    ColArg,
     DateBucketSelectItem,
     Predicate,
+    ScalarFunctionSelectItem,
+    StringAggSelectItem,
     StructuredQuery,
     WhereGroup,
     WhereNode,
 )
+from querygate.validation.schema_validation import select_item_column_refs
 
 AuditDecision = Literal["allowed", "denied", "unknown"]
 AuditSurface = Literal["rest", "mcp", "internal"]
@@ -199,11 +204,39 @@ def _select_shape(item: object) -> Dict[str, Any]:
         if item.alias is not None:
             shape["alias"] = item.alias
         return shape
+    if isinstance(item, StringAggSelectItem):
+        shape = {"kind": "string_agg", "column": item.col}
+        if item.alias is not None:
+            shape["alias"] = item.alias
+        return shape
+    if isinstance(item, ScalarFunctionSelectItem):
+        shape = {
+            "kind": "scalar_fn",
+            "function": item.fn,
+            "columns": list(select_item_column_refs(item)),
+        }
+        if item.alias is not None:
+            shape["alias"] = item.alias
+        return shape
+    if isinstance(item, CaseSelectItem):
+        return {
+            "kind": "case",
+            "alias": item.alias,
+            "branch_count": len(item.when),
+            "columns": list(select_item_column_refs(item)),
+        }
     raise TypeError(f"Unsupported select item: {type(item).__name__}")
 
 
-def _predicate_shape(predicate: Predicate) -> Dict[str, str]:
-    return {"column": predicate.col, "operator": predicate.op}
+def _predicate_shape(predicate: Predicate) -> Dict[str, Any]:
+    shape: Dict[str, Any] = {"operator": predicate.op}
+    if predicate.col is not None:
+        shape["column"] = predicate.col
+    else:
+        assert predicate.col_fn is not None
+        shape["function"] = predicate.col_fn.fn
+        shape["columns"] = [arg.col for arg in predicate.col_fn.args if isinstance(arg, ColArg)]
+    return shape
 
 
 def _where_shape(node: WhereNode) -> Dict[str, Any]:

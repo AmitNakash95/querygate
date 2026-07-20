@@ -49,6 +49,11 @@ class DialectAdapter(ABC):
     def stat_fn(self, name: Literal["stddev", "variance"]) -> Callable[..., Any]:
         """The callable to apply to a column for a statistical aggregate."""
 
+    @abstractmethod
+    def string_agg(self, col_expr: Any, delimiter: str) -> Any:
+        """Concatenate col_expr's grouped values into one delimiter-
+        separated string, e.g. STRING_AGG(Customer.Email, ', ')."""
+
 
 def _direction_expr(col_expr: Any, direction: Literal["asc", "desc"]) -> Any:
     return col_expr.asc() if direction == "asc" else col_expr.desc()
@@ -72,6 +77,9 @@ class PostgresDialectAdapter(DialectAdapter):
 
     def stat_fn(self, name: Literal["stddev", "variance"]) -> Callable[..., Any]:
         return {"stddev": sa.func.stddev, "variance": sa.func.variance}[name]
+
+    def string_agg(self, col_expr: Any, delimiter: str) -> Any:
+        return sa.func.string_agg(col_expr, delimiter)
 
 
 class MSSQLDialectAdapter(DialectAdapter):
@@ -103,6 +111,12 @@ class MSSQLDialectAdapter(DialectAdapter):
 
     def stat_fn(self, name: Literal["stddev", "variance"]) -> Callable[..., Any]:
         return {"stddev": sa.func.STDEV, "variance": sa.func.VAR}[name]
+
+    def string_agg(self, col_expr: Any, delimiter: str) -> Any:
+        # SQL Server 2017+'s STRING_AGG — no ORDER BY/DISTINCT support inside
+        # the call, matching the AST-level bound (query_ast/models.py's
+        # StringAggSelectItem docstring).
+        return sa.func.STRING_AGG(col_expr, delimiter)
 
 
 class SQLiteDialectAdapter(DialectAdapter):
@@ -146,6 +160,16 @@ class SQLiteDialectAdapter(DialectAdapter):
         raise QueryValidationError(
             f"{name} is not supported on the internal SQLite test/example dialect"
         )
+
+    def string_agg(self, col_expr: Any, delimiter: str) -> Any:
+        # Unlike stat_fn above, SQLite's group_concat(expr, sep) is a real
+        # equivalent with the identical 2-arg shape as Postgres's
+        # string_agg/MSSQL's STRING_AGG — not a stub — so this genuinely
+        # works rather than raising, which is what lets this feature get
+        # real end-to-end execution test coverage instead of rendering-only
+        # assertions. Concatenation order is implementation-defined here
+        # (as it is on every dialect without ORDER BY-in-call support).
+        return sa.func.group_concat(col_expr, delimiter)
 
 
 _ADAPTERS: Dict[str, DialectAdapter] = {

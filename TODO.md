@@ -4750,3 +4750,70 @@ first round — hand-written tests prove specific shapes work, but only the
 fuzzer proves the compiler is robust to the *combinatorics* item 36 was
 written to cover, and that guarantee had silently stopped extending to
 anything shipped after item 67.
+
+---
+
+### 80. `string_agg` aggregate function ✅ DONE
+
+**Problem.** Item 75 shipped `stddev`/`variance` and explicitly deferred
+`string_agg`/`array_agg` (need a delimiter parameter `AggregateSelectItem`'s
+`{fn, col}` shape has no room for) and `percentile_cont` (needs `WITHIN
+GROUP (ORDER BY ...)`, a structurally different shape). Of those,
+`string_agg` was the right next item: Postgres (`string_agg`) and MSSQL
+2017+ (`STRING_AGG`) both support it with the same `(expr, separator)`
+shape, unlike `array_agg` (no MSSQL equivalent at all) or `percentile_cont`
+(MSSQL-only-as-a-window-function).
+
+**Shipped.** New sibling AST type `StringAggSelectItem` (`col`, `delimiter`,
+optional `alias`) added to the `SelectItem` union — not a field bolted onto
+`AggregateSelectItem`, matching how `DateBucketSelectItem`/
+`ScalarFunctionSelectItem` are separate siblings. Its own model validator
+rejects `col == "*"` up front (string_agg is never valid over `*`).
+`DialectAdapter` (item 73) gained a fourth method, `string_agg(col_expr,
+delimiter)`: Postgres renders `string_agg(...)`, MSSQL renders
+`STRING_AGG(...)` (uppercase, matching the adapter's existing `STDEV`/`VAR`
+convention). **SQLite's adapter is a real implementation, not a raise**
+(unlike `stat_fn`, which has no SQLite stddev/variance equivalent at all):
+`group_concat(expr, sep)` has the identical 2-arg shape as Postgres/MSSQL,
+so it was mapped for real — a deliberate decision (confirmed with the user)
+that gave this item genuine end-to-end execution coverage
+(`tests/integration/test_sqlite_end_to_end.py::test_string_agg_end_to_end`,
+seeded GB-country customers, asserts the concatenated *set* of names
+matches, not an exact ordered string, since concatenation order is
+implementation-defined without an `ORDER BY`-in-call). `_build_select_columns`
+routes through `get_dialect_adapter(dialect).string_agg(...)`; `is_aggregate`
+detection in both the compiler and `schema_validation.py`'s two
+`has_aggregate` checks now treat `StringAggSelectItem` the same as
+`AggregateSelectItem` (it affects `clamp_limit`'s aggregate cap, `top_n`
+eligibility, and the having-without-group_by-or-aggregate rule identically).
+`schema_validation._select_aliases` gained a `_string_agg_alias` branch.
+
+**Explicitly out of scope, not silently dropped** (same reasoning item 75
+used for `distinct`): `ORDER BY`-within-the-call (real on Postgres, absent
+from MSSQL 2017+) and `DISTINCT` inside the call (Postgres supports it,
+T-SQL's `STRING_AGG` does not) — both would need per-dialect rejection or
+emulation, so v1 keeps the AST shape minimal instead. `array_agg`/
+`percentile_cont` remain deferred exactly as item 75 described.
+
+**Side-fix discovered and fixed in the same commit (confirmed with the
+user):** `audit/events.py`'s `_select_shape`/`_predicate_shape` — called
+unconditionally, unguarded, at the top of
+`StructuredQueryService.execute()` — only handled `str`/`AggregateSelectItem`/
+`DateBucketSelectItem` and raised `TypeError` for anything else. This meant
+any real query selecting a `ScalarFunctionSelectItem` or `CaseSelectItem`
+(items 71/72) already crashed `execute()` entirely, unnoticed because no
+test exercised that path. Fixed alongside `StringAggSelectItem`'s own
+branch, reusing the existing `select_item_column_refs`/`predicate_column_refs`
+collectors (`validation/schema_validation.py`) as the single redaction-safe
+source of which columns a select item or predicate touches, rather than
+re-deriving that logic in the audit module. `_predicate_shape` also now
+handles `Predicate.col_fn` (item 77) instead of silently emitting
+`{"column": None, ...}` for a HAVING clause built on a scalar function.
+
+**Effort: S**, same "one adapter method, zero new compiler branches" shape
+as items 74/75, plus the audit-shape side-fix.
+
+**Why it matters:** real reporting asks ("list every product SKU in this
+order as one string") were previously impossible to express at all; the
+audit-shape fix closes a real crash bug in the shared query-execution path,
+not just a cosmetic logging gap.

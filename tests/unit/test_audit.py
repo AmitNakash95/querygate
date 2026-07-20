@@ -31,7 +31,13 @@ from querygate.execution.admission import QueueMode
 from querygate.execution.service import StructuredQueryService
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
-from querygate.query_ast.models import Predicate, StructuredQuery
+from querygate.query_ast.models import (
+    CaseSelectItem,
+    Predicate,
+    ScalarFunctionSelectItem,
+    StringAggSelectItem,
+    StructuredQuery,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +64,88 @@ def test_normalized_query_shape_excludes_literals_and_intent():
     assert '"operator": "eq"' in serialized
     assert "secret@example.com" not in serialized
     assert "executive request" not in serialized
+
+
+def test_normalized_query_shape_handles_string_agg_select_item():
+    query = StructuredQuery(
+        from_table="customers",
+        select=[
+            "customers.country",
+            StringAggSelectItem(col="customers.email", delimiter=", ", alias="emails"),
+        ],
+        group_by=["customers.country"],
+        limit=10,
+    )
+    shape = normalize_query_shape(query)
+    serialized = json.dumps(shape)
+    assert "customers.email" in serialized
+    assert '"kind": "string_agg"' in serialized
+
+
+def test_normalized_query_shape_handles_scalar_function_select_item():
+    """Pre-existing gap fixed alongside item 80: _select_shape previously
+    raised TypeError for any select item it didn't explicitly recognize,
+    which meant any real query selecting a scalar function crashed
+    execute() entirely (normalize_query_shape is called unconditionally,
+    unguarded, at the top of StructuredQueryService.execute)."""
+    query = StructuredQuery(
+        from_table="customers",
+        select=[ScalarFunctionSelectItem(fn="lower", args=[{"col": "customers.email"}])],
+        limit=10,
+    )
+    shape = normalize_query_shape(query)
+    serialized = json.dumps(shape)
+    assert "customers.email" in serialized
+    assert '"kind": "scalar_fn"' in serialized
+
+
+def test_normalized_query_shape_handles_case_select_item():
+    """Same pre-existing crash-on-execute gap as the scalar_fn case above."""
+    query = StructuredQuery(
+        from_table="customers",
+        select=[
+            CaseSelectItem(
+                when=[
+                    {
+                        "when": {"col": "customers.email", "op": "eq", "value": "secret@x.com"},
+                        "then": {"literal": "redacted"},
+                    }
+                ],
+                else_={"literal": "visible"},
+                alias="label",
+            )
+        ],
+        limit=10,
+    )
+    shape = normalize_query_shape(query)
+    serialized = json.dumps(shape)
+    assert "customers.email" in serialized
+    assert '"kind": "case"' in serialized
+    assert "secret@x.com" not in serialized
+    assert "redacted" not in serialized
+
+
+def test_normalized_query_shape_handles_predicate_col_fn_in_having():
+    """Predicate.col_fn (item 77) previously fell through _predicate_shape
+    as {"column": None, ...}, silently losing which column a HAVING clause
+    actually filtered on."""
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.status", {"fn": "count", "col": "*", "as": "n"}],
+        group_by=["orders.status"],
+        having=[
+            Predicate(
+                col_fn={"fn": "coalesce", "args": [{"col": "orders.total_amount"}, {"literal": 0}]},
+                op="gt",
+                value=0,
+            )
+        ],
+        limit=10,
+    )
+    shape = normalize_query_shape(query)
+    serialized = json.dumps(shape)
+    assert "orders.total_amount" in serialized
+    assert '"function": "coalesce"' in serialized
 
 
 def test_jsonl_sink_appends_versioned_events_with_private_file_mode(tmp_path):
