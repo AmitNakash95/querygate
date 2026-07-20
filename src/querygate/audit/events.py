@@ -90,6 +90,10 @@ class AuditEvent(pyd.BaseModel):
     # Lets operators see curated-tool usage distinctly in the same audit stream.
     template_id: Optional[str] = None
     template_param_shape: Optional[List[str]] = None
+    # Output column names that policy masked in this query (TODO.md item 49) —
+    # never the pre-mask value, keeping this event redaction-safe. Lets an
+    # operator distinguish "masked" from "denied" access in the same stream.
+    masked_columns: List[str] = pyd.Field(default_factory=list)
 
     model_config = pyd.ConfigDict(extra="forbid")
 

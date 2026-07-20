@@ -35,7 +35,7 @@ from querygate.catalog.retrieval import (
     search_catalog,
 )
 from querygate.catalog.usage import build_usage_signal, enqueue_usage_signal, should_emit_signal
-from querygate.compiler.sqlalchemy_compiler import compile_structured_query
+from querygate.compiler.sqlalchemy_compiler import applied_column_masks, compile_structured_query
 from querygate.connections.engine import get_engine, get_metadata, session_scope
 from querygate.connections.models import DatabaseDialect
 from querygate.connections.registry import get_registry
@@ -484,6 +484,7 @@ class StructuredQueryService:
                         operation=self._audit_operation,
                         template_id=self._template_id,
                         template_param_shape=self._template_param_shape,
+                        masked_columns=applied_column_masks(query, policy),
                     )
                     self._emit_usage_signals(query, admission_id=admission_id)
                     QUERIES_TOTAL.labels(connection=self._connection_id, status="success").inc()

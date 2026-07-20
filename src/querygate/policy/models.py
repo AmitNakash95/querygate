@@ -36,6 +36,67 @@ class CostEstimationMode(StrEnum):
     OBSERVE = "observe"
 
 
+class ColumnMaskKind(StrEnum):
+    """How a `ColumnMask` transforms a column's value in the compiled Select.
+
+    HASH  — a deterministic one-way hash (real value never leaves the DB).
+    NULL  — always NULL (the value is fully suppressed but the column stays
+            selectable, unlike a denied column which can't be referenced).
+    LAST  — reveal only the trailing `length` characters (e.g. last-4 of a
+            card number); everything else is dropped by the DB.
+    BUCKET — round a numeric value down to a multiple of `bucket_size`
+            (e.g. a salary bucketed to the nearest 10_000).
+    """
+
+    HASH = "hash"
+    NULL = "null"
+    LAST = "last"
+    BUCKET = "bucket"
+
+
+class ColumnMask(pyd.BaseModel):
+    """A per-column value transform applied in the compiled Select so the
+    database itself never returns the raw value to a masked caller (TODO.md
+    item 49). Unlike allow/deny — which is binary — a mask grants *partial*
+    visibility of a column.
+
+    A masked column may only appear as a bare SELECT projection item. Using it
+    in a filter/join/order/group position, or nested inside a function/CASE/
+    aggregate, is rejected by policy_validation (an unmasked reference there
+    would leak the real value via inference), not silently masked-in-place.
+    """
+
+    column: str
+    kind: ColumnMaskKind
+    # LAST: number of trailing characters to reveal. BUCKET: numeric bucket
+    # width. HASH/NULL take no parameters.
+    length: Optional[int] = None
+    bucket_size: Optional[float] = None
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _check_params(self) -> "ColumnMask":
+        if self.kind is ColumnMaskKind.LAST:
+            if self.length is None or self.length <= 0:
+                raise ValueError(f"column_mask kind 'last' on {self.column!r} needs length > 0")
+            if self.bucket_size is not None:
+                raise ValueError(f"column_mask kind 'last' on {self.column!r} forbids bucket_size")
+        elif self.kind is ColumnMaskKind.BUCKET:
+            if self.bucket_size is None or self.bucket_size <= 0:
+                raise ValueError(
+                    f"column_mask kind 'bucket' on {self.column!r} needs bucket_size > 0"
+                )
+            if self.length is not None:
+                raise ValueError(f"column_mask kind 'bucket' on {self.column!r} forbids length")
+        else:  # HASH / NULL take no parameters
+            if self.length is not None or self.bucket_size is not None:
+                raise ValueError(
+                    f"column_mask kind {self.kind.value!r} on {self.column!r} takes no parameters"
+                )
+        return self
+
+
 class MandatoryRowFilter(pyd.BaseModel):
     """An equality filter always AND-ed into every query that touches
     `table` — a generic, policy-declared replacement for hardcoding a
@@ -89,6 +150,13 @@ class Policy(pyd.BaseModel):
     denied_tables: list[str] = pyd.Field(default_factory=list)
     allowed_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
     denied_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
+
+    # Per-column value masks (TODO.md item 49) — keyed by table name with "*"
+    # applying to every table, the same convention as allowed/denied_columns.
+    # A mask grants partial visibility of a column that is otherwise permitted;
+    # deny always wins, so a denied column is unreachable before a mask is ever
+    # consulted (no load-time cross-check needed).
+    column_masks: dict[str, list[ColumnMask]] = pyd.Field(default_factory=dict)
 
     # Query complexity caps.
     max_joins: int = pyd.Field(default=5)
@@ -218,3 +286,21 @@ class Policy(pyd.BaseModel):
         if allowed is not None:
             return any(c.lower() == col for c in allowed)
         return True
+
+    def column_mask(self, table_name: str, column_name: str) -> Optional[ColumnMask]:
+        """The mask configured for a column, or None if it's unmasked. A
+        table-specific entry wins over the "*" wildcard list; within a list the
+        first case-insensitive match on `column` wins. Same case-insensitive
+        table lookup as `column_allowed` (see `_ci_lookup`).
+        """
+        col = column_name.lower()
+        for masks in (
+            self._ci_lookup(self.column_masks, table_name),
+            self._ci_lookup(self.column_masks, "*"),
+        ):
+            if masks is None:
+                continue
+            for mask in masks:
+                if mask.column.lower() == col:
+                    return mask
+        return None

@@ -84,6 +84,26 @@ connections:
     denied_columns:
       customers: [email]
 
+    # Column value masking (item 49) — partial visibility of a column that is
+    # otherwise permitted, applied inside the compiled query so the database
+    # never returns the raw value. A masked column may ONLY appear as a bare
+    # SELECT item; using it in a filter/join/order/group position (or nested in
+    # a function/CASE/aggregate) is rejected, since an unmasked reference there
+    # would leak the real value by inference. Keyed by table with "*" for all
+    # tables, like allowed/denied_columns. Kinds: hash | null | last (needs
+    # `length`) | bucket (needs `bucket_size`).
+    column_masks:
+      customers:
+        - column: phone
+          kind: last        # reveal only the last 4 chars, e.g. "***-6789"
+          length: 4
+        - column: national_id
+          kind: hash        # deterministic one-way hash
+      orders:
+        - column: total_amount
+          kind: bucket      # round down to the nearest 100
+          bucket_size: 100
+
     max_limit: 200
 
     # Example mandatory row filter — always AND-ed into any query that

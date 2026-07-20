@@ -173,8 +173,22 @@ def _compile_where(node: WhereNode, tables: Dict[str, sa.Table], alias_map: Dict
     return sa.or_(*compiled)
 
 
+def _mask_for_select_ref(
+    ref: str, policy: Policy, name_to_physical: Dict[str, str]
+) -> Optional[Any]:
+    """The ColumnMask configured for a bare projection ref, resolved against
+    the physical table (an alias can never dodge a mask), or None."""
+    table, column = parse_column_ref(ref)
+    physical = name_to_physical.get(table.lower(), table)
+    return policy.column_mask(physical, column)
+
+
 def _build_select_columns(
-    query: StructuredQuery, tables: Dict[str, sa.Table], dialect: str
+    query: StructuredQuery,
+    tables: Dict[str, sa.Table],
+    dialect: str,
+    policy: Policy,
+    name_to_physical: Dict[str, str],
 ) -> Tuple[List[Any], Dict[str, Any]]:
     columns: List[Any] = []
     alias_map: Dict[str, Any] = {}
@@ -182,6 +196,16 @@ def _build_select_columns(
     for item in query.select:
         if isinstance(item, str):
             col = _column(tables, item)
+            mask = _mask_for_select_ref(item, policy, name_to_physical)
+            if mask is not None:
+                # Masked in the compiled Select (validation guarantees this is
+                # the only place a masked column can appear). Keep the original
+                # output name so the response shape is unchanged.
+                labeled = get_dialect_adapter(dialect).column_mask(col, mask).label(col.name)
+                columns.append(labeled)
+                alias_map[col.name] = labeled
+                alias_map[item] = labeled
+                continue
             columns.append(col)
             alias_map[col.name] = col
             alias_map[item] = col
@@ -314,6 +338,26 @@ def _apply_mandatory_row_filters(
     return stmt
 
 
+def applied_column_masks(query: StructuredQuery, policy: Policy) -> List[str]:
+    """The output column names that would be masked when this query is compiled
+    for this policy — bare projection columns whose physical column has a mask.
+    Shares `policy.column_mask` with the compiler, so the two can't drift.
+
+    Used by the audit trail to distinguish "masked" from "denied" access
+    (never the pre-mask value). Names, not `table.column` refs, so it matches
+    the response column names a masked caller actually sees.
+    """
+    name_to_physical = effective_name_map(query)
+    masked: List[str] = []
+    for item in query.select:
+        if not isinstance(item, str):
+            continue
+        if _mask_for_select_ref(item, policy, name_to_physical) is not None:
+            _table, column = parse_column_ref(item)
+            masked.append(column)
+    return masked
+
+
 def clamp_limit(requested: Optional[int], policy: Policy, *, is_aggregate: bool = False) -> int:
     max_limit = policy.max_limit_aggregate if is_aggregate else policy.max_limit
     limit = policy.default_limit if requested is None else requested
@@ -400,7 +444,8 @@ def compile_structured_query(
 
     Returns (statement, effective_limit).
     """
-    select_cols, alias_map = _build_select_columns(query, tables, dialect)
+    name_to_physical = effective_name_map(query)
+    select_cols, alias_map = _build_select_columns(query, tables, dialect, policy, name_to_physical)
     base = _table_by_name(tables, query.from_alias or query.from_table)
     stmt = sa.select(*select_cols).select_from(base)
     if query.distinct:
@@ -419,7 +464,6 @@ def compile_structured_query(
         isouter = join.type == "left"
         stmt = stmt.join(right, condition, isouter=isouter)
 
-    name_to_physical = effective_name_map(query)
     stmt = _apply_mandatory_row_filters(stmt, policy, tables, name_to_physical, principal)
 
     if query.where is not None:
