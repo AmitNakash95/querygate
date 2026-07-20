@@ -4217,3 +4217,28 @@ parametrized pattern, plus targeted rejection tests in
 in the WHERE/HAVING shape — every other structural dimension of a query
 (joins, select width, nesting depth, group-by width, top_n) already had an
 explicit ceiling.
+
+### 69. DISTINCT / COUNT(DISTINCT) ✅ DONE
+
+**Problem.** The AST had no way to de-duplicate rows — neither
+`SELECT DISTINCT` nor `COUNT(DISTINCT col)` — despite both being ordinary,
+frequent asks ("how many unique customers ordered this month").
+
+**Shipped.** Added `StructuredQuery.distinct: bool` (whole-query dedup) and
+`AggregateSelectItem.distinct: bool` (per-aggregate dedup) to
+`query_ast/models.py`, with a `model_validator` on `AggregateSelectItem`
+rejecting `distinct=True` combined with `col="*"` (`COUNT(DISTINCT *)` isn't
+valid SQL — a caller gets a clear rejection instead of a DB-level error).
+`compiler/sqlalchemy_compiler.py`: `compile_structured_query` calls
+`stmt.distinct()` when `query.distinct`; `_build_select_columns` wraps the
+resolved column with `.distinct()` before applying the aggregate fn when
+`item.distinct`. No new policy cap needed — bounded by the existing
+row/complexity caps. Added shape-validation tests to `test_query_ast.py`
+and rendering tests to `test_compiler.py`.
+
+**Effort: XS.** Two boolean fields, one validator, two compiler call sites.
+
+**Why it matters:** closes a gap where an agent literally could not express
+"unique X" — the request had to be either impossible or answered by
+pulling more rows than needed and de-duplicating client-side, defeating the
+point of a policy-enforced gateway.

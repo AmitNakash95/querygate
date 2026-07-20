@@ -91,6 +91,18 @@ class TestStructuredQueryModels:
         )
         assert q.joins[0].connection == "other_connection"
 
+    def test_distinct_rejects_count_star(self):
+        with pytest.raises(ValueError, match="count\\(\\*\\)"):
+            AggregateSelectItem(fn="count", col="*", distinct=True)
+
+    def test_distinct_on_real_column_allowed(self):
+        item = AggregateSelectItem(fn="count", col="orders.status", distinct=True)
+        assert item.distinct is True
+
+    def test_query_level_distinct_defaults_false(self):
+        q = StructuredQuery(from_table="orders", select=["orders.id"])
+        assert q.distinct is False
+
     def test_entity_id_field_no_longer_exists(self):
         """entity_id was a customer-specific "scope to Company.ID" concept —
         it's been replaced by policy-level mandatory_row_filters and must not
