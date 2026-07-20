@@ -282,11 +282,13 @@ def _apply_top_n(
     tables: Dict[str, sa.Table],
     alias_map: Dict[str, Any],
     is_aggregate: bool,
+    dialect: str,
 ) -> Tuple[sa.Select, Dict[str, Any]]:
     """Wrap stmt with a rank-per-partition subquery, keeping only the top n rows."""
     spec = query.top_n
     output_names = [c.name for c in stmt.selected_columns]
     rank_fn = _RANK_FNS[spec.fn]
+    adapter = get_dialect_adapter(dialect)
 
     if is_aggregate:
         # stmt already has group_by/having applied and its select list is
@@ -301,8 +303,9 @@ def _apply_top_n(
 
         partition_cols = [_agg_col(ref) for ref in spec.partition_by] or None
         order_cols = [
-            _agg_col(o.col).asc() if o.dir == "asc" else _agg_col(o.col).desc()
+            term
             for o in spec.order_by
+            for term in adapter.order_by_terms(_agg_col(o.col), o.dir, o.nulls)
         ]
         rank_expr = rank_fn().over(partition_by=partition_cols, order_by=order_cols).label("__rank")
         ranked = sa.select(*[agg.c[name] for name in output_names], rank_expr).subquery()
@@ -312,12 +315,13 @@ def _apply_top_n(
             for ref in spec.partition_by
         ] or None
         order_cols = [
-            (
-                _resolve_output_ref(o.col, tables, alias_map, allow_table_fallback=True).asc()
-                if o.dir == "asc"
-                else _resolve_output_ref(o.col, tables, alias_map, allow_table_fallback=True).desc()
-            )
+            term
             for o in spec.order_by
+            for term in adapter.order_by_terms(
+                _resolve_output_ref(o.col, tables, alias_map, allow_table_fallback=True),
+                o.dir,
+                o.nulls,
+            )
         ]
         rank_expr = rank_fn().over(partition_by=partition_cols, order_by=order_cols).label("__rank")
         ranked = stmt.add_columns(rank_expr).subquery()
@@ -390,12 +394,13 @@ def compile_structured_query(
 
     allow_table_fallback = True
     if query.top_n is not None:
-        stmt, alias_map = _apply_top_n(stmt, query, tables, alias_map, is_aggregate)
+        stmt, alias_map = _apply_top_n(stmt, query, tables, alias_map, is_aggregate, dialect)
         allow_table_fallback = False
 
+    adapter = get_dialect_adapter(dialect)
     for order in query.order_by:
         col = _resolve_output_ref(order.col, tables, alias_map, allow_table_fallback)
-        stmt = stmt.order_by(col.asc() if order.dir == "asc" else col.desc())
+        stmt = stmt.order_by(*adapter.order_by_terms(col, order.dir, order.nulls))
 
     limit = clamp_limit(query.limit, policy, is_aggregate=is_aggregate)
     stmt = stmt.limit(limit)

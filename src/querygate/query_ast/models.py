@@ -280,6 +280,14 @@ class OrderBySpec(pyd.BaseModel):
 
     col: str
     dir: SortDir = "asc"
+    nulls: Optional[Literal["first", "last"]] = pyd.Field(
+        default=None,
+        description=(
+            "Where NULLs sort relative to non-NULL values — omit for each dialect's "
+            "own default ordering. Applied identically across dialects even though "
+            "MSSQL has no native NULLS FIRST/LAST syntax (emulated internally)."
+        ),
+    )
 
     model_config = pyd.ConfigDict(extra="forbid")
 
