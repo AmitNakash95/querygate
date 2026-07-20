@@ -97,6 +97,8 @@ def _select_aliases(query: StructuredQuery, tables: Dict[str, sa.Table]) -> Set[
 def _where_depth(node: WhereNode, depth: int = 1) -> int:
     if isinstance(node, Predicate):
         return depth
+    if node.not_terms is not None:
+        return _where_depth(node.not_terms, depth + 1)
     children = node.and_terms or node.or_terms or []
     if not children:
         return depth
@@ -112,6 +114,12 @@ def _collect_tables_from_where(node: WhereNode, tables: Set[str]) -> None:
         if "." in node.col:
             table, _ = parse_column_ref(node.col)
             tables.add(table)
+        if node.value_col is not None:
+            table, _ = parse_column_ref(node.value_col)
+            tables.add(table)
+        return
+    if node.not_terms is not None:
+        _collect_tables_from_where(node.not_terms, tables)
         return
     for child in node.and_terms or node.or_terms or []:
         _collect_tables_from_where(child, tables)
@@ -232,6 +240,9 @@ async def validate_schema(
         # having may reference select aliases (no table) or Table.Col
         if "." in pred.col:
             t, _ = parse_column_ref(pred.col)
+            needed.add(t)
+        if pred.value_col is not None:
+            t, _ = parse_column_ref(pred.value_col)
             needed.add(t)
 
     if query.top_n is not None:
@@ -366,6 +377,9 @@ def _validate_where_columns(
     if isinstance(node, Predicate):
         _validate_predicate_columns(node, tables, allow_alias=allow_alias)
         return
+    if node.not_terms is not None:
+        _validate_where_columns(node.not_terms, tables, allow_alias=allow_alias)
+        return
     for child in node.and_terms or node.or_terms or []:
         _validate_where_columns(child, tables, allow_alias=allow_alias)
 
@@ -374,8 +388,11 @@ def _validate_predicate_columns(
     pred: Predicate, tables: Dict[str, sa.Table], allow_alias: bool
 ) -> None:
     if "." not in pred.col:
-        if allow_alias:
-            return
-        raise QueryValidationError(f"Column reference must be 'Table.Column', got {pred.col!r}")
-    t, c = parse_column_ref(pred.col)
-    resolve_column(tables[t], c)
+        if not allow_alias:
+            raise QueryValidationError(f"Column reference must be 'Table.Column', got {pred.col!r}")
+    else:
+        t, c = parse_column_ref(pred.col)
+        resolve_column(tables[t], c)
+    if pred.value_col is not None:
+        vt, vc = parse_column_ref(pred.value_col)
+        resolve_column(tables[vt], vc)

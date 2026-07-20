@@ -55,9 +55,11 @@ def _column(tables: Dict[str, sa.Table], col_ref: str) -> sa.Column:
     return resolve_column(_table_by_name(tables, table_name), column_name)
 
 
-def _apply_predicate(col: Any, pred: Predicate) -> Any:
+def _apply_predicate(col: Any, pred: Predicate, tables: Dict[str, sa.Table]) -> Any:
     op = pred.op
-    val = pred.value
+    # value_col is only valid for eq/neq/lt/lte/gt/gte (enforced at the AST
+    # layer), so every other op below always sees pred.value here.
+    val = _column(tables, pred.value_col) if pred.value_col is not None else pred.value
     if op == "eq":
         return col == val
     if op == "neq":
@@ -152,7 +154,10 @@ def _sqlite_date_bucket_expr(col: Any, granularity: str) -> Any:
 def _compile_where(node: WhereNode, tables: Dict[str, sa.Table], alias_map: Dict[str, Any]) -> Any:
     if isinstance(node, Predicate):
         target = _resolve_predicate_target(node, tables, alias_map)
-        return _apply_predicate(target, node)
+        return _apply_predicate(target, node, tables)
+
+    if node.not_terms is not None:
+        return sa.not_(_compile_where(node.not_terms, tables, alias_map))
 
     children = node.and_terms or node.or_terms or []
     compiled = [_compile_where(child, tables, alias_map) for child in children]
@@ -359,7 +364,7 @@ def compile_structured_query(
 
     for pred in query.having:
         target = _resolve_predicate_target(pred, tables, alias_map)
-        stmt = stmt.having(_apply_predicate(target, pred))
+        stmt = stmt.having(_apply_predicate(target, pred, tables))
 
     is_aggregate = bool(query.group_by) or any(
         isinstance(i, AggregateSelectItem) for i in query.select

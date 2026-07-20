@@ -254,6 +254,53 @@ class TestCompiler:
         with pytest.raises(PolicyViolationError, match="order_status"):
             compile_structured_query(query, tables, policy, principal=principal)
 
+    def test_not_group_renders(self):
+        # SQLAlchemy simplifies NOT(col = val) to col != val at the
+        # expression level (still a correct negation) rather than emitting a
+        # literal NOT — assert the negated effect, not the literal keyword.
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            where=WhereGroup(not_terms=Predicate(col="orders.status", op="eq", value="completed")),
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "!=" in compiled
+
+    def test_not_wrapping_and_group_renders(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            where=WhereGroup(
+                not_terms=WhereGroup(
+                    and_terms=[
+                        Predicate(col="orders.status", op="eq", value="completed"),
+                        Predicate(col="orders.total_amount", op="gt", value=100),
+                    ]
+                )
+            ),
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "NOT" in compiled.upper()
+        assert "AND" in compiled.upper()
+
+    def test_column_to_column_comparison_renders(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            where=Predicate(col="orders.total_amount", op="gt", value_col="orders.id"),
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "orders.total_amount > orders.id" in compiled
+
     def test_self_join_renders_two_aliases(self):
         metadata = sa.MetaData()
         employees = sa.Table(
