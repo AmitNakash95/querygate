@@ -132,6 +132,40 @@ class ArrayAggSelectItem(pyd.BaseModel):
         return self
 
 
+class PercentileContSelectItem(pyd.BaseModel):
+    """GROUP BY ordered-set aggregate computing a continuous-interpolation
+    percentile of col's grouped values, e.g.
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY Order.TotalAmount) for the
+    median. Its own sibling shape (not a field on AggregateSelectItem)
+    since WITHIN GROUP (ORDER BY ...) is a structurally different aggregate
+    form entirely, not an {fn, col} variant. Deliberately single-column/
+    single-fraction/always-ascending for v1 — no descending option, no
+    Postgres's multi-fraction array form, no PARTITION BY — same
+    "separate future item, not an oversight" reasoning as string_agg/
+    array_agg's deferred features (TODO.md item 82).
+    """
+
+    col: str = pyd.Field(description="Column ref (Table.Col) to compute the percentile of.")
+    fraction: float = pyd.Field(
+        description="Percentile as a fraction in [0.0, 1.0], e.g. 0.5 for the median."
+    )
+    alias: Optional[str] = pyd.Field(
+        default=None,
+        validation_alias=pyd.AliasChoices("as", "alias"),
+        serialization_alias="as",
+    )
+
+    model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _validate(self) -> "PercentileContSelectItem":
+        if self.col == "*":
+            raise ValueError("percentile_cont requires a real column, not '*'")
+        if not 0.0 <= self.fraction <= 1.0:
+            raise ValueError("percentile_cont fraction must be between 0.0 and 1.0")
+        return self
+
+
 class ColArg(pyd.BaseModel):
     """A scalar-function argument that is a column reference, not a literal."""
 
@@ -233,6 +267,7 @@ SelectItem = Union[
     DateBucketSelectItem,
     StringAggSelectItem,
     ArrayAggSelectItem,
+    PercentileContSelectItem,
     ScalarFunctionSelectItem,
     CaseSelectItem,
 ]
@@ -242,7 +277,12 @@ SelectItem = Union[
 # the having-without-group_by rule) — shared by sqlalchemy_compiler.py and
 # schema_validation.py's two has_aggregate checks so a fourth aggregate
 # type never has to be added to three places by hand (TODO.md item 81).
-_AGGREGATE_SELECT_ITEM_TYPES = (AggregateSelectItem, StringAggSelectItem, ArrayAggSelectItem)
+_AGGREGATE_SELECT_ITEM_TYPES = (
+    AggregateSelectItem,
+    StringAggSelectItem,
+    ArrayAggSelectItem,
+    PercentileContSelectItem,
+)
 
 
 class JoinSpec(pyd.BaseModel):

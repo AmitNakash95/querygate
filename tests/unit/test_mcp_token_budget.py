@@ -47,7 +47,12 @@ from querygate.mcp.server import create_mcp_server
 # Bumped 2026-07-20 (item 81: array_agg aggregate function) — measured
 # 67,822 chars, from ArrayAggSelectItem's two new Field(description=...)
 # entries joining the SelectItem union. New budget keeps modest headroom.
-_MAX_TOTAL_CHARS = 68_300
+#
+# Bumped 2026-07-20 (item 82: percentile_cont aggregate function) —
+# measured 69,042 chars, from PercentileContSelectItem's three new
+# Field(description=...) entries (col, fraction, alias) joining the
+# SelectItem union. New budget keeps modest headroom.
+_MAX_TOTAL_CHARS = 69_500
 
 
 def _tool_schema_chars(tool: object) -> int:

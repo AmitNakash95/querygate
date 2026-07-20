@@ -228,6 +228,16 @@ def test_denied_column_rejected_when_only_used_in_array_agg():
         validate_policy(query, policy, connection_id="demo")
 
 
+def test_denied_column_rejected_when_only_used_in_percentile_cont():
+    query = StructuredQuery(
+        from_table="orders",
+        select=[{"col": "orders.total_amount", "fraction": 0.5, "as": "median"}],
+    )
+    policy = Policy(denied_columns={"orders": ["total_amount"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
 def test_denied_column_rejected_inside_case_when():
     query = StructuredQuery(
         from_table="customers",

@@ -165,3 +165,26 @@ class TestArrayAgg:
         col = sa.column("status")
         with pytest.raises(QueryValidationError, match="not supported"):
             SQLiteDialectAdapter().array_agg(col)
+
+
+class TestPercentileCont:
+    def test_postgres_renders_percentile_cont(self):
+        col = sa.column("total_amount")
+        rendered = _render(PostgresDialectAdapter().percentile_cont(col, 0.5)).lower()
+        assert "percentile_cont(0.5)" in rendered
+        assert "within group" in rendered
+
+    def test_mssql_rejects_percentile_cont(self):
+        """T-SQL's PERCENTILE_CONT is analytic-function-only (requires an
+        OVER clause) — no GROUP BY-compatible aggregate form exists, unlike
+        Postgres. Verified this isn't just a naming gap: SQLAlchemy's
+        within_group() silently compiles against the mssql dialect too, so
+        this must be a deliberate raise, not left to fail at runtime."""
+        col = sa.column("total_amount")
+        with pytest.raises(QueryValidationError, match="analytic/window function"):
+            MSSQLDialectAdapter().percentile_cont(col, 0.5)
+
+    def test_sqlite_rejects_percentile_cont(self):
+        col = sa.column("total_amount")
+        with pytest.raises(QueryValidationError, match="ordered-set aggregate"):
+            SQLiteDialectAdapter().percentile_cont(col, 0.5)

@@ -34,6 +34,7 @@ from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     ArrayAggSelectItem,
     CaseSelectItem,
+    PercentileContSelectItem,
     Predicate,
     ScalarFunctionSelectItem,
     StringAggSelectItem,
@@ -97,6 +98,22 @@ def test_normalized_query_shape_handles_array_agg_select_item():
     serialized = json.dumps(shape)
     assert "customers.email" in serialized
     assert '"kind": "array_agg"' in serialized
+
+
+def test_normalized_query_shape_handles_percentile_cont_select_item():
+    query = StructuredQuery(
+        from_table="orders",
+        select=[
+            "orders.customer_id",
+            PercentileContSelectItem(col="orders.total_amount", fraction=0.5, alias="median"),
+        ],
+        group_by=["orders.customer_id"],
+        limit=10,
+    )
+    shape = normalize_query_shape(query)
+    serialized = json.dumps(shape)
+    assert "orders.total_amount" in serialized
+    assert '"kind": "percentile_cont"' in serialized
 
 
 def test_normalized_query_shape_handles_scalar_function_select_item():

@@ -17,6 +17,7 @@ from querygate.query_ast.models import (
     DateBucketSelectItem,
     JoinSpec,
     OrderBySpec,
+    PercentileContSelectItem,
     Predicate,
     StringAggSelectItem,
     StructuredQuery,
@@ -620,6 +621,69 @@ class TestCompiler:
             ],
             group_by=["orders.customer_id"],
             having=[Predicate(col="statuses", op="neq", value="")],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).upper()
+        assert "HAVING" in compiled
+
+    def test_percentile_cont_render_on_postgres(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                PercentileContSelectItem(col="orders.total_amount", fraction=0.5, alias="median"),
+            ],
+            group_by=["orders.customer_id"],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+        assert "percentile_cont(0.5)" in compiled
+        assert "within group" in compiled
+
+    def test_percentile_cont_rejected_on_mssql(self):
+        """T-SQL's PERCENTILE_CONT has no GROUP BY-compatible form — must
+        be rejected outright, not emulated, same shape as array_agg."""
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                PercentileContSelectItem(col="orders.total_amount", fraction=0.5, alias="median"),
+            ],
+            group_by=["orders.customer_id"],
+            limit=5,
+        )
+        with pytest.raises(QueryValidationError, match="analytic/window function"):
+            compile_structured_query(query, tables, Policy(), dialect="mssql")
+
+    def test_percentile_cont_default_alias(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[PercentileContSelectItem(col="orders.total_amount", fraction=0.5)],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "percentile_cont_total_amount" in compiled
+
+    def test_percentile_cont_is_treated_as_aggregate_for_having(self):
+        """A group_by + percentile_cont + having(on the percentile_cont
+        alias) shape must compile — this only works if
+        PercentileContSelectItem participates in the same "is_aggregate"
+        detection AggregateSelectItem does."""
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                PercentileContSelectItem(col="orders.total_amount", fraction=0.5, alias="median"),
+            ],
+            group_by=["orders.customer_id"],
+            having=[Predicate(col="median", op="gt", value=0)],
             limit=5,
         )
         stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
