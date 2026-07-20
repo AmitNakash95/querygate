@@ -18,7 +18,7 @@ def _gauge(name: str, labels: dict) -> float:
 
 @pytest.mark.asyncio
 async def test_concurrency_slot_updates_in_use_gauge():
-    cc.SEMAPHORES.pop("demo", None)
+    cc.in_process_limiter().reset_semaphore("demo")
     assert _gauge("querygate_concurrency_in_use", {"connection": "demo"}) == 0.0
 
     async with cc.concurrency_slot("demo", max_concurrency=2, wait_seconds=1):
@@ -30,7 +30,7 @@ async def test_concurrency_slot_updates_in_use_gauge():
 
 @pytest.mark.asyncio
 async def test_concurrency_cap_serializes_in_flight_calls():
-    cc.SEMAPHORES.pop("demo", None)
+    cc.in_process_limiter().reset_semaphore("demo")
     in_flight = 0
     max_in_flight = 0
 
@@ -48,8 +48,7 @@ async def test_concurrency_cap_serializes_in_flight_calls():
 
 @pytest.mark.asyncio
 async def test_concurrency_cap_raises_when_wait_exceeded():
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    await cc.in_process_limiter().semaphore("demo", 1).acquire()  # occupy the only slot
 
     with pytest.raises(ValueError, match="too many concurrent"):
         async with cc.concurrency_slot("demo", max_concurrency=1, wait_seconds=0.05):
@@ -58,9 +57,8 @@ async def test_concurrency_cap_raises_when_wait_exceeded():
 
 @pytest.mark.asyncio
 async def test_concurrency_caps_are_independent_per_connection():
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()
-    cc.SEMAPHORES.pop("other", None)
+    await cc.in_process_limiter().semaphore("demo", 1).acquire()
+    cc.in_process_limiter().reset_semaphore("other")
 
     # Must not block on "demo"'s exhausted slot.
     async with cc.concurrency_slot("other", max_concurrency=1, wait_seconds=1):
@@ -69,8 +67,8 @@ async def test_concurrency_caps_are_independent_per_connection():
 
 @pytest.mark.asyncio
 async def test_concurrency_slot_tracks_queue_depth_while_waiting():
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    sem = cc.in_process_limiter().semaphore("demo", 1)
+    await sem.acquire()  # occupy the only slot
     assert _gauge("querygate_queue_depth", {"connection": "demo"}) == 0.0
 
     async def _waiter():
@@ -81,15 +79,14 @@ async def test_concurrency_slot_tracks_queue_depth_while_waiting():
     await asyncio.sleep(0.02)  # let the waiter actually start blocking on acquire
     assert _gauge("querygate_queue_depth", {"connection": "demo"}) == 1.0
 
-    cc.SEMAPHORES["demo"].release()  # frees the slot the waiter is queued behind
+    sem.release()  # frees the slot the waiter is queued behind
     await task
     assert _gauge("querygate_queue_depth", {"connection": "demo"}) == 0.0
 
 
 @pytest.mark.asyncio
 async def test_concurrency_slot_releases_queue_depth_after_a_capacity_timeout():
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    await cc.in_process_limiter().semaphore("demo", 1).acquire()  # occupy the only slot
 
     with pytest.raises(ValueError, match="too many concurrent"):
         async with cc.concurrency_slot("demo", max_concurrency=1, wait_seconds=0.05):
@@ -103,11 +100,11 @@ async def test_concurrency_slot_dispatches_to_redis_limiter_when_configured():
     limiter = RedisConcurrencyLimiter(fakeredis.aioredis.FakeRedis(), lease_seconds=30)
     cc.init_redis_limiter(limiter)
     try:
-        # SEMAPHORES must stay untouched — proves the in-process path was
-        # never exercised for this call.
-        cc.SEMAPHORES.pop("demo", None)
+        # The in-process limiter must stay untouched — proves the in-process
+        # path was never exercised for this call.
+        cc.in_process_limiter().reset_semaphore("demo")
         async with cc.concurrency_slot("demo", max_concurrency=1, wait_seconds=1):
-            assert "demo" not in cc.SEMAPHORES
+            assert not cc.in_process_limiter().has_semaphore("demo")
     finally:
         cc.clear_redis_limiter()
 
@@ -118,9 +115,9 @@ async def test_clear_redis_limiter_reverts_to_in_process():
     cc.init_redis_limiter(limiter)
     cc.clear_redis_limiter()
 
-    cc.SEMAPHORES.pop("demo", None)
+    cc.in_process_limiter().reset_semaphore("demo")
     async with cc.concurrency_slot("demo", max_concurrency=1, wait_seconds=1):
-        assert "demo" in cc.SEMAPHORES
+        assert cc.in_process_limiter().has_semaphore("demo")
 
 
 # --- Queue-depth pressure controls (TODO.md item 35 phase 2) ---------------
@@ -128,9 +125,8 @@ async def test_clear_redis_limiter_reverts_to_in_process():
 
 @pytest.mark.asyncio
 async def test_max_queue_depth_rejects_once_local_queue_is_full():
-    cc.clear_local_queue_state()
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    sem = cc.in_process_limiter().semaphore("demo", 1)
+    await sem.acquire()  # occupy the only slot
 
     async def _waiter():
         async with cc.concurrency_slot(
@@ -149,14 +145,13 @@ async def test_max_queue_depth_rejects_once_local_queue_is_full():
         ):
             pass  # pragma: no cover
 
-    cc.SEMAPHORES["demo"].release()
+    sem.release()
     await task
 
 
 @pytest.mark.asyncio
 async def test_max_queue_depth_none_never_rejects():
-    cc.clear_local_queue_state()
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(2)
+    cc.in_process_limiter().semaphore("demo", 2)
 
     async def _hold():
         async with cc.concurrency_slot("demo", max_concurrency=2, wait_seconds=1):
@@ -169,9 +164,8 @@ async def test_max_queue_depth_none_never_rejects():
 
 @pytest.mark.asyncio
 async def test_max_queue_depth_per_principal_isolates_noisy_caller():
-    cc.clear_local_queue_state()
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()
+    sem = cc.in_process_limiter().semaphore("demo", 1)
+    await sem.acquire()
 
     async def _waiter(principal: str):
         async with cc.concurrency_slot(
@@ -203,7 +197,7 @@ async def test_max_queue_depth_per_principal_isolates_noisy_caller():
 
     # One release is enough: it frees `task`, which then releases the slot
     # again on its own way out, in turn freeing `other_task`.
-    cc.SEMAPHORES["demo"].release()
+    sem.release()
     await task
     await other_task
 
@@ -221,8 +215,7 @@ async def _waiter_for_other():
 
 @pytest.mark.asyncio
 async def test_max_queue_depth_releases_slot_on_success_not_just_on_error():
-    cc.clear_local_queue_state()
-    cc.SEMAPHORES.pop("demo", None)
+    cc.in_process_limiter().reset_semaphore("demo")
 
     async with cc.concurrency_slot("demo", max_concurrency=1, wait_seconds=1, max_queue_depth=1):
         pass
@@ -296,3 +289,20 @@ async def test_redis_backed_queue_depth_gauge_reflects_cross_replica_count():
         assert _gauge("querygate_queue_depth", {"connection": "demo-gauge"}) == 0.0
     finally:
         cc.clear_redis_limiter()
+
+
+# --- ConcurrencyLimiter Protocol conformance --------------------------------
+
+
+def test_in_process_and_redis_limiters_both_satisfy_the_protocol():
+    """Structural conformance check for the shared ConcurrencyLimiter
+    Protocol (CLAUDE.md's "Composable single-purpose interfaces" section) —
+    both concrete backends must expose the same four-method shape.
+    """
+    in_process: cc.ConcurrencyLimiter = cc.in_process_limiter()
+    redis_limiter: cc.ConcurrencyLimiter = RedisConcurrencyLimiter(
+        fakeredis.aioredis.FakeRedis(), lease_seconds=30
+    )
+    for limiter in (in_process, redis_limiter):
+        for method in ("acquire", "release", "enter_queue", "leave_queue"):
+            assert callable(getattr(limiter, method))

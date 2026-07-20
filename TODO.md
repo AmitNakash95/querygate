@@ -4581,6 +4581,18 @@ depending on which connection answered it is exactly the kind of silent
 inconsistency this project's dialect-isolation discipline exists to
 prevent.
 
+**Revised (2026-07-20) — MSSQL now rejects `nulls`, does not emulate.** The
+CASE-bucket emulation above was reconsidered against the "expose primitives,
+don't spoon-feed the agent" rule (CLAUDE.md, added after this item shipped):
+injecting an extra sort column the AST never expressed is the engine solving
+the agent's composition problem. `MSSQLDialectAdapter.order_by_terms` now
+raises `QueryValidationError` when `nulls` is set — same posture as
+`array_agg` (item 81) — at both the main `order_by` and `top_n` rank-ordering
+call sites. Postgres/SQLite keep native `.nulls_first()/.nulls_last()`. An
+agent wanting null placement on MSSQL composes it directly with primitives
+already exposed (a `CaseSelectItem` 0/1 "is null" bucket + a leading
+`OrderBySpec` on it). Recorded in `docs/PRODUCT_GUIDE.md`'s Decision Log.
+
 ### 75. `stddev`/`variance` aggregate functions ✅ DONE
 
 **Problem.** No statistical aggregates existed at all.
@@ -4950,3 +4962,99 @@ calling agent "no" on a supported production dialect rather than quietly
 downgrading behavior — validating that item 73's abstraction and CLAUDE.md's
 engine-philosophy rule both hold up under an actual forced-parity
 temptation, not just a hypothetical one.
+
+---
+
+### 82. `percentile_cont` aggregate function ✅ DONE
+
+**Problem.** Items 75/80/81 each explicitly deferred `percentile_cont` as
+the one remaining aggregate gap, noting it needs `WITHIN GROUP (ORDER BY
+...)`, a structurally different aggregate shape from `AggregateSelectItem`'s
+`{fn, col}` pattern (or `StringAggSelectItem`/`ArrayAggSelectItem`'s
+`{col, ...}` sibling shape).
+
+**Verified before implementing** (same "verify before implementing" step
+item 75 modeled for `stddev`/`variance`): Postgres's `percentile_cont
+(fraction) WITHIN GROUP (ORDER BY expr)` is a true ordered-set *aggregate*
+— usable in an ordinary `GROUP BY` query exactly like `array_agg`. MSSQL's
+`PERCENTILE_CONT` is documented by Microsoft as an **analytic (window)
+function only** — T-SQL requires an `OVER (...)` clause and has no
+`GROUP BY`-compatible aggregate form at all. Confirmed directly with
+SQLAlchemy: `sa.within_group(sa.func.percentile_cont(fraction), col_expr)`
+**silently compiles identical SQL text against both the Postgres and
+MSSQL dialect compilers** — it would pass compilation and only fail at
+runtime against a real SQL Server, the exact "renders fine, breaks live"
+trap item 75's investigation flagged for `stddev`/`variance` before
+`stat_fn` existed.
+
+**Shipped.** New sibling AST type `PercentileContSelectItem` (`col`,
+`fraction: float`, optional `alias`), added to the `SelectItem` union.
+Mirrors `StringAggSelectItem`/`ArrayAggSelectItem` otherwise (same
+`AliasChoices("as","alias")` pattern, `extra="forbid"`, `col == "*"`
+rejected) plus a new numeric-range validator rejecting `fraction` outside
+`[0.0, 1.0]` — the first aggregate select item needing one.
+`DialectAdapter` (item 73) gained a sixth method,
+`percentile_cont(col_expr, fraction)`: `PostgresDialectAdapter` renders
+`sa.within_group(sa.func.percentile_cont(fraction), col_expr)` — a real
+implementation. `MSSQLDialectAdapter.percentile_cont` raises
+`QueryValidationError` naming the actual structural gap (analytic/window-
+function-only, no `GROUP BY` form). **This is the first `DialectAdapter`
+rejection in this arc for a genuinely different reason than item 81's
+`array_agg`** — not "no equivalent type exists" but "the equivalent exists
+only in an incompatible structural form (window function vs. plain
+aggregate)" — confirming the per-dialect-capability question in CLAUDE.md's
+engine-philosophy section has more than one shape, not just a single
+repeated pattern. `SQLiteDialectAdapter.percentile_cont` also raises, for
+its own distinct reason: no ordered-set aggregate support at all.
+`_build_select_columns` routes through
+`get_dialect_adapter(dialect).percentile_cont(...)`, never an inline
+`if dialect == "mssql"` branch. `PercentileContSelectItem` was added to
+the shared `_AGGREGATE_SELECT_ITEM_TYPES` tuple item 81 introduced
+specifically so a fourth aggregate type wouldn't require touching three
+files by hand — confirming that refactor's payoff on its first real use.
+`schema_validation._select_aliases` gained a `_percentile_cont_alias`
+branch. `audit/events.py`'s `_select_shape` gained its
+`PercentileContSelectItem` branch (`{"kind": "percentile_cont", "column":
+..., "fraction": ...}`) proactively in this same change, per the item
+80/81 lesson about not deferring it.
+
+Because SQLite can't stand in for `percentile_cont` any more than it can
+for `array_agg`, this gets no `test_sqlite_end_to_end.py` coverage.
+Instead it gets genuine coverage against a real Postgres
+(`tests/integration/test_postgres_percentile_cont.py`, `pytest -m
+postgres_live`): groups `examples/demo_db`'s seeded orders by customer,
+`percentile_cont(0.5)` on `total_amount`, and asserts customer 2's median
+(3 orders seeded: 75.00, 249.00, 310.25 — an odd count, so the continuous-
+interpolation median lands exactly on the middle sorted value with no
+floating-point interpolation between two rows to account for) equals
+exactly `249.00`. Verified directly that the seeded 3-order set for
+customer 2 isn't one of `examples/demo_db/schema.py`'s explicitly pinned
+rows (only customer 1's 2-order count is called out there) before relying
+on it. `tests/unit/test_compiler.py` also gained a dedicated MSSQL
+rejection test, same shape as item 81's. `tests/unit/
+test_compiler_properties.py`'s `_aggregate_queries` fuzzer strategy now
+draws a 4-way choice among plain aggregates/`string_agg`/`array_agg`/
+`percentile_cont` (fraction drawn from `[0.0, 1.0]`); re-confirmed this
+file still only ever compiles at the default Postgres dialect before
+extending it, so the fuzzer never hits either deliberate MSSQL raise.
+
+**Explicitly out of scope, not silently dropped** (same v1-bound reasoning
+items 75/80/81 used): descending order inside `WITHIN GROUP`, Postgres's
+multi-fraction array form (`percentile_cont(array[...])`), and
+`PARTITION BY`. All reachable by a calling agent composing its own
+multi-query workaround if genuinely needed — not this v1's job to expose
+immediately.
+
+**Effort: S**, same "one adapter method, mostly zero new compiler
+branches" shape as items 74/75/80/81, plus one new numeric-range AST
+validator and reusing the `_AGGREGATE_SELECT_ITEM_TYPES` constant item 81
+had already generalized for a fourth type.
+
+**Why it matters:** real analytics asks ("what's the median order value
+per customer, not just the average") are now expressible on Postgres; this
+also closes out the last aggregate function explicitly flagged as
+deferred across items 75/80/81, and demonstrates that CLAUDE.md's
+no-forced-parity principle produces *differentiated* reasoning per
+dialect-capability gap (array/collection-type absence vs.
+window-function-only restriction vs. no-ordered-set-support-at-all) rather
+than a single boilerplate justification copy-pasted three times.

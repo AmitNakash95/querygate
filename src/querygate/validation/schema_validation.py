@@ -22,6 +22,7 @@ from querygate.query_ast.models import (
     CaseSelectItem,
     ColArg,
     DateBucketSelectItem,
+    PercentileContSelectItem,
     Predicate,
     ScalarFunctionSelectItem,
     SelectItem,
@@ -90,7 +91,7 @@ def select_item_column_refs(item: SelectItem) -> Iterator[str]:
             yield item.else_.col
         return
     # AggregateSelectItem / DateBucketSelectItem / StringAggSelectItem /
-    # ArrayAggSelectItem
+    # ArrayAggSelectItem / PercentileContSelectItem
     if item.col != "*":
         yield item.col
 
@@ -153,6 +154,13 @@ def _array_agg_alias(item: ArrayAggSelectItem) -> str:
     return f"array_agg_{col_name}"
 
 
+def _percentile_cont_alias(item: PercentileContSelectItem) -> str:
+    if item.alias:
+        return item.alias
+    _, col_name = parse_column_ref(item.col)
+    return f"percentile_cont_{col_name}"
+
+
 def _scalar_function_alias(item: ScalarFunctionSelectItem) -> str:
     if item.alias:
         return item.alias
@@ -174,6 +182,8 @@ def _select_aliases(query: StructuredQuery, tables: Dict[str, sa.Table]) -> Set[
             aliases.add(_string_agg_alias(item))
         elif isinstance(item, ArrayAggSelectItem):
             aliases.add(_array_agg_alias(item))
+        elif isinstance(item, PercentileContSelectItem):
+            aliases.add(_percentile_cont_alias(item))
         elif isinstance(item, ScalarFunctionSelectItem):
             aliases.add(_scalar_function_alias(item))
         elif isinstance(item, CaseSelectItem):

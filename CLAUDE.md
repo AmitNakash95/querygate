@@ -123,18 +123,17 @@ This gives a sharper test than "does every dialect support this" alone:
   rather than inventing an emulation.
 - **Do not synthesize query structure the AST never asked for**, to paper
   over a dialect's missing keyword — that's the engine solving the
-  agent's composition problem instead of exposing a primitive. Concretely
-  under active reconsideration: `MSSQLDialectAdapter.order_by_terms`
-  (TODO.md item 74) currently injects an *extra CASE-based sort column*
-  into the query when `OrderBySpec.nulls` is set, since T-SQL has no
-  `NULLS FIRST/LAST` syntax — structure the caller never expressed in the
-  AST. An agent can already build that exact CASE-bucket itself with
-  primitives QueryGate already exposes (`CaseSelectItem` for the bucket,
-  multiple `OrderBySpec` entries for the tie-break); whether the engine
-  should keep doing it automatically, or instead reject `nulls` on MSSQL
-  the same way `array_agg` will be rejected there, is an open question —
-  don't treat it as settled either way without asking first, and don't use
-  it as precedent for a similar shortcut elsewhere.
+  agent's composition problem instead of exposing a primitive. Settled
+  precedent (TODO.md item 74, Decision Log): `MSSQLDialectAdapter.order_by_terms`
+  used to inject an *extra CASE-based sort column* when `OrderBySpec.nulls`
+  was set, since T-SQL has no `NULLS FIRST/LAST` syntax — structure the
+  caller never expressed in the AST. It now **rejects** `nulls` on MSSQL
+  with `QueryValidationError`, the same posture as `array_agg`, because an
+  agent can build that exact CASE-bucket itself with primitives QueryGate
+  already exposes (`CaseSelectItem` for the bucket, multiple `OrderBySpec`
+  entries for the tie-break). Use this as the reference for how a
+  missing-keyword gap is resolved — reject and point at the primitives, do
+  not emulate.
 
 **Exceptions are possible but must be deliberate, not assumed.** If a
 specific case seems to genuinely warrant the engine doing more than
@@ -144,8 +143,9 @@ a good, concrete reason — that is a design discussion to have explicitly
 `docs/PRODUCT_GUIDE.md`) before implementing it, not a default anyone
 should reach for under time pressure or convenience. Treat this section's
 rule as the default for all new work; an exception must be justified on
-its own terms, in the open, the same way item 74's MSSQL nulls handling is
-being discussed rather than silently kept or silently reverted.
+its own terms, in the open, and recorded — the same way item 74's MSSQL
+nulls handling was decided in the open (reject, not emulate) rather than
+silently kept or silently reverted.
 
 ### Connections and policy are file-configured, not code-configured
 
@@ -204,16 +204,52 @@ JWKS-verified JWTs can be composed for both REST and MCP; principals carry
 subject, scopes, claims, and auth method. Don't duplicate bearer-token logic
 inside either transport.
 
+### Composable single-purpose interfaces
+
+Where a piece of behavior genuinely varies by backend/dialect/strategy,
+prefer a narrow Protocol/ABC (one or two methods) with one concrete class per
+variant, dispatched through a registry (a dict keyed by string/enum, or a
+`get_x(...)` lookup function) — never `if X == ...` branching scattered
+across call sites. Established precedent: `SecretResolver`
+(`secrets/resolvers.py`), `DialectAdapter` (`compiler/dialect_adapters.py`),
+`Authenticator` (`core/auth.py`), `AuditSink` (`audit/sinks.py`),
+`ConcurrencyLimiter` (`execution/concurrency.py`). Adding a variant means
+implementing the interface once and registering it — never hunting through
+every call site for a place the old assumption leaked in.
+
+This isn't just swapping one implementation for another — composition is a
+first-class option. `core/auth.py`'s `CompositeAuthenticator` chains multiple
+`Authenticator`s together (tries API-key, then JWT) rather than picking
+exactly one at a time.
+
+**Don't over-apply this.** When a variant is a single stateless expression
+with no parameters and no internal branching, a plain dict-of-callables
+(`_SCALAR_FNS`, `_RANK_FNS`, `_ADAPTERS` in `compiler/sqlalchemy_compiler.py`/
+`dialect_adapters.py`, `_AGGREGATE_SELECT_ITEM_TYPES` in `query_ast/models.py`)
+is the right-weight version of the same idea — wrapping a one-liner in a full
+class is ceremony, not clarity.
+
+Known, deliberate exceptions to this rule, not oversights:
+`connections/dialects.py`'s inline dialect branching (its own docstring
+frames centralizing dialect-specific SQL in one module as the goal — a
+lighter-weight tradeoff, not a gap) and `execution/service.py`'s
+Postgres-only cost-estimation gate (MSSQL's estimated-plan mechanism doesn't
+exist yet — TODO.md item 26 phase 2). Don't treat either as precedent for a
+new inline branch elsewhere.
+
 ### Testing gotchas (see `tests/conftest.py`)
 
 - Every test gets a fresh in-memory "demo" `ConnectionRegistry` and a
   permissive default `Policy` via an autouse fixture — don't rely on
   `examples/*.yaml` being loaded in tests.
-- `execution/concurrency.SEMAPHORES` is a module-level dict of
-  `asyncio.Semaphore` keyed by connection id. Semaphores are bound to the
-  event loop that created them, and pytest-asyncio gives each test its own
-  loop — the conftest fixture clears this dict every test. If you add new
-  concurrency state, clear it there too.
+- `execution/concurrency.in_process_limiter()` returns the persistent
+  `InProcessConcurrencyLimiter` singleton; its `semaphore(connection_id, n)`
+  method is a public get-or-create used both by production code and by tests
+  seeding a specific scenario (e.g. pre-acquiring a slot). `asyncio.Semaphore`
+  objects are bound to the event loop that created them, and pytest-asyncio
+  gives each test its own loop — the conftest fixture calls
+  `in_process_limiter().clear()` every test. If you add new concurrency
+  state, clear it there too.
 - To unit-test `schema_validation.validate_schema` without a real database,
   patch the module-level `_load_table` function (the one seam that touches a
   connection) rather than mocking SQLAlchemy internals.

@@ -10,6 +10,7 @@ from querygate.query_ast.models import (
     CaseSelectItem,
     JoinSpec,
     OrderBySpec,
+    PercentileContSelectItem,
     Predicate,
     ScalarFunctionCall,
     ScalarFunctionSelectItem,
@@ -147,6 +148,32 @@ class TestStructuredQueryModels:
     def test_array_agg_rejects_star(self):
         with pytest.raises(ValueError, match="requires a real column"):
             ArrayAggSelectItem(col="*")
+
+    def test_percentile_cont_select_item_valid(self):
+        item = PercentileContSelectItem(col="orders.total_amount", fraction=0.5, alias="median")
+        assert item.col == "orders.total_amount"
+        assert item.fraction == 0.5
+        assert item.alias == "median"
+
+    def test_percentile_cont_select_item_alias_optional(self):
+        item = PercentileContSelectItem(col="orders.total_amount", fraction=0.5)
+        assert item.alias is None
+
+    def test_percentile_cont_rejects_star(self):
+        with pytest.raises(ValueError, match="requires a real column"):
+            PercentileContSelectItem(col="*", fraction=0.5)
+
+    def test_percentile_cont_rejects_fraction_below_zero(self):
+        with pytest.raises(ValueError, match="fraction must be between 0.0 and 1.0"):
+            PercentileContSelectItem(col="orders.total_amount", fraction=-0.1)
+
+    def test_percentile_cont_rejects_fraction_above_one(self):
+        with pytest.raises(ValueError, match="fraction must be between 0.0 and 1.0"):
+            PercentileContSelectItem(col="orders.total_amount", fraction=1.1)
+
+    def test_percentile_cont_accepts_fraction_boundaries(self):
+        assert PercentileContSelectItem(col="orders.total_amount", fraction=0.0).fraction == 0.0
+        assert PercentileContSelectItem(col="orders.total_amount", fraction=1.0).fraction == 1.0
 
     def test_self_join_without_alias_on_either_side_rejected(self):
         with pytest.raises(ValueError, match="self-join"):

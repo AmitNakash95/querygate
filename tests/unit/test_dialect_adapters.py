@@ -93,13 +93,16 @@ class TestOrderByTerms:
         terms = MSSQLDialectAdapter().order_by_terms(col, "desc", None)
         assert len(terms) == 1
 
-    def test_mssql_nulls_emulated_via_case_bucket_not_native_syntax(self):
+    @pytest.mark.parametrize("nulls", ["first", "last"])
+    def test_mssql_nulls_rejected_not_emulated(self, nulls):
+        # T-SQL has no NULLS FIRST/LAST syntax. Per CLAUDE.md's engine
+        # philosophy (TODO.md item 74) this is a hard rejection, not a
+        # synthesized CASE-bucket emulation — same posture as array_agg.
         col = sa.column("status")
-        terms = MSSQLDialectAdapter().order_by_terms(col, "asc", "last")
-        assert len(terms) == 2
-        rendered = _render(terms[0]).upper()
-        assert "CASE" in rendered
-        assert "NULLS" not in rendered  # never emit the syntax T-SQL doesn't support
+        with pytest.raises(
+            QueryValidationError, match="nulls first/last ordering is not supported"
+        ):
+            MSSQLDialectAdapter().order_by_terms(col, "asc", nulls)
 
     def test_sqlite_nulls_uses_native_clause(self):
         col = sa.column("status")
@@ -165,3 +168,26 @@ class TestArrayAgg:
         col = sa.column("status")
         with pytest.raises(QueryValidationError, match="not supported"):
             SQLiteDialectAdapter().array_agg(col)
+
+
+class TestPercentileCont:
+    def test_postgres_renders_percentile_cont(self):
+        col = sa.column("total_amount")
+        rendered = _render(PostgresDialectAdapter().percentile_cont(col, 0.5)).lower()
+        assert "percentile_cont(0.5)" in rendered
+        assert "within group" in rendered
+
+    def test_mssql_rejects_percentile_cont(self):
+        """T-SQL's PERCENTILE_CONT is analytic-function-only (requires an
+        OVER clause) — no GROUP BY-compatible aggregate form exists, unlike
+        Postgres. Verified this isn't just a naming gap: SQLAlchemy's
+        within_group() silently compiles against the mssql dialect too, so
+        this must be a deliberate raise, not left to fail at runtime."""
+        col = sa.column("total_amount")
+        with pytest.raises(QueryValidationError, match="analytic/window function"):
+            MSSQLDialectAdapter().percentile_cont(col, 0.5)
+
+    def test_sqlite_rejects_percentile_cont(self):
+        col = sa.column("total_amount")
+        with pytest.raises(QueryValidationError, match="ordered-set aggregate"):
+            SQLiteDialectAdapter().percentile_cont(col, 0.5)

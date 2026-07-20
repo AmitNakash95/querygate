@@ -42,7 +42,10 @@ class DialectAdapter(ABC):
         nulls: Optional[Literal["first", "last"]],
     ) -> List[Any]:
         """One or more ORDER BY terms implementing `direction` (+ `nulls`
-        placement if set) for a single column/expression.
+        placement if set) for a single column/expression. A dialect whose SQL
+        has no NULLS FIRST/LAST equivalent rejects a set `nulls` with
+        QueryValidationError rather than synthesizing placement structure the
+        AST never asked for (see MSSQLDialectAdapter; TODO.md item 74).
         """
 
     @abstractmethod
@@ -58,6 +61,12 @@ class DialectAdapter(ABC):
     def array_agg(self, col_expr: Any) -> Any:
         """Collect col_expr's grouped values into a real array,
         e.g. ARRAY_AGG(OrderItem.Sku)."""
+
+    @abstractmethod
+    def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
+        """Continuous-interpolation percentile of col_expr's grouped
+        values, e.g. PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
+        Order.TotalAmount) for the median."""
 
 
 def _direction_expr(col_expr: Any, direction: Literal["asc", "desc"]) -> Any:
@@ -89,6 +98,9 @@ class PostgresDialectAdapter(DialectAdapter):
     def array_agg(self, col_expr: Any) -> Any:
         return sa.func.array_agg(col_expr)
 
+    def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
+        return sa.within_group(sa.func.percentile_cont(fraction), col_expr)
+
 
 class MSSQLDialectAdapter(DialectAdapter):
     def date_bucket(self, col: Any, granularity: str) -> Any:
@@ -107,15 +119,24 @@ class MSSQLDialectAdapter(DialectAdapter):
         if nulls is None:
             return [expr]
         # T-SQL has NO "NULLS FIRST/LAST" syntax at all (unlike Postgres/
-        # SQLite) — SQLAlchemy's mssql dialect will still silently *compile*
-        # `.nulls_last()` into that literal clause, which is a runtime syntax
-        # error against a real server. Emulate with a leading 0/1 CASE sort
-        # bucket instead: nulls land in one bucket, non-nulls in the other,
-        # sorted ascending, then the real column direction breaks ties.
-        null_bucket = 0 if nulls == "first" else 1
-        other_bucket = 1 - null_bucket
-        bucket = sa.case((col_expr.is_(None), null_bucket), else_=other_bucket)
-        return [bucket.asc(), expr]
+        # SQLite), and SQLAlchemy's mssql dialect will still silently *compile*
+        # an emitted `.nulls_last()` into that literal clause — a runtime
+        # syntax error against a real server. Per CLAUDE.md's "expose
+        # primitives, don't spoon-feed the agent" philosophy this is a hard
+        # rejection, decided the same way as array_agg/percentile_cont below
+        # (Decision Log, docs/PRODUCT_GUIDE.md; TODO.md item 74). QueryGate
+        # previously injected an extra leading 0/1 CASE sort bucket the AST
+        # never asked for to fake the placement — exactly the "engine solves
+        # the agent's composition problem" shortcut that section rules out. An
+        # agent that wants null placement on MSSQL expresses it directly with
+        # primitives QueryGate already exposes: a CaseSelectItem 0/1 "is null"
+        # bucket plus a leading OrderBySpec on it — the same workaround a human
+        # T-SQL author writes by hand.
+        raise QueryValidationError(
+            "nulls first/last ordering is not supported on MSSQL: T-SQL has no "
+            "NULLS FIRST/LAST syntax. Order by a CASE 0/1 'is null' bucket first "
+            "to place nulls explicitly."
+        )
 
     def stat_fn(self, name: Literal["stddev", "variance"]) -> Callable[..., Any]:
         return {"stddev": sa.func.STDEV, "variance": sa.func.VAR}[name]
@@ -136,6 +157,24 @@ class MSSQLDialectAdapter(DialectAdapter):
         raise QueryValidationError(
             "array_agg is not supported on MSSQL: T-SQL has no array/collection "
             "type to hold the result"
+        )
+
+    def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
+        # T-SQL's PERCENTILE_CONT exists only as an analytic (window)
+        # function requiring an OVER(...) clause — there is no GROUP BY-
+        # compatible aggregate form the way Postgres's percentile_cont is.
+        # Verified directly: SQLAlchemy's within_group() happily compiles
+        # identical SQL text against the mssql dialect (no dialect-level
+        # guard of its own), which would only fail at runtime against a
+        # real SQL Server — the same "renders fine, breaks live" trap
+        # item 75 flagged for stddev/variance before stat_fn existed. Per
+        # CLAUDE.md's engine philosophy, this stays a hard rejection
+        # rather than silently emitting SQL that can't actually run in
+        # the plain-aggregate shape the AST expresses.
+        raise QueryValidationError(
+            "percentile_cont is not supported on MSSQL as a GROUP BY aggregate: "
+            "T-SQL's PERCENTILE_CONT only exists as an analytic/window function "
+            "requiring an OVER(...) clause"
         )
 
 
@@ -200,6 +239,15 @@ class SQLiteDialectAdapter(DialectAdapter):
         raise QueryValidationError(
             "array_agg is not supported on the internal SQLite test/example dialect: "
             "json_group_array() returns a JSON string, not a real array"
+        )
+
+    def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
+        # SQLite has no ordered-set aggregate support at all (no
+        # PERCENTILE_CONT, no WITHIN GROUP) — a different reason from
+        # MSSQL's window-function-only restriction, but the same outcome.
+        raise QueryValidationError(
+            "percentile_cont is not supported on the internal SQLite test/example "
+            "dialect: SQLite has no ordered-set aggregate (WITHIN GROUP) support"
         )
 
 

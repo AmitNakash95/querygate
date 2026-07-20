@@ -34,6 +34,7 @@ from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     ArrayAggSelectItem,
     CaseSelectItem,
+    PercentileContSelectItem,
     Predicate,
     ScalarFunctionSelectItem,
     StringAggSelectItem,
@@ -97,6 +98,22 @@ def test_normalized_query_shape_handles_array_agg_select_item():
     serialized = json.dumps(shape)
     assert "customers.email" in serialized
     assert '"kind": "array_agg"' in serialized
+
+
+def test_normalized_query_shape_handles_percentile_cont_select_item():
+    query = StructuredQuery(
+        from_table="orders",
+        select=[
+            "orders.customer_id",
+            PercentileContSelectItem(col="orders.total_amount", fraction=0.5, alias="median"),
+        ],
+        group_by=["orders.customer_id"],
+        limit=10,
+    )
+    shape = normalize_query_shape(query)
+    serialized = json.dumps(shape)
+    assert "orders.total_amount" in serialized
+    assert '"kind": "percentile_cont"' in serialized
 
 
 def test_normalized_query_shape_handles_scalar_function_select_item():
@@ -340,8 +357,7 @@ async def test_capacity_timeout_event_carries_admission_fields(tmp_path):
     set_policy_store(
         PolicyStore(default=Policy(max_concurrency=1, concurrency_wait_seconds=5), overrides={})
     )
-    cc.SEMAPHORES["demo"] = asyncio.Semaphore(1)
-    await cc.SEMAPHORES["demo"].acquire()  # occupy the only slot
+    await cc.in_process_limiter().semaphore("demo", 1).acquire()  # occupy the only slot
 
     query = _query_with_sensitive_literals()
     service = StructuredQueryService(connection_id="demo")

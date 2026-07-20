@@ -18,7 +18,7 @@ from querygate.catalog.repository import catalog_process_lock
 from querygate.connections.engine import dispose_engine
 from querygate.connections.registry import ConnectionRegistry, get_registry, set_registry
 from querygate.core.logging import get_logger
-from querygate.execution.concurrency import SEMAPHORES
+from querygate.execution.concurrency import in_process_limiter
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.secrets.resolvers import SecretResolverRegistry
 from querygate.templates.loader import TemplateStore, set_template_store
@@ -74,7 +74,7 @@ async def _reload_config_unlocked(
     engine/pool to avoid unnecessary reconnect churn. Every connection's
     concurrency semaphore is reset unconditionally (not diffed), since it's
     the one piece of `Policy` baked into cached state
-    (`execution/concurrency.SEMAPHORES`) and reloads are rare, admin-
+    (`execution/concurrency.py`'s `InProcessConcurrencyLimiter`) and reloads are rare, admin-
     triggered operations, not hot-path — a request already holding a permit
     on the old semaphore still releases it correctly; there's a brief
     transition window where a connection's observed concurrency can exceed
@@ -107,7 +107,7 @@ async def _reload_config_unlocked(
 
     disposed = await _dispose_stale_engines(old_registry, new_registry)
     for connection_id in new_registry.all_ids():
-        SEMAPHORES.pop(connection_id, None)
+        in_process_limiter().reset_semaphore(connection_id)
 
     get_logger().info(
         "config.reload",

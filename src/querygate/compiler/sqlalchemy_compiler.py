@@ -21,6 +21,7 @@ from querygate.query_ast.models import (
     CaseSelectItem,
     ColArg,
     DateBucketSelectItem,
+    PercentileContSelectItem,
     Predicate,
     ScalarFunctionArg,
     ScalarFunctionSelectItem,
@@ -225,6 +226,15 @@ def _build_select_columns(
             col = _column(tables, item.col)
             expr = get_dialect_adapter(dialect).array_agg(col)
             alias = item.alias or f"array_agg_{col.name}"
+            labeled = expr.label(alias)
+            columns.append(labeled)
+            alias_map[alias] = labeled
+            continue
+
+        if isinstance(item, PercentileContSelectItem):
+            col = _column(tables, item.col)
+            expr = get_dialect_adapter(dialect).percentile_cont(col, item.fraction)
+            alias = item.alias or f"percentile_cont_{col.name}"
             labeled = expr.label(alias)
             columns.append(labeled)
             alias_map[alias] = labeled
