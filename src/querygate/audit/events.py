@@ -10,6 +10,7 @@ import pydantic as pyd
 
 from querygate.query_ast.models import (
     AggregateSelectItem,
+    ArrayAggSelectItem,
     CaseSelectItem,
     ColArg,
     DateBucketSelectItem,
@@ -206,6 +207,11 @@ def _select_shape(item: object) -> Dict[str, Any]:
         return shape
     if isinstance(item, StringAggSelectItem):
         shape = {"kind": "string_agg", "column": item.col}
+        if item.alias is not None:
+            shape["alias"] = item.alias
+        return shape
+    if isinstance(item, ArrayAggSelectItem):
+        shape = {"kind": "array_agg", "column": item.col}
         if item.alias is not None:
             shape["alias"] = item.alias
         return shape

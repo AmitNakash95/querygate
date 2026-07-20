@@ -4817,3 +4817,83 @@ as items 74/75, plus the audit-shape side-fix.
 order as one string") were previously impossible to express at all; the
 audit-shape fix closes a real crash bug in the shared query-execution path,
 not just a cosmetic logging gap.
+
+---
+
+### 81. `array_agg` aggregate function ✅ DONE
+
+**Problem.** Item 80 shipped `string_agg` and explicitly deferred
+`array_agg` as the harder of the two: Postgres has native `array_agg`, but
+MSSQL has no MSSQL equivalent at all — T-SQL has no array/collection type
+to hold the result, unlike `string_agg`'s lucky `(expr, separator)` shape
+match across all three dialects. Per CLAUDE.md's "Engine philosophy: expose
+primitives, don't spoon-feed the agent" section (added alongside item 80),
+the correct move for a dialect that genuinely lacks a capability is to
+implement it for real where it exists and reject it explicitly where it
+doesn't — not synthesize an emulation the AST never asked for.
+
+**Shipped.** New sibling AST type `ArrayAggSelectItem` (`col`, optional
+`alias` — no `delimiter`, since an array result doesn't need a separator)
+added to the `SelectItem` union, mirroring `StringAggSelectItem` exactly
+otherwise (same `AliasChoices("as","alias")` pattern, `extra="forbid"`, a
+model validator rejecting `col == "*"`). `DialectAdapter` (item 73) gained
+a fifth method, `array_agg(col_expr)`: `PostgresDialectAdapter` renders
+`sa.func.array_agg(col_expr)` — a real implementation, not a stub.
+`MSSQLDialectAdapter.array_agg` raises `QueryValidationError` naming the
+actual gap (no array/collection type in T-SQL). **This is the first
+`DialectAdapter` method where a real, supported registry dialect — not
+just the internal-only SQLite test/example path `stat_fn` already raised
+on — rejects a capability outright.** `SQLiteDialectAdapter.array_agg`
+also raises: `json_group_array()` returns a JSON-encoded string, not a
+real array, so mapping it would be exactly the forced-parity emulation the
+engine-philosophy section rules out, unlike `string_agg`'s genuine
+`group_concat` shape match. `_build_select_columns` routes through
+`get_dialect_adapter(dialect).array_agg(...)`, never an inline `if dialect
+== "mssql"` branch. `is_aggregate`/`has_aggregate` detection (compiler and
+both `schema_validation.py` checks) now treats `ArrayAggSelectItem` the
+same as `AggregateSelectItem`/`StringAggSelectItem` — pulled the growing
+3-type `isinstance` tuple into one shared `_AGGREGATE_SELECT_ITEM_TYPES`
+constant in `query_ast/models.py`, reused by all three call sites, rather
+than letting a third file drift with its own copy.
+`schema_validation._select_aliases` gained an `_array_agg_alias` branch.
+`audit/events.py`'s `_select_shape` gained its `ArrayAggSelectItem` branch
+proactively in this same change (not deferred to a follow-up, per the
+crash-bug lesson item 80 found and fixed for `StringAggSelectItem`/
+`ScalarFunctionSelectItem`/`CaseSelectItem`).
+
+Because SQLite can't stand in for a real array result, `array_agg` gets no
+`test_sqlite_end_to_end.py` coverage the way item 80's `string_agg` did.
+Instead it gets genuine coverage against a real Postgres
+(`tests/integration/test_postgres_array_agg.py`, `pytest -m
+postgres_live`): groups `examples/demo_db`'s seeded customers by country,
+`array_agg`s their names, and asserts GB's returned array is exactly `{Ada
+Lovelace, Alan Turing, Charles Babbage}` as a set (concatenation order is
+implementation-defined without an `ORDER BY`-in-call, same reasoning item
+80 used). `tests/unit/test_compiler.py` also gained a dedicated MSSQL
+rejection test (`pytest.raises(QueryValidationError)` around
+`compile_structured_query(..., dialect="mssql")`) — new for this item,
+since `string_agg` never needed one (it rendered successfully on MSSQL).
+`tests/unit/test_compiler_properties.py`'s `_aggregate_queries` fuzzer
+strategy now draws a 3-way choice among plain aggregates/`string_agg`/
+`array_agg`; confirmed first that this file only ever compiles at the
+default Postgres dialect, so the fuzzer never hits the deliberate MSSQL
+raise.
+
+**Explicitly out of scope, not silently dropped** (same v1-bound reasoning
+items 75/80 used): `distinct` and `ORDER BY`-within-the-call, matching
+`string_agg`'s bound. `percentile_cont` remains deferred exactly as item 75
+described — it needs a structurally different `WITHIN GROUP (ORDER BY
+...)` shape, unrelated to this item.
+
+**Effort: S**, same "one adapter method, mostly zero new compiler branches"
+shape as items 74/75/80, plus pulling the aggregate-type tuple into one
+shared constant while a third call site needed it anyway.
+
+**Why it matters:** real reporting asks ("give me every SKU in this order
+as a real list, not a string I have to re-split") are now expressible on
+Postgres; equally importantly, this is the first time the `DialectAdapter`
+abstraction has had to make a real, deliberate call about telling a
+calling agent "no" on a supported production dialect rather than quietly
+downgrading behavior — validating that item 73's abstraction and CLAUDE.md's
+engine-philosophy rule both hold up under an actual forced-parity
+temptation, not just a hypothetical one.

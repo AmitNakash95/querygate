@@ -142,3 +142,26 @@ class TestStringAgg:
         col = sa.column("email")
         rendered = _render(SQLiteDialectAdapter().string_agg(col, ", ")).lower()
         assert "group_concat" in rendered
+
+
+class TestArrayAgg:
+    def test_postgres_renders_array_agg(self):
+        col = sa.column("status")
+        rendered = _render(PostgresDialectAdapter().array_agg(col)).lower()
+        assert "array_agg(" in rendered
+
+    def test_mssql_rejects_array_agg(self):
+        """Unlike string_agg, T-SQL has no array/collection type at all —
+        the first DialectAdapter method where a real, supported registry
+        dialect rejects a capability outright (not just SQLite)."""
+        col = sa.column("status")
+        with pytest.raises(QueryValidationError, match="array/collection type"):
+            MSSQLDialectAdapter().array_agg(col)
+
+    def test_sqlite_rejects_array_agg(self):
+        """json_group_array() returns a JSON string, not a real array —
+        unlike string_agg's group_concat, there's no genuine shape match
+        here, so this stays a raise rather than a forced-parity emulation."""
+        col = sa.column("status")
+        with pytest.raises(QueryValidationError, match="not supported"):
+            SQLiteDialectAdapter().array_agg(col)

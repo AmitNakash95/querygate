@@ -9,10 +9,11 @@ import sqlalchemy as sa
 
 from querygate.compiler.sqlalchemy_compiler import clamp_limit, compile_structured_query
 from querygate.core.auth import Principal
-from querygate.core.exceptions import PolicyViolationError
+from querygate.core.exceptions import PolicyViolationError, QueryValidationError
 from querygate.policy.models import MandatoryRowFilter, Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
+    ArrayAggSelectItem,
     DateBucketSelectItem,
     JoinSpec,
     OrderBySpec,
@@ -555,6 +556,67 @@ class TestCompiler:
             select=[
                 "orders.customer_id",
                 StringAggSelectItem(col="orders.status", delimiter=", ", alias="statuses"),
+            ],
+            group_by=["orders.customer_id"],
+            having=[Predicate(col="statuses", op="neq", value="")],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).upper()
+        assert "HAVING" in compiled
+
+    def test_array_agg_render_on_postgres(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                ArrayAggSelectItem(col="orders.status", alias="statuses"),
+            ],
+            group_by=["orders.customer_id"],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+        assert "array_agg(orders.status)" in compiled
+
+    def test_array_agg_rejected_on_mssql(self):
+        """MSSQL has no array/collection type — array_agg must be rejected
+        outright, not emulated, unlike string_agg which renders on MSSQL."""
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                ArrayAggSelectItem(col="orders.status", alias="statuses"),
+            ],
+            group_by=["orders.customer_id"],
+            limit=5,
+        )
+        with pytest.raises(QueryValidationError, match="array/collection type"):
+            compile_structured_query(query, tables, Policy(), dialect="mssql")
+
+    def test_array_agg_default_alias(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[ArrayAggSelectItem(col="orders.status")],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "array_agg_status" in compiled
+
+    def test_array_agg_is_treated_as_aggregate_for_having(self):
+        """A group_by + array_agg + having(on the array_agg alias) shape
+        must compile — this only works if ArrayAggSelectItem participates
+        in the same "is_aggregate" detection AggregateSelectItem does."""
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                ArrayAggSelectItem(col="orders.status", alias="statuses"),
             ],
             group_by=["orders.customer_id"],
             having=[Predicate(col="statuses", op="neq", value="")],

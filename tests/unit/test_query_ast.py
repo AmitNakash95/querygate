@@ -6,6 +6,7 @@ import pytest
 
 from querygate.query_ast.models import (
     AggregateSelectItem,
+    ArrayAggSelectItem,
     CaseSelectItem,
     JoinSpec,
     OrderBySpec,
@@ -133,6 +134,19 @@ class TestStructuredQueryModels:
     def test_string_agg_rejects_star(self):
         with pytest.raises(ValueError, match="requires a real column"):
             StringAggSelectItem(col="*", delimiter=", ")
+
+    def test_array_agg_select_item_valid(self):
+        item = ArrayAggSelectItem(col="orders.status", alias="statuses")
+        assert item.col == "orders.status"
+        assert item.alias == "statuses"
+
+    def test_array_agg_select_item_alias_optional(self):
+        item = ArrayAggSelectItem(col="orders.status")
+        assert item.alias is None
+
+    def test_array_agg_rejects_star(self):
+        with pytest.raises(ValueError, match="requires a real column"):
+            ArrayAggSelectItem(col="*")
 
     def test_self_join_without_alias_on_either_side_rejected(self):
         with pytest.raises(ValueError, match="self-join"):

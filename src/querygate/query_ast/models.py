@@ -107,6 +107,31 @@ class StringAggSelectItem(pyd.BaseModel):
         return self
 
 
+class ArrayAggSelectItem(pyd.BaseModel):
+    """GROUP BY aggregate collecting col's grouped values into a real array,
+    e.g. ARRAY_AGG(OrderItem.Sku). Its own sibling shape (not a field on
+    AggregateSelectItem), matching StringAggSelectItem/DateBucketSelectItem
+    — but unlike string_agg there's no delimiter, since an array result
+    doesn't need one. Deliberately no ORDER BY-within-the-call and no
+    `distinct`, same v1 bound string_agg used (TODO.md item 81).
+    """
+
+    col: str = pyd.Field(description="Column ref (Table.Col) to collect.")
+    alias: Optional[str] = pyd.Field(
+        default=None,
+        validation_alias=pyd.AliasChoices("as", "alias"),
+        serialization_alias="as",
+    )
+
+    model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _validate_col(self) -> "ArrayAggSelectItem":
+        if self.col == "*":
+            raise ValueError("array_agg requires a real column, not '*'")
+        return self
+
+
 class ColArg(pyd.BaseModel):
     """A scalar-function argument that is a column reference, not a literal."""
 
@@ -207,9 +232,17 @@ SelectItem = Union[
     AggregateSelectItem,
     DateBucketSelectItem,
     StringAggSelectItem,
+    ArrayAggSelectItem,
     ScalarFunctionSelectItem,
     CaseSelectItem,
 ]
+
+# Select item types that make a query an aggregate query for is_aggregate/
+# has_aggregate purposes (clamp_limit's aggregate cap, top_n eligibility,
+# the having-without-group_by rule) — shared by sqlalchemy_compiler.py and
+# schema_validation.py's two has_aggregate checks so a fourth aggregate
+# type never has to be added to three places by hand (TODO.md item 81).
+_AGGREGATE_SELECT_ITEM_TYPES = (AggregateSelectItem, StringAggSelectItem, ArrayAggSelectItem)
 
 
 class JoinSpec(pyd.BaseModel):
