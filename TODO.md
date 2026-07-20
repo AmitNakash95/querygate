@@ -4566,3 +4566,40 @@ as item 74.
 **Why it matters:** real analytics asks ("how much does delivery time
 vary by region") were previously impossible to express at all, not just
 capped.
+
+### 76. Composite (multi-column) join keys ✅ DONE
+
+**Problem.** `JoinSpec.on` was hard-capped at exactly one column pair.
+Composite keys (e.g. `(tenant_id, order_id)` together) could only be
+half-expressed — join on one column, filter the rest in WHERE, which is
+both awkward and not actually equivalent (a WHERE filter runs after the
+join, not as part of the join condition itself, so it doesn't affect which
+rows a LEFT JOIN's unmatched side produces).
+
+**Design — additive, not a breaking shape change.** `JoinSpec.on` stays
+exactly as it was (zero churn across ~40 existing call sites/examples).
+New `JoinSpec.extra_on: List[List[str]]` — additional `[LeftTable.Col,
+RightTable.Col]` pairs ANDed with the primary `on`.
+
+**Shipped.** AST validator requires each `extra_on` entry be a real
+two-element pair. `schema_validation._validate_join_graph` additionally
+requires every `extra_on` pair reference the *same two tables* as the
+primary `on` — a join's condition is always about the one pair of tables
+it joins, never a smuggled third table's column. Compiler ANDs one
+equality condition per pair (`on` plus each `extra_on` entry) before
+`stmt.join(...)`. `policy_validation._iter_column_refs`'s join loop
+extended to also yield `extra_on` refs — **dedicated test**
+(`test_denied_column_rejected_when_only_used_in_extra_on`) proving a
+denied column reachable only through a composite key's second pair is
+still rejected, same category as every prior alias/value_col bypass test.
+Verified end-to-end against real SQLite execution: seeded data where two
+rows each satisfy only ONE of the two join conditions and one row satisfies
+both, confirming the compiled join returns only the row matching both —
+not a rendering-only check.
+
+**Effort: S.** Dialect-agnostic — unaffected by items 73–75's work.
+
+**Why it matters:** composite foreign keys are common in real schemas
+(especially multi-tenant ones scoping every table by `tenant_id` alongside
+its own primary key); the AST previously couldn't express that as an
+actual join condition at all.

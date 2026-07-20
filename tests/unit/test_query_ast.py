@@ -261,6 +261,26 @@ class TestStructuredQueryModels:
         assert isinstance(q.select[0], ScalarFunctionSelectItem)
         assert isinstance(q.select[1], CaseSelectItem)
 
+    def test_extra_on_accepts_valid_pairs(self):
+        j = JoinSpec(
+            table="order_items",
+            on=["orders.tenant_id", "order_items.tenant_id"],
+            extra_on=[["orders.id", "order_items.order_id"]],
+        )
+        assert j.extra_on == [["orders.id", "order_items.order_id"]]
+
+    def test_extra_on_rejects_pair_not_length_two(self):
+        with pytest.raises(ValueError, match="two-element"):
+            JoinSpec(
+                table="order_items",
+                on=["orders.tenant_id", "order_items.tenant_id"],
+                extra_on=[["orders.id"]],
+            )
+
+    def test_extra_on_defaults_empty(self):
+        j = JoinSpec(table="customers", on=["orders.customer_id", "customers.id"])
+        assert j.extra_on == []
+
     def test_plain_join_without_alias_still_works(self):
         """Ordinary (non-self) joins remain unaffected — no alias required."""
         q = StructuredQuery(
