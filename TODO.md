@@ -4527,3 +4527,42 @@ an expressiveness one — the same query returning differently-ordered rows
 depending on which connection answered it is exactly the kind of silent
 inconsistency this project's dialect-isolation discipline exists to
 prevent.
+
+### 75. `stddev`/`variance` aggregate functions ✅ DONE
+
+**Problem.** No statistical aggregates existed at all.
+
+**Verified before implementing:** `sa.func.stddev`/`sa.func.variance`
+render the identical literal function name on every SQLAlchemy dialect —
+but MSSQL has no functions by those names; its real ones are `STDEV`/`VAR`.
+A naive addition would have compiled fine and failed at execution time
+against a real SQL Server.
+
+**Shipped.** `AggregateFn` extended with `"stddev"`/`"variance"`.
+`AggregateSelectItem`'s distinct-guard validator (renamed
+`_validate_distinct`, its scope now broader than the name it replaced)
+also rejects `distinct=True` combined with either — T-SQL's `STDEV`/`VAR`
+don't accept `DISTINCT` at all, so this is rejected uniformly across
+dialects rather than working on Postgres and silently breaking on MSSQL.
+`DialectAdapter.stat_fn` (item 73) resolves the two names per dialect:
+Postgres/SQLite use `stddev`/`variance` directly; MSSQL uses `STDEV`/`VAR`;
+SQLite's raises (no such functions exist there, and it's the internal-only
+test/example dialect). `sqlalchemy_compiler.py`'s new `_aggregate_fn(name,
+dialect)` helper routes `stddev`/`variance` through the adapter and
+everything else through the existing dialect-universal `_AGG_FNS` dict —
+no new dialect branch in the compiler itself, exactly the payoff item 73
+was built for.
+
+**Explicitly out of scope, not silently dropped:** `string_agg`/
+`array_agg` (need an extra delimiter parameter — don't fit
+`AggregateSelectItem`'s `{fn, col}` shape) and `percentile_cont` (needs
+`WITHIN GROUP (ORDER BY ...)`, a structurally different aggregate shape,
+and MSSQL has no clean equivalent). Real and useful, but each needs its
+own AST shape — a separate future item, not a rushed fit into this one.
+
+**Effort: S**, same "one adapter method, zero new compiler branches" payoff
+as item 74.
+
+**Why it matters:** real analytics asks ("how much does delivery time
+vary by region") were previously impossible to express at all, not just
+capped.

@@ -371,6 +371,36 @@ class TestCompiler:
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "GROUP BY" in compiled.upper()
 
+    def test_stddev_variance_render_on_postgres(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                AggregateSelectItem(fn="stddev", col="orders.total_amount", alias="sd"),
+                AggregateSelectItem(fn="variance", col="orders.total_amount", alias="var"),
+            ],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+        assert "stddev(" in compiled
+        assert "variance(" in compiled
+
+    def test_stddev_variance_render_on_mssql(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                AggregateSelectItem(fn="stddev", col="orders.total_amount", alias="sd"),
+                AggregateSelectItem(fn="variance", col="orders.total_amount", alias="var"),
+            ],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "STDEV(" in compiled
+        assert "VAR(" in compiled
+
     def test_order_by_nulls_last_renders_natively_on_postgres(self):
         tables = _make_tables()
         query = StructuredQuery(
