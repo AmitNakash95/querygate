@@ -1,4 +1,5 @@
-"""Property-based fuzzing of the SQLAlchemy compiler (TODO.md item 36 phase 1).
+"""Property-based fuzzing of the SQLAlchemy compiler (TODO.md item 36 phase 1,
+extended by item 79 to cover the AST surface added in items 68-77).
 
 `test_compiler.py` proves the compiler handles a fixed set of hand-written
 AST shapes correctly. Nothing previously proved the compiler is robust
@@ -27,13 +28,21 @@ from querygate.compiler.sqlalchemy_compiler import compile_structured_query
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
+    CaseSelectItem,
+    CaseWhen,
+    ColArg,
     JoinSpec,
+    LiteralArg,
     OrderBySpec,
     Predicate,
+    ScalarFunctionCall,
+    ScalarFunctionSelectItem,
     StructuredQuery,
     TopNSpec,
     WhereGroup,
 )
+
+_NULLS = st.one_of(st.none(), st.sampled_from(["first", "last"]))
 
 _SLOW_SETTINGS = settings(
     max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow]
@@ -84,13 +93,50 @@ _PREDICATE_SPECS = st.one_of(
 )
 
 
+_VALUE_COL_PAIRS = st.sampled_from(
+    [("orders.total_amount", "orders.id"), ("orders.id", "orders.customer_id")]
+)
+
+
+@st.composite
+def _value_col_predicate(draw):
+    """item 71: comparing two columns instead of a column to a literal."""
+    col, other = draw(_VALUE_COL_PAIRS)
+    op = draw(st.sampled_from(["eq", "neq", "lt", "lte", "gt", "gte"]))
+    return Predicate(col=col, op=op, value_col=other)
+
+
+@st.composite
+def _col_fn_predicate(draw):
+    """item 77: a whitelisted scalar function as the predicate's LEFT side."""
+    fn = draw(st.sampled_from(["lower", "upper"]))
+    op = draw(st.sampled_from(["eq", "neq"]))
+    value = draw(_STRING_VALUES)
+    return Predicate(
+        col_fn=ScalarFunctionCall(fn=fn, args=[ColArg(col="orders.status")]), op=op, value=value
+    )
+
+
+@st.composite
+def _literal_predicate(draw):
+    col, op, value = draw(_PREDICATE_SPECS)
+    return Predicate(col=col, op=op, value=value)
+
+
 @st.composite
 def _predicates(draw, max_count=3):
     n = draw(st.integers(min_value=1, max_value=max_count))
     preds = []
     for _ in range(n):
-        col, op, value = draw(_PREDICATE_SPECS)
-        preds.append(Predicate(col=col, op=op, value=value))
+        # Biased toward plain literal predicates (the historically covered
+        # shape) with value_col/col_fn mixed in — not a uniform 1/3 split.
+        kind = draw(st.sampled_from(["literal", "literal", "literal", "value_col", "col_fn"]))
+        if kind == "value_col":
+            preds.append(draw(_value_col_predicate()))
+        elif kind == "col_fn":
+            preds.append(draw(_col_fn_predicate()))
+        else:
+            preds.append(draw(_literal_predicate()))
     return preds
 
 
@@ -98,9 +144,13 @@ def _predicates(draw, max_count=3):
 def _where_clauses(draw):
     preds = draw(_predicates())
     if len(preds) == 1:
-        return draw(st.one_of(st.just(preds[0]), st.just(WhereGroup(and_terms=preds))))
-    boolean = draw(st.sampled_from(["and", "or"]))
-    return WhereGroup(and_terms=preds) if boolean == "and" else WhereGroup(or_terms=preds)
+        node = draw(st.one_of(st.just(preds[0]), st.just(WhereGroup(and_terms=preds))))
+    else:
+        boolean = draw(st.sampled_from(["and", "or"]))
+        node = WhereGroup(and_terms=preds) if boolean == "and" else WhereGroup(or_terms=preds)
+    if draw(st.booleans()):
+        node = WhereGroup(not_terms=node)  # item 71: negated group
+    return node
 
 
 @st.composite
@@ -111,19 +161,43 @@ def _row_select_queries(draw):
     include_join = draw(st.booleans())
     order_by_pool = _ORDER_COLUMNS + (_CUSTOMER_COLUMNS if include_join else [])
 
-    select_cols = draw(
+    select_cols: list = draw(
         st.lists(st.sampled_from(_ORDER_COLUMNS), min_size=1, max_size=4, unique=True)
     )
     if include_join:
         select_cols = select_cols + draw(
             st.lists(st.sampled_from(_CUSTOMER_COLUMNS), min_size=0, max_size=2, unique=True)
         )
+    if draw(st.booleans()):  # item 72: a scalar function projection
+        select_cols = select_cols + [
+            ScalarFunctionSelectItem(fn="lower", args=[ColArg(col="orders.status")], alias="lc")
+        ]
+    if draw(st.booleans()):  # item 72: a CASE projection
+        select_cols = select_cols + [
+            CaseSelectItem(
+                when=[
+                    CaseWhen(
+                        when=Predicate(col="orders.status", op="eq", value="completed"),
+                        then=LiteralArg(literal="Done"),
+                    )
+                ],
+                else_=LiteralArg(literal="Open"),
+                alias="label",
+            )
+        ]
+
+    extra_on = (
+        [["orders.status", "customers.country"]]  # item 76: composite join key
+        if include_join and draw(st.booleans())
+        else []
+    )
     joins = (
         [
             JoinSpec(
                 table="customers",
                 type=draw(st.sampled_from(["inner", "left"])),
                 on=["orders.customer_id", "customers.id"],
+                extra_on=extra_on,
             )
         ]
         if include_join
@@ -136,6 +210,7 @@ def _row_select_queries(draw):
                 OrderBySpec,
                 col=st.sampled_from(order_by_pool),
                 dir=st.sampled_from(["asc", "desc"]),
+                nulls=_NULLS,
             ),
             max_size=2,
         )
@@ -144,6 +219,7 @@ def _row_select_queries(draw):
     return StructuredQuery(
         from_table="orders",
         select=select_cols,
+        distinct=draw(st.booleans()),  # item 69
         joins=joins,
         where=where,
         order_by=order_by,
@@ -154,11 +230,18 @@ def _row_select_queries(draw):
 @st.composite
 def _aggregate_queries(draw):
     """Random GROUP BY + aggregate + HAVING shapes."""
-    agg_fn = draw(st.sampled_from(["count", "sum", "avg", "min", "max"]))
+    # item 75: stddev/variance mixed into the aggregate function pool.
+    agg_fn = draw(st.sampled_from(["count", "sum", "avg", "min", "max", "stddev", "variance"]))
     agg_col = "*" if agg_fn == "count" and draw(st.booleans()) else "orders.total_amount"
+    # distinct is invalid with count(*) and with stddev/variance on every
+    # dialect (see item 75) — never draw it for those rather than relying on
+    # a post-hoc filter.
+    distinct = (
+        draw(st.booleans()) if agg_col != "*" and agg_fn not in ("stddev", "variance") else False
+    )
     select = [
         "orders.status",
-        AggregateSelectItem(fn=agg_fn, col=agg_col, alias="agg_value"),
+        AggregateSelectItem(fn=agg_fn, col=agg_col, alias="agg_value", distinct=distinct),
     ]
     having = draw(
         st.lists(
@@ -173,7 +256,12 @@ def _aggregate_queries(draw):
     )
     order_by = draw(
         st.lists(
-            st.builds(OrderBySpec, col=st.just("agg_value"), dir=st.sampled_from(["asc", "desc"])),
+            st.builds(
+                OrderBySpec,
+                col=st.just("agg_value"),
+                dir=st.sampled_from(["asc", "desc"]),
+                nulls=_NULLS,
+            ),
             max_size=1,
         )
     )
@@ -202,6 +290,7 @@ def _top_n_queries(draw):
             else st.sampled_from(["orders.id", "orders.total_amount"])
         ),
         dir=st.sampled_from(["asc", "desc"]),
+        nulls=_NULLS,
     )
     top_n = TopNSpec(
         partition_by=partition_by,
@@ -217,6 +306,33 @@ def _top_n_queries(draw):
         group_by = []
     return StructuredQuery(
         from_table="orders", select=select, group_by=group_by, top_n=top_n, limit=50
+    )
+
+
+def _self_join_tables() -> Dict[str, sa.Table]:
+    orders = _tables()["orders"]
+    return {"e": orders.alias("e"), "m": orders.alias("m")}
+
+
+@st.composite
+def _self_join_queries(draw):
+    """item 70: a structurally distinct shape from the other three
+    strategies — a self-join via from_alias/JoinSpec.alias, exercising the
+    effective-name machinery (every other strategy only ever references one
+    occurrence of each table, so aliasing/self-join resolution is otherwise
+    entirely untested by the fuzzer).
+    """
+    where = draw(
+        st.one_of(st.none(), st.just(Predicate(col="e.status", op="eq", value="completed")))
+    )
+    return StructuredQuery(
+        from_table="orders",
+        from_alias="e",
+        select=["e.id", "e.status", "m.id", "m.status"],
+        joins=[JoinSpec(table="orders", alias="m", on=["e.customer_id", "m.customer_id"])],
+        where=where,
+        order_by=[OrderBySpec(col="e.id", dir=draw(st.sampled_from(["asc", "desc"])))],
+        limit=draw(st.integers(min_value=1, max_value=100)),
     )
 
 
@@ -251,6 +367,40 @@ def test_compiler_never_crashes_on_top_n_shapes(query):
     compiled_text = str(stmt.compile()).upper()
     assert "OVER" in compiled_text
     assert isinstance(limit, int) and limit >= 1
+
+
+@_SLOW_SETTINGS
+@given(query=_self_join_queries())
+def test_compiler_never_crashes_on_self_join_shapes(query):
+    tables = _self_join_tables()
+    stmt, limit = compile_structured_query(query, tables, Policy())
+    compiled_text = str(stmt.compile()).upper()
+    assert "JOIN" in compiled_text
+    assert isinstance(limit, int) and limit >= 1
+    str(stmt.compile(compile_kwargs={"literal_binds": True}))
+
+
+@_SLOW_SETTINGS
+@given(query=_self_join_queries())
+def test_compiler_respects_mandatory_row_filter_across_self_join_shapes(query):
+    """Mirrors `test_compiler_respects_mandatory_row_filter_across_random_shapes`
+    below but for self-joins specifically — kept separate because self-join
+    queries need a structurally different `tables` dict (keyed by alias, not
+    physical name) than the other three strategies share. Proves item 70's
+    guarantee holds across random self-join shapes too: a mandatory filter
+    applies to EVERY alias of a self-joined table, not just one.
+    """
+    from querygate.policy.models import MandatoryRowFilter
+
+    tables = _self_join_tables()
+    policy = Policy(
+        mandatory_row_filters=[
+            MandatoryRowFilter(table="orders", column="status", value="__tenant_marker__")
+        ]
+    )
+    stmt, _ = compile_structured_query(query, tables, policy)
+    compiled_text = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert compiled_text.count("__tenant_marker__") == 2
 
 
 @_SLOW_SETTINGS
