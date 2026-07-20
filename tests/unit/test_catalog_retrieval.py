@@ -59,9 +59,26 @@ def _store() -> CatalogStore:
     )
 
 
-def test_search_returns_compact_versioned_provenance_and_current_freshness():
+def test_search_citation_is_compact_by_default():
     response = search_catalog(
         _store(), connection_id="demo", policy=Policy(), query="sales revenue", max_results=3
+    )
+
+    assert response.results
+    assert response.results[0].table == "orders"
+    citation = response.results[0].citation
+    assert citation.model_dump() == {"status": "verified", "precedence": citation.precedence}
+    assert response.result_count == len(response.results)
+
+
+def test_search_returns_full_versioned_provenance_and_current_freshness_when_verbose():
+    response = search_catalog(
+        _store(),
+        connection_id="demo",
+        policy=Policy(),
+        query="sales revenue",
+        max_results=3,
+        verbose_provenance=True,
     )
 
     assert response.results
@@ -108,12 +125,16 @@ def test_rejected_and_archived_entries_are_not_searchable():
 
 
 def test_search_enforces_byte_budget_without_returning_oversized_first_hit():
+    # verbose_provenance=True: the full citation is what's large enough to
+    # exceed a 512-byte budget on its own — the default compact citation
+    # (TODO.md item 64) now fits comfortably, which is the intended win.
     response = search_catalog(
         _store(),
         connection_id="demo",
         policy=Policy(),
         query="sales",
         max_response_bytes=512,
+        verbose_provenance=True,
     )
     assert response.results == []
     assert response.result_count == 0

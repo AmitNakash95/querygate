@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 import pydantic as pyd
 import sqlalchemy as sa
@@ -27,10 +27,11 @@ from querygate.catalog.models import (
 from querygate.catalog.retrieval import (
     CatalogCitation,
     CatalogSearchResponse,
-    catalog_citation,
+    CompactCatalogCitation,
     policy_hidden_identifier_tokens,
     policy_safe_catalog_aliases,
     policy_safe_catalog_text,
+    resolve_citation,
     search_catalog,
 )
 from querygate.catalog.usage import build_usage_signal, enqueue_usage_signal, should_emit_signal
@@ -88,7 +89,7 @@ class TableCatalogInfo(pyd.BaseModel):
     default_aggregation: Optional[str] = None
     allow_samples: bool = False
     relationships: List["RelationshipCatalogInfo"] = pyd.Field(default_factory=list)
-    provenance: CatalogCitation
+    provenance: Union[CatalogCitation, CompactCatalogCitation]
 
 
 class RelationshipCatalogInfo(pyd.BaseModel):
@@ -96,7 +97,7 @@ class RelationshipCatalogInfo(pyd.BaseModel):
     column: str
     to_column: str
     description: Optional[str] = None
-    provenance: CatalogCitation
+    provenance: Union[CatalogCitation, CompactCatalogCitation]
 
 
 class ColumnCatalogInfo(pyd.BaseModel):
@@ -104,7 +105,7 @@ class ColumnCatalogInfo(pyd.BaseModel):
     aliases: List[str] = pyd.Field(default_factory=list)
     sensitivity: SensitivityClass = SensitivityClass.NONE
     allow_samples: bool = False
-    provenance: CatalogCitation
+    provenance: Union[CatalogCitation, CompactCatalogCitation]
 
 
 class ColumnInfo(pyd.BaseModel):
@@ -149,7 +150,16 @@ class BatchQueryItemResult(pyd.BaseModel):
     limit: Optional[int] = None
     offset: Optional[int] = None
     admission_id: Optional[str] = None
+    admission_state: Optional[str] = None
     queue_wait_ms: Optional[int] = None
+    error: Optional[str] = None
+
+
+class BatchExplainItemResult(pyd.BaseModel):
+    sql: Optional[str] = None
+    params: Optional[str] = None
+    tables: Optional[List[str]] = None
+    limit: Optional[int] = None
     error: Optional[str] = None
 
 
@@ -200,11 +210,11 @@ def _compile_to_text(stmt: Any, *, include_literals: bool) -> Tuple[str, Optiona
     always uses bind placeholders, and parameter values are redacted before
     being turned into the returned params string. Without this, WHERE-clause
     literals (an email, an SSN) end up verbatim in the audit log and in
-    explain_structured_query's response, which contradicts the "audit
-    records never contain row payloads" guarantee for anything expressible
-    in a `where`. `include_literals=True` is an explicit per-policy opt-in
-    (`Policy.log_query_literals`) for deployments that want full literal SQL
-    for debugging.
+    run_structured_queries(mode="explain")'s response, which contradicts the
+    "audit records never contain row payloads" guarantee for anything
+    expressible in a `where`. `include_literals=True` is an explicit
+    per-policy opt-in (`Policy.log_query_literals`) for deployments that
+    want full literal SQL for debugging.
     """
     compiled = stmt.compile()
     params = dict(compiled.params) if hasattr(compiled, "params") else {}
@@ -544,6 +554,7 @@ class StructuredQueryService:
                     BatchQueryItemResult(
                         error=public_error_message(exc),
                         admission_id=getattr(exc, "admission_id", None),
+                        admission_state=getattr(exc, "admission_state", None),
                         queue_wait_ms=getattr(exc, "queue_wait_ms", None),
                     )
                 )
@@ -569,6 +580,17 @@ class StructuredQueryService:
             sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
             return ExplainResult(sql=sql, params=params, tables=sorted(tables), limit=limit)
 
+    async def explain_many(self, queries: List[StructuredQuery]) -> List[BatchExplainItemResult]:
+        """Explain each query independently; one failure doesn't drop the rest."""
+        results: List[BatchExplainItemResult] = []
+        for query in queries:
+            try:
+                result = await self.explain(query)
+                results.append(BatchExplainItemResult(**result.model_dump()))
+            except Exception as exc:
+                results.append(BatchExplainItemResult(error=public_error_message(exc)))
+        return results
+
     @log_execution
     async def list_tables(self) -> List[str]:
         """Known/reflected table names for this connection, filtered by policy.
@@ -588,13 +610,18 @@ class StructuredQueryService:
         return sorted(name for name in names if policy.table_allowed(name))
 
     @log_execution
-    async def search_catalog(self, query: str, *, max_results: int = 5) -> CatalogSearchResponse:
+    async def search_catalog(
+        self, query: str, *, max_results: int = 5, verbose_provenance: bool = False
+    ) -> CatalogSearchResponse:
         """Retrieve compact semantic context without touching the database.
 
         The catalog retrieval layer applies this principal's resolved policy
         before it tokenizes or ranks candidates. It is deliberately separate
         from query validation/execution: a missing or empty catalog returns no
         results and can never weaken or block ordinary structured queries.
+
+        Each hit's citation is compact (status + precedence) unless
+        `verbose_provenance` is set — see `catalog.retrieval.search_catalog`.
         """
 
         policy = self._get_policy()
@@ -605,12 +632,15 @@ class StructuredQueryService:
                 policy=policy,
                 query=query,
                 max_results=max_results,
+                verbose_provenance=verbose_provenance,
             )
         except ValueError as exc:
             raise QueryValidationError(str(exc)) from exc
 
     @log_execution
-    async def describe_table(self, table_name: str) -> TableDescription:
+    async def describe_table(
+        self, table_name: str, *, verbose_provenance: bool = False
+    ) -> TableDescription:
         policy = self._get_policy()
         try:
             sanitize_table_name(table_name)
@@ -646,7 +676,9 @@ class StructuredQueryService:
                 aliases=policy_safe_catalog_aliases(entry.aliases, hidden_identifier_tokens),
                 sensitivity=entry.sensitivity,
                 allow_samples=entry.allow_samples,
-                provenance=catalog_citation(entry.provenance, current_schema_fingerprint),
+                provenance=resolve_citation(
+                    entry.provenance, current_schema_fingerprint, verbose=verbose_provenance
+                ),
             )
 
         columns = [
@@ -686,13 +718,19 @@ class StructuredQueryService:
                         description=policy_safe_catalog_text(
                             relationship.description, hidden_identifier_tokens
                         ),
-                        provenance=catalog_citation(
-                            relationship.provenance, current_schema_fingerprint
+                        provenance=resolve_citation(
+                            relationship.provenance,
+                            current_schema_fingerprint,
+                            verbose=verbose_provenance,
                         ),
                     )
                     for relationship in visible_relationship_entries
                 ],
-                provenance=catalog_citation(catalog_entry.provenance, current_schema_fingerprint),
+                provenance=resolve_citation(
+                    catalog_entry.provenance,
+                    current_schema_fingerprint,
+                    verbose=verbose_provenance,
+                ),
             )
             if catalog_entry and agent_visible(catalog_entry.provenance)
             else None

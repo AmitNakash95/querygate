@@ -1442,17 +1442,21 @@ it, and — if it succeeds — stashes the resulting `Principal` (and the
 if it fails, it short-circuits with a 401 and never calls the wrapped app at
 all. Individual tool functions then call `get_mcp_caller()` /
 `get_mcp_config()` to read that context — this is how a tool like
-`execute_structured_query` knows *who* is calling without the caller having
+`run_structured_queries` knows *who* is calling without the caller having
 to pass identity as a tool argument (which an agent could tamper with).
 
 The actual tools, one module per concern:
 
 - `mcp/tools/connections.py` — `list_connections`.
 - `mcp/tools/schema.py` — table listing/description tools.
-- `mcp/tools/query.py` — `execute_structured_query`, `explain_structured_query`,
-  and `execute_structured_queries` (batch) — the MCP equivalents of the
-  REST query endpoints, calling the same `StructuredQueryService` with
-  `surface="mcp"` (REST passes `surface="rest"`) purely so downstream
+- `mcp/tools/query.py` — `run_structured_queries`, one tool for execute,
+  dry-run (`mode="explain"`), and single-or-batch (`queries` is always a
+  list) — the MCP equivalent of the REST query endpoints (which stay
+  split into `/query`, `/query/explain`, `/query/batch`; OpenAPI can
+  share one `$ref`'d schema across endpoints where raw per-tool MCP
+  schemas can't, so REST didn't have the duplication problem this merge
+  fixes — see TODO.md item 61), calling the same `StructuredQueryService`
+  with `surface="mcp"` (REST passes `surface="rest"`) purely so downstream
   logging/audit can tell which transport a request came from — the
   validation/compile/execute pipeline itself doesn't branch on it.
 - `mcp/tools/help.py` — the guide/diagnostics tools (see below).
@@ -1971,6 +1975,26 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-20 — Merged `execute_structured_query`/`explain_structured_query`/
+  `execute_structured_queries` into one `run_structured_queries` MCP tool
+  (TODO.md item 61), a deliberate breaking rename.** Each MCP tool's JSON
+  Schema is independently self-contained — the MCP `tools/list` protocol has
+  no mechanism for one tool to reference another's schema, unlike OpenAPI's
+  `$ref`'d component schemas, which is why REST kept its three separate
+  `/query`, `/query/explain`, `/query/batch` endpoints without this
+  problem. That meant `StructuredQuery`'s full nested schema was carried
+  three times, byte-for-byte identical, across the three MCP tools — real,
+  measured duplication (`tests/unit/test_mcp_token_budget.py`), not a
+  theoretical one. Collapsing to one tool (`queries` always a list, `mode:
+  "execute"|"explain"`) cut it to one copy. **Accepted cost:** any
+  caller/doc/example referencing the three old tool names by name breaks —
+  updated everywhere found in this repository (examples, this guide, the
+  landing sandbox), but an external integration holding the old names would
+  need to update too. **Why accepted anyway:** the alternative (leaving the
+  duplication in place) cost roughly 3x whatever `StructuredQuery`'s schema
+  size is on every single MCP session's fixed overhead, for every caller,
+  forever — a recurring tax rather than a one-time migration cost. See
+  [MCP transport](#mcp-transport).
 - **2026-07-20 — The "test now" connection probe got its own scope,
   separate from read.** `admin:connections:read` (item 43 phase 1) is
   passive — it only reads `HealthMonitor`'s cached snapshot. The new "test

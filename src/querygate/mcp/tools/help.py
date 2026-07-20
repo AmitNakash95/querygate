@@ -40,14 +40,19 @@ async def search_querygate_guide(
 @mcp_server.tool(
     description=(
         "Retrieve one complete canonical QueryGate guide topic by the topic_id returned from "
-        "search_querygate_guide, including installed-version citation and safe next actions."
+        "search_querygate_guide, including installed-version citation and safe next actions. "
+        "Truncated to max_response_bytes if the topic body would exceed it — check the "
+        "'truncated' flag."
     )
 )
 @safe_mcp_tool
 async def get_querygate_guide_topic(
     topic_id: Annotated[str, Field(min_length=1)],
+    max_response_bytes: Annotated[
+        int, Field(ge=512, description="Byte cap on the serialized response; truncates content.")
+    ] = 16_384,
 ) -> Union[GuideTopicResponse, MCPErrorResult]:
-    return get_guide_service().topic(topic_id)
+    return get_guide_service().topic(topic_id, max_response_bytes=max_response_bytes)
 
 
 @mcp_server.tool(
