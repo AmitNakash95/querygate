@@ -1976,6 +1976,22 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-20 — Whitelisted scalar functions/CASE (TODO.md item 72) are
+  SELECT-projection only, not usable as a WHERE/HAVING predicate target.**
+  Extending `Predicate.col` to accept a function-wrapped expression instead
+  of a bare `Table.Column` would thread a new type through every
+  `parse_column_ref` call site across policy validation, schema validation,
+  and the compiler — a materially bigger change than adding `coalesce`/
+  `lower`/`upper`/`trim`/`concat`/CASE as SELECT items, which only needed
+  new branches in the existing select-item dispatch. **Accepted cost:** a
+  request like "filter where lower(status) = 'active'" still can't be
+  expressed directly — the caller filters on the raw column instead.
+  **Why accepted anyway:** the SELECT-only version closes the far more
+  common gap (projecting a normalized/conditional value) at a fraction of
+  the risk, and keeps the WHERE/HAVING grammar exactly as narrow and
+  auditable as it was before. Extending function calls into predicates is
+  left as an explicit, separately-scoped future item if real usage shows
+  it's needed. See [The Core Request Pipeline](#the-core-request-pipeline).
 - **2026-07-20 — Merged `execute_structured_query`/`explain_structured_query`/
   `execute_structured_queries` into one `run_structured_queries` MCP tool
   (TODO.md item 61), a deliberate breaking rename.** Each MCP tool's JSON

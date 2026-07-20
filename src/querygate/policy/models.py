@@ -112,6 +112,11 @@ class Policy(pyd.BaseModel):
     max_where_predicates: int = pyd.Field(default=100)
     max_in_list_size: int = pyd.Field(default=1000)
 
+    # Caps the number of WHEN branches in any single CaseSelectItem — the
+    # same "structural size" guardrail philosophy as the caps above, applied
+    # to CASE expressions once those became expressible in SELECT.
+    max_case_branches: int = pyd.Field(default=10)
+
     # `max_limit`/`max_limit_aggregate` cap row *count*; this caps response
     # *size* — a wide TEXT/JSONB/BLOB column selected across many rows is a
     # policy-compliant query that can still blow up the response body. Rows

@@ -4355,3 +4355,83 @@ dedicated policy-bypass test — not just a happy-path compile test.
 compound condition; comparing two columns on the same row) while proving,
 not just assuming, that both stay inside the existing policy/cap
 enforcement rather than becoming a new blind spot.
+
+### 72. Whitelisted scalar functions and CASE in select (SELECT-only) ✅ DONE
+
+**Problem.** No `COALESCE`, `LOWER`/`UPPER`/`TRIM`, string concat, or
+`CASE WHEN` existed anywhere in the AST. Ordinary asks like "treat NULL
+discount as 0" or "compare names case-insensitively" were simply
+unrepresentable, not just capped.
+
+**Scope boundary (deliberate — see docs/PRODUCT_GUIDE.md Decision Log).**
+SELECT projections only, not usable as a WHERE/HAVING predicate target.
+Extending `Predicate.col` to accept a function-wrapped expression is a
+materially bigger change (threads a new type through every
+`parse_column_ref` call site); left as a separate, explicitly-scoped
+future item rather than folded in here.
+
+**Shipped.**
+- `query_ast/models.py`: a tagged-union arg shape avoids "is this string a
+  column ref or a literal?" ambiguity — `ColArg` (`{"col": "Table.Column"}`)
+  and `LiteralArg` (`{"literal": ...}`), verified to discriminate correctly
+  from plain JSON dicts via Pydantic's smart union. `ScalarFunctionSelectItem`
+  (`fn`: coalesce/lower/upper/trim/concat, `args`, optional `alias`) —
+  lower/upper/trim require exactly one `ColArg`; coalesce/concat require
+  2+ args of either kind. `CaseSelectItem` (`when`: list of `{when:
+  Predicate, then: ScalarFunctionArg}`, optional `else_`, REQUIRED `alias`
+  since no sensible default name exists) — `when` is a single `Predicate`
+  per branch, not a full `WhereNode`, a deliberate v1 simplification
+  covering the common `CASE WHEN col = x THEN ...` shape. Both added to
+  `SelectItem`'s union.
+- `policy/models.py`: `max_case_branches` (default 10), following the same
+  structural-size-cap philosophy as every other policy cap.
+- `validation/schema_validation.py`: new `select_item_column_refs(item)` —
+  single source of truth yielding every `Table.Column` ref inside any
+  select item variant (bare string, aggregate/date_bucket `.col`, scalar
+  function args, CASE when/then/else), replacing the old select-loop logic
+  in both this module and `policy_validation.py` (which previously assumed
+  every non-string select item had a `.col` attribute — true before this
+  item, false for the two new variants). `_validate_select_columns` now
+  resolves every item type's columns generically through it, plus a
+  strict pass on each CASE branch's `when` Predicate (`allow_alias=False`,
+  same reasoning as top-level `where`). `_select_aliases` extended so
+  `group_by`/`having`/`order_by`/`top_n` can reference a scalar-function or
+  CASE alias.
+- `validation/policy_validation.py`: **same security-correctness category
+  as items 70/71's fixes** — a naive extension of the old select-loop (which
+  assumed every non-string select item had a `.col` attribute) would have
+  left a denied column referenced only inside a `coalesce(...)` call or a
+  CASE `when`/`then`/`else` completely unwalked by
+  `_iter_column_refs`/`_collect_referenced_tables` — invisible to column
+  policy, not merely mis-attributed. The generic `select_item_column_refs`
+  rewrite closes that path from the start rather than shipping it and
+  patching later. Proven by `test_denied_column_rejected_inside_coalesce`,
+  `test_denied_column_rejected_inside_case_when`, and
+  `test_denied_column_rejected_inside_case_then`. Also added the
+  `max_case_branches` cap check.
+- `compiler/sqlalchemy_compiler.py`: `_build_select_columns` gains branches
+  for both item types (`sa.func.coalesce`/`concat`/`lower`/`upper`/`trim`,
+  `sa.case((cond, then), ..., else_=...)` reusing the existing
+  `_resolve_predicate_target`/`_apply_predicate` pair for each `when`
+  condition). Verified end-to-end against a real in-memory SQLite engine
+  (not just rendered SQL): `COALESCE`, `LOWER`, and `CASE WHEN...ELSE` all
+  executed and returned correct values, and a CASE alias was confirmed
+  usable in `GROUP BY`.
+- `examples/policy.example.yaml` and `mcp/instructions.py` updated
+  (the latter with the explicit SELECT-only caveat, since an agent might
+  otherwise reasonably assume a function usable in SELECT is also usable
+  in WHERE).
+- `tests/unit/test_mcp_token_budget.py`: `_MAX_TOTAL_CHARS` bumped from
+  62,000 to 66,500 (measured actual: 63,201) — the new Field descriptions
+  across items 68-72 pushed past budget; bumped deliberately in this same
+  commit per item 66's own rule, not silently.
+
+**Effort: L.** The riskiest item by design (closest to a general expression
+grammar) — kept bounded by the SELECT-only scope decision and an explicit
+function whitelist rather than open-ended expressions.
+
+**Why it matters:** closes the highest-value remaining expressiveness gap
+identified in the original review, while the select-loop rewrite it forced
+also fixed a genuine policy-bypass latent in how select items were walked
+for column-level policy — a second security-correctness fix, not just a
+feature add.

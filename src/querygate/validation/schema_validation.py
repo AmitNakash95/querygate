@@ -6,7 +6,7 @@ validation/policy_validation.py, before this module ever reflects anything.
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional, Set, Tuple
+from typing import Callable, Dict, Iterator, Optional, Set, Tuple
 
 import sqlalchemy as sa
 
@@ -18,8 +18,12 @@ from querygate.core.exceptions import QueryValidationError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
+    CaseSelectItem,
+    ColArg,
     DateBucketSelectItem,
     Predicate,
+    ScalarFunctionSelectItem,
+    SelectItem,
     StructuredQuery,
     WhereNode,
 )
@@ -59,6 +63,37 @@ def effective_name_map(query: StructuredQuery) -> Dict[str, str]:
     return mapping
 
 
+def select_item_column_refs(item: SelectItem) -> Iterator[str]:
+    """Every Table.Column ref a single select item touches, across every
+    variant — a bare string, an aggregate/date_bucket's `.col`, a scalar
+    function's column-typed args, or a CASE expression's when/then/else.
+    Shared by schema validation (which tables/columns to reflect/resolve)
+    and policy validation (which refs column-level policy must check).
+    """
+    if isinstance(item, str):
+        yield item
+        return
+    if isinstance(item, ScalarFunctionSelectItem):
+        for arg in item.args:
+            if isinstance(arg, ColArg):
+                yield arg.col
+        return
+    if isinstance(item, CaseSelectItem):
+        for branch in item.when:
+            if "." in branch.when.col:
+                yield branch.when.col
+            if branch.when.value_col is not None:
+                yield branch.when.value_col
+            if isinstance(branch.then, ColArg):
+                yield branch.then.col
+        if isinstance(item.else_, ColArg):
+            yield item.else_.col
+        return
+    # AggregateSelectItem / DateBucketSelectItem
+    if item.col != "*":
+        yield item.col
+
+
 def resolve_column(table: sa.Table, column_name: str) -> sa.Column:
     col_map = {c.name.lower(): c for c in table.c}
     key = column_name.lower()
@@ -84,6 +119,16 @@ def _aggregate_alias(item: AggregateSelectItem) -> str:
     return f"{item.fn}_{col_name}"
 
 
+def _scalar_function_alias(item: ScalarFunctionSelectItem) -> str:
+    if item.alias:
+        return item.alias
+    for arg in item.args:
+        if isinstance(arg, ColArg):
+            _, col_name = parse_column_ref(arg.col)
+            return f"{item.fn}_{col_name}"
+    return f"{item.fn}_result"
+
+
 def _select_aliases(query: StructuredQuery, tables: Dict[str, sa.Table]) -> Set[str]:
     aliases: Set[str] = set()
     for item in query.select:
@@ -91,6 +136,10 @@ def _select_aliases(query: StructuredQuery, tables: Dict[str, sa.Table]) -> Set[
             aliases.add(_aggregate_alias(item))
         elif isinstance(item, DateBucketSelectItem):
             aliases.add(_date_bucket_alias(item, tables))
+        elif isinstance(item, ScalarFunctionSelectItem):
+            aliases.add(_scalar_function_alias(item))
+        elif isinstance(item, CaseSelectItem):
+            aliases.add(item.alias)
     return aliases
 
 
@@ -215,11 +264,8 @@ async def validate_schema(
             needed.add(t)
 
     for item in query.select:
-        if isinstance(item, str):
-            t, _ = parse_column_ref(item)
-            needed.add(t)
-        elif item.col != "*":
-            t, _ = parse_column_ref(item.col)
+        for ref in select_item_column_refs(item):
+            t, _ = parse_column_ref(ref)
             needed.add(t)
 
     for col_ref in query.group_by:
@@ -296,14 +342,17 @@ async def validate_schema(
 
 def _validate_select_columns(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None:
     for item in query.select:
-        if isinstance(item, str):
-            t, c = parse_column_ref(item)
-            resolve_column(tables[t], c)
-        elif item.col != "*":
-            t, c = parse_column_ref(item.col)
-            resolve_column(tables[t], c)
-        elif item.fn != "count":
+        if isinstance(item, AggregateSelectItem) and item.col == "*" and item.fn != "count":
             raise QueryValidationError("Only count(*) is allowed as a star aggregate")
+        if isinstance(item, CaseSelectItem):
+            # Same strictness as a top-level WHERE predicate (no bare-alias
+            # `when` — CASE branch conditions must reference a real column,
+            # same reasoning `_validate_where_columns` applies to `where`).
+            for branch in item.when:
+                _validate_predicate_columns(branch.when, tables, allow_alias=False)
+        for ref in select_item_column_refs(item):
+            t, c = parse_column_ref(ref)
+            resolve_column(tables[t], c)
 
 
 def _validate_join_columns(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None:

@@ -254,6 +254,123 @@ class TestCompiler:
         with pytest.raises(PolicyViolationError, match="order_status"):
             compile_structured_query(query, tables, policy, principal=principal)
 
+    def test_coalesce_renders_on_postgres_and_mssql(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                {
+                    "fn": "coalesce",
+                    "args": [{"col": "orders.total_amount"}, {"literal": 0}],
+                    "as": "amount",
+                }
+            ],
+            limit=5,
+        )
+        for dialect in ("postgresql", "mssql"):
+            stmt, _ = compile_structured_query(query, tables, Policy(), dialect=dialect)
+            compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            assert "coalesce" in compiled.lower()
+            assert "AS amount" in compiled
+
+    def test_lower_upper_trim_render(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                {"fn": "lower", "args": [{"col": "orders.status"}], "as": "lc"},
+                {"fn": "upper", "args": [{"col": "orders.status"}], "as": "uc"},
+                {"fn": "trim", "args": [{"col": "orders.status"}], "as": "tc"},
+            ],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+        assert "lower(orders.status)" in compiled
+        assert "upper(orders.status)" in compiled
+        assert "trim(orders.status)" in compiled
+
+    def test_scalar_function_default_alias(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[{"fn": "lower", "args": [{"col": "orders.status"}]}],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "AS lower_status" in compiled
+
+    def test_case_with_else_renders(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                {
+                    "when": [
+                        {
+                            "when": {"col": "orders.status", "op": "eq", "value": "completed"},
+                            "then": {"literal": "Done"},
+                        }
+                    ],
+                    "else": {"literal": "Open"},
+                    "as": "label",
+                }
+            ],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "CASE WHEN" in compiled.upper()
+        assert "ELSE" in compiled.upper()
+        assert "AS label" in compiled
+
+    def test_case_without_else_renders(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                {
+                    "when": [
+                        {
+                            "when": {"col": "orders.status", "op": "eq", "value": "completed"},
+                            "then": {"literal": "Done"},
+                        }
+                    ],
+                    "as": "label",
+                }
+            ],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "CASE WHEN" in compiled.upper()
+        assert "ELSE" not in compiled.upper()
+
+    def test_case_group_by_alias_referenceable(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                {
+                    "when": [
+                        {
+                            "when": {"col": "orders.status", "op": "eq", "value": "completed"},
+                            "then": {"literal": "Done"},
+                        }
+                    ],
+                    "else": {"literal": "Open"},
+                    "as": "label",
+                },
+                AggregateSelectItem(fn="count", col="*", alias="n"),
+            ],
+            group_by=["label"],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "GROUP BY" in compiled.upper()
+
     def test_not_group_renders(self):
         # SQLAlchemy simplifies NOT(col = val) to col != val at the
         # expression level (still a correct negation) rather than emitting a
