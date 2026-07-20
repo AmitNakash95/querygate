@@ -117,6 +117,43 @@ def test_permitted_query_passes():
     validate_policy(query, Policy(), connection_id="demo")  # must not raise
 
 
+def test_denied_column_rejected_when_referenced_through_alias():
+    """A denied column must still be caught when the table it belongs to is
+    referenced through a from_alias/JoinSpec.alias, not just its own name —
+    otherwise aliasing becomes a policy bypass.
+    """
+    query = StructuredQuery(from_table="customers", from_alias="c", select=["c.email"])
+    policy = Policy(denied_columns={"customers": ["email"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_denied_table_rejected_when_referenced_through_join_alias():
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        joins=[JoinSpec(table="customers", alias="c", on=["orders.customer_id", "c.id"])],
+    )
+    policy = Policy(denied_tables=["customers"])
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_self_join_mandatory_filter_table_still_policy_checked_via_alias():
+    """referenced_tables()/table_allowed must see the PHYSICAL table for
+    both self-join occurrences, not the aliases 'e'/'m'.
+    """
+    query = StructuredQuery(
+        from_table="employees",
+        from_alias="e",
+        select=["e.id"],
+        joins=[JoinSpec(table="employees", alias="m", on=["e.manager_id", "m.id"])],
+    )
+    policy = Policy(denied_tables=["employees"])
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
 def test_where_predicate_count_exceeded():
     query = StructuredQuery(
         from_table="orders",

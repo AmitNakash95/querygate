@@ -6,6 +6,7 @@ import pytest
 
 from querygate.query_ast.models import (
     AggregateSelectItem,
+    JoinSpec,
     OrderBySpec,
     Predicate,
     StructuredQuery,
@@ -102,6 +103,50 @@ class TestStructuredQueryModels:
     def test_query_level_distinct_defaults_false(self):
         q = StructuredQuery(from_table="orders", select=["orders.id"])
         assert q.distinct is False
+
+    def test_self_join_without_alias_on_either_side_rejected(self):
+        with pytest.raises(ValueError, match="self-join"):
+            StructuredQuery(
+                from_table="employees",
+                select=["employees.id"],
+                joins=[JoinSpec(table="employees", on=["employees.manager_id", "employees.id"])],
+            )
+
+    def test_self_join_with_one_side_unaliased_still_rejected(self):
+        with pytest.raises(ValueError, match="self-join"):
+            StructuredQuery(
+                from_table="employees",
+                select=["employees.id"],
+                joins=[JoinSpec(table="employees", alias="m", on=["employees.manager_id", "m.id"])],
+            )
+
+    def test_self_join_with_both_sides_aliased_accepted(self):
+        q = StructuredQuery(
+            from_table="employees",
+            from_alias="e",
+            select=["e.id", "m.name"],
+            joins=[JoinSpec(table="employees", alias="m", on=["e.manager_id", "m.id"])],
+        )
+        assert q.from_alias == "e"
+        assert q.joins[0].alias == "m"
+
+    def test_duplicate_effective_name_rejected(self):
+        with pytest.raises(ValueError, match="Duplicate table/alias"):
+            StructuredQuery(
+                from_table="orders",
+                from_alias="o",
+                select=["o.id"],
+                joins=[JoinSpec(table="customers", alias="o", on=["o.customer_id", "o.id"])],
+            )
+
+    def test_plain_join_without_alias_still_works(self):
+        """Ordinary (non-self) joins remain unaffected — no alias required."""
+        q = StructuredQuery(
+            from_table="orders",
+            select=["orders.id", "customers.name"],
+            joins=[JoinSpec(table="customers", on=["orders.customer_id", "customers.id"])],
+        )
+        assert q.joins[0].alias is None
 
     def test_entity_id_field_no_longer_exists(self):
         """entity_id was a customer-specific "scope to Company.ID" concept —
