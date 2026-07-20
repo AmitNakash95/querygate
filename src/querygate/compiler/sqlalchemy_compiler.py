@@ -17,8 +17,12 @@ from querygate.core.exceptions import QueryValidationError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
+    CaseSelectItem,
+    ColArg,
     DateBucketSelectItem,
     Predicate,
+    ScalarFunctionArg,
+    ScalarFunctionSelectItem,
     StructuredQuery,
     WhereNode,
 )
@@ -34,6 +38,16 @@ _AGG_FNS = {
     "avg": sa.func.avg,
     "min": sa.func.min,
     "max": sa.func.max,
+}
+
+_SCALAR_FNS = {
+    "coalesce": sa.func.coalesce,
+    "lower": sa.func.lower,
+    "upper": sa.func.upper,
+    # MSSQL's TRIM() requires SQL Server 2017+; not special-cased here since
+    # the project already treats MSSQL as a single supported dialect version.
+    "trim": sa.func.trim,
+    "concat": sa.func.concat,
 }
 
 _RANK_FNS = {
@@ -53,6 +67,12 @@ def _table_by_name(tables: Dict[str, sa.Table], name: str) -> sa.Table:
 def _column(tables: Dict[str, sa.Table], col_ref: str) -> sa.Column:
     table_name, column_name = parse_column_ref(col_ref)
     return resolve_column(_table_by_name(tables, table_name), column_name)
+
+
+def _resolve_scalar_arg(arg: ScalarFunctionArg, tables: Dict[str, sa.Table]) -> Any:
+    if isinstance(arg, ColArg):
+        return _column(tables, arg.col)
+    return arg.literal
 
 
 def _apply_predicate(col: Any, pred: Predicate, tables: Dict[str, sa.Table]) -> Any:
@@ -187,6 +207,36 @@ def _build_select_columns(
             labeled = expr.label(alias)
             columns.append(labeled)
             alias_map[alias] = labeled
+            continue
+
+        if isinstance(item, ScalarFunctionSelectItem):
+            scalar_fn = _SCALAR_FNS[item.fn]
+            args = [_resolve_scalar_arg(arg, tables) for arg in item.args]
+            expr = scalar_fn(*args)
+            alias = item.alias
+            if not alias:
+                first_col = next((a for a in item.args if isinstance(a, ColArg)), None)
+                alias = (
+                    f"{item.fn}_{parse_column_ref(first_col.col)[1]}"
+                    if first_col is not None
+                    else f"{item.fn}_result"
+                )
+            labeled = expr.label(alias)
+            columns.append(labeled)
+            alias_map[alias] = labeled
+            continue
+
+        if isinstance(item, CaseSelectItem):
+            whens = []
+            for branch in item.when:
+                target = _resolve_predicate_target(branch.when, tables, alias_map={})
+                condition = _apply_predicate(target, branch.when, tables)
+                whens.append((condition, _resolve_scalar_arg(branch.then, tables)))
+            else_value = _resolve_scalar_arg(item.else_, tables) if item.else_ is not None else None
+            expr = sa.case(*whens, else_=else_value)
+            labeled = expr.label(item.alias)
+            columns.append(labeled)
+            alias_map[item.alias] = labeled
             continue
 
         fn = _AGG_FNS[item.fn]

@@ -10,10 +10,11 @@ from typing import Iterator, List, Set
 
 from querygate.core.exceptions import PolicyViolationError
 from querygate.policy.models import Policy
-from querygate.query_ast.models import Predicate, StructuredQuery, WhereNode
+from querygate.query_ast.models import CaseSelectItem, Predicate, StructuredQuery, WhereNode
 from querygate.validation.schema_validation import (
     effective_name_map,
     parse_column_ref,
+    select_item_column_refs,
     where_depth,
 )
 
@@ -27,11 +28,8 @@ def _collect_referenced_tables(query: StructuredQuery) -> Set[str]:
     name_to_physical = effective_name_map(query)
     tables = {query.from_table, *(join.table for join in query.joins)}
     for item in query.select:
-        if isinstance(item, str):
-            t, _ = parse_column_ref(item)
-            tables.add(name_to_physical.get(t.lower(), t))
-        elif item.col != "*":
-            t, _ = parse_column_ref(item.col)
+        for ref in select_item_column_refs(item):
+            t, _ = parse_column_ref(ref)
             tables.add(name_to_physical.get(t.lower(), t))
     return tables
 
@@ -68,10 +66,7 @@ def _iter_column_refs(query: StructuredQuery) -> Iterator[str]:
     without ever selecting it.
     """
     for item in query.select:
-        if isinstance(item, str):
-            yield item
-        elif item.col != "*":
-            yield item.col
+        yield from select_item_column_refs(item)
     for join in query.joins:
         yield from join.on
     if query.where is not None:
@@ -119,6 +114,11 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
 
     if len(query.select) > policy.max_select_columns:
         raise PolicyViolationError(f"select exceeds max of {policy.max_select_columns} items")
+    for item in query.select:
+        if isinstance(item, CaseSelectItem) and len(item.when) > policy.max_case_branches:
+            raise PolicyViolationError(
+                f"case when branches exceeds max of {policy.max_case_branches}"
+            )
     if len(query.joins) > policy.max_joins:
         raise PolicyViolationError(f"joins exceeds max of {policy.max_joins}")
     if len(query.group_by) > policy.max_group_by:

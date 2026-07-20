@@ -198,6 +198,105 @@ def test_where_predicate_count_counts_predicates_inside_not_group():
         validate_policy(query, Policy(max_where_predicates=2), connection_id="demo")
 
 
+def test_denied_column_rejected_inside_coalesce():
+    query = StructuredQuery(
+        from_table="customers",
+        select=[{"fn": "coalesce", "args": [{"col": "customers.email"}, {"literal": "n/a"}]}],
+    )
+    policy = Policy(denied_columns={"customers": ["email"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_denied_column_rejected_inside_case_when():
+    query = StructuredQuery(
+        from_table="customers",
+        select=[
+            {
+                "when": [
+                    {
+                        "when": {"col": "customers.email", "op": "eq", "value": "x"},
+                        "then": {"literal": "y"},
+                    }
+                ],
+                "as": "label",
+            }
+        ],
+    )
+    policy = Policy(denied_columns={"customers": ["email"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_denied_column_rejected_inside_case_then():
+    query = StructuredQuery(
+        from_table="customers",
+        select=[
+            {
+                "when": [
+                    {
+                        "when": {"col": "customers.id", "op": "gt", "value": 0},
+                        "then": {"col": "customers.email"},
+                    }
+                ],
+                "as": "label",
+            }
+        ],
+    )
+    policy = Policy(denied_columns={"customers": ["email"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_max_case_branches_exceeded():
+    query = StructuredQuery(
+        from_table="orders",
+        select=[
+            {
+                "when": [
+                    {
+                        "when": {"col": "orders.status", "op": "eq", "value": "a"},
+                        "then": {"literal": 1},
+                    },
+                    {
+                        "when": {"col": "orders.status", "op": "eq", "value": "b"},
+                        "then": {"literal": 2},
+                    },
+                    {
+                        "when": {"col": "orders.status", "op": "eq", "value": "c"},
+                        "then": {"literal": 3},
+                    },
+                ],
+                "as": "label",
+            }
+        ],
+    )
+    with pytest.raises(PolicyViolationError, match="case when branches"):
+        validate_policy(query, Policy(max_case_branches=2), connection_id="demo")
+
+
+def test_max_case_branches_at_cap_passes():
+    query = StructuredQuery(
+        from_table="orders",
+        select=[
+            {
+                "when": [
+                    {
+                        "when": {"col": "orders.status", "op": "eq", "value": "a"},
+                        "then": {"literal": 1},
+                    },
+                    {
+                        "when": {"col": "orders.status", "op": "eq", "value": "b"},
+                        "then": {"literal": 2},
+                    },
+                ],
+                "as": "label",
+            }
+        ],
+    )
+    validate_policy(query, Policy(max_case_branches=2), connection_id="demo")
+
+
 def test_where_predicate_count_exceeded():
     query = StructuredQuery(
         from_table="orders",

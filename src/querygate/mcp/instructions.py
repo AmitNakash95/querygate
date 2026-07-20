@@ -47,6 +47,14 @@ field's own schema description covers its exact contract (order_by.dir's
 strict enum, intent's audit-only purpose, a join's cross-connection
 `connection` field, and so on) — read it rather than guessing.
 
+## Scalar functions and CASE in select (SELECT only)
+A select item may also be a whitelisted scalar function (coalesce/lower/
+upper/trim/concat) or a CASE WHEN...THEN...ELSE expression — see
+ScalarFunctionSelectItem/CaseSelectItem's own field schemas for the exact
+argument shape. These are SELECT-projection only: you cannot use a scalar
+function or CASE as a WHERE/HAVING predicate target — filter on the
+underlying Table.Column instead.
+
 ## Self-joins (the same table more than once in one query)
 Joining a table to itself (e.g. Employee to Employee for a manager lookup)
 requires an explicit alias on EVERY occurrence — from_alias for the from

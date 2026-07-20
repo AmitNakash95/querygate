@@ -71,7 +71,91 @@ class DateBucketSelectItem(pyd.BaseModel):
     model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
 
 
-SelectItem = Union[str, AggregateSelectItem, DateBucketSelectItem]
+class ColArg(pyd.BaseModel):
+    """A scalar-function argument that is a column reference, not a literal."""
+
+    col: str = pyd.Field(description="Table.Column (or Alias.Column) ref supplying this argument.")
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class LiteralArg(pyd.BaseModel):
+    """A scalar-function argument that is a literal value, not a column."""
+
+    literal: Any = pyd.Field(description="A literal scalar value (string/number/bool/null).")
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+ScalarFunctionArg = Union[ColArg, LiteralArg]
+
+ScalarFn = Literal["coalesce", "lower", "upper", "trim", "concat"]
+
+
+class ScalarFunctionSelectItem(pyd.BaseModel):
+    """A whitelisted scalar function projection — SELECT only, not usable as a
+    WHERE/HAVING predicate target. lower/upper/trim take exactly one column
+    argument ({"col": "Table.Column"}); coalesce/concat take 2+ arguments,
+    each either {"col": ...} or {"literal": ...}.
+    """
+
+    fn: ScalarFn
+    args: List[ScalarFunctionArg] = pyd.Field(min_length=1)
+    alias: Optional[str] = pyd.Field(
+        default=None,
+        validation_alias=pyd.AliasChoices("as", "alias"),
+        serialization_alias="as",
+    )
+
+    model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _validate_args(self) -> "ScalarFunctionSelectItem":
+        if self.fn in ("lower", "upper", "trim"):
+            if len(self.args) != 1 or not isinstance(self.args[0], ColArg):
+                raise ValueError(f"{self.fn} takes exactly one column argument")
+        elif len(self.args) < 2:
+            raise ValueError(f"{self.fn} requires at least 2 arguments")
+        return self
+
+
+class CaseWhen(pyd.BaseModel):
+    """One CASE WHEN branch: a single Predicate condition (not a full
+    WhereNode — a deliberate v1 simplification covering the common
+    `CASE WHEN col = x THEN ...` shape without full boolean nesting inside a
+    select item) and the value to project when it's true.
+    """
+
+    when: Predicate
+    then: ScalarFunctionArg
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class CaseSelectItem(pyd.BaseModel):
+    """CASE WHEN ... THEN ... [ELSE ...] END, evaluated top-to-bottom —
+    the first matching `when` wins. `alias` is REQUIRED (unlike aggregates/
+    date_bucket) since there's no sensible default output name for a
+    conditional expression.
+    """
+
+    when: List[CaseWhen] = pyd.Field(min_length=1)
+    else_: Optional[ScalarFunctionArg] = pyd.Field(
+        default=None,
+        validation_alias=pyd.AliasChoices("else", "else_"),
+        serialization_alias="else",
+    )
+    alias: str = pyd.Field(
+        validation_alias=pyd.AliasChoices("as", "alias"),
+        serialization_alias="as",
+    )
+
+    model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
+
+
+SelectItem = Union[
+    str, AggregateSelectItem, DateBucketSelectItem, ScalarFunctionSelectItem, CaseSelectItem
+]
 
 
 class JoinSpec(pyd.BaseModel):

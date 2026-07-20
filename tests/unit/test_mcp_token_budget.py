@@ -31,7 +31,15 @@ from querygate.mcp.server import create_mcp_server
 # near-term legitimate growth (e.g. a new dialect or tool). Bump this
 # deliberately, in the same PR as the change that needs it — this is meant
 # to make growth a visible review decision, not a silent one.
-_MAX_TOTAL_CHARS = 62_000
+#
+# Bumped 2026-07-20 (items 68-72: WHERE/HAVING guardrail caps, DISTINCT,
+# table aliases/self-joins, NOT groups + column-to-column comparisons,
+# whitelisted scalar functions/CASE) — measured 63,201 chars, a deliberate
+# increase from real new StructuredQuery surface (from_alias, JoinSpec.alias,
+# Predicate.value_col, ScalarFunctionSelectItem/CaseSelectItem/ColArg/
+# LiteralArg and their Field descriptions, plus one short mcp/instructions.py
+# self-join section), not drift. New budget again keeps ~5% headroom.
+_MAX_TOTAL_CHARS = 66_500
 
 
 def _tool_schema_chars(tool: object) -> int:
