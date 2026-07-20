@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Callable, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query
 
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
-from querygate.core.exceptions import AuthorizationError, NotFoundError, QueryValidationError
 from querygate.help.models import (
     AccessSummary,
     ConfigFieldExplanation,
@@ -19,10 +18,6 @@ from querygate.help.models import (
     SetupChecklistResponse,
 )
 from querygate.help.service import get_guide_service
-
-
-def _not_found(exc: NotFoundError) -> HTTPException:
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
 
 
 def build_help_router(
@@ -37,10 +32,7 @@ def build_help_router(
         q: str = Query(min_length=1, max_length=200),
         limit: int = Query(default=5, ge=1, le=10),
     ):
-        try:
-            return get_guide_service().search(q, limit=limit)
-        except QueryValidationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        return get_guide_service().search(q, limit=limit)
 
     @router.get("/topics/{topic_id}", response_model=GuideTopicResponse)
     async def get_guide_topic(
@@ -51,10 +43,7 @@ def build_help_router(
             description="Byte cap on the serialized response; truncates content.",
         ),
     ):
-        try:
-            return get_guide_service().topic(topic_id, max_response_bytes=max_response_bytes)
-        except NotFoundError as exc:
-            raise _not_found(exc)
+        return get_guide_service().topic(topic_id, max_response_bytes=max_response_bytes)
 
     @router.get("/setup-checklist", response_model=SetupChecklistResponse)
     async def get_setup_checklist(
@@ -64,17 +53,11 @@ def build_help_router(
 
     @router.get("/config-fields/{model}/{field}", response_model=ConfigFieldExplanation)
     async def explain_config_field(model: str, field: str):
-        try:
-            return get_guide_service().explain_config_field(model, field)
-        except NotFoundError as exc:
-            raise _not_found(exc)
+        return get_guide_service().explain_config_field(model, field)
 
     @router.get("/errors/{error_code}", response_model=ErrorExplanation)
     async def explain_error(error_code: str):
-        try:
-            return get_guide_service().explain_error(error_code)
-        except NotFoundError as exc:
-            raise _not_found(exc)
+        return get_guide_service().explain_error(error_code)
 
     # Live endpoints authenticate before their context is assembled. They do
     # not participate in the static search index or its process-wide cache.
@@ -84,9 +67,6 @@ def build_help_router(
 
     @router.get("/configuration", response_model=RedactedConfiguration)
     async def inspect_configuration(principal: Principal = Depends(get_principal)):
-        try:
-            return get_guide_service().redacted_configuration(cfg, principal)
-        except AuthorizationError as exc:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+        return get_guide_service().redacted_configuration(cfg, principal)
 
     return router

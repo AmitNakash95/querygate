@@ -17,6 +17,7 @@ from querygate.query_ast.models import (
     DateBucketSelectItem,
     JoinSpec,
     OrderBySpec,
+    PercentileContSelectItem,
     Predicate,
     StringAggSelectItem,
     StructuredQuery,
@@ -626,6 +627,69 @@ class TestCompiler:
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).upper()
         assert "HAVING" in compiled
 
+    def test_percentile_cont_render_on_postgres(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                PercentileContSelectItem(col="orders.total_amount", fraction=0.5, alias="median"),
+            ],
+            group_by=["orders.customer_id"],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+        assert "percentile_cont(0.5)" in compiled
+        assert "within group" in compiled
+
+    def test_percentile_cont_rejected_on_mssql(self):
+        """T-SQL's PERCENTILE_CONT has no GROUP BY-compatible form — must
+        be rejected outright, not emulated, same shape as array_agg."""
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                PercentileContSelectItem(col="orders.total_amount", fraction=0.5, alias="median"),
+            ],
+            group_by=["orders.customer_id"],
+            limit=5,
+        )
+        with pytest.raises(QueryValidationError, match="analytic/window function"):
+            compile_structured_query(query, tables, Policy(), dialect="mssql")
+
+    def test_percentile_cont_default_alias(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[PercentileContSelectItem(col="orders.total_amount", fraction=0.5)],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "percentile_cont_total_amount" in compiled
+
+    def test_percentile_cont_is_treated_as_aggregate_for_having(self):
+        """A group_by + percentile_cont + having(on the percentile_cont
+        alias) shape must compile — this only works if
+        PercentileContSelectItem participates in the same "is_aggregate"
+        detection AggregateSelectItem does."""
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                PercentileContSelectItem(col="orders.total_amount", fraction=0.5, alias="median"),
+            ],
+            group_by=["orders.customer_id"],
+            having=[Predicate(col="median", op="gt", value=0)],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).upper()
+        assert "HAVING" in compiled
+
     def test_order_by_nulls_last_renders_natively_on_postgres(self):
         tables = _make_tables()
         query = StructuredQuery(
@@ -638,7 +702,10 @@ class TestCompiler:
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "NULLS LAST" in compiled.upper()
 
-    def test_order_by_nulls_first_emulated_on_mssql(self):
+    def test_order_by_nulls_rejected_on_mssql(self):
+        """T-SQL has no NULLS FIRST/LAST syntax — QueryGate rejects `nulls` on
+        MSSQL rather than synthesizing a CASE-bucket the AST never asked for,
+        the same posture as array_agg (CLAUDE.md engine philosophy, item 74)."""
         tables = _make_tables()
         query = StructuredQuery(
             from_table="orders",
@@ -646,10 +713,10 @@ class TestCompiler:
             order_by=[OrderBySpec(col="orders.status", dir="asc", nulls="first")],
             limit=5,
         )
-        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
-        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
-        assert "CASE" in compiled.upper()
-        assert "NULLS" not in compiled.upper()
+        with pytest.raises(
+            QueryValidationError, match="nulls first/last ordering is not supported"
+        ):
+            compile_structured_query(query, tables, Policy(), dialect="mssql")
 
     def test_order_by_without_nulls_unaffected(self):
         tables = _make_tables()
@@ -664,7 +731,7 @@ class TestCompiler:
         assert "CASE" not in compiled.upper()
         assert "DESC" in compiled.upper()
 
-    def test_top_n_with_nulls_renders_inside_over_order_by(self):
+    def test_top_n_with_nulls_renders_inside_over_order_by_on_postgres(self):
         tables = _make_tables()
         query = StructuredQuery(
             from_table="orders",
@@ -675,10 +742,29 @@ class TestCompiler:
             ),
             limit=50,
         )
-        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
-        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
-        assert "OVER" in compiled.upper()
-        assert "CASE" in compiled.upper()
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).upper()
+        assert "OVER" in compiled
+        assert "NULLS LAST" in compiled
+
+    def test_top_n_with_nulls_rejected_on_mssql(self):
+        """The rejection covers the rank-ordering call site too, not just the
+        outer ORDER BY — `nulls` anywhere the MSSQL adapter renders order terms
+        is rejected (item 74)."""
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id", "orders.customer_id"],
+            top_n=TopNSpec(
+                order_by=[OrderBySpec(col="orders.total_amount", dir="desc", nulls="last")],
+                n=3,
+            ),
+            limit=50,
+        )
+        with pytest.raises(
+            QueryValidationError, match="nulls first/last ordering is not supported"
+        ):
+            compile_structured_query(query, tables, Policy(), dialect="mssql")
 
     def test_not_group_renders(self):
         # SQLAlchemy simplifies NOT(col = val) to col != val at the

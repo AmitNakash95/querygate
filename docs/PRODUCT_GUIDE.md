@@ -248,21 +248,31 @@ native `date_trunc()` that handles every granularity directly, MSSQL has
 no equivalent so it's built from `DATEADD`/`DATEDIFF` (the standard MSSQL
 truncation idiom), SQLite (test/example path only) uses `strftime()`
 string formatting. The interface also defines `order_by_terms`, `stat_fn`,
-`string_agg`, and `array_agg` for four dialect-sensitive features (NULLS
-FIRST/LAST ordering, `stddev`/`variance` aggregates, the `string_agg`
-aggregate, and the `array_agg` aggregate — see the corresponding TODO.md
-items). `string_agg` is the one case where the internal SQLite adapter
-does real work instead of raising: SQLite's `group_concat(expr, sep)`
-happens to share the exact `(expr, separator)` shape as Postgres's
-`string_agg`/MSSQL's `STRING_AGG`, unlike stddev/variance (SQLite has no
-such functions at all), so it's a genuine mapping rather than a stub — the
-only adapter method with a real SQLite implementation today. `array_agg`
-goes the other way: Postgres gets a real `array_agg(...)` implementation,
-but both MSSQL (no array/collection type in T-SQL at all) and SQLite
-(`json_group_array()` returns a JSON string, not a real array) raise
-`QueryValidationError` rather than faking one — the first time a real,
-supported registry dialect (MSSQL), not just the internal-only SQLite
-path, rejects a capability outright.
+`string_agg`, `array_agg`, and `percentile_cont` for five dialect-sensitive
+features (NULLS FIRST/LAST ordering, `stddev`/`variance` aggregates, the
+`string_agg` aggregate, the `array_agg` aggregate, and the `percentile_cont`
+aggregate — see the corresponding TODO.md items). `string_agg` is the one
+case where the internal SQLite adapter does real work instead of raising:
+SQLite's `group_concat(expr, sep)` happens to share the exact `(expr,
+separator)` shape as Postgres's `string_agg`/MSSQL's `STRING_AGG`, unlike
+stddev/variance (SQLite has no such functions at all), so it's a genuine
+mapping rather than a stub — the only adapter method with a real SQLite
+implementation today. `array_agg` goes the other way: Postgres gets a real
+`array_agg(...)` implementation, but both MSSQL (no array/collection type
+in T-SQL at all) and SQLite (`json_group_array()` returns a JSON string,
+not a real array) raise `QueryValidationError` rather than faking one —
+the first time a real, supported registry dialect (MSSQL), not just the
+internal-only SQLite path, rejects a capability outright. `percentile_cont`
+rejects on MSSQL too, but for a genuinely different reason worth
+distinguishing from `array_agg`'s: Postgres's `percentile_cont(fraction)
+WITHIN GROUP (ORDER BY ...)` is a true `GROUP BY`-compatible aggregate,
+while T-SQL's `PERCENTILE_CONT` exists only as an analytic (window)
+function requiring an `OVER (...)` clause — not a missing type, but an
+incompatible structural form. Confirmed directly that this needed a real
+adapter-level rejection rather than being left to fail at runtime: SQLAlchemy's
+`within_group()` construct silently compiles identical SQL text against
+both the Postgres and MSSQL dialect compilers with no dialect-level guard
+of its own.
 
 Adding a real third dialect (item 19) means implementing one new
 `DialectAdapter` subclass, not a hunt through the compiler for
