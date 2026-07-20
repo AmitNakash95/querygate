@@ -11,6 +11,16 @@ or endpoint anywhere in the codebase. See `README.md` for the product pitch,
 `docs/RELEASING.md` for release gates, and `archive/extraction/` only when
 historical extraction context is explicitly needed.
 
+`docs/PRODUCT_GUIDE.md` is a plain-language, human-facing explainer of the
+product's architecture, terms, and technical decisions (also used to answer
+marketing/positioning questions). After finishing any non-trivial task,
+check whether it introduced or changed something worth recording there —
+new architecture, a deliberate tradeoff, a new term/tool, a customer-facing
+capability — and update the relevant section (and its Decision Log) if so.
+Skip this for pure bug fixes, refactors with no behavioral change, or
+test-only changes. See that file's own "Maintenance protocol" section for
+the exact rule.
+
 ## Commands
 
 ```bash
@@ -113,13 +123,14 @@ already write to). `version_id` and `generation_id` are file-global, not
 per-connection — `import_connection` must keep remapping them against the
 target catalog's current content; do not "simplify" that away, it exists
 specifically to stop one connection's import from corrupting another
-connection's history. 32C (adaptive usage learning) has not started; its
-governance boundary (32B) is now complete, so it may begin, but stay bounded
-by the explicit 32C acceptance criteria in TODO.md item 32 (typed
-redaction-safe signals only, per-customer/connection partitioning, no
-feedback loops, learned content must go through the existing 32B review
-path and can never publish itself) — do not add a live LLM call, embedding
-index, or autonomous policy edit as a side effect of that work.
+connection's history. 32C (adaptive usage learning) has shipped
+(`catalog/usage.py`, `catalog/learning.py`,
+`catalog/adaptive_learning_benchmark.py`) — stay bounded by its explicit
+acceptance criteria in TODO.md item 32 (typed redaction-safe signals only,
+per-customer/connection partitioning, no feedback loops, learned content
+must go through the existing 32B review path and can never publish itself)
+when touching it. Do not add a live LLM call, embedding index, or autonomous
+policy edit as a side effect of future work here.
 
 **Security invariant**: `connections/models.py` splits `ConnectionProfile`
 (carries the real connection string, resolved from `${ENV_VAR}` in the YAML
