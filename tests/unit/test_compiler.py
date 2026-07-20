@@ -371,6 +371,60 @@ class TestCompiler:
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "GROUP BY" in compiled.upper()
 
+    def test_order_by_nulls_last_renders_natively_on_postgres(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            order_by=[OrderBySpec(col="orders.status", dir="asc", nulls="last")],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "NULLS LAST" in compiled.upper()
+
+    def test_order_by_nulls_first_emulated_on_mssql(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            order_by=[OrderBySpec(col="orders.status", dir="asc", nulls="first")],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "CASE" in compiled.upper()
+        assert "NULLS" not in compiled.upper()
+
+    def test_order_by_without_nulls_unaffected(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            order_by=[OrderBySpec(col="orders.status", dir="desc")],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "CASE" not in compiled.upper()
+        assert "DESC" in compiled.upper()
+
+    def test_top_n_with_nulls_renders_inside_over_order_by(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id", "orders.customer_id"],
+            top_n=TopNSpec(
+                order_by=[OrderBySpec(col="orders.total_amount", dir="desc", nulls="last")],
+                n=3,
+            ),
+            limit=50,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "OVER" in compiled.upper()
+        assert "CASE" in compiled.upper()
+
     def test_not_group_renders(self):
         # SQLAlchemy simplifies NOT(col = val) to col != val at the
         # expression level (still a correct negation) rather than emitting a

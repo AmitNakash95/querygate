@@ -4486,3 +4486,44 @@ effort per additional dialect (item 19) or per additional dialect-sensitive
 feature (items 74/75, immediately next). Naming and isolating the
 abstraction now, verified behavior-neutral against the one branch that
 already existed, is what keeps that cost flat going forward.
+
+### 74. NULLS FIRST/LAST ordering ✅ DONE
+
+**Problem.** No control over where NULLs sort in `order_by`/`top_n`. Worse
+than a missing feature: Postgres and MSSQL default NULL ordering
+*differently*, so the identical query returns rows in a different order
+depending only on which connection it hits — a silent, dialect-dependent
+correctness gap, not just an expressiveness one.
+
+**Verified before implementing (empirically, not assumed):** MSSQL has no
+`NULLS FIRST/LAST` syntax at all — T-SQL never supported it — but
+SQLAlchemy's mssql dialect will still *compile* `.nulls_last()` into the
+literal (broken) clause rather than raising, so rendering alone can't catch
+this; it has to be handled explicitly per dialect.
+
+**Shipped.** `OrderBySpec.nulls: Optional[Literal["first","last"]]`. Both
+`MSSQLDialectAdapter.order_by_terms` and `PostgresDialectAdapter`/
+`SQLiteDialectAdapter`'s (item 73) now do real work: Postgres/SQLite use
+native `.nulls_first()/.nulls_last()`; MSSQL emulates with a leading 0/1
+CASE-based sort bucket (NULLs and non-NULLs into separate buckets, sorted
+ascending, then the real column direction breaks ties within each bucket)
+— proven to actually take that path, not silently fall through to the
+broken native compile, by asserting `CASE` appears and the literal string
+`NULLS` does not. `compile_structured_query`'s main `order_by` loop and
+`_apply_top_n`'s window-function `order_by` (which needed `dialect` threaded
+into its signature — didn't take one before) both call
+`get_dialect_adapter(dialect).order_by_terms(...)` uniformly; neither call
+site branches on dialect itself. Verified end-to-end against real SQLite
+execution (not just rendered SQL) that NULLs actually land where requested
+for both `nulls="first"` and `nulls="last"`.
+
+**Effort: S**, on top of item 73's foundation — this is exactly the kind of
+change item 73 was meant to make small: one new adapter method
+implemented three times, two call sites updated to use it, zero new
+dialect branches in `sqlalchemy_compiler.py` itself.
+
+**Why it matters:** closes a real cross-dialect correctness gap, not just
+an expressiveness one — the same query returning differently-ordered rows
+depending on which connection answered it is exactly the kind of silent
+inconsistency this project's dialect-isolation discipline exists to
+prevent.
