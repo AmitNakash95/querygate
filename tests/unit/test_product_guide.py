@@ -14,7 +14,8 @@ from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import AuthorizationError
 from querygate.help.service import GuideService, get_guide_service
-from querygate.policy.models import Policy
+from querygate.policy.loader import PolicyStore, set_policy_store
+from querygate.policy.models import MandatoryRowFilter, Policy
 
 
 def test_packaged_corpus_matches_installed_version_and_searches_deterministically():
@@ -160,6 +161,61 @@ def test_access_capability_matrix_for_ordinary_operator_reader_and_writer(
     assert result.capabilities.read_configuration is read
     assert result.capabilities.change_configuration is write
     assert result.capabilities.reload_configuration is reload
+
+
+def test_access_summary_reports_effective_guardrails_and_claim_readiness():
+    """TODO.md item 45: the non-admin "my access" portal needs effective,
+    per-connection guardrails and mandatory-filter claim readiness — never a
+    filter value — alongside the existing scopes/visible-connections summary.
+    """
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                max_joins=2,
+                mandatory_row_filters=[
+                    MandatoryRowFilter(
+                        table="customers", column="tenant_id", from_claim="tenant_id"
+                    ),
+                ],
+            ),
+            overrides={},
+        )
+    )
+    ready_principal = Principal(subject="tenant-a", scopes=frozenset(), claims={"tenant_id": "a"})
+    missing_claim_principal = Principal(subject="tenant-b", scopes=frozenset())
+
+    ready = get_guide_service().access_summary(ready_principal)
+    missing = get_guide_service().access_summary(missing_claim_principal)
+
+    assert [detail.connection for detail in ready.connection_access] == ["demo"]
+    assert ready.connection_access[0].guardrails.max_joins == 2
+    [filter_ready] = ready.connection_access[0].mandatory_filters
+    assert filter_ready.table == "customers"
+    assert filter_ready.column == "tenant_id"
+    assert filter_ready.source == "claim"
+    assert filter_ready.claim == "tenant_id"
+    assert filter_ready.ready is True
+
+    [filter_missing] = missing.connection_access[0].mandatory_filters
+    assert filter_missing.ready is False
+
+
+def test_access_summary_excludes_mandatory_filter_for_a_table_the_principal_cannot_see():
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                denied_tables=["customers"],
+                mandatory_row_filters=[
+                    MandatoryRowFilter(table="customers", column="tenant_id", value="fixed-value"),
+                ],
+            ),
+            overrides={},
+        )
+    )
+
+    result = get_guide_service().access_summary(Principal(subject="reader", scopes=frozenset()))
+
+    assert result.connection_access[0].mandatory_filters == []
 
 
 def _redaction_cfg(tmp_path) -> AppConfig:

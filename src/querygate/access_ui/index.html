@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101216">
+  <meta name="robots" content="noindex,nofollow">
+  <title>QueryGate My Access</title>
+  <meta name="description" content="See your own QueryGate identity, visible connections, effective query limits, and schema.">
+  <link rel="icon" type="image/svg+xml" href="/admin/favicon.svg">
+  <link rel="stylesheet" href="/admin/app.css">
+  <script src="/access/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#workspace">Skip to your access</a>
+
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <div class="brand-lockup">
+        <span class="brand-identity"><img class="brand-wordmark" src="/admin/logo-wordmark.svg" alt="QueryGate;"><small>My access</small></span>
+      </div>
+
+      <div class="sidebar-foot">
+        <div class="boundary-note">
+          <span class="status-light" aria-hidden="true"></span>
+          <span><strong>Read-only view</strong><small>No admin controls here</small></span>
+        </div>
+        <button id="disconnect-button" class="text-button" type="button">Disconnect session</button>
+      </div>
+    </aside>
+
+    <main id="workspace" class="workspace" tabindex="-1">
+      <header class="topbar">
+        <div>
+          <p class="kicker">My access / Overview</p>
+          <h1>What you can query</h1>
+        </div>
+        <div class="session-summary">
+          <span id="session-state" class="status-chip neutral">Disconnected</span>
+          <span id="session-principal" class="principal-chip">No principal</span>
+        </div>
+      </header>
+
+      <div id="global-banner" class="banner" role="status" hidden></div>
+
+      <section class="view active">
+        <div class="hero-grid">
+          <article class="hero-card">
+            <p class="eyebrow">Identity</p>
+            <h2 id="identity-subject">Not connected</h2>
+            <p id="identity-method">Authentication method: —</p>
+            <div id="scope-list" class="capability-list"></div>
+          </article>
+          <article class="boundary-card">
+            <div class="boundary-head"><span>CAPABILITIES</span></div>
+            <ul id="capability-list" class="capability-list"></ul>
+          </article>
+        </div>
+
+        <div class="two-column lower-grid">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">Connections</p><h3>Visible to you, with your effective limits</h3></div></div>
+            <div id="connection-cards" class="connection-list">
+              <p class="empty">Connect to load your access.</p>
+            </div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">Mandatory row filters</p><h3>Tenant/row scoping applied to your queries</h3></div></div>
+            <div id="filter-list" class="connection-list">
+              <p class="empty">Connect to load your access.</p>
+            </div>
+          </article>
+        </div>
+
+        <div class="two-column lower-grid">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">Schema</p><h3>Browse a connection</h3></div></div>
+            <label><span>Connection</span>
+              <select id="connection-select"><option value="">Select a connection</option></select>
+            </label>
+            <div id="table-list" class="connection-list"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">Table</p><h3 id="table-title">Select a table</h3></div></div>
+            <div id="column-list" class="column-list"></div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="auth-dialog" class="auth-dialog" aria-labelledby="auth-title">
+    <form id="auth-form" method="dialog">
+      <div class="dialog-brand"><img class="brand-wordmark" src="/admin/logo-wordmark.svg" alt="QueryGate;"></div>
+      <p class="eyebrow">My access</p>
+      <h2 id="auth-title">See your own QueryGate access</h2>
+      <p>Use your own bearer token. This page shows only what is visible to you — never other principals, raw configuration, or admin controls.</p>
+      <label><span>Bearer token</span><input id="auth-token" type="password" autocomplete="off" required placeholder="Paste token"></label>
+      <label class="checkbox-row"><input id="remember-token" type="checkbox"><span>Keep token for this browser tab</span></label>
+      <p id="auth-error" class="form-error" role="alert" hidden></p>
+      <button class="button primary wide" type="submit">Connect</button>
+      <small>The token is sent only in the Authorization header. It is never written anywhere on the server.</small>
+    </form>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

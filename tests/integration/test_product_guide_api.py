@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -62,6 +64,88 @@ async def test_my_access_requires_auth_and_returns_only_caller_capabilities():
     assert body["capabilities"]["read_configuration"] is True
     assert body["capabilities"]["change_configuration"] is False
     assert [item["id"] for item in body["visible_connections"]] == ["demo"]
+    assert [item["connection"] for item in body["connection_access"]] == ["demo"]
+    assert body["connection_access"][0]["guardrails"]["max_joins"] > 0
+    assert body["connection_access"][0]["mandatory_filters"] == []
+
+
+@pytest.mark.asyncio
+async def test_my_access_reports_per_principal_guardrails_and_claim_readiness():
+    """TODO.md item 45: two principals with different per-principal policy
+    overrides must see different effective guardrails and mandatory-filter
+    claim readiness through the same `GET /help/my-access` endpoint the new
+    non-admin `/access/` portal calls — never a filter/claim value. Uses two
+    JWTs with distinct `sub` claims, matching the existing per-principal
+    verification pattern (see `test_jwt_enabled_in_local_dev_still_rejects_invalid_tokens`
+    in `tests/integration/test_rest_api.py`) since a single API-key list maps
+    to one shared subject.
+    """
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from querygate.policy.loader import PolicyStore, set_policy_store
+    from querygate.policy.models import MandatoryRowFilter, Policy
+
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                max_joins=5,
+                mandatory_row_filters=[
+                    MandatoryRowFilter(
+                        table="customers", column="tenant_id", from_claim="tenant_id"
+                    ),
+                ],
+            ),
+            overrides={},
+            principal_overrides={"narrow-agent": {"demo": {"max_joins": 1}}},
+        )
+    )
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key = private_key.public_key()
+    app = create_app(
+        _settings(
+            jwt_enabled=True,
+            jwt_jwks_url="https://idp.example.com/.well-known/jwks.json",
+            jwt_issuer="https://idp.example.com/",
+            jwt_audience="querygate",
+        )
+    )
+
+    def _token(subject: str) -> str:
+        return jwt.encode(
+            {"sub": subject, "iss": "https://idp.example.com/", "aud": "querygate"},
+            private_key,
+            algorithm="RS256",
+        )
+
+    with patch(
+        "jwt.PyJWKClient.get_signing_key_from_jwt",
+        lambda self, tok: type("K", (), {"key": public_key})(),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://localhost"
+        ) as client:
+            broad = await client.get(
+                "/api/v1/help/my-access",
+                headers={"Authorization": f"Bearer {_token('broad-agent')}"},
+            )
+            narrow = await client.get(
+                "/api/v1/help/my-access",
+                headers={"Authorization": f"Bearer {_token('narrow-agent')}"},
+            )
+
+    assert broad.status_code == 200
+    assert narrow.status_code == 200
+    broad_detail = broad.json()["connection_access"][0]
+    narrow_detail = narrow.json()["connection_access"][0]
+    assert broad_detail["guardrails"]["max_joins"] == 5
+    assert narrow_detail["guardrails"]["max_joins"] == 1
+    [broad_filter] = broad_detail["mandatory_filters"]
+    [narrow_filter] = narrow_detail["mandatory_filters"]
+    assert broad_filter["claim"] == "tenant_id"
+    assert broad_filter["ready"] is False
+    assert narrow_filter["ready"] is False
 
 
 @pytest.mark.asyncio
