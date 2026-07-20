@@ -82,6 +82,9 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     assert ">;</tspan>" in logo.text
     assert favicon.status_code == 200
     assert ">;</text>" in favicon.text
+    # TODO.md item 46: safe-start policy templates panel.
+    assert "Safe-start templates" in response.text
+    assert "/admin/config/templates/render" in script.text
 
 
 @pytest.mark.asyncio

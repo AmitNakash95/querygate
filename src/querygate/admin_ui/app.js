@@ -57,6 +57,8 @@
     currentProposal: null,
     publishedComparison: null,
     connectionHealth: [],
+    templates: [],
+    templatePreview: null,
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -1207,6 +1209,87 @@
     syncDirtyState();
     renderEditor();
     if (canWrite() || canRead()) await parsePolicyDocument();
+    if (!state.templates.length) {
+      try {
+        state.templates = await api("/admin/config/templates");
+        renderTemplateSelect();
+      } catch (error) { toast(error.message, "bad"); }
+    }
+  }
+
+  function renderTemplateSelect() {
+    $("#template-select").innerHTML = state.templates
+      .map((template) => `<option value="${escapeHtml(template.id)}">${escapeHtml(template.name)}</option>`)
+      .join("");
+    renderTemplateParams();
+  }
+
+  function renderTemplateParams() {
+    const template = state.templates.find((item) => item.id === $("#template-select").value) || state.templates[0];
+    state.templatePreview = null;
+    $("#apply-template").disabled = true;
+    $("#template-result").hidden = true;
+    if (!template) { $("#template-params").innerHTML = ""; return; }
+    $("#template-params").innerHTML = template.parameters.map((param) => {
+      const inputType = param.type === "integer" ? "number" : "text";
+      const placeholder = param.type === "string_list" ? "comma-separated" : "";
+      const defaultValue = param.default != null ? param.default : "";
+      return `
+        <label ${param.type === "string_list" ? 'class="span-2"' : ""}>
+          <span>${escapeHtml(param.label)}${param.required ? "" : " (optional)"}</span>
+          <input data-param-name="${escapeHtml(param.name)}" data-param-type="${escapeHtml(param.type)}"
+                 type="${inputType}" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(defaultValue)}">
+          <small>${escapeHtml(param.description)}</small>
+        </label>`;
+    }).join("");
+  }
+
+  function collectTemplateParams() {
+    const params = {};
+    $$("#template-params [data-param-name]").forEach((input) => {
+      const name = input.dataset.paramName;
+      const type = input.dataset.paramType;
+      const raw = input.value.trim();
+      if (!raw) return;
+      if (type === "integer") params[name] = Number(raw);
+      else if (type === "string_list") params[name] = raw.split(",").map((item) => item.trim()).filter(Boolean);
+      else params[name] = raw;
+    });
+    return params;
+  }
+
+  async function previewTemplate() {
+    const templateId = $("#template-select").value;
+    if (!templateId) return;
+    const button = $("#preview-template");
+    setBusy(button, true, "Rendering…");
+    try {
+      const result = await api("/admin/config/templates/render", {
+        method: "POST",
+        body: JSON.stringify({
+          template_id: templateId,
+          params: collectTemplateParams(),
+          policy_yaml: state.draftDocuments.policy,
+        }),
+      });
+      state.templatePreview = result;
+      $("#template-result").hidden = false;
+      $("#template-result").innerHTML = result.rules
+        .map((rule) => `<li class="capability"><span>${escapeHtml(rule)}</span></li>`)
+        .join("");
+      $("#apply-template").disabled = false;
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally { setBusy(button, false); }
+  }
+
+  function applyTemplateToDraft() {
+    if (!state.templatePreview) return;
+    state.draftDocuments.policy = state.templatePreview.policy_yaml;
+    syncDirtyState();
+    selectDocument("policy");
+    showView("changes");
+    toast("Template applied to the local policy draft. Validate before staging.");
   }
 
   async function connect(token, remember = false) {
@@ -1285,6 +1368,9 @@
       $("#policy-allowed-columns").value = csv(layer.allowed_columns?.[table]);
       $("#policy-denied-columns").value = csv(layer.denied_columns?.[table]);
     });
+    $("#template-select").addEventListener("change", renderTemplateParams);
+    $("#preview-template").addEventListener("click", previewTemplate);
+    $("#apply-template").addEventListener("click", applyTemplateToDraft);
     $("#apply-designer").addEventListener("click", applyDesigner);
     $("#reset-designer").addEventListener("click", populateDesigner);
     $("#remove-policy-layer").addEventListener("click", () => removePolicyLayer().catch((error) => toast(error.message, "bad")));

@@ -173,6 +173,20 @@
           </aside>
 
           <div class="designer-stack">
+            <article class="panel template-panel">
+              <div class="panel-head"><div><p class="eyebrow">Safe-start templates</p><h3>Apply a reviewed preset to the local draft</h3></div></div>
+              <p class="panel-copy">A template can only tighten the draft, never loosen a restriction already there — apply one on top of hand-edited policy without checking for conflicts yourself.</p>
+              <div class="form-grid">
+                <label class="span-2"><span>Template</span><select id="template-select"></select></label>
+              </div>
+              <div id="template-params" class="form-grid"></div>
+              <div class="form-actions">
+                <button id="preview-template" class="button secondary" type="button">Preview template</button>
+                <button id="apply-template" class="button primary" type="button" disabled>Apply to draft</button>
+              </div>
+              <div id="template-result" class="capability-list" hidden></div>
+            </article>
+
             <article class="panel">
               <div class="panel-head"><div><p class="eyebrow">Discovery boundary</p><h3>Connection, table and column access</h3></div><label class="compact-field"><span>Access state</span><select id="policy-enabled"><option value="">Inherit</option><option value="true">Enabled</option><option value="false">Disabled</option></select></label></div>
               <div class="form-grid">

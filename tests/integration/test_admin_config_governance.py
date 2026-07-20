@@ -361,3 +361,91 @@ async def test_get_unknown_version_returns_404(app):
             "/api/v1/admin/config/versions/does-not-exist", headers=_auth(_ADMIN_KEY)
         )
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_templates_requires_read_scope(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        unauthenticated = await client.get("/api/v1/admin/config/templates")
+        authorized = await client.get("/api/v1/admin/config/templates", headers=_auth(_ADMIN_KEY))
+
+    assert unauthenticated.status_code == 401
+    assert authorized.status_code == 200
+    ids = {template["id"] for template in authorized.json()}
+    assert "reporting-only" in ids
+    assert "tenant-isolated" in ids
+
+
+@pytest.mark.asyncio
+async def test_render_template_requires_write_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("GOV_TEST_DB_URL", "postgresql+asyncpg://user:pass@localhost/x")
+    connections_file, policy_file = _write_source_files(tmp_path)
+    read_only_app = create_app(
+        AppConfig(
+            environment="localhost",
+            mcp_enabled=False,
+            audit_sink_backend="none",
+            connections_file=connections_file,
+            policy_file=policy_file,
+            api_keys=["reader-only-key"],
+            api_key_scopes=["admin:config:read"],
+        )
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=read_only_app), base_url=_BASE_URL
+    ) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/templates/render",
+            json={"template_id": "deny-by-default", "params": {}},
+            headers=_auth("reader-only-key"),
+        )
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_render_template_rejects_unknown_template_id(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/templates/render",
+            json={"template_id": "does-not-exist", "params": {}},
+            headers=_auth(_ADMIN_KEY),
+        )
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_render_template_end_to_end_through_validate_and_stage(app):
+    """TODO.md item 46: a rendered template is not a special code path — it
+    is plain policy_yaml text that goes through the exact same /validate and
+    /versions (stage) endpoints as a hand-edited draft.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        rendered = await client.post(
+            "/api/v1/admin/config/templates/render",
+            json={
+                "template_id": "reporting-only",
+                "params": {"connection": "gov-demo", "allowed_tables": ["foo"], "max_limit": 25},
+            },
+            headers=_auth(_ADMIN_KEY),
+        )
+        assert rendered.status_code == 200
+        policy_yaml = rendered.json()["policy_yaml"]
+        assert rendered.json()["rules"]
+
+        validated = await client.post(
+            "/api/v1/admin/config/validate",
+            json={"policy_yaml": policy_yaml},
+            headers=_auth(_ADMIN_KEY),
+        )
+        assert validated.status_code == 200
+        assert validated.json()["valid"] is True
+
+        staged = await client.post(
+            "/api/v1/admin/config/versions",
+            json={"policy_yaml": policy_yaml, "description": "apply reporting-only template"},
+            headers=_auth(_ADMIN_KEY),
+        )
+        assert staged.status_code == 201
+        assert staged.json()["status"] == "staged"

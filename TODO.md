@@ -75,7 +75,7 @@ order-of-magnitude, not commitments.
 | 43 | ✅ Admin connection-operations and health workspace (phase 1: admin connection-status API; phase 2a: "test now" probe; phase 2b: browser workspace) | L | 7, 12, 31 |
 | 44 | Admin observability and rejection-trend dashboard | L | 12, 23, 31, 35 |
 | 45 | ✅ Dedicated non-admin "My access" portal (phase 1: identity, guardrails, mandatory-filter readiness, schema browser; phase 2: personal denial history not started) | M | 22, 31, 33 |
-| 46 | Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
+| 46 | ✅ Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
 | 47 | Safe draft recovery plus config export/import UX | M | 13, 25, 31 |
 | 48 | Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) | L | 6, 22, 25, 32B |
 | 49 | Column-value masking/tokenization (not just allow/deny) | L | 6, 27 |
@@ -3202,7 +3202,51 @@ recent personal denials where the audit authorization model permits it. Never
 show raw YAML, other principals, global audit history, version controls, or
 admin navigation; keep `/admin/` explicitly scoped and worded for operators.
 
-### 46. Validated policy templates and safe-start presets
+### 46. Validated policy templates and safe-start presets ✅ DONE
+
+**Shipped:** Five fixed, code-reviewed presets (`querygate/admin/templates.py`):
+`deny-by-default`, `reporting-only`, `customer-support`, `tenant-isolated`,
+`bounded-analytics`. Each declares a small typed parameter list
+(`TemplateParameter`) and a pure `build(params) -> (scope, patch, rules)`
+function — no live schema/table inference, no credential or tenant value
+ever hardcoded. `GET /api/v1/admin/config/templates` lists them
+(`admin:config:read`); `POST /api/v1/admin/config/templates/render` renders
+one against the caller's own supplied `policy_yaml` draft
+(`admin:config:write`, matching `/validate`/`/preview`'s posture since it
+resolves caller-supplied content bound for staging) and returns the merged
+document plus a plain-English `rules` preview — nothing is persisted, and
+the live registry/policy singletons and version store are never touched.
+
+The merge (`render_template`) is monotonically restrictive, not a blind
+overwrite: numeric guardrail caps the templates set
+(`max_joins`/`max_where_depth`/`max_limit`/`max_limit_aggregate`/
+`timeout_seconds`) take `min(existing, template)`; `allowed_tables` only
+narrows an existing non-empty allow-list (never widens it) and only adopts
+the template's list outright when nothing was previously restricted;
+`denied_columns` and `mandatory_row_filters` union onto what's already
+there (append-only, keyed by table/column so re-applying a template is
+idempotent) rather than replacing it. Every case where the merge kept an
+existing, stricter value instead of the template's own is called out by
+name in the returned `rules` list, not silently absorbed. A rendered
+document is not a special code path — it is plain `policy_yaml` text
+verified to flow through the exact same `/validate` and `/versions` (stage)
+endpoints as a hand-edited draft (`test_render_template_end_to_end_through_validate_and_stage`).
+
+The browser control plane's Policy designer (item 31) gained a "Safe-start
+templates" panel: a template picker, a dynamically rendered parameter form,
+"Preview template" (calls `/render` against the current local draft and
+shows the rules list), and "Apply to draft" (writes the rendered document
+into the existing draft/validate/stage flow — no new mutation surface).
+
+See `tests/unit/test_policy_templates.py` (rendering, restrictive-merge,
+idempotency, and no-credential/no-secret-embedding coverage) and the
+template-endpoint tests added to `tests/integration/test_admin_config_governance.py`
+and `tests/integration/test_admin_ui.py`.
+
+**Deliberately out of scope for this pass:** the item's "keep generated YAML
+fully editable/exportable for infrastructure-as-code users" is satisfied
+structurally (the render output is ordinary `policy_yaml` text, not a
+managed/opaque artifact) rather than by adding a separate export format.
 
 **Effort: M (2–3 days).** Rendering a form is small; the real work is defining
 versioned presets, parameter schemas, secure merge semantics, documentation,
