@@ -317,6 +317,43 @@ def test_denied_column_rejected_when_only_used_in_extra_on():
         validate_policy(query, policy, connection_id="demo")
 
 
+def test_denied_column_rejected_when_only_used_inside_predicate_col_fn():
+    """A denied column reachable only through lower(customers.email) = 'x'
+    (the predicate's LEFT side wrapped in a scalar function) must still be
+    rejected — col_fn isn't a separate, unwalked ref site.
+    """
+    query = StructuredQuery(
+        from_table="customers",
+        select=["customers.id"],
+        where=Predicate(
+            col_fn={"fn": "lower", "args": [{"col": "customers.email"}]},
+            op="eq",
+            value="a@b.com",
+        ),
+    )
+    policy = Policy(denied_columns={"customers": ["email"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_denied_column_rejected_when_only_used_inside_having_col_fn():
+    query = StructuredQuery(
+        from_table="customers",
+        select=["customers.id"],
+        group_by=["customers.id"],
+        having=[
+            Predicate(
+                col_fn={"fn": "coalesce", "args": [{"col": "customers.email"}, {"literal": ""}]},
+                op="neq",
+                value="",
+            )
+        ],
+    )
+    policy = Policy(denied_columns={"customers": ["email"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
 def test_where_predicate_count_exceeded():
     query = StructuredQuery(
         from_table="orders",

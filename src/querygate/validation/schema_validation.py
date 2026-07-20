@@ -80,10 +80,7 @@ def select_item_column_refs(item: SelectItem) -> Iterator[str]:
         return
     if isinstance(item, CaseSelectItem):
         for branch in item.when:
-            if "." in branch.when.col:
-                yield branch.when.col
-            if branch.when.value_col is not None:
-                yield branch.when.value_col
+            yield from predicate_column_refs(branch.when)
             if isinstance(branch.then, ColArg):
                 yield branch.then.col
         if isinstance(item.else_, ColArg):
@@ -92,6 +89,25 @@ def select_item_column_refs(item: SelectItem) -> Iterator[str]:
     # AggregateSelectItem / DateBucketSelectItem
     if item.col != "*":
         yield item.col
+
+
+def predicate_column_refs(pred: Predicate) -> Iterator[str]:
+    """Every Table.Column ref a Predicate's LEFT side touches: `col` if it's
+    a dotted Table.Column (a bare alias — valid only in HAVING — is skipped
+    here; enforcing that strictly is `_validate_predicate_columns`'s job,
+    not this collector's), else each `ColArg` in `col_fn.args` — plus
+    `value_col` if set. Single source of truth shared by policy validation's
+    ref walk and this module's own table-collection/reflection logic.
+    """
+    if pred.col is not None:
+        if "." in pred.col:
+            yield pred.col
+    elif pred.col_fn is not None:
+        for arg in pred.col_fn.args:
+            if isinstance(arg, ColArg):
+                yield arg.col
+    if pred.value_col is not None:
+        yield pred.value_col
 
 
 def resolve_column(table: sa.Table, column_name: str) -> sa.Column:
@@ -160,11 +176,8 @@ def where_depth(node: WhereNode) -> int:
 
 def _collect_tables_from_where(node: WhereNode, tables: Set[str]) -> None:
     if isinstance(node, Predicate):
-        if "." in node.col:
-            table, _ = parse_column_ref(node.col)
-            tables.add(table)
-        if node.value_col is not None:
-            table, _ = parse_column_ref(node.value_col)
+        for ref in predicate_column_refs(node):
+            table, _ = parse_column_ref(ref)
             tables.add(table)
         return
     if node.not_terms is not None:
@@ -294,11 +307,8 @@ async def validate_schema(
 
     for pred in query.having:
         # having may reference select aliases (no table) or Table.Col
-        if "." in pred.col:
-            t, _ = parse_column_ref(pred.col)
-            needed.add(t)
-        if pred.value_col is not None:
-            t, _ = parse_column_ref(pred.value_col)
+        for ref in predicate_column_refs(pred):
+            t, _ = parse_column_ref(ref)
             needed.add(t)
 
     if query.top_n is not None:
@@ -446,7 +456,12 @@ def _validate_where_columns(
 def _validate_predicate_columns(
     pred: Predicate, tables: Dict[str, sa.Table], allow_alias: bool
 ) -> None:
-    if "." not in pred.col:
+    if pred.col_fn is not None:
+        for arg in pred.col_fn.args:
+            if isinstance(arg, ColArg):
+                t, c = parse_column_ref(arg.col)
+                resolve_column(tables[t], c)
+    elif "." not in pred.col:
         if not allow_alias:
             raise QueryValidationError(f"Column reference must be 'Table.Column', got {pred.col!r}")
     else:

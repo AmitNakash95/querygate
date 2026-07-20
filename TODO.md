@@ -4603,3 +4603,64 @@ not a rendering-only check.
 (especially multi-tenant ones scoping every table by `tenant_id` alongside
 its own primary key); the AST previously couldn't express that as an
 actual join condition at all.
+
+### 77. Scalar functions in WHERE/HAVING predicates (`Predicate.col_fn`) ✅ DONE
+
+**Supersedes item 72's SELECT-only scope decision** — see the Decision Log
+entry recording the reversal (docs/PRODUCT_GUIDE.md). Closes the exact gap
+item 72 deferred: `WHERE lower(status) = 'active'`,
+`HAVING coalesce(discount, 0) > 5` are now expressible, not just projectable.
+
+**The "materially bigger change" item 72 predicted didn't fully
+materialize.** `Predicate.col` didn't need to become `Union[str,
+expression]` — instead `Predicate.col_fn: Optional[ScalarFunctionCall]`, a
+sibling field to `col`, mutually exclusive with it (validated by
+`_validate_col_shape`, `col` itself became `Optional[str]`). `Scalar
+FunctionSelectItem`'s `fn`/`args` shape (and its arg-count validator) was
+factored into a shared base `ScalarFunctionCall`, with
+`ScalarFunctionSelectItem` now just `ScalarFunctionCall` + an alias — one
+definition of the whitelist/shape, two use sites. **No function nesting** —
+`args` stays `List[ColArg | LiteralArg]`, never another
+`ScalarFunctionCall` — kept exactly as narrow as item 72's version, still
+not an open-ended expression grammar. `col_fn` works with every operator
+(not just eq/neq/lt/lte/gt/gte the way `value_col` is restricted) — `lower(
+status) IN (...)`, `coalesce(x, 0) BETWEEN ...` are all ordinary SQL.
+`CaseWhen.when: Predicate` gained `col_fn` for free, proven by a test:
+`CASE WHEN lower(status) = 'x' THEN ...` now works too.
+
+**Shipped.** `validation/schema_validation.py`: new `predicate_column_refs(
+pred) -> Iterator[str]` — single source of truth (col if dotted, else each
+`col_fn.args`' `ColArg`, plus `value_col`) replacing three separate ad hoc
+`if "." in ...`/`if value_col` duplications
+(`_where_column_refs`-equivalent walk, the `having` table-collection loop,
+`_collect_tables_from_where`) — and `select_item_column_refs`'s CASE branch
+now delegates to it too, closing a gap where a CASE `when` predicate's
+`col_fn` would otherwise have been silently invisible to both reflection
+and policy. `_validate_predicate_columns` resolves `col_fn`'s columns
+against the live schema. `compiler/sqlalchemy_compiler.py`:
+`_resolve_predicate_target` resolves `col_fn` via the existing `_SCALAR_FNS`/
+`_resolve_scalar_arg` helpers item 72 already built.
+
+**Critical fix, same category as items 70–72's fixes.**
+`validation/policy_validation.py`'s `_where_column_refs` and the `having`
+loop in `_iter_column_refs` now delegate to `predicate_column_refs` too —
+closing the path where a denied column reachable only through
+`lower(customers.email) = 'x'` (WHERE) or inside a `coalesce(...)` in
+HAVING would otherwise never be walked by column-level policy at all.
+Proven by `test_denied_column_rejected_when_only_used_inside_predicate_col_fn`
+and its HAVING-variant sibling.
+
+Verified end-to-end against real SQLite execution (not just rendered SQL):
+seeded rows with mixed-case status values, confirmed
+`WHERE lower(status) = 'active'` matched both `'Active'` and `'ACTIVE'`
+while excluding `'inactive'`.
+
+**Effort: L.** The architecturally central item of this round — touches
+all four layers, with the same "walk every new ref site or it's a policy
+bypass" discipline as every prior alias/value_col/extra_on addition.
+
+**Why it matters:** this was the single highest-leverage gap identified
+after the first round — the one place where "SELECT-only" was a real,
+user-visible limitation rather than a reasonable scope boundary, and it's
+now closed at no cost to the narrowness (no nesting, whitelisted functions
+only) that made the original version safe.

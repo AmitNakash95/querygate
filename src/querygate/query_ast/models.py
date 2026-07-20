@@ -99,15 +99,37 @@ ScalarFunctionArg = Union[ColArg, LiteralArg]
 ScalarFn = Literal["coalesce", "lower", "upper", "trim", "concat"]
 
 
-class ScalarFunctionSelectItem(pyd.BaseModel):
-    """A whitelisted scalar function projection — SELECT only, not usable as a
-    WHERE/HAVING predicate target. lower/upper/trim take exactly one column
-    argument ({"col": "Table.Column"}); coalesce/concat take 2+ arguments,
-    each either {"col": ...} or {"literal": ...}.
+class ScalarFunctionCall(pyd.BaseModel):
+    """A whitelisted scalar function call: fn + args. lower/upper/trim take
+    exactly one column argument ({"col": "Table.Column"}); coalesce/concat
+    take 2+ arguments, each either {"col": ...} or {"literal": ...}.
+    **No nesting** — args are always ColArg/LiteralArg, never another
+    ScalarFunctionCall — a deliberate bound keeping this from becoming an
+    open-ended expression grammar. Used both as a SELECT projection
+    (`ScalarFunctionSelectItem`, which adds an alias) and as a WHERE/HAVING
+    predicate target (`Predicate.col_fn`, which has none).
     """
 
     fn: ScalarFn
     args: List[ScalarFunctionArg] = pyd.Field(min_length=1)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _validate_args(self) -> "ScalarFunctionCall":
+        if self.fn in ("lower", "upper", "trim"):
+            if len(self.args) != 1 or not isinstance(self.args[0], ColArg):
+                raise ValueError(f"{self.fn} takes exactly one column argument")
+        elif len(self.args) < 2:
+            raise ValueError(f"{self.fn} requires at least 2 arguments")
+        return self
+
+
+class ScalarFunctionSelectItem(ScalarFunctionCall):
+    """SELECT-projection use of a `ScalarFunctionCall` — see that class for
+    the fn/args shape.
+    """
+
     alias: Optional[str] = pyd.Field(
         default=None,
         validation_alias=pyd.AliasChoices("as", "alias"),
@@ -115,15 +137,6 @@ class ScalarFunctionSelectItem(pyd.BaseModel):
     )
 
     model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
-
-    @pyd.model_validator(mode="after")
-    def _validate_args(self) -> "ScalarFunctionSelectItem":
-        if self.fn in ("lower", "upper", "trim"):
-            if len(self.args) != 1 or not isinstance(self.args[0], ColArg):
-                raise ValueError(f"{self.fn} takes exactly one column argument")
-        elif len(self.args) < 2:
-            raise ValueError(f"{self.fn} requires at least 2 arguments")
-        return self
 
 
 class CaseWhen(pyd.BaseModel):
@@ -217,7 +230,20 @@ class JoinSpec(pyd.BaseModel):
 
 
 class Predicate(pyd.BaseModel):
-    col: str
+    col: Optional[str] = pyd.Field(
+        default=None,
+        description="Table.Column being compared. Exactly one of col/col_fn is required.",
+    )
+    col_fn: Optional[ScalarFunctionCall] = pyd.Field(
+        default=None,
+        description=(
+            "A whitelisted scalar function applied to a column instead of a bare "
+            "Table.Column, e.g. {fn: lower, args: [{col: Customer.Name}]} for "
+            "lower(Customer.Name) = ... — same fn/args shape as a select item's scalar "
+            "function. Mutually exclusive with col. No function nesting (see "
+            "ScalarFunctionCall)."
+        ),
+    )
     op: CompareOp
     value: Optional[Any] = pyd.Field(
         default=None,
@@ -239,6 +265,12 @@ class Predicate(pyd.BaseModel):
     )
 
     model_config = pyd.ConfigDict(extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _validate_col_shape(self) -> "Predicate":
+        if (self.col is None) == (self.col_fn is None):
+            raise ValueError("Predicate must set exactly one of 'col' or 'col_fn'")
+        return self
 
     @pyd.model_validator(mode="after")
     def _validate_value_shape(self) -> "Predicate":

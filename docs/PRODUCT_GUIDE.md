@@ -1982,6 +1982,22 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-20 — Superseded: item 72's SELECT-only scalar-function
+  restriction, below, no longer holds (TODO.md item 77).** The "materially
+  bigger change" item 72 deferred turned out to be worth doing: rather than
+  making `Predicate.col` itself a `Union[str, expression]`, the fix was
+  `Predicate.col_fn: Optional[ScalarFunctionCall]` — a field sibling to
+  `col`, mutually exclusive with it, reusing the exact same whitelisted
+  fn/args shape `ScalarFunctionSelectItem` already had (factored into a
+  shared `ScalarFunctionCall` base once two different places needed it).
+  `WHERE lower(Customer.Email) = 'x'` and `HAVING coalesce(discount, 0) >
+  5` are both expressible now. The narrowness that made the original
+  SELECT-only version safe is preserved deliberately: no function nesting
+  (`col_fn`'s args are still only a column ref or a literal, never another
+  function call), and `col_fn`'s columns are always real `Table.Column`
+  refs, never a select-item alias. See TODO.md item 77 for the shipped
+  design; the entry below is kept as an accurate record of the tradeoff as
+  it stood on 2026-07-20, not deleted.
 - **2026-07-20 — Whitelisted scalar functions/CASE (TODO.md item 72) are
   SELECT-projection only, not usable as a WHERE/HAVING predicate target.**
   Extending `Predicate.col` to accept a function-wrapped expression instead

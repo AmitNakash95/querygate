@@ -210,6 +210,55 @@ class TestValidateSchema:
         with pytest.raises(ValueError, match="same two tables"):
             await sv.validate_schema(query, connection_id="demo")
 
+    async def test_predicate_col_fn_column_resolved(self, monkeypatch):
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            where=Predicate(
+                col_fn={"fn": "lower", "args": [{"col": "orders.status"}]},
+                op="eq",
+                value="active",
+            ),
+            limit=5,
+        )
+        loaded = await sv.validate_schema(query, connection_id="demo")
+        assert set(loaded) == {"orders"}
+
+    async def test_predicate_col_fn_unknown_column_rejected(self, monkeypatch):
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            where=Predicate(
+                col_fn={"fn": "lower", "args": [{"col": "orders.missing"}]},
+                op="eq",
+                value="active",
+            ),
+            limit=5,
+        )
+        with pytest.raises(ValueError, match="not found"):
+            await sv.validate_schema(query, connection_id="demo")
+
+    async def test_predicate_col_fn_referencing_join_table_reflects_it(self, monkeypatch):
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            joins=[JoinSpec(table="customers", on=["orders.customer_id", "customers.id"])],
+            where=Predicate(
+                col_fn={"fn": "lower", "args": [{"col": "customers.name"}]},
+                op="eq",
+                value="ada",
+            ),
+            limit=5,
+        )
+        loaded = await sv.validate_schema(query, connection_id="demo")
+        assert set(loaded) == {"orders", "customers"}
+
     async def test_having_requires_group_by_or_aggregate(self, monkeypatch):
         tables = _make_tables()
         _patch_load_table(monkeypatch, tables)

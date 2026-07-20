@@ -10,6 +10,7 @@ from querygate.query_ast.models import (
     JoinSpec,
     OrderBySpec,
     Predicate,
+    ScalarFunctionCall,
     ScalarFunctionSelectItem,
     StructuredQuery,
     WhereGroup,
@@ -260,6 +261,56 @@ class TestStructuredQueryModels:
         )
         assert isinstance(q.select[0], ScalarFunctionSelectItem)
         assert isinstance(q.select[1], CaseSelectItem)
+
+    def test_predicate_col_fn_accepted(self):
+        p = Predicate(
+            col_fn={"fn": "lower", "args": [{"col": "customers.email"}]}, op="eq", value="a@b.com"
+        )
+        assert p.col is None
+        assert p.col_fn.fn == "lower"
+
+    def test_predicate_col_and_col_fn_both_set_rejected(self):
+        with pytest.raises(ValueError, match="exactly one of 'col' or 'col_fn'"):
+            Predicate(
+                col="customers.email",
+                col_fn={"fn": "lower", "args": [{"col": "customers.email"}]},
+                op="eq",
+                value="x",
+            )
+
+    def test_predicate_neither_col_nor_col_fn_rejected(self):
+        with pytest.raises(ValueError, match="exactly one of 'col' or 'col_fn'"):
+            Predicate(op="eq", value="x")
+
+    def test_predicate_col_fn_works_with_in_op(self):
+        p = Predicate(
+            col_fn={"fn": "lower", "args": [{"col": "orders.status"}]},
+            op="in",
+            value=["completed", "pending"],
+        )
+        assert p.col_fn is not None
+
+    def test_scalar_function_call_rejects_nested_function(self):
+        with pytest.raises(ValueError):
+            ScalarFunctionCall.model_validate(
+                {"fn": "coalesce", "args": [{"fn": "lower", "args": [{"col": "a.b"}]}]}
+            )
+
+    def test_case_when_predicate_supports_col_fn(self):
+        item = CaseSelectItem(
+            when=[
+                {
+                    "when": {
+                        "col_fn": {"fn": "lower", "args": [{"col": "orders.status"}]},
+                        "op": "eq",
+                        "value": "active",
+                    },
+                    "then": {"literal": "Active"},
+                }
+            ],
+            alias="label",
+        )
+        assert item.when[0].when.col_fn.fn == "lower"
 
     def test_extra_on_accepts_valid_pairs(self):
         j = JoinSpec(
