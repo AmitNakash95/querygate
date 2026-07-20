@@ -184,6 +184,15 @@ class JoinSpec(pyd.BaseModel):
         max_length=2,
         description="Equality join: [LeftTable.Col, RightTable.Col]",
     )
+    extra_on: List[List[str]] = pyd.Field(
+        default_factory=list,
+        description=(
+            "Additional equality pairs ANDed with `on`, for composite/multi-column join "
+            "keys — each entry is a two-element [LeftTable.Col, RightTable.Col] pair "
+            "referencing the SAME two tables/aliases as `on` (a join's condition is "
+            "always about the one pair of tables it joins, never a third)."
+        ),
+    )
     connection: Optional[str] = pyd.Field(
         default=None,
         description=(
@@ -195,6 +204,16 @@ class JoinSpec(pyd.BaseModel):
     )
 
     model_config = pyd.ConfigDict(extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _validate_extra_on_pairs(self) -> "JoinSpec":
+        for pair in self.extra_on:
+            if len(pair) != 2:
+                raise ValueError(
+                    "Each extra_on entry must be a two-element [LeftTable.Col, "
+                    f"RightTable.Col] pair, got {pair!r}"
+                )
+        return self
 
 
 class Predicate(pyd.BaseModel):

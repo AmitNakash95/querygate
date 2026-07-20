@@ -374,13 +374,16 @@ def compile_structured_query(
 
     for join in query.joins:
         right = _table_by_name(tables, join.alias or join.table)
-        left_ref, right_ref = join.on
-        left_t, left_c = parse_column_ref(left_ref)
-        right_t, right_c = parse_column_ref(right_ref)
-        left_col = resolve_column(_table_by_name(tables, left_t), left_c)
-        right_col = resolve_column(_table_by_name(tables, right_t), right_c)
+        conditions = []
+        for left_ref, right_ref in [join.on, *join.extra_on]:
+            left_t, left_c = parse_column_ref(left_ref)
+            right_t, right_c = parse_column_ref(right_ref)
+            left_col = resolve_column(_table_by_name(tables, left_t), left_c)
+            right_col = resolve_column(_table_by_name(tables, right_t), right_c)
+            conditions.append(left_col == right_col)
+        condition = sa.and_(*conditions) if len(conditions) > 1 else conditions[0]
         isouter = join.type == "left"
-        stmt = stmt.join(right, left_col == right_col, isouter=isouter)
+        stmt = stmt.join(right, condition, isouter=isouter)
 
     name_to_physical = effective_name_map(query)
     stmt = _apply_mandatory_row_filters(stmt, policy, tables, name_to_physical, principal)

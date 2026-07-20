@@ -371,6 +371,40 @@ class TestCompiler:
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "GROUP BY" in compiled.upper()
 
+    def test_composite_join_key_ands_both_conditions(self):
+        metadata = sa.MetaData()
+        orders = sa.Table(
+            "orders",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("tenant_id", sa.Integer),
+        )
+        order_items = sa.Table(
+            "order_items",
+            metadata,
+            sa.Column("order_id", sa.Integer),
+            sa.Column("tenant_id", sa.Integer),
+            sa.Column("sku", sa.String(20)),
+        )
+        tables = {"orders": orders, "order_items": order_items}
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id", "order_items.sku"],
+            joins=[
+                JoinSpec(
+                    table="order_items",
+                    on=["orders.tenant_id", "order_items.tenant_id"],
+                    extra_on=[["orders.id", "order_items.order_id"]],
+                )
+            ],
+            limit=10,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "orders.tenant_id = order_items.tenant_id" in compiled
+        assert "orders.id = order_items.order_id" in compiled
+        assert "AND" in compiled.upper()
+
     def test_stddev_variance_render_on_postgres(self):
         tables = _make_tables()
         query = StructuredQuery(
