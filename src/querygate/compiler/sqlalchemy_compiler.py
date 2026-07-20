@@ -123,6 +123,10 @@ def _apply_predicate(col: Any, pred: Predicate, tables: Dict[str, sa.Table]) -> 
 def _resolve_predicate_target(
     pred: Predicate, tables: Dict[str, sa.Table], alias_map: Dict[str, Any]
 ) -> Any:
+    if pred.col_fn is not None:
+        scalar_fn = _SCALAR_FNS[pred.col_fn.fn]
+        args = [_resolve_scalar_arg(arg, tables) for arg in pred.col_fn.args]
+        return scalar_fn(*args)
     if "." in pred.col:
         return _column(tables, pred.col)
     if pred.col in alias_map:

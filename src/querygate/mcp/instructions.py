@@ -47,13 +47,15 @@ field's own schema description covers its exact contract (order_by.dir's
 strict enum, intent's audit-only purpose, a join's cross-connection
 `connection` field, and so on) — read it rather than guessing.
 
-## Scalar functions and CASE in select (SELECT only)
+## Scalar functions and CASE in select, and in WHERE/HAVING
 A select item may also be a whitelisted scalar function (coalesce/lower/
 upper/trim/concat) or a CASE WHEN...THEN...ELSE expression — see
 ScalarFunctionSelectItem/CaseSelectItem's own field schemas for the exact
-argument shape. These are SELECT-projection only: you cannot use a scalar
-function or CASE as a WHERE/HAVING predicate target — filter on the
-underlying Table.Column instead.
+argument shape. The same whitelisted functions are also usable as a
+WHERE/HAVING predicate's LEFT side via Predicate.col_fn instead of col
+(e.g. lower(Customer.Email) = 'x') — see Predicate.col_fn's own field
+description. No function nesting anywhere (a function's arguments are
+always a column ref or a literal, never another function call).
 
 ## Self-joins (the same table more than once in one query)
 Joining a table to itself (e.g. Employee to Employee for a manager lookup)

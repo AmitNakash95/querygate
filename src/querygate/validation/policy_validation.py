@@ -14,6 +14,7 @@ from querygate.query_ast.models import CaseSelectItem, Predicate, StructuredQuer
 from querygate.validation.schema_validation import (
     effective_name_map,
     parse_column_ref,
+    predicate_column_refs,
     select_item_column_refs,
     where_depth,
 )
@@ -36,10 +37,7 @@ def _collect_referenced_tables(query: StructuredQuery) -> Set[str]:
 
 def _where_column_refs(node: WhereNode) -> Iterator[str]:
     if isinstance(node, Predicate):
-        if "." in node.col:
-            yield node.col
-        if node.value_col is not None:
-            yield node.value_col
+        yield from predicate_column_refs(node)
         return
     if node.not_terms is not None:
         yield from _where_column_refs(node.not_terms)
@@ -77,10 +75,7 @@ def _iter_column_refs(query: StructuredQuery) -> Iterator[str]:
         if "." in col_ref:
             yield col_ref
     for pred in query.having:
-        if "." in pred.col:
-            yield pred.col
-        if pred.value_col is not None:
-            yield pred.value_col
+        yield from predicate_column_refs(pred)
     for order in query.order_by:
         if "." in order.col:
             yield order.col
@@ -157,8 +152,9 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
         all_predicates.extend(_iter_where_predicates(query.where))
     for pred in all_predicates:
         if pred.op in ("in", "not_in") and len(pred.value) > policy.max_in_list_size:
+            target = pred.col if pred.col is not None else f"{pred.col_fn.fn}(...)"
             raise PolicyViolationError(
-                f"{pred.op} list for {pred.col!r} exceeds max_in_list_size of "
+                f"{pred.op} list for {target!r} exceeds max_in_list_size of "
                 f"{policy.max_in_list_size} items"
             )
 

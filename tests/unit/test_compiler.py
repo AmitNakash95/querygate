@@ -371,6 +371,74 @@ class TestCompiler:
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "GROUP BY" in compiled.upper()
 
+    def test_where_predicate_col_fn_renders(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            where=Predicate(
+                col_fn={"fn": "lower", "args": [{"col": "orders.status"}]},
+                op="eq",
+                value="active",
+            ),
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "lower(orders.status) = 'active'" in compiled
+
+    def test_having_predicate_col_fn_renders(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.status",
+                AggregateSelectItem(fn="count", col="*", alias="n"),
+            ],
+            group_by=["orders.status"],
+            having=[
+                Predicate(
+                    col_fn={
+                        "fn": "coalesce",
+                        "args": [{"col": "orders.total_amount"}, {"literal": 0}],
+                    },
+                    op="gt",
+                    value=0,
+                )
+            ],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "coalesce(orders.total_amount, 0) >" in compiled
+
+    def test_case_when_predicate_with_col_fn_renders(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                {
+                    "when": [
+                        {
+                            "when": {
+                                "col_fn": {"fn": "lower", "args": [{"col": "orders.status"}]},
+                                "op": "eq",
+                                "value": "completed",
+                            },
+                            "then": {"literal": "Done"},
+                        }
+                    ],
+                    "else": {"literal": "Open"},
+                    "as": "label",
+                }
+            ],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "lower(orders.status)" in compiled
+        assert "CASE WHEN" in compiled.upper()
+
     def test_composite_join_key_ands_both_conditions(self):
         metadata = sa.MetaData()
         orders = sa.Table(
