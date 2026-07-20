@@ -11,20 +11,28 @@ from typing import Iterator, List, Set
 from querygate.core.exceptions import PolicyViolationError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import Predicate, StructuredQuery, WhereNode
-from querygate.validation.schema_validation import parse_column_ref, where_depth
+from querygate.validation.schema_validation import (
+    effective_name_map,
+    parse_column_ref,
+    where_depth,
+)
 
 
 def _collect_referenced_tables(query: StructuredQuery) -> Set[str]:
-    tables = {query.from_table}
-    for join in query.joins:
-        tables.add(join.table)
+    """Every PHYSICAL table this query touches — column refs are qualified by
+    effective name (alias if given, else table name), so each one is mapped
+    back through `effective_name_map` before being added, ensuring table-
+    level policy is checked against the real table, never an alias.
+    """
+    name_to_physical = effective_name_map(query)
+    tables = {query.from_table, *(join.table for join in query.joins)}
     for item in query.select:
         if isinstance(item, str):
             t, _ = parse_column_ref(item)
-            tables.add(t)
+            tables.add(name_to_physical.get(t.lower(), t))
         elif item.col != "*":
             t, _ = parse_column_ref(item.col)
-            tables.add(t)
+            tables.add(name_to_physical.get(t.lower(), t))
     return tables
 
 
@@ -79,16 +87,19 @@ def _iter_column_refs(query: StructuredQuery) -> Iterator[str]:
 
 
 def referenced_tables(query: StructuredQuery) -> Set[str]:
-    """Return every table touched by a query using the production policy walk.
+    """Return every PHYSICAL table touched by a query using the production
+    policy walk (see `_collect_referenced_tables` — every column ref's
+    effective/alias name is mapped back to its physical table).
 
     Candidate simulation uses this to scope mandatory-filter readiness to the
     same query graph that policy validation sees, without inspecting predicate
     values or compiling SQL.
     """
+    name_to_physical = effective_name_map(query)
     tables = _collect_referenced_tables(query)
     for ref in _iter_column_refs(query):
         table, _column = parse_column_ref(ref)
-        tables.add(table)
+        tables.add(name_to_physical.get(table.lower(), table))
     return tables
 
 
@@ -141,6 +152,7 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
 
     column_refs = list(_iter_column_refs(query))
     tables = referenced_tables(query)
+    name_to_physical = effective_name_map(query)
 
     for table in tables:
         if not policy.table_allowed(table):
@@ -148,7 +160,11 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
 
     for ref in column_refs:
         t, c = parse_column_ref(ref)
-        if not policy.column_allowed(t, c):
+        # t is the ref's effective name (an alias, or the table name itself)
+        # — always resolve to the PHYSICAL table before checking column
+        # policy, so an alias can never be used to dodge a denied column.
+        physical_t = name_to_physical.get(t.lower(), t)
+        if not policy.column_allowed(physical_t, c):
             raise PolicyViolationError(f"Column {ref!r} is not accessible under the active policy")
 
 

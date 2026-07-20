@@ -38,8 +38,14 @@ def _nested_where(depth: int) -> Union[Predicate, WhereGroup]:
 
 
 def _joins(n: int) -> List[JoinSpec]:
+    # Each join aliases "customers" distinctly — StructuredQuery's own
+    # validator requires an explicit alias on every occurrence once the same
+    # physical table is joined more than once (self-join disambiguation),
+    # and this helper only cares about exercising max_joins, not building a
+    # graph-connected query (validate_policy doesn't check connectivity).
     return [
-        JoinSpec(table="customers", on=["orders.customer_id", "customers.id"]) for _ in range(n)
+        JoinSpec(table="customers", alias=f"c{i}", on=["orders.customer_id", f"c{i}.id"])
+        for i in range(n)
     ]
 
 

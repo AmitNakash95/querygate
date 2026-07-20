@@ -4242,3 +4242,66 @@ and rendering tests to `test_compiler.py`.
 "unique X" — the request had to be either impossible or answered by
 pulling more rows than needed and de-duplicating client-side, defeating the
 point of a policy-enforced gateway.
+
+### 70. Table aliases and self-joins ✅ DONE
+
+**Problem.** `JoinSpec.table` had to be a real table name, and every
+column-resolution path (schema reflection, policy checks, compilation) keyed
+off that raw name — so the same physical table could never appear twice in
+one query. A common ask like "for each employee, who is their manager"
+(`Employee` joined to itself) was structurally impossible.
+
+**Design.** Introduced *effective names*: every from/join occurrence has an
+effective name (its alias if given, else its own table name), and every
+`Table.Column` reference elsewhere in the query is qualified by effective
+name. Kept strictly separate from *physical* names, which schema reflection
+and policy allow/deny checks always operate on — an alias must never be a
+back door around table/column policy.
+
+**Shipped.**
+- `query_ast/models.py`: `StructuredQuery.from_alias` and `JoinSpec.alias`,
+  plus a `model_validator` (`_validate_table_aliases`) that runs at the pure
+  AST layer, before any DB touch: effective names must be unique
+  case-insensitively, and a physical table used more than once (a
+  self-join) must carry an explicit alias on *every* occurrence — no
+  implicit "first one wins."
+- `validation/schema_validation.py`: new `effective_name_map(query)` —
+  single source of truth mapping every effective name to its physical
+  table, reused by policy validation and the compiler. `validate_schema`
+  now reflects each distinct physical table once (a local cache keyed by
+  physical name, independent of `schema/reflection.py`'s own cache) and
+  wraps every aliased occurrence with SQLAlchemy's `.alias(effective_name)`;
+  `resolve_query_table_connections` and `_validate_join_graph` operate on
+  effective names throughout.
+- `validation/policy_validation.py`: **critical fix** — every place that
+  checked a `Table.Column` ref's leading component against
+  `policy.table_allowed`/`column_allowed` now maps it through
+  `effective_name_map` to the physical table first. Without this, aliasing
+  a denied table/column would have silently bypassed column-level policy.
+  Added `test_denied_column_rejected_when_referenced_through_alias` and
+  `test_denied_table_rejected_when_referenced_through_join_alias` proving
+  the fix.
+- `compiler/sqlalchemy_compiler.py`: FROM/JOIN resolve by effective name.
+  `_apply_mandatory_row_filters` now applies a matching filter to *every*
+  occurrence of a physical table, not just the first dict match — a
+  self-join of a mandatory-filtered table (e.g. tenant-scoped `Employee`)
+  gets the filter AND-ed in on both aliases, proven by
+  `test_mandatory_row_filter_applies_to_every_self_join_alias`.
+- Verified end-to-end against a real in-memory SQLite engine (compiled SQL
+  executed, not just rendered): a self-join of an `employees` table
+  correctly returned each row's manager's name via a LEFT JOIN on two
+  distinct aliases of the same table.
+- `mcp/instructions.py` gained a short "Self-joins" section (aliasing is a
+  required, non-obvious step the AST rejects without) alongside the
+  existing "Cross-connection joins" section it sits next to.
+
+**Effort: L.** The largest of the five items — touches AST validation,
+both validation layers, and the compiler, with two separate
+security-correctness invariants (policy must resolve aliases to physical
+identity; mandatory filters must cover every alias) each needing their own
+dedicated test, not just a happy-path check.
+
+**Why it matters:** self-joins are an ordinary, frequent query shape
+(hierarchies, before/after comparisons on the same entity) that was
+previously simply unrepresentable — not capped, not restricted, entirely
+absent from the grammar.
