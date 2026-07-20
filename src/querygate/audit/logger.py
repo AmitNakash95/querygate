@@ -50,6 +50,7 @@ def audit_query(
     admission_state: Optional[str] = None,
     template_id: Optional[str] = None,
     template_param_shape: Optional[List[str]] = None,
+    masked_columns: Optional[List[str]] = None,
 ) -> None:
     log = get_logger()
     event = AuditEvent(
@@ -73,6 +74,7 @@ def audit_query(
         admission_state=admission_state,
         template_id=template_id,
         template_param_shape=template_param_shape,
+        masked_columns=masked_columns or [],
     )
     log.info(
         "audit.query",
@@ -94,6 +96,7 @@ def audit_query(
         admission_id=admission_id,
         queue_wait_ms=queue_wait_ms,
         admission_state=admission_state,
+        masked_columns=masked_columns,
     )
     try:
         get_audit_sink().emit(event)

@@ -88,6 +88,41 @@ def _iter_column_refs(query: StructuredQuery) -> Iterator[str]:
                 yield order.col
 
 
+def _non_projection_column_refs(query: StructuredQuery) -> Iterator[str]:
+    """Every Table.Column reference EXCEPT bare top-level select projection
+    items — the only position a masked column is allowed to appear (TODO.md
+    item 49). This is `_iter_column_refs` minus the bare-`str` select branch:
+    columns nested inside a scalar-fn/CASE/aggregate select item, plus every
+    join key, where, group_by, having, order_by, and top_n reference, all of
+    which would expose a masked column's raw value.
+    """
+    for item in query.select:
+        if isinstance(item, str):
+            continue
+        yield from select_item_column_refs(item)
+    for join in query.joins:
+        yield from join.on
+        for pair in join.extra_on:
+            yield from pair
+    if query.where is not None:
+        yield from _where_column_refs(query.where)
+    for col_ref in query.group_by:
+        if "." in col_ref:
+            yield col_ref
+    for pred in query.having:
+        yield from predicate_column_refs(pred)
+    for order in query.order_by:
+        if "." in order.col:
+            yield order.col
+    if query.top_n is not None:
+        for ref in query.top_n.partition_by:
+            if "." in ref:
+                yield ref
+        for order in query.top_n.order_by:
+            if "." in order.col:
+                yield order.col
+
+
 def referenced_tables(query: StructuredQuery) -> Set[str]:
     """Return every PHYSICAL table touched by a query using the production
     policy walk (see `_collect_referenced_tables` — every column ref's
@@ -174,6 +209,19 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
         physical_t = name_to_physical.get(t.lower(), t)
         if not policy.column_allowed(physical_t, c):
             raise PolicyViolationError(f"Column {ref!r} is not accessible under the active policy")
+
+    # A masked column may only appear as a bare SELECT projection item —
+    # anywhere else (filter/join/order/group, or nested in a function/CASE/
+    # aggregate) an unmasked reference would leak the real value via inference,
+    # so it's rejected rather than silently masked-in-place (TODO.md item 49).
+    for ref in _non_projection_column_refs(query):
+        t, c = parse_column_ref(ref)
+        physical_t = name_to_physical.get(t.lower(), t)
+        if policy.column_mask(physical_t, c) is not None:
+            raise PolicyViolationError(
+                f"Column {ref!r} is masked by policy and can only appear in the select "
+                "projection, not in filters, joins, ordering, grouping, or nested in a function"
+            )
 
 
 def validate_batch_size(count: int, policy: Policy) -> None:
