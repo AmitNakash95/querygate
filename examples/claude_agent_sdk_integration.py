@@ -46,9 +46,7 @@ QUERYGATE_TOOLS = [
     "mcp__querygate__list_connections",
     "mcp__querygate__list_tables",
     "mcp__querygate__describe_table",
-    "mcp__querygate__execute_structured_query",
-    "mcp__querygate__execute_structured_queries",
-    "mcp__querygate__explain_structured_query",
+    "mcp__querygate__run_structured_queries",
 ]
 
 

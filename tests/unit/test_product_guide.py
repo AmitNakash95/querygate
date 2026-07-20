@@ -93,6 +93,38 @@ def test_setup_checklist_and_error_explanation_are_source_attributed():
     assert error.citation.topic_id == "troubleshooting.errors"
 
 
+def test_guide_topic_is_not_truncated_under_the_default_byte_budget():
+    """TODO.md item 65: all packaged topics must fit under the default
+    max_response_bytes (mirrors search_catalog's own default), so this is
+    guarding future topic growth, not a change to today's responses.
+    """
+    service = get_guide_service()
+    for topic_id in service._corpus.topic_ids():
+        response = service.topic(topic_id)
+        assert response.truncated is False
+        assert response.content == service._corpus.get(topic_id).body
+
+
+def test_guide_topic_truncates_content_under_a_tight_byte_budget():
+    service = get_guide_service()
+    full = service.topic("configuration.governance")
+
+    truncated = service.topic("configuration.governance", max_response_bytes=700)
+
+    assert truncated.truncated is True
+    assert len(truncated.content) < len(full.content)
+    serialized_bytes = len(json.dumps(truncated.model_dump(mode="json")).encode("utf-8"))
+    assert serialized_bytes <= 700
+    # Fields other than content/truncated are unaffected by truncation.
+    assert truncated.title == full.title
+    assert truncated.citation == full.citation
+
+
+def test_guide_topic_rejects_a_budget_too_small_for_its_own_envelope():
+    with pytest.raises(ValueError, match="at least 512"):
+        get_guide_service().topic("configuration.governance", max_response_bytes=1)
+
+
 def test_access_summary_contains_only_caller_scopes_and_visible_connections():
     principal = Principal(
         subject="guide-reader",

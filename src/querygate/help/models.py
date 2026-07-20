@@ -64,6 +64,8 @@ class GuideTopicResponse(pyd.BaseModel):
     content: str
     citation: GuideCitation
     next_actions: List[str] = pyd.Field(default_factory=list)
+    truncated: bool = False
+    max_response_bytes: int = pyd.Field(default=16_384, ge=1)
 
     model_config = pyd.ConfigDict(extra="forbid")
 

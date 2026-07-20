@@ -129,6 +129,7 @@ def evaluate_benchmark(
             policy=case.policy,
             query=case.query,
             max_results=20,
+            verbose_provenance=True,  # _hit_matches() checks hit.citation.freshness
         )
         matched = 0
         for expected in case.expected_hits:

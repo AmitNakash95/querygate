@@ -88,7 +88,14 @@ class JoinSpec(pyd.BaseModel):
 class Predicate(pyd.BaseModel):
     col: str
     op: CompareOp
-    value: Optional[Any] = None
+    value: Optional[Any] = pyd.Field(
+        default=None,
+        description=(
+            "Required for every op except is_null/is_not_null (omit value for those two). "
+            "between: two-element [low, high] list. in/not_in: non-empty list. "
+            "Everything else: a single scalar."
+        ),
+    )
 
     model_config = pyd.ConfigDict(extra="forbid")
 
@@ -110,6 +117,11 @@ class Predicate(pyd.BaseModel):
 
 
 class WhereGroup(pyd.BaseModel):
+    """Boolean group: set exactly one of `and`/`or` (not both, not neither) to a
+    list of terms, where each term is itself a Predicate or a nested WhereGroup
+    — nest freely to express arbitrary boolean logic.
+    """
+
     and_terms: Optional[List["WhereNode"]] = pyd.Field(
         default=None,
         validation_alias=pyd.AliasChoices("and", "and_terms"),
@@ -153,6 +165,12 @@ class TopNSpec(pyd.BaseModel):
 
     partition_by may be empty — this ranks across all rows/groups as one
     partition (i.e. an overall top-N, not a per-group top-N).
+
+    Without group_by/aggregates: partition_by/order_by may reference any
+    Table.Col in the query graph, or a date_bucket select alias.
+    WITH group_by/aggregates: ranking runs over the grouped result (one row
+    per group), so partition_by/order_by must reference a group_by column or
+    a select alias (aggregate or date_bucket) — not a raw table column.
     """
 
     partition_by: List[str] = pyd.Field(default_factory=list)
@@ -165,22 +183,54 @@ class TopNSpec(pyd.BaseModel):
 
 class StructuredQuery(pyd.BaseModel):
     """Read-only structured query. No raw SQL — every field is a validated,
-    schema-checked identifier or literal.
+    schema-checked identifier or literal. Every column reference anywhere in
+    this AST (select strings, where/having col, group_by, order_by, joins.on,
+    top_n.partition_by) must be "Table.Column" (e.g. "Customer.Name"), or a
+    select item's own alias where noted below — never a bare column name.
     """
 
     from_table: str = pyd.Field(
         validation_alias=pyd.AliasChoices("from", "from_table"),
         serialization_alias="from",
+        description='Root table name (not Table.Column) — e.g. "Customer".',
     )
-    select: List[SelectItem] = pyd.Field(min_length=1)
+    select: List[SelectItem] = pyd.Field(
+        min_length=1,
+        description=(
+            'Each item is EITHER a bare "Table.Column" string, OR an object: '
+            "{fn, col, as} for an aggregate, or {col, granularity, as} for a date_bucket."
+        ),
+    )
     joins: List[JoinSpec] = pyd.Field(default_factory=list)
-    where: Optional[WhereNode] = None
-    group_by: List[str] = pyd.Field(default_factory=list)
-    having: List[Predicate] = pyd.Field(default_factory=list)
-    order_by: List[OrderBySpec] = pyd.Field(default_factory=list)
+    where: Optional[WhereNode] = pyd.Field(
+        default=None,
+        description=(
+            "A single Predicate ({col, op, value}), or a WhereGroup for boolean "
+            "nesting — see each type's own fields for its exact shape."
+        ),
+    )
+    group_by: List[str] = pyd.Field(
+        default_factory=list,
+        description="Table.Column refs, or a date_bucket select item's alias.",
+    )
+    having: List[Predicate] = pyd.Field(
+        default_factory=list,
+        description=(
+            "Predicates evaluated after group_by/aggregation, same shape as a where "
+            "Predicate. The list is AND-combined (no nested and/or here) — for OR logic "
+            "on grouped values, filter in `where` before grouping instead."
+        ),
+    )
+    order_by: List[OrderBySpec] = pyd.Field(
+        default_factory=list,
+        description="May reference a Table.Column or a select item's alias.",
+    )
     limit: Optional[int] = pyd.Field(default=None, ge=1)
     offset: int = pyd.Field(default=0, ge=0)
-    top_n: Optional[TopNSpec] = None
+    top_n: Optional[TopNSpec] = pyd.Field(
+        default=None,
+        description="Top/bottom N rows per partition — see TopNSpec's own fields.",
+    )
     intent: Optional[str] = pyd.Field(
         default=None,
         description=(

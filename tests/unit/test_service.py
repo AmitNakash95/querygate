@@ -27,6 +27,7 @@ from querygate.execution import service as svc
 from querygate.execution.admission import QueueMode
 from querygate.execution.cost_estimation import QueryCostEstimate
 from querygate.execution.service import (
+    ExplainResult,
     StructuredQueryResult,
     StructuredQueryService,
     TableDescription,
@@ -547,6 +548,33 @@ async def test_execute_many_partial_failure():
 
 
 @pytest.mark.asyncio
+async def test_explain_many_partial_failure():
+    """Mirrors test_execute_many_partial_failure — TODO.md item 61's
+    run_structured_queries(mode="explain") tool relies on the same per-item
+    error isolation as execute_many, not a top-level failure.
+    """
+    query_ok = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    query_bad = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    ok_result = ExplainResult(
+        sql="SELECT customers.id FROM customers", tables=["customers"], limit=5
+    )
+
+    service = StructuredQueryService(connection_id="demo")
+    with patch.object(
+        service,
+        "explain",
+        AsyncMock(side_effect=[ok_result, QueryValidationError("boom")]),
+    ):
+        results = await service.explain_many([query_ok, query_bad])
+
+    assert len(results) == 2
+    assert results[0].error is None
+    assert results[0].sql == "SELECT customers.id FROM customers"
+    assert results[1].error == "boom"
+    assert results[1].sql is None
+
+
+@pytest.mark.asyncio
 async def test_explain_does_not_open_a_db_session():
     table = _company_table()
     query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
@@ -773,7 +801,7 @@ async def test_describe_table_merges_catalog_metadata():
         patch.object(svc, "get_engine", return_value=MagicMock()),
         patch.object(svc, "get_table_schema", AsyncMock(return_value=table)),
     ):
-        desc = await service.describe_table("customers")
+        desc = await service.describe_table("customers", verbose_provenance=True)
 
     assert desc.catalog.description == "One row per customer."
     assert desc.catalog.sensitivity == "internal"
@@ -786,6 +814,60 @@ async def test_describe_table_merges_catalog_metadata():
     id_col = next(c for c in desc.columns if c.name == "id")
     assert id_col.catalog is None  # no catalog entry for this column
     assert "private-admin-subject" not in json.dumps(desc.model_dump(mode="json"))
+
+
+@pytest.mark.asyncio
+async def test_describe_table_catalog_provenance_is_compact_by_default():
+    """TODO.md item 64: full CatalogCitation (entry_id, source_evidence,
+    catalog_version, schema_fingerprint, ...) is opt-in via
+    verbose_provenance — the default response carries only status +
+    precedence, smaller but still enough to judge trust.
+    """
+    table = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("email", sa.String(200)),
+    )
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "connections": {
+                    "demo": {
+                        "tables": {
+                            "customers": {
+                                "description": "One row per customer.",
+                                "columns": {"email": {"description": "Email"}},
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+    service = StructuredQueryService(connection_id="demo")
+    with (
+        patch.object(svc, "get_engine", return_value=MagicMock()),
+        patch.object(svc, "get_table_schema", AsyncMock(return_value=table)),
+    ):
+        compact = await service.describe_table("customers")
+        verbose = await service.describe_table("customers", verbose_provenance=True)
+
+    assert compact.catalog.provenance.model_dump() == {
+        "status": "verified",
+        "precedence": verbose.catalog.provenance.precedence,
+    }
+    assert not hasattr(compact.catalog.provenance, "entry_id")
+    assert verbose.catalog.provenance.entry_id
+    assert verbose.catalog.provenance.status == "verified"
+    email_col = next(c for c in compact.columns if c.name == "email")
+    assert email_col.catalog.provenance.model_dump() == {
+        "status": "verified",
+        "precedence": email_col.catalog.provenance.precedence,
+    }
+    compact_bytes = len(json.dumps(compact.model_dump(mode="json")))
+    verbose_bytes = len(json.dumps(verbose.model_dump(mode="json")))
+    assert compact_bytes < verbose_bytes
 
 
 @pytest.mark.asyncio

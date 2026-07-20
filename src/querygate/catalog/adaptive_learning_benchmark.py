@@ -196,7 +196,12 @@ def _task_finds_relationship(
     store: CatalogStore, *, connection_id: str, policy: Policy, task: BenchmarkTask
 ) -> tuple[bool, Optional[CatalogFreshness]]:
     response = search_catalog(
-        store, connection_id=connection_id, policy=policy, query=task.query, max_results=20
+        store,
+        connection_id=connection_id,
+        policy=policy,
+        query=task.query,
+        max_results=20,
+        verbose_provenance=True,  # returns hit.citation.freshness below
     )
     for hit in response.results:
         if _relationship_matches(

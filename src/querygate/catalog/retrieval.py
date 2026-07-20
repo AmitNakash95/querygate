@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 from enum import StrEnum
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Union
 
 import pydantic as pyd
 
@@ -57,6 +57,21 @@ class CatalogCitation(pyd.BaseModel):
     model_config = pyd.ConfigDict(extra="forbid")
 
 
+class CompactCatalogCitation(pyd.BaseModel):
+    """Minimal provenance signal (TODO.md item 64): enough for a caller to
+    judge trust — is this entry published/verified, and at what precedence —
+    without the full evidence list and fingerprint payload. Returned by
+    default; the full `CatalogCitation` is opt-in via `verbose_provenance`.
+    Tracking, precedence resolution, and storage are unchanged — this is a
+    response-shaping projection over an already-built `CatalogCitation`.
+    """
+
+    status: CatalogEntryStatus
+    precedence: int
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
 class CatalogEvidenceCitation(pyd.BaseModel):
     """Public evidence citation: kind plus a stable digest, never the raw pointer."""
 
@@ -76,7 +91,7 @@ class CatalogSearchHit(pyd.BaseModel):
     aliases: list[str] = pyd.Field(default_factory=list)
     sensitivity: Optional[SensitivityClass] = None
     score: int = pyd.Field(ge=1)
-    citation: CatalogCitation
+    citation: Union[CatalogCitation, CompactCatalogCitation]
 
     model_config = pyd.ConfigDict(extra="forbid")
 
@@ -204,6 +219,20 @@ def catalog_citation(
     )
 
 
+def compact_citation(citation: CatalogCitation) -> CompactCatalogCitation:
+    return CompactCatalogCitation(status=citation.status, precedence=citation.precedence)
+
+
+def resolve_citation(
+    provenance: CatalogEntryProvenance,
+    current_schema_fingerprint: Optional[str],
+    *,
+    verbose: bool,
+) -> Union[CatalogCitation, CompactCatalogCitation]:
+    citation = catalog_citation(provenance, current_schema_fingerprint)
+    return citation if verbose else compact_citation(citation)
+
+
 def _searchable_status(provenance: CatalogEntryProvenance) -> bool:
     return agent_visible(provenance)
 
@@ -214,6 +243,8 @@ def _table_hit(
     entry: TableCatalogEntry,
     current_schema_fingerprint: Optional[str],
     hidden_identifier_tokens: set[str],
+    *,
+    verbose_provenance: bool,
 ) -> Optional[CatalogSearchHit]:
     if not _searchable_status(entry.provenance):
         return None
@@ -236,7 +267,9 @@ def _table_hit(
         aliases=aliases,
         sensitivity=entry.sensitivity,
         score=score,
-        citation=catalog_citation(entry.provenance, current_schema_fingerprint),
+        citation=resolve_citation(
+            entry.provenance, current_schema_fingerprint, verbose=verbose_provenance
+        ),
     )
 
 
@@ -247,6 +280,8 @@ def _column_hit(
     entry: ColumnCatalogEntry,
     current_schema_fingerprint: Optional[str],
     hidden_identifier_tokens: set[str],
+    *,
+    verbose_provenance: bool,
 ) -> Optional[CatalogSearchHit]:
     if not _searchable_status(entry.provenance):
         return None
@@ -267,7 +302,9 @@ def _column_hit(
         aliases=aliases,
         sensitivity=entry.sensitivity,
         score=score,
-        citation=catalog_citation(entry.provenance, current_schema_fingerprint),
+        citation=resolve_citation(
+            entry.provenance, current_schema_fingerprint, verbose=verbose_provenance
+        ),
     )
 
 
@@ -277,6 +314,8 @@ def _relationship_hit(
     relationship: RelationshipHint,
     current_schema_fingerprint: Optional[str],
     hidden_identifier_tokens: set[str],
+    *,
+    verbose_provenance: bool,
 ) -> Optional[CatalogSearchHit]:
     if not _searchable_status(relationship.provenance):
         return None
@@ -301,7 +340,9 @@ def _relationship_hit(
         to_column=relationship.to_column,
         description=description,
         score=score,
-        citation=catalog_citation(relationship.provenance, current_schema_fingerprint),
+        citation=resolve_citation(
+            relationship.provenance, current_schema_fingerprint, verbose=verbose_provenance
+        ),
     )
 
 
@@ -313,8 +354,16 @@ def search_catalog(
     query: str,
     max_results: int = 5,
     max_response_bytes: int = 16_384,
+    verbose_provenance: bool = False,
 ) -> CatalogSearchResponse:
-    """Search only the already-authorized view of one connection's catalog."""
+    """Search only the already-authorized view of one connection's catalog.
+
+    Each hit's `citation` is a compact `CompactCatalogCitation` (status +
+    precedence only) by default; pass `verbose_provenance=True` for the full
+    `CatalogCitation` (entry id, evidence, confidence, version, fingerprint,
+    freshness). See `CompactCatalogCitation` — this changes response
+    shaping only, never provenance tracking or precedence resolution.
+    """
 
     query = query.strip()
     if not query:
@@ -364,6 +413,7 @@ def search_catalog(
             table_entry,
             current_fingerprint,
             hidden_identifier_tokens,
+            verbose_provenance=verbose_provenance,
         )
         if table_hit is not None:
             candidates.append(table_hit)
@@ -377,6 +427,7 @@ def search_catalog(
                 column_entry,
                 current_fingerprint,
                 hidden_identifier_tokens,
+                verbose_provenance=verbose_provenance,
             )
             if column_hit is not None:
                 candidates.append(column_hit)
@@ -387,6 +438,7 @@ def search_catalog(
                 relationship,
                 current_fingerprint,
                 hidden_identifier_tokens,
+                verbose_provenance=verbose_provenance,
             )
             if relationship_hit is not None:
                 candidates.append(relationship_hit)

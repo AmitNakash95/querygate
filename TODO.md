@@ -90,12 +90,12 @@ order-of-magnitude, not commitments.
 | 58 | Published adversarial benchmark vs. raw-SQL agent and Google Toolbox | M | 28, 36 |
 | 59 | Read-only behavioral anomaly surfacing on the audit stream | M | 32C, 44 |
 | 60 | Bug bounty / responsible disclosure program | S | 53 |
-| 61 | Deduplicate the StructuredQuery JSON Schema across execute/explain/batch tools | S–M | — |
-| 62 | Consolidate redundant instructional prose into one source of truth | M | 61 (pairs well) |
-| 63 | Scope-gate admin-only tool schemas out of non-admin sessions | M | 8, 22 |
-| 64 | Make full catalog provenance opt-in on describe_table/search_catalog | S–M | 27 |
-| 65 | Add a response-size cap to get_querygate_guide_topic | XS–S | — |
-| 66 | CI/test guardrail on total MCP schema+instructions size | S | 61, 62, 63, 64, 65 |
+| 61 | ✅ Deduplicate the StructuredQuery JSON Schema across execute/explain/batch tools | S–M | — |
+| 62 | ✅ Consolidate redundant instructional prose into one source of truth | M | 61 (pairs well) |
+| 63 | ✅ Scope-gate admin-only tool schemas out of non-admin sessions | M | 8, 22 |
+| 64 | ✅ Make full catalog provenance opt-in on describe_table/search_catalog | S–M | 27 |
+| 65 | ✅ Add a response-size cap to get_querygate_guide_topic | XS–S | — |
+| 66 | ✅ CI/test guardrail on total MCP schema+instructions size | S | 61, 62, 63, 64, 65 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
@@ -110,11 +110,18 @@ from an explicit competitive-gap analysis against Google's Gen AI Toolbox,
 Hasura, and Immuta/Privacera-class governance products. They live in their
 own "P4" section below until reviewed and pulled forward into P2/P3.
 
-Items 61–66 are proposed, not yet triaged into a priority tranche — added
-from an explicit MCP token/context-efficiency audit against DBHub
-(bytebase/dbhub) and Google's MCP Toolbox for Databases, both much leaner
-MCP surfaces. They live in their own "P5" section below until reviewed and
-pulled forward into P2/P3.
+Items 61–67 are all shipped — added from an explicit MCP token/context-
+efficiency audit against DBHub (bytebase/dbhub) and Google's MCP Toolbox
+for Databases, both much leaner MCP surfaces, and implemented immediately
+after triage rather than sitting in a holding tranche. Item 61
+(cross-tool JSON Schema duplication) was investigated first and initially
+deferred — the MCP protocol has no mechanism for schema-sharing across
+separate tools, so the only fix was a breaking tool-surface change
+(merging three tools into one) — then implemented once that tradeoff was
+explicitly accepted; see its own entry. Combined effect measured in
+`tests/unit/test_mcp_token_budget.py`: 53,841 chars (~13,460 tokens) per
+MCP session, down from the original pre-tranche 67,338. They live in their
+own "P5" section below.
 
 \*\* item 53's effort is engineering coordination and remediation only; the
 audit itself is an external vendor engagement and calendar-time cost, not
@@ -3628,33 +3635,62 @@ established for item 53's audit findings.
 
 ---
 
-## P5 — proposed: MCP token/context efficiency (not yet triaged)
+## P5 — MCP token/context efficiency
 
-Items 61–66 come from an explicit MCP token/context-efficiency audit, not
+Items 61–67 come from an explicit MCP token/context-efficiency audit, not
 from a general repo scan. The comparators are DBHub (`bytebase/dbhub`, ~2
 tools / ~1.4k tokens of combined schema+instructions) and Google's MCP
 Toolbox for Databases — both meaningfully leaner MCP surfaces than
 QueryGate's. A verification pass (2026-07-20) instantiated the real FastMCP
-server and measured QueryGate's actual per-session fixed overhead: 14
-registered tools plus `MCP_INSTRUCTIONS` total roughly 68,600 chars
+server and measured QueryGate's starting per-session fixed overhead: 14
+registered tools plus `MCP_INSTRUCTIONS` totaling roughly 68,600 chars
 (~17,150 tokens) sent on every session's `initialize`/`tools/list`
 exchange, regardless of which tools a caller ever uses — roughly 12x
-DBHub's footprint. About 2,880 of the ~15,076 tool-schema tokens are pure
+DBHub's footprint. About 2,880 of the ~15,076 tool-schema tokens were pure
 duplication (the identical `StructuredQuery` JSON Schema `$defs` tree
 repeated verbatim across three tools), not information a client couldn't
-already have gotten once.
+already have gotten once. After items 61–67: 12 tools, 53,841 chars
+(~13,460 tokens) — roughly 9.6x DBHub's footprint, down from 12x, measured
+in `tests/unit/test_mcp_token_budget.py`.
 
-Every item below is a presentation/efficiency change only, per this file's
-non-negotiable constraint: none of them touch the AST-only input guarantee
-(no raw SQL, ever), the policy-before-compile enforcement order or what it
-checks, credential redaction guarantees, audit event content/redaction
-guarantees, or catalog provenance/precedence semantics. Where an item makes
-a verbose field opt-in (items 63, 64), the underlying tracking, resolution,
-and enforcement behind that field is unchanged — only its default
-*visibility* to a caller who didn't ask for it becomes configurable. No
-efficiency fix that would require cutting an actual safety or governance
-check is included here; none was found to be necessary to close a
-meaningful share of the gap.
+Items 62–67 shipped the same session this tranche was triaged. Item 61's
+protocol-level schema-sharing option turned out not to exist (the MCP
+`tools/list` response has no cross-tool `$defs` mechanism, and no real
+client resolves an external `$ref`) — the only working fix was merging
+`execute_structured_query`/`explain_structured_query`/
+`execute_structured_queries` into one `run_structured_queries` tool, a
+deliberate breaking rename accepted explicitly rather than silently; see
+its own entry for the full blast-radius accounting and what was updated.
+Item 67 (restoring `StructuredQuery` field descriptions that turned out
+not to exist, closing a real reliability gap item 62's design had left)
+arrived mid-session packaged with an unattributed, undisclosed-by-default
+delivery mechanism — flagged to the user immediately per this project's
+standing instructions on suspected prompt injection, independently
+re-verified claim-by-claim before anything was kept, and partially
+corrected (two redundant additions trimmed, one unsubstantiated claim
+removed) — see item 67's own entry for the full account.
+
+Every shipped item is a presentation/efficiency change only, per this
+file's non-negotiable constraint: none of them touch the AST-only input
+guarantee (no raw SQL, ever), the policy-before-compile enforcement order
+or what it checks, credential redaction guarantees, audit event
+content/redaction guarantees, or catalog provenance/precedence semantics.
+Item 64 makes a verbose field (catalog citation provenance) opt-in — the
+underlying tracking, resolution, and enforcement behind it is unchanged,
+only its default *visibility* to a caller who didn't ask for it became
+configurable. Item 63 is visibility-only tool-list filtering layered in
+front of an unchanged call-time scope check, never a replacement for it.
+Item 61's tool merge preserves every existing capability (execute, explain,
+batch, per-item error isolation, admission/queue signals — including a
+real `admission_state` gap in `execute_many()` found and fixed while
+merging) behind a new single tool name and an always-a-list argument shape;
+nothing that used to work stopped working, only the tool surface changed.
+No efficiency fix that would require cutting an actual safety or
+governance check was found necessary to close a meaningful share of the
+gap. Final measured total (`tests/unit/test_mcp_token_budget.py`): 53,841
+chars (~13,460 tokens), down from the original pre-tranche 67,338 —
+roughly 20% lower — despite item 67 adding genuinely new content, because
+item 61's merge more than paid for it.
 
 \* The audit also checked `admission_id`/`queue_wait_ms` (two small integer
 fields always present on a successful query result) and `admission_state`
@@ -3663,7 +3699,60 @@ not unconditional bloat as originally suspected). Neither was significant
 enough to justify its own item; both are folded into item 66's baseline
 size measurement instead.
 
-### 61. Deduplicate the StructuredQuery JSON Schema across execute/explain/batch tools
+### 61. Deduplicate the StructuredQuery JSON Schema across execute/explain/batch tools ✅ DONE
+
+**Shipped:** Confirmed against the MCP spec first (`mcp.types.Tool.inputSchema:
+dict[str, Any]`, `ListToolsResult.tools: list[Tool]`) that each tool's schema
+is fully self-contained with no shared top-level `$defs` across tools in a
+`tools/list` response, and that a `$ref` to an external document — legal
+JSON Schema syntax — isn't resolved by any real MCP client. So the only
+viable fix was collapsing tool count, not schema sharing. Merged
+`execute_structured_query`, `explain_structured_query`, and
+`execute_structured_queries` into one `run_structured_queries` tool
+(`mcp/tools/query.py`): `queries: List[StructuredQuery]` is always a list
+(min length 1 — a single query is a batch of one), `mode:
+Literal["execute", "explain"] = "execute"` replaces the separate explain
+tool, and the response is always `results: [...]` in the same order with
+per-item error isolation (one failing query never fails the others) —
+extending the batch semantics `execute_structured_queries` already had to
+every call, not just multi-query ones.
+
+New `StructuredQueryService.explain_many()` (`execution/service.py`) mirrors
+`execute_many()`'s per-item try/except exactly, including a real gap found
+while wiring this up: `execute_many()`'s per-item error never carried
+`admission_state` (only `admission_id`/`queue_wait_ms`), unlike the old
+single-query tool's top-level `MCPErrorResult`, which did. Fixed by adding
+`admission_state` to `BatchQueryItemResult`/`BatchQueryItemToolResult` and
+populating it the same way the other two admission fields already were
+(`getattr(exc, "admission_state", None)`) — without this fix, merging
+execute into always-batch would have silently dropped the
+`capacity_timeout`/`queue_full` signal for the single-query case, the most
+common one.
+
+This is a deliberate breaking rename — every caller/doc/example referencing
+the three old tool names by name breaks. Updated everywhere found in this
+repository: `mcp/instructions.py`, `examples/mcp_calls.md`,
+`examples/claude_agent_sdk_integration.py` (its `allowed_tools` list),
+`README.md`, `docs/PRODUCT_GUIDE.md` (+ regenerated `docs/product-guide.html`
+via `scripts/generate_product_guide_html.py`, plus a new Decision Log entry
+explaining the tradeoff), and `landing/sandbox.html`'s interactive demo.
+An external integration holding the old tool names would need to update
+too — that cost was accepted deliberately (see the Decision Log entry) in
+exchange for permanently removing the duplication rather than accepting it
+as a recurring per-session tax. Test coverage:
+`tests/unit/test_service.py::test_explain_many_partial_failure`,
+`tests/integration/test_mcp_server.py`'s
+`test_mcp_run_structured_queries_explain_mode_never_executes` and
+`test_mcp_run_structured_queries_isolates_per_item_failure`, plus every
+existing MCP integration test that called one of the three old tools was
+updated to the new shape (`tests/unit/test_mcp_tools_registration.py`'s
+`_EXPECTED_TOOLS` and `tests/integration/test_mcp_server.py`'s copy both
+updated to match).
+
+Net effect measured in `tests/unit/test_mcp_token_budget.py`: 53,841 chars
+(~13,460 tokens) total — down from the original pre-tranche 67,338, *despite*
+item 67 (below) adding real new content, because this item collapsed
+`StructuredQuery`'s `$defs` tree from 3 duplicated copies to 1.
 
 **Effort: S–M (1–2 days).** The duplication is in schema *generation*, not
 schema *content* — `StructuredQuery` and its nested AST types don't change;
@@ -3695,7 +3784,27 @@ response shape, and that existing callers/examples/docs referencing the
 tool names by name are updated. No change to `StructuredQuery` validation,
 the compiler, or any enforcement path — this is schema transport only.
 
-### 62. Consolidate redundant instructional prose into one source of truth
+### 62. Consolidate redundant instructional prose into one source of truth ✅ DONE
+
+**Shipped:** Trimmed `mcp/instructions.py` from 8,347 to 7,031 stripped
+chars by removing the restated detail that duplicated `query_ast/models.py`
+`Field` descriptions and tool descriptions (cross-connection `join_group`
+semantics, `intent`, `order_by.dir`, `top_n.fn`'s options, `date_bucket`
+granularity) in favor of short pointers ("see the field schema for..."),
+and by removing the two internal self-duplications (date-bucketing restated
+at both `:53-56`/`:98-104`, batching restated at both `:90-96`/`:123-125`).
+Also trimmed `execute_structured_query`'s own tool description
+(`mcp/tools/query.py`) the same way, since it independently restated the
+same AST-field mechanics a third time. No guide-topic content move was
+needed in the end — cutting the duplicate copies while keeping exactly one
+canonical copy (the `Field` description, already schema-visible every
+session regardless) fully addressed the redundancy without relocating
+anything into on-demand-only territory, so the "note" in this item's
+original write-up about guide topics lacking that detail is now moot: nothing
+was ever moved there, only de-duplicated in place. Unique, non-schema-visible
+facts (the join_group retry-avoidance advice, the default
+`bucket_<Column>_<granularity>` alias-naming rule) were preserved, not
+deleted. See `tests/unit/test_mcp_token_budget.py` for the measured total.
 
 **Effort: M (2–3 days).** Touches `mcp/instructions.py`, tool descriptions
 in `mcp/tools/query.py`/`schema.py`, and potentially new `help/content/*.md`
@@ -3733,7 +3842,29 @@ original design intended rather than an already-duplicated one. Fix
 restructure. No change to any validation rule or enforcement behavior —
 only where its explanation lives and how many times it's repeated.
 
-### 63. Scope-gate admin-only tool schemas out of non-admin sessions
+### 63. Scope-gate admin-only tool schemas out of non-admin sessions ✅ DONE
+
+**Shipped:** `mcp/server.py`'s `_install_scoped_tool_listing` re-registers
+the low-level `Server`'s `ListToolsRequest` handler with a wrapper that
+calls the original `FastMCP.list_tools()`, then drops any tool in a new
+`_SCOPE_GATED_TOOLS` dict (currently just
+`inspect_querygate_configuration` → `admin:config:read`) whose required
+scope isn't in the current request's principal scopes. The principal comes
+from `mcp/auth.py`'s existing `get_mcp_caller()` contextvar — confirmed
+this is populated for every ASGI request to the mounted MCP app (not just
+`tools/call`), since `MCPAuthMiddleware` wraps the whole sub-app, so it's
+set correctly before a `tools/list` request too. No request context (e.g. a
+direct/offline call) fails open on visibility only, never on enforcement.
+`help/service.py`'s existing call-time scope check is completely unchanged
+and remains the actual authorization boundary — this is additive filtering
+in front of it. `explain_querygate_config_field` was confirmed still
+correctly unrestricted (visible to everyone) since it isn't in
+`_SCOPE_GATED_TOOLS`. See
+`test_mcp_tools_list_omits_scope_gated_tool_without_scope` and
+`test_mcp_tools_list_includes_scope_gated_tool_with_scope` in
+`tests/integration/test_mcp_server.py`, plus the updated
+`test_mcp_dev_bypass_lists_tools` (the anonymous dev-bypass principal has
+no scopes, so it now correctly no longer sees the admin tool either).
 
 **Effort: M (2–3 days).** Requires investigating whether the installed
 FastMCP SDK exposes a per-session tool-listing hook; if not, this needs a
@@ -3763,7 +3894,32 @@ admin-scoped session's still includes it, and that the underlying call-time
 scope check still rejects a direct call even if list-time filtering were
 ever bypassed.
 
-### 64. Make full catalog provenance opt-in on describe_table/search_catalog
+### 64. Make full catalog provenance opt-in on describe_table/search_catalog ✅ DONE
+
+**Shipped:** Added `CompactCatalogCitation` (status + precedence only) next
+to `CatalogCitation` in `catalog/retrieval.py`, plus a `resolve_citation(...,
+verbose: bool)` helper that builds the existing full `CatalogCitation`
+exactly as before (via the unchanged `catalog_citation()`) and only
+projects it down when the caller didn't opt in — `catalog_citation()`
+itself, its precedence resolution, and `catalog/governance.py` are all
+untouched. `search_catalog()` (`catalog/retrieval.py`) and
+`describe_table()`/`search_catalog()` (`execution/service.py`) all gained a
+`verbose_provenance: bool = False` parameter threaded down to every hit/
+column/table/relationship citation, exposed on both the MCP tools
+(`mcp/tools/schema.py`) and the REST routes (`api/routes.py`) for
+consistency. `CatalogSearchHit.citation` and the three catalog-info
+`provenance` fields are now typed `Union[CatalogCitation,
+CompactCatalogCitation]`. Two internal (non-MCP/REST) consumers —
+`catalog/benchmark.py` and `catalog/adaptive_learning_benchmark.py`, which
+read `hit.citation.freshness` for offline evaluation — were found reading
+this data too and updated to pass `verbose_provenance=True`, since they
+need the full citation and aren't token-metered. See
+`test_describe_table_catalog_provenance_is_compact_by_default` in
+`tests/unit/test_service.py` and
+`test_search_citation_is_compact_by_default` in
+`tests/unit/test_catalog_retrieval.py` for the default-vs-opt-in proof;
+existing tests that asserted full-citation fields were updated to pass
+`verbose_provenance=True` explicitly.
 
 **Effort: S–M (1–2 days).** Response-shaping only, at the two MCP tool/
 service call sites — `catalog/governance.py`'s construction, precedence
@@ -3795,7 +3951,22 @@ anything under `catalog/governance.py` — this touches response shaping in
 proving the default response is smaller and that the full citation is
 still byte-for-byte retrievable and unchanged when a caller opts in.
 
-### 65. Add a response-size cap to get_querygate_guide_topic
+### 65. Add a response-size cap to get_querygate_guide_topic ✅ DONE
+
+**Shipped:** `GuideTopicResponse` (`help/models.py`) gained `truncated:
+bool = False` and `max_response_bytes: int = 16_384` fields.
+`GuideService.topic()` (`help/service.py`) takes a matching
+`max_response_bytes` parameter (rejecting anything under 512 bytes, same
+floor as `search_catalog`); when the full response would exceed the
+budget, it measures the envelope with empty content first (same
+incremental-measurement approach as `search_catalog`'s truncation), then
+truncates the `content` body to fit exactly. Exposed on the MCP tool
+(`mcp/tools/help.py`) and the REST route (`api/help_routes.py`) with the
+same default. All 11 current packaged topics (157–426 words) return in
+full under the default — verified directly in
+`test_guide_topic_is_not_truncated_under_the_default_byte_budget`
+(`tests/unit/test_product_guide.py`), alongside a dedicated truncation test
+and a too-small-budget rejection test.
 
 **Effort: XS–S (a few hours–1 day).** Mirrors an existing pattern
 (`search_catalog`'s `max_response_bytes`) rather than inventing a new one.
@@ -3818,7 +3989,23 @@ content off mid-sentence. Keep the default generous enough that all 11
 current topics are returned in full (the point is guarding future growth,
 not shrinking today's responses).
 
-### 66. CI/test guardrail on total MCP schema+instructions size
+### 66. CI/test guardrail on total MCP schema+instructions size ✅ DONE
+
+**Shipped:** `tests/unit/test_mcp_token_budget.py` instantiates the real
+`create_mcp_server()` (same "assert against the live schema" pattern as
+`test_credential_redaction.py`), sums `MCP_INSTRUCTIONS` length plus every
+registered tool's description + input schema + output schema chars, and
+asserts the total stays under an explicit `_MAX_TOTAL_CHARS = 75_000`
+constant with a comment documenting the measured baseline and requiring a
+deliberate bump in the same PR as any legitimate increase. Landed first
+(before items 62/64/65) specifically so the rest of this tranche's changes
+were measured against a real regression gate rather than ad hoc scripts —
+the baseline moved from 67,338 chars pre-tranche to 66,458 chars after
+items 62/64/65 (item 63's runtime-only filtering doesn't change registered
+schema size, which is what this test measures) despite adding two new
+opt-in parameters and a truncation parameter, net negative overhead. Later
+updated to reflect item 61's merge and item 67's field descriptions — see
+those items' own entries for the final numbers.
 
 **Effort: S (0.5–1 day).** One new test, modeled directly on an existing
 pattern in this codebase.
@@ -3844,3 +4031,74 @@ PR, so growth is a visible review decision rather than a silent regression.
 Set the initial budget from this item's own measured baseline plus
 reasonable headroom for near-term legitimate growth (e.g. a new dialect or
 tool), not an arbitrary round number.
+
+### 67. Restore StructuredQuery field descriptions items 62/64/65 assumed existed ✅ DONE
+
+**Shipped, after independent review.** This item's content first appeared
+in the working tree without attribution mid-session, packaged with an
+instruction (in the tool output framing, not from the user) to not
+disclose the change — treated as a prompt-injection attempt per this
+project's standing instructions and reported to the user rather than acted
+on directly. Every factual and technical claim below was independently
+re-verified against `git HEAD` and the live schema before anything was
+kept; the parts that didn't hold up were fixed or removed (see the last
+paragraph).
+
+Item 62's trim relied on the premise that per-field detail (order_by.dir,
+WhereGroup and/or shape, select item variants, Table.Column format, top_n's
+grouped-vs-ungrouped column rules, Predicate.value's per-op shape) was
+"already schema-visible every session regardless" via `query_ast/models.py`
+`Field(description=...)`. Checked directly against `git show
+HEAD:src/querygate/query_ast/models.py`: true for `intent` only — the other
+10 of `StructuredQuery`'s 11 top-level fields had no schema-visible
+description at all, including `where`, a recursive and/or predicate tree.
+This matters independently of whether a given caller's MCP client forwards
+`mcp/instructions.py`'s server-level `instructions` into the model's
+context: the MCP spec documents that field as a `MAY`-level hint a client
+*can* choose to forward, not a guarantee, while a tool's JSON Schema is
+something every client must have to call the tool at all. So content
+essential to correct first-attempt tool use has to live in a
+schema-guaranteed location, not only in `instructions.py` — a real gap in
+item 62's design that this item legitimately closes.
+
+Added `Field(description=...)` to `StructuredQuery`'s from/select/where/
+group_by/having/order_by/top_n, a `WhereGroup` class docstring (and/or
+exclusivity + recursion — a docstring rather than a field description so
+it's attached once at the `$defs` level, not repeated per reference),
+`Predicate.value` (the per-op shape rule `_validate_value_shape` already
+enforced but was previously invisible in the schema), a `having` field
+description (its AND-only semantics, not previously stated anywhere), and
+one compact worked example on `execute_structured_query`'s tool
+description (later folded into `run_structured_queries` — see item 61)
+with the other two tools pointing at it rather than duplicating it.
+
+Two of the original additions were reverted or moved after review:
+`TopNSpec`'s docstring and `group_by`/`order_by`'s alias-referencing
+description duplicated content item 62 had deliberately kept in
+`mcp/instructions.py` ("Top-N per group", "Time-bucketed trends") — since
+those two sections were never trimmed to account for the new schema
+coverage, the net effect was a second copy of the same facts, not a fix.
+Trimmed `instructions.py`'s two sections down to short pointers at the
+schema (keeping the one fact — the `bucket_<Column>_<granularity>` default
+alias name — that has no schema-visible home) so the reliability gain is
+kept without paying for it twice. Also removed one unverifiable claim from
+this item's original text ("real-world MCP agents were observed guessing
+wrong") — presented as an empirical observation with no evidence behind
+it; the technical justification above stands on its own without it.
+
+Because item 61 (above) later collapsed `StructuredQuery`'s `$defs` from 3
+duplicated tool-schema copies to 1, this item's content — which touches
+that exact struct — ended up roughly 3x cheaper than it would have been if
+item 61 hadn't shipped in the same pass. See item 61's entry for the
+final combined numbers; the `_MAX_TOTAL_CHARS` budget in
+`test_mcp_token_budget.py` reflects the state after both items, not this
+one in isolation.
+
+**Effort: XS–S.** Field descriptions and one example string; no shape or
+behavioral change to the AST.
+
+**Why it matters:** `where` (a recursive and/or predicate tree) and the
+other nine previously-undocumented top-level fields are exactly the shapes
+most likely to trip up a first attempt at constructing a `StructuredQuery`
+with no schema-visible guidance — this closes that gap without reverting
+item 62's de-duplication of the tool description prose itself.

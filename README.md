@@ -243,10 +243,11 @@ This is Postgres-only for now. MSSQL's estimated-plan equivalent
 statement the way Postgres's `EXPLAIN` can — it needs its own dedicated
 connection lifecycle — so setting these fields on an MSSQL connection is
 accepted but has no effect (see `execution/cost_estimation.py` and TODO.md
-item 26). `explain_structured_query` (MCP) and `POST .../query/explain`
-(REST) never open a database session at all (by design — it stays a pure,
-always-cheap compile preview), so this check runs only on
-`execute_structured_query`/`POST .../query`, not `explain`.
+item 26). `run_structured_queries(mode="explain")` (MCP) and
+`POST .../query/explain` (REST) never open a database session at all (by
+design — it stays a pure, always-cheap compile preview), so this check
+runs only on `mode="execute"` (the default)/`POST .../query`, not
+`mode="explain"`.
 
 Because Postgres's planner-cost units aren't portable across schemas or
 hardware, a threshold copied from documentation is a guess, not a
@@ -725,8 +726,8 @@ bounded to 2000 entries per catalog file.
 }
 ```
 
-`POST /api/v1/demo/query` with that body — or `execute_structured_query`
-over MCP with `connection: "demo"` and the same `query` object — runs it.
+`POST /api/v1/demo/query` with that body — or `run_structured_queries` over
+MCP with `connection: "demo"` and `queries: [<that object>]` — runs it.
 Supported: multi-column select, inner/left joins (including cross-connection
 joins within a policy `join_group`), nested and/or `where`, `group_by` /
 `having`, `order_by`, `limit`/`offset`, aggregate and date-bucket select
@@ -740,15 +741,17 @@ items, and `top_n` per-partition ranking (top-N-per-group).
   "id": 1,
   "method": "tools/call",
   "params": {
-    "name": "execute_structured_query",
+    "name": "run_structured_queries",
     "arguments": {
       "connection": "demo",
-      "query": {
-        "from": "orders",
-        "select": ["orders.id", "orders.status", "orders.total_amount"],
-        "where": { "col": "orders.status", "op": "eq", "value": "completed" },
-        "limit": 10
-      }
+      "queries": [
+        {
+          "from": "orders",
+          "select": ["orders.id", "orders.status", "orders.total_amount"],
+          "where": { "col": "orders.status", "op": "eq", "value": "completed" },
+          "limit": 10
+        }
+      ]
     }
   }
 }
@@ -756,9 +759,9 @@ items, and `top_n` per-partition ranking (top-N-per-group).
 
 POST this to `/mcp` (Streamable HTTP) with `MCP_ENABLED=true`. Tools:
 `list_connections`, `list_tables`, `describe_table`, `search_catalog`,
-`explain_structured_query`, `execute_structured_query`,
-`execute_structured_queries` (batch), plus the product-guide and access tools
-described below. More examples in
+`run_structured_queries` (execute, dry-run/explain via `mode="explain"`,
+and single-or-batch — `queries` is always a list — all in one tool), plus
+the product-guide and access tools described below. More examples in
 [`examples/mcp_calls.md`](examples/mcp_calls.md).
 
 ## Agent-visible capacity waiting
@@ -767,8 +770,8 @@ described below. More examples in
 many queries run at once per connection and how long an over-cap request
 waits for a slot before it's rejected. `queue_mode` and `wait_timeout_seconds`
 (both optional, request-level — REST query params on `POST .../query` and
-`.../query/batch`; extra MCP tool arguments on `execute_structured_query`/
-`execute_structured_queries`) make that existing wait caller-tunable:
+`.../query/batch`; extra MCP tool arguments on `run_structured_queries`,
+ignored in `mode="explain"`) make that existing wait caller-tunable:
 
 - `queue_mode=fail_fast` — reject immediately if the connection is at
   capacity, no waiting at all.

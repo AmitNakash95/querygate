@@ -4,7 +4,7 @@ Note: deliberately does NOT use `from __future__ import annotations` — see
 mcp/tools/connections.py for why.
 """
 
-from typing import Annotated, Any, Dict, List, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -42,23 +42,6 @@ def _service(connection: str) -> StructuredQueryService:
     return StructuredQueryService(connection_id=connection, principal=caller, surface="mcp")
 
 
-class StructuredQueryToolResult(BaseModel):
-    rows: List[Dict[str, Any]]
-    row_count: int
-    truncated: bool
-    limit: int
-    offset: int
-    admission_id: Optional[str] = None
-    queue_wait_ms: Optional[int] = None
-
-
-class ExplainToolResult(BaseModel):
-    sql: str
-    params: Optional[str] = None
-    tables: List[str]
-    limit: int
-
-
 class BatchQueryItemToolResult(BaseModel):
     rows: Optional[List[Dict[str, Any]]] = None
     row_count: Optional[int] = None
@@ -66,6 +49,7 @@ class BatchQueryItemToolResult(BaseModel):
     limit: Optional[int] = None
     offset: Optional[int] = None
     admission_id: Optional[str] = None
+    admission_state: Optional[str] = None
     queue_wait_ms: Optional[int] = None
     error: Optional[str] = None
 
@@ -74,103 +58,77 @@ class BatchQueryToolResult(BaseModel):
     results: List[BatchQueryItemToolResult]
 
 
-@mcp_server.tool(
-    description=(
-        "Execute a read-only structured query against the given connection. Supports "
-        "multi-column select, inner/left joins, nested and/or filters (eq, neq, lt, lte, "
-        "gt, gte, in, not_in, like, between, is_null, is_not_null), group_by, having, "
-        "order_by, limit/offset, aggregate and date_bucket select items, and top_n "
-        "per-partition ranking. Raw SQL is not accepted — every identifier is validated "
-        "against the live reflected schema and the active policy before compilation. "
-        "A join may target a DIFFERENT connection than the primary `connection` argument "
-        "via the join's own `connection` field — only when both connections share the "
-        "same policy join_group; otherwise run one call per connection and merge results "
-        "yourself. "
-        "order_by is a list of {col, dir} objects — dir must be the exact string 'asc' or "
-        "'desc'; any other spelling is rejected with a validation error rather than being "
-        "silently ignored. "
-        "Select items may be a Table.Column string, an aggregate "
-        "({fn: count|sum|avg|min|max, col, as}), or a date_bucket "
-        "({col, granularity: day|week|month|quarter|year, as}) for time-bucketed trends. "
-        "Optional top_n ({partition_by, order_by, n, fn: row_number|rank|dense_rank}) ranks "
-        "rows within each partition and keeps only the top n — use for 'top N per group' "
-        "asks. Row cap is tiered by policy: a lower limit for plain row selects, a higher "
-        "one when the query has group_by or an aggregate select item. "
-        "Always set intent to a short plain-language summary of the user's ask — logged "
-        "with the compiled SQL for audit, never returned to the caller. "
-        "Use explain_structured_query first to sanity-check an expensive-looking query. "
-        "Queries run under a server-side execution timeout and a per-connection "
-        "concurrency cap — a 'too many concurrent queries' error (VALIDATION, with "
-        "admission_state 'capacity_timeout') means wait briefly and retry once, not retry "
-        "in a tight loop. Use queue_mode='fail_fast' to reject immediately instead of "
-        "waiting for capacity, or wait_timeout_seconds to request a shorter wait than the "
-        "deployment's default (it can only be shortened, never lengthened). Every call "
-        "returns an admission_id and queue_wait_ms for correlating with logs/metrics. Use "
-        "list_tables and describe_table to discover valid identifiers first."
-    )
-)
-@safe_mcp_tool
-async def execute_structured_query(
-    connection: Annotated[str, _CONNECTION_FIELD],
-    query: Annotated[StructuredQuery, Field(description="Structured query AST")],
-    queue_mode: Annotated[Optional[QueueMode], _QUEUE_MODE_FIELD] = None,
-    wait_timeout_seconds: Annotated[Optional[float], _WAIT_TIMEOUT_FIELD] = None,
-) -> Union[StructuredQueryToolResult, MCPErrorResult]:
-    service = _service(connection)
-    result = await service.execute(
-        query, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
-    )
-    return StructuredQueryToolResult(**result.model_dump())
+class BatchExplainItemToolResult(BaseModel):
+    sql: Optional[str] = None
+    params: Optional[str] = None
+    tables: Optional[List[str]] = None
+    limit: Optional[int] = None
+    error: Optional[str] = None
+
+
+class BatchExplainToolResult(BaseModel):
+    results: List[BatchExplainItemToolResult]
 
 
 @mcp_server.tool(
     description=(
-        "Validate and compile a StructuredQuery WITHOUT executing it — returns the SQL "
-        "text (and bind params, if literal-binding wasn't possible) that "
-        "execute_structured_query would run. Use this before running an "
-        "expensive-looking query (wide joins, weak filters) to sanity-check it, or to "
-        "debug a validation error without spending a real DB round trip."
+        "Run or dry-run one or more read-only StructuredQuery objects against one "
+        "connection — always pass queries as a list, even for a single query; results "
+        "are always a list in the same order, one item per query, and one failing query "
+        "never fails the others (check each item's 'error' field). mode='execute' "
+        "(default) runs each query for real and returns rows. mode='explain' validates "
+        "and compiles WITHOUT executing — returns the SQL (and bind params) that would "
+        "run, with no database round trip and no concurrency-limiter interaction; use it "
+        "before running an expensive-looking query (wide joins, weak filters) or to debug "
+        "a validation error. Supports multi-column select, inner/left joins, nested "
+        "and/or filters (eq, neq, lt, lte, gt, gte, in, not_in, like, between, is_null, "
+        "is_not_null), group_by, having, order_by, limit/offset, aggregate and date_bucket "
+        "select items, and top_n per-partition ranking — see the StructuredQuery field "
+        "schema for each field's exact contract (order_by.dir, a join's cross-connection "
+        "connection field, date_bucket granularity, top_n's fn options, intent, etc). Raw "
+        "SQL is not accepted — every identifier is validated against the live reflected "
+        "schema and the active policy before compilation. A cross-connection analytical "
+        "ask spanning multiple connections still needs one call per connection. Row cap "
+        "is tiered by policy: a lower limit for plain row selects, a higher one when a "
+        "query has group_by or an aggregate select item. mode='execute' queries run under "
+        "a server-side execution timeout and a per-connection concurrency cap — a 'too "
+        "many concurrent queries' error means wait briefly and retry once, not in a tight "
+        "loop; queue_mode/wait_timeout_seconds below control the wait (ignored in "
+        "mode='explain'). Use list_tables/describe_table to discover valid identifiers "
+        "first. Example query (region totals, paid or high-priority orders over $100, "
+        "top region first): "
+        '{"from": "Order", "select": ["Customer.Region", '
+        '{"fn": "sum", "col": "Order.Total", "as": "total"}], '
+        '"joins": [{"table": "Customer", "on": ["Order.CustomerId", "Customer.Id"]}], '
+        '"where": {"and": [{"col": "Order.Status", "op": "eq", "value": "paid"}, '
+        '{"or": [{"col": "Order.Total", "op": "gte", "value": 100}, '
+        '{"col": "Order.Priority", "op": "eq", "value": "high"}]}]}, '
+        '"group_by": ["Customer.Region"], '
+        '"order_by": [{"col": "total", "dir": "desc"}], "limit": 10}'
     )
 )
 @safe_mcp_tool
-async def explain_structured_query(
-    connection: Annotated[str, _CONNECTION_FIELD],
-    query: Annotated[
-        StructuredQuery,
-        Field(description="Structured query AST to validate and compile"),
-    ],
-) -> Union[ExplainToolResult, MCPErrorResult]:
-    service = _service(connection)
-    result = await service.explain(query)
-    return ExplainToolResult(**result.model_dump())
-
-
-@mcp_server.tool(
-    description=(
-        "Run several StructuredQuery objects against one connection in a single MCP call "
-        "(still one DB round trip per query, but a single tool call) — subject to a "
-        "per-connection max batch size set by policy. Prefer this over several separate "
-        "execute_structured_query calls when you already know you need multiple "
-        "vertical-slice queries. A cross-connection analytical ask spanning multiple "
-        "connections still needs one call per connection — this batches multiple queries "
-        "within a single connection, it does not span connections. "
-        "One failing query in the batch does not fail the others — check each result's "
-        "'error' field."
-    )
-)
-@safe_mcp_tool
-async def execute_structured_queries(
+async def run_structured_queries(
     connection: Annotated[str, _CONNECTION_FIELD],
     queries: Annotated[
         List[StructuredQuery],
-        Field(description="List of structured query ASTs to run in one call"),
+        Field(min_length=1, description="One or more structured query ASTs to run, in order."),
     ],
+    mode: Annotated[
+        Literal["execute", "explain"],
+        Field(description="'execute' runs queries for real; 'explain' validates/compiles only."),
+    ] = "execute",
     queue_mode: Annotated[Optional[QueueMode], _QUEUE_MODE_FIELD] = None,
     wait_timeout_seconds: Annotated[Optional[float], _WAIT_TIMEOUT_FIELD] = None,
-) -> Union[BatchQueryToolResult, MCPErrorResult]:
+) -> Union[BatchQueryToolResult, BatchExplainToolResult, MCPErrorResult]:
     caller = get_mcp_caller()
     validate_batch_size(len(queries), get_policy(connection, principal=caller))
     service = _service(connection)
+    if mode == "explain":
+        explain_results = await service.explain_many(queries)
+        return BatchExplainToolResult(
+            results=[BatchExplainItemToolResult(**r.model_dump()) for r in explain_results]
+        )
     results = await service.execute_many(
         queries, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
     )
