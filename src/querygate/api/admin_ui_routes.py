@@ -18,6 +18,7 @@ import pydantic as pyd
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from querygate.api._errors import require_scope
 from querygate.audit.events import PersistableEvent
 from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
@@ -140,14 +141,6 @@ class AuditEventPage(pyd.BaseModel):
     next_cursor: Optional[int] = pyd.Field(default=None, ge=0)
 
     model_config = pyd.ConfigDict(extra="forbid")
-
-
-def _require_scope(principal: Principal, scope: str) -> None:
-    if scope not in principal.scopes:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Missing required scope: {scope!r}",
-        )
 
 
 def _require_any_scope(principal: Principal, *scopes: str) -> None:
@@ -380,7 +373,7 @@ def build_admin_ui_router(
         request: PolicyRenderRequest,
         principal: Principal = Depends(get_principal),
     ):
-        _require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
         document = _policy_document(
             yaml.safe_dump(request.document, sort_keys=False, allow_unicode=True)
         )
@@ -393,7 +386,7 @@ def build_admin_ui_router(
         request: PolicyTestRequest,
         principal: Principal = Depends(get_principal),
     ):
-        _require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
         return _test_policy(request)
 
     @router.get("/audit/events", response_model=AuditEventPage)
@@ -407,7 +400,7 @@ def build_admin_ui_router(
         action: Optional[str] = Query(default=None, max_length=64),
         principal: Principal = Depends(get_principal),
     ):
-        _require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
         if event_type is not None and event_type not in _AUDIT_EVENT_TYPES:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

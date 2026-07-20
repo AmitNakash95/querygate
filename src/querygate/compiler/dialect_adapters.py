@@ -42,7 +42,10 @@ class DialectAdapter(ABC):
         nulls: Optional[Literal["first", "last"]],
     ) -> List[Any]:
         """One or more ORDER BY terms implementing `direction` (+ `nulls`
-        placement if set) for a single column/expression.
+        placement if set) for a single column/expression. A dialect whose SQL
+        has no NULLS FIRST/LAST equivalent rejects a set `nulls` with
+        QueryValidationError rather than synthesizing placement structure the
+        AST never asked for (see MSSQLDialectAdapter; TODO.md item 74).
         """
 
     @abstractmethod
@@ -116,15 +119,24 @@ class MSSQLDialectAdapter(DialectAdapter):
         if nulls is None:
             return [expr]
         # T-SQL has NO "NULLS FIRST/LAST" syntax at all (unlike Postgres/
-        # SQLite) — SQLAlchemy's mssql dialect will still silently *compile*
-        # `.nulls_last()` into that literal clause, which is a runtime syntax
-        # error against a real server. Emulate with a leading 0/1 CASE sort
-        # bucket instead: nulls land in one bucket, non-nulls in the other,
-        # sorted ascending, then the real column direction breaks ties.
-        null_bucket = 0 if nulls == "first" else 1
-        other_bucket = 1 - null_bucket
-        bucket = sa.case((col_expr.is_(None), null_bucket), else_=other_bucket)
-        return [bucket.asc(), expr]
+        # SQLite), and SQLAlchemy's mssql dialect will still silently *compile*
+        # an emitted `.nulls_last()` into that literal clause — a runtime
+        # syntax error against a real server. Per CLAUDE.md's "expose
+        # primitives, don't spoon-feed the agent" philosophy this is a hard
+        # rejection, decided the same way as array_agg/percentile_cont below
+        # (Decision Log, docs/PRODUCT_GUIDE.md; TODO.md item 74). QueryGate
+        # previously injected an extra leading 0/1 CASE sort bucket the AST
+        # never asked for to fake the placement — exactly the "engine solves
+        # the agent's composition problem" shortcut that section rules out. An
+        # agent that wants null placement on MSSQL expresses it directly with
+        # primitives QueryGate already exposes: a CaseSelectItem 0/1 "is null"
+        # bucket plus a leading OrderBySpec on it — the same workaround a human
+        # T-SQL author writes by hand.
+        raise QueryValidationError(
+            "nulls first/last ordering is not supported on MSSQL: T-SQL has no "
+            "NULLS FIRST/LAST syntax. Order by a CASE 0/1 'is null' bucket first "
+            "to place nulls explicitly."
+        )
 
     def stat_fn(self, name: Literal["stddev", "variance"]) -> Callable[..., Any]:
         return {"stddev": sa.func.STDEV, "variance": sa.func.VAR}[name]
