@@ -17,7 +17,7 @@ from querygate.core.auth import Principal
 from querygate.core.exceptions import QueryValidationError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
-    AggregateSelectItem,
+    ArrayAggSelectItem,
     CaseSelectItem,
     ColArg,
     DateBucketSelectItem,
@@ -27,6 +27,7 @@ from querygate.query_ast.models import (
     StringAggSelectItem,
     StructuredQuery,
     WhereNode,
+    _AGGREGATE_SELECT_ITEM_TYPES,
 )
 from querygate.validation.schema_validation import (
     effective_name_map,
@@ -215,6 +216,15 @@ def _build_select_columns(
             col = _column(tables, item.col)
             expr = get_dialect_adapter(dialect).string_agg(col, item.delimiter)
             alias = item.alias or f"string_agg_{col.name}"
+            labeled = expr.label(alias)
+            columns.append(labeled)
+            alias_map[alias] = labeled
+            continue
+
+        if isinstance(item, ArrayAggSelectItem):
+            col = _column(tables, item.col)
+            expr = get_dialect_adapter(dialect).array_agg(col)
+            alias = item.alias or f"array_agg_{col.name}"
             labeled = expr.label(alias)
             columns.append(labeled)
             alias_map[alias] = labeled
@@ -418,7 +428,7 @@ def compile_structured_query(
         stmt = stmt.having(_apply_predicate(target, pred, tables))
 
     is_aggregate = bool(query.group_by) or any(
-        isinstance(i, (AggregateSelectItem, StringAggSelectItem)) for i in query.select
+        isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in query.select
     )
 
     allow_table_fallback = True

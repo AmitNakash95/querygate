@@ -54,6 +54,11 @@ class DialectAdapter(ABC):
         """Concatenate col_expr's grouped values into one delimiter-
         separated string, e.g. STRING_AGG(Customer.Email, ', ')."""
 
+    @abstractmethod
+    def array_agg(self, col_expr: Any) -> Any:
+        """Collect col_expr's grouped values into a real array,
+        e.g. ARRAY_AGG(OrderItem.Sku)."""
+
 
 def _direction_expr(col_expr: Any, direction: Literal["asc", "desc"]) -> Any:
     return col_expr.asc() if direction == "asc" else col_expr.desc()
@@ -80,6 +85,9 @@ class PostgresDialectAdapter(DialectAdapter):
 
     def string_agg(self, col_expr: Any, delimiter: str) -> Any:
         return sa.func.string_agg(col_expr, delimiter)
+
+    def array_agg(self, col_expr: Any) -> Any:
+        return sa.func.array_agg(col_expr)
 
 
 class MSSQLDialectAdapter(DialectAdapter):
@@ -117,6 +125,18 @@ class MSSQLDialectAdapter(DialectAdapter):
         # the call, matching the AST-level bound (query_ast/models.py's
         # StringAggSelectItem docstring).
         return sa.func.STRING_AGG(col_expr, delimiter)
+
+    def array_agg(self, col_expr: Any) -> Any:
+        # Unlike string_agg, there is no MSSQL equivalent to raise a real
+        # gap for: T-SQL has no array/collection type at all, so there is
+        # nothing to render into — not a missing-function gap that some
+        # other T-SQL idiom could stand in for. Per CLAUDE.md's engine
+        # philosophy, this stays a hard rejection rather than an emulation
+        # (e.g. faking an array with STRING_AGG-as-CSV or a JSON trick).
+        raise QueryValidationError(
+            "array_agg is not supported on MSSQL: T-SQL has no array/collection "
+            "type to hold the result"
+        )
 
 
 class SQLiteDialectAdapter(DialectAdapter):
@@ -170,6 +190,17 @@ class SQLiteDialectAdapter(DialectAdapter):
         # assertions. Concatenation order is implementation-defined here
         # (as it is on every dialect without ORDER BY-in-call support).
         return sa.func.group_concat(col_expr, delimiter)
+
+    def array_agg(self, col_expr: Any) -> Any:
+        # Unlike string_agg's group_concat, there is no genuine SQLite
+        # equivalent here: json_group_array() returns a JSON-encoded
+        # string, not a real array value — mapping it would be exactly the
+        # forced-parity emulation CLAUDE.md's engine philosophy rules out,
+        # not a lucky shape match. Raise the same way MSSQL does.
+        raise QueryValidationError(
+            "array_agg is not supported on the internal SQLite test/example dialect: "
+            "json_group_array() returns a JSON string, not a real array"
+        )
 
 
 _ADAPTERS: Dict[str, DialectAdapter] = {
