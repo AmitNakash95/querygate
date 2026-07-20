@@ -139,6 +139,48 @@ class TestStructuredQueryModels:
                 joins=[JoinSpec(table="customers", alias="o", on=["o.customer_id", "o.id"])],
             )
 
+    def test_not_group_accepted(self):
+        g = WhereGroup(not_terms=Predicate(col="orders.status", op="eq", value="x"))
+        assert g.not_terms is not None
+        assert g.and_terms is None
+        assert g.or_terms is None
+
+    def test_not_plus_and_both_set_rejected(self):
+        with pytest.raises(ValueError, match="exactly one"):
+            WhereGroup(
+                and_terms=[Predicate(col="orders.status", op="eq", value="x")],
+                not_terms=Predicate(col="orders.id", op="eq", value=1),
+            )
+
+    def test_where_group_with_none_set_rejected(self):
+        with pytest.raises(ValueError, match="exactly one"):
+            WhereGroup()
+
+    def test_value_col_accepted_for_comparison_ops(self):
+        p = Predicate(col="orders.price", op="gt", value_col="orders.cost")
+        assert p.value_col == "orders.cost"
+        assert p.value is None
+
+    def test_value_col_and_value_both_set_rejected(self):
+        with pytest.raises(ValueError, match="both"):
+            Predicate(col="orders.price", op="gt", value=5, value_col="orders.cost")
+
+    def test_value_col_rejected_for_in_op(self):
+        with pytest.raises(ValueError, match="value_col is not valid"):
+            Predicate(col="orders.status", op="in", value_col="orders.other_status")
+
+    def test_value_col_rejected_for_like_op(self):
+        with pytest.raises(ValueError, match="value_col is not valid"):
+            Predicate(col="orders.name", op="like", value_col="orders.other_name")
+
+    def test_value_col_rejected_with_is_null(self):
+        with pytest.raises(ValueError, match="must not include"):
+            Predicate(col="orders.status", op="is_null", value_col="orders.other")
+
+    def test_neither_value_nor_value_col_rejected(self):
+        with pytest.raises(ValueError, match="requires a value"):
+            Predicate(col="orders.status", op="eq")
+
     def test_plain_join_without_alias_still_works(self):
         """Ordinary (non-self) joins remain unaffected — no alias required."""
         q = StructuredQuery(
