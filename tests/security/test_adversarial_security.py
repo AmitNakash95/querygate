@@ -1460,3 +1460,86 @@ async def test_usage_evidence_from_one_connection_never_contributes_to_another(
             )
         ).json()
         assert demo2_after["review_status"] == "pending"
+
+
+def test_query_template_cannot_exceed_policy():
+    """A curated query template (TODO.md item 48) is just a stored
+    StructuredQuery — binding a parameter into it produces an ordinary query
+    that is still policy-validated, so a denied column it references is rejected
+    exactly as for an ad-hoc query. A parameter gets no exemption from policy.
+    """
+    from querygate.templates.binding import bind_template
+    from querygate.templates.models import QueryTemplate
+
+    template = QueryTemplate.model_validate(
+        {
+            "id": "leak_via_template",
+            "connection": "demo",
+            "parameters": [{"name": "value", "type": "string"}],
+            "query": {
+                "from": "customers",
+                "select": ["customers.id"],
+                # A denied column used only as a filter — the classic bypass the
+                # column-level policy must still catch on the *bound* query.
+                "where": {"col": "customers.email", "op": "eq", "value": {"param": "value"}},
+            },
+        }
+    )
+    bound = bind_template(template, {"value": "target@example.com"})
+    policy = Policy(denied_columns={"customers": ["email"]})
+
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(bound, policy, connection_id="demo")
+
+
+def test_query_template_parameter_value_is_bound_data_not_executable_sql():
+    """A query-template parameter (item 48) is bound as data, not concatenated
+    into SQL — a classic injection payload in a parameter value ends up a bound
+    parameter, exactly as for an ad-hoc predicate value, because the bound
+    template compiles through the same SQLAlchemy Core path."""
+    from querygate.templates.binding import bind_template
+    from querygate.templates.models import QueryTemplate
+
+    attack = "x' OR 1=1; DROP TABLE customers; --"
+    template = QueryTemplate.model_validate(
+        {
+            "id": "lookup_by_email",
+            "connection": "demo",
+            "parameters": [{"name": "email", "type": "string"}],
+            "query": {
+                "from": "customers",
+                "select": ["customers.id"],
+                "where": {"col": "customers.email", "op": "eq", "value": {"param": "email"}},
+            },
+        }
+    )
+    query = bind_template(template, {"email": attack})
+    stmt, _limit = compile_structured_query(
+        query, {"customers": _customers_table()}, Policy(), dialect="postgresql"
+    )
+    compiled = stmt.compile()
+    assert attack not in str(compiled)
+    assert attack in compiled.params.values()
+
+
+def test_query_template_denied_table_rejected():
+    """A template whose bound query targets a denied table is rejected by policy
+    exactly as an ad-hoc query is — the template path is not a policy bypass."""
+    from querygate.templates.binding import bind_template
+    from querygate.templates.models import QueryTemplate
+
+    template = QueryTemplate.model_validate(
+        {
+            "id": "read_employees",
+            "connection": "demo",
+            "parameters": [{"name": "v", "type": "string"}],
+            "query": {
+                "from": "employees",
+                "select": ["employees.id"],
+                "where": {"col": "employees.ssn", "op": "eq", "value": {"param": "v"}},
+            },
+        }
+    )
+    bound = bind_template(template, {"v": "000-00-0000"})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(bound, Policy(denied_tables=["employees"]), connection_id="demo")

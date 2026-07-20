@@ -823,9 +823,79 @@ items, and `top_n` per-partition ranking (top-N-per-group).
 POST this to `/mcp` (Streamable HTTP) with `MCP_ENABLED=true`. Tools:
 `list_connections`, `list_tables`, `describe_table`, `search_catalog`,
 `run_structured_queries` (execute, dry-run/explain via `mode="explain"`,
-and single-or-batch — `queries` is always a list — all in one tool), plus
+and single-or-batch — `queries` is always a list — all in one tool),
+`list_query_templates`/`run_query_template` (curated templates, below), plus
 the product-guide and access tools described below. More examples in
 [`examples/mcp_calls.md`](examples/mcp_calls.md).
+
+## Curated query templates (optional)
+
+Instead of (or alongside) letting an agent compose an arbitrary
+`StructuredQuery` within policy caps, an admin can pre-define a fixed set of
+**named, parameterized queries** — `get_orders_for_customer(customer_id)`,
+`top_products(category, n)` — and agents invoke one of *those* by name with
+typed parameters. This shrinks the effective surface to a finite, reviewed set
+of query shapes ("these are the twelve things this agent may ask") and gives
+non-technical stakeholders something concrete to sign off on. It is **additive
+to QueryGate's core guarantee, not a new one**: a template is just a stored
+`StructuredQuery` AST — there is still no raw-SQL field anywhere.
+
+Templates are file-configured (`TEMPLATES_FILE`, unset by default — a
+deployment with no templates behaves identically), hot-reloadable via the same
+`POST /api/v1/admin/reload-config` endpoint, and validated by
+`querygate-validate-config --template-file`:
+
+```yaml
+# examples/templates.example.yaml
+templates:
+  - id: orders_for_customer
+    connection: demo
+    description: A customer's most recent orders, newest first.
+    parameters:
+      - {name: customer_id, type: integer, required: true}
+      - {name: limit, type: integer, required: false, default: 10, min: 1, max: 100}
+    query:
+      from: orders
+      select: [orders.id, orders.status, orders.total_amount]
+      where: {col: orders.customer_id, op: eq, value: {param: customer_id}}
+      order_by: [{col: orders.id, dir: desc}]
+      limit: {param: limit}
+```
+
+`query` is a normal `StructuredQuery` skeleton with `{param: <name>}`
+placeholders in value positions. At invocation the caller's parameters are
+type/constraint-checked against the slots, bound in, and the **resulting**
+`StructuredQuery` runs through the unchanged validate → policy → schema →
+compile → execute pipeline — so a bound template inherits every policy cap,
+allow/deny list, and mandatory row filter an ad-hoc query does, and a parameter
+gets **no exemption** from policy.
+
+```bash
+# List the templates this principal may invoke (filtered to visible connections)
+curl -H "Authorization: Bearer $KEY" $HOST/api/v1/query-templates
+
+# Invoke one with typed parameters
+curl -X POST -H "Authorization: Bearer $KEY" \
+  $HOST/api/v1/query-templates/orders_for_customer/run \
+  -d '{"parameters": {"customer_id": 42, "limit": 5}}'
+```
+
+The MCP equivalents are `list_query_templates` and
+`run_query_template(template_id, parameters)`, and the browser control plane at
+`/admin/` has a read-only **Query templates** panel that lists the callable
+templates and their parameter signatures (filtered by the same per-connection
+visibility, no special scope required). `querygate-validate-config
+--template-file` structurally validates each template's query skeleton at
+deploy time — a malformed template is caught before deploy, not at first
+invocation. A template is visible/invocable
+only if its target connection is visible to the caller (same rule as
+`list_connections`); an unknown template and one on a hidden connection return
+the same non-enumerating not-found. Invocations are audited distinctly
+(`operation="run_query_template"`, the template id, and the parameter *names* —
+never parameter values, which are stripped from the query shape like any
+literal). The governed create/edit/approve/publish/rollback workflow for
+templates (reusing the catalog-governance state machine) is a later phase; for
+now templates are declarative config, exactly as safe as `policy.yaml`.
 
 ## Agent-visible capacity waiting
 

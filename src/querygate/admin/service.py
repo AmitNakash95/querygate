@@ -683,6 +683,10 @@ async def apply(
         connections_file=paths.connections,
         policy_file=paths.policy,
         catalog_file=paths.catalog,
+        # Templates (item 48) aren't part of config-governance versions in
+        # phase 1 — keep the deployment's static template file across a
+        # version apply/rollback rather than clobbering it to empty.
+        template_file=cfg.template_file,
         resolver_registry=build_secret_resolver_registry(cfg),
     )
     updated_version = store.mark_active(version_id, actor=principal.subject)

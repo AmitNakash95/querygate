@@ -21,12 +21,14 @@ from querygate.core.logging import get_logger
 from querygate.execution.concurrency import SEMAPHORES
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.secrets.resolvers import SecretResolverRegistry
+from querygate.templates.loader import TemplateStore, set_template_store
 
 
 class ReloadResult(pyd.BaseModel):
     connection_ids: List[str]
     policy_connection_overrides: List[str]
     catalog_connection_ids: List[str]
+    template_ids: List[str]
     disposed_connections: List[str]
 
 
@@ -35,6 +37,7 @@ async def reload_config(
     connections_file: str,
     policy_file: str,
     catalog_file: Optional[str] = None,
+    template_file: Optional[str] = None,
     resolver_registry: Optional[SecretResolverRegistry] = None,
 ) -> ReloadResult:
     """Serialize a full config swap against in-process catalog refresh."""
@@ -44,6 +47,7 @@ async def reload_config(
             connections_file=connections_file,
             policy_file=policy_file,
             catalog_file=catalog_file,
+            template_file=template_file,
             resolver_registry=resolver_registry,
         )
 
@@ -53,6 +57,7 @@ async def _reload_config_unlocked(
     connections_file: str,
     policy_file: str,
     catalog_file: Optional[str] = None,
+    template_file: Optional[str] = None,
     resolver_registry: Optional[SecretResolverRegistry] = None,
 ) -> ReloadResult:
     """Atomically swap in a freshly loaded registry + policy store.
@@ -91,10 +96,14 @@ async def _reload_config_unlocked(
     new_catalog_store = (
         CatalogStore.from_file(catalog_file) if catalog_file else CatalogStore.empty()
     )
+    new_template_store = (
+        TemplateStore.from_file(template_file) if template_file else TemplateStore.empty()
+    )
 
     set_registry(new_registry)
     set_policy_store(new_policy_store)
     set_catalog_store(new_catalog_store)
+    set_template_store(new_template_store)
 
     disposed = await _dispose_stale_engines(old_registry, new_registry)
     for connection_id in new_registry.all_ids():
@@ -109,6 +118,7 @@ async def _reload_config_unlocked(
         connection_ids=new_registry.all_ids(),
         policy_connection_overrides=new_policy_store.override_connection_ids(),
         catalog_connection_ids=new_catalog_store.connection_ids(),
+        template_ids=new_template_store.template_ids(),
         disposed_connections=disposed,
     )
 
