@@ -186,7 +186,8 @@ def _build_select_columns(
                 raise QueryValidationError("Only count(*) is allowed as a star aggregate")
             expr = fn()
         else:
-            expr = fn(_column(tables, item.col))
+            arg = _column(tables, item.col)
+            expr = fn(arg.distinct()) if item.distinct else fn(arg)
 
         alias = item.alias
         if not alias:
@@ -313,6 +314,8 @@ def compile_structured_query(
     select_cols, alias_map = _build_select_columns(query, tables, dialect)
     base = _table_by_name(tables, query.from_table)
     stmt = sa.select(*select_cols).select_from(base)
+    if query.distinct:
+        stmt = stmt.distinct()
 
     for join in query.joins:
         right = _table_by_name(tables, join.table)
