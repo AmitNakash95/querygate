@@ -4187,3 +4187,33 @@ other nine previously-undocumented top-level fields are exactly the shapes
 most likely to trip up a first attempt at constructing a `StructuredQuery`
 with no schema-visible guidance — this closes that gap without reverting
 item 62's de-duplication of the tool description prose itself.
+
+### 68. WHERE/HAVING resource-exhaustion guardrail caps ✅ DONE
+
+**Problem.** `Policy` already caps join count, select width, WHERE nesting
+*depth*, and group-by width (`validation/policy_validation.py`), but nothing
+capped the *total number* of predicates in a WHERE tree or the *size* of a
+single `in`/`not_in` predicate's value list. A single-level
+`{"or": [10,000 predicates]}` has `where_depth() == 2` and passed every
+existing check while still compiling into a huge boolean expression; an
+`in` predicate with an arbitrarily long value list had no cap at all.
+
+**Shipped.** Added `Policy.max_where_predicates` (default 100) and
+`Policy.max_in_list_size` (default 1000) to `policy/models.py`.
+`validate_policy` in `validation/policy_validation.py` now: counts total
+`Predicate` leaves in `where` via a new `_iter_where_predicates` walker and
+rejects over-cap counts; separately checks `having`'s flat list length
+against the same cap; and checks every `in`/`not_in` predicate's value list
+(across both `where` and `having`) against `max_in_list_size`. Documented
+both fields in `examples/policy.example.yaml` next to the other complexity
+caps. Added boundary tests (at-cap passes, one-over-cap rejects) to
+`tests/unit/test_policy_boundaries.py` following that file's existing
+parametrized pattern, plus targeted rejection tests in
+`test_policy_validation.py`.
+
+**Effort: XS.** Validation-only; no AST or compiler change.
+
+**Why it matters:** closes the last un-capped resource-exhaustion surface
+in the WHERE/HAVING shape — every other structural dimension of a query
+(joins, select width, nesting depth, group-by width, top_n) already had an
+explicit ceiling.

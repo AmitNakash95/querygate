@@ -822,7 +822,8 @@ already gates its own action buttons per scope.
 
 A `Policy` bundles everything that bounds a query against one connection:
 table/column allow and deny lists, per-query complexity caps (`max_joins`,
-`max_select_columns`, `max_where_depth`, `max_group_by`, `max_top_n` and
+`max_select_columns`, `max_where_depth`, `max_where_predicates` and
+`max_in_list_size` for WHERE/HAVING shape, `max_group_by`, `max_top_n` and
 `max_partition_by` for windowed queries, `max_limit`/`max_limit_aggregate`
 for row counts, `max_response_bytes` for response size), execution
 guardrails (`timeout_seconds`, `max_concurrency`, queue-depth caps),
