@@ -371,6 +371,30 @@ always happens regardless of where a request failed is the last one: audit
 logging wraps the whole pipeline so every attempt — allowed or denied — is
 recorded.
 
+### Query templates — a curated entry point, not a second pipeline
+
+Query templates (TODO.md item 48) let an admin publish named, parameterized
+`StructuredQuery` skeletons — e.g. `orders_for_customer` with a typed
+`customer_id` parameter — that an agent can invoke by id (`GET
+/api/v1/query-templates`, `POST /api/v1/query-templates/{id}/run`, or the
+`list_query_templates`/`run_query_template` MCP tools) instead of assembling
+the whole AST itself. This is deliberately *not* a bypass: a template is a
+stored `StructuredQuery`, never raw SQL, and binding one first validates the
+supplied parameters against their declared types/bounds, substitutes them as
+bound values (not string-spliced SQL), then hands the resulting
+`StructuredQuery` to the exact same `StructuredQueryService.execute()`
+described above. Every stage — policy caps, table/column allow-deny, schema
+existence, compilation, concurrency admission, session guardrails, audit —
+runs unchanged. Templated execution is therefore a strict *superset* of
+enforcement: it adds parameter validation on top of the normal pipeline and
+never removes a check. The audit event records `operation:
+"run_query_template"` with the `template_id` and the parameter *names* bound
+(`template_param_shape`), never their values. Templates are file-configured
+(`TEMPLATES_FILE`) and hot-reloadable like connections/policy/catalog, and a
+template referencing a denied table or an over-cap shape is rejected the same
+way an ad-hoc query would be — at deploy-time validation and again at run
+time.
+
 ## Security Model
 
 The [Core Request Pipeline](#the-core-request-pipeline) section explains what
@@ -1994,6 +2018,25 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-20 — Query templates bind through the unchanged
+  `execute()` pipeline as a strict enforcement superset, rather than a
+  separate templated-execution path (TODO.md item 48).** `bind_template`
+  validates the supplied parameters against their declared types/bounds,
+  substitutes them as bound values, and produces an ordinary
+  `StructuredQuery` that goes through the exact same
+  `StructuredQueryService.execute()` — policy caps, allow-deny, schema
+  existence, compilation, concurrency, audit — as an ad-hoc query. **Why
+  accepted:** the safety-critical property is that no invocation shape can
+  ever see *fewer* checks than an ad-hoc query. Reusing `execute()`
+  verbatim makes that structural (templates can only *add* parameter
+  validation on top), instead of asking a reviewer to prove a parallel
+  code path re-implemented every guardrail identically. Templates are
+  file-configured (`TEMPLATES_FILE`) and hot-reloadable like the other
+  config stores, and deliberately expose no query skeleton to agents —
+  only the id, description, and typed parameter signature — so a template
+  is a curation/ergonomics layer, never a new trust boundary. Governed
+  edit/approve/publish of templates through the admin control plane is a
+  recorded follow-up, not part of item 48.
 - **2026-07-20 — `array_agg` rejects outright on MSSQL and SQLite instead
   of emulating an array (TODO.md item 81).** Postgres's `DialectAdapter.
   array_agg` is a real implementation (`array_agg(...)`, a native
