@@ -35,6 +35,9 @@ default:
   max_where_predicates: 100
   max_in_list_size: 1000
 
+  # Caps the number of WHEN branches in a single CASE select item.
+  max_case_branches: 10
+
   timeout_seconds: 30
   max_concurrency: 8
   concurrency_wait_seconds: 10

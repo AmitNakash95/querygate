@@ -6,9 +6,11 @@ import pytest
 
 from querygate.query_ast.models import (
     AggregateSelectItem,
+    CaseSelectItem,
     JoinSpec,
     OrderBySpec,
     Predicate,
+    ScalarFunctionSelectItem,
     StructuredQuery,
     WhereGroup,
 )
@@ -180,6 +182,72 @@ class TestStructuredQueryModels:
     def test_neither_value_nor_value_col_rejected(self):
         with pytest.raises(ValueError, match="requires a value"):
             Predicate(col="orders.status", op="eq")
+
+    def test_lower_requires_exactly_one_column_arg(self):
+        with pytest.raises(ValueError, match="exactly one column argument"):
+            ScalarFunctionSelectItem(fn="lower", args=[{"literal": "x"}])
+
+    def test_lower_rejects_extra_args(self):
+        with pytest.raises(ValueError, match="exactly one column argument"):
+            ScalarFunctionSelectItem(
+                fn="lower", args=[{"col": "orders.status"}, {"col": "orders.id"}]
+            )
+
+    def test_coalesce_requires_at_least_two_args(self):
+        with pytest.raises(ValueError, match="at least 2 arguments"):
+            ScalarFunctionSelectItem(fn="coalesce", args=[{"col": "orders.discount"}])
+
+    def test_coalesce_with_two_args_accepted(self):
+        item = ScalarFunctionSelectItem(
+            fn="coalesce", args=[{"col": "orders.discount"}, {"literal": 0}]
+        )
+        assert len(item.args) == 2
+
+    def test_case_alias_required(self):
+        with pytest.raises(ValueError):
+            CaseSelectItem.model_validate(
+                {
+                    "when": [
+                        {
+                            "when": {"col": "orders.status", "op": "eq", "value": "x"},
+                            "then": {"literal": "y"},
+                        }
+                    ]
+                }
+            )
+
+    def test_case_accepts_else_and_alias(self):
+        item = CaseSelectItem(
+            when=[
+                {
+                    "when": {"col": "orders.status", "op": "eq", "value": "x"},
+                    "then": {"literal": "y"},
+                }
+            ],
+            else_={"literal": "z"},
+            alias="label",
+        )
+        assert item.alias == "label"
+        assert item.else_.literal == "z"
+
+    def test_select_item_discriminates_between_scalar_function_and_case(self):
+        q = StructuredQuery(
+            from_table="orders",
+            select=[
+                {"fn": "upper", "args": [{"col": "orders.status"}], "as": "s"},
+                {
+                    "when": [
+                        {
+                            "when": {"col": "orders.id", "op": "gt", "value": 0},
+                            "then": {"literal": "pos"},
+                        }
+                    ],
+                    "as": "label",
+                },
+            ],
+        )
+        assert isinstance(q.select[0], ScalarFunctionSelectItem)
+        assert isinstance(q.select[1], CaseSelectItem)
 
     def test_plain_join_without_alias_still_works(self):
         """Ordinary (non-self) joins remain unaffected — no alias required."""
