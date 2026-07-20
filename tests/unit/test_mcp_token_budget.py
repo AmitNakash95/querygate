@@ -53,7 +53,13 @@ from querygate.mcp.server import create_mcp_server
 # PublicQueryTemplate/parameter output schemas) add a deliberate new
 # agent-facing surface on top of item 81's array_agg. New budget keeps modest
 # headroom.
-_MAX_TOTAL_CHARS = 74_500
+#
+# Re-bumped 2026-07-20 (item 48 merge into main) — the 74,500 above was
+# measured on the item-48 branch in isolation; merging it on top of main's
+# meanwhile-grown tool surface combines both, measured 75,682 chars. Not
+# drift — the additive sum of two independently-approved surfaces. New budget
+# restores ~5% headroom.
+_MAX_TOTAL_CHARS = 79_500
 
 
 def _tool_schema_chars(tool: object) -> int:
