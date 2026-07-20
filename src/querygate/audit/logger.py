@@ -48,6 +48,8 @@ def audit_query(
     admission_id: Optional[str] = None,
     queue_wait_ms: Optional[int] = None,
     admission_state: Optional[str] = None,
+    template_id: Optional[str] = None,
+    template_param_shape: Optional[List[str]] = None,
 ) -> None:
     log = get_logger()
     event = AuditEvent(
@@ -69,6 +71,8 @@ def audit_query(
         admission_id=admission_id,
         queue_wait_ms=queue_wait_ms,
         admission_state=admission_state,
+        template_id=template_id,
+        template_param_shape=template_param_shape,
     )
     log.info(
         "audit.query",

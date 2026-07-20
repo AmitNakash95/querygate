@@ -38,6 +38,7 @@ from querygate.execution.concurrency import (
     clear_redis_limiter,
 )
 from querygate.policy.loader import PolicyStore, set_policy_store
+from querygate.templates.loader import TemplateStore, set_template_store
 from querygate.policy.models import Policy
 
 
@@ -60,6 +61,7 @@ def reset_state(tmp_path):
     set_registry(make_demo_registry())
     set_policy_store(PolicyStore(default=Policy(), overrides={}))
     set_catalog_store(CatalogStore.empty())
+    set_template_store(TemplateStore.empty())
     set_config_version_store(ConfigVersionStore(str(tmp_path / "config_versions")))
     reset_engines()
     # asyncio.Semaphore objects are bound to the event loop that created

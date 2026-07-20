@@ -83,6 +83,12 @@ class AppConfig(BaseSettings):
     # catalog behaves identically, just without the extra `catalog` field.
     catalog_file: Optional[str] = pyd.Field(default=None)
 
+    # Optional admin-defined query templates (querygate/templates/, TODO.md
+    # item 48) — named, parameterized `StructuredQuery` skeletons agents invoke
+    # by name. Unset by default: a deployment with no templates behaves
+    # identically, just without the template list/run surface.
+    template_file: Optional[str] = pyd.Field(default=None)
+
     # Governed semantic-memory enrichment (catalog/). Provider execution is
     # deliberately limited to disabled/manual-only in 32A-2; no networked
     # provider implementation is shipped. Row-free schema refresh is a
