@@ -254,6 +254,56 @@ class TestCompiler:
         with pytest.raises(PolicyViolationError, match="order_status"):
             compile_structured_query(query, tables, policy, principal=principal)
 
+    def test_self_join_renders_two_aliases(self):
+        metadata = sa.MetaData()
+        employees = sa.Table(
+            "employees",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("name", sa.String(100)),
+            sa.Column("manager_id", sa.Integer),
+        )
+        tables = {"e": employees.alias("e"), "m": employees.alias("m")}
+        query = StructuredQuery(
+            from_table="employees",
+            from_alias="e",
+            select=["e.name", "m.name"],
+            joins=[JoinSpec(table="employees", alias="m", on=["e.manager_id", "m.id"])],
+            limit=10,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "AS e" in compiled or "employees AS e" in compiled
+        assert "AS m" in compiled or "employees AS m" in compiled
+        assert "JOIN" in compiled.upper()
+
+    def test_mandatory_row_filter_applies_to_every_self_join_alias(self):
+        metadata = sa.MetaData()
+        employees = sa.Table(
+            "employees",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("name", sa.String(100)),
+            sa.Column("manager_id", sa.Integer),
+            sa.Column("tenant", sa.String(20)),
+        )
+        tables = {"e": employees.alias("e"), "m": employees.alias("m")}
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="employees", column="tenant", value="acme")
+            ]
+        )
+        query = StructuredQuery(
+            from_table="employees",
+            from_alias="e",
+            select=["e.name"],
+            joins=[JoinSpec(table="employees", alias="m", on=["e.manager_id", "m.id"])],
+            limit=10,
+        )
+        stmt, _ = compile_structured_query(query, tables, policy)
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert compiled.count("acme") == 2
+
     def test_query_level_distinct_renders(self):
         tables = _make_tables()
         query = StructuredQuery(

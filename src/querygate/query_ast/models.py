@@ -8,7 +8,7 @@ reflected schema (validation/schema_validation.py) and the active policy
 
 from __future__ import annotations
 
-from typing import Any, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Set, Union
 
 import pydantic as pyd
 
@@ -76,6 +76,17 @@ SelectItem = Union[str, AggregateSelectItem, DateBucketSelectItem]
 
 class JoinSpec(pyd.BaseModel):
     table: str
+    alias: Optional[str] = pyd.Field(
+        default=None,
+        description=(
+            "Optional name this occurrence of `table` is referred to by everywhere else "
+            "in the query (on/select/where/group_by/having/order_by/top_n use "
+            "Alias.Column instead of Table.Column once set). REQUIRED when the same "
+            "physical table appears more than once in one query (a self-join) — every "
+            "occurrence of a repeated table must carry its own alias, e.g. joining "
+            "Employee to itself as `m` to look up each row's manager."
+        ),
+    )
     type: JoinType = "inner"
     on: List[str] = pyd.Field(
         min_length=2,
@@ -195,14 +206,23 @@ class StructuredQuery(pyd.BaseModel):
     """Read-only structured query. No raw SQL — every field is a validated,
     schema-checked identifier or literal. Every column reference anywhere in
     this AST (select strings, where/having col, group_by, order_by, joins.on,
-    top_n.partition_by) must be "Table.Column" (e.g. "Customer.Name"), or a
-    select item's own alias where noted below — never a bare column name.
+    top_n.partition_by) must be "Table.Column" (e.g. "Customer.Name") — or
+    "Alias.Column" once from_alias/JoinSpec.alias is set for that table — or
+    a select item's own alias where noted below — never a bare column name.
     """
 
     from_table: str = pyd.Field(
         validation_alias=pyd.AliasChoices("from", "from_table"),
         serialization_alias="from",
         description='Root table name (not Table.Column) — e.g. "Customer".',
+    )
+    from_alias: Optional[str] = pyd.Field(
+        default=None,
+        description=(
+            "Optional name the root table is referred to by everywhere else in the "
+            "query, in place of from_table — same rule as JoinSpec.alias, including "
+            "being required if from_table is also used as a join table (self-join)."
+        ),
     )
     select: List[SelectItem] = pyd.Field(
         min_length=1,
@@ -254,3 +274,38 @@ class StructuredQuery(pyd.BaseModel):
     )
 
     model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _validate_table_aliases(self) -> "StructuredQuery":
+        """Every from/join occurrence has an *effective name* (its alias if
+        given, else its own table name) — the name every Table.Column ref
+        elsewhere in the query must use. Effective names must be unique, and
+        a physical table used more than once (a self-join) must carry an
+        explicit alias on EVERY occurrence, so there's never an implicit
+        "first occurrence wins" ambiguity. This runs at the AST layer, before
+        any DB touch, same as every other structural StructuredQuery check.
+        """
+        occurrences = [(self.from_table, self.from_alias)] + [
+            (j.table, j.alias) for j in self.joins
+        ]
+        physical_counts: Dict[str, int] = {}
+        for physical, _alias in occurrences:
+            key = physical.lower()
+            physical_counts[key] = physical_counts.get(key, 0) + 1
+
+        seen: Set[str] = set()
+        for physical, alias in occurrences:
+            effective = (alias or physical).lower()
+            if effective in seen:
+                raise ValueError(
+                    f"Duplicate table/alias {effective!r} — every from/join effective "
+                    "name (its alias if given, else its table name) must be unique"
+                )
+            seen.add(effective)
+            if physical_counts[physical.lower()] > 1 and alias is None:
+                raise ValueError(
+                    f"Table {physical!r} is used more than once in this query "
+                    "(a self-join) — every occurrence must have an explicit alias, "
+                    "including this one"
+                )
+        return self

@@ -22,7 +22,11 @@ from querygate.query_ast.models import (
     StructuredQuery,
     WhereNode,
 )
-from querygate.validation.schema_validation import parse_column_ref, resolve_column
+from querygate.validation.schema_validation import (
+    effective_name_map,
+    parse_column_ref,
+    resolve_column,
+)
 
 _AGG_FNS = {
     "count": sa.func.count,
@@ -207,11 +211,18 @@ def _apply_mandatory_row_filters(
     stmt: sa.Select,
     policy: Policy,
     tables: Dict[str, sa.Table],
+    name_to_physical: Dict[str, str],
     principal: Optional[Principal],
 ) -> sa.Select:
     """AND in every policy-declared mandatory filter whose table is actually
     part of this query's graph — silently skipped for tables outside the
     graph, rather than erroring, so unrelated queries aren't blocked.
+
+    `tables` is keyed by effective name (alias if given, else table name);
+    `name_to_physical` maps each of those back to its physical table, so a
+    filter matches every OCCURRENCE of that physical table, not just one —
+    a self-join of a mandatory-filtered table must be filtered on every
+    alias, or one side could see rows the filter was meant to hide.
 
     A filter's value is either a static literal or resolved from the
     authenticated principal's claims (`MandatoryRowFilter.resolve` raises
@@ -220,12 +231,17 @@ def _apply_mandatory_row_filters(
     unfiltered query).
     """
     for row_filter in policy.mandatory_row_filters:
-        matches = [key for key in tables if key.lower() == row_filter.table.lower()]
+        matches = [
+            key
+            for key in tables
+            if name_to_physical.get(key.lower(), key).lower() == row_filter.table.lower()
+        ]
         if not matches:
             continue
-        table = tables[matches[0]]
-        col = resolve_column(table, row_filter.column)
-        stmt = stmt.where(col == row_filter.resolve(principal))
+        value = row_filter.resolve(principal)
+        for key in matches:
+            col = resolve_column(tables[key], row_filter.column)
+            stmt = stmt.where(col == value)
     return stmt
 
 
@@ -312,13 +328,13 @@ def compile_structured_query(
     Returns (statement, effective_limit).
     """
     select_cols, alias_map = _build_select_columns(query, tables, dialect)
-    base = _table_by_name(tables, query.from_table)
+    base = _table_by_name(tables, query.from_alias or query.from_table)
     stmt = sa.select(*select_cols).select_from(base)
     if query.distinct:
         stmt = stmt.distinct()
 
     for join in query.joins:
-        right = _table_by_name(tables, join.table)
+        right = _table_by_name(tables, join.alias or join.table)
         left_ref, right_ref = join.on
         left_t, left_c = parse_column_ref(left_ref)
         right_t, right_c = parse_column_ref(right_ref)
@@ -327,7 +343,8 @@ def compile_structured_query(
         isouter = join.type == "left"
         stmt = stmt.join(right, left_col == right_col, isouter=isouter)
 
-    stmt = _apply_mandatory_row_filters(stmt, policy, tables, principal)
+    name_to_physical = effective_name_map(query)
+    stmt = _apply_mandatory_row_filters(stmt, policy, tables, name_to_physical, principal)
 
     if query.where is not None:
         stmt = stmt.where(_compile_where(query.where, tables, alias_map={}))

@@ -39,12 +39,20 @@ all changes stay in the validate/preview/stage/apply governance workflow.
    (mode="execute" is the default).
 
 ## StructuredQuery rules
-Pass a StructuredQuery object: from/select/joins/where/group_by/having/
-order_by/limit/offset/top_n/intent. Column refs MUST be Table.Column (e.g.
-Customer.Name). Raw SQL strings are FORBIDDEN and will be rejected. Each
+Pass a StructuredQuery object: from/select/distinct/joins/where/group_by/
+having/order_by/limit/offset/top_n/intent. Column refs MUST be Table.Column
+(e.g. Customer.Name), or Alias.Column once from_alias/JoinSpec.alias is set
+for that table. Raw SQL strings are FORBIDDEN and will be rejected. Each
 field's own schema description covers its exact contract (order_by.dir's
 strict enum, intent's audit-only purpose, a join's cross-connection
 `connection` field, and so on) — read it rather than guessing.
+
+## Self-joins (the same table more than once in one query)
+Joining a table to itself (e.g. Employee to Employee for a manager lookup)
+requires an explicit alias on EVERY occurrence — from_alias for the from
+table, JoinSpec.alias for each join — or the query is rejected before it
+ever reaches the database. Every column reference then uses Alias.Column
+instead of Table.Column for that table.
 
 ## Cross-connection joins
 A join across connections only validates within one policy-declared

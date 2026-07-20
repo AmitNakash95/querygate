@@ -86,6 +86,39 @@ class TestValidateSchema:
         with pytest.raises(ValueError, match="does not connect"):
             await sv.validate_schema(query, connection_id="demo")
 
+    async def test_self_join_reflects_physical_table_once_and_aliases_both(self, monkeypatch):
+        metadata = sa.MetaData()
+        employees = sa.Table(
+            "employees",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("name", sa.String(100)),
+            sa.Column("manager_id", sa.Integer),
+        )
+        calls = _patch_load_table(monkeypatch, {"employees": employees})
+        query = StructuredQuery(
+            from_table="employees",
+            from_alias="e",
+            select=["e.name", "m.name"],
+            joins=[
+                JoinSpec(
+                    table="employees",
+                    alias="m",
+                    on=["e.manager_id", "m.id"],
+                )
+            ],
+            limit=5,
+        )
+        tables = await sv.validate_schema(query, connection_id="demo")
+        assert set(tables) == {"e", "m"}
+        assert tables["e"].name == "e"
+        assert tables["m"].name == "m"
+        assert tables["e"].element is employees
+        assert tables["m"].element is employees
+        assert tables["e"] is not tables["m"]
+        # the physical table was only reflected once, not once per occurrence
+        assert len(calls) == 1
+
     async def test_having_requires_group_by_or_aggregate(self, monkeypatch):
         tables = _make_tables()
         _patch_load_table(monkeypatch, tables)

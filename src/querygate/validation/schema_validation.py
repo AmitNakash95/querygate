@@ -41,6 +41,24 @@ def parse_column_ref(col_ref: str) -> Tuple[str, str]:
     return table, column
 
 
+def effective_name_map(query: StructuredQuery) -> Dict[str, str]:
+    """Map every declared effective name (an alias, or the physical table
+    name itself when no alias is given), case-insensitively, to its physical
+    table name (original casing). `StructuredQuery`'s own validator already
+    guarantees effective names are unique and that a physical table repeated
+    across from/joins (a self-join) always carries an explicit alias on
+    every occurrence, so this mapping is always well-defined for any AST
+    that passed Pydantic validation. Shared by policy validation (map an
+    effective name back to the physical table/column policy checks must
+    apply to) and schema validation/compilation (which physical table to
+    reflect, and which occurrences need a SQL alias).
+    """
+    mapping: Dict[str, str] = {(query.from_alias or query.from_table).lower(): query.from_table}
+    for join in query.joins:
+        mapping[(join.alias or join.table).lower()] = join.table
+    return mapping
+
+
 def resolve_column(table: sa.Table, column_name: str) -> sa.Column:
     col_map = {c.name.lower(): c for c in table.c}
     key = column_name.lower()
@@ -130,7 +148,7 @@ def resolve_query_table_connections(
     primary, policy = resolver(connection_id, principal)
     primary_group = policy.join_group or primary.effective_join_group()
 
-    table_connection: Dict[str, str] = {query.from_table: connection_id}
+    table_connection: Dict[str, str] = {(query.from_alias or query.from_table): connection_id}
     for join in query.joins:
         join_connection_id = join.connection or connection_id
         if join_connection_id != connection_id:
@@ -143,21 +161,24 @@ def resolve_query_table_connections(
                     f"primary connection {connection_id!r} — run a separate query per "
                     "connection and combine results instead."
                 )
-        table_connection[join.table] = join_connection_id
+        table_connection[join.alias or join.table] = join_connection_id
     return table_connection
 
 
 def _validate_join_graph(query: StructuredQuery) -> None:
-    """Require each declared join to connect exactly one new table to the graph."""
-    known = {query.from_table.lower()}
+    """Require each declared join to connect exactly one new table (by its
+    effective name — alias if given, else its own table name) to the graph.
+    """
+    known = {(query.from_alias or query.from_table).lower()}
     for join in query.joins:
         left_t, _ = parse_column_ref(join.on[0])
         right_t, _ = parse_column_ref(join.on[1])
         sides = {left_t.lower(), right_t.lower()}
-        joined_table = join.table.lower()
+        joined_table = (join.alias or join.table).lower()
         if joined_table not in sides:
             raise QueryValidationError(
-                f"Join condition for {join.table!r} must reference that table"
+                f"Join condition for {join.table!r} must reference that table "
+                f"(as {joined_table!r})"
             )
         if not (sides - {joined_table}) & known:
             raise QueryValidationError(
@@ -176,10 +197,11 @@ async def validate_schema(
     """
     table_connection = resolve_query_table_connections(query, connection_id, principal=principal)
     _validate_join_graph(query)
+    name_to_physical = effective_name_map(query)
 
-    needed: Set[str] = {query.from_table}
+    needed: Set[str] = {query.from_alias or query.from_table}
     for join in query.joins:
-        needed.add(join.table)
+        needed.add(join.alias or join.table)
         for side in join.on:
             t, _ = parse_column_ref(side)
             needed.add(t)
@@ -222,18 +244,26 @@ async def validate_schema(
                 t, _ = parse_column_ref(order.col)
                 needed.add(t)
 
-    declared_tables = {query.from_table.lower(), *(join.table.lower() for join in query.joins)}
+    declared_tables = set(name_to_physical)
     undeclared_tables = sorted(name for name in needed if name.lower() not in declared_tables)
     if undeclared_tables:
         raise QueryValidationError(
-            "Column references may only use the query's from table or an explicitly "
-            f"declared join table; undeclared: {undeclared_tables}"
+            "Column references may only use the query's from table/alias or an "
+            f"explicitly declared join table/alias; undeclared: {undeclared_tables}"
         )
 
     tables: Dict[str, sa.Table] = {}
+    physical_tables: Dict[str, sa.Table] = {}
     for name in needed:
-        tables[name] = await _load_table(
-            connection_id, name, table_connection.get(name, connection_id)
+        physical_name = name_to_physical[name.lower()]
+        physical_key = physical_name.lower()
+        if physical_key not in physical_tables:
+            physical_tables[physical_key] = await _load_table(
+                connection_id, physical_name, table_connection.get(name, connection_id)
+            )
+        physical_table = physical_tables[physical_key]
+        tables[name] = (
+            physical_table if name.lower() == physical_key else physical_table.alias(name)
         )
 
     _validate_select_columns(query, tables)
