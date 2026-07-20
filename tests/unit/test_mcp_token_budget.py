@@ -48,11 +48,12 @@ from querygate.mcp.server import create_mcp_server
 # 67,822 chars, from ArrayAggSelectItem's two new Field(description=...)
 # entries joining the SelectItem union. New budget keeps modest headroom.
 #
-# Bumped 2026-07-20 (item 82: percentile_cont aggregate function) —
-# measured 69,042 chars, from PercentileContSelectItem's three new
-# Field(description=...) entries (col, fraction, alias) joining the
-# SelectItem union. New budget keeps modest headroom.
-_MAX_TOTAL_CHARS = 69_500
+# Bumped 2026-07-20 (item 48: query templates) — the two new MCP tools
+# list_query_templates/run_query_template (their descriptions plus the
+# PublicQueryTemplate/parameter output schemas) add a deliberate new
+# agent-facing surface on top of item 81's array_agg. New budget keeps modest
+# headroom.
+_MAX_TOTAL_CHARS = 74_500
 
 
 def _tool_schema_chars(tool: object) -> int:

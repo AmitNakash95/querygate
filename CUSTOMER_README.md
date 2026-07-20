@@ -140,6 +140,15 @@ The supported model includes:
 The `intent` field is optional context for operational diagnostics. It does not
 grant access, change query semantics, or bypass validation.
 
+Optionally, an administrator can publish **curated query templates** — named,
+parameterized structured queries — that agents invoke by name (`GET/POST
+/api/v1/query-templates`, or the `list_query_templates`/`run_query_template`
+MCP tools, and a read-only panel in the admin console). This narrows the
+effective surface to a finite, reviewed set of query shapes. A template is a
+stored structured query, not raw SQL; its parameters are typed and validated,
+and the bound query passes through the same policy, schema, and guardrail checks
+as any other — a template can never exceed policy.
+
 The explain operation runs validation and compilation without executing the
 query. By default, its SQL representation uses placeholders and redacts
 parameter values. Literal rendering should be enabled only when the resulting

@@ -1,0 +1,75 @@
+# Example admin-defined query templates for QueryGate (optional — set
+# TEMPLATES_FILE to point at your own copy; unset by default, in which case the
+# list/run surface is simply empty). See TODO.md item 48.
+#
+# A template is a NAMED, PARAMETERIZED StructuredQuery: agents invoke it by id
+# with typed parameters instead of composing an arbitrary query, shrinking the
+# effective surface to a finite, reviewed set of shapes ("these are the things
+# this agent may ask"). This is additive to QueryGate's core guarantee, never a
+# new one — there is still no raw-SQL field anywhere. `query` is a normal
+# StructuredQuery skeleton with {param: <name>} placeholders in value
+# positions; at invocation the caller's parameters are type-checked against the
+# slots, bound in, and the RESULTING StructuredQuery runs through the unchanged
+# policy/schema/guardrail pipeline. A bound template can never exceed the
+# caller's policy — parameters get no exemption from caps, allow/deny lists, or
+# mandatory row filters.
+#
+# A template is visible/invocable only if its target `connection` is visible to
+# the caller's principal (same rule as list_connections).
+#
+# Surface:
+#   REST:  GET  /api/v1/query-templates
+#          POST /api/v1/query-templates/{id}/run   body: {"parameters": {...}}
+#   MCP:   list_query_templates()
+#          run_query_template(template_id, parameters)
+
+templates:
+  - id: orders_for_customer
+    connection: demo
+    description: A customer's most recent orders, newest first.
+    parameters:
+      - name: customer_id
+        type: integer
+        required: true
+        description: The customer id to fetch orders for.
+      - name: limit
+        type: integer
+        required: false
+        default: 10
+        min: 1
+        max: 100
+        description: How many orders to return (1-100).
+    query:
+      from: orders
+      select:
+        - orders.id
+        - orders.status
+        - orders.total_amount
+      where:
+        col: orders.customer_id
+        op: eq
+        value: { param: customer_id }
+      order_by:
+        - { col: orders.id, dir: desc }
+      limit: { param: limit }
+
+  - id: orders_by_status
+    connection: demo
+    description: Orders in one of the given statuses.
+    parameters:
+      - name: statuses
+        type: string
+        is_list: true
+        required: true
+        allowed_values: [pending, completed, cancelled]
+        description: One or more order statuses to include.
+    query:
+      from: orders
+      select:
+        - orders.id
+        - orders.status
+      where:
+        col: orders.status
+        op: in
+        value: { param: statuses }
+      limit: 50
