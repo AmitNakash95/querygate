@@ -233,23 +233,29 @@ The compiler also applies the resolved `Policy` itself at this stage —
 a caller can't remove (e.g. tenant scoping), and `clamp_limit` caps the
 result size even if the caller asked for something larger.
 
-**Dialect-specific logic lives in one place.** QueryGate supports Postgres
+**Dialect-specific logic lives behind one interface.**
+(`compiler/dialect_adapters.py`, TODO.md item 73, a compiler-scoped slice
+of item 57's "pluggable dialect adapter" plan.) QueryGate supports Postgres
 and MSSQL (SQLite is used only internally, for tests/examples — see
 `connections/models.py`'s `DatabaseDialect`). Almost the entire compiler is
-dialect-agnostic SQLAlchemy Core, except for one thing that genuinely differs
-per database: bucketing a date column into a day/week/month/quarter/year
-("date_trunc"-style grouping). That logic is isolated to a single function,
-`_date_bucket_expr`:
+dialect-agnostic SQLAlchemy Core; the things that genuinely differ per
+database are each one method on a small `DialectAdapter` interface, with
+one concrete adapter class per dialect (`PostgresDialectAdapter`,
+`MSSQLDialectAdapter`, `SQLiteDialectAdapter`) rather than an `if dialect
+== ...` branch scattered at each call site. Today that's date bucketing
+(`date_bucket`) — a day/week/month/quarter/year truncation: Postgres has a
+native `date_trunc()` that handles every granularity directly, MSSQL has
+no equivalent so it's built from `DATEADD`/`DATEDIFF` (the standard MSSQL
+truncation idiom), SQLite (test/example path only) uses `strftime()`
+string formatting. The interface also defines `order_by_terms` and
+`stat_fn` for two dialect-sensitive features landing immediately after
+this one (NULLS FIRST/LAST ordering, `stddev`/`variance` aggregates) —
+see the corresponding TODO.md items for what those wire up to once shipped.
 
-- **Postgres** has a native `date_trunc()` function that handles every
-  granularity directly.
-- **MSSQL** has no equivalent, so it's built from `DATEADD`/`DATEDIFF`
-  (the standard MSSQL truncation idiom).
-- **SQLite** (test/example path only) uses `strftime()` string formatting.
-
-Keeping this in one function means adding a third real dialect later is a
-change to one place, not a hunt through the whole compiler for
-Postgres-flavored assumptions.
+Adding a real third dialect (item 19) means implementing one new
+`DialectAdapter` subclass, not a hunt through the compiler for
+Postgres/MSSQL-flavored assumptions — that containment is the whole point
+of the abstraction, not just where today's two dialects happen to differ.
 
 ### 4. Concurrency control — don't overwhelm the database
 
