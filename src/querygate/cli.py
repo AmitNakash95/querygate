@@ -21,6 +21,8 @@ from querygate.catalog.loader import CatalogStore
 from querygate.connections.registry import ConnectionRegistry
 from querygate.policy.loader import PolicyStore
 from querygate.secrets.resolvers import SecretResolverRegistry
+from querygate.templates.binding import validate_template_structure
+from querygate.templates.loader import TemplateStore
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ def load_config_context(
     policy_file: str,
     catalog_file: Optional[str] = None,
     resolver_registry: Optional[SecretResolverRegistry] = None,
+    template_file: Optional[str] = None,
 ) -> tuple[Optional[LoadedConfigContext], list[str]]:
     """Load and cross-validate config, returning isolated objects on success.
 
@@ -86,6 +89,27 @@ def load_config_context(
                     f"connection id in {connections_file} (known ids: {sorted(known_ids)})"
                 )
 
+    if template_file:
+        template_store: Optional[TemplateStore] = None
+        try:
+            template_store = TemplateStore.from_file(template_file)
+        except Exception as exc:
+            errors.append(f"{template_file}: {exc}")
+        if template_store is not None:
+            for template in template_store.list():
+                structural_error = validate_template_structure(template)
+                if structural_error is not None:
+                    errors.append(f"{template_file}: {structural_error}")
+        if registry is not None and template_store is not None:
+            known_ids = set(registry.all_ids())
+            for connection_id in template_store.connection_ids():
+                if connection_id not in known_ids:
+                    errors.append(
+                        f"{template_file}: template targets connection {connection_id!r} which "
+                        f"does not match any connection id in {connections_file} "
+                        f"(known ids: {sorted(known_ids)})"
+                    )
+
     if errors or registry is None or policy_store is None or catalog_store is None:
         return None, errors
     return LoadedConfigContext(registry, policy_store, catalog_store), []
@@ -96,6 +120,7 @@ def validate_config(
     policy_file: str,
     catalog_file: Optional[str] = None,
     resolver_registry: Optional[SecretResolverRegistry] = None,
+    template_file: Optional[str] = None,
 ) -> list[str]:
     """Return a list of human-readable problems; empty means every given file is valid.
 
@@ -110,6 +135,7 @@ def validate_config(
         policy_file,
         catalog_file,
         resolver_registry=resolver_registry,
+        template_file=template_file,
     )
     return errors
 
@@ -137,6 +163,14 @@ def main() -> None:
             "AppConfig default; skipped entirely when neither is set)"
         ),
     )
+    parser.add_argument(
+        "--template-file",
+        default=None,
+        help=(
+            "Path to an optional query-templates.yaml (defaults to TEMPLATES_FILE / "
+            "AppConfig default; skipped entirely when neither is set)"
+        ),
+    )
     args = parser.parse_args()
 
     from querygate.core.config import config
@@ -145,12 +179,14 @@ def main() -> None:
     connections_file = args.connections_file or config.connections_file
     policy_file = args.policy_file or config.policy_file
     catalog_file = args.catalog_file or config.catalog_file
+    template_file = args.template_file or config.template_file
 
     errors = validate_config(
         connections_file,
         policy_file,
         catalog_file,
         resolver_registry=build_secret_resolver_registry(config),
+        template_file=template_file,
     )
     if errors:
         print(f"Config validation FAILED ({len(errors)} problem(s)):", file=sys.stderr)
@@ -158,8 +194,8 @@ def main() -> None:
             print(f"  - {error}", file=sys.stderr)
         sys.exit(1)
 
-    catalog_note = f", {catalog_file}" if catalog_file else ""
-    print(f"Config validation OK: {connections_file}, {policy_file}{catalog_note}")
+    extra = "".join(f", {f}" for f in (catalog_file, template_file) if f)
+    print(f"Config validation OK: {connections_file}, {policy_file}{extra}")
 
 
 if __name__ == "__main__":

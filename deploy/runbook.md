@@ -20,7 +20,8 @@ section (`admin:reload-config`, or `admin:config:read`/`admin:config:write`
    reflects the change.
 
 This reloads whatever the running process's `CONNECTIONS_FILE`/
-`POLICY_FILE`/`CATALOG_FILE` currently point at — a Helm `values` change
+`POLICY_FILE`/`CATALOG_FILE`/`TEMPLATES_FILE` (the optional curated
+query-templates file, item 48) currently point at — a Helm `values` change
 needs `helm upgrade` (which recreates pods with the new ConfigMap mounted)
 before this reload has anything new to pick up; a Compose `config/` file
 edit takes effect on the next reload immediately, no restart needed.

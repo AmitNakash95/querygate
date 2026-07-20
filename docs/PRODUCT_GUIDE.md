@@ -381,6 +381,30 @@ always happens regardless of where a request failed is the last one: audit
 logging wraps the whole pipeline so every attempt — allowed or denied — is
 recorded.
 
+### Query templates — a curated entry point, not a second pipeline
+
+Query templates (TODO.md item 48) let an admin publish named, parameterized
+`StructuredQuery` skeletons — e.g. `orders_for_customer` with a typed
+`customer_id` parameter — that an agent can invoke by id (`GET
+/api/v1/query-templates`, `POST /api/v1/query-templates/{id}/run`, or the
+`list_query_templates`/`run_query_template` MCP tools) instead of assembling
+the whole AST itself. This is deliberately *not* a bypass: a template is a
+stored `StructuredQuery`, never raw SQL, and binding one first validates the
+supplied parameters against their declared types/bounds, substitutes them as
+bound values (not string-spliced SQL), then hands the resulting
+`StructuredQuery` to the exact same `StructuredQueryService.execute()`
+described above. Every stage — policy caps, table/column allow-deny, schema
+existence, compilation, concurrency admission, session guardrails, audit —
+runs unchanged. Templated execution is therefore a strict *superset* of
+enforcement: it adds parameter validation on top of the normal pipeline and
+never removes a check. The audit event records `operation:
+"run_query_template"` with the `template_id` and the parameter *names* bound
+(`template_param_shape`), never their values. Templates are file-configured
+(`TEMPLATES_FILE`) and hot-reloadable like connections/policy/catalog, and a
+template referencing a denied table or an over-cap shape is rejected the same
+way an ad-hoc query would be — at deploy-time validation and again at run
+time.
+
 ## Security Model
 
 The [Core Request Pipeline](#the-core-request-pipeline) section explains what
@@ -2004,82 +2028,25 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
-- **2026-07-20 — MSSQL now *rejects* `nulls first/last` ordering instead of
-  emulating it with a synthesized CASE bucket (TODO.md item 74, reversing that
-  item's original shipped behavior).** T-SQL has no `NULLS FIRST/LAST` syntax.
-  Item 74 originally made `MSSQLDialectAdapter.order_by_terms` inject an extra
-  leading `CASE WHEN col IS NULL THEN 0/1` sort column to place nulls where the
-  caller asked. That predated the "expose primitives, don't spoon-feed the
-  agent" section of CLAUDE.md; measured against it, the emulation is the engine
-  synthesizing query structure the AST never expressed — solving the agent's
-  composition problem for it. `order_by_terms` now raises `QueryValidationError`
-  when `nulls` is set on MSSQL, at both the main `order_by` and the `top_n`
-  rank-ordering call sites. Postgres/SQLite keep their native
-  `.nulls_first()/.nulls_last()`. **Why accepted:** it makes the missing-keyword
-  gap resolve the same way as `array_agg` (item 81) and `percentile_cont`
-  (item 82) — reject and name the gap, never emulate — and the capability isn't
-  lost: an agent composes null placement directly from primitives QueryGate
-  already exposes (a `CaseSelectItem` 0/1 "is null" bucket plus a leading
-  `OrderBySpec` on it), exactly the workaround a human T-SQL author writes by
-  hand. This was the one "still-open" dialect question the earlier Decision Log
-  entries flagged; it is now settled and is the reference precedent for how a
-  dialect's missing-keyword gap is handled.
-- **2026-07-20 — `execution/concurrency.py`'s semaphore-vs-Redis dispatch
-  refactored into a `ConcurrencyLimiter` Protocol, choosing full
-  encapsulation over a lower-risk hybrid once the real blast radius was
-  known.** An architecture audit (prompted by formalizing CLAUDE.md's
-  "Composable single-purpose interfaces" principle) found the concurrency
-  module was the one genuine gap versus `SecretResolver`/`DialectAdapter`/
-  `Authenticator`/`AuditSink`'s established Protocol-plus-registry shape: an
-  `if _REDIS_LIMITER is not None` check duplicated across four functions,
-  with no shared interface even though `RedisConcurrencyLimiter` was already
-  class-shaped. Investigation before implementing surfaced a much bigger
-  surface than expected: the module-level `SEMAPHORES` dict was directly,
-  externally mutated by 25+ call sites across 7 test files and by production
-  code (`config_reload.py`'s hot-reload semaphore invalidation) — not just
-  an internal implementation detail. Offered a lower-risk hybrid (keep the
-  module-level dicts public, only refactor the dispatch logic around them);
-  the explicit choice was full encapsulation instead — `SEMAPHORES` no
-  longer exists as a raw dict; `InProcessConcurrencyLimiter` now implements
-  the same `ConcurrencyLimiter` shape `RedisConcurrencyLimiter` already did
-  (zero changes needed to `redis_concurrency.py` or its Lua scripts, since it
-  already matched the target Protocol exactly), with a small public surface
-  (`semaphore()`, `reset_semaphore()`, `has_semaphore()`, `clear()`) replacing
-  direct dict poking everywhere it was needed. **Why accepted:** the module
-  the audit exists to fix is exactly the one place this codebase's "no inline
-  backend branching" principle wasn't followed — doing the encapsulation
-  properly (not a half-measure that left raw dict access as an escape hatch)
-  is what makes the new CLAUDE.md section true of the whole codebase, not
-  just the parts convenient to fix.
-- **2026-07-20 — `percentile_cont` rejects on MSSQL for a different reason
-  than `array_agg` did, and SQLite rejects for a third reason again
-  (TODO.md item 82).** Postgres's `DialectAdapter.percentile_cont` is a
-  real implementation (`within_group(func.percentile_cont(fraction),
-  col_expr)`, rendering `percentile_cont(f) WITHIN GROUP (ORDER BY ...)`,
-  a genuine `GROUP BY`-compatible ordered-set aggregate). MSSQL's
-  `PERCENTILE_CONT` is documented by Microsoft as an analytic (window)
-  function only — it requires an `OVER (...)` clause and has no plain-
-  aggregate form at all, so `MSSQLDialectAdapter.percentile_cont` raises
-  `QueryValidationError` naming that structural incompatibility. This is
-  **not** the same reason `array_agg` rejects on MSSQL (no array/
-  collection type exists at all there) — `percentile_cont` genuinely
-  exists in T-SQL, just in an incompatible structural shape (window
-  function vs. plain aggregate) from what the AST expresses. SQLite
-  rejects too, for yet a third reason: no ordered-set aggregate support
-  at all, not even in a different shape. **Why accepted:** confirmed by
-  direct testing before implementing (the same "verify before
-  implementing" step item 75's stddev/variance section modeled) that
-  SQLAlchemy's `within_group()` construct **silently compiles identical
-  SQL text against both the Postgres and MSSQL dialect compilers** — it
-  would pass compilation and only fail at runtime against a real SQL
-  Server. Leaving that to fail live, rather than rejecting it explicitly
-  at the adapter boundary, would be exactly the "renders fine, breaks
-  live" trap CLAUDE.md's engine philosophy and item 75's own investigation
-  both warn about. Documenting all three rejections (item 74's MSSQL
-  `nulls` handling since resolved the same way — see the newest entry above)
-  side by side here is deliberate: it shows the no-forced-parity principle
-  produces differentiated reasoning per actual capability gap, not one
-  boilerplate justification reused three times.
+- **2026-07-20 — Query templates bind through the unchanged
+  `execute()` pipeline as a strict enforcement superset, rather than a
+  separate templated-execution path (TODO.md item 48).** `bind_template`
+  validates the supplied parameters against their declared types/bounds,
+  substitutes them as bound values, and produces an ordinary
+  `StructuredQuery` that goes through the exact same
+  `StructuredQueryService.execute()` — policy caps, allow-deny, schema
+  existence, compilation, concurrency, audit — as an ad-hoc query. **Why
+  accepted:** the safety-critical property is that no invocation shape can
+  ever see *fewer* checks than an ad-hoc query. Reusing `execute()`
+  verbatim makes that structural (templates can only *add* parameter
+  validation on top), instead of asking a reviewer to prove a parallel
+  code path re-implemented every guardrail identically. Templates are
+  file-configured (`TEMPLATES_FILE`) and hot-reloadable like the other
+  config stores, and deliberately expose no query skeleton to agents —
+  only the id, description, and typed parameter signature — so a template
+  is a curation/ergonomics layer, never a new trust boundary. Governed
+  edit/approve/publish of templates through the admin control plane is a
+  recorded follow-up, not part of item 48.
 - **2026-07-20 — `array_agg` rejects outright on MSSQL and SQLite instead
   of emulating an array (TODO.md item 81).** Postgres's `DialectAdapter.
   array_agg` is a real implementation (`array_agg(...)`, a native

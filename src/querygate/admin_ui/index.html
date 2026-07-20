@@ -45,6 +45,9 @@
         <button class="nav-item" type="button" data-view-target="health">
           <span class="nav-glyph">08</span><span>Connection health</span>
         </button>
+        <button class="nav-item" type="button" data-view-target="templates">
+          <span class="nav-glyph">09</span><span>Query templates</span>
+        </button>
       </nav>
 
       <div class="sidebar-foot">
@@ -395,6 +398,14 @@
             <tbody id="health-body"><tr><td colspan="8" class="empty-cell">Connect with admin:connections:read to load connection health.</td></tr></tbody>
           </table>
         </div>
+      </section>
+
+      <section id="view-templates" class="view" data-view="templates" hidden>
+        <div class="section-intro">
+          <div><p class="eyebrow">Callable queries</p><h2>Named, parameterized queries this principal can run.</h2><p>Curated query templates are the finite set of pre-approved questions an agent may ask by name — filtered by per-connection visibility, the same boundary as schema and catalog, and requiring no special scope. A template is a stored StructuredQuery, never raw SQL, and runs through the same policy and guardrail checks as an ad-hoc query.</p></div>
+          <button id="refresh-templates" class="button secondary" type="button">Refresh templates</button>
+        </div>
+        <div id="template-cards" class="audit-list"><p class="empty-state">Connect to load query templates.</p></div>
       </section>
     </main>
   </div>

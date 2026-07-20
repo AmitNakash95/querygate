@@ -31,11 +31,29 @@ from querygate.policy.loader import get_policy
 from querygate.query_ast.models import StructuredQuery
 from querygate.core.scopes import ADMIN_RELOAD_CONFIG_SCOPE
 from querygate.secrets.resolvers import build_secret_resolver_registry
+from querygate.templates.binding import bind_template
+from querygate.templates.loader import get_template_store
+from querygate.templates.models import PublicQueryTemplate, QueryTemplate
 from querygate.validation.policy_validation import validate_batch_size
+
+from typing import Any, Dict
 
 
 class TablesListResult(pyd.BaseModel):
     tables: List[str]
+
+
+class TemplateRunRequest(pyd.BaseModel):
+    parameters: Dict[str, Any] = pyd.Field(default_factory=dict)
+
+
+def _visible_template(connection_id: str, principal: Principal) -> None:
+    """A template is visible/invocable only if its target connection is —
+    reuse the exact non-enumerating connection-visibility rule (item 22), and
+    report an invisible template's connection as an unknown template so it
+    can't be used to probe hidden connection ids.
+    """
+    resolve_visible_connection(connection_id, principal=principal)
 
 
 class BatchQueryRequest(pyd.BaseModel):
@@ -165,6 +183,83 @@ def build_router(
         )
         return result
 
+    @router.get("/query-templates", response_model=List[PublicQueryTemplate])
+    async def list_query_templates(principal: Principal = Depends(get_principal)):
+        """Curated query templates whose target connection is visible to the
+        caller — the finite set of named, parameterized queries this principal
+        may invoke (TODO.md item 48).
+        """
+        visible: List[PublicQueryTemplate] = []
+        for template in get_template_store().list():
+            try:
+                _visible_template(template.connection, principal)
+            except NotFoundError:
+                continue
+            visible.append(PublicQueryTemplate.from_template(template))
+        return visible
+
+    @router.post("/query-templates/{template_id}/run", response_model=StructuredQueryResult)
+    async def run_query_template(
+        template_id: str,
+        request: TemplateRunRequest,
+        response: Response,
+        principal: Principal = Depends(get_principal),
+        queue_mode: Optional[QueueMode] = _QUEUE_MODE_QUERY,
+        wait_timeout_seconds: Optional[float] = _WAIT_TIMEOUT_QUERY,
+    ):
+        template: Optional[QueryTemplate] = get_template_store().get(template_id)
+        # Uniform not-found whether the template is unknown or its connection is
+        # hidden from this principal — never an enumeration oracle.
+        if template is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unknown query template: {template_id!r}",
+            )
+        try:
+            _visible_template(template.connection, principal)
+        except NotFoundError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unknown query template: {template_id!r}",
+            )
+        service = StructuredQueryService(
+            connection_id=template.connection,
+            principal=principal,
+            surface="rest",
+            template_id=template.id,
+            template_param_shape=sorted(request.parameters),
+        )
+        try:
+            query = bind_template(template, request.parameters)
+            result = await service.execute(
+                query, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
+            )
+        except CapacityTimeoutError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+                headers=_admission_headers(
+                    admission_id=exc.admission_id,
+                    state=exc.admission_state,
+                    queue_wait_ms=exc.queue_wait_ms,
+                ),
+            )
+        except (PolicyViolationError, QueryValidationError, ConcurrencyLimitError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=PUBLIC_INTERNAL_ERROR,
+            )
+        response.headers.update(
+            _admission_headers(
+                admission_id=result.admission_id,
+                state="completed",
+                queue_wait_ms=result.queue_wait_ms,
+            )
+        )
+        return result
+
     @router.post("/{connection}/query/batch", response_model=BatchQueryResult)
     async def execute_query_batch(
         connection: str,
@@ -188,6 +283,7 @@ def build_router(
                 connections_file=cfg.connections_file,
                 policy_file=cfg.policy_file,
                 catalog_file=cfg.catalog_file,
+                template_file=cfg.template_file,
                 resolver_registry=build_secret_resolver_registry(cfg),
             )
         except Exception as exc:

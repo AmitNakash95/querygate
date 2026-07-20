@@ -238,10 +238,22 @@ class StructuredQueryService:
         connection_id: str,
         principal: Optional[Principal] = None,
         surface: AuditSurface = "internal",
+        template_id: Optional[str] = None,
+        template_param_shape: Optional[list[str]] = None,
     ) -> None:
         self._connection_id = connection_id
         self._principal = principal
         self._surface = surface
+        # Set only when this service was built to invoke a curated query
+        # template (TODO.md item 48); threaded into the audit event so template
+        # usage shows up distinctly from ad-hoc structured queries in the same
+        # stream. `template_param_shape` carries parameter NAMES only.
+        self._template_id = template_id
+        self._template_param_shape = template_param_shape
+
+    @property
+    def _audit_operation(self) -> str:
+        return "run_query_template" if self._template_id else "execute_structured_query"
 
     @property
     def _principal_subject(self) -> Optional[str]:
@@ -469,6 +481,9 @@ class StructuredQueryService:
                         admission_id=admission_id,
                         queue_wait_ms=queue_wait_ms,
                         admission_state="completed",
+                        operation=self._audit_operation,
+                        template_id=self._template_id,
+                        template_param_shape=self._template_param_shape,
                     )
                     self._emit_usage_signals(query, admission_id=admission_id)
                     QUERIES_TOTAL.labels(connection=self._connection_id, status="success").inc()
@@ -527,6 +542,9 @@ class StructuredQueryService:
                 admission_id=admission_id,
                 queue_wait_ms=queue_wait_ms,
                 admission_state=getattr(exc, "admission_state", None),
+                operation=self._audit_operation,
+                template_id=self._template_id,
+                template_param_shape=self._template_param_shape,
             )
             QUERIES_TOTAL.labels(connection=self._connection_id, status="rejected").inc()
             QUERIES_REJECTED_TOTAL.labels(

@@ -11,6 +11,7 @@
     audit: ["Control plane / Audit trail", "Decisions without sensitive payloads"],
     catalog: ["Control plane / Catalog review", "Review, approve, and publish schema-catalog proposals"],
     health: ["Control plane / Connection health", "Reachability, credential-free"],
+    templates: ["Control plane / Query templates", "Named, parameterized queries"],
   };
   const documentKeys = ["policy", "connections", "catalog"];
   const guardrailFields = {
@@ -59,6 +60,7 @@
     connectionHealth: [],
     templates: [],
     templatePreview: null,
+    templateList: [],
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -145,6 +147,7 @@
       loadCatalogVersions();
     }
     if (name === "health" && state.access && !$("#health-body [data-health-row]")) loadConnectionHealth();
+    if (name === "templates" && state.access && !state.templateList.length) loadTemplates();
   }
 
   function formatDate(value) {
@@ -1167,6 +1170,44 @@
     }
   }
 
+  function paramSignature(param) {
+    const bits = [escapeHtml(param.type)];
+    if (param.is_list) bits.push("list");
+    bits.push(param.required ? "required" : "optional");
+    if (param.allowed_values) bits.push(`one of ${escapeHtml(param.allowed_values.join(", "))}`);
+    return `<span class="template-param" title="${escapeHtml(param.description || "")}"><code>${escapeHtml(param.name)}</code> ${bits.join(" · ")}</span>`;
+  }
+
+  function renderTemplates() {
+    $("#template-cards").innerHTML = state.templateList.length
+      ? state.templateList
+          .map(
+            (tpl) => `
+      <div class="template-card">
+        <div><strong>${escapeHtml(tpl.id)}</strong><p>${escapeHtml(tpl.description || "No description")}</p>
+          <div class="template-params">${tpl.parameters.length ? tpl.parameters.map(paramSignature).join("") : "<small>No parameters</small>"}</div>
+        </div>
+        <span class="status-chip neutral">${escapeHtml(tpl.connection)}</span>
+      </div>`
+          )
+          .join("")
+      : '<p class="empty-state">No query templates visible to this principal.</p>';
+  }
+
+  async function loadTemplates() {
+    const button = $("#refresh-templates");
+    setBusy(button, true, "Loading…");
+    try {
+      state.templateList = await api("/query-templates");
+      renderTemplates();
+    } catch (error) {
+      state.templateList = [];
+      $("#template-cards").innerHTML = `<p class="empty-state">${escapeHtml(error.message)}</p>`;
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
   async function testConnectionNow(connectionId) {
     const button = $(`[data-test-connection="${CSS.escape(connectionId)}"]`);
     setBusy(button, true, "Testing…");
@@ -1429,6 +1470,7 @@
       if (button) rollbackCatalogVersion(button.dataset.rollbackVersion);
     });
     $("#refresh-health").addEventListener("click", () => loadConnectionHealth());
+    $("#refresh-templates").addEventListener("click", () => loadTemplates());
     $("#health-body").addEventListener("click", (event) => {
       const button = event.target.closest("[data-test-connection]");
       if (button) testConnectionNow(button.dataset.testConnection);

@@ -10,6 +10,8 @@ _EXPECTED_TOOLS = {
     "describe_table",
     "search_catalog",
     "run_structured_queries",
+    "list_query_templates",
+    "run_query_template",
     "search_querygate_guide",
     "get_querygate_guide_topic",
     "get_querygate_setup_checklist",

@@ -100,6 +100,21 @@ curl -X POST http://localhost:8000/api/v1/demo/query/batch \
   }'
 ```
 
+## Query templates (curated, admin-defined)
+
+List the named, parameterized templates this principal may invoke (filtered to
+visible connections), then run one by id with typed parameters. A template is a
+stored `StructuredQuery` — never raw SQL — and runs through the same policy,
+schema, and guardrail checks as an ad-hoc query.
+
+```bash
+curl http://localhost:8000/api/v1/query-templates
+
+curl -X POST http://localhost:8000/api/v1/query-templates/orders_for_customer/run \
+  -H "Content-Type: application/json" \
+  -d '{"parameters": {"customer_id": 1, "limit": 5}}'
+```
+
 ## What raw SQL looks like here
 
 There is no field, no endpoint, and no escape hatch that accepts a SQL
