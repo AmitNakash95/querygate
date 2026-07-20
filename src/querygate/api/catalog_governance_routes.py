@@ -25,6 +25,7 @@ import pydantic as pyd
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 
+from querygate.api._errors import require_scope
 from querygate.audit.logger import audit_catalog_governance
 from querygate.catalog import governance
 from querygate.catalog.generation import generate_catalog_drafts
@@ -61,13 +62,6 @@ from querygate.core.scopes import (
     CATALOG_ROLLBACK_SCOPE,
 )
 from querygate.policy.loader import get_policy
-
-
-def _require_scope(principal: Principal, scope: str) -> None:
-    if scope not in principal.scopes:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail=f"Missing required scope: {scope!r}"
-        )
 
 
 def _require_known_connection(connection_id: str) -> None:
@@ -279,7 +273,7 @@ def build_catalog_governance_router(
         proposal_id: Optional[str],
         mutator,
     ) -> governance.CatalogGovernanceUpdate:
-        _require_scope(principal, scope)
+        require_scope(principal, scope)
         _require_known_connection(connection)
         start = time.monotonic()
         repository = _repository(cfg)
@@ -328,7 +322,7 @@ def build_catalog_governance_router(
         request: GenerateDraftsRequest,
         principal: Principal = Depends(get_principal),
     ):
-        _require_scope(principal, CATALOG_GENERATE_SCOPE)
+        require_scope(principal, CATALOG_GENERATE_SCOPE)
         _require_known_connection(connection)
         if request.batch.connection_id != connection:
             raise HTTPException(
@@ -398,7 +392,7 @@ def build_catalog_governance_router(
         generate-drafts' manual/model batch.
         """
 
-        _require_scope(principal, CATALOG_GENERATE_SCOPE)
+        require_scope(principal, CATALOG_GENERATE_SCOPE)
         _require_known_connection(connection)
         start = time.monotonic()
         repository = _repository(cfg)
@@ -441,7 +435,7 @@ def build_catalog_governance_router(
     async def list_usage_signals_endpoint(
         connection: str, principal: Principal = Depends(get_principal)
     ):
-        _require_scope(principal, CATALOG_REVIEW_SCOPE)
+        require_scope(principal, CATALOG_REVIEW_SCOPE)
         _require_known_connection(connection)
         store = get_catalog_store()
         return [
@@ -455,7 +449,7 @@ def build_catalog_governance_router(
         review_status: Optional[ProposalReviewStatus] = Query(default=None),
         principal: Principal = Depends(get_principal),
     ):
-        _require_scope(principal, CATALOG_REVIEW_SCOPE)
+        require_scope(principal, CATALOG_REVIEW_SCOPE)
         _require_known_connection(connection)
         store = get_catalog_store()
         proposals = list(store.iter_draft_proposals(connection))
@@ -467,7 +461,7 @@ def build_catalog_governance_router(
     async def get_proposal_endpoint(
         connection: str, proposal_id: str, principal: Principal = Depends(get_principal)
     ):
-        _require_scope(principal, CATALOG_REVIEW_SCOPE)
+        require_scope(principal, CATALOG_REVIEW_SCOPE)
         _require_known_connection(connection)
         store = get_catalog_store()
         proposal = store.get_draft_proposal(proposal_id)
@@ -488,7 +482,7 @@ def build_catalog_governance_router(
         principal_subject: str = Query(min_length=1, max_length=200),
         principal: Principal = Depends(get_principal),
     ):
-        _require_scope(principal, CATALOG_REVIEW_SCOPE)
+        require_scope(principal, CATALOG_REVIEW_SCOPE)
         _require_known_connection(connection)
         store = get_catalog_store()
         test_policy = get_policy(connection, principal=Principal(subject=principal_subject))
@@ -634,7 +628,7 @@ def build_catalog_governance_router(
     async def list_versions_endpoint(
         connection: str, principal: Principal = Depends(get_principal)
     ):
-        _require_scope(principal, CATALOG_REVIEW_SCOPE)
+        require_scope(principal, CATALOG_REVIEW_SCOPE)
         _require_known_connection(connection)
         store = get_catalog_store()
         return [
@@ -645,7 +639,7 @@ def build_catalog_governance_router(
     async def get_version_endpoint(
         connection: str, version_id: str, principal: Principal = Depends(get_principal)
     ):
-        _require_scope(principal, CATALOG_REVIEW_SCOPE)
+        require_scope(principal, CATALOG_REVIEW_SCOPE)
         _require_known_connection(connection)
         store = get_catalog_store()
         record = store.get_version_record(version_id)
@@ -682,7 +676,7 @@ def build_catalog_governance_router(
     async def export_connection_endpoint(
         connection: str, principal: Principal = Depends(get_principal)
     ):
-        _require_scope(principal, CATALOG_EXPORT_SCOPE)
+        require_scope(principal, CATALOG_EXPORT_SCOPE)
         _require_known_connection(connection)
         start = time.monotonic()
         store = get_catalog_store()
