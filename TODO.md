@@ -79,7 +79,7 @@ order-of-magnitude, not commitments.
 | 47 | Safe draft recovery plus config export/import UX | M | 13, 25, 31 |
 | 48 | ✅ Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) (phase 1: file-configured invocable templates + REST/MCP; phase 2: governed create/edit/approve/publish/rollback not started) | L | 6, 22, 25, 32B |
 | 49 | ✅ Column-value masking/tokenization (not just allow/deny) | L | 6, 27 |
-| 50 | Per-principal rate limits / query quotas over time | M | 9, 25 |
+| 50 | ✅ Per-principal rate limits / query quotas over time (phase 1: in-process rolling-window request/byte quota; phase 2: Redis-backed cross-replica quota not started) | M | 9, 25 |
 | 51 | Typed client-side query-builder SDK (Python + TypeScript) | M (per language) | 20 |
 | 52 | Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI) | S (per framework) | 20 |
 | 53 | Independent third-party security audit + published report | S* | 28 |
@@ -3591,7 +3591,58 @@ redacting the response after the fact. Audit which columns were masked
 (never the pre-mask value) so operators can distinguish "denied" from
 "masked" access in the same audit stream item 23 already provides.
 
-### 50. Per-principal rate limits / query quotas over time
+### 50. Per-principal rate limits / query quotas over time ✅ DONE (phase 1)
+
+**Shipped (phase 1 — in-process rolling-window quota):** three `Policy`
+fields (`max_requests_per_window`, `max_response_bytes_per_window`,
+`quota_window_seconds`; both caps unset = disabled, identical to prior
+behavior), resolved per principal through the existing `PolicyStore` merge —
+so a per-principal `principals:` override can throttle one noisy caller
+without a code change. Enforcement is a new `execution/quota.py` with a
+narrow `QuotaLimiter` Protocol (CLAUDE.md "Composable single-purpose
+interfaces") and one `InProcessQuotaLimiter` today: a sliding-window log
+keyed by `(connection_id, principal_subject)`. `StructuredQueryService.execute`
+calls `enforce_query_quota` **before** it queues or opens a DB session
+(`reserve()` atomically prunes the window, checks both caps, and records the
+attempt so concurrent in-flight callers can't race past the cap), and
+`record_query_quota_bytes` attributes the response size afterward (the query
+that crosses the byte ceiling completes; the next one is refused). A rejected
+caller raises `QuotaExceededError` (a `PolicyViolationError`, so every
+existing deny-path handler and `public_error_message` treat it as
+client-actionable) and never touches the database.
+
+Distinct, contextful rejection (not a bare 429): REST maps it to **429 with a
+`Retry-After` header** (`api/_errors.py`), MCP to a **`RATE_LIMITED`** error
+code (`mcp/exceptions.py`) — both carrying a message that names the cap and a
+retry hint. Audited exactly like other policy denials (`policy_decision:
+denied`, `error_category: quota`), with a dedicated `quota` reason in
+`metrics.classify_rejection`/`querygate_queries_rejected_total` plus a
+`querygate_query_quota_rejections_total{connection,quota_kind}` counter
+breaking out requests-vs-bytes. `explain()` is deliberately not quota-gated
+(it compiles a preview and never executes — same reason it skips
+cost-estimation).
+
+**Coverage:** `tests/unit/test_query_quota.py` (window semantics, per-
+principal/per-connection isolation, byte accounting, policy validation,
+classification, REST-429/MCP mapping), `tests/integration/test_query_quota_e2e.py`
+(real execute pipeline against SQLite: request cap, per-principal isolation,
+byte cap, unauthenticated skip, metric increment), and a
+`tests/security/test_adversarial_security.py` case proving a quota-rejected
+attempt is refused strictly before schema validation / the engine.
+
+**Phase 2 — Redis-backed cross-replica quota (NOT STARTED):** the in-process
+window is per-replica, so under a load balancer the effective quota is
+multiplied by instance count — exactly the caveat the default in-process
+concurrency limiter carries (see `execution/redis_concurrency.py`). Closing
+it means a `RedisQuotaLimiter` implementing the same `QuotaLimiter` Protocol
+(a per-key sorted set of attempt timestamps + byte weights, pruned by a
+single atomic Lua `ZREMRANGEBYSCORE`/`ZADD` script — the exact shape item 9's
+`RedisConcurrencyLimiter` already uses), selected by the same
+`concurrency_backend`/startup swap `init_redis_limiter` uses, plus a
+live-Redis integration gate. Split out because the in-process quota is a
+complete, shippable guardrail for single-instance deployments on its own, and
+the cross-replica variant needs the real-Redis test infrastructure item 9
+established — the same phasing precedent as item 35 phase 2.
 
 **Effort: M (2–3 days).** Reuses the Redis-backed cross-instance state item
 9 already introduced for the concurrency limiter; this is a second counter

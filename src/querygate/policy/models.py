@@ -211,6 +211,23 @@ class Policy(pyd.BaseModel):
     # when max_queue_depth still has headroom.
     max_queue_depth_per_principal: Optional[int] = pyd.Field(default=None, ge=0)
 
+    # Per-principal request/byte quota over a rolling window (TODO.md item 50).
+    # max_concurrency bounds *in-flight* queries; these bound the *rate* over
+    # time, so a caller that never exceeds its concurrency limit still can't
+    # fire unbounded sequential queries and exhaust DB capacity or a cost
+    # budget. Unset (None, the default for both caps) means the quota is
+    # disabled — existing deployments behave identically. The quota is scoped
+    # per principal per connection and is only enforced for an authenticated
+    # caller (an anonymous/unattributable request can't be rate-limited per
+    # principal, so it's skipped). Enforcement is in-process — correct for a
+    # single instance; a Redis-backed cross-replica quota is item 50 phase 2.
+    # `max_response_bytes_per_window` counts a query's response size *after* it
+    # runs, so the request that crosses the byte ceiling still completes and the
+    # next one is refused (rolling total already at/over the cap).
+    max_requests_per_window: Optional[int] = pyd.Field(default=None, ge=1)
+    max_response_bytes_per_window: Optional[int] = pyd.Field(default=None, ge=1)
+    quota_window_seconds: int = pyd.Field(default=60, ge=1)
+
     # Pre-execution cost estimation (execution/cost_estimation.py, TODO.md
     # item 26 phase 1). Unset (None, the default for both) means disabled —
     # existing deployments behave identically. When set, `execute()` asks
@@ -250,6 +267,13 @@ class Policy(pyd.BaseModel):
     @property
     def cost_estimation_enabled(self) -> bool:
         return self.max_estimated_rows is not None or self.max_estimated_cost is not None
+
+    @property
+    def query_quota_enabled(self) -> bool:
+        return (
+            self.max_requests_per_window is not None
+            or self.max_response_bytes_per_window is not None
+        )
 
     def table_allowed(self, table_name: str) -> bool:
         name = table_name.lower()

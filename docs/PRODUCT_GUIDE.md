@@ -328,6 +328,18 @@ server resources.
 queuing for a database slot before QueryGate even knows the query is valid
 SQL worth running.
 
+A related but distinct control (`execution/quota.py`) sits *earlier*, before
+the caller even queues: a **per-principal rate/byte quota** over a rolling
+time window. Concurrency caps bound how many queries run *at once*; the quota
+bounds how many (and how large a total response) one authenticated caller may
+run *over time* — so an agent that stays under its concurrency limit still
+can't fire unbounded sequential queries and run up a database's load or a
+customer's cost budget. It's checked before queuing so a throttled caller
+never even consumes a slot, and a rejection comes back as a distinct 429 /
+`RATE_LIMITED` with a retry hint, not a generic denial. See the Decision Log
+entry on rate limits for the deliberate scope choices (in-process phase 1,
+counts admitted attempts, skips anonymous callers).
+
 ### 5. Session lifecycle and dialect guardrails
 
 **Files:** `src/querygate/connections/engine.py`,
@@ -2047,6 +2059,36 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-21 — Per-principal quota is enforced before queuing, counts every
+  admitted attempt, skips anonymous callers, and ships in-process first
+  (TODO.md item 50 phase 1).** A rolling-window cap on request count and
+  response bytes (`execution/quota.py`), resolved per principal per connection
+  through the existing policy merge. Four deliberate scope choices, each with a
+  rejected alternative: **(1) Checked before the concurrency slot / DB session,
+  not alongside execution** — a throttled caller shouldn't get to consume a
+  slot or a connection just to be rejected; putting the gate first keeps
+  rejected traffic cheap, matching where allow/deny already sits. **(2) The
+  reservation counts as one request the moment it's admitted, and a query that
+  then fails downstream is *not* refunded** — a quota is an anti-abuse / cost
+  control, so an admitted attempt is spent whatever its outcome; refunding
+  failures would let a caller probe invalid queries for free at machine speed.
+  Reserving atomically at admission (prune-check-record in one step) also
+  closes a check-then-act race where many concurrent in-flight callers each
+  pass a check before any records. **(3) Only authenticated callers are
+  throttled** — an anonymous/unattributable request has no principal to key a
+  per-principal window on; applying the quota to a shared anonymous bucket
+  would let one caller's traffic throttle an unrelated one, so it's skipped
+  (a deployment that wants anonymous callers rate-limited should require auth,
+  which is a separate control). **(4) In-process window now, Redis cross-replica
+  later** — the in-process quota is a complete guardrail for a single instance
+  and the exact same phasing the concurrency limiter itself used (item 9 /
+  item 35 phase 2); under a load balancer the window is per-replica until the
+  `RedisQuotaLimiter` (phase 2) lands behind the same `QuotaLimiter` Protocol.
+  The rejection is a distinct 429 + `Retry-After` (REST) / `RATE_LIMITED`
+  (MCP), not a generic denial, so an agent can tell "slow down / budget spent,
+  retry later" apart from a structural error it should not retry unchanged.
+  `explain` is not quota-gated — it compiles a preview without executing, the
+  same reason it skips cost-estimation.
 - **2026-07-20 — A masked column may appear only as a bare `select`
   projection; any other use is rejected, not silently masked-in-place
   (TODO.md item 49).** Column value masking (`hash`/`null`/`last`/`bucket`,

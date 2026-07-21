@@ -46,6 +46,7 @@ from querygate.core.exceptions import (
     NotFoundError,
     PolicyViolationError,
     QueryValidationError,
+    QuotaExceededError,
     public_error_message,
 )
 from querygate.core.logging import get_logger
@@ -157,6 +158,18 @@ def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(ConcurrencyLimitError)
     async def _concurrency(_request: Request, exc: ConcurrencyLimitError) -> JSONResponse:
         return _response(exc, status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+    # Registered separately from (and more specifically than)
+    # PolicyViolationError: a per-principal quota rejection (TODO.md item 50) is
+    # semantically rate limiting, so it answers 429 with a Retry-After hint
+    # rather than the generic 422 other policy violations use.
+    @app.exception_handler(QuotaExceededError)
+    async def _quota(_request: Request, exc: QuotaExceededError) -> JSONResponse:
+        return _response(
+            exc,
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        )
 
     @app.exception_handler(PolicyViolationError)
     async def _policy(_request: Request, exc: PolicyViolationError) -> JSONResponse:
