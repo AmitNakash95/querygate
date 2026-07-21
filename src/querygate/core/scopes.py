@@ -18,6 +18,13 @@ ADMIN_CONNECTIONS_TEST_SCOPE = "admin:connections:test"
 # Catalog governance (TODO.md item 32B) — least-privilege, split by
 # operation rather than one broad "catalog admin" scope.
 CATALOG_GENERATE_SCOPE = "catalog:generate"
+# Human authoring of a curated catalog entry (TODO.md item 84) — distinct
+# from review so a deployment *can* keep authoring and approving as different
+# principals, but separation of duties is enforced by scope, not identity: a
+# principal that also holds catalog:review may approve/publish its own manual
+# proposal. A manual proposal stays quarantined until published, exactly like
+# a generated one.
+CATALOG_AUTHOR_SCOPE = "catalog:author"
 CATALOG_REVIEW_SCOPE = "catalog:review"
 CATALOG_EDIT_SCOPE = "catalog:edit"
 CATALOG_APPROVE_SCOPE = "catalog:approve"
