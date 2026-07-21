@@ -132,6 +132,14 @@ connections:
     # deployments need, since a static value is identical for every caller.
     mandatory_row_filters: []
 
+    # Optional k-anonymity guardrail (off by default). When set (floor 2), the
+    # compiler injects `HAVING count(*) >= k` into every aggregate query, so a
+    # caller can't single out an individual by aggregating over a razor-thin
+    # filter — a group backed by fewer than k rows is suppressed, not returned.
+    # Applies only to aggregate queries; closes single-query singling-out, not
+    # multi-query differencing. See docs/INFERENCE_RISKS.md (R3).
+    # min_group_size: 5
+
 # Per-principal overrides — optional, on top of the `default`/`connections`
 # layers above. Uncomment and adapt once callers have distinct identities
 # (a per-key `api_key_subject`, or JWT auth — see AppConfig's `jwt_*`

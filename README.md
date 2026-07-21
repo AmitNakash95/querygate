@@ -252,12 +252,22 @@ connections:
       customers: [email]
     max_limit: 200
     mandatory_row_filters: []   # e.g. [{table: orders, column: tenant_id, value: 42}]
+    min_group_size: 5           # k-anonymity: suppress aggregate groups < 5 rows
 ```
 
 Every table and column reference anywhere in a query — select, join keys,
 where, group_by, having, order_by, top_n — is checked against this policy
 *before* compilation. A denied column can't be used to filter or sort on
-even if it's never selected.
+even if it's never selected. See [docs/INFERENCE_RISKS.md](docs/INFERENCE_RISKS.md)
+for the full analysis of what this closes and what stays a residual.
+
+`min_group_size` is an optional **k-anonymity guardrail** (off by default):
+when set, the compiler injects `HAVING count(*) >= k` into every aggregate
+query, so a caller can't single out an individual by aggregating over a
+razor-thin filter — a `count(*)` over a group backed by fewer than *k* rows is
+suppressed rather than returned. It is the aggregate analog of a mandatory row
+filter (policy-driven, injected, non-removable) and applies only to aggregate
+queries; it closes single-query singling-out, not multi-query differencing.
 
 ### Pre-execution cost estimation (Postgres)
 
