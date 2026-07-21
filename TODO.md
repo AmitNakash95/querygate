@@ -98,6 +98,7 @@ order-of-magnitude, not commitments.
 | 64 | ✅ Make full catalog provenance opt-in on describe_table/search_catalog | S–M | 27 |
 | 65 | ✅ Add a response-size cap to get_querygate_guide_topic | XS–S | — |
 | 66 | ✅ CI/test guardrail on total MCP schema+instructions size | S | 61, 62, 63, 64, 65 |
+| 88 | ✅ Minimum aggregation group size (k-anonymity guardrail) | S–M | 55 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
@@ -2019,3 +2020,39 @@ REST's "malformed input is a clean client error, never a 5xx" posture. Keep
 the cap a named `AppConfig` field with a generous default so normal batches
 are unaffected, and add a regression flipping the phase-2a MCP deep-body test
 from "handled 500" to "clean 4xx".
+
+### 88. Minimum aggregation group size (k-anonymity guardrail) ✅ DONE
+
+**Shipped:** A new `Policy.min_group_size` cap (`policy/models.py`) that closes
+the direct, single-query form of the aggregate-differencing residual that item
+55's design note flagged as R3 (`docs/INFERENCE_RISKS.md`). When set (floor 2;
+`None` disables), the compiler (`compiler/sqlalchemy_compiler.py`) injects
+`HAVING count(*) >= k` into every **aggregate** query — grouped or
+single-implicit-group — so any result group backed by fewer than *k* underlying
+rows is suppressed. A caller can no longer aggregate over a razor-thin filter to
+single out an individual (`count(*) WHERE id = X` returns nothing when fewer
+than *k* rows match). It is the aggregate analog of a mandatory row filter:
+policy-driven, injected, non-removable, and it only touches aggregate queries —
+plain row reads remain governed by mandatory row filters, not group size.
+
+**Scope (deliberate):** this closes single-query singling-out, **not**
+multi-query differencing (isolating an individual by subtracting two
+independently-compliant aggregates), which needs query-set auditing or
+differential privacy — out of scope and documented as still-residual in
+`docs/INFERENCE_RISKS.md`. No new AST surface; `min_group_size` is a policy cap,
+loaded generically from `policy.yaml` like every other cap.
+
+**Coverage:** compiler unit tests (`test_compiler.py::TestMinGroupSize` — HAVING
+injection on grouped/single-group aggregates, no-op on plain selects, combines
+with caller HAVING, `None` no-op), real end-to-end suppression against SQLite
+(`test_sqlite_end_to_end.py` — a single-customer country group and a
+single-row filtered count are suppressed; the whole-table count is returned),
+a security test tying the closure back to item 55's R3
+(`test_adversarial_security.py`), and policy-model validation
+(`test_policy_models.py` — default `None`, floor of 2).
+
+**Why it matters:** item 55 proved the direct column-reference defenses are
+complete and documented the residuals it couldn't close. R3 (no minimum group
+size) was the one residual with a bounded, well-precedented fix — this item
+builds it, turning a documented gap into an opt-in enforced guardrail without
+overclaiming (multi-query differencing stays honestly out of scope).
