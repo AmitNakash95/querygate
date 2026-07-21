@@ -133,6 +133,14 @@ made via the governance API, and vice versa.
 - `GET /metrics` — unauthenticated Prometheus text format; empty samples
   (only `# HELP`/`# TYPE` lines) until at least one query has run in the
   process's lifetime — that's expected, not a bug.
+- `GET /api/v1/admin/observability/overview` (scope `admin:observability:read`)
+  — an authenticated, aggregated read of those same metrics: query volume,
+  success/rejection categories, queue/concurrency pressure, and the
+  cost-estimation fail-open rate, globally and per connection, rendered as the
+  `/admin/` "Observability" panel. It is an honest current-process snapshot
+  (`durable: false`, cumulative-since-start, per-replica under the default
+  in-process backends) — for durable, cross-replica history, scrape `/metrics`
+  into your own time-series backend rather than reading this endpoint.
 - Persisted audit JSONL (when `AUDIT_SINK_BACKEND=jsonl`) — Compose: the
   `querygate-audit` named volume; Helm: `/app/var/audit` inside each pod,
   ephemeral by default (`persistence.enabled: false`) since every event is
