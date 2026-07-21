@@ -478,6 +478,31 @@ the twelve things this agent may ask, and here's who signed off on the change"
 story without any new governance machinery — templates simply joined the plane
 that already governs every other config document.
 
+**A guided form composes the template, not just raw YAML (item 87).** Authoring
+a template used to mean hand-typing it into the `templates.yaml` change-set
+`<textarea>` — knowing the exact key names, the parameter-slot schema, and all
+the type/bounds/`allowed_values` self-consistency rules. The Templates domain
+now carries a structured form (`admin_ui/`): template id, connection,
+description, a repeatable parameter-slot builder (name/type/required/list plus
+numeric bounds, string length, and allowed values), and the `StructuredQuery`
+skeleton. On submit it composes a template, merges it by id into the current
+`templates.yaml` draft through two support endpoints
+(`POST /admin/ui/templates/parse` and `/templates/render`), and the result
+flows through the *same* validate → stage → apply → rollback as before — no new
+store, no per-domain publish. The schema authority is the very same
+`QueryTemplateFile`/`TemplateParameter` model the loader and dry-run use, so a
+bad slot (e.g. a numeric bound on a string type, or a duplicate id) is rejected
+with a clear 422 *at compose time* rather than surfacing later at stage. The
+form opens on demand from a "+ New template" button, and each template already
+in the browse list is clickable to expand a read-only view of its query
+skeleton — read from the admin's own `templates.yaml` (the agent-facing
+`/query-templates` projection deliberately omits the AST). Raw `templates.yaml`
+editing stays available in the change-set editor as the power-user escape
+hatch — the form is additive. This mirrors the visual policy
+designer, which already composed a validated `Policy` layer into the draft the
+same way; item 87 brought that "form instead of YAML" ergonomics to templates,
+the one config document that still lacked it.
+
 ## Security Model
 
 The [Core Request Pipeline](#the-core-request-pipeline) section explains what
@@ -942,6 +967,37 @@ routes. Each row's "Test now" button is disabled client-side (with an
 explanatory `title`) when the caller lacks `admin:connections:test` or the
 connection is deployment-disabled, mirroring how the catalog workspace
 already gates its own action buttons per scope.
+
+**How the control plane is organized (item 85).** The single-page app groups
+its views into seven domains in the sidebar — **Overview**, **Connections**
+(schema review + connection health), **Policy** (the visual designer, its
+safe-start presets, and policy simulation), **Catalog** (Curate + Review
+proposals + Versions & rollback), **Templates** (query templates),
+**Releases** (change set + versions), and **Audit** (the redaction-safe audit
+trail) — with a secondary tab bar inside any domain that has more than one
+view. This is a pure nav/layout
+shell: routing is still a flat `showView(<view>)` over a `viewMeta` map, now
+resolved through a domain→tab model, and every per-view render function and
+`hasScope`/`canRead`/`canWrite` gate is reused unchanged. The URL hash still
+names the leaf view (`/admin/#catalog-versions`), so every view stays
+deep-linkable and selects its owning domain and sub-panel on load. The
+`catalog:author`-gated **Curate** panel is a tab inside the Catalog domain
+that appears only when the principal holds that scope — the same gate as
+before, expressed against the tab model instead of a standalone nav slot.
+
+Crucially, the grouping makes an honest structural fact visible rather than
+papering over it. Each domain's tab bar carries a one-line release signal:
+Connections, Policy, and Templates say their edits **stage into the shared
+release** — because `ConfigVersionStore` bundles policy + connections +
+catalog.yaml + templates into one atomic version, so their *authoring*
+surfaces feed a single cross-domain change set that is staged and applied
+together in the **Releases** domain. **Catalog is the sole exception**: it
+carries its own governance versioning (`CatalogFileRepository`, described
+above) independent of `ConfigVersionStore`, so its tab bar reads
+*self-contained* and the whole author → review → publish → rollback loop lives
+inside the Catalog domain. The UI surfaces this split deliberately so an
+operator can see which edits flow into a shared release and which publish on
+their own — see the [Decision Log](#decision-log).
 
 ### Why policy is per-connection, not global
 
@@ -1617,7 +1673,8 @@ sibling and a standalone dependency-light distribution are planned (TODO item
 ### MCP transport
 
 **Files:** `src/querygate/mcp/server.py`, `src/querygate/mcp/auth.py`,
-`src/querygate/mcp/tools/*.py`, `src/querygate/mcp/exceptions.py`
+`src/querygate/mcp/transport_guard.py`, `src/querygate/mcp/tools/*.py`,
+`src/querygate/mcp/exceptions.py`
 
 **MCP** ("Model Context Protocol") is a standard protocol that lets an AI
 agent discover a set of callable "tools" from a server — each with a name,
@@ -1649,6 +1706,19 @@ all. Individual tool functions then call `get_mcp_caller()` /
 `get_mcp_config()` to read that context — this is how a tool like
 `run_structured_queries` knows *who* is calling without the caller having
 to pass identity as a tool argument (which an agent could tamper with).
+
+A second, outer ASGI layer sits *around* the auth wrapper:
+`transport_guard.py`'s `MCPRequestGuardMiddleware` (TODO item 86). The
+upstream MCP Streamable-HTTP transport parses the request body with its own
+`json.loads`, which raises `RecursionError` on a body nested past the JSON
+parser's recursion guard — surfacing as a *handled but HTTP 500* JSON-RPC
+internal error, unlike REST's clean 400 for the same input. The guard closes
+that asymmetry by rejecting an oversized body (`413`) or an over-deep body
+(`400`, via a cheap O(n) structural-depth scan that skips string contents)
+*before* the transport ever parses it — so malformed input is a clean client
+error on the MCP surface too, never a 5xx. Both thresholds are configurable
+(`mcp_max_request_bytes` / `mcp_max_request_depth`) with defaults far above
+any legitimate batch, so normal traffic is untouched.
 
 The actual tools, one module per concern:
 
@@ -2204,6 +2274,53 @@ reasoning behind them, newest first. Added to incrementally as work happens
   query-set auditing or differential privacy. Rather than overclaim
   "k-anonymity," the guardrail's scope is stated exactly, and multi-query
   differencing stays a documented residual in `docs/INFERENCE_RISKS.md` (R3).
+- **2026-07-21 — Structured template authoring feeds the shared release, and
+  keeps the query skeleton as validated JSON rather than a visual AST builder
+  (TODO.md item 87).** Three choices. **(1) It composes into the change-set
+  draft, not a governance queue.** Unlike catalog (item 84), query templates
+  have no independent governance versioning — they are a config document in the
+  bundled `ConfigVersionStore` release. So the form's output merges into the
+  draft `templates.yaml` and flows through the shared validate → stage → apply →
+  rollback, consistent with item 85's Releases domain; routing it through a
+  per-domain publish would have been the wrong versioning plane. **(2) The
+  parameter-slot builder is structured, the query skeleton stays JSON.** The
+  error-prone, schema-heavy part of a template is the parameter slots (type +
+  required/default + numeric/length bounds + `allowed_values`, all with
+  self-consistency rules), so that got a guided row builder; the
+  `StructuredQuery` skeleton is entered as validated JSON rather than a full
+  visual AST builder, which would be a large separate surface and is already
+  served by the typed query-builder SDK and raw editing. The whole template is
+  validated against the same `QueryTemplateFile` model the loader uses, so
+  compose-time errors match stage-time ones. **(3) Policy needed no new work.**
+  The visual policy designer already composed a validated `Policy` layer into
+  the draft — item 87's "form instead of YAML" goal was already met for policy,
+  so the deliverable was templates, the one document that still lacked it. Raw
+  YAML editing stays as the escape hatch for every document.
+- **2026-07-21 — The domain-separated admin UI surfaces the shared-release vs.
+  self-contained-catalog split rather than hiding it (TODO.md item 85).** The
+  control-plane nav was regrouped from nine-plus flat views into seven domains
+  (Overview / Connections / Policy / Catalog / Templates / Releases / Audit). The
+  tempting "clean" grouping would give each domain its own self-contained
+  authoring-and-activation loop, but that would misrepresent how config
+  actually versions: `ConfigVersionStore` stages policy + connections +
+  catalog.yaml + templates as **one** bundled atomic version, so those
+  domains' authoring surfaces inherently feed a single cross-domain change set
+  that lives in a shared **Releases** domain — they cannot each own their own
+  activation. Catalog is the deliberate exception: it has its own governance
+  versioning (`CatalogFileRepository`), independent of `ConfigVersionStore`, so
+  its whole author → review → publish → rollback loop *is* self-contained in
+  the Catalog domain. Rather than paper over this asymmetry (e.g. faking a
+  per-domain "apply" everywhere, or burying the change set), each domain's tab
+  bar carries a one-line release signal — *"edits stage into the shared
+  release"* for Connections/Policy/Templates vs. *"self-contained governance"*
+  for Catalog — so an operator can see which edits flow into a shared,
+  co-applied release and which publish on their own. Two secondary choices:
+  the refactor is nav/layout only (routing stays a flat `showView` over a
+  `viewMeta` map, now resolved through a domain→tab model; every render
+  function and scope gate is reused unchanged, and the leaf-view URL hash keeps
+  every view deep-linkable), and `app.js` was **not** split into per-domain
+  modules — the change never touches the view-render logic, so a module split
+  would add risk without reducing it.
 - **2026-07-21 — Human-authored catalog entries route through the catalog
   governance queue (a new `manual` proposal source), with scope-based — not
   identity-based — separation of duties (TODO.md item 84).** Two deliberate

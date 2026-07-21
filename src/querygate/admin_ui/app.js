@@ -4,16 +4,70 @@
   const API = "/api/v1";
   const viewMeta = {
     overview: ["Control plane / Overview", "Access policy at a glance"],
-    connections: ["Control plane / Schema review", "Policy-filtered schema"],
-    policy: ["Control plane / Policy designer", "Design and simulate access"],
-    changes: ["Control plane / Change set", "Validate before activation"],
-    history: ["Control plane / Versions", "Immutable configuration history"],
+    connections: ["Control plane / Connections / Schema review", "Policy-filtered schema"],
+    health: ["Control plane / Connections / Connection health", "Reachability, credential-free"],
+    policy: ["Control plane / Policy / Designer", "Design and simulate access"],
+    curate: ["Control plane / Catalog / Curate", "Author curated entries through the governance queue"],
+    catalog: ["Control plane / Catalog / Review proposals", "Review, approve, and publish schema-catalog proposals"],
+    "catalog-versions": ["Control plane / Catalog / Versions & rollback", "Every publish and rollback, connection-scoped"],
+    templates: ["Control plane / Templates / Query templates", "Named, parameterized queries"],
+    changes: ["Control plane / Releases / Change set", "Validate before activation"],
+    history: ["Control plane / Releases / Versions", "Immutable configuration history"],
     audit: ["Control plane / Audit trail", "Decisions without sensitive payloads"],
-    catalog: ["Control plane / Catalog review", "Review, approve, and publish schema-catalog proposals"],
-    curate: ["Control plane / Curate catalog", "Author curated entries through the governance queue"],
-    health: ["Control plane / Connection health", "Reachability, credential-free"],
-    templates: ["Control plane / Query templates", "Named, parameterized queries"],
   };
+
+  // Two-level navigation: six domains, each grouping one or more inner tabs.
+  // A tab's `section` is the `.view` it activates (defaults to its own `view`
+  // key); `panel` optionally selects a sub-panel within that section. `release`
+  // records how a domain's edits reach activation — `self` = catalog's own
+  // governance (self-contained), `shared` = feeds the bundled ConfigVersionStore
+  // release, `bundle` = the shared atomic-version surface itself.
+  const navModel = [
+    { id: "overview", label: "Overview", glyph: "01", release: null, tabs: [
+      { view: "overview", label: "Overview" },
+    ] },
+    { id: "connections", label: "Connections", glyph: "02", release: "shared", tabs: [
+      { view: "connections", label: "Schema review" },
+      { view: "health", label: "Connection health" },
+    ] },
+    { id: "policy", label: "Policy", glyph: "03", release: "shared", tabs: [
+      { view: "policy", label: "Designer" },
+    ] },
+    { id: "catalog", label: "Catalog", glyph: "04", release: "self", tabs: [
+      { view: "curate", label: "Curate", scope: "catalog:author" },
+      { view: "catalog", label: "Review proposals", section: "catalog", panel: "review" },
+      { view: "catalog-versions", label: "Versions & rollback", section: "catalog", panel: "versions" },
+    ] },
+    { id: "templates", label: "Templates", glyph: "05", release: "shared", tabs: [
+      { view: "templates", label: "Query templates" },
+    ] },
+    { id: "releases", label: "Releases", glyph: "06", release: "bundle", tabs: [
+      { view: "changes", label: "Change set" },
+      { view: "history", label: "Versions" },
+    ] },
+    { id: "audit", label: "Audit", glyph: "07", release: null, tabs: [
+      { view: "audit", label: "Audit trail" },
+    ] },
+  ];
+
+  const releaseNotes = {
+    self: "Self-contained governance — proposals publish independently, not through the shared release.",
+    shared: "Edits here stage into the shared release — activate them in Releases.",
+    bundle: "Shared atomic version — policy, connections, catalog.yaml and templates apply together.",
+  };
+
+  // Reverse lookups from a tab's view key to its tab descriptor and owning domain.
+  const viewToTab = {};
+  const viewToDomain = {};
+  for (const domain of navModel) {
+    for (const tab of domain.tabs) {
+      if (!tab.section) tab.section = tab.view;
+      viewToTab[tab.view] = tab;
+      viewToDomain[tab.view] = domain;
+    }
+  }
+  const defaultDomainView = (domain) =>
+    (domain.tabs.find((tab) => !tab.scope || hasScope(tab.scope)) || domain.tabs[0]).view;
   const documentKeys = ["policy", "connections", "catalog", "templates"];
   const guardrailFields = {
     "guard-max-limit": "max_limit",
@@ -62,6 +116,7 @@
     templates: [],
     templatePreview: null,
     templateList: [],
+    templateSources: {},
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -128,14 +183,41 @@
   function canRead() { return hasScope("admin:config:read"); }
   function canWrite() { return hasScope("admin:config:write"); }
 
+  function renderDomainTabs(domain, activeView) {
+    const bar = $("#domain-tabs");
+    const visibleTabs = domain.tabs.filter((tab) => !tab.scope || hasScope(tab.scope));
+    if (visibleTabs.length <= 1) {
+      bar.hidden = true;
+      bar.innerHTML = "";
+    } else {
+      bar.hidden = false;
+      bar.innerHTML = visibleTabs.map((tab) =>
+        `<button class="domain-tab${tab.view === activeView ? " active" : ""}" type="button" role="tab" aria-selected="${tab.view === activeView}" data-view-target="${escapeHtml(tab.view)}">${escapeHtml(tab.label)}</button>`
+      ).join("");
+    }
+    const note = $("#domain-release-note");
+    const message = domain.release ? releaseNotes[domain.release] : "";
+    note.textContent = message;
+    note.hidden = !message;
+    note.className = `domain-release ${domain.release || ""}`.trim();
+  }
+
   function showView(name) {
-    if (!viewMeta[name]) return;
+    const tab = viewToTab[name];
+    if (!tab) return;
+    const domain = viewToDomain[name];
     $$(".view").forEach((view) => {
-      const active = view.dataset.view === name;
+      const active = view.dataset.view === tab.section;
       view.classList.toggle("active", active);
       view.hidden = !active;
     });
-    $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.viewTarget === name));
+    if (tab.panel) {
+      $$(`#view-${tab.section} [data-catalog-panel]`).forEach((panel) => {
+        panel.hidden = panel.dataset.catalogPanel !== tab.panel;
+      });
+    }
+    $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.domain === domain.id));
+    renderDomainTabs(domain, name);
     $("#view-kicker").textContent = viewMeta[name][0];
     $("#view-title").textContent = viewMeta[name][1];
     document.body.classList.remove("menu-open");
@@ -147,9 +229,13 @@
       loadCatalogProposals();
       loadCatalogVersions();
     }
+    if (name === "catalog-versions" && state.access && $("#catalog-connection").value && !state.catalogVersions.length) loadCatalogVersions();
     if (name === "curate" && state.access) initCurateView();
     if (name === "health" && state.access && !$("#health-body [data-health-row]")) loadConnectionHealth();
-    if (name === "templates" && state.access && !state.templateList.length) loadTemplates();
+    if (name === "templates" && state.access) {
+      initTemplateAuthorView();
+      if (!state.templateList.length) loadTemplates();
+    }
   }
 
   function formatDate(value) {
@@ -1420,15 +1506,68 @@
       ? state.templateList
           .map(
             (tpl) => `
-      <div class="template-card">
-        <div><strong>${escapeHtml(tpl.id)}</strong><p>${escapeHtml(tpl.description || "No description")}</p>
-          <div class="template-params">${tpl.parameters.length ? tpl.parameters.map(paramSignature).join("") : "<small>No parameters</small>"}</div>
-        </div>
-        <span class="status-chip neutral">${escapeHtml(tpl.connection)}</span>
+      <div class="template-card" data-template-id="${escapeHtml(tpl.id)}">
+        <button class="template-card-head" type="button" data-template-toggle="${escapeHtml(tpl.id)}" aria-expanded="false">
+          <div><strong>${escapeHtml(tpl.id)}</strong><p>${escapeHtml(tpl.description || "No description")}</p>
+            <div class="template-params">${tpl.parameters.length ? tpl.parameters.map(paramSignature).join("") : "<small>No parameters</small>"}</div>
+          </div>
+          <span class="template-card-meta"><span class="status-chip neutral">${escapeHtml(tpl.connection)}</span><span class="template-card-caret" aria-hidden="true">▸</span></span>
+        </button>
+        <div class="template-query" data-template-query="${escapeHtml(tpl.id)}" hidden></div>
       </div>`
           )
           .join("")
       : '<p class="empty-state">No query templates visible to this principal.</p>';
+  }
+
+  function toggleTemplateQuery(head) {
+    const card = head.closest(".template-card");
+    if (!card) return;
+    const id = head.dataset.templateToggle;
+    const region = $(".template-query", card);
+    const opening = region.hidden;
+    if (opening && !region.dataset.rendered) {
+      const template = state.templateSources[id];
+      if (template) {
+        region.innerHTML =
+          `<div class="template-query-label">Query skeleton <small>read-only — edit via the templates.yaml draft</small></div>` +
+          `<pre class="code-view">${escapeHtml(JSON.stringify(template.query, null, 2))}</pre>`;
+      } else {
+        region.innerHTML = canRead() || canWrite()
+          ? '<p class="empty-state">Query skeleton not found in the current templates.yaml draft.</p>'
+          : '<p class="empty-state">Connect with <code>admin:config:read</code> to view the query skeleton.</p>';
+      }
+      region.dataset.rendered = "1";
+    }
+    region.hidden = !opening;
+    head.setAttribute("aria-expanded", String(opening));
+    card.classList.toggle("open", opening);
+  }
+
+  async function loadTemplateSources() {
+    // The agent-facing /query-templates projection omits the query skeleton by
+    // design; the admin reads it from the templates.yaml it already governs.
+    state.templateSources = {};
+    if (!canRead() && !canWrite()) return;
+    // The browse list is the live template set, so read its queries from the
+    // active templates.yaml (fall back to the draft when no active copy loaded).
+    const yaml = state.activeDocuments.templates || state.draftDocuments.templates || "";
+    if (!yaml.trim()) return;
+    try {
+      const parsed = await api("/admin/ui/templates/parse", {
+        method: "POST",
+        body: JSON.stringify({ templates_yaml: yaml }),
+      });
+      // Defense in depth: only retain query skeletons for templates that are in
+      // this principal's visibility-filtered browse list, so the in-memory
+      // footprint never exceeds what a card could actually reveal.
+      const visibleIds = new Set(state.templateList.map((template) => template.id));
+      for (const template of parsed.document?.templates || []) {
+        if (visibleIds.has(template.id)) state.templateSources[template.id] = template;
+      }
+    } catch {
+      state.templateSources = {};
+    }
   }
 
   async function loadTemplates() {
@@ -1436,6 +1575,7 @@
     setBusy(button, true, "Loading…");
     try {
       state.templateList = await api("/query-templates");
+      await loadTemplateSources();
       renderTemplates();
     } catch (error) {
       state.templateList = [];
@@ -1443,6 +1583,134 @@
     } finally {
       setBusy(button, false);
     }
+  }
+
+  // --- Query-template authoring (TODO.md item 87) ------------------------
+  // A guided form composes a validated QueryTemplate and merges it into the
+  // draft templates.yaml change-set document, which then flows through the
+  // shared validate → stage → apply → rollback (Releases). Raw-YAML editing of
+  // templates.yaml stays available in the change-set editor as the escape hatch.
+  function templateParamRowMarkup() {
+    return `<div class="param-row">
+      <input type="text" data-p="name" placeholder="name" aria-label="Parameter name">
+      <select data-p="type" aria-label="Parameter type"><option value="string">string</option><option value="integer">integer</option><option value="number">number</option><option value="boolean">boolean</option></select>
+      <label class="inline-check"><input type="checkbox" data-p="required" checked> req</label>
+      <label class="inline-check"><input type="checkbox" data-p="is_list"> list</label>
+      <input type="text" data-p="default" placeholder="default" aria-label="Default value">
+      <input type="text" data-p="min" placeholder="min" aria-label="Min">
+      <input type="text" data-p="max" placeholder="max" aria-label="Max">
+      <input type="text" data-p="max_length" placeholder="max len" aria-label="Max length">
+      <input type="text" data-p="allowed_values" placeholder="allowed (csv)" aria-label="Allowed values">
+      <button type="button" class="text-button danger" data-remove-param aria-label="Remove parameter">✕</button>
+    </div>`;
+  }
+
+  const templateParamsEmpty = '<p class="empty-state">No parameters — a template can be a fixed query with no slots.</p>';
+
+  function addTemplateParamRow() {
+    const rows = $("#template-param-rows");
+    if ($(".empty-state", rows)) rows.innerHTML = "";
+    rows.insertAdjacentHTML("beforeend", templateParamRowMarkup());
+  }
+
+  function coerceTemplateScalar(type, raw) {
+    // Best-effort coercion from a text field to the slot's declared type; if
+    // it can't coerce, the raw string is kept and the model validation rejects
+    // it with a clear message the caller sees as a toast.
+    if (type === "integer" || type === "number") { const n = Number(raw); return raw !== "" && !Number.isNaN(n) ? n : raw; }
+    if (type === "boolean") { if (raw === "true") return true; if (raw === "false") return false; return raw; }
+    return raw;
+  }
+
+  function readTemplateParams() {
+    return $$("#template-param-rows .param-row").map((row) => {
+      const get = (p) => $(`[data-p="${p}"]`, row);
+      const type = get("type").value;
+      const param = { name: get("name").value.trim(), type, required: get("required").checked };
+      if (get("is_list").checked) param.is_list = true;
+      const def = get("default").value.trim();
+      if (def !== "") param.default = param.is_list ? csvValues(def).map((v) => coerceTemplateScalar(type, v)) : coerceTemplateScalar(type, def);
+      const min = get("min").value.trim(); if (min !== "") param.min = Number(min);
+      const max = get("max").value.trim(); if (max !== "") param.max = Number(max);
+      const maxLen = get("max_length").value.trim(); if (maxLen !== "") param.max_length = Number(maxLen);
+      const allowed = get("allowed_values").value.trim();
+      if (allowed !== "") param.allowed_values = csvValues(allowed).map((v) => coerceTemplateScalar(type, v));
+      return param;
+    });
+  }
+
+  async function addTemplateToDraft(event) {
+    event.preventDefault();
+    if (!canWrite()) { toast("Authoring a template needs admin:config:write.", "bad"); return; }
+    const button = $("#add-template-to-draft");
+    setBusy(button, true, "Adding…");
+    try {
+      const id = $("#template-author-id").value.trim();
+      const connection = $("#template-author-connection").value;
+      if (!id) throw new Error("Template id is required.");
+      if (!connection) throw new Error("Select a connection.");
+      let query;
+      try { query = JSON.parse($("#template-author-query").value || ""); }
+      catch { throw new Error("Query skeleton must be valid JSON."); }
+      const template = { id, connection, parameters: readTemplateParams(), query };
+      const description = $("#template-author-description").value.trim();
+      if (description) template.description = description;
+
+      // Round-trip the current draft through the shared model, merge by id, and
+      // re-render — a validation failure (bad slot, duplicate id) comes back as
+      // a 422 and surfaces below without corrupting the draft.
+      const parsed = await api("/admin/ui/templates/parse", {
+        method: "POST",
+        body: JSON.stringify({ templates_yaml: state.draftDocuments.templates || "" }),
+      });
+      const document = parsed.document && typeof parsed.document === "object" ? parsed.document : {};
+      const templates = Array.isArray(document.templates) ? document.templates : [];
+      const index = templates.findIndex((entry) => entry.id === id);
+      if (index >= 0) templates[index] = template; else templates.push(template);
+      document.templates = templates;
+
+      const rendered = await api("/admin/ui/templates/render", {
+        method: "POST",
+        body: JSON.stringify({ document }),
+      });
+      state.draftDocuments.templates = rendered.templates_yaml;
+      if (state.selectedDocument === "templates") { $("#document-editor").value = rendered.templates_yaml; renderEditor(); }
+      syncDirtyState();
+      resetTemplateAuthorForm();
+      closeTemplateAuthorForm();
+      toast(index >= 0 ? `Template “${id}” updated in the templates.yaml draft.` : `Template “${id}” added to the templates.yaml draft.`);
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  let templateAuthorInitialized = false;
+  function openTemplateAuthorForm() {
+    $("#template-author-form").hidden = false;
+    $("#toggle-template-author").hidden = true;
+    $("#template-author-id").focus();
+  }
+  function closeTemplateAuthorForm() {
+    $("#template-author-form").hidden = true;
+    $("#toggle-template-author").hidden = !canWrite();
+  }
+  function resetTemplateAuthorForm() {
+    ["#template-author-id", "#template-author-description", "#template-author-query"].forEach((sel) => { $(sel).value = ""; });
+    $("#template-param-rows").innerHTML = templateParamsEmpty;
+  }
+  function initTemplateAuthorView() {
+    const authorized = canWrite();
+    $("#template-author-gate").hidden = authorized;
+    // The form is opened on demand via the toggle button, not always-on.
+    $("#toggle-template-author").hidden = !authorized || !$("#template-author-form").hidden;
+    if (!authorized) $("#template-author-form").hidden = true;
+    if (!authorized || templateAuthorInitialized) return;
+    templateAuthorInitialized = true;
+    $("#template-author-connection").innerHTML =
+      state.connections.map((c) => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.id)}</option>`).join("")
+      || '<option value="">No visible connections</option>';
   }
 
   async function testConnectionNow(connectionId) {
@@ -1582,7 +1850,15 @@
     populateConnectionSelects();
     populateCatalogConnectionOptions();
     curateInitialized = false;
-    $("#nav-curate").hidden = !hasScope("catalog:author");
+    templateAuthorInitialized = false;
+    // Set the template-authoring entry point (button vs. gate) as soon as scopes
+    // are known, so it is correct even when the Templates view is deep-linked
+    // and shown before connect() runs.
+    initTemplateAuthorView();
+    // Re-render the active domain's inner tabs now that scopes are known — this
+    // is what surfaces/hides the catalog:author-gated Curate tab.
+    const activeView = viewToTab[window.location.hash.slice(1)] ? window.location.hash.slice(1) : "overview";
+    renderDomainTabs(viewToDomain[activeView], activeView);
     renderOverview();
     if (canRead()) {
       await loadGovernance(false);
@@ -1614,7 +1890,14 @@
   }
 
   function bindEvents() {
-    $$(".nav-item").forEach((item) => item.addEventListener("click", () => showView(item.dataset.viewTarget)));
+    $$(".nav-item").forEach((item) => item.addEventListener("click", () => {
+      const domain = navModel.find((entry) => entry.id === item.dataset.domain);
+      if (domain) showView(defaultDomainView(domain));
+    }));
+    $("#domain-tabs").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-view-target]");
+      if (button) showView(button.dataset.viewTarget);
+    });
     $$('[data-go-view]').forEach((button) => button.addEventListener("click", () => showView(button.dataset.goView)));
     $("#menu-button").addEventListener("click", () => {
       const open = document.body.classList.toggle("menu-open");
@@ -1719,6 +2002,20 @@
     $("#curate-form").addEventListener("submit", submitManualProposal);
     $("#refresh-health").addEventListener("click", () => loadConnectionHealth());
     $("#refresh-templates").addEventListener("click", () => loadTemplates());
+    $("#template-cards").addEventListener("click", (event) => {
+      const toggle = event.target.closest("[data-template-toggle]");
+      if (toggle) toggleTemplateQuery(toggle);
+    });
+    $("#toggle-template-author").addEventListener("click", openTemplateAuthorForm);
+    $("#cancel-template-author").addEventListener("click", closeTemplateAuthorForm);
+    $("#add-template-param").addEventListener("click", addTemplateParamRow);
+    $("#template-param-rows").addEventListener("click", (event) => {
+      const remove = event.target.closest("[data-remove-param]");
+      if (!remove) return;
+      remove.closest(".param-row").remove();
+      if (!$("#template-param-rows .param-row")) $("#template-param-rows").innerHTML = templateParamsEmpty;
+    });
+    $("#template-author-form").addEventListener("submit", addTemplateToDraft);
     $("#health-body").addEventListener("click", (event) => {
       const button = event.target.closest("[data-test-connection]");
       if (button) testConnectionNow(button.dataset.testConnection);
