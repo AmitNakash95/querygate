@@ -33,6 +33,7 @@ from querygate.catalog.learning import generate_learned_relationship_proposals
 from querygate.catalog.loader import get_catalog_store
 from querygate.catalog.models import (
     CatalogDraftContent,
+    CatalogDraftObjectType,
     CatalogDraftProposal,
     CatalogDraftTarget,
     CatalogExportBundle,
@@ -52,6 +53,7 @@ from querygate.core.config import AppConfig
 from querygate.core.exceptions import CatalogGovernanceError, NotFoundError
 from querygate.core.scopes import (
     CATALOG_APPROVE_SCOPE,
+    CATALOG_AUTHOR_SCOPE,
     CATALOG_DELETE_SCOPE,
     CATALOG_EDIT_SCOPE,
     CATALOG_EXPORT_SCOPE,
@@ -139,6 +141,30 @@ class ProposalListItem(pyd.BaseModel):
 
 class EditProposalRequest(pyd.BaseModel):
     content: CatalogDraftContent
+
+
+class CreateManualProposalRequest(pyd.BaseModel):
+    """Human-authored (TODO item 84) catalog entry, composed by the Curate UI.
+
+    The primitive fields build a `CatalogDraftTarget` + `CatalogDraftContent`;
+    the existing model validators then do the "compose into validated content"
+    work (non-empty content, unique aliases, table-only default_aggregation,
+    relationship shape). There is deliberately no `sensitivity`/`allow_samples`
+    field here: a draft's content model structurally cannot carry those (they
+    are verified-only, set through a direct catalog edit), and manual authoring
+    does not weaken that quarantine invariant.
+    """
+
+    object_type: CatalogDraftObjectType
+    table: str
+    column: Optional[str] = None
+    to_table: Optional[str] = None
+    to_column: Optional[str] = None
+    description: Optional[str] = None
+    aliases: List[str] = pyd.Field(default_factory=list)
+    default_aggregation: Optional[str] = None
+
+    model_config = pyd.ConfigDict(extra="forbid")
 
 
 class RejectRequest(pyd.BaseModel):
@@ -442,6 +468,60 @@ def build_catalog_governance_router(
             UsageSignalSummaryItem.from_summary(summary)
             for summary in summarize_usage_signals(store, connection)
         ]
+
+    @router.post(
+        "/{connection}/proposals",
+        response_model=GovernanceActionResult,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_manual_proposal_endpoint(
+        connection: str,
+        request: CreateManualProposalRequest,
+        principal: Principal = Depends(get_principal),
+    ):
+        """Author a human-curated catalog entry (TODO item 84).
+
+        Gated on `catalog:author` — distinct from the `catalog:review` scope
+        that approves/publishes it. The proposal is quarantined until a
+        reviewer publishes it (self-review allowed when the same principal also
+        holds `catalog:review`); the mutation runs through the same
+        `CatalogFileRepository` lock and `catalog.governance` audit event as
+        every other governance write.
+        """
+
+        require_scope(principal, CATALOG_AUTHOR_SCOPE)
+        _require_known_connection(connection)
+        try:
+            target = CatalogDraftTarget(
+                connection_id=connection,
+                object_type=request.object_type,
+                table=request.table,
+                column=request.column,
+                to_table=request.to_table,
+                to_column=request.to_column,
+            )
+            content = CatalogDraftContent(
+                description=request.description,
+                aliases=request.aliases,
+                default_aggregation=request.default_aggregation,
+            )
+        except pyd.ValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        update = await _run_mutation(
+            action="manual_create",
+            scope=CATALOG_AUTHOR_SCOPE,
+            connection=connection,
+            principal=principal,
+            proposal_id=None,
+            mutator=lambda store: governance.create_manual_proposal(
+                store,
+                connection_id=connection,
+                target=target,
+                content=content,
+                actor=principal.subject,
+            ),
+        )
+        return GovernanceActionResult(outcome=update.outcome, proposal_id=update.proposal_id)
 
     @router.get("/{connection}/proposals", response_model=List[ProposalListItem])
     async def list_proposals_endpoint(
