@@ -185,6 +185,17 @@ class Policy(pyd.BaseModel):
     # to CASE expressions once those became expressible in SELECT.
     max_case_branches: int = pyd.Field(default=10)
 
+    # k-anonymity guardrail (TODO.md item 88): the minimum number of underlying
+    # rows any aggregate result group must be backed by. When set, the compiler
+    # injects `HAVING count(*) >= min_group_size` into every aggregate query
+    # (grouped or single-group), suppressing any group small enough for a caller
+    # to single out an individual by aggregating over a razor-thin filter — the
+    # aggregate analog of a mandatory row filter, and non-removable the same way.
+    # None (the default) disables it; the floor is 2, since k=1 is no protection.
+    # It bounds single-query singling-out, not multi-query differencing — see
+    # docs/INFERENCE_RISKS.md (R3).
+    min_group_size: Optional[int] = pyd.Field(default=None, ge=2)
+
     # `max_limit`/`max_limit_aggregate` cap row *count*; this caps response
     # *size* — a wide TEXT/JSONB/BLOB column selected across many rows is a
     # policy-compliant query that can still blow up the response body. Rows

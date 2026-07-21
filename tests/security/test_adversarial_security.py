@@ -312,6 +312,24 @@ def test_aggregate_has_no_minimum_group_size_documented_residual():
     validate_policy(query, policy, connection_id="demo")  # must not raise
 
 
+def test_min_group_size_closes_the_single_row_aggregate_singling_out():
+    """The R3 residual above (a count over a razor-thin filter) is closed when a
+    policy sets min_group_size (TODO.md item 88): the compiler injects a
+    `HAVING count(*) >= k` floor so the single-row group is suppressed rather
+    than returned. This is the enforcement counterpart to the documented
+    residual — with the guardrail on, the singling-out no longer succeeds."""
+    query = StructuredQuery(
+        from_table="customers",
+        select=[AggregateSelectItem(fn="count", col="*", alias="n")],
+        where=Predicate(col="customers.id", op="eq", value=1),
+    )
+    stmt, _ = compile_structured_query(
+        query, {"customers": _customers_table()}, Policy(min_group_size=5)
+    )
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "count(*) >= 5" in compiled.lower()
+
+
 def test_denied_table_cannot_be_smuggled_through_a_filter():
     query = StructuredQuery(
         from_table="customers",
