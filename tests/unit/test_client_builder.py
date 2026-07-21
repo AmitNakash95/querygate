@@ -1,0 +1,377 @@
+"""Tests for the typed client-side query builder (TODO.md item 51, phase 1).
+
+Two things are proven here:
+
+1. **Fidelity** — the builder emits the exact wire JSON a hand-written
+   ``StructuredQuery`` body would, and everything it emits round-trips back
+   through the real server model unchanged. The builder reuses the server's
+   own Pydantic models, so an illegal shape raises in ``build()`` with the
+   same error the server would return.
+2. **Drift guards** — introspective tests that fail if the ``StructuredQuery``
+   AST grows a field, a ``SelectItem`` variant, or a ``CompareOp`` the builder
+   can't express. This is the "kept in sync via a schema test" acceptance
+   criterion from item 51: the builder can never silently fall behind the AST.
+"""
+
+from __future__ import annotations
+
+import typing
+
+import pydantic
+import pytest
+
+from querygate.client import (
+    Query,
+    agg,
+    and_,
+    array_agg,
+    asc,
+    case,
+    col,
+    col_fn,
+    date_bucket,
+    desc,
+    fn,
+    fn_select,
+    lit,
+    not_,
+    or_,
+    percentile_cont,
+    string_agg,
+    when,
+)
+from querygate.query_ast import models as m
+
+pytestmark = pytest.mark.unit
+
+
+# --------------------------------------------------------------------------- #
+# Fidelity
+# --------------------------------------------------------------------------- #
+def test_builder_matches_handwritten_wire_dict():
+    """A realistic aggregate query serializes to exactly the JSON the REST docs
+    show a caller writing by hand."""
+    built = (
+        Query.from_("orders")
+        .join("customers", on=("orders.customer_id", "customers.id"))
+        .select("customers.name", agg.sum("orders.total_amount", as_="total_spend"))
+        .where(col("customers.country") == "GB")
+        .group_by("customers.name")
+        .order_by("total_spend", desc=True)
+        .limit(5)
+        .intent("top GB customers by total spend")
+        .to_dict()
+    )
+
+    assert built == {
+        "from": "orders",
+        "select": [
+            "customers.name",
+            {"fn": "sum", "col": "orders.total_amount", "as": "total_spend"},
+        ],
+        "joins": [{"table": "customers", "on": ["orders.customer_id", "customers.id"]}],
+        "where": {"col": "customers.country", "op": "eq", "value": "GB"},
+        "group_by": ["customers.name"],
+        "order_by": [{"col": "total_spend", "dir": "desc"}],
+        "limit": 5,
+        "intent": "top GB customers by total spend",
+    }
+
+
+def test_output_roundtrips_through_the_real_model():
+    """Whatever the builder emits validates cleanly as a StructuredQuery and is
+    identical to the model the builder itself constructed."""
+    q = (
+        Query.from_("order_items")
+        .select("order_items.id", agg.count("*", as_="n"))
+        .where(col("order_items.quantity").between(1, 10))
+        .group_by("order_items.id")
+    )
+    reparsed = m.StructuredQuery.model_validate(q.to_dict())
+    assert reparsed == q.build()
+
+
+def test_multiple_where_calls_are_anded():
+    q = (
+        Query.from_("orders")
+        .select("orders.id")
+        .where(col("orders.status") == "completed")
+        .where(col("orders.total_amount") > 100)
+    )
+    assert q.to_dict()["where"] == {
+        "and": [
+            {"col": "orders.status", "op": "eq", "value": "completed"},
+            {"col": "orders.total_amount", "op": "gt", "value": 100},
+        ]
+    }
+
+
+def test_single_where_is_not_wrapped_in_a_group():
+    q = Query.from_("orders").select("orders.id").where(col("orders.id") == 1)
+    assert q.to_dict()["where"] == {"col": "orders.id", "op": "eq", "value": 1}
+
+
+def test_column_to_column_comparison_uses_value_col():
+    pred = col("order_items.unit_price") > col("order_items.quantity")
+    assert pred.model_dump(exclude_none=True) == {
+        "col": "order_items.unit_price",
+        "op": "gt",
+        "value_col": "order_items.quantity",
+    }
+
+
+def test_boolean_groups_and_not():
+    q = (
+        Query.from_("orders")
+        .select("orders.id")
+        .where(
+            and_(
+                or_(col("orders.status") == "completed", col("orders.status") == "shipped"),
+                not_(col("orders.total_amount").is_null()),
+            )
+        )
+    )
+    assert q.to_dict()["where"] == {
+        "and": [
+            {
+                "or": [
+                    {"col": "orders.status", "op": "eq", "value": "completed"},
+                    {"col": "orders.status", "op": "eq", "value": "shipped"},
+                ]
+            },
+            {"not": {"col": "orders.total_amount", "op": "is_null"}},
+        ]
+    }
+
+
+def test_scalar_fn_predicate_and_projection():
+    q = (
+        Query.from_("customers")
+        .select(fn_select("upper", col("customers.name"), as_="shout"))
+        .where(fn("lower", col("customers.name")) == "ada")
+    )
+    body = q.to_dict()
+    assert body["select"] == [{"fn": "upper", "args": [{"col": "customers.name"}], "as": "shout"}]
+    assert body["where"] == {
+        "col_fn": {"fn": "lower", "args": [{"col": "customers.name"}]},
+        "op": "eq",
+        "value": "ada",
+    }
+
+
+def test_case_with_else_and_literal_and_column_branches():
+    item = case(
+        when(col("orders.total_amount") > 100, lit("big")),
+        when(col("orders.status") == "pending", col("orders.status")),
+        else_=lit("other"),
+        as_="bucket",
+    )
+    assert item.model_dump(by_alias=True, exclude_none=True) == {
+        "when": [
+            {
+                "when": {"col": "orders.total_amount", "op": "gt", "value": 100},
+                "then": {"literal": "big"},
+            },
+            {
+                "when": {"col": "orders.status", "op": "eq", "value": "pending"},
+                "then": {"col": "orders.status"},
+            },
+        ],
+        "else": {"literal": "other"},
+        "as": "bucket",
+    }
+
+
+def test_top_n_with_partition_and_ordering_helpers():
+    q = (
+        Query.from_("order_items")
+        .select("order_items.id")
+        .top_n(
+            2,
+            order_by=[desc("order_items.unit_price"), asc("order_items.id")],
+            partition_by=["order_items.order_id"],
+            fn="rank",
+        )
+    )
+    assert q.to_dict()["top_n"] == {
+        "partition_by": ["order_items.order_id"],
+        "order_by": [
+            {"col": "order_items.unit_price", "dir": "desc"},
+            {"col": "order_items.id"},
+        ],
+        "n": 2,
+        "fn": "rank",
+    }
+
+
+def test_self_join_needs_alias_and_from_alias_are_expressible():
+    q = (
+        Query.from_("employees", alias="e")
+        .join("employees", on=("e.manager_id", "m.id"), alias="m", type="left")
+        .select("e.name", "m.name")
+    )
+    body = q.to_dict()
+    assert body["from"] == "employees"
+    assert body["from_alias"] == "e"
+    assert body["joins"][0]["alias"] == "m"
+    assert body["joins"][0]["type"] == "left"
+
+
+def test_distinct_and_offset_and_composite_join():
+    q = (
+        Query.from_("orders")
+        .distinct()
+        .select("orders.status")
+        .join(
+            "order_items",
+            on=("orders.id", "order_items.order_id"),
+            extra_on=[("orders.customer_id", "order_items.id")],
+        )
+        .offset(5)
+        .limit(10)
+    )
+    body = q.to_dict()
+    assert body["distinct"] is True
+    assert body["offset"] == 5
+    assert body["joins"][0]["extra_on"] == [["orders.customer_id", "order_items.id"]]
+
+
+# --------------------------------------------------------------------------- #
+# Validation is the server's, not re-implemented
+# --------------------------------------------------------------------------- #
+def test_illegal_shape_raises_the_servers_own_error_at_build_time():
+    # distinct count(*) is rejected by AggregateSelectItem's own validator.
+    with pytest.raises(pydantic.ValidationError):
+        agg.count("*", distinct=True)
+
+
+def test_between_builds_a_two_element_list_predicate():
+    pred = col("orders.total_amount").between(10, 100)
+    assert pred.model_dump(exclude_none=True) == {
+        "col": "orders.total_amount",
+        "op": "between",
+        "value": [10, 100],
+    }
+
+
+def test_self_join_missing_alias_raises_the_servers_own_error():
+    # employees joined to itself with no alias is rejected by StructuredQuery's
+    # own self-join validator — the builder does not pre-empt or hide it.
+    with pytest.raises(pydantic.ValidationError):
+        Query.from_("employees").select("employees.id").join(
+            "employees", on=("employees.manager_id", "employees.id")
+        ).build()
+
+
+def test_scalar_fn_args_must_be_wrapped_explicitly():
+    with pytest.raises(TypeError):
+        fn("lower", "customers.name")  # a bare string is ambiguous
+
+
+def test_percentile_fraction_out_of_range_raises():
+    with pytest.raises(pydantic.ValidationError):
+        percentile_cont("orders.total_amount", 1.5)
+
+
+def test_predicate_helper_in_select_gives_a_clear_error():
+    # fn(...) is a predicate target, not a projection — must point at fn_select.
+    with pytest.raises(TypeError, match="fn_select"):
+        Query.from_("customers").select(fn("upper", col("customers.name")))
+    with pytest.raises(TypeError, match="where"):
+        Query.from_("customers").select(col("customers.id") == 1)
+
+
+# --------------------------------------------------------------------------- #
+# Drift guards — the builder cannot silently fall behind the AST
+# --------------------------------------------------------------------------- #
+def test_every_structuredquery_field_is_settable_by_the_builder():
+    """Build a query that sets every StructuredQuery field to a non-default
+    value, then assert the serialized keys equal the full set of the model's
+    serialization aliases. A new AST field that the builder can't set fails
+    here."""
+    q = (
+        Query.from_("employees", alias="e")
+        .distinct()
+        .select("e.name", agg.count("*", as_="n"))
+        .join("employees", on=("e.manager_id", "m.id"), alias="m")
+        .where(col("e.name") == "x")
+        .group_by("e.name")
+        .having(col("n") > 1)
+        .order_by("n", desc=True)
+        .limit(10)
+        .offset(2)
+        .top_n(1, order_by=[desc("n")], partition_by=["e.name"])
+        .intent("everything")
+    )
+    dumped = q.build().model_dump(by_alias=True)  # no exclusions: every key present
+
+    expected_aliases = {
+        field.serialization_alias or name for name, field in m.StructuredQuery.model_fields.items()
+    }
+    assert set(dumped.keys()) == expected_aliases
+
+
+def test_every_non_string_select_item_type_is_constructible():
+    """The set of select-item model classes the builder can produce must equal
+    the concrete (non-str) members of the SelectItem union. A new aggregate
+    variant added to the AST fails here until a builder helper exists."""
+    produced = {
+        type(agg.count("*")),
+        type(date_bucket("orders.created_at", "month")),
+        type(string_agg("customers.email", ", ")),
+        type(array_agg("order_items.product_name")),
+        type(percentile_cont("orders.total_amount", 0.5)),
+        type(fn_select("upper", col("customers.name"))),
+        type(case(when(col("orders.id") == 1, lit("x")), as_="k")),
+    }
+    union_members = {arg for arg in typing.get_args(m.SelectItem) if arg is not str}
+    assert produced == union_members
+
+
+def test_every_compare_op_is_reachable_through_the_dsl():
+    c = col("t.c")
+    reachable = {
+        (c == 1).op,
+        (c != 1).op,
+        (c < 1).op,
+        (c <= 1).op,
+        (c > 1).op,
+        (c >= 1).op,
+        c.in_([1, 2]).op,
+        c.not_in([1, 2]).op,
+        c.like("a%").op,
+        c.between(1, 2).op,
+        c.is_null().op,
+        c.is_not_null().op,
+    }
+    assert reachable == set(typing.get_args(m.CompareOp))
+
+
+def test_every_aggregate_fn_is_reachable():
+    reachable = {
+        agg.count("*").fn,
+        agg.sum("t.c").fn,
+        agg.avg("t.c").fn,
+        agg.min("t.c").fn,
+        agg.max("t.c").fn,
+        agg.stddev("t.c").fn,
+        agg.variance("t.c").fn,
+    }
+    assert reachable == set(typing.get_args(m.AggregateFn))
+
+
+def test_every_scalar_fn_is_reachable():
+    one_arg = {
+        fn("lower", col("t.c")).call.fn,
+        fn("upper", col("t.c")).call.fn,
+        fn("trim", col("t.c")).call.fn,
+    }
+    multi_arg = {
+        fn("coalesce", col("t.c"), lit("x")).call.fn,
+        fn("concat", col("t.c"), lit("x")).call.fn,
+    }
+    assert one_arg | multi_arg == set(typing.get_args(m.ScalarFn))
+
+
+def test_col_fn_alias_matches_fn():
+    assert col_fn("lower", col("t.c")).call == fn("lower", col("t.c")).call

@@ -9,10 +9,14 @@ Neither of those gets a parallel implementation here.
 
 from __future__ import annotations
 
+import re
 import tempfile
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+import sqlalchemy as sa
+import yaml
 
 from querygate.admin.access_diff import compute_access_diff
 from querygate.admin.blast_radius import compute_blast_radius_report
@@ -30,6 +34,8 @@ from querygate.admin.models import (
     MandatoryFilterReadiness,
     PolicyBlastRadiusReport,
     SemanticAccessDiff,
+    TemplateSchemaCheck,
+    TemplateSchemaCheckResult,
 )
 from querygate.admin.store import ConfigVersionStore, get_config_version_store
 from querygate.audit.logger import audit_config_change
@@ -48,8 +54,14 @@ from querygate.core.exceptions import (
 from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE
 from querygate.policy.models import Policy
 from querygate.secrets.resolvers import build_secret_resolver_registry
+from querygate.templates.binding import dummy_bound_query
+from querygate.templates.loader import TemplateStore
+from querygate.templates.models import QueryTemplate
 from querygate.validation.policy_validation import referenced_tables, validate_policy
-from querygate.validation.schema_validation import resolve_query_table_connections
+from querygate.validation.schema_validation import (
+    resolve_query_table_connections,
+    validate_schema,
+)
 
 _SAFE_SIMULATION_VALIDATION_ERROR = (
     "Candidate configuration is invalid; run the config validation endpoint for details "
@@ -57,16 +69,20 @@ _SAFE_SIMULATION_VALIDATION_ERROR = (
 )
 
 
+def _read_optional_file(path: Optional[str]) -> Optional[str]:
+    return Path(path).read_text() if path and Path(path).exists() else None
+
+
 def _bootstrap(cfg: AppConfig, store: ConfigVersionStore) -> ConfigVersion:
     connections_yaml = Path(cfg.connections_file).read_text()
     policy_yaml = Path(cfg.policy_file).read_text()
-    catalog_yaml = (
-        Path(cfg.catalog_file).read_text()
-        if cfg.catalog_file and Path(cfg.catalog_file).exists()
-        else None
-    )
+    catalog_yaml = _read_optional_file(cfg.catalog_file)
+    templates_yaml = _read_optional_file(cfg.template_file)
     return store.bootstrap_if_empty(
-        connections_yaml=connections_yaml, policy_yaml=policy_yaml, catalog_yaml=catalog_yaml
+        connections_yaml=connections_yaml,
+        policy_yaml=policy_yaml,
+        catalog_yaml=catalog_yaml,
+        templates_yaml=templates_yaml,
     )
 
 
@@ -77,20 +93,22 @@ def _resolve_candidate(
     connections_yaml: Optional[str],
     policy_yaml: Optional[str],
     catalog_yaml: Optional[str],
-) -> Tuple[str, str, Optional[str]]:
+    templates_yaml: Optional[str],
+) -> Tuple[str, str, Optional[str], Optional[str]]:
     """A field left unset (None) inherits unchanged from the active version.
 
-    There is no dedicated way to explicitly clear a catalog back to "none"
-    through this API — pass an empty-but-present catalog document (e.g.
-    `"connections: {}"`) if that's genuinely needed; this keeps the request
-    shape simple (no separate "unset" sentinel) for what is, in practice, a
-    rare edge case.
+    There is no dedicated way to explicitly clear a catalog or templates
+    document back to "none" through this API — pass an empty-but-present
+    document (e.g. `"templates: []"`) if that's genuinely needed; this keeps
+    the request shape simple (no separate "unset" sentinel) for what is, in
+    practice, a rare edge case.
     """
     active = _bootstrap(cfg, store)
     return (
         connections_yaml if connections_yaml is not None else active.connections_yaml,
         policy_yaml if policy_yaml is not None else active.policy_yaml,
         catalog_yaml if catalog_yaml is not None else active.catalog_yaml,
+        templates_yaml if templates_yaml is not None else active.templates_yaml,
     )
 
 
@@ -474,8 +492,36 @@ def compute_blast_radius(
     return result
 
 
+_PYDANTIC_URL_LINE = re.compile(r"\n\s*For further information visit https://\S+")
+# The trailing "[type=..., input_value=..., input_type=...]" noise pydantic
+# appends to each error line — useful for library debugging, not for an admin
+# reading a config dry-run.
+_PYDANTIC_TAIL = re.compile(r"\s*\[type=[^\n]*?input_type=[^\]\n]*\]")
+
+
+def _humanize_validation_errors(errors: List[str], doc_names: dict) -> List[str]:
+    """Turn raw validate_config errors into something an admin can act on in the
+    dry-run panel: attribute each to its logical document name (never the
+    throwaway temp path the candidate was written to) and strip pydantic's
+    library-debugging boilerplate (the docs URL line and the
+    `[type=..., input_value=..., input_type=...]` tail). The underlying human
+    message and field path (e.g. `templates.0.parameters.0`) are preserved."""
+    cleaned: List[str] = []
+    for error in errors:
+        for path, name in doc_names.items():
+            error = error.replace(path, name)
+        error = _PYDANTIC_URL_LINE.sub("", error)
+        error = _PYDANTIC_TAIL.sub("", error)
+        cleaned.append(error.strip())
+    return cleaned
+
+
 def validate_candidate_content(
-    cfg: AppConfig, connections_yaml: str, policy_yaml: str, catalog_yaml: Optional[str]
+    cfg: AppConfig,
+    connections_yaml: str,
+    policy_yaml: str,
+    catalog_yaml: Optional[str],
+    templates_yaml: Optional[str] = None,
 ) -> List[str]:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -488,12 +534,116 @@ def validate_candidate_content(
             catalog_path = tmp_path / "catalog.yaml"
             catalog_path.write_text(catalog_yaml)
             catalog_file = str(catalog_path)
-        return validate_config(
+        template_file: Optional[str] = None
+        if templates_yaml is not None:
+            templates_path = tmp_path / "templates.yaml"
+            templates_path.write_text(templates_yaml)
+            template_file = str(templates_path)
+        errors = validate_config(
             str(connections_file),
             str(policy_file),
             catalog_file,
+            template_file=template_file,
             resolver_registry=build_secret_resolver_registry(cfg),
         )
+        doc_names = {
+            str(connections_file): "connections.yaml",
+            str(policy_file): "policy.yaml",
+        }
+        if catalog_file is not None:
+            doc_names[catalog_file] = "catalog.yaml"
+        if template_file is not None:
+            doc_names[template_file] = "templates.yaml"
+        return _humanize_validation_errors(errors, doc_names)
+
+
+async def _check_one_template_schema(template: QueryTemplate) -> TemplateSchemaCheck:
+    """Reflect the target connection and verify the template's referenced
+    tables/columns exist. Reuses the exact `validate_schema` the live pipeline
+    runs (with `principal=None`, so the check resolves the connection by its
+    deployment visibility, not a query-time principal policy) against a
+    dummy-bound query — placeholder values never change which identifiers a
+    query references."""
+    base = {"template_id": template.id, "connection": template.connection}
+    try:
+        bound = dummy_bound_query(template)
+    except Exception as exc:  # structurally invalid skeleton — fix in the dry-run
+        return TemplateSchemaCheck(**base, status="structural_error", messages=[str(exc)])
+    try:
+        await validate_schema(bound, template.connection, principal=None)
+    except NotFoundError:
+        return TemplateSchemaCheck(
+            **base,
+            status="connection_unavailable",
+            messages=[
+                f"connection {template.connection!r} is not a live, enabled connection "
+                "to reflect a schema from"
+            ],
+        )
+    except QueryValidationError as exc:  # a missing column, or a structural rule
+        return TemplateSchemaCheck(**base, status="issues", messages=[str(exc)])
+    except sa.exc.NoSuchTableError as exc:  # a referenced table doesn't exist
+        return TemplateSchemaCheck(
+            **base, status="issues", messages=[f"table {str(exc)!r} does not exist"]
+        )
+    except sa.exc.SQLAlchemyError:  # DB unreachable/auth/etc — best-effort, never blocks
+        return TemplateSchemaCheck(
+            **base,
+            status="unreachable",
+            messages=["schema not checked — the connection's database could not be reached"],
+        )
+    return TemplateSchemaCheck(**base, status="ok")
+
+
+async def check_template_schema(
+    cfg: AppConfig, actor: Principal, templates_yaml: Optional[str]
+) -> TemplateSchemaCheckResult:
+    """On-demand check of every query template's referenced tables/columns
+    against the *currently-live* connections' reflected schema — the existence
+    check the offline dry-run deliberately skips (it never opens a DB session,
+    like `explain`/cost-estimation). Best-effort: a connection that can't be
+    reached yields an `unreachable` result, never an error, so a down database
+    can never block staging otherwise-valid config. A field left unset inherits
+    the active version's templates, matching the rest of the config plane."""
+    start = time.monotonic()
+    store = get_config_version_store()
+    _, _, _, resolved_templates = _resolve_candidate(
+        cfg,
+        store,
+        connections_yaml=None,
+        policy_yaml=None,
+        catalog_yaml=None,
+        templates_yaml=templates_yaml,
+    )
+    if resolved_templates is None:
+        return TemplateSchemaCheckResult(checked=False, note="No query templates are configured.")
+    try:
+        template_store = TemplateStore.from_dict(yaml.safe_load(resolved_templates) or {})
+    except Exception:
+        audit_config_change(
+            action="check_template_schema",
+            outcome="rejected",
+            principal=actor.subject,
+            principal_scopes=sorted(actor.scopes),
+            auth_method=actor.auth_method,
+            error_category="validation",
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        return TemplateSchemaCheckResult(
+            checked=False,
+            note="The templates document is not structurally valid — run Validate (dry-run) first.",
+        )
+
+    results = [await _check_one_template_schema(t) for t in template_store.list()]
+    audit_config_change(
+        action="check_template_schema",
+        outcome="success",
+        principal=actor.subject,
+        principal_scopes=sorted(actor.scopes),
+        auth_method=actor.auth_method,
+        duration_ms=int((time.monotonic() - start) * 1000),
+    )
+    return TemplateSchemaCheckResult(checked=True, results=results)
 
 
 def validate(
@@ -503,18 +653,22 @@ def validate(
     connections_yaml: Optional[str],
     policy_yaml: Optional[str],
     catalog_yaml: Optional[str],
+    templates_yaml: Optional[str] = None,
 ) -> List[str]:
     start = time.monotonic()
     store = get_config_version_store()
-    resolved_connections, resolved_policy, resolved_catalog = _resolve_candidate(
-        cfg,
-        store,
-        connections_yaml=connections_yaml,
-        policy_yaml=policy_yaml,
-        catalog_yaml=catalog_yaml,
+    resolved_connections, resolved_policy, resolved_catalog, resolved_templates = (
+        _resolve_candidate(
+            cfg,
+            store,
+            connections_yaml=connections_yaml,
+            policy_yaml=policy_yaml,
+            catalog_yaml=catalog_yaml,
+            templates_yaml=templates_yaml,
+        )
     )
     errors = validate_candidate_content(
-        cfg, resolved_connections, resolved_policy, resolved_catalog
+        cfg, resolved_connections, resolved_policy, resolved_catalog, resolved_templates
     )
     if principal is not None:
         audit_config_change(
@@ -536,6 +690,7 @@ def preview(
     connections_yaml: Optional[str],
     policy_yaml: Optional[str],
     catalog_yaml: Optional[str],
+    templates_yaml: Optional[str] = None,
 ) -> ConfigPreview:
     """Validate a candidate and return a content-free document-level preview.
 
@@ -547,15 +702,18 @@ def preview(
     start = time.monotonic()
     store = get_config_version_store()
     active = _bootstrap(cfg, store)
-    resolved_connections, resolved_policy, resolved_catalog = _resolve_candidate(
-        cfg,
-        store,
-        connections_yaml=connections_yaml,
-        policy_yaml=policy_yaml,
-        catalog_yaml=catalog_yaml,
+    resolved_connections, resolved_policy, resolved_catalog, resolved_templates = (
+        _resolve_candidate(
+            cfg,
+            store,
+            connections_yaml=connections_yaml,
+            policy_yaml=policy_yaml,
+            catalog_yaml=catalog_yaml,
+            templates_yaml=templates_yaml,
+        )
     )
     errors = validate_candidate_content(
-        cfg, resolved_connections, resolved_policy, resolved_catalog
+        cfg, resolved_connections, resolved_policy, resolved_catalog, resolved_templates
     )
     can_compare = ADMIN_CONFIG_READ_SCOPE in principal.scopes
 
@@ -578,6 +736,10 @@ def preview(
         ConfigDocumentPreview(
             document="catalog",
             change=change(catalog_yaml, resolved_catalog, active.catalog_yaml),
+        ),
+        ConfigDocumentPreview(
+            document="templates",
+            change=change(templates_yaml, resolved_templates, active.templates_yaml),
         ),
     ]
     audit_config_change(
@@ -605,18 +767,22 @@ def stage(
     connections_yaml: Optional[str],
     policy_yaml: Optional[str],
     catalog_yaml: Optional[str],
+    templates_yaml: Optional[str] = None,
     description: Optional[str],
 ) -> ConfigVersion:
     store = get_config_version_store()
-    resolved_connections, resolved_policy, resolved_catalog = _resolve_candidate(
-        cfg,
-        store,
-        connections_yaml=connections_yaml,
-        policy_yaml=policy_yaml,
-        catalog_yaml=catalog_yaml,
+    resolved_connections, resolved_policy, resolved_catalog, resolved_templates = (
+        _resolve_candidate(
+            cfg,
+            store,
+            connections_yaml=connections_yaml,
+            policy_yaml=policy_yaml,
+            catalog_yaml=catalog_yaml,
+            templates_yaml=templates_yaml,
+        )
     )
     errors = validate_candidate_content(
-        cfg, resolved_connections, resolved_policy, resolved_catalog
+        cfg, resolved_connections, resolved_policy, resolved_catalog, resolved_templates
     )
     if errors:
         audit_config_change(
@@ -634,6 +800,7 @@ def stage(
         connections_yaml=resolved_connections,
         policy_yaml=resolved_policy,
         catalog_yaml=resolved_catalog,
+        templates_yaml=resolved_templates,
         description=description,
         actor=principal.subject,
     )
@@ -663,7 +830,11 @@ async def apply(
     start = time.monotonic()
 
     errors = validate_candidate_content(
-        cfg, version.connections_yaml, version.policy_yaml, version.catalog_yaml
+        cfg,
+        version.connections_yaml,
+        version.policy_yaml,
+        version.catalog_yaml,
+        version.templates_yaml,
     )
     if errors:
         audit_config_change(
@@ -683,10 +854,12 @@ async def apply(
         connections_file=paths.connections,
         policy_file=paths.policy,
         catalog_file=paths.catalog,
-        # Templates (item 48) aren't part of config-governance versions in
-        # phase 1 — keep the deployment's static template file across a
-        # version apply/rollback rather than clobbering it to empty.
-        template_file=cfg.template_file,
+        # Query templates (item 48 phase 2) are now a governed document, so a
+        # version carries its own templates snapshot and apply/rollback loads
+        # exactly that. A version staged before phase 2 has no snapshot
+        # (paths.templates is None); fall back to the deployment's static
+        # template file rather than clobbering it to empty on an old rollback.
+        template_file=paths.templates if paths.templates is not None else cfg.template_file,
         resolver_registry=build_secret_resolver_registry(cfg),
     )
     updated_version = store.mark_active(version_id, actor=principal.subject)
