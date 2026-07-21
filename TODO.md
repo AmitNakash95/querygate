@@ -78,7 +78,7 @@ order-of-magnitude, not commitments.
 | 46 | ✅ Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
 | 47 | Safe draft recovery plus config export/import UX | M | 13, 25, 31 |
 | 48 | ✅ Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) (phase 1: file-configured invocable templates + REST/MCP; phase 2: governed create/edit/approve/publish/rollback not started) | L | 6, 22, 25, 32B |
-| 49 | Column-value masking/tokenization (not just allow/deny) | L | 6, 27 |
+| 49 | ✅ Column-value masking/tokenization (not just allow/deny) | L | 6, 27 |
 | 50 | Per-principal rate limits / query quotas over time | M | 9, 25 |
 | 51 | Typed client-side query-builder SDK (Python + TypeScript) | M (per language) | 20 |
 | 52 | Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI) | S (per framework) | 20 |
