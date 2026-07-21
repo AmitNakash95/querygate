@@ -1684,6 +1684,20 @@ Instead of a human hitting REST endpoints with `curl`, an AI agent (Claude,
 or any other MCP-capable client) connects to QueryGate's MCP server, lists
 its available tools, and calls them directly as part of its own reasoning.
 
+Because MCP is a shared standard, QueryGate works with any framework that
+speaks it — there's nothing QueryGate-specific to install on the agent side.
+The repo ships runnable, framework-idiomatic quick-starts under `examples/`
+for the Claude Agent SDK, LangChain / LangGraph, LlamaIndex, and OpenAI's
+Chat Completions function-calling (the OpenAI one bridges MCP tool schemas
+into OpenAI function schemas, since that API doesn't speak MCP natively).
+Each registers QueryGate as a Streamable-HTTP MCP server and lets the
+framework's agent discover and call the tools itself. The examples deliberately
+add no maintained QueryGate SDK layer of their own — they're thin references,
+so there's no extra library to keep in sync with each framework's churn. A
+model-free test (`tests/integration/test_integration_examples.py`) keeps them
+honest by asserting every tool each example wires up is still a tool the MCP
+server actually registers.
+
 `mcp/server.py` builds one shared `FastMCP` instance (`mcp_server`) and, on
 startup, calls `discover_and_register_tools()` (`mcp/tools/__init__.py`),
 which imports every non-underscore-prefixed module under `mcp/tools/` —
