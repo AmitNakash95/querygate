@@ -285,6 +285,22 @@ All notable changes to QueryGate are documented here.
   residual carrying a demonstrating test asserting the current allowed-by-design
   behavior so the boundary is explicit and regression-locked rather than
   silently unaddressed.
+- Minimum aggregation group size / k-anonymity guardrail (TODO.md item 88),
+  closing the direct form of item 55's R3 residual. New `Policy.min_group_size`
+  cap (`policy/models.py`, floor 2, `None`/default disables): when set, the
+  compiler (`compiler/sqlalchemy_compiler.py`) injects `HAVING count(*) >= k`
+  into every aggregate query — grouped or single-implicit-group — so any result
+  group backed by fewer than *k* underlying rows is suppressed. A caller can no
+  longer aggregate over a razor-thin filter to single out an individual
+  (`count(*) WHERE id = X` returns nothing when fewer than *k* rows match). It
+  is the aggregate analog of a mandatory row filter — policy-driven, injected,
+  non-removable, and applied only to aggregate queries (plain row reads stay
+  governed by mandatory row filters). It closes single-query singling-out, not
+  multi-query differencing (which needs query-set auditing or differential
+  privacy — deliberately out of scope, documented as still-residual in
+  `docs/INFERENCE_RISKS.md` R3). Proven by compiler unit tests, real end-to-end
+  suppression against SQLite, a security test tying it to R3, and policy-model
+  validation.
 
 ### Known issues
 

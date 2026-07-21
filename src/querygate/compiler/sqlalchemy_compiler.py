@@ -485,6 +485,17 @@ def compile_structured_query(
         isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in query.select
     )
 
+    # k-anonymity guardrail (TODO.md item 88): on an aggregate query, suppress
+    # any result group backed by fewer than policy.min_group_size underlying
+    # rows, so a caller can't single out an individual by aggregating over a
+    # razor-thin filter. Injected like a mandatory row filter — policy-driven
+    # and non-removable — and only on aggregate queries (plain row reads are
+    # governed by mandatory row filters, not group size). `count()` with no
+    # argument is COUNT(*), counting rows per group (or the single implicit
+    # group when there's no GROUP BY), ANDed with any caller HAVING above.
+    if is_aggregate and policy.min_group_size is not None:
+        stmt = stmt.having(sa.func.count() >= policy.min_group_size)
+
     allow_table_fallback = True
     if query.top_n is not None:
         stmt, alias_map = _apply_top_n(stmt, query, tables, alias_map, is_aggregate, dialect)

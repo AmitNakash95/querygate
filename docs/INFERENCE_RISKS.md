@@ -90,20 +90,30 @@ This is a property of the database contents, below QueryGate's layer.
   addressing it belongs to data modeling / differential privacy at the source,
   not an identifier-level policy engine.
 
-### R3 — Aggregate differencing / no minimum group size
+### R3 — Aggregate differencing / minimum group size
 
 An aggregate over a highly selective *permitted* predicate can narrow a group
-to a single row (a query-set-size / differencing inference), and repeated
+to a single row (a query-set-size / singling-out inference), and repeated
 aggregates with and without a condition can isolate one individual's
-contribution. QueryGate enforces no minimum aggregation group size and no
-k-anonymity in v1.
+contribution (multi-query differencing).
 
-- **Decision: accepted residual for v1; a candidate future policy feature.** A
-  `min_group_size` guardrail (reject aggregates whose groups can be smaller than
-  *k*) would close the direct form but needs its own design — it interacts with
-  `having`, `top_n`, and mandatory row filters — so it is out of item 55's
-  scope. Recorded here rather than half-built.
-- Demonstrated by `test_aggregate_has_no_minimum_group_size_documented_residual`.
+- **Single-query singling-out: closed by `Policy.min_group_size` (TODO.md item
+  88).** When set, the compiler injects `HAVING count(*) >= k` into every
+  aggregate query, so any result group backed by fewer than *k* underlying rows
+  is suppressed — `count(*) WHERE id = X` returns nothing rather than revealing
+  a single individual. It is the aggregate analog of a mandatory row filter:
+  policy-driven, injected, non-removable, and applied only to aggregate queries.
+  When it is **unset** (the default), this remains an accepted residual — the
+  guardrail is opt-in per connection. Behavior demonstrated both ways:
+  `test_aggregate_has_no_minimum_group_size_documented_residual` (unset → the
+  thin aggregate is allowed) and
+  `test_min_group_size_closes_the_single_row_aggregate_singling_out` /
+  `test_sqlite_end_to_end.py`'s suppression tests (set → suppressed).
+- **Multi-query differencing: still residual.** Isolating an individual by
+  subtracting two *independently* compliant aggregates (each ≥ *k*) is not
+  closed by a per-query group-size floor; defending it needs query-set auditing
+  or differential privacy, deliberately out of scope. Documented, not
+  half-built.
 
 ### R4 — Existence and row-count probing
 
@@ -124,6 +134,7 @@ Class A (direct reference in any clause) is **closed and regression-locked** —
 the exhaustive test above fails if any future AST node reintroduces an
 unharvested reference. Class B (semantic correlation, derived columns,
 aggregate differencing, existence probing) is **not closable by identifier
-allow/deny**; R1 is closed by policy configuration, R3 is a scoped candidate for
-a future `min_group_size` guardrail, and R2/R4 are accepted residuals mitigated
-in depth by mandatory filters, masking, quotas, and audit.
+allow/deny**; R1 is closed by policy configuration, R3's single-query
+singling-out is closed by the opt-in `Policy.min_group_size` guardrail (item 88)
+with multi-query differencing left an honest residual, and R2/R4 are accepted
+residuals mitigated in depth by mandatory filters, masking, quotas, and audit.
