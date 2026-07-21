@@ -21,6 +21,31 @@ Skip this for pure bug fixes, refactors with no behavioral change, or
 test-only changes. See that file's own "Maintenance protocol" section for
 the exact rule.
 
+`TODO.md` is the live worklist; `docs/TODO_ARCHIVE.md` holds the full
+write-ups of completed items. Keep them split to keep routine reads cheap
+(TODO.md is read constantly; the archive is loaded only when history is
+needed). The rules:
+
+- **Item numbers are permanent and file-global.** Never renumber or reuse a
+  number — the repo has ~176 internal "item N" cross-refs plus references
+  from CLAUDE.md and tests that must keep resolving. A new item takes the
+  next unused number (currently start at 83).
+- **When an item ships fully** (its `###` heading ends in exactly
+  `✅ DONE`, no trailing qualifier), move its full body to
+  `docs/TODO_ARCHIVE.md` — insert it in numeric order under a `### N.`
+  heading — and leave a stub in `TODO.md`: the same heading, one line
+  summarizing what shipped, then
+  `**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item N).`
+- **Partially-done items stay full inline in TODO.md.** Anything marked
+  `✅ DONE (phase 1)` / with "phase 2 not started" still carries open work,
+  so its body belongs in the live worklist, not the archive. Only stub it
+  once every phase is complete.
+- Update the Quick-scan summary table (it indexes items 1–66; extend it or
+  leave new items table-less as the current file does — the stub/heading is
+  the authoritative per-item anchor either way).
+- The archive is reference-only: never put an open action item there, and
+  don't add a second TODO file or a competing index.
+
 ## Commands
 
 ```bash
