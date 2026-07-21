@@ -6,6 +6,29 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- Admin observability overview API, phase 1 (TODO.md item 44). A new
+  `admin:observability:read`-scoped `GET /api/v1/admin/observability/overview`
+  (`api/admin_observability_routes.py`, `admin/observability.py`) returns a
+  typed, redaction-safe `ObservabilityOverview` aggregated from the existing
+  in-process Prometheus registry — query volume, success/rejection categories,
+  average duration, queue depth and wait-by-outcome, concurrency
+  in-use/max/utilization, per-principal quota rejections by kind, and
+  cost-estimation attempts/unavailable/would-reject with a derived
+  `fail_open_rate` — both globally and per connection, so an operator can see
+  *which reason rejects the most*, *whether queue pressure is rising*, and
+  *whether the cost-estimate gate is silently failing open* without parsing
+  logs or scraping raw `/metrics`. It is explicitly an honest current-process
+  snapshot (`source="process_snapshot"`, `durable=false`, `since`, and a `note`
+  that counters are cumulative-since-start and per-replica under the default
+  backends) — it never implies durable history. The overview is built only from
+  already-public, low-cardinality metric labels (connection ids and fixed
+  reason/outcome/quota buckets), never a query, value, principal, table, or
+  column; its own least-privilege scope gates the whole response including the
+  per-connection breakdown. Documented as QG-28 in `docs/THREAT_MODEL.md`. The
+  browser dashboard (cards/charts), a config/catalog-change trend card (those
+  events live in the audit stream, not the metrics registry), and querying an
+  operator-configured external metrics backend for durable cross-replica
+  history are phase 2.
 - Admin-defined query templates, phase 1 (TODO.md item 48). A new
   `querygate/templates/` module + optional `TEMPLATES_FILE` let an admin
   pre-define named, parameterized `StructuredQuery` skeletons (typed parameter
