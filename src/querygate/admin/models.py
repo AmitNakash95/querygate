@@ -40,6 +40,7 @@ class ConfigVersion(pyd.BaseModel):
     connections_yaml: str
     policy_yaml: str
     catalog_yaml: Optional[str] = None
+    templates_yaml: Optional[str] = None
 
     applied_at: Optional[datetime] = None
     applied_by: Optional[str] = None
@@ -54,7 +55,7 @@ class ConfigVersion(pyd.BaseModel):
 class ConfigDocumentPreview(pyd.BaseModel):
     """Content-free change signal safe for a config writer without read scope."""
 
-    document: Literal["connections", "policy", "catalog"]
+    document: Literal["connections", "policy", "catalog", "templates"]
     change: Literal["changed", "unchanged", "submitted", "inherited"]
 
     model_config = pyd.ConfigDict(extra="forbid")

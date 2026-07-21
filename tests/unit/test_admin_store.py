@@ -36,6 +36,35 @@ def test_bootstrap_is_idempotent(tmp_path):
     assert second.connections_yaml == "connections: []\n"  # not overwritten by the second call
 
 
+def test_templates_yaml_snapshot_round_trips_and_appears_in_file_paths(tmp_path):
+    store = _store(tmp_path)
+    store.bootstrap_if_empty(
+        connections_yaml="connections: []\n", policy_yaml="default: {}\n", catalog_yaml=None
+    )
+    staged = store.create_staged_version(
+        connections_yaml="connections: []\n",
+        policy_yaml="default: {}\n",
+        catalog_yaml=None,
+        templates_yaml="templates: []\n",
+        description="add templates document",
+        actor="agent-a",
+    )
+    # Re-read from disk (not the in-memory return) to prove it persisted.
+    reloaded = store.get_version(staged.id)
+    assert reloaded.templates_yaml == "templates: []\n"
+    paths = store.file_paths(staged.id)
+    assert paths.templates is not None and paths.templates.endswith("templates.yaml")
+
+
+def test_version_without_templates_has_none_and_no_templates_path(tmp_path):
+    store = _store(tmp_path)
+    version = store.bootstrap_if_empty(
+        connections_yaml="connections: []\n", policy_yaml="default: {}\n", catalog_yaml=None
+    )
+    assert version.templates_yaml is None
+    assert store.file_paths(version.id).templates is None
+
+
 def test_create_staged_version_does_not_change_active_version(tmp_path):
     store = _store(tmp_path)
     store.bootstrap_if_empty(

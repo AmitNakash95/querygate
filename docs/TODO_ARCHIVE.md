@@ -2218,6 +2218,102 @@ to restrictive values, never infer table/column grants from names, never embed
 credentials or tenant values, and keep generated YAML fully editable/exportable
 for infrastructure-as-code users.
 
+### 48. Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) ✅ DONE
+
+**Phase 1 (file-configured, invocable templates) ✅ DONE. Phase 2 (governed
+create/edit/publish/rollback) ✅ DONE — via the item 25 config-versioning
+plane, not 32B's per-entry proposal state machine (a deliberate governance-
+model decision, see below).**
+
+**Phase 1 shipped:** A `querygate/templates/` module adds a `QueryTemplate`
+model — a named, parameterized `StructuredQuery` *skeleton* (a raw dict with
+`{param: name}` placeholders in value positions) plus typed parameter slots
+(`type`/`required`/`default`/`min`/`max`/`max_length`/`allowed_values`/
+`is_list`) — loaded from an optional `TEMPLATES_FILE` into a `TemplateStore`
+singleton that mirrors `CatalogStore` (hot-reloadable via the existing
+config-reload; validated by `querygate-validate-config --template-file`; cross-
+checked so every template targets a real connection id). At invocation
+(`templates/binding.py`) the caller's parameters are type/constraint-checked
+against the slots, substituted into the skeleton, and the **result validated as
+a real `StructuredQuery`** and run through the *unchanged*
+`StructuredQueryService` — so a bound template inherits every policy cap,
+allow/deny list, mandatory row filter, schema check, and guardrail an ad-hoc
+query has, and a parameter can never smuggle SQL (there is no SQL) or exceed
+policy (`tests/security/test_adversarial_security.py::
+test_query_template_cannot_exceed_policy`). Surface:
+`GET /api/v1/query-templates` + `POST /api/v1/query-templates/{id}/run` (REST),
+`list_query_templates`/`run_query_template` (MCP), and a read-only "Query
+templates" browse panel in the `/admin/` control plane — all filtered
+per-principal by target-connection visibility (item 22) — an unknown template
+and one on a hidden connection return the same non-enumerating 404. Invocations
+audit distinctly (`operation="run_query_template"`, `template_id`, and the
+parameter *names* — never values). Documented as QG-26 in
+`docs/THREAT_MODEL.md`. Covered by `tests/unit/test_query_templates.py`,
+`tests/integration/test_query_template_api.py`, `tests/integration/test_admin_ui.py`,
+plus MCP registration + adversarial tests.
+
+**Phase 2 shipped — governed authoring via the config-versioning plane
+(item 25), not 32B:** `templates.yaml` became a fourth governed configuration
+document alongside `connections.yaml`/`policy.yaml`/`catalog.yaml`. It is now
+carried through the entire `ConfigVersionStore` snapshot lifecycle and the
+`/api/v1/admin/config/*` governance API — `validate`, `preview` (adds a
+`templates` document-change signal), `versions` (stage), `versions/{id}/apply`,
+and rollback — exactly the way an optional `catalog.yaml` already was. A
+version now snapshots its own `templates.yaml`; `apply`/`rollback` reload the
+`TemplateStore` from that snapshot (a pre-phase-2 version with no snapshot
+falls back to the deployment's static `template_file` rather than clobbering
+it to empty). Templates are validated together with the rest of the config
+both at stage and — crucially — re-validated at apply (QG-15's posture, now
+covering templates: a version whose template stopped validating can't be
+silently activated). The admin config editor gained a `templates.yaml` pane
+(a fourth document tab) reusing the existing validate → preview → stage →
+apply → rollback UI with no new mutation path.
+
+**Why the config-versioning plane and not 32B's proposal state machine:** the
+item's original phase-2 sketch said "route through 32B's proposal state
+machine," but query templates are a configuration *document* loaded by
+`config_reload` alongside connections/policy/catalog — not catalog *entries*
+(which carry sensitivity/confidence/provenance/relationship-target fields that
+the 32B model is built around). Routing a config document through the
+catalog-entry proposal machinery would have been a second, awkward mutation
+path — exactly what this repo's standing rule forbids. The config-versioning
+plane already *is* "governed create/edit/publish/rollback" for config
+documents (whole-document staging, validation, atomic apply, rollback, audit,
+no self-publish), so templates joined it as one more document. This satisfies
+the item's "why it matters" — a reviewed, versioned, rollbackable finite set
+of query shapes that non-technical stakeholders can sign off on — with zero
+new governance machinery. A finer-grained *per-template* proposal/approval
+workflow (individual sign-off with separation of duties, mirroring catalog
+governance) was consciously **not** built: it's a possible future nicety, not
+required for governed authoring, and would be the "Option A" alternative in
+this pass's Decision Log entry.
+
+**Coverage (phase 2):** `tests/unit/test_admin_store.py` (templates snapshot
+round-trips and appears in `file_paths`; a template-free version has none),
+`tests/unit/test_admin_service.py` (preview reports the `templates` document
+change), `tests/integration/test_admin_config_governance.py` (a template
+authored through stage→apply becomes invocable on `/query-templates` and a
+rollback removes it; a malformed template — e.g. targeting a nonexistent
+connection — is rejected at stage and never persisted; a security-marked test
+that a *staged* template is not live until a separate apply, proving no
+self-publish), and `tests/integration/test_admin_ui.py` (the `templates.yaml`
+config-editor tab is served). `docs/THREAT_MODEL.md` QG-10 now lists templates
+among the governed documents.
+
+**Why it matters:** Google's Gen AI Toolbox for Databases popularized a
+pattern this project's own model is a natural fit for: instead of (or in
+addition to) letting an agent compose an arbitrary `StructuredQuery` within
+policy caps, an admin pre-defines a fixed set of named, parameterized queries
+and agents only ever call one of *those* by name with typed parameters. This
+shrinks the effective attack/error surface to a reviewed, finite set of query
+shapes, gives non-technical stakeholders something concrete to sign off on,
+and matches how teams already think about tool-calling for agents. It is
+additive to QueryGate's existing guarantee, not a new one: a template is just
+a stored, named, parameterized `StructuredQuery` AST, so it inherits every
+validation and guardrail already built for ad-hoc queries — and phase 2 makes
+authoring it a governed, versioned, rollbackable change rather than a
+hand-edited file.
+
 ### 49. Column-value masking/tokenization (not just allow/deny) ✅ DONE
 
 **Shipped:** a `column_mask` policy primitive (`policy/models.py`:

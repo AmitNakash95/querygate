@@ -88,6 +88,9 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     # TODO.md item 48: read-only query-templates browse panel.
     assert "Query templates" in response.text
     assert "/query-templates" in script.text
+    # TODO.md item 48 phase 2: templates.yaml is a governed config-editor document.
+    assert 'data-document="templates"' in response.text
+    assert '"templates"' in script.text
 
 
 @pytest.mark.asyncio
