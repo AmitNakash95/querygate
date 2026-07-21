@@ -148,14 +148,14 @@ CI/CD, and secrets-management controls.
 
 | ID | Threat | Implemented controls | Verification |
 |---|---|---|---|
-| QG-01 | Raw SQL or SQL injection | No raw-SQL field or endpoint; Pydantic forbids extra AST fields; identifiers resolve to reflected SQLAlchemy objects; predicate values use binds | `test_raw_sql_rejected_on_every_query_endpoint`; security test `test_predicate_payload_is_bound_data_not_executable_sql` |
+| QG-01 | Raw SQL or SQL injection | No raw-SQL field or endpoint; Pydantic forbids extra AST fields; identifiers resolve to reflected SQLAlchemy objects; predicate values use binds | `test_raw_sql_rejected_on_every_query_endpoint`; security test `test_predicate_payload_is_bound_data_not_executable_sql`; REST/MCP malformed-input boundary fuzzing proving a smuggled `sql`/`raw_sql`/`query`/... field (and every other malformed shape) is rejected before execution (`test_malformed_input_fuzzing.py`, TODO item 36 phase 2a) |
 | QG-02 | Table/column policy bypass through filters, joins, grouping, having, ordering, or ranking | Policy gathers every qualified reference before reflection; deny wins; matching is case-insensitive | Security parametrization `test_denied_column_cannot_be_used_for_inference` and denied-table smuggling test |
 | QG-03 | Implicit/undeclared table injection | Every referenced table must be the `from` table or an explicit join; each join must reference the joined table and connect to the existing graph | Security test `test_undeclared_table_reference_is_rejected_before_reflection`; schema-validation join tests |
 | QG-04 | Schema discovery leaks hidden resources | Connection listing, direct access, table listing, and column description resolve the caller's policy; hidden connections return the same not-found shape as unknown ones | `test_connection_visibility.py`; REST/MCP principal-scoping integration tests |
 | QG-13 | Curated schema-catalog metadata discloses a hidden table/column | Catalog entries are display-only and never bypass policy; a denied column is excluded from `describe_table` before catalog lookup happens; a relationship hint pointing at a policy-denied table is dropped from the response | `test_catalog_relationship_hint_cannot_disclose_a_denied_table`; catalog unit/integration tests |
 | QG-05 | Cross-principal or cross-tenant confusion | Immutable request-local `Principal`; per-principal policy resolution; claim-derived mandatory row filters; MCP caller stored in a reset `ContextVar` | Security principal-isolation and aggregate row-filter tests; policy-loader and MCP tests |
 | QG-06 | Authentication spoofing or token confusion | Constant-time API-key comparison; JWT signature, algorithm, issuer, audience, expiry, required subject, and configured JWKS verification; anonymous bypass only in local/development when no real authenticator is configured | `test_auth.py`, `test_jwt_auth.py`, REST/MCP authentication integration tests |
-| QG-07 | Credential, row, predicate, or backend-detail leakage | Public connection DTO has no credential field; unexpected REST/MCP/batch errors are generic; persisted audit schema excludes SQL, params, intent, exception text, and rows; explain/audit SQL is parameterized by default | `test_credential_redaction.py`, `test_audit.py`, security public-error tests |
+| QG-07 | Credential, row, predicate, or backend-detail leakage | Public connection DTO has no credential field; unexpected REST/MCP/batch errors are generic; persisted audit schema excludes SQL, params, intent, exception text, and rows; explain/audit SQL is parameterized by default | `test_credential_redaction.py`, `test_audit.py`, security public-error tests; malformed-input boundary fuzzing asserting no traceback/path/driver/credential leaks in a REST or MCP rejection body (`test_malformed_input_fuzzing.py`, TODO item 36 phase 2a) |
 | QG-08 | Oversized or abusive requests/results | AST depth/width/join/top-N/batch caps; server-side row limits; hard serialized-row byte ceiling, including a single oversized row; database timeout; per-connection concurrency, including a caller-selected `queue_mode`/`wait_timeout_seconds` that can only shorten the operator's `concurrency_wait_seconds` ceiling, never lengthen it; `max_queue_depth`/`max_queue_depth_per_principal` bounding how many callers may wait at once (cross-replica when `concurrency_backend: redis`), so an unbounded waiting queue can't itself become a resource-exhaustion vector; optional Postgres pre-execution `EXPLAIN`-based row/cost estimate rejection before a likely full scan or join explosion runs | Policy/service tests, real timeout tests, security oversized-row test, `test_postgres_cost_estimation.py`, `test_caller_cannot_extend_the_operators_concurrency_wait_ceiling`, `test_unbounded_waiting_queue_is_capped_not_a_dos_vector`, `test_max_queue_depth_per_principal_prevents_one_caller_starving_another` |
 | QG-09 | Cross-connection access | Both connections must be visible to the principal and share the resolved `join_group`; the join uses the primary engine and declared physical database mapping | Cross-connection schema tests, including hidden-connection denial |
 | QG-10 | Unauthorized configuration changes | `/admin/reload-config` requires `admin:reload-config`; the config-governance API (`/admin/config/*`) separately requires `admin:config:write` for validate/preview/stage/apply/rollback and `admin:config:read` for history/inspection; every path fully validates new content before atomic registry/policy replacement. The governed documents are connections, policy, catalog, and — since item 48 phase 2 — query templates (`templates.yaml`): a curated query template is authored only through this staged/validated/re-validated-on-apply/rollbackable path, never a direct mutation endpoint, so it can never publish itself | REST reload scope tests, config-reload tests, `test_config_governance_write_endpoints_require_write_scope`, `test_config_governance_read_endpoints_require_read_scope`, `test_query_template_authored_through_governance_becomes_invocable_then_rolls_back`, `test_staged_template_is_not_live_until_a_separate_apply` |
@@ -271,6 +271,21 @@ defaults.
   row from leaving QueryGate, but the database driver must first receive that
   row. Database-side statement limits and denial of large/blob columns remain
   important.
+- **Malformed-input boundary is fuzzed, with one transport asymmetry left as a
+  follow-up (TODO items 36 phase 2a / 84):** a broad corpus of malformed JSON
+  (wrong types, missing/extra fields, invalid enums, invalid/empty JSON,
+  non-finite numbers, and over-deep `where` trees) is rejected as a clean
+  client error on both the REST and MCP surfaces without leaking any server
+  internal or reaching the database (`test_malformed_input_fuzzing.py`). A
+  non-finite number (`NaN`/`Infinity`) that used to 500 by making the REST
+  validation-error response fail to encode is now a clean 422
+  (`api/_errors.py`). The one remaining asymmetry: a `where` nested past the
+  JSON parser's recursion guard is a clean 400 over REST but a *handled*
+  JSON-RPC internal-error (`-32603`, HTTP 500, generic non-sensitive message,
+  no leak) over the mounted MCP Streamable-HTTP transport, whose own
+  `json.loads` raises `RecursionError`. This is a robustness/consistency gap,
+  not a disclosure — a transport-level request body-size/depth guard to make
+  it a clean 4xx is tracked as TODO item 86.
 - **Configuration governance has version history and rollback, but no
   approval workflow yet:** the `/admin/config/*` API validates, versions,
   previews document-level changes, attributes, and audits every change, and a single `admin:config:write`
