@@ -654,6 +654,45 @@ category, never a raw driver error or connection string). The browser
 control plane's "Connection health" tab (below) renders this same status
 view and exposes "Test now" as a button, per connection.
 
+### Admin observability overview API
+
+`GET /api/v1/admin/observability/overview`, gated by a dedicated
+`admin:observability:read` scope, aggregates the in-process Prometheus metrics
+into one operational snapshot so an administrator can see trends — *which
+reason rejects the most queries*, *whether queue pressure is rising*, *whether
+the cost-estimate gate is silently failing open* — without scraping raw
+`/metrics` or parsing logs:
+
+```bash
+curl -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/observability/overview
+# -> {"source": "process_snapshot", "durable": false, "since": "...",
+#     "note": "Current-process snapshot: ... This is not durable history.",
+#     "queries_total": 128, "queries_success": 120, "queries_rejected": 8,
+#     "rejections_by_reason": {"policy": 5, "schema": 3},
+#     "concurrency_utilization": 0.25,
+#     "cost_estimation": {"attempts": 40, "unavailable": 1, "would_reject": 2,
+#                         "fail_open_rate": 0.025}, ...,
+#     "by_connection": [{"connection": "demo", "queries_total": 128, ...}]}
+```
+
+It reports both a global rollup and a per-connection breakdown of query volume,
+success/rejection categories, average duration, queue depth and wait-by-outcome,
+concurrency in-use/max/utilization, per-principal quota rejections by kind, and
+cost-estimation health. It is deliberately an **honest current-process
+snapshot**, not durable history: the response says so (`source`, `durable:
+false`, `since`, `note`), because counters are cumulative since process start
+and reset on restart, and under the default in-process backends everything is
+per-replica. Output is built only from already-public, low-cardinality metric
+labels (connection ids and fixed reason/outcome buckets) — never a query,
+value, principal, table, or column — and `admin:observability:read` gates the
+whole overview, including the per-connection breakdown. The browser control
+plane renders this as a read-only "Observability" section (overview cards + a
+per-connection table + a banner echoing the snapshot's honesty note).
+Time-window trend charts (the endpoint is a point-in-time snapshot with no
+stored history), a config/catalog-change trend card (those events live in the
+audit stream, not the metrics registry), and querying an operator-configured
+external metrics backend for durable cross-replica history are follow-ups.
+
 ## Example schema catalog (optional)
 
 Raw reflection tells an agent that `customers.email` exists and is a
