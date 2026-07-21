@@ -279,13 +279,16 @@ defaults.
   internal or reaching the database (`test_malformed_input_fuzzing.py`). A
   non-finite number (`NaN`/`Infinity`) that used to 500 by making the REST
   validation-error response fail to encode is now a clean 422
-  (`api/_errors.py`). The one remaining asymmetry: a `where` nested past the
-  JSON parser's recursion guard is a clean 400 over REST but a *handled*
-  JSON-RPC internal-error (`-32603`, HTTP 500, generic non-sensitive message,
-  no leak) over the mounted MCP Streamable-HTTP transport, whose own
-  `json.loads` raises `RecursionError`. This is a robustness/consistency gap,
-  not a disclosure — a transport-level request body-size/depth guard to make
-  it a clean 4xx is tracked as TODO item 86.
+  (`api/_errors.py`). The former REST/MCP asymmetry is closed (TODO item 86):
+  a `where` nested past the JSON parser's recursion guard was a clean 400 over
+  REST but a *handled* JSON-RPC internal-error (`-32603`, HTTP 500) over the
+  mounted MCP transport, whose own `json.loads` raised `RecursionError`.
+  `mcp/transport_guard.py`'s `MCPRequestGuardMiddleware` now wraps the MCP
+  mount (outside auth) and rejects an oversized body (`413`) or an over-deep
+  body (`400`) *before* the transport parses it — thresholds are configurable
+  (`AppConfig.mcp_max_request_bytes` / `mcp_max_request_depth`) with generous
+  defaults, so the MCP surface matches REST's "malformed input is a clean
+  client error, never a 5xx" posture.
 - **Configuration governance has version history and rollback, but no
   approval workflow yet:** the `/admin/config/*` API validates, versions,
   previews document-level changes, attributes, and audits every change, and a single `admin:config:write`

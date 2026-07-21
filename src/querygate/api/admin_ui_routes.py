@@ -26,6 +26,7 @@ from querygate.core.config import AppConfig, AuditSinkBackend
 from querygate.core.exceptions import PolicyViolationError
 from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE, ADMIN_CONFIG_WRITE_SCOPE
 from querygate.policy.loader import PolicyStore, get_policy_store
+from querygate.templates.models import QueryTemplateFile
 
 
 _AUDIT_EVENT_ADAPTER = pyd.TypeAdapter(PersistableEvent)
@@ -54,6 +55,35 @@ class PolicyRenderRequest(pyd.BaseModel):
 
 class PolicyRenderResponse(pyd.BaseModel):
     policy_yaml: str
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+# TODO.md item 87: structured query-template authoring. Mirrors the policy
+# parse/render pair above — the Templates domain form composes a validated
+# QueryTemplate and merges it into the draft templates.yaml change-set
+# document, which then flows through the same validate → stage → apply →
+# rollback as any other config document (no new store).
+class TemplateDocumentRequest(pyd.BaseModel):
+    templates_yaml: str
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class TemplateDocumentResponse(pyd.BaseModel):
+    document: Dict[str, Any]
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class TemplateRenderRequest(pyd.BaseModel):
+    document: Dict[str, Any]
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class TemplateRenderResponse(pyd.BaseModel):
+    templates_yaml: str
 
     model_config = pyd.ConfigDict(extra="forbid")
 
@@ -170,6 +200,35 @@ def _policy_document(policy_yaml: str) -> Dict[str, Any]:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Invalid policy document: {exc}",
+        ) from exc
+    return raw
+
+
+def _template_document(templates_yaml: str) -> Dict[str, Any]:
+    """Parse + validate a templates.yaml body against `QueryTemplateFile`.
+
+    Returns the raw (validated) mapping unchanged — the schema authority is the
+    same model the loader/dry-run uses, so a template that passes here passes
+    staging. Mirrors `_policy_document`.
+    """
+    try:
+        raw = yaml.safe_load(templates_yaml) or {}
+    except yaml.YAMLError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid templates YAML: {exc}",
+        ) from exc
+    if not isinstance(raw, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Templates document root must be a mapping.",
+        )
+    try:
+        QueryTemplateFile.model_validate(raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid templates document: {exc}",
         ) from exc
     return raw
 
@@ -379,6 +438,29 @@ def build_admin_ui_router(
         )
         return PolicyRenderResponse(
             policy_yaml=yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
+        )
+
+    @router.post("/templates/parse", response_model=TemplateDocumentResponse)
+    async def parse_templates(
+        request: TemplateDocumentRequest,
+        principal: Principal = Depends(get_principal),
+    ):
+        # Same read-or-write posture as policy/parse: parsing a document the
+        # caller supplied never loads current content on their behalf.
+        _require_any_scope(principal, ADMIN_CONFIG_READ_SCOPE, ADMIN_CONFIG_WRITE_SCOPE)
+        return TemplateDocumentResponse(document=_template_document(request.templates_yaml))
+
+    @router.post("/templates/render", response_model=TemplateRenderResponse)
+    async def render_templates(
+        request: TemplateRenderRequest,
+        principal: Principal = Depends(get_principal),
+    ):
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        document = _template_document(
+            yaml.safe_dump(request.document, sort_keys=False, allow_unicode=True)
+        )
+        return TemplateRenderResponse(
+            templates_yaml=yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
         )
 
     @router.post("/policy/test", response_model=PolicyTestResponse)
