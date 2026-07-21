@@ -112,6 +112,7 @@ def test_preview_validates_and_reports_only_document_level_changes(tmp_path, mon
         "connections": "inherited",
         "policy": "submitted",
         "catalog": "inherited",
+        "templates": "inherited",
     }
     serialized = result.model_dump_json()
     assert "max_joins" not in serialized

@@ -47,6 +47,7 @@ class ConfigChangeRequest(pyd.BaseModel):
     connections_yaml: Optional[str] = None
     policy_yaml: Optional[str] = None
     catalog_yaml: Optional[str] = None
+    templates_yaml: Optional[str] = None
     description: Optional[str] = None
 
 
@@ -76,6 +77,7 @@ def build_admin_config_router(
             connections_yaml=request.connections_yaml,
             policy_yaml=request.policy_yaml,
             catalog_yaml=request.catalog_yaml,
+            templates_yaml=request.templates_yaml,
         )
         return ValidationResult(valid=not errors, errors=errors)
 
@@ -90,6 +92,7 @@ def build_admin_config_router(
             connections_yaml=request.connections_yaml,
             policy_yaml=request.policy_yaml,
             catalog_yaml=request.catalog_yaml,
+            templates_yaml=request.templates_yaml,
         )
 
     @router.post("/simulate", response_model=CandidatePolicySimulation)
@@ -177,6 +180,7 @@ def build_admin_config_router(
                 connections_yaml=request.connections_yaml,
                 policy_yaml=request.policy_yaml,
                 catalog_yaml=request.catalog_yaml,
+                templates_yaml=request.templates_yaml,
                 description=request.description,
             )
         except ConfigValidationError as exc:

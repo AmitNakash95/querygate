@@ -376,8 +376,9 @@ cannot be re-enabled by principal policy.
 ## Config-governance API (staged versions, apply, rollback)
 
 `POST /api/v1/admin/reload-config` (above) reloads whatever
-`connections.yaml`/`policy.yaml`/`catalog.yaml` currently contain on disk —
-the right fit for infra-as-code deployments that edit those files directly.
+`connections.yaml`/`policy.yaml`/`catalog.yaml`/`templates.yaml` currently
+contain on disk — the right fit for infra-as-code deployments that edit those
+files directly.
 For teams that want to submit config changes over the API instead — with
 validation, staged review, full version history, and rollback — a separate
 `/api/v1/admin/config/*` surface layers on top of the same reload mechanism,
@@ -430,9 +431,13 @@ curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/blast-rad
   -d '{"policy_yaml": "default:\n  enabled: true\n  max_limit: 50\n"}'
 
 # Stage it as a new version (only the fields you send change; everything
-# else inherits from the current active version)
+# else inherits from the current active version). templates_yaml is a governed
+# document too (item 48 phase 2): stage a curated query-template change here and
+# it goes live only on apply — the same validate/stage/apply/rollback path,
+# never a direct template-mutation endpoint.
 curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/versions \
-  -d '{"policy_yaml": "...", "description": "tighten max_joins for pilot customer X"}'
+  -d '{"templates_yaml": "templates:\n  - id: orders_for_customer\n    ...",
+       "description": "add the orders_for_customer curated template"}'
 # -> {"id": "7", "status": "staged", ...}
 
 # Apply it — validates once more, then reloads exactly like
@@ -451,8 +456,8 @@ principal and recorded in the same audit trail as query execution (a
 `config.governance` event — action, version id, outcome, actor — never the
 YAML content itself, which stays only in the version store). The first call to
 any `/admin/config/*` endpoint bootstraps version `"1"` from whatever
-`connections.yaml`/`policy.yaml`/`catalog.yaml` the deployment started with, so
-"current active version" always means something. Gated behind two scopes,
+`connections.yaml`/`policy.yaml`/`catalog.yaml`/`templates.yaml` the deployment
+started with, so "current active version" always means something. Gated behind two scopes,
 matching the read/write split most admin APIs use: `admin:config:read`
 (list/inspect versions) and `admin:config:write` (validate/preview/stage/
 apply/rollback). `simulate`, `diff`, and `blast-radius` each require *both*

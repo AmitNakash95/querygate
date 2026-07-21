@@ -6,6 +6,7 @@ Layout under `AppConfig.config_governance_dir`:
     versions/<id>/connections.yaml
     versions/<id>/policy.yaml
     versions/<id>/catalog.yaml        — only when the version has a catalog
+    versions/<id>/templates.yaml      — only when the version has query templates
     current.json                      — {"version_id": "<id>"} pointer
 
 No database dependency — matches this project's existing "file-configured"
@@ -31,6 +32,7 @@ class ConfigVersionFilePaths(NamedTuple):
     connections: str
     policy: str
     catalog: Optional[str]
+    templates: Optional[str]
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -63,6 +65,8 @@ class ConfigVersionStore:
         manifest["policy_yaml"] = (version_dir / "policy.yaml").read_text()
         catalog_path = version_dir / "catalog.yaml"
         manifest["catalog_yaml"] = catalog_path.read_text() if catalog_path.exists() else None
+        templates_path = version_dir / "templates.yaml"
+        manifest["templates_yaml"] = templates_path.read_text() if templates_path.exists() else None
         return ConfigVersion.model_validate(manifest)
 
     def _write_manifest(self, version: ConfigVersion) -> None:
@@ -70,12 +74,18 @@ class ConfigVersionStore:
         # into manifest.json — keeps the manifest small and the YAML the
         # single source of truth for what a version actually contains.
         manifest = version.model_dump(
-            mode="json", exclude={"connections_yaml", "policy_yaml", "catalog_yaml"}
+            mode="json",
+            exclude={"connections_yaml", "policy_yaml", "catalog_yaml", "templates_yaml"},
         )
         _atomic_write(self._manifest_path(version.id), json.dumps(manifest, indent=2))
 
     def _write_content(
-        self, version_id: str, connections_yaml: str, policy_yaml: str, catalog_yaml: Optional[str]
+        self,
+        version_id: str,
+        connections_yaml: str,
+        policy_yaml: str,
+        catalog_yaml: Optional[str],
+        templates_yaml: Optional[str],
     ) -> None:
         version_dir = self._version_dir(version_id)
         version_dir.mkdir(parents=True, exist_ok=True)
@@ -83,6 +93,8 @@ class ConfigVersionStore:
         (version_dir / "policy.yaml").write_text(policy_yaml)
         if catalog_yaml is not None:
             (version_dir / "catalog.yaml").write_text(catalog_yaml)
+        if templates_yaml is not None:
+            (version_dir / "templates.yaml").write_text(templates_yaml)
 
     def _next_id(self) -> str:
         if not self._versions_dir.exists():
@@ -102,10 +114,12 @@ class ConfigVersionStore:
         if not version_dir.exists():
             raise NotFoundError(f"Unknown config version: {version_id!r}")
         catalog_path = version_dir / "catalog.yaml"
+        templates_path = version_dir / "templates.yaml"
         return ConfigVersionFilePaths(
             connections=str(version_dir / "connections.yaml"),
             policy=str(version_dir / "policy.yaml"),
             catalog=str(catalog_path) if catalog_path.exists() else None,
+            templates=str(templates_path) if templates_path.exists() else None,
         )
 
     def get_version(self, version_id: str) -> ConfigVersion:
@@ -128,7 +142,12 @@ class ConfigVersionStore:
         return self._read_manifest(version_id) if version_id is not None else None
 
     def bootstrap_if_empty(
-        self, *, connections_yaml: str, policy_yaml: str, catalog_yaml: Optional[str]
+        self,
+        *,
+        connections_yaml: str,
+        policy_yaml: str,
+        catalog_yaml: Optional[str],
+        templates_yaml: Optional[str] = None,
     ) -> ConfigVersion:
         """Seed version "1" from whatever files the deployment started with,
         the first time the governance API is used — so "current active
@@ -140,7 +159,9 @@ class ConfigVersionStore:
                 return active
             now = datetime.now(timezone.utc)
             version_id = self._next_id()
-            self._write_content(version_id, connections_yaml, policy_yaml, catalog_yaml)
+            self._write_content(
+                version_id, connections_yaml, policy_yaml, catalog_yaml, templates_yaml
+            )
             version = ConfigVersion(
                 id=version_id,
                 status=ConfigVersionStatus.ACTIVE,
@@ -150,6 +171,7 @@ class ConfigVersionStore:
                 connections_yaml=connections_yaml,
                 policy_yaml=policy_yaml,
                 catalog_yaml=catalog_yaml,
+                templates_yaml=templates_yaml,
                 applied_at=now,
                 applied_by="system:bootstrap",
             )
@@ -163,12 +185,15 @@ class ConfigVersionStore:
         connections_yaml: str,
         policy_yaml: str,
         catalog_yaml: Optional[str],
+        templates_yaml: Optional[str] = None,
         description: Optional[str],
         actor: str,
     ) -> ConfigVersion:
         with self._lock:
             version_id = self._next_id()
-            self._write_content(version_id, connections_yaml, policy_yaml, catalog_yaml)
+            self._write_content(
+                version_id, connections_yaml, policy_yaml, catalog_yaml, templates_yaml
+            )
             version = ConfigVersion(
                 id=version_id,
                 status=ConfigVersionStatus.STAGED,
@@ -178,6 +203,7 @@ class ConfigVersionStore:
                 connections_yaml=connections_yaml,
                 policy_yaml=policy_yaml,
                 catalog_yaml=catalog_yaml,
+                templates_yaml=templates_yaml,
             )
             self._write_manifest(version)
             return version

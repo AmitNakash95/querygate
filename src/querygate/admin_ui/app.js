@@ -13,7 +13,7 @@
     health: ["Control plane / Connection health", "Reachability, credential-free"],
     templates: ["Control plane / Query templates", "Named, parameterized queries"],
   };
-  const documentKeys = ["policy", "connections", "catalog"];
+  const documentKeys = ["policy", "connections", "catalog", "templates"];
   const guardrailFields = {
     "guard-max-limit": "max_limit",
     "guard-max-limit-aggregate": "max_limit_aggregate",
@@ -46,8 +46,8 @@
     tables: [],
     selectedTable: null,
     policyDocument: null,
-    activeDocuments: { policy: "", connections: "", catalog: "" },
-    draftDocuments: { policy: "", connections: "", catalog: "" },
+    activeDocuments: { policy: "", connections: "", catalog: "", templates: "" },
+    draftDocuments: { policy: "", connections: "", catalog: "", templates: "" },
     selectedDocument: "policy",
     validatedFingerprint: null,
     auditCursor: 0,
@@ -660,7 +660,7 @@
     const phrase = `${rollback ? "ROLLBACK" : "ACTIVATE"} v${version.id}`;
     const confirmed = await confirmAction({
       title: rollback ? `Roll back to v${version.id}?` : `Activate v${version.id}?`,
-      message: `${rollback ? "This restores an earlier complete configuration snapshot." : "This reloads connections, policy, and catalog from the staged snapshot."}${anyDocumentChanged() ? " Your current local draft will be reset to the newly active version." : ""} Type ${phrase} to continue.`,
+      message: `${rollback ? "This restores an earlier complete configuration snapshot." : "This reloads connections, policy, catalog, and query templates from the staged snapshot."}${anyDocumentChanged() ? " Your current local draft will be reset to the newly active version." : ""} Type ${phrase} to continue.`,
       phrase,
     });
     if (!confirmed) {
@@ -683,6 +683,7 @@
       connections: version.connections_yaml || "",
       policy: version.policy_yaml || "",
       catalog: version.catalog_yaml || "",
+      templates: version.templates_yaml || "",
     };
     state.validatedFingerprint = null;
     syncDirtyState();
@@ -1243,6 +1244,7 @@
       connections: current.connections_yaml || "",
       policy: current.policy_yaml || "",
       catalog: current.catalog_yaml || "",
+      templates: current.templates_yaml || "",
     };
     if (!preserveDraft || !anyDocumentChanged()) state.draftDocuments = { ...state.activeDocuments };
     renderOverview(configuration);
