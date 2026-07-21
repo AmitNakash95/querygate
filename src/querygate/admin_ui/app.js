@@ -564,14 +564,16 @@
       const valid = validation.valid && preview.ready_to_stage;
       $("#validation-status").className = `status-chip ${valid ? "good" : "bad"}`;
       $("#validation-status").textContent = valid ? "Valid" : "Needs changes";
+      const scopeNote = "Structural, slot, and policy checks. Column/table existence is verified against the live database separately.";
       if (valid) {
         const documentSummary = preview.documents.map((item) => `${item.document}: ${item.change}`).join(" · ");
-        $("#validation-result").innerHTML = `<div class="validation-ok"><span class="status-chip good">Passed</span><p>${escapeHtml(documentSummary)}</p></div>`;
+        $("#validation-result").innerHTML = `<div class="validation-ok"><span class="status-chip good">Passed</span><p>${escapeHtml(documentSummary)}</p><p class="validation-note">${escapeHtml(scopeNote)}</p></div>`;
         state.validatedFingerprint = fingerprintDraft();
         $("#stage-draft").disabled = !anyDocumentChanged();
       } else {
         const errors = [...(validation.errors || []), ...(preview.errors || [])];
-        $("#validation-result").innerHTML = `<ul>${Array.from(new Set(errors)).map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul>`;
+        const items = Array.from(new Set(errors)).map((error) => `<li>${escapeHtml(error)}</li>`).join("");
+        $("#validation-result").innerHTML = `<ul>${items}</ul><p class="validation-note">${escapeHtml(scopeNote)}</p>`;
         state.validatedFingerprint = null;
         $("#stage-draft").disabled = true;
       }

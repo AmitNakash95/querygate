@@ -10,6 +10,7 @@ real `StructuredQuery` — see `templates/binding.py`.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Dict, List, Literal, Optional
 
@@ -20,6 +21,51 @@ import pydantic as pyd
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 ParameterType = Literal["string", "integer", "number", "boolean"]
+
+
+def scalar_type_error(
+    param_type: ParameterType,
+    value: Any,
+    *,
+    min: Optional[float] = None,
+    max: Optional[float] = None,
+    max_length: Optional[int] = None,
+) -> Optional[str]:
+    """Return a human-readable reason `value` is not a valid scalar for
+    `param_type` (and its numeric/length bounds), or None if it is fine.
+
+    Single source of truth shared by two callers so they can never disagree
+    about what a slot accepts: `TemplateParameter`'s own load-time
+    self-consistency check (are the template author's `allowed_values`/`default`
+    valid for the declared type?) and `binding._coerce_scalar`'s run-time check
+    (is the *invoker's* supplied value valid?). Membership in `allowed_values`
+    is deliberately NOT checked here — that is a separate concern each caller
+    layers on top.
+    """
+    if param_type == "boolean":
+        return None if isinstance(value, bool) else "must be a boolean"
+    # bool is a subclass of int — exclude it from numeric/string types.
+    if isinstance(value, bool):
+        return f"must be of type {param_type}"
+    if param_type == "string":
+        if not isinstance(value, str):
+            return "must be a string"
+        if max_length is not None and len(value) > max_length:
+            return f"exceeds max length {max_length}"
+    elif param_type == "integer":
+        if not isinstance(value, int):
+            return "must be an integer"
+    elif param_type == "number":
+        if not isinstance(value, (int, float)):
+            return "must be a number"
+        if not math.isfinite(value):
+            return "must be finite"
+    if param_type in ("integer", "number"):
+        if min is not None and value < min:
+            return f"is below min {min}"
+        if max is not None and value > max:
+            return f"is above max {max}"
+    return None
 
 
 class TemplateParameter(pyd.BaseModel):
@@ -70,7 +116,45 @@ class TemplateParameter(pyd.BaseModel):
             raise ValueError(f"parameter {self.name!r}: max_length only valid for string type")
         if self.max_length is not None and self.max_length < 0:
             raise ValueError(f"parameter {self.name!r}: max_length must be non-negative")
+        self._validate_slot_self_consistency()
         return self
+
+    def _validate_slot_self_consistency(self) -> None:
+        """A slot's own `allowed_values` and `default` must be valid for its
+        declared type and bounds — otherwise the template deploys but can never
+        be invoked (e.g. type `integer` with string `allowed_values`, so every
+        integer a caller supplies fails the enum). Caught at load/dry-run time
+        rather than surfacing as a confusing run-time rejection.
+        """
+        if self.allowed_values is not None:
+            for value in self.allowed_values:
+                reason = scalar_type_error(
+                    self.type, value, min=self.min, max=self.max, max_length=self.max_length
+                )
+                if reason is not None:
+                    raise ValueError(
+                        f"parameter {self.name!r}: allowed value {value!r} {reason} "
+                        f"(declared type is {self.type})"
+                    )
+        if self.default is not None:
+            if self.is_list:
+                if not isinstance(self.default, list):
+                    raise ValueError(
+                        f"parameter {self.name!r}: default for a list parameter must be a list"
+                    )
+                default_values = self.default
+            else:
+                default_values = [self.default]
+            for value in default_values:
+                reason = scalar_type_error(
+                    self.type, value, min=self.min, max=self.max, max_length=self.max_length
+                )
+                if reason is not None:
+                    raise ValueError(f"parameter {self.name!r}: default {value!r} {reason}")
+                if self.allowed_values is not None and value not in self.allowed_values:
+                    raise ValueError(
+                        f"parameter {self.name!r}: default {value!r} is not in allowed_values"
+                    )
 
 
 class QueryTemplate(pyd.BaseModel):
