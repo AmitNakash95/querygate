@@ -53,6 +53,23 @@ default:
   # max_queue_depth: 50
   # max_queue_depth_per_principal: 5
 
+  # Per-principal rate/byte quota over a rolling window (TODO.md item 50).
+  # Unset by default: no rate limiting. max_concurrency bounds queries
+  # *in flight at once*; these bound how many (and how large a total
+  # response) a single authenticated principal may run *over time*, so a
+  # well-behaved caller that never exceeds its concurrency limit still can't
+  # fire unbounded sequential queries and exhaust DB capacity or a cost
+  # budget. Scoped per principal per connection; only enforced for an
+  # authenticated caller (an anonymous request can't be rate-limited per
+  # principal). A caller past either cap is refused before its query touches
+  # the database — REST answers 429 with a Retry-After header; MCP returns a
+  # RATE_LIMITED error. Set a tighter quota for a specific noisy agent under
+  # `principals:` below. Enforcement is in-process (correct for a single
+  # instance); a Redis-backed cross-replica quota is item 50 phase 2.
+  # max_requests_per_window: 600
+  # max_response_bytes_per_window: 104857600
+  # quota_window_seconds: 60
+
   # Pre-execution cost estimation (Postgres only — see
   # execution/cost_estimation.py, TODO.md item 26). Unset by default: no
   # extra EXPLAIN round-trip, no behavior change. Uncomment to have
@@ -134,3 +151,11 @@ connections:
 #       # A read-only reporting caller gets a tighter row cap on every
 #       # connection it can reach, without needing a connection-specific entry.
 #       max_limit: 20
+#   batch-agent:
+#     "*":
+#       # A noisy batch caller is throttled to 60 queries per minute on every
+#       # connection it can reach, even if the connection default has no quota
+#       # (TODO.md item 50). Per-principal overrides merge over the default, so
+#       # this narrows just this one caller's rate.
+#       max_requests_per_window: 60
+#       quota_window_seconds: 60

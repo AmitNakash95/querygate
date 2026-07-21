@@ -33,6 +33,7 @@ from querygate.connections.engine import reset_engines
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.execution.concurrency import clear_redis_limiter, in_process_limiter
+from querygate.execution.quota import in_process_quota_limiter
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.templates.loader import TemplateStore, set_template_store
 from querygate.policy.models import Policy
@@ -66,10 +67,12 @@ def reset_state(tmp_path):
     # loop" (or, worse, look permanently "locked") if reused here.
     in_process_limiter().clear()
     clear_redis_limiter()
+    in_process_quota_limiter().clear()
     reset_usage_signal_buffer()
     yield
     reset_audit_sink()
     reset_engines()
     in_process_limiter().clear()
     clear_redis_limiter()
+    in_process_quota_limiter().clear()
     reset_usage_signal_buffer()

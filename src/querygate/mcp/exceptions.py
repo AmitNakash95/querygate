@@ -19,6 +19,7 @@ from querygate.core.exceptions import (
     NotFoundError,
     PolicyViolationError,
     QueryValidationError,
+    QuotaExceededError,
     public_error_message,
 )
 from querygate.core.logging import get_logger
@@ -47,6 +48,12 @@ def _error_code_from_exception(exc: Exception) -> tuple[str, str]:
         return f"HTTP_{exc.status_code}", message
     if isinstance(exc, AuthorizationError):
         return "FORBIDDEN", public_error_message(exc)
+    # Checked before PolicyViolationError (its superclass): a per-principal
+    # quota rejection (TODO.md item 50) gets its own code so an agent can tell
+    # "slow down / budget exhausted, retry later" apart from a structural
+    # validation error it should not retry unchanged.
+    if isinstance(exc, QuotaExceededError):
+        return "RATE_LIMITED", public_error_message(exc)
     if isinstance(exc, (PolicyViolationError, QueryValidationError, ConcurrencyLimitError)):
         return "VALIDATION", public_error_message(exc)
     return "INTERNAL", public_error_message(exc)

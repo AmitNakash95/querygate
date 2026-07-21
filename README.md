@@ -65,6 +65,7 @@ row cap tacked on. QueryGate is structurally different:
 | Row limits | Often just `LIMIT` appended, sometimes bypassable | Server-clamped, tiered by query shape (aggregate vs. row select) |
 | Multi-database support | One connection string, hardcoded | Dynamic connection registry, credential-isolated from schema/tool responses |
 | Concurrency/load control | Rare | Per-connection concurrency semaphore + execution timeout |
+| Rate limits / cost budget | DIY | Per-principal rolling-window request & response-byte quotas (429 + `Retry-After`) |
 | Multi-tenant scoping | DIY | Policy-level `mandatory_row_filters` |
 | Audit trail | Rare | Every query logged plus an optional persisted, redaction-safe JSONL event |
 
@@ -269,6 +270,50 @@ warning log line — alert on that counter climbing, since it means the gate
 has silently stopped evaluating queries on that connection.
 `querygate_cost_estimation_attempts_total{connection}` is the matching
 denominator for computing a fail-open rate.
+
+### Per-principal rate limits / query quotas
+
+`max_concurrency` bounds how many queries a principal can have *in flight at
+once*; it says nothing about how many it can run *over time*. A well-behaved
+agent that never exceeds its concurrency limit can still fire tens of
+thousands of sequential queries an hour, exhausting a database's capacity or a
+customer's cost budget. `Policy.max_requests_per_window` /
+`max_response_bytes_per_window` (both unset/disabled by default) add the
+missing *rate* dimension — a rolling-window cap on request count and on total
+response bytes, scoped per principal per connection:
+
+```yaml
+default:
+  max_requests_per_window: 600           # at most 600 queries …
+  max_response_bytes_per_window: 104857600  # … and 100 MiB of results …
+  quota_window_seconds: 60               # … per principal per 60s window
+```
+
+The quota is checked **before** a query is queued or touches the database, so
+a rate-limited caller never consumes a concurrency slot or a DB session. Only
+authenticated callers are throttled — an anonymous request has no principal to
+attribute usage to, so it's skipped rather than sharing one bucket. Because
+per-principal overrides merge over the default, you can throttle a single
+noisy agent without touching everyone else:
+
+```yaml
+principals:
+  batch-agent:
+    "*":
+      max_requests_per_window: 60
+      quota_window_seconds: 60
+```
+
+A caller past either cap gets a distinct, contextful rejection — REST answers
+**429** with a `Retry-After` header; MCP returns a **`RATE_LIMITED`** error —
+naming which cap tripped and roughly when to retry. Quota rejections are
+audited exactly like other policy denials (`policy_decision: denied`) and
+counted under `querygate_queries_rejected_total{reason="quota"}` plus a
+dedicated `querygate_query_quota_rejections_total{connection,quota_kind}`
+(`requests` / `bytes`). Like `max_concurrency`, enforcement is in-process:
+correct for a single instance, but the window is per-replica under a load
+balancer (a Redis-backed cross-replica quota is TODO.md item 50 phase 2).
+`explain` is never quota-gated — it compiles a preview without executing.
 
 For production, the safest connection-discovery posture is deny by default:
 

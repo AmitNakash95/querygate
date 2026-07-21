@@ -96,6 +96,29 @@ class CostEstimateExceededError(PolicyViolationError):
     """
 
 
+class QuotaExceededError(PolicyViolationError):
+    """A principal's request-count or response-byte quota over a rolling
+    window (TODO.md item 50) is already exhausted, so this execution attempt
+    is refused before it runs. Subclasses `PolicyViolationError` so every
+    existing `except ValueError`/`except PolicyViolationError` site and
+    `public_error_message` keep treating it as a client-actionable rejection
+    with a surfaceable message; it exists as its own type so
+    `metrics.classify_rejection` can report a dedicated `quota` reason and the
+    REST/MCP edges can additionally surface a `Retry-After` hint without
+    sniffing message text (same split `ConcurrencyLimitError`/
+    `CostEstimateExceededError` already use).
+
+    `quota_kind` is `"requests"` or `"bytes"`; `retry_after_seconds` is a
+    conservative whole-second hint (when the oldest in-window attempt ages
+    out) the REST 429 handler puts in a `Retry-After` header.
+    """
+
+    def __init__(self, message: str, *, quota_kind: str, retry_after_seconds: int) -> None:
+        super().__init__(message)
+        self.quota_kind = quota_kind
+        self.retry_after_seconds = retry_after_seconds
+
+
 class QueryValidationError(ValueError):
     """Client-actionable query/schema validation failure.
 
