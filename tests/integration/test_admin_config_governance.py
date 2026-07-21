@@ -324,6 +324,40 @@ async def test_query_template_authored_through_governance_becomes_invocable_then
         assert gone.json() == []
 
 
+@pytest.mark.asyncio
+async def test_dry_run_catches_slot_type_contradiction_with_a_readable_error(app):
+    """A parameter whose declared type contradicts its allowed_values now fails
+    the dry-run (item: slot self-consistency), and the error is attributed to
+    templates.yaml in plain language — no temp path, no pydantic URL/tail."""
+    contradictory = """
+templates:
+  - id: bad_slot
+    connection: gov-demo
+    parameters:
+      - name: status
+        type: integer
+        allowed_values: [pending, completed]
+    query: {from: foo, select: [foo.id], limit: 5}
+"""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/validate",
+            json={"templates_yaml": contradictory},
+            headers=_auth(_ADMIN_KEY),
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["valid"] is False
+    joined = " ".join(body["errors"])
+    # Readable + attributed to the logical document, not the throwaway temp file.
+    assert "templates.yaml:" in joined
+    assert "allowed value 'pending' must be an integer" in joined
+    # Pydantic library noise and the temp path are stripped.
+    assert "/var/folders" not in joined and "/tmp" not in joined
+    assert "pydantic.dev" not in joined
+    assert "input_type=" not in joined
+
+
 @pytest.mark.security
 @pytest.mark.asyncio
 async def test_staged_template_is_not_live_until_a_separate_apply(app):

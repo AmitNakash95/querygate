@@ -436,6 +436,21 @@ template referencing a denied table or an over-cap shape is rejected the same
 way an ad-hoc query would be — at deploy-time validation and again at run
 time.
 
+**What the dry-run validates (and what it deliberately doesn't).** Staging a
+template through the config plane runs a fast, database-free check: the YAML
+shape, the query skeleton's *structural* validity (dummy-substitute each
+`{param}` and validate the result as a real `StructuredQuery`), the target
+connection's existence, and each parameter *slot's self-consistency* — a slot
+whose `allowed_values` or `default` contradict its declared `type`/bounds (e.g.
+`type: integer` with string `allowed_values`, which would deploy but never bind)
+is rejected at dry-run, not left to fail confusingly at invocation. What the
+dry-run does **not** do is touch the live database, so it does not verify that a
+referenced *column or table actually exists* — that stays a run-time check (the
+bound query hits live schema validation), consistent with how `explain` and
+cost-estimation never open a session. The admin dry-run panel says so, and
+surfaces validation failures attributed to their document (`templates.yaml: …`)
+in plain language rather than raw validator output.
+
 **Authoring a template is a governed change (item 48 phase 2).** `templates.yaml`
 is a fourth governed document in the config-versioning plane (see [the admin
 surface](#the-admin-surface-config-as-versioned-history-not-a-live-edited-file)),

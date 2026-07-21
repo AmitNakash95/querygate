@@ -9,6 +9,7 @@ Neither of those gets a parallel implementation here.
 
 from __future__ import annotations
 
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -480,6 +481,30 @@ def compute_blast_radius(
     return result
 
 
+_PYDANTIC_URL_LINE = re.compile(r"\n\s*For further information visit https://\S+")
+# The trailing "[type=..., input_value=..., input_type=...]" noise pydantic
+# appends to each error line — useful for library debugging, not for an admin
+# reading a config dry-run.
+_PYDANTIC_TAIL = re.compile(r"\s*\[type=[^\n]*?input_type=[^\]\n]*\]")
+
+
+def _humanize_validation_errors(errors: List[str], doc_names: dict) -> List[str]:
+    """Turn raw validate_config errors into something an admin can act on in the
+    dry-run panel: attribute each to its logical document name (never the
+    throwaway temp path the candidate was written to) and strip pydantic's
+    library-debugging boilerplate (the docs URL line and the
+    `[type=..., input_value=..., input_type=...]` tail). The underlying human
+    message and field path (e.g. `templates.0.parameters.0`) are preserved."""
+    cleaned: List[str] = []
+    for error in errors:
+        for path, name in doc_names.items():
+            error = error.replace(path, name)
+        error = _PYDANTIC_URL_LINE.sub("", error)
+        error = _PYDANTIC_TAIL.sub("", error)
+        cleaned.append(error.strip())
+    return cleaned
+
+
 def validate_candidate_content(
     cfg: AppConfig,
     connections_yaml: str,
@@ -503,13 +528,22 @@ def validate_candidate_content(
             templates_path = tmp_path / "templates.yaml"
             templates_path.write_text(templates_yaml)
             template_file = str(templates_path)
-        return validate_config(
+        errors = validate_config(
             str(connections_file),
             str(policy_file),
             catalog_file,
             template_file=template_file,
             resolver_registry=build_secret_resolver_registry(cfg),
         )
+        doc_names = {
+            str(connections_file): "connections.yaml",
+            str(policy_file): "policy.yaml",
+        }
+        if catalog_file is not None:
+            doc_names[catalog_file] = "catalog.yaml"
+        if template_file is not None:
+            doc_names[template_file] = "templates.yaml"
+        return _humanize_validation_errors(errors, doc_names)
 
 
 def validate(
