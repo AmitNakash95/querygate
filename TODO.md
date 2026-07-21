@@ -75,7 +75,7 @@ order-of-magnitude, not commitments.
 | 41 | ✅ Policy-change blast-radius analysis (phase 1: bounded synchronous aggregation + ranking; phase 2: async/paginated evaluation for very large principal counts not started) | M–L | 22, 25, 31, 40 |
 | 42 | Four-eyes config approval and separation of duties | XL | 10, 23, 25, 31 |
 | 43 | ✅ Admin connection-operations and health workspace (phase 1: admin connection-status API; phase 2a: "test now" probe; phase 2b: browser workspace) | L | 7, 12, 31 |
-| 44 | Admin observability and rejection-trend dashboard | L | 12, 23, 31, 35 |
+| 44 | ✅ Admin observability and rejection-trend dashboard (phase 1: admin-scoped aggregated overview API + read-only browser cards panel; phase 2: time-window charts, config/catalog-change trend, external metrics backend not started) | L | 12, 23, 31, 35 |
 | 45 | ✅ Dedicated non-admin "My access" portal (phase 1: identity, guardrails, mandatory-filter readiness, schema browser; phase 2: personal denial history not started) | M | 22, 31, 33 |
 | 46 | ✅ Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
 | 47 | Safe draft recovery plus config export/import UX | M | 13, 25, 31 |
@@ -1227,26 +1227,63 @@ the browser while the server still permits self-approval.
 
 `GET /api/v1/admin/connections` (`api/admin_connections_routes.py`) returns a credential-free, per-connection operational status built from the same `HealthMonitor` snapshot… **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 43).
 
-### 44. Admin observability and rejection-trend dashboard
+### 44. Admin observability and rejection-trend dashboard ✅ DONE (phase 1)
 
-**Effort: L (3–5 days).** Current Prometheus metrics and JSONL events provide
-the raw signals, but a useful dashboard needs safe aggregation, time-window
-semantics, cardinality controls, pagination, and a decision about behavior when
-no durable time-series backend is configured.
+**Shipped (phase 1 — the aggregation API plus a read-only browser panel):** A
+new `admin:observability:read`-scoped `GET
+/api/v1/admin/observability/overview` (`api/admin_observability_routes.py`)
+returning a typed, redaction-safe `ObservabilityOverview`
+(`admin/observability.py`) aggregated from the *existing* in-process Prometheus
+registry (`metrics.py`) — query volume, success/rejection categories, average
+duration, queue depth + wait-by-outcome, concurrency in-use/max/utilization,
+per-principal quota rejections by kind, and cost-estimation attempts/
+unavailable/would-reject with a derived `fail_open_rate` — both as a global
+rollup and a per-connection breakdown.
+
+The `/admin/` control plane renders it as an "Observability" section:
+overview cards (queries, top reject reason, avg duration, concurrency
+utilization, queue depth, cost-estimate fail-open rate), a per-connection
+table, and a banner echoing the snapshot's `note`/`since` so the honesty
+about durability is visible in the UI, not just the JSON. The panel calls the
+same scoped endpoint and shows an explicit "connect with
+admin:observability:read" empty state without it.
+
+The aggregator (`build_overview(registry)`) is pure over the registry it reads,
+so it's unit-tested against a fresh `CollectorRegistry`; the endpoint is
+integration-tested for scope enforcement (403 without the scope), honest
+snapshot labeling, real-activity reflection, and low-cardinality-only output;
+the panel is asserted in the admin-UI static-shell test.
+
+**Honesty about durability (item 44's explicit requirement):** the response is
+labeled `source="process_snapshot"`, `durable=false`, `since=<process start>`,
+with a `note` stating counters are cumulative-since-start, gauges are
+instantaneous, and — under the default in-process backends — everything is
+per-replica. It never implies a durable time-series store QueryGate does not
+own. Its own least-privilege scope (distinct from config/connection scopes)
+gates the whole overview, including the per-connection breakdown; output is
+built only from already-public, low-cardinality metric labels (never a query,
+value, principal, table, or column).
+
+**Deliberately deferred (phase 2, not a gap in this pass):**
+- **Time-window trend charts.** Phase 1's endpoint is a point-in-time
+  snapshot, not time-series — there is no stored history to plot, so the panel
+  renders honest current-value cards rather than faking a trend line over a
+  window it cannot reconstruct. Real charts depend on the external
+  metrics-backend below.
+- A **config/catalog-change trend card** ("which connection changed after the
+  last rollout?"). Those events live in the audit stream, not the metrics
+  registry — surfacing them safely needs an audit-read aggregation path, not a
+  metrics read, so it's its own slice.
+- **Querying an operator-configured external metrics backend** (e.g. Prometheus
+  HTTP API) for real time-windowed history and cross-replica aggregation,
+  replacing the honest single-process snapshot where such a backend exists.
 
 **Why it matters:** Item 31 can browse individual audit events, but it cannot
 answer operational questions such as “Which policies reject the most
-requests?”, “Is queue pressure rising?”, “Did cost-estimation availability
-regress?”, or “Which connection changed after the last rollout?” Those trends
-are what let an administrator tune policy and capacity proactively.
-
-**What to do:** Add overview cards and time-window charts for query volume,
-success/rejection categories, queue wait/depth, concurrency saturation,
-timeouts, cost-estimation unavailable/would-reject rates, and config/catalog
-changes. Prefer querying an operator-configured metrics backend when available;
-otherwise expose an honest current-process snapshot and label it as such—do
-not imply durable history. Keep labels low-cardinality and require admin scope
-for any principal-, connection-, table-, or policy-specific breakdown.
+requests?”, “Is queue pressure rising?”, or “Did cost-estimation availability
+regress?” Those trends are what let an administrator tune policy and capacity
+proactively — and phase 1 answers them now over the API, honestly scoped to
+what a single process can truthfully report.
 
 ### 45. Dedicated non-admin "My access" portal ✅ DONE (phase 1)
 
