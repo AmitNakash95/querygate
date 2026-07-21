@@ -63,6 +63,7 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
         response = await client.get("/admin/")
         script = await client.get("/admin/app.js")
+        styles = await client.get("/admin/app.css")
         logo = await client.get("/admin/logo-wordmark.svg")
         favicon = await client.get("/admin/favicon.svg")
 
@@ -71,10 +72,22 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     assert "default-src 'self'" in response.headers["content-security-policy"]
     assert response.headers["referrer-policy"] == "no-referrer"
     assert response.headers["cache-control"] == "no-store"
+    # The JS/CSS assets must be no-store too, not just the HTML shell — otherwise
+    # a browser serves a stale control plane after a UI update.
+    assert script.headers["cache-control"] == "no-store"
+    assert styles.status_code == 200
+    assert styles.headers["cache-control"] == "no-store"
     assert script.status_code == 200
     assert "policy/test" in script.text
     assert "/admin/config/simulate" in script.text
-    assert "Catalog review" in response.text
+    # TODO.md item 85: domain-separated nav. Catalog is a top-level domain in
+    # the sidebar; its inner tabs (Review proposals / Versions & rollback /
+    # Curate) are rendered from the navModel in app.js, and the Catalog domain
+    # is signalled as self-contained (its own governance, not the shared release).
+    assert 'data-domain="catalog"' in response.text
+    assert "Review proposals" in script.text
+    assert "Versions & rollback" in script.text
+    assert "Self-contained governance" in script.text
     assert "/admin/catalog/" in script.text
     assert "catalog:review" in script.text
     assert logo.status_code == 200
@@ -85,8 +98,10 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     # TODO.md item 46: safe-start policy templates panel.
     assert "Safe-start templates" in response.text
     assert "/admin/config/templates/render" in script.text
-    # TODO.md item 48: read-only query-templates browse panel.
-    assert "Query templates" in response.text
+    # TODO.md item 48: read-only query-templates browse panel. Item 85 moved
+    # the nav label into the Templates domain's inner tab (rendered from app.js).
+    assert 'data-domain="templates"' in response.text
+    assert "Query templates" in script.text
     assert "/query-templates" in script.text
     # TODO.md item 48 phase 2: templates.yaml is a governed config-editor document.
     assert 'data-document="templates"' in response.text
@@ -94,6 +109,97 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     # On-demand live-schema check for query templates.
     assert 'id="check-schema"' in response.text
     assert "/admin/config/check-template-schema" in script.text
+
+
+@pytest.mark.asyncio
+async def test_template_authoring_parse_render_round_trip_and_validation(tmp_path, monkeypatch):
+    """TODO.md item 87: the Templates domain composes a validated QueryTemplate
+    into the draft templates.yaml via parse/render, the same pattern as the
+    policy designer. A malformed slot is rejected as a clean 422 by the shared
+    model authority, never silently accepted."""
+    app = create_app(_settings(tmp_path, monkeypatch))
+    templates_yaml = """
+templates:
+  - id: recent_orders
+    connection: demo
+    description: Recent orders
+    parameters:
+      - name: since
+        type: string
+        required: true
+    query:
+      from: orders
+      select: [orders.id]
+      where:
+        col: orders.created_at
+        op: gte
+        value: {param: since}
+"""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        parsed = await client.post(
+            "/api/v1/admin/ui/templates/parse",
+            json={"templates_yaml": templates_yaml},
+            headers=_auth(),
+        )
+        document = parsed.json()["document"]
+        # Add a second template through the structured document, then render.
+        document["templates"].append(
+            {
+                "id": "customer_count",
+                "connection": "demo",
+                "parameters": [],
+                "query": {"from": "customers", "select": [{"fn": "count", "as": "n"}]},
+            }
+        )
+        rendered = await client.post(
+            "/api/v1/admin/ui/templates/render",
+            json={"document": document},
+            headers=_auth(),
+        )
+        # A slot whose numeric bound is set on a string type must be rejected.
+        bad = await client.post(
+            "/api/v1/admin/ui/templates/render",
+            json={
+                "document": {
+                    "templates": [
+                        {
+                            "id": "bad_slot",
+                            "connection": "demo",
+                            "parameters": [{"name": "x", "type": "string", "min": 3}],
+                            "query": {"from": "customers", "select": ["customers.id"]},
+                        }
+                    ]
+                }
+            },
+            headers=_auth(),
+        )
+
+    assert parsed.status_code == 200
+    assert [t["id"] for t in document["templates"]] == ["recent_orders", "customer_count"]
+    assert rendered.status_code == 200
+    assert "id: customer_count" in rendered.json()["templates_yaml"]
+    assert "id: recent_orders" in rendered.json()["templates_yaml"]
+    assert bad.status_code == 422
+    assert "min/max only valid for numeric types" in bad.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_template_authoring_render_requires_write_scope(tmp_path, monkeypatch):
+    """Composing into the draft is a write action; parse is read-or-write."""
+    app = create_app(_settings(tmp_path, monkeypatch, scopes=["admin:config:read"]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        parse = await client.post(
+            "/api/v1/admin/ui/templates/parse",
+            json={"templates_yaml": "templates: []"},
+            headers=_auth(),
+        )
+        render = await client.post(
+            "/api/v1/admin/ui/templates/render",
+            json={"document": {"templates": []}},
+            headers=_auth(),
+        )
+    assert parse.status_code == 200
+    assert render.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -295,10 +401,25 @@ async def test_admin_support_apis_require_config_scope(tmp_path, monkeypatch):
             json={"policy_yaml": "default: {}"},
             headers=_auth(),
         )
+        # item 87: the template-authoring support endpoints are config-scoped too,
+        # so a caller with no config scope can never read a template's query
+        # skeleton through them (the admin-only "view query" path).
+        templates_parse = await client.post(
+            "/api/v1/admin/ui/templates/parse",
+            json={"templates_yaml": "templates: []"},
+            headers=_auth(),
+        )
+        templates_render = await client.post(
+            "/api/v1/admin/ui/templates/render",
+            json={"document": {"templates": []}},
+            headers=_auth(),
+        )
 
     assert policy_test.status_code == 403
     assert audit.status_code == 403
     assert parse.status_code == 403
+    assert templates_parse.status_code == 403
+    assert templates_render.status_code == 403
 
 
 @pytest.mark.asyncio

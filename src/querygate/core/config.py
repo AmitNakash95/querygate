@@ -148,6 +148,14 @@ class AppConfig(BaseSettings):
         ]
     )
     mcp_allowed_origins: list[str] = pyd.Field(default_factory=list)
+    # TODO.md item 86: transport-level request-body guards for the mounted MCP
+    # Streamable-HTTP surface, so an oversized or absurdly deep body is a clean
+    # client error (413/400) *before* the transport's own json.loads — matching
+    # REST's "malformed input is never a 5xx" posture. Both defaults are far
+    # above any legitimate batch (a policy-bounded query nests well under 10;
+    # max_where_depth defaults to 5), so normal traffic is unaffected.
+    mcp_max_request_bytes: int = pyd.Field(default=4 * 1024 * 1024, ge=1)
+    mcp_max_request_depth: int = pyd.Field(default=100, ge=1)
 
     # JWT bearer-token auth (core/jwt_auth.JwtAuthenticator) — a second,
     # optional Authenticator alongside the static api_keys above. Shared by
