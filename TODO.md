@@ -82,7 +82,7 @@ order-of-magnitude, not commitments.
 | 48 | ✅ Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) (phase 1: file-configured invocable templates + REST/MCP; phase 2: governed create/edit/approve/publish/rollback not started) | L | 6, 22, 25, 32B |
 | 49 | ✅ Column-value masking/tokenization (not just allow/deny) | L | 6, 27 |
 | 50 | ✅ Per-principal rate limits / query quotas over time (phase 1: in-process rolling-window request/byte quota; phase 2: Redis-backed cross-replica quota not started) | M | 9, 25 |
-| 51 | Typed client-side query-builder SDK (Python + TypeScript) | M (per language) | 20 |
+| 51 | ✅ Typed client-side query-builder SDK (phase 1: Python builder; phase 2: TypeScript + standalone dependency-light distribution not started) | M (per language) | 20 |
 | 52 | Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI) | S (per framework) | 20 |
 | 53 | Independent third-party security audit + published report | S* | 28 |
 | 54 | Compliance control mapping (SOC 2 / ISO 27001 readiness) | L | 23, 25, 28 |
@@ -1529,9 +1529,76 @@ audit quota rejections the same way other policy denials are audited today.
 
 ### 51. Typed client-side query-builder SDK (Python + TypeScript)
 
-**Effort: M per language.** A thin, generated-or-hand-written typed
-wrapper around the existing `StructuredQuery` Pydantic schema — no
-server-side change; it mirrors a contract that already exists.
+**Phase 1 (Python builder) ✅ DONE.** **Phase 2 (TypeScript sibling +
+standalone dependency-light distribution) not started — split out below
+because the standalone-distribution half is coupled to item 30 phase 2's
+still-unresolved registry decision, and TypeScript is a genuinely separate
+language implementation, not more of the Python work.**
+
+**Phase 1 shipped:** `querygate/client/` — a fluent, typed builder that
+constructs the *same* `query_ast` Pydantic models the server validates, then
+serializes them to the exact REST/MCP wire JSON. Public surface
+(`querygate.client.builder`, re-exported from `querygate.client`):
+
+- `Query.from_(...)` with chainable `.select/.distinct/.join/.where/.group_by/
+  .having/.order_by/.limit/.offset/.top_n/.intent`, terminating in
+  `.build()` (a validated `StructuredQuery`), `.to_dict()`, or `.to_json()`.
+- A predicate DSL: `col("Table.Col")` with Python comparison operators
+  (`==`/`!=`/`<`/`<=`/`>`/`>=`, plus named `.eq/.neq/...`), `.in_/.not_in/
+  .like/.between/.is_null/.is_not_null`, column-to-column comparison
+  (`col("a") > col("b")` → `value_col`), and boolean groups `and_/or_/not_`.
+- Select-item helpers for every non-string member of the `SelectItem` union:
+  `agg.{count,sum,avg,min,max,stddev,variance}`, `date_bucket`, `string_agg`,
+  `array_agg`, `percentile_cont`, `fn_select` (scalar function projection),
+  and `case`/`when`; scalar-function predicate targets via `fn`/`col_fn`;
+  `asc`/`desc` ordering helpers. Scalar-function args and CASE results must be
+  wrapped `col(...)`/`lit(...)` (bare values are rejected as ambiguous), and
+  a predicate helper handed to `.select()` raises a message pointing at
+  `fn_select`.
+
+**No server change, and no duplicated validation** (the CLAUDE.md invariant):
+because `build()` instantiates the real models, an illegal shape (`count(*)`
+with `distinct`, a self-join missing an alias, an out-of-range percentile,
+`between` without two values) raises client-side with the *same* error the
+server would return — and whatever it emits is still fully policy/schema/
+guardrail-checked by `StructuredQueryService` before any row is touched.
+The builder can never drift ahead of or behind the AST because it *is* a
+thin front-end over it.
+
+Covered by `tests/unit/test_client_builder.py` (23 tests): fidelity to
+hand-written wire JSON, round-trip back through the real model, operator/
+value_col/boolean/CASE/top_n/self-join/composite-join coverage, validation
+propagation, and three **drift guards** that fail if the AST grows a
+`StructuredQuery` field, a `SelectItem` variant, or a `CompareOp`/
+`AggregateFn`/`ScalarFn` the builder can't express — the "kept in sync via a
+schema test" acceptance criterion. `examples/client_sdk_python.py` is a
+runnable script (offline build + optional `--send`); its three queries were
+executed end-to-end against a real demo Postgres (HTTP 200) during
+development, and a masked-column variant was confirmed to still get a policy
+`422`, proving the builder adds no trust.
+
+**Ships inside the `querygate` package** for phase 1 — `import` it from an
+installed wheel (`from querygate.client import Query`), and since
+`query_ast/models.py` and `querygate/__init__.py` are pydantic-only the
+import stays light. It is not yet a *separate* dependency-light distribution.
+
+**Explicitly deferred to phase 2:**
+
+- **TypeScript builder.** The same contract in TS with a compile-time-typed
+  `StructuredQuery` — a separate language implementation with its own
+  sync-test strategy (it can't reuse the Python Pydantic models), not more of
+  the Python work.
+- **Standalone, dependency-light distribution** (a `querygate-client` package
+  on PyPI / an npm package) so an adopter can install the builder without the
+  full server dependency closure (`pyodbc`/`asyncpg`/`fastapi`/`redis`/…).
+  This is coupled to **item 30 phase 2**: no package/registry has been chosen
+  or configured, and publishing needs explicit maintainer approval — building
+  a standalone dist with nowhere to publish it is premature. Until then the
+  in-tree `querygate.client` is the shipped, importable, tested surface.
+
+**Effort: M per language.** A thin typed wrapper around the existing
+`StructuredQuery` schema — no server-side change; it mirrors a contract that
+already exists.
 
 **Why it matters:** Adopters today either hand-write `StructuredQuery` JSON
 or read `examples/rest_calls.md` / `examples/mcp_calls.md`'s raw JSON-RPC
@@ -1540,12 +1607,12 @@ typed SDKs in multiple languages with autocomplete and client-side
 validation. This is the single largest lever on integration friction and
 the most concrete ecosystem gap identified against Google's Toolbox.
 
-**What to do:** Generate (or hand-maintain, kept in sync via a schema test)
-a typed builder for `StructuredQuery` in Python and TypeScript — table/
-column references, filters, joins, and aggregations as typed method calls
-rather than raw dict/JSON construction. Ship as an installable package, not
-just an example script, and keep it a pure client-side convenience: it must
-not bypass or duplicate any server-side validation.
+**What to do (phase 2):** Add the TypeScript builder mirroring phase 1's
+Python surface with its own schema-sync test, and — once item 30 phase 2
+chooses a registry — extract the Python builder into a standalone
+dependency-light `querygate-client` distribution, keeping the in-tree
+`querygate.client` importable for existing users. Keep it a pure client-side
+convenience: it must not bypass or duplicate any server-side validation.
 
 ### 52. Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI function-calling)
 
