@@ -1232,6 +1232,36 @@ proposals can't also silently approve or publish them. Every action emits
 a redaction-safe `catalog.governance` audit event: who, what action, which
 proposal/version, outcome — never the draft text itself.
 
+### Human-authored catalog entries (item 84)
+
+Generated and usage-learned proposals aren't the only way curated content
+gets in. A human can author a catalog entry directly — describe a table,
+column, or relationship in a guided form (the admin UI's **Curate** panel:
+pick a connection → object type → table → optional column, then fill in a
+description, aliases, or a table's default aggregation, each with inline
+field help) instead of hand-typing raw `catalog.yaml`. The key decision is
+*where that authored content goes*: it is composed into the same validated
+`CatalogDraftContent`/`CatalogDraftTarget` models and routed through the
+**catalog governance queue** (`create_manual_proposal` →
+`CatalogFileRepository`), **not** the change-set/`ConfigVersionStore`
+`catalog.yaml` tab. So a hand-authored entry gets the identical staged →
+reviewed → published → rolled-back safety and actor-attributed audit that
+agent-generated proposals already get, and there is still exactly one
+catalog file and one mutation path.
+
+A manual proposal carries a distinct `source_class = manual`. That is a
+proposal-only class: it stays **quarantined** (never agent-visible, never
+indexed) until a reviewer publishes it, at which point the normal
+`publish_proposal` merge mints a `verified` entry — it is *publishable as
+verified*, never auto-trusted. Authoring is gated on its own
+`catalog:author` scope, separate from `catalog:review`. Separation of duties
+is deliberately **scope-based, not identity-based**: a deployment that wants
+strict separation grants `catalog:author` and `catalog:review` to different
+principals, but a principal holding both may approve and publish its own
+manual proposal — there is no author≠approver identity check. Actor
+attribution (`created_by`/`approved_by`) is still recorded on every step for
+audit; it's the *gate* that's scope-driven, not the paper trail.
+
 ### Search and retrieval: what an agent actually sees
 
 `catalog/retrieval.py`'s `search_catalog` is the read path agents actually
@@ -2155,6 +2185,35 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-21 — Human-authored catalog entries route through the catalog
+  governance queue (a new `manual` proposal source), with scope-based — not
+  identity-based — separation of duties (TODO.md item 84).** Two deliberate
+  choices. **(1) Route authored content through catalog governance
+  (`CatalogFileRepository`), not the change-set store.** `catalog.yaml` already
+  carries human-curated content, but the only prior way to author it by hand
+  was raw YAML in the change-set `<textarea>`, which flows through
+  `ConfigVersionStore` — whose snapshot copy CLAUDE.md explicitly warns
+  diverges from the live `CATALOG_FILE` catalog governance writes to. The
+  Curate form instead composes a validated `CatalogDraftContent` and creates a
+  `source_class = manual` proposal through the same
+  quarantine → review → publish → rollback path generated proposals use, so it
+  gets the same staged safety and actor-attributed audit and there is still one
+  catalog file and one mutation path. The rejected alternative (author straight
+  into the change-set `catalog.yaml`) was declined precisely because it uses the
+  wrong versioning plane. `manual` is a proposal-only knowledge class — it stays
+  quarantined until publish resolves it to a `verified` entry; it is
+  publishable-as-verified, never auto-trusted or auto-indexed, and the draft
+  content model still structurally has no sensitivity/sampling field, so a
+  manual body can't smuggle one in. **(2) Separation of duties is scope-based,
+  not identity-based.** Authoring is gated on a distinct `catalog:author` scope,
+  but a principal that *also* holds `catalog:review` may approve and publish its
+  own manual proposal — there is no author≠approver check. The rejected
+  alternative was a hard-coded identity gate forbidding self-approval; it was
+  declined because it can't express the real deployment spectrum (a solo
+  operator vs. enforced four-eyes) — granting `catalog:author` and
+  `catalog:review` to different principals is what enforces four-eyes, and the
+  scopes are the knob. `created_by`/`approved_by` are still recorded for audit;
+  only the gate is scope-driven.
 - **2026-07-21 — Query-template validation is layered: offline slot/structural
   checks in the always-on dry-run, live column/table existence as a separate
   best-effort on-demand action (TODO.md item 83).** Two deliberate choices.

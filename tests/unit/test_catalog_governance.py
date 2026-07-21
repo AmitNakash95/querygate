@@ -10,7 +10,13 @@ import sqlalchemy as sa
 from querygate.catalog import governance
 from querygate.catalog.generation import generate_catalog_drafts
 from querygate.catalog.loader import CatalogStore
-from querygate.catalog.models import CatalogDraftContent, ProposalReviewStatus
+from querygate.catalog.models import (
+    CatalogDraftContent,
+    CatalogDraftTarget,
+    CatalogEntryProvenance,
+    ProposalReviewStatus,
+    replacement_decision,
+)
 from querygate.catalog.providers import ManualDraftBatch, ManualSemanticMemoryProvider
 from querygate.catalog.providers import SemanticGenerationRequest
 from querygate.catalog.repository import CatalogFileRepository, CatalogFileUpdate
@@ -918,3 +924,133 @@ def test_delete_version_record_only_allows_rollback_records():
     assert deleted.get_version_record("3") is None
     # The (reverted) publish record it reverted is untouched by this delete.
     assert deleted.get_version_record("2") is not None
+
+
+# --- Manual authoring (TODO item 84) ---------------------------------------
+
+
+def test_manual_proposal_is_quarantined_then_publishes_as_verified():
+    store = _base_store()
+    target = CatalogDraftTarget(
+        connection_id="demo", object_type="column", table="customers", column="email"
+    )
+    content = CatalogDraftContent(description="Primary contact email.", aliases=["contact_email"])
+
+    created = governance.create_manual_proposal(
+        store, connection_id="demo", target=target, content=content, actor="curator", now=_NOW
+    )
+    store = created.store
+    proposal = store.get_draft_proposal(created.proposal_id)
+    # Quarantined until published: manual source class, pending, still draft,
+    # attributed to its author.
+    assert proposal.provenance.source_class.value == "manual"
+    assert proposal.review_status == ProposalReviewStatus.PENDING
+    assert proposal.provenance.status.value == "draft"
+    assert proposal.provenance.created_by == "curator"
+    # Not yet agent-visible: nothing published for the target.
+    assert store.get_table("demo", "customers").column("email") is None
+
+    approved = governance.approve_proposal(
+        store, proposal_id=created.proposal_id, connection_id="demo", actor="reviewer", now=_NOW
+    )
+    published = governance.publish_proposal(
+        approved.store,
+        proposal_id=created.proposal_id,
+        connection_id="demo",
+        actor="reviewer",
+        now=_NOW,
+    )
+    column = published.store.get_table("demo", "customers").column("email")
+    # Publish resolves a manual proposal to a verified, agent-visible entry.
+    assert column is not None
+    assert column.description == "Primary contact email."
+    assert column.provenance.source_class.value == "verified"
+    assert column.provenance.created_by == "curator"
+    assert column.provenance.approved_by == "reviewer"
+
+
+def test_manual_author_may_self_approve_and_publish_its_own_proposal():
+    # Separation of duties is scope-based, not identity-based: the SAME actor
+    # authoring, approving, and publishing is allowed at the governance layer
+    # (scope enforcement lives at the REST boundary).
+    store = _base_store()
+    target = CatalogDraftTarget(
+        connection_id="demo", object_type="column", table="customers", column="email"
+    )
+    created = governance.create_manual_proposal(
+        store,
+        connection_id="demo",
+        target=target,
+        content=CatalogDraftContent(description="Contact email."),
+        actor="solo-operator",
+        now=_NOW,
+    )
+    approved = governance.approve_proposal(
+        created.store,
+        proposal_id=created.proposal_id,
+        connection_id="demo",
+        actor="solo-operator",
+        now=_NOW,
+    )
+    published = governance.publish_proposal(
+        approved.store,
+        proposal_id=created.proposal_id,
+        connection_id="demo",
+        actor="solo-operator",
+        now=_NOW,
+    )
+    assert published.outcome == "published"
+
+
+def test_manual_proposal_rejects_default_aggregation_on_non_table():
+    store = _base_store()
+    target = CatalogDraftTarget(
+        connection_id="demo", object_type="column", table="customers", column="email"
+    )
+    with pytest.raises(CatalogGovernanceError, match="default_aggregation"):
+        governance.create_manual_proposal(
+            store,
+            connection_id="demo",
+            target=target,
+            content=CatalogDraftContent(default_aggregation="sum(amount)"),
+            actor="curator",
+            now=_NOW,
+        )
+
+
+def test_manual_proposal_target_absent_from_snapshot_is_rejected():
+    store = _base_store()
+    target = CatalogDraftTarget(connection_id="demo", object_type="table", table="ghost")
+    with pytest.raises(CatalogGovernanceError, match="absent from the current schema"):
+        governance.create_manual_proposal(
+            store,
+            connection_id="demo",
+            target=target,
+            content=CatalogDraftContent(description="Nope."),
+            actor="curator",
+            now=_NOW,
+        )
+
+
+def test_replacement_decision_downgrade_guard_still_holds():
+    verified = CatalogEntryProvenance(source_class="verified", status="verified")
+    # Verified-over-verified stays allowed — the "edit an existing curated
+    # description" case a published manual proposal exercises.
+    assert replacement_decision(
+        verified,
+        CatalogEntryProvenance(source_class="verified", status="verified"),
+        field_name="description",
+    ).allowed
+    # A non-verified candidate can never overwrite verified content.
+    assert not replacement_decision(
+        verified,
+        CatalogEntryProvenance(source_class="inferred", status="draft", confidence=0.5),
+        field_name="description",
+    ).allowed
+    # A manual DRAFT provenance is likewise not directly publishable through
+    # the merge gate — publishing always presents a verified candidate.
+    assert not replacement_decision(
+        verified,
+        CatalogEntryProvenance(source_class="manual", status="draft"),
+        field_name="description",
+    ).allowed

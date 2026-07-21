@@ -5,6 +5,8 @@ rollback (32B-1) and export/import/delete (32B-2) flows.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import yaml
 import sqlalchemy as sa
 import pytest
@@ -27,6 +29,7 @@ _BASE_URL = "http://localhost"
 _ADMIN_KEY = "catalog-governance-admin-key"
 _ALL_CATALOG_SCOPES = [
     "catalog:generate",
+    "catalog:author",
     "catalog:review",
     "catalog:edit",
     "catalog:approve",
@@ -522,3 +525,106 @@ async def test_usage_signals_endpoint_requires_review_scope(usage_sources):
     async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
         resp = await client.get("/api/v1/admin/catalog/demo/usage-signals", headers=_auth())
         assert resp.status_code == 403
+
+
+# --- Manual authoring (TODO item 84) ---------------------------------------
+
+
+def _manual_body() -> dict:
+    return {
+        "object_type": "column",
+        "table": "customers",
+        "column": "email",
+        "description": "Primary contact email.",
+        "aliases": ["contact_email"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_manual_create_requires_author_scope(sources):
+    connections_file, policy_file, catalog_file, _snapshot = sources
+
+    # A reviewer without catalog:author cannot author a manual entry.
+    reviewer_app = create_app(
+        _settings(
+            connections_file,
+            policy_file,
+            catalog_file,
+            scopes=["catalog:review", "catalog:approve", "catalog:publish"],
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=reviewer_app), base_url=_BASE_URL) as client:
+        denied = await client.post(
+            "/api/v1/admin/catalog/demo/proposals", json=_manual_body(), headers=_auth()
+        )
+        assert denied.status_code == 403
+
+    # catalog:author alone can create a quarantined manual proposal.
+    author_app = create_app(
+        _settings(connections_file, policy_file, catalog_file, scopes=["catalog:author"])
+    )
+    async with AsyncClient(transport=ASGITransport(app=author_app), base_url=_BASE_URL) as client:
+        created = await client.post(
+            "/api/v1/admin/catalog/demo/proposals", json=_manual_body(), headers=_auth()
+        )
+        assert created.status_code == 201
+        assert created.json()["outcome"] == "manual_created"
+
+
+@pytest.mark.asyncio
+async def test_manual_author_holding_review_can_self_approve_and_publish(sources):
+    connections_file, policy_file, catalog_file, _snapshot = sources
+    app = create_app(
+        _settings(connections_file, policy_file, catalog_file, scopes=_ALL_CATALOG_SCOPES)
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        created = await client.post(
+            "/api/v1/admin/catalog/demo/proposals", json=_manual_body(), headers=_auth()
+        )
+        assert created.status_code == 201
+        proposal_id = created.json()["proposal_id"]
+
+        # It surfaces in the existing review queue tagged as a manual source.
+        listed = await client.get(
+            "/api/v1/admin/catalog/demo/proposals",
+            params={"review_status": "pending"},
+            headers=_auth(),
+        )
+        manual = [p for p in listed.json() if p["proposal_id"] == proposal_id]
+        assert manual and manual[0]["source_class"] == "manual"
+
+        # Separation of duties is scope-based, not identity-based: the same
+        # principal that authored it (and also holds catalog:review) may
+        # approve and publish its own manual proposal — allowed, not blocked.
+        approve = await client.post(
+            f"/api/v1/admin/catalog/demo/proposals/{proposal_id}/approve", headers=_auth()
+        )
+        assert approve.status_code == 200
+        publish = await client.post(
+            f"/api/v1/admin/catalog/demo/proposals/{proposal_id}/publish", headers=_auth()
+        )
+        assert publish.status_code == 200
+
+        # It lands as a verified entry in the live CATALOG_FILE via the
+        # governance path (CatalogFileRepository) — never a second store.
+        catalog = yaml.safe_load(Path(catalog_file).read_text())
+        column = catalog["connections"]["demo"]["tables"]["customers"]["columns"]["email"]
+        assert column["description"] == "Primary contact email."
+        assert column["provenance"]["source_class"] == "verified"
+        assert column["provenance"]["approved_by"] is not None
+
+        # No ConfigVersionStore catalog snapshot path was introduced: the only
+        # catalog file that changed is CATALOG_FILE itself.
+        assert not list(Path(catalog_file).parent.glob("config_versions/**/catalog.yaml"))
+
+
+@pytest.mark.asyncio
+async def test_manual_proposal_target_absent_is_rejected(sources):
+    connections_file, policy_file, catalog_file, _snapshot = sources
+    app = create_app(
+        _settings(connections_file, policy_file, catalog_file, scopes=["catalog:author"])
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        body = {"object_type": "table", "table": "ghost", "description": "Nope."}
+        resp = await client.post("/api/v1/admin/catalog/demo/proposals", json=body, headers=_auth())
+        assert resp.status_code == 409
