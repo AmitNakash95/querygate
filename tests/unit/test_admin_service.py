@@ -93,6 +93,24 @@ def test_validate_valid_candidate_has_no_errors(tmp_path, monkeypatch):
     assert errors == []
 
 
+def test_humanize_validation_errors_attributes_and_strips_pydantic_noise():
+    raw = [
+        "/tmp/xyzabc/templates.yaml: 1 validation error for QueryTemplateFile\n"
+        "templates.0.parameters.0\n"
+        "  Value error, parameter 'status': allowed value 'pending' must be an integer "
+        "[type=value_error, input_value={'x': 1}, input_type=dict]\n"
+        "    For further information visit https://errors.pydantic.dev/2.11/v/value_error"
+    ]
+    [cleaned] = governance._humanize_validation_errors(
+        raw, {"/tmp/xyzabc/templates.yaml": "templates.yaml"}
+    )
+    assert cleaned.startswith("templates.yaml:")
+    assert "allowed value 'pending' must be an integer" in cleaned
+    assert "/tmp/xyzabc" not in cleaned
+    assert "pydantic.dev" not in cleaned
+    assert "input_type=" not in cleaned and "[type=" not in cleaned
+
+
 def test_preview_validates_and_reports_only_document_level_changes(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch)
     set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
