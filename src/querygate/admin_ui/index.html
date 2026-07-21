@@ -42,14 +42,17 @@
         <button class="nav-item" type="button" data-view-target="catalog">
           <span class="nav-glyph">07</span><span>Catalog review</span><span id="catalog-pending-dot" class="draft-dot" hidden></span>
         </button>
+        <button id="nav-curate" class="nav-item" type="button" data-view-target="curate" hidden>
+          <span class="nav-glyph">08</span><span>Curate catalog</span>
+        </button>
         <button class="nav-item" type="button" data-view-target="health">
-          <span class="nav-glyph">08</span><span>Connection health</span>
+          <span class="nav-glyph">09</span><span>Connection health</span>
         </button>
         <button class="nav-item" type="button" data-view-target="templates">
-          <span class="nav-glyph">09</span><span>Query templates</span>
+          <span class="nav-glyph">10</span><span>Query templates</span>
         </button>
         <button class="nav-item" type="button" data-view-target="observability">
-          <span class="nav-glyph">10</span><span>Observability</span>
+          <span class="nav-glyph">11</span><span>Observability</span>
         </button>
       </nav>
 
@@ -312,6 +315,7 @@
               <option value="">Any source</option>
               <option value="inferred">Generated</option>
               <option value="learned">Usage-learned</option>
+              <option value="manual">Human-authored</option>
             </select>
           </label>
           <label><span>Object type</span>
@@ -391,6 +395,43 @@
 
         <div class="section-intro catalog-history-head"><div><p class="eyebrow">Catalog version history</p><h2>Every publish and rollback, connection-scoped.</h2></div><button id="refresh-catalog-versions" class="button secondary" type="button">Refresh versions</button></div>
         <div class="table-wrap"><table class="history-table"><thead><tr><th>Version</th><th>Action</th><th>Target</th><th>Fields changed</th><th>Actor</th><th>When</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="catalog-history-body"><tr><td colspan="7" class="empty-cell">Select a connection to load catalog version history.</td></tr></tbody></table></div>
+      </section>
+
+      <section id="view-curate" class="view" data-view="curate" hidden>
+        <div class="section-intro">
+          <div><p class="eyebrow">Human-authored catalog</p><h2>Curate a catalog entry through the governance queue.</h2><p>This composes a validated draft and routes it through the same review → publish → rollback path as generated proposals — never the raw catalog.yaml change-set. It stays quarantined until a <code>catalog:review</code> reviewer publishes it. Authoring needs <code>catalog:author</code>.</p></div>
+        </div>
+        <div id="curate-gate" class="large-empty" hidden>
+          <span class="empty-glyph">AU</span><h3>Authoring not available</h3><p>Connect with <code>catalog:author</code> to curate catalog entries.</p>
+        </div>
+        <div id="curate-body" class="catalog-layout">
+          <form id="curate-form" class="panel">
+            <div class="panel-head"><div><p class="eyebrow">New entry</p><h3>Describe a table, column, or relationship</h3></div></div>
+            <div class="form-grid">
+              <label><span>Connection</span><select id="curate-connection"></select></label>
+              <label><span>Object type</span>
+                <select id="curate-object-type">
+                  <option value="table">Table</option>
+                  <option value="column">Column</option>
+                  <option value="relationship">Relationship</option>
+                </select>
+              </label>
+              <label><span>Table <small>the object this entry describes</small></span><select id="curate-table"></select></label>
+              <label id="curate-column-wrap" hidden><span>Column <small>column this entry describes</small></span><select id="curate-column"></select></label>
+              <label id="curate-to-table-wrap" hidden><span>Related table <small>join target table</small></span><select id="curate-to-table"></select></label>
+              <label id="curate-to-column-wrap" hidden><span>Related column <small>join target column</small></span><select id="curate-to-column"></select></label>
+              <label class="span-2"><span>Description <small>plain-language meaning agents will see</small></span><textarea id="curate-description" rows="2"></textarea></label>
+              <label><span>Aliases <small>comma-separated synonyms callers may use</small></span><input id="curate-aliases" type="text"></label>
+              <label id="curate-default-aggregation-wrap"><span>Default aggregation <small>table entries only — e.g. sum(amount)</small></span><input id="curate-default-aggregation" type="text"></label>
+            </div>
+            <p class="form-hint">At least one of description, aliases, or default aggregation is required. Relationships cannot carry aliases; default aggregation applies to tables only.</p>
+            <div class="form-actions"><button id="submit-manual-proposal" class="button primary" type="submit">Submit for review</button></div>
+          </form>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">Currently published</p><h3>What agents see today</h3></div></div>
+            <dl id="curate-published-fields" class="compare-fields"><p class="empty-state">Pick a target to compare against the live catalog.</p></dl>
+          </article>
+        </div>
       </section>
 
       <section id="view-health" class="view" data-view="health" hidden>

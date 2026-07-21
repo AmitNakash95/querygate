@@ -36,6 +36,8 @@ exists.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal, Optional
@@ -51,6 +53,7 @@ from querygate.catalog.models import (
     CatalogEntryProvenance,
     CatalogEntryStatus,
     CatalogExportBundle,
+    CatalogGenerationRecord,
     CatalogVersionAction,
     CatalogVersionChange,
     CatalogVersionRecord,
@@ -286,6 +289,149 @@ def _find_proposal_raw(raw: dict, proposal_id: str) -> dict:
         if proposal_raw.get("proposal_id") == proposal_id:
             return proposal_raw
     raise NotFoundError(f"Unknown catalog proposal: {proposal_id!r}")
+
+
+def _manual_digest(
+    connection_id: str, target: CatalogDraftTarget, content: CatalogDraftContent, now: datetime
+) -> str:
+    identity = json.dumps(
+        {
+            "connection_id": connection_id,
+            "target": target.model_dump(mode="json"),
+            "content": content.model_dump(mode="json"),
+            "created_at": now.isoformat(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()
+
+
+def _manual_target_exists(snapshot, target: CatalogDraftTarget) -> bool:
+    def _table(name: str):
+        wanted = name.casefold()
+        return next((table for table in snapshot.tables if table.name.casefold() == wanted), None)
+
+    def _has_column(table, name: Optional[str]) -> bool:
+        if table is None or name is None:
+            return False
+        wanted = name.casefold()
+        return any(column.name.casefold() == wanted for column in table.columns)
+
+    source_table = _table(target.table)
+    if source_table is None:
+        return False
+    if target.object_type == CatalogDraftObjectType.TABLE:
+        return True
+    if not _has_column(source_table, target.column):
+        return False
+    if target.object_type == CatalogDraftObjectType.RELATIONSHIP:
+        return _has_column(_table(target.to_table or ""), target.to_column)
+    return True
+
+
+def create_manual_proposal(
+    store: CatalogStore,
+    *,
+    connection_id: str,
+    target: CatalogDraftTarget,
+    content: CatalogDraftContent,
+    actor: str,
+    now: Optional[datetime] = None,
+) -> CatalogGovernanceUpdate:
+    """Quarantine a human-authored (TODO item 84) catalog entry as a pending
+    draft proposal, routed through the same governance queue as generated and
+    learned proposals — never the Change-set/`ConfigVersionStore` catalog.yaml.
+
+    The proposal is `source_class="manual"` and stays quarantined (DRAFT) until
+    a `catalog:review` principal approves and publishes it, at which point the
+    normal `publish_proposal` merge mints a `verified` entry. It is never
+    auto-trusted, auto-indexed, or agent-visible before that. Separation of
+    duties is scope-based: the authoring principal may itself hold
+    `catalog:review` and approve/publish this proposal — there is no
+    author≠approver identity gate — while actor attribution
+    (`created_by`/`approved_by`) is retained for audit.
+    """
+
+    now = now or _utcnow()
+    if target.connection_id != connection_id:
+        raise CatalogGovernanceError(
+            f"proposal target connection_id {target.connection_id!r} does not match the "
+            f"authoring connection {connection_id!r}"
+        )
+    # Mirror the same governance-level guardrails edit_proposal enforces; the
+    # CatalogDraftProposal/CatalogDraftContent pydantic validators enforce them
+    # too, but keeping the explicit checks here yields a readable 409 rather
+    # than a raw validation error surfacing through the mutation lock.
+    if (
+        target.object_type != CatalogDraftObjectType.TABLE
+        and content.default_aggregation is not None
+    ):
+        raise CatalogGovernanceError("default_aggregation may only be proposed for a table")
+    if target.object_type == CatalogDraftObjectType.RELATIONSHIP and content.aliases:
+        raise CatalogGovernanceError("relationship proposals cannot define aliases")
+
+    snapshot = store.get_schema_snapshot(connection_id)
+    if snapshot is not None and not _manual_target_exists(snapshot, target):
+        raise CatalogGovernanceError(
+            "manual proposal target is absent from the current schema snapshot for "
+            f"{connection_id!r}"
+        )
+    fingerprint = snapshot.fingerprint if snapshot is not None else "untracked"
+
+    digest = _manual_digest(connection_id, target, content, now)
+    proposal_id = f"urn:querygate:catalog:manual:{digest[:32]}"
+    generation_id = f"manual:{digest[:32]}"
+
+    raw = store.to_dict()
+    if any(
+        proposal_raw.get("proposal_id") == proposal_id
+        for proposal_raw in raw.get("draft_proposals", [])
+    ):
+        raise CatalogGovernanceError("an identical manual proposal already exists")
+
+    proposal = CatalogDraftProposal(
+        proposal_id=proposal_id,
+        generation_id=generation_id,
+        target=target,
+        content=content,
+        provenance=CatalogEntryProvenance(
+            entry_id=proposal_id,
+            catalog_version=store.version,
+            source_class="manual",
+            source_evidence=[{"kind": "manual", "reference": "manual:admin-ui"}],
+            confidence=1.0,
+            status="draft",
+            schema_fingerprint=fingerprint,
+            created_by=actor,
+            created_at=now,
+        ),
+    )
+    # The store invariant requires every draft proposal to reference a
+    # generation record (SchemaCatalog validator). A manual authoring action
+    # is its own single-proposal "generation": provider_mode="manual", the
+    # human actor as provider_id — no model/prompt metadata, no draft text.
+    record = CatalogGenerationRecord(
+        generation_id=generation_id,
+        connection_id=connection_id,
+        provider_mode="manual",
+        provider_id="human-author",
+        prompt_template_version="manual-authoring-v1",
+        schema_fingerprint=fingerprint,
+        input_fingerprint=f"sha256:{digest}",
+        proposal_ids=[proposal_id],
+        created_by=actor,
+        created_at=now,
+    )
+    raw.setdefault("draft_proposals", []).append(
+        proposal.model_dump(mode="json", exclude_none=True, round_trip=True)
+    )
+    raw.setdefault("generation_records", []).append(
+        record.model_dump(mode="json", exclude_none=True)
+    )
+    return CatalogGovernanceUpdate(
+        store=store.replace(raw), outcome="manual_created", proposal_id=proposal_id
+    )
 
 
 def edit_proposal(

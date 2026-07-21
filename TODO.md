@@ -1930,6 +1930,81 @@ New sibling AST type `PercentileContSelectItem` (`col`, `fraction: float`, optio
 
 Parameter-slot self-consistency (a slot's `allowed_values`/`default` must match its declared `type`/bounds, sharing one `scalar_type_error` primitive with runtime binding so they can't drift); attributed, plain-language config dry-run errors (temp paths and pydantic boilerplate stripped, `templates.yaml: …`); and a separate best-effort on-demand live-schema check (`POST /admin/config/check-template-schema` + the admin-UI "Check templates vs. schema" button) that reflects the currently-live connections and reports per-template `ok`/`issues`/`connection_unavailable`/`unreachable` — the column/table existence the offline dry-run deliberately skips. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 83).
 
+### 84. Structured catalog authoring UI (human-curated entries through the governance queue) ✅ DONE
+
+A guided admin-UI "Curate" panel and a `catalog:author`-gated `POST /{connection}/proposals` endpoint compose a human-authored catalog entry into a validated draft carrying the new `source_class = manual`, routed through the existing catalog governance queue (`CatalogFileRepository`) — not the change-set/`ConfigVersionStore` catalog.yaml tab — so it gets the same quarantine → review → publish (as `verified`) → rollback safety and actor-attributed audit. Separation of duties is scope-based, not identity-based: a principal holding `catalog:review` may approve/publish its own manual proposal (no author≠approver check). **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 84).
+
+### 85. Domain-separated admin UI (group the 9 flat views into Policy / Catalog / Templates / Connections / Releases)
+
+**Effort: M (2–3 days).** Nav + layout refactor of the existing single-page
+admin UI; reuses every existing per-view render function and scope gate. Not a
+rewrite of view logic. Best done AFTER item 84 so the new Curate panel is
+folded into the Catalog domain rather than bolted onto the flat nav.
+
+**Why it matters:** the admin UI (`admin_ui/index.html` + a single ~75KB
+`app.js`) has grown to 9 flat nav items (Overview, Schema review, Policy
+designer, Change set, Versions, Audit, Catalog review, Connection health, Query
+templates) and will keep growing as structured authoring lands per domain.
+Grouping by domain makes the surface navigable and gives each domain a coherent
+home for its authoring + review + history sub-panels.
+
+**What to do:**
+1. **Target grouping** (domain → inner tabs):
+   - **Overview** — top-level, cross-cutting, unchanged.
+   - **Connections** — `Schema review` + `Connection health`.
+   - **Policy** — `Designer` + `Templates/presets` + policy simulation.
+   - **Catalog** — `Curate` (item 84) + `Review proposals` + `Versions & rollback`.
+   - **Templates** — `Query templates`.
+   - **Releases** — `Change set` + `Versions` + `Audit trail`.
+2. **Honest structural constraint to preserve in the UI (do not "fix" it):**
+   `ConfigVersionStore` stages policy + connections + catalog.yaml + templates
+   as ONE bundled atomic version (`admin/store.py`, `admin/service.py`), so the
+   change-set/stage/apply surface is inherently cross-domain — it lives in the
+   shared **Releases** domain, and each domain's *authoring* surface feeds it.
+   **Catalog is the exception**: it has its own governance versioning
+   independent of `ConfigVersionStore`, so the Catalog domain is fully
+   self-contained (author → review → publish → rollback all in-domain). The UI
+   must make this distinction legible (catalog = self-contained; other domains'
+   edits = flow into a shared release), not paper over it.
+3. **Front-end mechanics.** Routing is a flat `showView(name)` over the
+   `viewMeta` map (`app.js` ~L5/L130). Extend to a two-level domain→tab map with
+   nested `data-view` targets; reuse existing render fns and the `hasScope`/
+   `canRead`/`canWrite` gating unchanged. Preserve deep-linkable view state.
+4. **Decide during implementation:** whether to split the single `app.js` into
+   per-domain modules as part of this (flagged, not assumed — keep as one file
+   unless the split clearly reduces risk).
+5. **Tests/verify.** Drive the UI (see the `verify`/`run` skills) to confirm
+   every previously-reachable view is still reachable under its new domain and
+   scope gating is unchanged.
+
+### 87. Extend structured authoring to Policy and Templates (same form→validated-YAML→staged pattern)
+
+**Effort: M–L.** Only pursue after item 84 validates the pattern and item 85
+provides the domain shell. Policy/templates differ from catalog: they have NO
+governance path — their authoring feeds the shared `ConfigVersionStore`
+change-set (Releases domain), staged/applied atomically, not a per-domain
+publish.
+
+**Why it matters:** the same "guided form instead of raw YAML" UX win applies
+to policy layers and query templates, which today are also hand-edited YAML in
+the Change-set `<textarea>`. Reusing the item-84 pattern (structured form →
+compose a validated model → into the draft) removes the same "you must know the
+YAML schema" barrier for the other domains.
+
+**What to do:**
+1. Structured forms in the Policy and Templates domains that compose a
+   validated policy-layer / query-template model (reuse the existing policy
+   `models.py` / templates models and their validators as the schema authority).
+2. Form output merges into the **draft change-set document** for that file and
+   flows through the existing validate → stage → apply → rollback
+   (`ConfigVersionStore`), NOT a new store — consistent with item 85's Releases
+   domain. Reuse the visual policy designer (`#apply-designer` "Apply to draft"
+   in `admin_ui/index.html`) as precedent for form→draft composition.
+3. Keep raw-YAML editing available as the escape hatch for power users; the
+   form is additive, not a replacement.
+4. Tests + `verify` UI drive; docs update per `PRODUCT_GUIDE.md` maintenance
+   protocol.
+
 ### 86. MCP transport request-body size/depth guard
 
 **Effort: S.** Surfaced by item 36 phase 2a's malformed-input fuzzing

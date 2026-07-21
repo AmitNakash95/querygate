@@ -10,6 +10,7 @@
     history: ["Control plane / Versions", "Immutable configuration history"],
     audit: ["Control plane / Audit trail", "Decisions without sensitive payloads"],
     catalog: ["Control plane / Catalog review", "Review, approve, and publish schema-catalog proposals"],
+    curate: ["Control plane / Curate catalog", "Author curated entries through the governance queue"],
     health: ["Control plane / Connection health", "Reachability, credential-free"],
     templates: ["Control plane / Query templates", "Named, parameterized queries"],
     observability: ["Control plane / Observability", "Rejection and capacity trends"],
@@ -148,6 +149,7 @@
       loadCatalogProposals();
       loadCatalogVersions();
     }
+    if (name === "curate" && state.access) initCurateView();
     if (name === "health" && state.access && !$("#health-body [data-health-row]")) loadConnectionHealth();
     if (name === "templates" && state.access && !state.templateList.length) loadTemplates();
     if (name === "observability" && state.access && !state.observability) loadObservability();
@@ -1175,6 +1177,177 @@
     }
   }
 
+  // --- Curate (human-authored catalog entries, TODO item 84) -------------
+
+  const curateState = { tables: [], columns: [], toColumns: [] };
+
+  function curateObjectType() {
+    return $("#curate-object-type").value;
+  }
+
+  function applyCurateFieldVisibility() {
+    const type = curateObjectType();
+    $("#curate-column-wrap").hidden = type === "table";
+    $("#curate-to-table-wrap").hidden = type !== "relationship";
+    $("#curate-to-column-wrap").hidden = type !== "relationship";
+    $("#curate-default-aggregation-wrap").hidden = type !== "table";
+    // A relationship carries no aliases (mirrors the backend validator).
+    $("#curate-aliases").closest("label").hidden = type === "relationship";
+  }
+
+  function optionMarkup(values, placeholder) {
+    if (!values.length) return `<option value="">${escapeHtml(placeholder)}</option>`;
+    return values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("");
+  }
+
+  async function loadCurateTables() {
+    const connection = $("#curate-connection").value;
+    curateState.tables = [];
+    if (!connection) {
+      $("#curate-table").innerHTML = optionMarkup([], "No connection");
+      return;
+    }
+    try {
+      const body = await api(`/${encodeURIComponent(connection)}/tables`);
+      curateState.tables = (body.tables || []).map((table) => table.name || table);
+    } catch (error) {
+      curateState.tables = [];
+      toast(error.message, "bad");
+    }
+    $("#curate-table").innerHTML = optionMarkup(curateState.tables, "No visible tables");
+    $("#curate-to-table").innerHTML = optionMarkup(curateState.tables, "No visible tables");
+    await loadCurateColumns();
+  }
+
+  async function fetchTableColumns(table) {
+    const connection = $("#curate-connection").value;
+    if (!connection || !table) return [];
+    try {
+      const description = await api(
+        `/${encodeURIComponent(connection)}/tables/${encodeURIComponent(table)}`
+      );
+      return (description.columns || []).map((column) => column.name);
+    } catch (error) {
+      toast(error.message, "bad");
+      return [];
+    }
+  }
+
+  async function loadCurateColumns() {
+    curateState.columns = await fetchTableColumns($("#curate-table").value);
+    $("#curate-column").innerHTML = optionMarkup(curateState.columns, "No visible columns");
+    await loadCurateToColumns();
+    await loadCuratePublished();
+  }
+
+  async function loadCurateToColumns() {
+    if (curateObjectType() !== "relationship") return;
+    curateState.toColumns = await fetchTableColumns($("#curate-to-table").value);
+    $("#curate-to-column").innerHTML = optionMarkup(curateState.toColumns, "No visible columns");
+  }
+
+  function curateTarget() {
+    const type = curateObjectType();
+    const target = { object_type: type, table: $("#curate-table").value };
+    if (type === "column" || type === "relationship") target.column = $("#curate-column").value;
+    if (type === "relationship") {
+      target.to_table = $("#curate-to-table").value;
+      target.to_column = $("#curate-to-column").value;
+    }
+    return target;
+  }
+
+  async function loadCuratePublished() {
+    const dl = $("#curate-published-fields");
+    const target = curateTarget();
+    if (!target.table) {
+      dl.innerHTML = '<p class="empty-state">Pick a target to compare against the live catalog.</p>';
+      return;
+    }
+    // Reuses the exact compare shape the review workbench uses.
+    await loadPublishedComparison({ target: { ...target, connection_id: $("#curate-connection").value } });
+    const rendered = state.publishedComparison
+      ? fieldsMarkup(state.publishedComparison)
+      : `${fieldsMarkup(null)}`;
+    dl.innerHTML = rendered;
+    if (!state.publishedComparison) {
+      dl.insertAdjacentHTML("afterbegin", '<p class="empty-state">Nothing published for this target yet — submitting will propose a new entry.</p>');
+    }
+  }
+
+  function populateCurateConnectionOptions() {
+    const select = $("#curate-connection");
+    const previous = select.value;
+    const items = state.connections.map((c) => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.id)}</option>`).join("");
+    select.innerHTML = items || '<option value="">No visible connections</option>';
+    if (previous && state.connections.some((c) => c.id === previous)) select.value = previous;
+  }
+
+  let curateInitialized = false;
+  function initCurateView() {
+    const authorized = hasScope("catalog:author");
+    $("#curate-gate").hidden = authorized;
+    $("#curate-body").hidden = !authorized;
+    if (!authorized || curateInitialized) return;
+    curateInitialized = true;
+    populateCurateConnectionOptions();
+    applyCurateFieldVisibility();
+    loadCurateTables();
+  }
+
+  async function submitManualProposal(event) {
+    event.preventDefault();
+    const connection = $("#curate-connection").value;
+    if (!connection) { toast("Select a connection first.", "bad"); return; }
+    const type = curateObjectType();
+    const target = curateTarget();
+    if (!target.table) { toast("Select a table.", "bad"); return; }
+    if ((type === "column" || type === "relationship") && !target.column) { toast("Select a column.", "bad"); return; }
+    if (type === "relationship" && (!target.to_table || !target.to_column)) { toast("Select the related table and column.", "bad"); return; }
+
+    const payload = { object_type: type, table: target.table };
+    if (target.column) payload.column = target.column;
+    if (target.to_table) payload.to_table = target.to_table;
+    if (target.to_column) payload.to_column = target.to_column;
+    const description = $("#curate-description").value.trim();
+    const aliases = type === "relationship" ? [] : csvValues($("#curate-aliases").value);
+    const defaultAggregation = type === "table" ? $("#curate-default-aggregation").value.trim() : "";
+    if (description) payload.description = description;
+    if (aliases.length) payload.aliases = aliases;
+    if (defaultAggregation) payload.default_aggregation = defaultAggregation;
+    if (!description && !aliases.length && !defaultAggregation) {
+      toast("Provide at least one of description, aliases, or default aggregation.", "bad");
+      return;
+    }
+
+    const button = $("#submit-manual-proposal");
+    setBusy(button, true, "Submitting…");
+    try {
+      await api(`/admin/catalog/${encodeURIComponent(connection)}/proposals`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      toast("Manual proposal created — pending review.");
+      $("#curate-description").value = "";
+      $("#curate-aliases").value = "";
+      $("#curate-default-aggregation").value = "";
+      // Surface it in the review queue so the reviewer picks it straight up.
+      if (hasScope("catalog:review")) {
+        $("#catalog-connection").value = connection;
+        $("#catalog-status-filter").value = "pending";
+        $("#catalog-source-filter").value = "manual";
+        resetProposalSelection();
+        showView("catalog");
+        loadCatalogProposals();
+        loadCatalogVersions();
+      }
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
   function healthStatusChipClass(status) {
     if (status === "healthy") return "good";
     if (status === "degraded") return "bad";
@@ -1475,6 +1648,8 @@
     renderConnectionList();
     populateConnectionSelects();
     populateCatalogConnectionOptions();
+    curateInitialized = false;
+    $("#nav-curate").hidden = !hasScope("catalog:author");
     renderOverview();
     if (canRead()) {
       await loadGovernance(false);
@@ -1602,6 +1777,13 @@
       const button = event.target.closest("[data-rollback-version]");
       if (button) rollbackCatalogVersion(button.dataset.rollbackVersion);
     });
+    $("#curate-connection").addEventListener("change", loadCurateTables);
+    $("#curate-object-type").addEventListener("change", () => { applyCurateFieldVisibility(); loadCurateToColumns(); loadCuratePublished(); });
+    $("#curate-table").addEventListener("change", loadCurateColumns);
+    $("#curate-column").addEventListener("change", loadCuratePublished);
+    $("#curate-to-table").addEventListener("change", () => { loadCurateToColumns().then(loadCuratePublished); });
+    $("#curate-to-column").addEventListener("change", loadCuratePublished);
+    $("#curate-form").addEventListener("submit", submitManualProposal);
     $("#refresh-health").addEventListener("click", () => loadConnectionHealth());
     $("#refresh-templates").addEventListener("click", () => loadTemplates());
     $("#refresh-observability").addEventListener("click", () => loadObservability());

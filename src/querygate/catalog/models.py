@@ -27,12 +27,20 @@ class SensitivityClass(StrEnum):
 
 
 class KnowledgeSourceClass(StrEnum):
-    """Structurally separate evidence classes from TODO item 32."""
+    """Structurally separate evidence classes from TODO item 32.
+
+    ``MANUAL`` (TODO item 84) is a proposal-only class: a human-authored draft
+    stays quarantined under it until published, at which point the publish step
+    mints a fresh ``VERIFIED`` provenance for the merged entry. It therefore
+    never appears on a published, agent-visible catalog entry — only on a
+    pending/approved draft proposal.
+    """
 
     OBSERVED = "observed"
     INFERRED = "inferred"
     VERIFIED = "verified"
     LEARNED = "learned"
+    MANUAL = "manual"
 
 
 class CatalogEntryStatus(StrEnum):
@@ -78,6 +86,12 @@ _PRECEDENCE = {
     KnowledgeSourceClass.INFERRED: CatalogPrecedence.INFERRED,
     KnowledgeSourceClass.OBSERVED: CatalogPrecedence.OBSERVED,
     KnowledgeSourceClass.VERIFIED: CatalogPrecedence.VERIFIED,
+    # A human-authored manual proposal is trusted at the verified tier — it
+    # publishes as a verified entry. It never actually participates in a
+    # replacement_decision merge as a candidate (publish presents a verified
+    # probe, see governance._plan_publish), so this only backs the computed
+    # `precedence` field on the quarantined draft's provenance.
+    KnowledgeSourceClass.MANUAL: CatalogPrecedence.VERIFIED,
 }
 
 
@@ -443,8 +457,11 @@ class CatalogDraftProposal(pyd.BaseModel):
         if self.provenance.source_class not in {
             KnowledgeSourceClass.INFERRED,
             KnowledgeSourceClass.LEARNED,
+            KnowledgeSourceClass.MANUAL,
         }:
-            raise ValueError("generated catalog proposals must remain inferred or learned")
+            raise ValueError(
+                "catalog proposals must remain inferred, learned, or manual until published"
+            )
         if self.provenance.status not in {
             CatalogEntryStatus.DRAFT,
             CatalogEntryStatus.STALE,

@@ -40,6 +40,7 @@ ConfigChangeAction = Literal[
 CatalogGovernanceAction = Literal[
     "generate",
     "learn",
+    "manual_create",
     "edit",
     "approve",
     "reject",
