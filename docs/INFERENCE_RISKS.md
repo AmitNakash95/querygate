@@ -1,0 +1,129 @@
+# Inference and transitive-exposure risks
+
+A design note (TODO.md item 55) enumerating **inference attacks** against the
+`StructuredQuery` AST — attempts to learn a *denied* value without ever
+directly selecting the denied column — and, for each shape, stating explicitly
+whether QueryGate closes it or accepts it as a documented residual risk. It
+complements `docs/THREAT_MODEL.md`; the adversarial regression cases live in
+`tests/security/test_adversarial_security.py`.
+
+## The core guarantee, and its exact boundary
+
+Column allow/deny is enforced on **every column reference in every clause**,
+not just the `select` projection. `validation/policy_validation.py`'s
+`_iter_column_refs` walks the whole AST and checks each reference against the
+resolved `Policy`; `validation/schema_validation.py`'s
+`select_item_column_refs` / `predicate_column_refs` are the shared leaf
+harvesters. So a denied column cannot be reached by *referencing* it anywhere.
+
+What this guarantee does **not** cover: information a caller can reconstruct
+using **only permitted references** — through a permitted column that is
+semantically related to a denied one, or by observing aggregate/row-count
+*results*. Identifier-level allow/deny cannot see semantics or result values,
+so those are a different class of risk, handled below.
+
+## Closed: direct reference in any clause (Class A)
+
+Every AST position that can carry a column reference is harvested and policy-
+checked. If any were missed, a denied value would leak indirectly (e.g.
+`ORDER BY salary` then reading the row order, or `CASE WHEN salary > 100000`
+then reading the flag). The parametrized
+`test_denied_column_cannot_be_used_for_inference` proves each rejects a denied
+column:
+
+| AST position | Harvested by | Test id |
+|---|---|---|
+| `where` predicate | `predicate_column_refs` | `where` |
+| `group_by` | `_iter_column_refs` | `group_by` |
+| `having` predicate | `predicate_column_refs` | `having` |
+| `order_by` | `_iter_column_refs` | `order_by` |
+| `top_n.partition_by` | `_iter_column_refs` | `partition_by` |
+| `top_n.order_by` | `_iter_column_refs` | `top_n` |
+| join `on` key | `_iter_column_refs` | `join` |
+| join `extra_on` composite key (item 76) | `_iter_column_refs` | `composite_join_extra_on` |
+| scalar function arg (items 71/77) | `select_item_column_refs` | `scalar_fn_select` |
+| `CASE WHEN` condition (item 72) | `select_item_column_refs` → `predicate_column_refs` | `case_when_condition` |
+| `CASE ... THEN` value | `select_item_column_refs` | `case_then_value` |
+| `CASE ... ELSE` value | `select_item_column_refs` | `case_else_value` |
+| aggregate `col` | `select_item_column_refs` | `aggregate_col` |
+| `percentile_cont` col (item 82) | `select_item_column_refs` | `percentile_cont` |
+| `string_agg` col (item 80) | `select_item_column_refs` | `string_agg` |
+| predicate `col_fn` arg (item 77) | `predicate_column_refs` | `predicate_col_fn` |
+| predicate `value_col` (column-to-column) | `predicate_column_refs` | `predicate_value_col` |
+
+The harvest is exhaustive by construction, not just by enumeration: a scalar
+function's arguments are `ColArg | LiteralArg` with **no nested-function
+variant** (`query_ast/models.py`, `ScalarFunctionCall`), and `CASE`
+`then`/`else` are that same union — so there is no deeper expression tree a
+column could hide inside. Any new AST node that can carry a column reference
+**must** extend `select_item_column_refs` / `predicate_column_refs` and gain a
+case here; that is the single place this guarantee is maintained.
+
+## Residual: not closable by identifier allow/deny (Class B)
+
+These use only permitted references. They are **accepted residual risks** in
+v1, documented rather than silently ignored, each with a demonstrating test
+asserting the current (allowed) behavior so the boundary is explicit and would
+flip the day a closing feature lands.
+
+### R1 — Derived or correlated permitted columns
+
+A permitted column that is a coarsened form of a denied one (`salary_band`
+permitted while `salary` is denied), or statistically correlated with it, still
+leaks information about the denied value. Allow/deny works on identifiers, not
+semantics, so it cannot detect the relationship.
+
+- **Decision: closed by policy, not by the engine.** The mitigation is a
+  configuration decision — if a column is a derived/bucketed form of a
+  sensitive one, deny it too (or don't model it). QueryGate cannot infer which
+  permitted columns are proxies for denied ones.
+- Demonstrated by `test_derived_or_correlated_permitted_column_is_a_documented_residual`.
+
+### R2 — Correlation in the underlying data
+
+Two permitted columns, or a permitted column and externally-known facts, can
+jointly narrow a denied attribute purely through the data's own distribution.
+This is a property of the database contents, below QueryGate's layer.
+
+- **Decision: accepted residual, out of scope for an access gateway.** No
+  query-shape rule can close a correlation that exists in the stored data;
+  addressing it belongs to data modeling / differential privacy at the source,
+  not an identifier-level policy engine.
+
+### R3 — Aggregate differencing / no minimum group size
+
+An aggregate over a highly selective *permitted* predicate can narrow a group
+to a single row (a query-set-size / differencing inference), and repeated
+aggregates with and without a condition can isolate one individual's
+contribution. QueryGate enforces no minimum aggregation group size and no
+k-anonymity in v1.
+
+- **Decision: accepted residual for v1; a candidate future policy feature.** A
+  `min_group_size` guardrail (reject aggregates whose groups can be smaller than
+  *k*) would close the direct form but needs its own design — it interacts with
+  `having`, `top_n`, and mandatory row filters — so it is out of item 55's
+  scope. Recorded here rather than half-built.
+- Demonstrated by `test_aggregate_has_no_minimum_group_size_documented_residual`.
+
+### R4 — Existence and row-count probing
+
+Any query interface that returns rows or counts lets a caller confirm whether
+rows matching a permitted predicate exist. This is inherent to permitting reads
+at all.
+
+- **Decision: accepted residual, mitigated in depth, not eliminated.** Existing
+  controls shrink the surface without pretending to remove it: mandatory row
+  filters (item 6) bound every query to the caller's own partition, column
+  masking (item 49) removes raw sensitive values from results, per-principal
+  quotas (item 50) rate-limit the probing needed for a differencing attack, and
+  the audit trail (item 23) makes a probing pattern observable after the fact.
+
+## Summary
+
+Class A (direct reference in any clause) is **closed and regression-locked** —
+the exhaustive test above fails if any future AST node reintroduces an
+unharvested reference. Class B (semantic correlation, derived columns,
+aggregate differencing, existence probing) is **not closable by identifier
+allow/deny**; R1 is closed by policy configuration, R3 is a scoped candidate for
+a future `min_group_size` guardrail, and R2/R4 are accepted residuals mitigated
+in depth by mandatory filters, masking, quotas, and audit.

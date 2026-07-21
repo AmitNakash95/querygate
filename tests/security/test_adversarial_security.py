@@ -59,9 +59,16 @@ from querygate.policy.models import MandatoryRowFilter, Policy
 from querygate.secrets.resolvers import VaultSecretResolver
 from querygate.query_ast.models import (
     AggregateSelectItem,
+    CaseSelectItem,
+    CaseWhen,
+    ColArg,
     JoinSpec,
     OrderBySpec,
+    PercentileContSelectItem,
     Predicate,
+    ScalarFunctionCall,
+    ScalarFunctionSelectItem,
+    StringAggSelectItem,
     StructuredQuery,
     TopNSpec,
 )
@@ -131,14 +138,178 @@ def _customers_table() -> sa.Table:
                 )
             ],
         ),
+        # --- item 55: the same "reference it without selecting it" bypass, but
+        # through every remaining AST node that can carry a column reference.
+        # Each must be harvested by the policy column walk, or a denied value
+        # leaks indirectly. ---
+        # A scalar function over the denied column (item 71/77).
+        StructuredQuery(
+            from_table="customers",
+            select=[
+                ScalarFunctionSelectItem(
+                    fn="lower", args=[ColArg(col="customers.email")], alias="e"
+                )
+            ],
+        ),
+        # A CASE *condition* testing the denied column (item 72).
+        StructuredQuery(
+            from_table="customers",
+            select=[
+                CaseSelectItem(
+                    when=[
+                        CaseWhen(
+                            when=Predicate(
+                                col="customers.email", op="eq", value="target@example.com"
+                            ),
+                            then=ColArg(col="customers.id"),
+                        )
+                    ],
+                    else_=ColArg(col="customers.id"),
+                    alias="flag",
+                )
+            ],
+        ),
+        # A CASE *then* value reading the denied column.
+        StructuredQuery(
+            from_table="customers",
+            select=[
+                CaseSelectItem(
+                    when=[
+                        CaseWhen(
+                            when=Predicate(col="customers.id", op="gt", value=0),
+                            then=ColArg(col="customers.email"),
+                        )
+                    ],
+                    alias="flag",
+                )
+            ],
+        ),
+        # A CASE *else* value reading the denied column.
+        StructuredQuery(
+            from_table="customers",
+            select=[
+                CaseSelectItem(
+                    when=[
+                        CaseWhen(
+                            when=Predicate(col="customers.id", op="gt", value=0),
+                            then=ColArg(col="customers.id"),
+                        )
+                    ],
+                    else_=ColArg(col="customers.email"),
+                    alias="flag",
+                )
+            ],
+        ),
+        # An aggregate over the denied column.
+        StructuredQuery(
+            from_table="customers",
+            select=[AggregateSelectItem(fn="count", col="customers.email", alias="n")],
+        ),
+        # A percentile ordered-set aggregate over the denied column (item 82).
+        StructuredQuery(
+            from_table="customers",
+            select=[PercentileContSelectItem(col="customers.email", fraction=0.5, alias="p")],
+        ),
+        # A string_agg concatenating the denied column (item 80).
+        StructuredQuery(
+            from_table="customers",
+            select=[StringAggSelectItem(col="customers.email", delimiter=",", alias="s")],
+        ),
+        # A predicate whose LEFT side is a scalar function of the denied column
+        # (Predicate.col_fn, item 77).
+        StructuredQuery(
+            from_table="customers",
+            select=["customers.id"],
+            where=Predicate(
+                col_fn=ScalarFunctionCall(fn="lower", args=[ColArg(col="customers.email")]),
+                op="eq",
+                value="target@example.com",
+            ),
+        ),
+        # A predicate comparing a permitted column to the denied column via
+        # value_col (a column-to-column comparison, not a literal).
+        StructuredQuery(
+            from_table="customers",
+            select=["customers.id"],
+            where=Predicate(col="customers.id", op="eq", value_col="customers.email"),
+        ),
+        # A composite (multi-key) join whose *extra* key is the denied column
+        # (item 76) — the first key looks innocuous, the second smuggles it.
+        StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            joins=[
+                JoinSpec(
+                    table="customers",
+                    on=["orders.customer_id", "customers.id"],
+                    extra_on=[["orders.customer_id", "customers.email"]],
+                )
+            ],
+        ),
     ],
-    ids=["where", "group_by", "having", "order_by", "partition_by", "top_n", "join"],
+    ids=[
+        "where",
+        "group_by",
+        "having",
+        "order_by",
+        "partition_by",
+        "top_n",
+        "join",
+        "scalar_fn_select",
+        "case_when_condition",
+        "case_then_value",
+        "case_else_value",
+        "aggregate_col",
+        "percentile_cont",
+        "string_agg",
+        "predicate_col_fn",
+        "predicate_value_col",
+        "composite_join_extra_on",
+    ],
 )
 def test_denied_column_cannot_be_used_for_inference(query: StructuredQuery):
     policy = Policy(denied_columns={"customers": ["email"]})
 
     with pytest.raises(PolicyViolationError, match="not accessible"):
         validate_policy(query, policy, connection_id="demo")
+
+
+# --- item 55: residual inference risks column allow/deny CANNOT close ---
+# These assert the *current, deliberate* behavior — the query is ALLOWED — and
+# exist so the residual is explicit and regression-locked, not silent. They are
+# documented in docs/INFERENCE_RISKS.md; each would flip if a future policy
+# feature (deny-derived, minimum-group-size) closes the gap.
+
+
+def test_derived_or_correlated_permitted_column_is_a_documented_residual():
+    """A permitted column that is a coarsened form of, or correlated with, a
+    denied one still leaks information about it — but column allow/deny works on
+    identifiers, not semantics, so it cannot see the correlation. Reading a
+    permitted `tenant_id` while `email` is denied is allowed by design; the
+    mitigation is a policy decision (deny the derived column too), not an engine
+    check. See docs/INFERENCE_RISKS.md (R1)."""
+    policy = Policy(denied_columns={"customers": ["email"]})
+    query = StructuredQuery(
+        from_table="customers",
+        select=["customers.tenant_id"],
+        where=Predicate(col="customers.tenant_id", op="eq", value="tenant-1"),
+    )
+    validate_policy(query, policy, connection_id="demo")  # must not raise
+
+
+def test_aggregate_has_no_minimum_group_size_documented_residual():
+    """An aggregate over a highly selective *permitted* predicate can narrow to
+    a single row (a differencing / query-set-size inference). QueryGate does not
+    enforce a minimum aggregation group size (no k-anonymity) in v1 — this is an
+    accepted residual risk, not a bypass of column policy: no denied column is
+    referenced. See docs/INFERENCE_RISKS.md (R3)."""
+    policy = Policy(denied_columns={"customers": ["email"]})
+    query = StructuredQuery(
+        from_table="customers",
+        select=[AggregateSelectItem(fn="count", col="*", alias="n")],
+        where=Predicate(col="customers.id", op="eq", value=1),
+    )
+    validate_policy(query, policy, connection_id="demo")  # must not raise
 
 
 def test_denied_table_cannot_be_smuggled_through_a_filter():
