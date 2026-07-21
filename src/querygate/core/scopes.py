@@ -15,6 +15,15 @@ ADMIN_CONNECTIONS_READ_SCOPE = "admin:connections:read"
 # its own least-privilege scope rather than being implied by the read scope.
 ADMIN_CONNECTIONS_TEST_SCOPE = "admin:connections:test"
 
+# Admin observability (TODO.md item 44) — read-only aggregated operational
+# trends (query volume, rejection categories, queue/concurrency pressure,
+# cost-estimation health). Its own scope, distinct from the config and
+# connection scopes: reading trend aggregates is a different privilege from
+# reading/changing config or probing a connection. The overview is built from
+# already-public, low-cardinality metric labels — never a query, value, or
+# principal — but a per-connection breakdown is still admin-gated per item 44.
+ADMIN_OBSERVABILITY_READ_SCOPE = "admin:observability:read"
+
 # Catalog governance (TODO.md item 32B) — least-privilege, split by
 # operation rather than one broad "catalog admin" scope.
 CATALOG_GENERATE_SCOPE = "catalog:generate"

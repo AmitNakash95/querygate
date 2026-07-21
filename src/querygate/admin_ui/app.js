@@ -12,6 +12,7 @@
     catalog: ["Control plane / Catalog review", "Review, approve, and publish schema-catalog proposals"],
     health: ["Control plane / Connection health", "Reachability, credential-free"],
     templates: ["Control plane / Query templates", "Named, parameterized queries"],
+    observability: ["Control plane / Observability", "Rejection and capacity trends"],
   };
   const documentKeys = ["policy", "connections", "catalog", "templates"];
   const guardrailFields = {
@@ -61,6 +62,7 @@
     templates: [],
     templatePreview: null,
     templateList: [],
+    observability: null,
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -148,6 +150,7 @@
     }
     if (name === "health" && state.access && !$("#health-body [data-health-row]")) loadConnectionHealth();
     if (name === "templates" && state.access && !state.templateList.length) loadTemplates();
+    if (name === "observability" && state.access && !state.observability) loadObservability();
   }
 
   function formatDate(value) {
@@ -1257,6 +1260,85 @@
     }
   }
 
+  const obsPercent = (value) => (value == null ? "—" : `${(value * 100).toFixed(1)}%`);
+  const obsSeconds = (stat) =>
+    stat && stat.avg_seconds != null ? `${(stat.avg_seconds * 1000).toFixed(0)} ms` : "—";
+
+  function obsTopReasons(byReason) {
+    const entries = Object.entries(byReason || {}).sort((a, b) => b[1] - a[1]);
+    if (!entries.length) return "—";
+    return entries
+      .slice(0, 2)
+      .map(([reason, count]) => `${escapeHtml(reason)} ${count}`)
+      .join(", ");
+  }
+
+  function obsCard(label, value, sub) {
+    return `<div class="observability-card"><span class="observability-card-label">${escapeHtml(label)}</span><strong class="observability-card-value">${escapeHtml(value)}</strong>${sub ? `<small>${escapeHtml(sub)}</small>` : ""}</div>`;
+  }
+
+  function renderObservability() {
+    const overview = state.observability;
+    const banner = $("#observability-snapshot");
+    if (!overview) {
+      banner.hidden = true;
+      $("#observability-table-wrap").hidden = true;
+      return;
+    }
+    banner.hidden = false;
+    banner.textContent = `${overview.note} (since ${overview.since})`;
+
+    const cost = overview.cost_estimation || {};
+    $("#observability-cards").innerHTML = [
+      obsCard("Queries", String(overview.queries_total), `${overview.queries_success} ok · ${overview.queries_rejected} rejected`),
+      obsCard("Top reject reason", obsTopReasons(overview.rejections_by_reason), "since process start"),
+      obsCard("Avg duration", obsSeconds(overview.duration), `${overview.duration ? overview.duration.count : 0} sampled`),
+      obsCard("Concurrency", obsPercent(overview.concurrency_utilization), `${overview.concurrency_in_use_total}/${overview.concurrency_max_total} slots`),
+      obsCard("Queue depth", String(overview.queue_depth_total), "waiting now"),
+      obsCard("Cost-estimate fail-open", obsPercent(cost.fail_open_rate), `${cost.unavailable || 0}/${cost.attempts || 0} unavailable`),
+    ].join("");
+
+    const rows = overview.by_connection || [];
+    $("#observability-table-wrap").hidden = rows.length === 0;
+    $("#observability-body").innerHTML = rows
+      .map(
+        (conn) => `<tr>
+        <td>${escapeHtml(conn.connection)}</td>
+        <td>${conn.queries_total}</td>
+        <td>${conn.queries_rejected}</td>
+        <td>${obsTopReasons(conn.rejections_by_reason)}</td>
+        <td>${obsSeconds(conn.duration)}</td>
+        <td>${obsPercent(conn.concurrency_utilization)}</td>
+        <td>${obsPercent(conn.cost_estimation ? conn.cost_estimation.fail_open_rate : null)}</td>
+      </tr>`
+      )
+      .join("");
+  }
+
+  async function loadObservability() {
+    if (!hasScope("admin:observability:read")) {
+      state.observability = null;
+      $("#observability-snapshot").hidden = true;
+      $("#observability-table-wrap").hidden = true;
+      $("#observability-cards").innerHTML =
+        '<p class="empty-state">Connect with admin:observability:read to load observability.</p>';
+      return;
+    }
+    const button = $("#refresh-observability");
+    setBusy(button, true, "Loading…");
+    try {
+      state.observability = await api("/admin/observability/overview");
+      renderObservability();
+    } catch (error) {
+      state.observability = null;
+      $("#observability-snapshot").hidden = true;
+      $("#observability-table-wrap").hidden = true;
+      $("#observability-cards").innerHTML = `<p class="empty-state">${escapeHtml(error.message)}</p>`;
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
   async function testConnectionNow(connectionId) {
     const button = $(`[data-test-connection="${CSS.escape(connectionId)}"]`);
     setBusy(button, true, "Testing…");
@@ -1522,6 +1604,7 @@
     });
     $("#refresh-health").addEventListener("click", () => loadConnectionHealth());
     $("#refresh-templates").addEventListener("click", () => loadTemplates());
+    $("#refresh-observability").addEventListener("click", () => loadObservability());
     $("#health-body").addEventListener("click", (event) => {
       const button = event.target.closest("[data-test-connection]");
       if (button) testConnectionNow(button.dataset.testConnection);

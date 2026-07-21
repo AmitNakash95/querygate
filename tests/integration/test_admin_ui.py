@@ -94,6 +94,11 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     # On-demand live-schema check for query templates.
     assert 'id="check-schema"' in response.text
     assert "/admin/config/check-template-schema" in script.text
+    # TODO.md item 44 phase 2: read-only observability panel + honest snapshot wording.
+    assert 'data-view-target="observability"' in response.text
+    assert "admin:observability:read" in response.text
+    assert "not durable history" in response.text
+    assert "/admin/observability/overview" in script.text
 
 
 @pytest.mark.asyncio
