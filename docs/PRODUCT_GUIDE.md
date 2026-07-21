@@ -1493,6 +1493,53 @@ specifically checks that this generated schema never exposes a credential
 field, since `PublicConnectionInfo` is the only connection shape ever
 returned over REST (see [Security Model](#security-model)).
 
+### The typed Python query builder — authoring, not a new pipeline
+
+**Files:** `src/querygate/client/builder.py`, `src/querygate/client/__init__.py`,
+`examples/client_sdk_python.py`
+
+A caller composes a `StructuredQuery` as JSON. That JSON is easy to get
+subtly wrong by hand — a mistyped key, the wrong operator spelling, a
+forgotten self-join alias — and today the only feedback is a `422` after a
+network round-trip. `querygate.client` is a fluent, typed builder that makes
+that authoring ergonomic:
+
+```python
+from querygate.client import Query, agg, col, desc
+
+body = (
+    Query.from_("orders")
+    .join("customers", on=("orders.customer_id", "customers.id"))
+    .select("customers.name", agg.count("*", as_="order_count"))
+    .where(col("customers.country") == "GB")
+    .group_by("customers.name")
+    .order_by("order_count", desc=True)
+    .to_dict()   # the exact wire JSON to POST to /api/v1/<connection>/query
+)
+```
+
+The important design property: **the builder is not a second way to talk to
+the database, and adds no validation of its own.** It constructs the *same*
+`query_ast` Pydantic models the server validates, then serializes them. Two
+consequences fall out of that for free:
+
+- An illegal shape (a `count(*)` with `distinct`, a self-join missing an
+  alias, a percentile fraction outside `[0,1]`) raises *client-side* with the
+  identical error the server would return — because it *is* the server's
+  validator running early.
+- Whatever the builder emits is still fully policy-, schema-, and
+  guardrail-checked by `StructuredQueryService` before a single row is read.
+  A masked or denied column composed by the builder still gets a policy
+  `422`. The builder cannot bypass or weaken any guardrail; it only makes the
+  JSON pleasant to write.
+
+Because it front-ends the real AST, it can't drift: `tests/unit/test_client_builder.py`
+includes drift guards that fail if the `StructuredQuery` AST grows a field, a
+`SelectItem` variant, or a comparison/aggregate/scalar function the builder
+can't express. It ships inside the `querygate` package for now; a TypeScript
+sibling and a standalone dependency-light distribution are planned (TODO item
+51 phase 2, and see the [Decision Log](#decision-log)).
+
 ### MCP transport
 
 **Files:** `src/querygate/mcp/server.py`, `src/querygate/mcp/auth.py`,
@@ -1918,6 +1965,11 @@ Alphabetical. Each term links back to the section that covers it in depth.
 - **Provenance** — the paper trail attached to every catalog entry: which
   knowledge source produced it, evidence pointers, confidence, status, who
   approved it and when. See [Catalog / Semantic Layer](#catalog--semantic-layer).
+- **Query builder** — `querygate.client`, a typed, fluent Python API for
+  constructing a [`StructuredQuery`](#the-core-request-pipeline) with method
+  calls and autocomplete instead of raw JSON. A pure client-side authoring
+  convenience: it builds the same models the server validates, so it adds no
+  trust and cannot bypass any guardrail. See [Auth & Transports](#auth--transports-rest--mcp).
 - **Quarantine** (catalog) — the structural separation between draft
   proposals and real, published catalog entries — a proposal literally
   cannot carry access-affecting fields, and agent-facing lookups never read
@@ -2059,6 +2111,33 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-21 — The typed Python query builder front-ends the real AST
+  rather than re-implementing it, and ships in-tree before a standalone
+  distribution (TODO.md item 51 phase 1).** `querygate.client` builds the
+  same `query_ast` Pydantic models `StructuredQueryService` validates, then
+  serializes them to wire JSON. Two deliberate choices, each with a rejected
+  alternative: **(1) Reuse the server's models, don't build a parallel typed
+  schema.** The obvious "SDK" shape is a decoupled client with its own
+  validation, but that would *duplicate* server-side validation (a CLAUDE.md
+  invariant forbids exactly that) and could silently drift from the AST. By
+  constructing the real models, `build()` raises the server's own error
+  early, the builder can never accept a shape the server rejects (or vice
+  versa), and drift is structurally impossible — enforced by explicit
+  drift-guard tests that fail if the AST grows a field/variant/operator the
+  builder can't express. The cost is that the builder currently imports from
+  the `querygate` package; acceptable because that import path
+  (`query_ast/models.py`, `querygate/__init__.py`) is pydantic-only and
+  stays light. **(2) Ship in-tree (`from querygate.client import Query`) now;
+  defer the standalone dependency-light distribution.** A separate
+  `querygate-client` package (PyPI/npm) that installs without the server's
+  full dependency closure is the eventual goal, but it is coupled to item 30
+  phase 2: no package registry has been chosen or configured, and publishing
+  requires explicit maintainer approval. Building a standalone dist with
+  nowhere to publish it — and a second copy of the models to keep in sync —
+  would be premature; the in-tree module is the shipped, importable, tested
+  surface until a registry exists. TypeScript is likewise phase 2: a genuine
+  second-language implementation with its own sync-test strategy, not more of
+  the Python work.
 - **2026-07-21 — Per-principal quota is enforced before queuing, counts every
   admitted attempt, skips anonymous callers, and ships in-process first
   (TODO.md item 50 phase 1).** A rolling-window cap on request count and

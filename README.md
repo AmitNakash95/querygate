@@ -126,6 +126,44 @@ QueryGate into an agent framework directly instead of raw JSON-RPC/curl, see
 [`examples/claude_agent_sdk_integration.py`](examples/claude_agent_sdk_integration.py)
 (Claude Agent SDK, `pip install claude-agent-sdk`).
 
+### Typed Python query builder
+
+Rather than hand-writing the `StructuredQuery` JSON above, construct it with a
+typed, autocompleting builder shipped in the package
+(`from querygate.client import Query`):
+
+```python
+from querygate.client import Query, agg, col, desc
+
+body = (
+    Query.from_("orders")
+    .join("customers", on=("orders.customer_id", "customers.id"))
+    .select("customers.name", agg.count("*", as_="order_count"))
+    .where(col("customers.country") == "GB")
+    .where(col("orders.status") == "completed")
+    .group_by("customers.name")
+    .order_by("order_count", desc=True)
+    .limit(5)
+    .to_dict()          # -> the exact JSON to POST to /api/v1/<connection>/query
+)
+```
+
+The builder is a **pure client-side convenience**: it constructs the same
+Pydantic models the server validates, so an illegal query (a `count(*)` with
+`distinct`, a self-join missing an alias) raises locally with the same error
+the server would return — and whatever it emits is still fully policy-,
+schema-, and guardrail-checked server-side before any row is touched. It adds
+no trust and cannot bypass any guardrail. Predicate operators (`==`, `>`,
+`.in_`, `.between`, `.is_null`), boolean groups (`and_`/`or_`/`not_`),
+aggregates (`agg.*`), `date_bucket`, `string_agg`/`array_agg`,
+`percentile_cont`, scalar functions (`fn`/`fn_select`), `case`/`when`, and
+`top_n` cover the full AST. Runnable end-to-end demo:
+[`examples/client_sdk_python.py`](examples/client_sdk_python.py)
+(`python examples/client_sdk_python.py` to print bodies; add `--send` with
+`QUERYGATE_API_KEY` set to run them against a local server). A TypeScript
+sibling and a standalone dependency-light distribution are planned (TODO item
+51 phase 2).
+
 The seed script under `examples/demo_db/` can generate a SQLite fixture for
 tests and data inspection, but SQLite is not a supported QueryGate connection.
 The runnable quickstart deliberately exercises the same Postgres path used in
