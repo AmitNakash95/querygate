@@ -2372,6 +2372,45 @@ redacting the response after the fact. Audit which columns were masked
 (never the pre-mask value) so operators can distinguish "denied" from
 "masked" access in the same audit stream item 23 already provides.
 
+### 52. Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI function-calling) ✅ DONE
+
+**Shipped:** three runnable integration examples mirroring item 20's Claude
+Agent SDK script — `examples/langchain_integration.py` (LangChain / LangGraph
+via `langchain-mcp-adapters`), `examples/llamaindex_integration.py` (LlamaIndex
+via `llama-index-tools-mcp`), and `examples/openai_function_calling_integration.py`
+(OpenAI Chat Completions function-calling, bridging QueryGate's MCP tool schemas
+into OpenAI function schemas with a pure `mcp_tool_to_openai_function` helper,
+using the already-bundled `mcp` client SDK for discovery/dispatch). No new
+runtime dependency was added — the frameworks are user-installed exactly like
+`claude-agent-sdk`, and each example imports its framework lazily so its
+`QUERYGATE_TOOLS` allow-list stays importable without the framework present.
+
+Following item 20's verification bar (mechanically verify what can be verified
+without a live model call; state plainly what wasn't): a model-free
+`tests/integration/test_integration_examples.py` asserts, against the live MCP
+server's `tools/list`, that every tool each example wires up is really
+registered (drift guard), and that `mcp_tool_to_openai_function` turns
+QueryGate's real tool schemas into well-formed OpenAI function schemas. The
+framework agent loops and the live model calls are explicitly *not* exercised in
+CI. No maintained framework-specific SDK layer was added, per item 20's warning.
+README's integration section and `docs/PRODUCT_GUIDE.md`'s MCP-transport section
+were updated to list all four examples.
+
+**Effort: S per framework.** Same shape as item 20's existing Claude Agent
+SDK example — a runnable script registering QueryGate's MCP tools and
+asking a natural-language question against the demo data.
+
+**Why it matters:** Item 20 deliberately scoped to one framework to avoid
+scope creep. With the core product now stable, closing this gap directly
+addresses the ecosystem-breadth deficit against Google's Toolbox, which
+documents integration with most major agent frameworks out of the box.
+
+**What to do:** Add one example per additional framework, following item
+20's existing verification bar (mechanically verify what can be verified
+without a live model call; state plainly what wasn't exercised). Resist
+adding a maintained framework-specific SDK layer beyond the example
+itself — that risk was already called out in item 20.
+
 ### 61. Deduplicate the StructuredQuery JSON Schema across execute/explain/batch tools ✅ DONE
 
 **Shipped:** Confirmed against the MCP spec first (`mcp.types.Tool.inputSchema:
