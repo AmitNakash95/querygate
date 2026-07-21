@@ -67,7 +67,7 @@ order-of-magnitude, not commitments.
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
 | 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
-| 36 | ✅ Extensive production-grade QA project / edge-case test suite (phase 1: policy-cap boundary tests + Hypothesis property-based compiler fuzzing; phase 2: cross-dialect differential tests + REST/MCP malformed-input fuzzing not started) | L | 15, 28 |
+| 36 | ✅ Extensive production-grade QA project / edge-case test suite (phase 1: policy-cap boundary tests + Hypothesis property-based compiler fuzzing; phase 2a: REST/MCP malformed-input fuzzing; phase 2b: cross-dialect differential tests not started) | L | 15, 28 |
 | 37 | ✅ Automated end-to-end proof of adaptive semantic learning | M–L | 23, 25, 27, 28, 32B, 32C |
 | 38 | ✅ Admin UI catalog-governance workspace (phase 1: core review/approve/reject/publish/rollback loop; phase 2: bulk ops, export/import UI, generation triggers not started) | L | 27, 31, 32B |
 | 39 | ✅ Draft-aware policy simulation before staging | M–L | 6, 17, 25, 31 |
@@ -590,10 +590,15 @@ This is the first independently deployable slice of 32B, built entirely on 32A's
 ### 36. Extensive production-grade QA project / edge-case test suite
 
 **Phase 1 (policy-cap boundary tests + property-based compiler fuzzing) ✅
-DONE.** **Phase 2 (cross-dialect differential tests + REST/MCP
-malformed-input fuzzing) not started — split out below because it needs a
-live/mocked second-dialect comparison harness and a JSON-boundary fuzzing
-setup, not just more Hypothesis strategies on the existing compiler tests.**
+DONE.** **Phase 2a (REST/MCP malformed-input fuzzing) ✅ DONE.** **Phase 2b
+(cross-dialect differential tests) not started — split out below because it
+needs a live/mocked second-dialect comparison harness, not just more
+Hypothesis strategies on the existing compiler tests.** Phase 2 was split
+into 2a/2b because the two halves have unrelated infrastructure: malformed-
+input fuzzing is a fully in-process JSON-boundary sweep, while cross-dialect
+differential *execution* comparison needs both a live Postgres and a live
+MSSQL to compare real results — a heavy dual-DB harness. (Compile-time
+cross-dialect *rendering* was already covered by item 78.)
 
 **Phase 1 shipped:** `tests/unit/test_policy_boundaries.py` proves the
 sharper boundary claim `tests/unit/test_policy_validation.py` didn't: for
@@ -617,12 +622,48 @@ shape — the multi-tenant isolation guarantee must never silently drop out
 for an AST combination hand-written tests didn't happen to construct. Added
 `hypothesis` as a dev dependency (`pyproject.toml`/`poetry.lock`).
 
-**Explicitly out of scope for this pass, tracked as phase 2:**
-cross-dialect differential tests (same AST compiled against Postgres and
-MSSQL, asserting equivalent semantics where the AST doesn't invoke
-dialect-specific behavior) and malformed-input fuzzing at the REST/MCP JSON
-boundary (wrong types, extra fields, deeply nested `where`, huge string
-literals — proving schema validation rejects cleanly rather than 500ing).
+**Phase 2a shipped:** `tests/security/test_malformed_input_fuzzing.py`
+(security-marked, in the default suite) sweeps the input-parsing/schema
+boundary of both transports with a broad corpus of malformed-but-plausible
+JSON — wrong body/field types, missing/extra fields (including the
+no-raw-SQL `sql`/`raw_sql`/`query`/... smuggle set, QG-01), invalid enum
+values, invalid/empty JSON, non-finite numbers, and `where` trees deep
+enough to trip the JSON parser's recursion guard — and asserts, for REST
+(`/query`, `/query/explain`, `/query/batch`) and MCP (`run_structured_queries`
+via a real `tools/call`): the input is rejected with a clean client error
+(never a 5xx crash), the error body never leaks a server internal (traceback,
+file path, driver/SQLAlchemy text, `NoSuchTableError`, or a connection-string
+credential — QG-07), and the `StructuredQueryService` execute/explain/batch
+methods are patched and asserted *un-called* so malformed input provably
+never reaches the database (QG-01). A mirror case proves an extreme-but-valid
+literal is accepted (not spuriously size-rejected), so the suite tests
+*malformed* shapes, not merely large ones. Policy-cap rejection (over-depth/
+size/batch) is intentionally left to phase 1's `test_policy_boundaries.py`.
+
+Two real robustness gaps the suite surfaced (per this item's "where a real
+gap is found, fix it or record it — don't leave it silent" posture):
+
+- **Fixed — non-finite numbers 500'd at the REST boundary.** `NaN`/`Infinity`
+  (accepted by Python's json parser, not valid JSON) in a numeric field made
+  the *validation-error* response fail to encode (Starlette's `JSONResponse`
+  renders with `allow_nan=False`) and surface as a 500 — leaking a traceback
+  under `debug=True`. `api/_errors.py` now registers a `RequestValidationError`
+  handler that scrubs non-finite floats out of the echoed error, so it is a
+  clean 422. Adversarially confirmed to 500 before the handler existed.
+- **Recorded as residual risk (item 86) — MCP transport 500 on a pathological
+  deep body.** REST rejects a `where` nested past the parser's recursion guard
+  with a clean 400, but the upstream MCP Streamable-HTTP transport's
+  `json.loads` raises `RecursionError`, which it catches and returns as a
+  handled JSON-RPC internal-error (`-32603`, generic non-sensitive message) —
+  an HTTP 500 rather than a 4xx. Handled and leak-free, so the test asserts
+  the security property (handled + no leak + not executed) and item 86 tracks
+  the transport-level body-size/depth guard that would make it a 4xx.
+
+**Explicitly out of scope for this pass, tracked as phase 2b:**
+cross-dialect differential tests (same AST compiled and *executed* against a
+live Postgres and a live MSSQL, asserting equivalent results where the AST
+doesn't invoke dialect-specific behavior) — needs the dual-live-DB harness
+noted above.
 
 **Effort: L (3–5 days) for the full item; phase 1 above was closer to a
 focused 1-day slice.** Not a new subsystem, but a wide sweep across the
@@ -1851,3 +1892,35 @@ New sibling AST type `PercentileContSelectItem` (`col`, `fraction: float`, optio
 ### 83. Query-template authoring UX: slot self-consistency, readable dry-run, and on-demand live-schema check ✅ DONE
 
 Parameter-slot self-consistency (a slot's `allowed_values`/`default` must match its declared `type`/bounds, sharing one `scalar_type_error` primitive with runtime binding so they can't drift); attributed, plain-language config dry-run errors (temp paths and pydantic boilerplate stripped, `templates.yaml: …`); and a separate best-effort on-demand live-schema check (`POST /admin/config/check-template-schema` + the admin-UI "Check templates vs. schema" button) that reflects the currently-live connections and reports per-template `ok`/`issues`/`connection_unavailable`/`unreachable` — the column/table existence the offline dry-run deliberately skips. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 83).
+
+### 86. MCP transport request-body size/depth guard
+
+**Effort: S.** Surfaced by item 36 phase 2a's malformed-input fuzzing
+(`tests/security/test_malformed_input_fuzzing.py`).
+
+**Why it matters:** The REST surface rejects a JSON body nested past the JSON
+parser's recursion guard with a clean 400 (Starlette catches the decode
+error). The mounted MCP Streamable-HTTP transport does not: its own
+`json.loads(body)` raises `RecursionError`, which the upstream `mcp` library
+catches and returns as a handled JSON-RPC internal-error (`-32603`, generic
+non-sensitive message) — an HTTP 500 rather than a 4xx. The response is
+already handled and leak-free (no traceback/path/driver/credential in the
+body — proven in item 36 phase 2a's
+`test_mcp_deeply_nested_argument_body_is_handled_without_leaking`), so this is
+a robustness/consistency gap, not a disclosure vuln: an absurdly deep or
+oversized MCP body should be rejected as a client error before the transport
+attempts to parse it. Left as a residual risk in `docs/THREAT_MODEL.md`
+(§8) by item 36 phase 2a rather than fixed inline, because a body-size/depth
+cap is a judgment call (its threshold must not reject legitimate large
+batches) that deserves its own small, deliberate pass, not a drive-by change
+bundled into a test tranche.
+
+**What to do:** Add a small ASGI wrapper around the MCP mount
+(`mcp/server.py`'s `authed_mcp`) — mirroring the existing auth-wrapping layer
+— that rejects a request whose declared/streamed body exceeds a configurable
+byte cap (and, if cheap to detect, an excessive nesting depth) with a clean
+`413`/`400` *before* the transport's `json.loads`, so the MCP surface matches
+REST's "malformed input is a clean client error, never a 5xx" posture. Keep
+the cap a named `AppConfig` field with a generous default so normal batches
+are unaffected, and add a regression flipping the phase-2a MCP deep-body test
+from "handled 500" to "clean 4xx".

@@ -29,10 +29,13 @@ Two mechanisms, split deliberately:
 
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette import status
 
@@ -121,6 +124,22 @@ def mask_unexpected() -> Iterator[None]:
         )
 
 
+def _scrub_non_finite(obj: Any) -> Any:
+    """Replace any non-finite float (`NaN`/`Infinity`) with its string repr,
+    recursively. Python's JSON parser accepts these (they are not valid JSON),
+    but Starlette's `JSONResponse` renders with `allow_nan=False` and would
+    raise while encoding a body that contains one — see
+    `_request_validation` below for why that matters.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else repr(obj)
+    if isinstance(obj, dict):
+        return {k: _scrub_non_finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_scrub_non_finite(v) for v in obj]
+    return obj
+
+
 def _response(exc: Exception, status_code: int, *, headers: Optional[dict] = None) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
@@ -135,6 +154,25 @@ def install_exception_handlers(app: FastAPI) -> None:
     Only fires for exceptions a route lets propagate; routes needing a
     context-specific status keep their own local handling (see module docstring).
     """
+
+    @app.exception_handler(RequestValidationError)
+    async def _request_validation(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        """Render request-body/param validation failures as a clean 422.
+
+        This mirrors FastAPI's own default handler (a `{"detail": [...]}` list of
+        typed field errors, good for a caller debugging its query) with one
+        hardening: the error list echoes the offending input, and Starlette's
+        `JSONResponse` renders with `allow_nan=False`, so a request that smuggled
+        a non-finite JSON number (`NaN`/`Infinity`, which Python's json parser
+        accepts but which is not valid JSON) would make the default body fail to
+        encode and surface as a 500 — leaking a traceback under `debug=True`.
+        Scrubbing non-finite floats keeps the malformed input a clean 422.
+        (QG-01/QG-07; TODO.md item 36 phase 2a.)
+        """
+        content = _scrub_non_finite(jsonable_encoder(exc.errors()))
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": content}
+        )
 
     @app.exception_handler(NotFoundError)
     async def _not_found(_request: Request, exc: NotFoundError) -> JSONResponse:
