@@ -51,3 +51,20 @@ def test_cost_estimation_enabled_by_max_estimated_rows_alone():
 
 def test_cost_estimation_enabled_by_max_estimated_cost_alone():
     assert Policy(max_estimated_cost=1000.0).cost_estimation_enabled is True
+
+
+def test_min_group_size_defaults_to_disabled():
+    assert Policy().min_group_size is None
+
+
+def test_min_group_size_accepts_k_of_two_or_more():
+    assert Policy(min_group_size=2).min_group_size == 2
+    assert Policy(min_group_size=25).min_group_size == 25
+
+
+def test_min_group_size_rejects_k_below_two():
+    # k=1 is no protection (every single row is its own group); the floor is 2.
+    with pytest.raises(ValueError):
+        Policy(min_group_size=1)
+    with pytest.raises(ValueError):
+        Policy(min_group_size=0)

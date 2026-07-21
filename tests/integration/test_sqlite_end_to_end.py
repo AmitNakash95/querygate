@@ -141,3 +141,79 @@ async def test_limit_is_clamped_end_to_end(sqlite_app):
     body = resp.json()
     assert body["limit"] == 2
     assert body["row_count"] <= 2
+
+
+@pytest.mark.asyncio
+async def test_min_group_size_suppresses_small_groups_end_to_end(sqlite_app):
+    """k-anonymity guardrail (item 88), executed for real: with min_group_size=2,
+    a GROUP BY country aggregate returns only countries backed by >= 2 customers;
+    a country with a single customer is suppressed. Computed from seed data."""
+    from collections import Counter
+
+    from querygate.policy.loader import PolicyStore, set_policy_store
+    from querygate.policy.models import Policy
+
+    counts = Counter(c["country"] for c in CUSTOMERS_DATA)
+    k = 2
+    expected_visible = {country for country, n in counts.items() if n >= k}
+    # Precondition: the seed data has both a suppressed and a surviving group,
+    # or the test would prove nothing.
+    assert any(n < k for n in counts.values())
+    assert len(expected_visible) >= 1
+
+    set_policy_store(PolicyStore(default=Policy(min_group_size=k), overrides={}))
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/demo/query",
+            json={
+                "from": "customers",
+                "select": ["customers.country", {"fn": "count", "col": "*", "as": "n"}],
+                "group_by": ["customers.country"],
+                "limit": 100,
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert {row["country"] for row in body["rows"]} == expected_visible
+    assert all(row["n"] >= k for row in body["rows"])
+
+
+@pytest.mark.asyncio
+async def test_min_group_size_suppresses_single_row_aggregate_end_to_end(sqlite_app):
+    """A count over a filter matching exactly one customer is suppressed to zero
+    rows under min_group_size=2 — the caller cannot single that person out."""
+    from querygate.policy.loader import PolicyStore, set_policy_store
+    from querygate.policy.models import Policy
+
+    one = CUSTOMERS_DATA[0]
+    set_policy_store(PolicyStore(default=Policy(min_group_size=2), overrides={}))
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/demo/query",
+            json={
+                "from": "customers",
+                "select": [{"fn": "count", "col": "*", "as": "n"}],
+                "where": {"col": "customers.id", "op": "eq", "value": one["id"]},
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.json()["row_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_min_group_size_allows_large_group_aggregate_end_to_end(sqlite_app):
+    """The whole-table count (>= k rows) is returned unchanged — the guardrail
+    suppresses only under-k groups, it doesn't block aggregation."""
+    from querygate.policy.loader import PolicyStore, set_policy_store
+    from querygate.policy.models import Policy
+
+    set_policy_store(PolicyStore(default=Policy(min_group_size=2), overrides={}))
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/demo/query",
+            json={"from": "customers", "select": [{"fn": "count", "col": "*", "as": "n"}]},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["row_count"] == 1
+    assert body["rows"][0]["n"] == len(CUSTOMERS_DATA)

@@ -86,7 +86,7 @@ order-of-magnitude, not commitments.
 | 52 | Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI) | S (per framework) | 20 |
 | 53 | Independent third-party security audit + published report | S* | 28 |
 | 54 | Compliance control mapping (SOC 2 / ISO 27001 readiness) | L | 23, 25, 28 |
-| 55 | Inference/transitive-exposure adversarial test suite | M | 28 |
+| 55 | ✅ Inference/transitive-exposure adversarial test suite | M | 28 |
 | 56 | HA / multi-region reference deployment + DR runbook | L | 29 |
 | 57 | Pluggable dialect-adapter architecture | L | 2, 19 |
 | 58 | Published adversarial benchmark vs. raw-SQL agent and Google Toolbox | M | 28, 36 |
@@ -98,6 +98,7 @@ order-of-magnitude, not commitments.
 | 64 | ✅ Make full catalog provenance opt-in on describe_table/search_catalog | S–M | 27 |
 | 65 | ✅ Add a response-size cap to get_querygate_guide_topic | XS–S | — |
 | 66 | ✅ CI/test guardrail on total MCP schema+instructions size | S | 61, 62, 63, 64, 65 |
+| 88 | ✅ Minimum aggregation group size (k-anonymity guardrail) | S–M | 55 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
@@ -1655,25 +1656,45 @@ access-review cadence, incident-response runbook), and close only the gaps
 that are real rather than adding process theater around controls that
 already exist.
 
-### 55. Inference/transitive-exposure adversarial test suite
+### 55. Inference/transitive-exposure adversarial test suite ✅ DONE
 
-**Effort: M (2–3 days).** Extends item 28's existing adversarial suite with
-a new attack category rather than a new enforcement mechanism.
+**Shipped:** A new design note (`docs/INFERENCE_RISKS.md`) enumerating
+inference-attack shapes against the `StructuredQuery` AST, plus adversarial
+regression cases added to item 28's suite
+(`tests/security/test_adversarial_security.py`).
+
+The investigation found **no enforcement gap**: the policy column walk
+(`validation/policy_validation.py`'s `_iter_column_refs` + the shared
+`select_item_column_refs`/`predicate_column_refs` harvesters) already checks
+every column reference in every clause, and the AST forbids nested scalar
+functions, so there is no expression tree a column can hide inside. The value
+of this item is therefore (a) proving that exhaustively and (b) documenting the
+residual risks that identifier allow/deny structurally *cannot* close.
+
+- **Class A — direct reference in any clause (closed, regression-locked):**
+  `test_denied_column_cannot_be_used_for_inference` is now parametrized across
+  every column-carrying AST position — where/group_by/having/order_by/top_n
+  (partition_by + order_by)/join `on`, plus scalar-function args, `CASE`
+  when/then/else, aggregate/`percentile_cont`/`string_agg` columns, predicate
+  `col_fn` and `value_col`, and composite join `extra_on` keys — each asserting
+  a denied column is rejected. Adding a new column-carrying AST node without
+  extending the harvest fails this test.
+- **Class B — residual risks (documented, not closable by allow/deny):** R1
+  derived/correlated permitted columns (closed by *policy* — deny the derived
+  column too), R2 underlying-data correlation (out of scope for an access
+  gateway), R3 aggregate differencing / no minimum group size (accepted v1
+  residual; a scoped candidate `min_group_size` guardrail is noted, not
+  half-built), R4 existence/row-count probing (accepted, mitigated in depth by
+  mandatory row filters, masking, quotas, and audit). R1 and R3 each carry a
+  demonstrating test asserting the current allowed-by-design behavior, so the
+  boundary is explicit and flips the day a closing feature lands.
 
 **Why it matters:** Column allow/deny stops a query from directly selecting
-a denied column, but does not provably stop a caller from reconstructing a
-denied value indirectly — e.g. inferring a denied `salary` through a
-permitted bucketed join key, or through a computed expression built
-entirely from permitted columns that happens to correlate with a denied
-one. This is a distinct security category (inference attacks) that item
-28's threat model may not yet enumerate.
-
-**What to do:** Write a design note enumerating known inference-attack
-shapes against this AST model, then add adversarial regression cases for
-each to item 28's suite. Where a real gap is found (rather than a
-theoretical one), decide explicitly whether it's closed by policy (e.g.
-restricting join keys derived from sensitive columns) or documented as an
-accepted residual risk — don't leave it silently unaddressed either way.
+a denied column, but "provably does not leak it *indirectly*" was previously
+asserted only for a handful of clauses. This item makes that guarantee
+exhaustive and regression-locked, and draws the honest line between what the
+engine closes and what remains a policy-configuration or accepted residual
+risk — rather than leaving the inference category silently unaddressed.
 
 ### 56. HA / multi-region reference deployment + DR runbook
 
@@ -1945,3 +1966,39 @@ The Templates domain gained a guided authoring form (id/connection/description +
 ### 86. MCP transport request-body size/depth guard ✅ DONE
 
 `mcp/transport_guard.py`'s `MCPRequestGuardMiddleware` wraps the MCP mount outside auth and rejects an oversized body (`413`) or one nested past a cheap O(n) structural-depth scan (`400`) *before* the transport's `json.loads` — closing the REST/MCP asymmetry where a deeply-nested MCP body used to surface as a handled HTTP 500. Thresholds are configurable (`mcp_max_request_bytes` default 4 MiB, `mcp_max_request_depth` default 100), far above any legitimate batch; the phase-2a deep-body test was flipped from "handled 500" to a clean 4xx and a byte-cap regression added. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 86).
+
+### 88. Minimum aggregation group size (k-anonymity guardrail) ✅ DONE
+
+**Shipped:** A new `Policy.min_group_size` cap (`policy/models.py`) that closes
+the direct, single-query form of the aggregate-differencing residual that item
+55's design note flagged as R3 (`docs/INFERENCE_RISKS.md`). When set (floor 2;
+`None` disables), the compiler (`compiler/sqlalchemy_compiler.py`) injects
+`HAVING count(*) >= k` into every **aggregate** query — grouped or
+single-implicit-group — so any result group backed by fewer than *k* underlying
+rows is suppressed. A caller can no longer aggregate over a razor-thin filter to
+single out an individual (`count(*) WHERE id = X` returns nothing when fewer
+than *k* rows match). It is the aggregate analog of a mandatory row filter:
+policy-driven, injected, non-removable, and it only touches aggregate queries —
+plain row reads remain governed by mandatory row filters, not group size.
+
+**Scope (deliberate):** this closes single-query singling-out, **not**
+multi-query differencing (isolating an individual by subtracting two
+independently-compliant aggregates), which needs query-set auditing or
+differential privacy — out of scope and documented as still-residual in
+`docs/INFERENCE_RISKS.md`. No new AST surface; `min_group_size` is a policy cap,
+loaded generically from `policy.yaml` like every other cap.
+
+**Coverage:** compiler unit tests (`test_compiler.py::TestMinGroupSize` — HAVING
+injection on grouped/single-group aggregates, no-op on plain selects, combines
+with caller HAVING, `None` no-op), real end-to-end suppression against SQLite
+(`test_sqlite_end_to_end.py` — a single-customer country group and a
+single-row filtered count are suppressed; the whole-table count is returned),
+a security test tying the closure back to item 55's R3
+(`test_adversarial_security.py`), and policy-model validation
+(`test_policy_models.py` — default `None`, floor of 2).
+
+**Why it matters:** item 55 proved the direct column-reference defenses are
+complete and documented the residuals it couldn't close. R3 (no minimum group
+size) was the one residual with a bounded, well-precedented fix — this item
+builds it, turning a documented gap into an opt-in enforced guardrail without
+overclaiming (multi-query differencing stays honestly out of scope).
