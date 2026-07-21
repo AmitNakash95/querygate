@@ -57,16 +57,20 @@ _SAFE_SIMULATION_VALIDATION_ERROR = (
 )
 
 
+def _read_optional_file(path: Optional[str]) -> Optional[str]:
+    return Path(path).read_text() if path and Path(path).exists() else None
+
+
 def _bootstrap(cfg: AppConfig, store: ConfigVersionStore) -> ConfigVersion:
     connections_yaml = Path(cfg.connections_file).read_text()
     policy_yaml = Path(cfg.policy_file).read_text()
-    catalog_yaml = (
-        Path(cfg.catalog_file).read_text()
-        if cfg.catalog_file and Path(cfg.catalog_file).exists()
-        else None
-    )
+    catalog_yaml = _read_optional_file(cfg.catalog_file)
+    templates_yaml = _read_optional_file(cfg.template_file)
     return store.bootstrap_if_empty(
-        connections_yaml=connections_yaml, policy_yaml=policy_yaml, catalog_yaml=catalog_yaml
+        connections_yaml=connections_yaml,
+        policy_yaml=policy_yaml,
+        catalog_yaml=catalog_yaml,
+        templates_yaml=templates_yaml,
     )
 
 
@@ -77,20 +81,22 @@ def _resolve_candidate(
     connections_yaml: Optional[str],
     policy_yaml: Optional[str],
     catalog_yaml: Optional[str],
-) -> Tuple[str, str, Optional[str]]:
+    templates_yaml: Optional[str],
+) -> Tuple[str, str, Optional[str], Optional[str]]:
     """A field left unset (None) inherits unchanged from the active version.
 
-    There is no dedicated way to explicitly clear a catalog back to "none"
-    through this API — pass an empty-but-present catalog document (e.g.
-    `"connections: {}"`) if that's genuinely needed; this keeps the request
-    shape simple (no separate "unset" sentinel) for what is, in practice, a
-    rare edge case.
+    There is no dedicated way to explicitly clear a catalog or templates
+    document back to "none" through this API — pass an empty-but-present
+    document (e.g. `"templates: []"`) if that's genuinely needed; this keeps
+    the request shape simple (no separate "unset" sentinel) for what is, in
+    practice, a rare edge case.
     """
     active = _bootstrap(cfg, store)
     return (
         connections_yaml if connections_yaml is not None else active.connections_yaml,
         policy_yaml if policy_yaml is not None else active.policy_yaml,
         catalog_yaml if catalog_yaml is not None else active.catalog_yaml,
+        templates_yaml if templates_yaml is not None else active.templates_yaml,
     )
 
 
@@ -475,7 +481,11 @@ def compute_blast_radius(
 
 
 def validate_candidate_content(
-    cfg: AppConfig, connections_yaml: str, policy_yaml: str, catalog_yaml: Optional[str]
+    cfg: AppConfig,
+    connections_yaml: str,
+    policy_yaml: str,
+    catalog_yaml: Optional[str],
+    templates_yaml: Optional[str] = None,
 ) -> List[str]:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -488,10 +498,16 @@ def validate_candidate_content(
             catalog_path = tmp_path / "catalog.yaml"
             catalog_path.write_text(catalog_yaml)
             catalog_file = str(catalog_path)
+        template_file: Optional[str] = None
+        if templates_yaml is not None:
+            templates_path = tmp_path / "templates.yaml"
+            templates_path.write_text(templates_yaml)
+            template_file = str(templates_path)
         return validate_config(
             str(connections_file),
             str(policy_file),
             catalog_file,
+            template_file=template_file,
             resolver_registry=build_secret_resolver_registry(cfg),
         )
 
@@ -503,18 +519,22 @@ def validate(
     connections_yaml: Optional[str],
     policy_yaml: Optional[str],
     catalog_yaml: Optional[str],
+    templates_yaml: Optional[str] = None,
 ) -> List[str]:
     start = time.monotonic()
     store = get_config_version_store()
-    resolved_connections, resolved_policy, resolved_catalog = _resolve_candidate(
-        cfg,
-        store,
-        connections_yaml=connections_yaml,
-        policy_yaml=policy_yaml,
-        catalog_yaml=catalog_yaml,
+    resolved_connections, resolved_policy, resolved_catalog, resolved_templates = (
+        _resolve_candidate(
+            cfg,
+            store,
+            connections_yaml=connections_yaml,
+            policy_yaml=policy_yaml,
+            catalog_yaml=catalog_yaml,
+            templates_yaml=templates_yaml,
+        )
     )
     errors = validate_candidate_content(
-        cfg, resolved_connections, resolved_policy, resolved_catalog
+        cfg, resolved_connections, resolved_policy, resolved_catalog, resolved_templates
     )
     if principal is not None:
         audit_config_change(
@@ -536,6 +556,7 @@ def preview(
     connections_yaml: Optional[str],
     policy_yaml: Optional[str],
     catalog_yaml: Optional[str],
+    templates_yaml: Optional[str] = None,
 ) -> ConfigPreview:
     """Validate a candidate and return a content-free document-level preview.
 
@@ -547,15 +568,18 @@ def preview(
     start = time.monotonic()
     store = get_config_version_store()
     active = _bootstrap(cfg, store)
-    resolved_connections, resolved_policy, resolved_catalog = _resolve_candidate(
-        cfg,
-        store,
-        connections_yaml=connections_yaml,
-        policy_yaml=policy_yaml,
-        catalog_yaml=catalog_yaml,
+    resolved_connections, resolved_policy, resolved_catalog, resolved_templates = (
+        _resolve_candidate(
+            cfg,
+            store,
+            connections_yaml=connections_yaml,
+            policy_yaml=policy_yaml,
+            catalog_yaml=catalog_yaml,
+            templates_yaml=templates_yaml,
+        )
     )
     errors = validate_candidate_content(
-        cfg, resolved_connections, resolved_policy, resolved_catalog
+        cfg, resolved_connections, resolved_policy, resolved_catalog, resolved_templates
     )
     can_compare = ADMIN_CONFIG_READ_SCOPE in principal.scopes
 
@@ -578,6 +602,10 @@ def preview(
         ConfigDocumentPreview(
             document="catalog",
             change=change(catalog_yaml, resolved_catalog, active.catalog_yaml),
+        ),
+        ConfigDocumentPreview(
+            document="templates",
+            change=change(templates_yaml, resolved_templates, active.templates_yaml),
         ),
     ]
     audit_config_change(
@@ -605,18 +633,22 @@ def stage(
     connections_yaml: Optional[str],
     policy_yaml: Optional[str],
     catalog_yaml: Optional[str],
+    templates_yaml: Optional[str] = None,
     description: Optional[str],
 ) -> ConfigVersion:
     store = get_config_version_store()
-    resolved_connections, resolved_policy, resolved_catalog = _resolve_candidate(
-        cfg,
-        store,
-        connections_yaml=connections_yaml,
-        policy_yaml=policy_yaml,
-        catalog_yaml=catalog_yaml,
+    resolved_connections, resolved_policy, resolved_catalog, resolved_templates = (
+        _resolve_candidate(
+            cfg,
+            store,
+            connections_yaml=connections_yaml,
+            policy_yaml=policy_yaml,
+            catalog_yaml=catalog_yaml,
+            templates_yaml=templates_yaml,
+        )
     )
     errors = validate_candidate_content(
-        cfg, resolved_connections, resolved_policy, resolved_catalog
+        cfg, resolved_connections, resolved_policy, resolved_catalog, resolved_templates
     )
     if errors:
         audit_config_change(
@@ -634,6 +666,7 @@ def stage(
         connections_yaml=resolved_connections,
         policy_yaml=resolved_policy,
         catalog_yaml=resolved_catalog,
+        templates_yaml=resolved_templates,
         description=description,
         actor=principal.subject,
     )
@@ -663,7 +696,11 @@ async def apply(
     start = time.monotonic()
 
     errors = validate_candidate_content(
-        cfg, version.connections_yaml, version.policy_yaml, version.catalog_yaml
+        cfg,
+        version.connections_yaml,
+        version.policy_yaml,
+        version.catalog_yaml,
+        version.templates_yaml,
     )
     if errors:
         audit_config_change(
@@ -683,10 +720,12 @@ async def apply(
         connections_file=paths.connections,
         policy_file=paths.policy,
         catalog_file=paths.catalog,
-        # Templates (item 48) aren't part of config-governance versions in
-        # phase 1 — keep the deployment's static template file across a
-        # version apply/rollback rather than clobbering it to empty.
-        template_file=cfg.template_file,
+        # Query templates (item 48 phase 2) are now a governed document, so a
+        # version carries its own templates snapshot and apply/rollback loads
+        # exactly that. A version staged before phase 2 has no snapshot
+        # (paths.templates is None); fall back to the deployment's static
+        # template file rather than clobbering it to empty on an old rollback.
+        template_file=paths.templates if paths.templates is not None else cfg.template_file,
         resolver_registry=build_secret_resolver_registry(cfg),
     )
     updated_version = store.mark_active(version_id, actor=principal.subject)

@@ -111,6 +111,7 @@ async def test_preview_endpoint_returns_redacted_document_diff_without_persistin
         "connections": "unchanged",
         "policy": "changed",
         "catalog": "unchanged",
+        "templates": "unchanged",
     }
     assert "max_joins" not in resp.text
     assert len(versions_resp.json()) == 1
@@ -251,6 +252,114 @@ async def test_stage_with_invalid_content_returns_422(app):
             headers=_auth(_ADMIN_KEY),
         )
     assert resp.status_code == 422
+
+
+# --- Governed query templates (item 48 phase 2) ---------------------------- #
+
+_GOVERNED_TEMPLATE_YAML = """
+templates:
+  - id: foo_by_id
+    connection: gov-demo
+    description: Fetch a foo row by id.
+    parameters:
+      - name: foo_id
+        type: integer
+        required: true
+    query:
+      from: foo
+      select:
+        - foo.id
+      where:
+        col: foo.id
+        op: eq
+        value: { param: foo_id }
+      limit: 10
+"""
+
+
+@pytest.mark.asyncio
+async def test_query_template_authored_through_governance_becomes_invocable_then_rolls_back(app):
+    """A query template staged + applied through the config-versioning plane
+    becomes live (listed on /query-templates), and a rollback removes it —
+    proving templates are now a governed document with no self-publish path."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        # No template exists in the bootstrap version.
+        before = await client.get("/api/v1/query-templates", headers=_auth(_ADMIN_KEY))
+        assert before.status_code == 200
+        assert before.json() == []
+
+        # Stage a version that adds the template document.
+        stage_resp = await client.post(
+            "/api/v1/admin/config/versions",
+            json={
+                "templates_yaml": _GOVERNED_TEMPLATE_YAML,
+                "description": "add the foo_by_id curated template",
+            },
+            headers=_auth(_ADMIN_KEY),
+        )
+        assert stage_resp.status_code == 201
+        staged = stage_resp.json()
+        assert staged["templates_yaml"] and "foo_by_id" in staged["templates_yaml"]
+
+        # Staging alone must not make it live — it is not applied yet.
+        still_empty = await client.get("/api/v1/query-templates", headers=_auth(_ADMIN_KEY))
+        assert still_empty.json() == []
+
+        # Apply -> the template is now invocable.
+        apply_resp = await client.post(
+            f"/api/v1/admin/config/versions/{staged['id']}/apply", headers=_auth(_ADMIN_KEY)
+        )
+        assert apply_resp.status_code == 200
+        assert apply_resp.json()["reload"]["template_ids"] == ["foo_by_id"]
+
+        listed = await client.get("/api/v1/query-templates", headers=_auth(_ADMIN_KEY))
+        assert [t["id"] for t in listed.json()] == ["foo_by_id"]
+
+        # Roll back to the template-free version -> it disappears again.
+        rollback_resp = await client.post(
+            "/api/v1/admin/config/versions/1/apply", headers=_auth(_ADMIN_KEY)
+        )
+        assert rollback_resp.status_code == 200
+        gone = await client.get("/api/v1/query-templates", headers=_auth(_ADMIN_KEY))
+        assert gone.json() == []
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_staged_template_is_not_live_until_a_separate_apply(app):
+    """A curated template can never publish itself: staging a version that
+    contains it does not change what agents can invoke — only a distinct,
+    separately-authorized apply activates it (same anti-self-publish posture as
+    a catalog draft)."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        stage_resp = await client.post(
+            "/api/v1/admin/config/versions",
+            json={"templates_yaml": _GOVERNED_TEMPLATE_YAML},
+            headers=_auth(_ADMIN_KEY),
+        )
+        assert stage_resp.status_code == 201
+        # The version exists and holds the template, but the live surface is
+        # unchanged — staging is authoring, not activation.
+        listed = await client.get("/api/v1/query-templates", headers=_auth(_ADMIN_KEY))
+        assert listed.json() == []
+        current = await client.get("/api/v1/admin/config/current", headers=_auth(_ADMIN_KEY))
+        assert current.json()["id"] == "1"  # bootstrap version is still active
+
+
+@pytest.mark.asyncio
+async def test_stage_with_malformed_template_is_rejected_not_persisted(app):
+    """A template targeting a connection that does not exist is caught by the
+    same validation connections/policy/catalog get, so it is never staged."""
+    bad_template_yaml = _GOVERNED_TEMPLATE_YAML.replace("gov-demo", "ghost-connection")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/versions",
+            json={"templates_yaml": bad_template_yaml},
+            headers=_auth(_ADMIN_KEY),
+        )
+        versions_resp = await client.get("/api/v1/admin/config/versions", headers=_auth(_ADMIN_KEY))
+    assert resp.status_code == 422
+    assert len(versions_resp.json()) == 1  # only the bootstrap version
 
 
 @pytest.mark.asyncio

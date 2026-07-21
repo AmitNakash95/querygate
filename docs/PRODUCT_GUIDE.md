@@ -436,6 +436,20 @@ template referencing a denied table or an over-cap shape is rejected the same
 way an ad-hoc query would be — at deploy-time validation and again at run
 time.
 
+**Authoring a template is a governed change (item 48 phase 2).** `templates.yaml`
+is a fourth governed document in the config-versioning plane (see [the admin
+surface](#the-admin-surface-config-as-versioned-history-not-a-live-edited-file)),
+right alongside connections/policy/catalog. An admin submits a template change
+through the same `/admin/config/*` validate → preview → stage → apply →
+rollback flow (and the admin UI's `templates.yaml` editor tab): it is validated
+with the rest of the config, staged as an immutable version, and becomes live
+only on a separate, separately-authorized apply — never a self-publishing
+direct mutation. A version snapshots its own `templates.yaml`, so a rollback
+restores the exact template set that was live before. This gives the "these are
+the twelve things this agent may ask, and here's who signed off on the change"
+story without any new governance machinery — templates simply joined the plane
+that already governs every other config document.
+
 ## Security Model
 
 The [Core Request Pipeline](#the-core-request-pipeline) section explains what
@@ -818,11 +832,13 @@ config_governance_dir/
   versions/<id>/connections.yaml
   versions/<id>/policy.yaml
   versions/<id>/catalog.yaml        — only if this version has one
+  versions/<id>/templates.yaml      — only if this version has query templates
   current.json                      — {"version_id": "<id>"} pointer
 ```
 
-Every version is a complete, immutable snapshot of all three documents
-together (never a partial diff), written with the same atomic
+Every version is a complete, immutable snapshot of all its documents
+together (connections + policy, plus catalog and query templates when the
+deployment uses them — never a partial diff), written with the same atomic
 write-then-rename pattern used elsewhere in the codebase
 (`_atomic_write`: write to a `.tmp` file, then `os.replace()`). A version is
 `staged` (created but not yet live), `active` (the one currently in effect),
@@ -2111,6 +2127,32 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-21 — Query templates are governed through the config-versioning
+  plane (item 25), not 32B's catalog-proposal state machine (TODO.md item 48
+  phase 2).** Item 48's original sketch said route template authoring "through
+  32B's proposal state machine." On implementation the better fit was item
+  25's config-versioning plane: `templates.yaml` became a fourth governed
+  document beside connections/policy/catalog, carried through the same
+  `ConfigVersionStore` snapshots and `/admin/config/*` validate → preview →
+  stage → apply → rollback flow (plus a `templates.yaml` admin-UI editor tab).
+  The rejected alternative (**Option A**) was a per-template proposal model
+  with individual approve/publish and separation of duties, mirroring
+  `catalog/governance.py`. Two reasons it lost: **(1)** query templates are a
+  configuration *document* loaded by `config_reload` alongside the other three
+  — not catalog *entries*, which carry sensitivity/confidence/provenance/
+  relationship-target fields the 32B model is built around; forcing a config
+  document through catalog-entry machinery would have been a second, awkward
+  mutation path, exactly what this repo's standing rule forbids. **(2)** The
+  config-versioning plane already *is* "governed create/edit/publish/rollback"
+  for config documents — whole-document staging, validation, re-validation on
+  apply (QG-15), atomic reload, rollback to a prior snapshot, redaction-safe
+  audit, and no self-publish (staging is not activation). Templates joined it
+  as one more document with zero new governance code. The cost is that
+  governance is whole-`templates.yaml`, not per-template; a finer-grained
+  per-template sign-off workflow remains a possible future addition, not a gap
+  this phase left broken. A version snapshots its own `templates.yaml`, and a
+  pre-phase-2 version with no snapshot falls back to the deployment's static
+  `template_file` on apply rather than clobbering it to empty.
 - **2026-07-21 — The typed Python query builder front-ends the real AST
   rather than re-implementing it, and ships in-tree before a standalone
   distribution (TODO.md item 51 phase 1).** `querygate.client` builds the
