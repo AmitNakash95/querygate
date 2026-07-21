@@ -87,7 +87,13 @@ class AppConfig(BaseSettings):
     # item 48) — named, parameterized `StructuredQuery` skeletons agents invoke
     # by name. Unset by default: a deployment with no templates behaves
     # identically, just without the template list/run surface.
-    template_file: Optional[str] = pyd.Field(default=None)
+    # The documented env var is the plural TEMPLATES_FILE (see .env.example and
+    # examples/templates.example.yaml); without this alias the field name would
+    # only bind the singular TEMPLATE_FILE, so the documented var was silently
+    # ignored — same AliasChoices pattern as api_keys/mcp_api_keys.
+    template_file: Optional[str] = pyd.Field(
+        default=None, validation_alias=pyd.AliasChoices("TEMPLATES_FILE", "template_file")
+    )
 
     # Governed semantic-memory enrichment (catalog/). Provider execution is
     # deliberately limited to disabled/manual-only in 32A-2; no networked
