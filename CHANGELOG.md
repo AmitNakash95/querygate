@@ -264,6 +264,28 @@ All notable changes to QueryGate are documented here.
   again. (The MCP tools and the `GET /query-templates` list endpoint were
   unaffected; only the REST run route regressed.)
 
+### Security
+
+- Inference/transitive-exposure adversarial test suite + design note (TODO.md
+  item 55). Extends item 28's adversarial suite with a new attack *category*:
+  reconstructing a *denied* value without ever selecting the denied column.
+  `test_denied_column_cannot_be_used_for_inference` is now exhaustive across
+  every AST position that can carry a column reference — scalar-function args,
+  `CASE` when/then/else, aggregate/`percentile_cont`/`string_agg` columns,
+  predicate `col_fn` and `value_col`, and composite join `extra_on` keys, on
+  top of the existing where/group_by/having/order_by/top_n/join cases —
+  proving the policy column walk (`validation/policy_validation.py`) harvests
+  and rejects a denied column in all of them, with no new enforcement code
+  required (the harvest was already complete; this locks it against
+  regression). New `docs/INFERENCE_RISKS.md` enumerates the attack shapes and,
+  for each, states whether QueryGate closes it (Class A — direct reference in
+  any clause) or accepts it as a documented residual risk (Class B — derived/
+  correlated permitted columns, underlying-data correlation, aggregate
+  differencing with no minimum group size, existence probing), each Class-B
+  residual carrying a demonstrating test asserting the current allowed-by-design
+  behavior so the boundary is explicit and regression-locked rather than
+  silently unaddressed.
+
 ### Known issues
 
 - The dependency audit above currently allowlists 13 known advisories across `click`,

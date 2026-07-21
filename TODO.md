@@ -86,7 +86,7 @@ order-of-magnitude, not commitments.
 | 52 | Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI) | S (per framework) | 20 |
 | 53 | Independent third-party security audit + published report | S* | 28 |
 | 54 | Compliance control mapping (SOC 2 / ISO 27001 readiness) | L | 23, 25, 28 |
-| 55 | Inference/transitive-exposure adversarial test suite | M | 28 |
+| 55 | ✅ Inference/transitive-exposure adversarial test suite | M | 28 |
 | 56 | HA / multi-region reference deployment + DR runbook | L | 29 |
 | 57 | Pluggable dialect-adapter architecture | L | 2, 19 |
 | 58 | Published adversarial benchmark vs. raw-SQL agent and Google Toolbox | M | 28, 36 |
@@ -1618,25 +1618,45 @@ access-review cadence, incident-response runbook), and close only the gaps
 that are real rather than adding process theater around controls that
 already exist.
 
-### 55. Inference/transitive-exposure adversarial test suite
+### 55. Inference/transitive-exposure adversarial test suite ✅ DONE
 
-**Effort: M (2–3 days).** Extends item 28's existing adversarial suite with
-a new attack category rather than a new enforcement mechanism.
+**Shipped:** A new design note (`docs/INFERENCE_RISKS.md`) enumerating
+inference-attack shapes against the `StructuredQuery` AST, plus adversarial
+regression cases added to item 28's suite
+(`tests/security/test_adversarial_security.py`).
+
+The investigation found **no enforcement gap**: the policy column walk
+(`validation/policy_validation.py`'s `_iter_column_refs` + the shared
+`select_item_column_refs`/`predicate_column_refs` harvesters) already checks
+every column reference in every clause, and the AST forbids nested scalar
+functions, so there is no expression tree a column can hide inside. The value
+of this item is therefore (a) proving that exhaustively and (b) documenting the
+residual risks that identifier allow/deny structurally *cannot* close.
+
+- **Class A — direct reference in any clause (closed, regression-locked):**
+  `test_denied_column_cannot_be_used_for_inference` is now parametrized across
+  every column-carrying AST position — where/group_by/having/order_by/top_n
+  (partition_by + order_by)/join `on`, plus scalar-function args, `CASE`
+  when/then/else, aggregate/`percentile_cont`/`string_agg` columns, predicate
+  `col_fn` and `value_col`, and composite join `extra_on` keys — each asserting
+  a denied column is rejected. Adding a new column-carrying AST node without
+  extending the harvest fails this test.
+- **Class B — residual risks (documented, not closable by allow/deny):** R1
+  derived/correlated permitted columns (closed by *policy* — deny the derived
+  column too), R2 underlying-data correlation (out of scope for an access
+  gateway), R3 aggregate differencing / no minimum group size (accepted v1
+  residual; a scoped candidate `min_group_size` guardrail is noted, not
+  half-built), R4 existence/row-count probing (accepted, mitigated in depth by
+  mandatory row filters, masking, quotas, and audit). R1 and R3 each carry a
+  demonstrating test asserting the current allowed-by-design behavior, so the
+  boundary is explicit and flips the day a closing feature lands.
 
 **Why it matters:** Column allow/deny stops a query from directly selecting
-a denied column, but does not provably stop a caller from reconstructing a
-denied value indirectly — e.g. inferring a denied `salary` through a
-permitted bucketed join key, or through a computed expression built
-entirely from permitted columns that happens to correlate with a denied
-one. This is a distinct security category (inference attacks) that item
-28's threat model may not yet enumerate.
-
-**What to do:** Write a design note enumerating known inference-attack
-shapes against this AST model, then add adversarial regression cases for
-each to item 28's suite. Where a real gap is found (rather than a
-theoretical one), decide explicitly whether it's closed by policy (e.g.
-restricting join keys derived from sensitive columns) or documented as an
-accepted residual risk — don't leave it silently unaddressed either way.
+a denied column, but "provably does not leak it *indirectly*" was previously
+asserted only for a handful of clauses. This item makes that guarantee
+exhaustive and regression-locked, and draws the honest line between what the
+engine closes and what remains a policy-configuration or accepted residual
+risk — rather than leaving the inference category silently unaddressed.
 
 ### 56. HA / multi-region reference deployment + DR runbook
 
