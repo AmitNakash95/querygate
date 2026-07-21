@@ -563,18 +563,33 @@
         api("/admin/config/validate", { method: "POST", body: JSON.stringify(payload) }),
         api("/admin/config/preview", { method: "POST", body: JSON.stringify(payload) }),
       ]);
-      const valid = validation.valid && preview.ready_to_stage;
-      $("#validation-status").className = `status-chip ${valid ? "good" : "bad"}`;
-      $("#validation-status").textContent = valid ? "Valid" : "Needs changes";
+      const errors = Array.from(
+        new Set([...(validation.errors || []), ...(preview.errors || [])])
+      );
+      const passed = validation.valid && (preview.errors || []).length === 0;
+      const valid = passed && preview.ready_to_stage;
       const scopeNote = "Structural, slot, and policy checks. Column/table existence is verified against the live database separately.";
       if (valid) {
+        $("#validation-status").className = "status-chip good";
+        $("#validation-status").textContent = "Valid";
         const documentSummary = preview.documents.map((item) => `${item.document}: ${item.change}`).join(" · ");
         $("#validation-result").innerHTML = `<div class="validation-ok"><span class="status-chip good">Passed</span><p>${escapeHtml(documentSummary)}</p><p class="validation-note">${escapeHtml(scopeNote)}</p></div>`;
         state.validatedFingerprint = fingerprintDraft();
         $("#stage-draft").disabled = !anyDocumentChanged();
+      } else if (passed && errors.length === 0) {
+        // Checks passed but the draft is identical to the active configuration,
+        // so there is nothing to stage — a distinct outcome from failed checks.
+        $("#validation-status").className = "status-chip warning";
+        $("#validation-status").textContent = "No changes";
+        $("#validation-result").innerHTML = `<div class="validation-ok"><span class="status-chip warning">Nothing to stage</span><p>The draft passed all checks but is identical to the active configuration. Edit a document before staging.</p><p class="validation-note">${escapeHtml(scopeNote)}</p></div>`;
+        state.validatedFingerprint = null;
+        $("#stage-draft").disabled = true;
       } else {
-        const errors = [...(validation.errors || []), ...(preview.errors || [])];
-        const items = Array.from(new Set(errors)).map((error) => `<li>${escapeHtml(error)}</li>`).join("");
+        $("#validation-status").className = "status-chip bad";
+        $("#validation-status").textContent = "Needs changes";
+        const items = errors.length
+          ? errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")
+          : "<li>Validation failed but no detail was returned. Check the connection, policy, catalog, and template documents, then retry.</li>";
         $("#validation-result").innerHTML = `<ul>${items}</ul><p class="validation-note">${escapeHtml(scopeNote)}</p>`;
         state.validatedFingerprint = null;
         $("#stage-draft").disabled = true;
