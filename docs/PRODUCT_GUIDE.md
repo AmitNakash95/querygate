@@ -436,6 +436,48 @@ template referencing a denied table or an over-cap shape is rejected the same
 way an ad-hoc query would be — at deploy-time validation and again at run
 time.
 
+**What the dry-run validates (and what it deliberately doesn't).** Staging a
+template through the config plane runs a fast, database-free check: the YAML
+shape, the query skeleton's *structural* validity (dummy-substitute each
+`{param}` and validate the result as a real `StructuredQuery`), the target
+connection's existence, and each parameter *slot's self-consistency* — a slot
+whose `allowed_values` or `default` contradict its declared `type`/bounds (e.g.
+`type: integer` with string `allowed_values`, which would deploy but never bind)
+is rejected at dry-run, not left to fail confusingly at invocation. What the
+dry-run does **not** do is touch the live database, so it does not verify that a
+referenced *column or table actually exists* — that stays a run-time check (the
+bound query hits live schema validation), consistent with how `explain` and
+cost-estimation never open a session. The admin dry-run panel says so, and
+surfaces validation failures attributed to their document (`templates.yaml: …`)
+in plain language rather than raw validator output.
+
+For column/table existence there is a separate, **explicit on-demand check**
+(`POST /admin/config/check-template-schema`, the admin UI's "Check templates
+vs. schema" button): it reflects each template's target connection from the
+*currently-live* registry, binds the skeleton with dummy values, and runs the
+same `validate_schema` the real pipeline uses, reporting per template `ok` /
+`issues` (a missing column/table, named) / `connection_unavailable` /
+`unreachable`. It is deliberately **best-effort** — a database that can't be
+reached yields `unreachable`, never a hard failure — so the fast, offline
+dry-run stays decoupled from database availability while authors still get
+pre-stage schema feedback on demand. Like `simulate`/`diff` it requires both
+config scopes (it reveals live schema detail while resolving caller-supplied
+template content).
+
+**Authoring a template is a governed change (item 48 phase 2).** `templates.yaml`
+is a fourth governed document in the config-versioning plane (see [the admin
+surface](#the-admin-surface-config-as-versioned-history-not-a-live-edited-file)),
+right alongside connections/policy/catalog. An admin submits a template change
+through the same `/admin/config/*` validate → preview → stage → apply →
+rollback flow (and the admin UI's `templates.yaml` editor tab): it is validated
+with the rest of the config, staged as an immutable version, and becomes live
+only on a separate, separately-authorized apply — never a self-publishing
+direct mutation. A version snapshots its own `templates.yaml`, so a rollback
+restores the exact template set that was live before. This gives the "these are
+the twelve things this agent may ask, and here's who signed off on the change"
+story without any new governance machinery — templates simply joined the plane
+that already governs every other config document.
+
 ## Security Model
 
 The [Core Request Pipeline](#the-core-request-pipeline) section explains what
@@ -818,11 +860,13 @@ config_governance_dir/
   versions/<id>/connections.yaml
   versions/<id>/policy.yaml
   versions/<id>/catalog.yaml        — only if this version has one
+  versions/<id>/templates.yaml      — only if this version has query templates
   current.json                      — {"version_id": "<id>"} pointer
 ```
 
-Every version is a complete, immutable snapshot of all three documents
-together (never a partial diff), written with the same atomic
+Every version is a complete, immutable snapshot of all its documents
+together (connections + policy, plus catalog and query templates when the
+deployment uses them — never a partial diff), written with the same atomic
 write-then-rename pattern used elsewhere in the codebase
 (`_atomic_write`: write to a `.tmp` file, then `os.replace()`). A version is
 `staged` (created but not yet live), `active` (the one currently in effect),
@@ -1493,6 +1537,53 @@ specifically checks that this generated schema never exposes a credential
 field, since `PublicConnectionInfo` is the only connection shape ever
 returned over REST (see [Security Model](#security-model)).
 
+### The typed Python query builder — authoring, not a new pipeline
+
+**Files:** `src/querygate/client/builder.py`, `src/querygate/client/__init__.py`,
+`examples/client_sdk_python.py`
+
+A caller composes a `StructuredQuery` as JSON. That JSON is easy to get
+subtly wrong by hand — a mistyped key, the wrong operator spelling, a
+forgotten self-join alias — and today the only feedback is a `422` after a
+network round-trip. `querygate.client` is a fluent, typed builder that makes
+that authoring ergonomic:
+
+```python
+from querygate.client import Query, agg, col, desc
+
+body = (
+    Query.from_("orders")
+    .join("customers", on=("orders.customer_id", "customers.id"))
+    .select("customers.name", agg.count("*", as_="order_count"))
+    .where(col("customers.country") == "GB")
+    .group_by("customers.name")
+    .order_by("order_count", desc=True)
+    .to_dict()   # the exact wire JSON to POST to /api/v1/<connection>/query
+)
+```
+
+The important design property: **the builder is not a second way to talk to
+the database, and adds no validation of its own.** It constructs the *same*
+`query_ast` Pydantic models the server validates, then serializes them. Two
+consequences fall out of that for free:
+
+- An illegal shape (a `count(*)` with `distinct`, a self-join missing an
+  alias, a percentile fraction outside `[0,1]`) raises *client-side* with the
+  identical error the server would return — because it *is* the server's
+  validator running early.
+- Whatever the builder emits is still fully policy-, schema-, and
+  guardrail-checked by `StructuredQueryService` before a single row is read.
+  A masked or denied column composed by the builder still gets a policy
+  `422`. The builder cannot bypass or weaken any guardrail; it only makes the
+  JSON pleasant to write.
+
+Because it front-ends the real AST, it can't drift: `tests/unit/test_client_builder.py`
+includes drift guards that fail if the `StructuredQuery` AST grows a field, a
+`SelectItem` variant, or a comparison/aggregate/scalar function the builder
+can't express. It ships inside the `querygate` package for now; a TypeScript
+sibling and a standalone dependency-light distribution are planned (TODO item
+51 phase 2, and see the [Decision Log](#decision-log)).
+
 ### MCP transport
 
 **Files:** `src/querygate/mcp/server.py`, `src/querygate/mcp/auth.py`,
@@ -1918,6 +2009,11 @@ Alphabetical. Each term links back to the section that covers it in depth.
 - **Provenance** — the paper trail attached to every catalog entry: which
   knowledge source produced it, evidence pointers, confidence, status, who
   approved it and when. See [Catalog / Semantic Layer](#catalog--semantic-layer).
+- **Query builder** — `querygate.client`, a typed, fluent Python API for
+  constructing a [`StructuredQuery`](#the-core-request-pipeline) with method
+  calls and autocomplete instead of raw JSON. A pure client-side authoring
+  convenience: it builds the same models the server validates, so it adds no
+  trust and cannot bypass any guardrail. See [Auth & Transports](#auth--transports-rest--mcp).
 - **Quarantine** (catalog) — the structural separation between draft
   proposals and real, published catalog entries — a proposal literally
   cannot carry access-affecting fields, and agent-facing lookups never read
@@ -2059,6 +2155,79 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-21 — Query-template validation is layered: offline slot/structural
+  checks in the always-on dry-run, live column/table existence as a separate
+  best-effort on-demand action (TODO.md item 83).** Two deliberate choices.
+  **(1)** Parameter-slot self-consistency (`allowed_values`/`default` must match
+  the declared `type`/bounds) is validated at load/dry-run time in the model
+  itself, sharing one `scalar_type_error` primitive with runtime binding so the
+  two can't disagree — a slot that could never bind (e.g. `type: integer` with
+  string `allowed_values`) is caught before it ships, not left to fail at
+  invocation. **(2)** Column/table existence is *not* folded into the dry-run,
+  which is intentionally offline (no DB session, same posture as
+  `explain`/cost-estimation). Folding it in would couple every config
+  validation to database availability — a slow or down database would block
+  staging otherwise-valid config. Instead it's a distinct, opt-in
+  `check-template-schema` action that reflects the currently-live connections
+  and returns best-effort per-template results (`ok`/`issues`/
+  `connection_unavailable`/`unreachable`); an unreachable database is reported,
+  never a hard failure. The rejected alternative — always-on live schema
+  validation in the dry-run — was declined for that coupling, even though it
+  would be marginally more convenient, because keeping the fast path offline is
+  worth more than saving one button click.
+- **2026-07-21 — Query templates are governed through the config-versioning
+  plane (item 25), not 32B's catalog-proposal state machine (TODO.md item 48
+  phase 2).** Item 48's original sketch said route template authoring "through
+  32B's proposal state machine." On implementation the better fit was item
+  25's config-versioning plane: `templates.yaml` became a fourth governed
+  document beside connections/policy/catalog, carried through the same
+  `ConfigVersionStore` snapshots and `/admin/config/*` validate → preview →
+  stage → apply → rollback flow (plus a `templates.yaml` admin-UI editor tab).
+  The rejected alternative (**Option A**) was a per-template proposal model
+  with individual approve/publish and separation of duties, mirroring
+  `catalog/governance.py`. Two reasons it lost: **(1)** query templates are a
+  configuration *document* loaded by `config_reload` alongside the other three
+  — not catalog *entries*, which carry sensitivity/confidence/provenance/
+  relationship-target fields the 32B model is built around; forcing a config
+  document through catalog-entry machinery would have been a second, awkward
+  mutation path, exactly what this repo's standing rule forbids. **(2)** The
+  config-versioning plane already *is* "governed create/edit/publish/rollback"
+  for config documents — whole-document staging, validation, re-validation on
+  apply (QG-15), atomic reload, rollback to a prior snapshot, redaction-safe
+  audit, and no self-publish (staging is not activation). Templates joined it
+  as one more document with zero new governance code. The cost is that
+  governance is whole-`templates.yaml`, not per-template; a finer-grained
+  per-template sign-off workflow remains a possible future addition, not a gap
+  this phase left broken. A version snapshots its own `templates.yaml`, and a
+  pre-phase-2 version with no snapshot falls back to the deployment's static
+  `template_file` on apply rather than clobbering it to empty.
+- **2026-07-21 — The typed Python query builder front-ends the real AST
+  rather than re-implementing it, and ships in-tree before a standalone
+  distribution (TODO.md item 51 phase 1).** `querygate.client` builds the
+  same `query_ast` Pydantic models `StructuredQueryService` validates, then
+  serializes them to wire JSON. Two deliberate choices, each with a rejected
+  alternative: **(1) Reuse the server's models, don't build a parallel typed
+  schema.** The obvious "SDK" shape is a decoupled client with its own
+  validation, but that would *duplicate* server-side validation (a CLAUDE.md
+  invariant forbids exactly that) and could silently drift from the AST. By
+  constructing the real models, `build()` raises the server's own error
+  early, the builder can never accept a shape the server rejects (or vice
+  versa), and drift is structurally impossible — enforced by explicit
+  drift-guard tests that fail if the AST grows a field/variant/operator the
+  builder can't express. The cost is that the builder currently imports from
+  the `querygate` package; acceptable because that import path
+  (`query_ast/models.py`, `querygate/__init__.py`) is pydantic-only and
+  stays light. **(2) Ship in-tree (`from querygate.client import Query`) now;
+  defer the standalone dependency-light distribution.** A separate
+  `querygate-client` package (PyPI/npm) that installs without the server's
+  full dependency closure is the eventual goal, but it is coupled to item 30
+  phase 2: no package registry has been chosen or configured, and publishing
+  requires explicit maintainer approval. Building a standalone dist with
+  nowhere to publish it — and a second copy of the models to keep in sync —
+  would be premature; the in-tree module is the shipped, importable, tested
+  surface until a registry exists. TypeScript is likewise phase 2: a genuine
+  second-language implementation with its own sync-test strategy, not more of
+  the Python work.
 - **2026-07-21 — Per-principal quota is enforced before queuing, counts every
   admitted attempt, skips anonymous callers, and ships in-process first
   (TODO.md item 50 phase 1).** A rolling-window cap on request count and

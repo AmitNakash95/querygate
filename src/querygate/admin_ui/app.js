@@ -13,7 +13,7 @@
     health: ["Control plane / Connection health", "Reachability, credential-free"],
     templates: ["Control plane / Query templates", "Named, parameterized queries"],
   };
-  const documentKeys = ["policy", "connections", "catalog"];
+  const documentKeys = ["policy", "connections", "catalog", "templates"];
   const guardrailFields = {
     "guard-max-limit": "max_limit",
     "guard-max-limit-aggregate": "max_limit_aggregate",
@@ -46,8 +46,8 @@
     tables: [],
     selectedTable: null,
     policyDocument: null,
-    activeDocuments: { policy: "", connections: "", catalog: "" },
-    draftDocuments: { policy: "", connections: "", catalog: "" },
+    activeDocuments: { policy: "", connections: "", catalog: "", templates: "" },
+    draftDocuments: { policy: "", connections: "", catalog: "", templates: "" },
     selectedDocument: "policy",
     validatedFingerprint: null,
     auditCursor: 0,
@@ -564,14 +564,16 @@
       const valid = validation.valid && preview.ready_to_stage;
       $("#validation-status").className = `status-chip ${valid ? "good" : "bad"}`;
       $("#validation-status").textContent = valid ? "Valid" : "Needs changes";
+      const scopeNote = "Structural, slot, and policy checks. Column/table existence is verified against the live database separately.";
       if (valid) {
         const documentSummary = preview.documents.map((item) => `${item.document}: ${item.change}`).join(" · ");
-        $("#validation-result").innerHTML = `<div class="validation-ok"><span class="status-chip good">Passed</span><p>${escapeHtml(documentSummary)}</p></div>`;
+        $("#validation-result").innerHTML = `<div class="validation-ok"><span class="status-chip good">Passed</span><p>${escapeHtml(documentSummary)}</p><p class="validation-note">${escapeHtml(scopeNote)}</p></div>`;
         state.validatedFingerprint = fingerprintDraft();
         $("#stage-draft").disabled = !anyDocumentChanged();
       } else {
         const errors = [...(validation.errors || []), ...(preview.errors || [])];
-        $("#validation-result").innerHTML = `<ul>${Array.from(new Set(errors)).map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul>`;
+        const items = Array.from(new Set(errors)).map((error) => `<li>${escapeHtml(error)}</li>`).join("");
+        $("#validation-result").innerHTML = `<ul>${items}</ul><p class="validation-note">${escapeHtml(scopeNote)}</p>`;
         state.validatedFingerprint = null;
         $("#stage-draft").disabled = true;
       }
@@ -579,6 +581,52 @@
       $("#validation-status").className = "status-chip bad";
       $("#validation-status").textContent = "Request failed";
       $("#validation-result").innerHTML = `<ul><li>${escapeHtml(error.message)}</li></ul>`;
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  const SCHEMA_STATUS_CLASS = {
+    ok: "good",
+    issues: "bad",
+    connection_unavailable: "warning",
+    unreachable: "warning",
+    structural_error: "bad",
+  };
+
+  function renderSchemaCheck(result) {
+    const el = $("#schema-check-result");
+    if (!result.checked) {
+      el.innerHTML = `<p class="empty-state">${escapeHtml(result.note || "Nothing to check.")}</p>`;
+      return;
+    }
+    if (!result.results.length) {
+      el.innerHTML = `<p class="empty-state">No query templates to check.</p>`;
+      return;
+    }
+    el.innerHTML = result.results
+      .map((row) => {
+        const cls = SCHEMA_STATUS_CLASS[row.status] || "neutral";
+        const messages = row.messages.length
+          ? `<ul>${row.messages.map((m) => `<li>${escapeHtml(m)}</li>`).join("")}</ul>`
+          : "";
+        return `<div class="schema-check-row"><span class="status-chip ${cls}">${escapeHtml(row.status.replace(/_/g, " "))}</span> <code>${escapeHtml(row.template_id)}</code> <small>${escapeHtml(row.connection)}</small>${messages}</div>`;
+      })
+      .join("");
+  }
+
+  async function checkSchema() {
+    const button = $("#check-schema");
+    setBusy(button, true, "Checking…");
+    try {
+      const payload = { templates_yaml: state.draftDocuments.templates || null };
+      const result = await api("/admin/config/check-template-schema", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      renderSchemaCheck(result);
+    } catch (error) {
+      $("#schema-check-result").innerHTML = `<ul><li>${escapeHtml(error.message)}</li></ul>`;
     } finally {
       setBusy(button, false);
     }
@@ -660,7 +708,7 @@
     const phrase = `${rollback ? "ROLLBACK" : "ACTIVATE"} v${version.id}`;
     const confirmed = await confirmAction({
       title: rollback ? `Roll back to v${version.id}?` : `Activate v${version.id}?`,
-      message: `${rollback ? "This restores an earlier complete configuration snapshot." : "This reloads connections, policy, and catalog from the staged snapshot."}${anyDocumentChanged() ? " Your current local draft will be reset to the newly active version." : ""} Type ${phrase} to continue.`,
+      message: `${rollback ? "This restores an earlier complete configuration snapshot." : "This reloads connections, policy, catalog, and query templates from the staged snapshot."}${anyDocumentChanged() ? " Your current local draft will be reset to the newly active version." : ""} Type ${phrase} to continue.`,
       phrase,
     });
     if (!confirmed) {
@@ -683,6 +731,7 @@
       connections: version.connections_yaml || "",
       policy: version.policy_yaml || "",
       catalog: version.catalog_yaml || "",
+      templates: version.templates_yaml || "",
     };
     state.validatedFingerprint = null;
     syncDirtyState();
@@ -1243,6 +1292,7 @@
       connections: current.connections_yaml || "",
       policy: current.policy_yaml || "",
       catalog: current.catalog_yaml || "",
+      templates: current.templates_yaml || "",
     };
     if (!preserveDraft || !anyDocumentChanged()) state.draftDocuments = { ...state.activeDocuments };
     renderOverview(configuration);
@@ -1435,6 +1485,7 @@
       catch { toast("Clipboard access is unavailable in this browser.", "bad"); }
     });
     $("#validate-draft").addEventListener("click", validateDraft);
+    $("#check-schema").addEventListener("click", checkSchema);
     $("#stage-draft").addEventListener("click", stageDraft);
     $("#discard-draft").addEventListener("click", discardDraft);
     $("#refresh-history").addEventListener("click", () => loadGovernance(true).then(() => toast("Version history refreshed.")).catch((error) => toast(error.message, "bad")));

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+from querygate.core.config import AppConfig
 from querygate.core.exceptions import QueryValidationError
 from querygate.query_ast.models import StructuredQuery
 from querygate.templates.binding import bind_template, validate_template_structure
@@ -13,6 +14,7 @@ from querygate.templates.models import (
     PublicQueryTemplate,
     QueryTemplate,
     QueryTemplateFile,
+    TemplateParameter,
 )
 
 
@@ -71,6 +73,60 @@ def test_min_max_only_valid_for_numeric():
                 "query": {"from": "orders", "select": ["orders.id"]},
             }
         )
+
+
+# ── slot self-consistency (allowed_values / default must match the type) ──────
+def test_allowed_values_must_match_declared_type():
+    # type integer but the enum is strings — the classic contradiction: the
+    # template would deploy but no integer a caller supplies could ever match.
+    with pytest.raises(ValueError, match="allowed value 'pending' must be an integer"):
+        TemplateParameter(name="status", type="integer", allowed_values=["pending", "completed"])
+
+
+def test_allowed_value_out_of_numeric_bounds_rejected():
+    with pytest.raises(ValueError, match="allowed value 99 is above max 10"):
+        TemplateParameter(name="n", type="integer", max=10, allowed_values=[1, 5, 99])
+
+
+def test_default_must_satisfy_its_own_slot_type():
+    with pytest.raises(ValueError, match="default 'hello' must be an integer"):
+        TemplateParameter(name="n", type="integer", required=False, default="hello")
+
+
+def test_default_must_be_in_allowed_values_when_set():
+    with pytest.raises(ValueError, match="default 3 is not in allowed_values"):
+        TemplateParameter(
+            name="k", type="integer", required=False, default=3, allowed_values=[1, 2]
+        )
+
+
+def test_string_default_over_max_length_rejected():
+    with pytest.raises(ValueError, match="default 'toolong' exceeds max length 2"):
+        TemplateParameter(name="x", type="string", max_length=2, required=False, default="toolong")
+
+
+def test_list_default_elements_validated_against_slot():
+    with pytest.raises(ValueError, match="default 'x' must be an integer"):
+        TemplateParameter(
+            name="ids", type="integer", is_list=True, required=False, default=[1, "x"]
+        )
+
+
+def test_self_consistent_slot_is_accepted():
+    p = TemplateParameter(
+        name="ok", type="integer", required=False, default=2, allowed_values=[1, 2, 3]
+    )
+    assert p.default == 2
+
+
+def test_documented_TEMPLATES_FILE_env_var_populates_template_file(monkeypatch):
+    """Regression: the documented env var is the plural TEMPLATES_FILE
+    (.env.example, examples/templates.example.yaml, CLI help). Without the
+    field's AliasChoices it only bound the singular TEMPLATE_FILE, so the
+    documented var was silently ignored and no templates ever loaded."""
+    monkeypatch.setenv("TEMPLATES_FILE", "examples/templates.example.yaml")
+    monkeypatch.delenv("TEMPLATE_FILE", raising=False)
+    assert AppConfig().template_file == "examples/templates.example.yaml"
 
 
 def test_template_file_rejects_duplicate_ids():
