@@ -27,7 +27,15 @@ from querygate.validation.schema_validation import select_item_column_refs
 AuditDecision = Literal["allowed", "denied", "unknown"]
 AuditSurface = Literal["rest", "mcp", "internal"]
 ConfigChangeAction = Literal[
-    "validate", "preview", "simulate", "diff", "blast_radius", "stage", "apply", "rollback"
+    "validate",
+    "preview",
+    "simulate",
+    "diff",
+    "blast_radius",
+    "check_template_schema",
+    "stage",
+    "apply",
+    "rollback",
 ]
 CatalogGovernanceAction = Literal[
     "generate",
