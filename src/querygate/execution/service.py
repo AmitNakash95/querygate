@@ -50,6 +50,7 @@ from querygate.core.exceptions import (
     QueryValidationError,
     QueueDepthExceededError,
     QueueFullError,
+    QuotaExceededError,
     public_error_message,
 )
 from querygate.core.logging import get_logger, log_execution
@@ -61,11 +62,13 @@ from querygate.execution.cost_estimation import (
     enforce_cost_estimate,
     estimate_postgres_query_cost,
 )
+from querygate.execution.quota import enforce_query_quota, record_query_quota_bytes
 from querygate.metrics import (
     COST_ESTIMATION_WOULD_REJECT_TOTAL,
     QUERIES_REJECTED_TOTAL,
     QUERIES_TOTAL,
     QUERY_DURATION_SECONDS,
+    QUERY_QUOTA_REJECTIONS_TOTAL,
     QUEUE_WAIT_SECONDS,
     classify_rejection,
 )
@@ -419,8 +422,18 @@ class StructuredQueryService:
         params: Optional[str] = None
         policy_validated = False
         queue_wait_ms: Optional[int] = None
+        quota_reservation = None
         try:
             policy = self._get_policy()
+            # Per-principal rate/byte quota (TODO.md item 50) — checked before
+            # queuing or touching the database, so a rate-limited caller doesn't
+            # even consume a concurrency slot. Raises QuotaExceededError (a
+            # PolicyViolationError), handled by the outer `except` below.
+            quota_reservation = enforce_query_quota(
+                policy,
+                connection_id=self._connection_id,
+                principal_subject=self._principal_subject,
+            )
             wait_seconds = resolve_wait_seconds(
                 queue_mode=queue_mode,
                 requested_wait_seconds=wait_timeout_seconds,
@@ -459,6 +472,9 @@ class StructuredQueryService:
                     rows, byte_cap_hit = _cap_response_bytes(rows, policy.max_response_bytes)
                     truncated = row_limit_hit or byte_cap_hit
                     response_bytes = len(json.dumps(rows, default=str).encode("utf-8"))
+                    # Attribute this response's size to the quota window (item
+                    # 50); a no-op when the quota is disabled for this policy.
+                    record_query_quota_bytes(quota_reservation, response_bytes)
                     elapsed_seconds = time.monotonic() - start
                     QUEUE_WAIT_SECONDS.labels(
                         connection=self._connection_id, outcome="completed"
@@ -534,7 +550,7 @@ class StructuredQueryService:
                     if policy_validated
                     else (
                         "denied"
-                        if error_category in ("policy", "schema", "not_found")
+                        if error_category in ("policy", "schema", "not_found", "quota")
                         else "unknown"
                     )
                 ),
@@ -551,6 +567,10 @@ class StructuredQueryService:
             QUERIES_REJECTED_TOTAL.labels(
                 connection=self._connection_id, reason=classify_rejection(exc)
             ).inc()
+            if isinstance(exc, QuotaExceededError):
+                QUERY_QUOTA_REJECTIONS_TOTAL.labels(
+                    connection=self._connection_id, quota_kind=exc.quota_kind
+                ).inc()
             raise
 
     async def execute_many(

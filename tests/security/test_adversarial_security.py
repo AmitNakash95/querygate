@@ -1546,3 +1546,63 @@ def test_query_template_denied_table_rejected():
     bound = bind_template(template, {"v": "000-00-0000"})
     with pytest.raises(PolicyViolationError, match="not accessible"):
         validate_policy(bound, Policy(denied_tables=["employees"]), connection_id="demo")
+
+
+@pytest.mark.asyncio
+async def test_per_principal_quota_refuses_execution_before_touching_the_database(monkeypatch):
+    """TODO.md item 50: max_concurrency bounds *in-flight* queries; a caller
+    that never exceeds it can still fire unbounded sequential queries and
+    exhaust DB capacity / a cost budget. The per-principal rolling-window quota
+    closes that: once a principal's window is at its cap, the next attempt is
+    refused before validation, compilation, or any DB session — so a
+    quota-rejected query never reaches the database. A different principal's
+    window is independent and unaffected.
+    """
+    from querygate.core.exceptions import QuotaExceededError
+    from querygate.execution.quota import in_process_quota_limiter
+
+    set_policy_store(
+        PolicyStore(
+            default=Policy(max_requests_per_window=2, quota_window_seconds=3600), overrides={}
+        )
+    )
+
+    # Fail loudly if execution ever reaches the schema/engine layer: a
+    # quota-rejected attempt must be refused strictly before this seam.
+    def _boom(*_a, **_k):
+        raise AssertionError("quota-rejected query must not reach schema validation / the engine")
+
+    monkeypatch.setattr(svc, "get_engine", _boom)
+    monkeypatch.setattr(sv, "get_engine", _boom)
+
+    limiter = in_process_quota_limiter()
+    # Simulate this principal already having spent its window (two prior
+    # queries on this connection) without needing a live DB round-trip.
+    for _ in range(2):
+        limiter.reserve(
+            ("demo", "noisy-agent"),
+            max_requests=2,
+            max_response_bytes=None,
+            window_seconds=3600,
+        )
+
+    noisy = StructuredQueryService(
+        connection_id="demo", principal=Principal(subject="noisy-agent", auth_method="api_key")
+    )
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+
+    with pytest.raises(QuotaExceededError) as exc_info:
+        await noisy.execute(query)
+    assert exc_info.value.quota_kind == "requests"
+    # It is a PolicyViolationError, so every existing deny-path handler treats
+    # it as a client-actionable rejection with a surfaceable message.
+    assert isinstance(exc_info.value, PolicyViolationError)
+
+    # A different principal has a fresh window: the quota gate lets it through
+    # (it then fails at the sabotaged engine seam, proving it passed the quota
+    # check rather than being throttled).
+    other = StructuredQueryService(
+        connection_id="demo", principal=Principal(subject="other-agent", auth_method="api_key")
+    )
+    with pytest.raises(AssertionError, match="must not reach"):
+        await other.execute(query)

@@ -27,6 +27,7 @@ from querygate.core.exceptions import (
     CostEstimateExceededError,
     PolicyViolationError,
     QueueFullError,
+    QuotaExceededError,
 )
 
 REGISTRY = CollectorRegistry()
@@ -50,7 +51,11 @@ QUERIES_REJECTED_TOTAL = Counter(
     # from "waited and ran out of time". cost_estimate: rejected by a
     # pre-execution Postgres EXPLAIN cost check (TODO.md item 26) — broken
     # out from the coarser `policy` bucket so operators can tell threshold
-    # tuning apart from allow/deny rules. db_error: everything else,
+    # tuning apart from allow/deny rules. quota: rejected before execution by a
+    # per-principal rate/byte quota (TODO.md item 50) — broken out from `policy`
+    # so operators can tell cost/rate-budget throttling apart from allow/deny
+    # rules; see also querygate_query_quota_rejections_total for the
+    # requests-vs-bytes breakdown. db_error: everything else,
     # including genuine query timeouts — see TODO.md item 3, which hasn't
     # yet established a reliable, dialect-verified way to distinguish a
     # timeout from any other DB-layer failure.
@@ -99,6 +104,18 @@ QUEUE_WAIT_SECONDS = Histogram(
     "running, hitting a capacity timeout, or being rejected for an "
     "already-full queue, by connection and outcome (TODO.md item 35).",
     ["connection", "outcome"],  # outcome: completed | capacity_timeout | queue_full
+    registry=REGISTRY,
+)
+
+QUERY_QUOTA_REJECTIONS_TOTAL = Counter(
+    "querygate_query_quota_rejections_total",
+    "Execution attempts refused before running by a per-principal quota "
+    "(TODO.md item 50), by connection and which cap tripped. quota_kind: "
+    "requests (rolling-window request-count cap) | bytes (rolling-window "
+    "response-byte cap). Single-instance visibility only — the default "
+    "in-process quota window is per-replica, like the in-process concurrency "
+    "limiter; a Redis-backed cross-replica quota is item 50 phase 2.",
+    ["connection", "quota_kind"],
     registry=REGISTRY,
 )
 
@@ -184,6 +201,10 @@ def classify_rejection(exc: BaseException) -> str:
         return "concurrency"
     if isinstance(exc, CostEstimateExceededError):
         return "cost_estimate"
+    # Checked before PolicyViolationError: QuotaExceededError subclasses it, and
+    # a rate/budget throttle is a distinct operational signal from allow/deny.
+    if isinstance(exc, QuotaExceededError):
+        return "quota"
     if isinstance(exc, PolicyViolationError):
         return "policy"
     if isinstance(exc, ValueError):
@@ -201,6 +222,7 @@ __all__ = [
     "QUERIES_TOTAL",
     "QUERIES_REJECTED_TOTAL",
     "QUERY_DURATION_SECONDS",
+    "QUERY_QUOTA_REJECTIONS_TOTAL",
     "CONCURRENCY_IN_USE",
     "CONCURRENCY_MAX",
     "QUEUE_DEPTH",
