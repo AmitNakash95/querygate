@@ -17,7 +17,14 @@ connection string or raw driver error. `POST
 independent of the read scope) triggers an immediate re-check of one
 connection instead of waiting for the next background interval, rate-limited
 to one manual probe per connection per cooldown window. `/metrics` provides Prometheus-format
-operational metrics. Structured application logs carry request correlation
+operational metrics. `GET /api/v1/admin/observability/overview` (scope
+`admin:observability:read`) aggregates those metrics into a redaction-safe
+operational overview — query volume, success/rejection categories,
+queue/concurrency pressure, and the cost-estimation fail-open rate, globally
+and per connection — as an honest current-process snapshot (labeled
+non-durable, per-replica under the default backends), so operators can read
+trends without scraping raw `/metrics`; the `/admin/` control plane renders it
+as an "Observability" panel. Structured application logs carry request correlation
 IDs, while persisted audit events record normalized query shape, caller,
 surface, outcome, timing, and bounded result metadata without predicate
 literals or returned rows.
