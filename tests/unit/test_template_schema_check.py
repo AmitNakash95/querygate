@@ -76,15 +76,25 @@ async def test_missing_table_is_reported_as_issues(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unreachable_database_is_best_effort_not_a_failure(monkeypatch):
-    _patch_reflection(
-        monkeypatch, raises=sa.exc.OperationalError("SELECT 1", {}, Exception("refused"))
+async def test_unreachable_database_is_best_effort_and_never_leaks_the_driver_error(monkeypatch):
+    # A real connection failure embeds host/credentials/SQL in the driver error.
+    # The result must report only a generic status/message — never that text.
+    driver_error = sa.exc.OperationalError(
+        "SELECT * FROM orders  -- statement text",
+        {},
+        Exception("connection refused: password=SUPERSECRET host=db.internal port=5432"),
     )
+    _patch_reflection(monkeypatch, raises=driver_error)
     result = await governance._check_one_template_schema(
         _template({"from": "orders", "select": ["orders.id"], "limit": 5})
     )
     assert result.status == "unreachable"
-    assert "could not be reached" in result.messages[0]
+    assert result.messages == [
+        "schema not checked — the connection's database could not be reached"
+    ]
+    blob = " ".join(result.messages)
+    for leak in ("SUPERSECRET", "password=", "db.internal", "5432", "statement text", "SELECT"):
+        assert leak not in blob
 
 
 @pytest.mark.asyncio
