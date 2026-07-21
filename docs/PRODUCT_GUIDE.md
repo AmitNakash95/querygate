@@ -2155,6 +2155,30 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-21 — The admin observability overview reports an honest
+  single-process snapshot rather than pretending to be a durable
+  time-series (TODO.md item 44, phase 1).** `GET
+  /api/v1/admin/observability/overview` aggregates the in-process
+  Prometheus registry into operational trends (rejection categories, queue
+  pressure, cost-estimate fail-open rate) globally and per connection.
+  QueryGate does **not** own a durable metrics store, so instead of
+  silently presenting cumulative-since-process-start counters as if they
+  were history, the response is explicitly labeled
+  (`source="process_snapshot"`, `durable=false`, `since`, and a `note` that
+  the numbers are per-replica under the default backends). **Why accepted:**
+  an observability surface that quietly implies more durability/coverage
+  than it has is actively misleading to the operator making a capacity or
+  policy decision from it — worse than a smaller, truthful one. The
+  aggregates are also built only from already-public, low-cardinality
+  metric labels (connection ids, fixed reason/outcome buckets), never a
+  query, value, or principal, so the surface stays inside the same
+  redaction invariant as `metrics.py`/`audit/logger.py` (QG-28). The `/admin/`
+  control plane renders it as a read-only cards panel over the same scoped
+  endpoint, with the snapshot's honesty note shown in the UI. Consistent with
+  that honesty, the panel shows current-value **cards**, not time-window trend
+  charts — a point-in-time snapshot has no stored history to plot, so real
+  charts wait on the deferred external metrics backend. The phase-1 boundary is
+  deliberately "ship the honest cards, not a dishonest trend line."
 - **2026-07-21 — Query-template validation is layered: offline slot/structural
   checks in the always-on dry-run, live column/table existence as a separate
   best-effort on-demand action (TODO.md item 83).** Two deliberate choices.
