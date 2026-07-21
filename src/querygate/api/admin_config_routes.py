@@ -30,6 +30,7 @@ from querygate.admin.models import (
     PolicyTemplateRenderRequest,
     PolicyTemplateRenderResult,
     PolicyTemplateSummary,
+    TemplateSchemaCheckResult,
     SemanticAccessDiff,
 )
 from querygate.config_reload import ReloadResult
@@ -47,7 +48,15 @@ class ConfigChangeRequest(pyd.BaseModel):
     connections_yaml: Optional[str] = None
     policy_yaml: Optional[str] = None
     catalog_yaml: Optional[str] = None
+    templates_yaml: Optional[str] = None
     description: Optional[str] = None
+
+
+class TemplateSchemaCheckRequest(pyd.BaseModel):
+    """Draft templates to check against live schema; unset inherits the active
+    version's templates."""
+
+    templates_yaml: Optional[str] = None
 
 
 class ValidationResult(pyd.BaseModel):
@@ -76,6 +85,7 @@ def build_admin_config_router(
             connections_yaml=request.connections_yaml,
             policy_yaml=request.policy_yaml,
             catalog_yaml=request.catalog_yaml,
+            templates_yaml=request.templates_yaml,
         )
         return ValidationResult(valid=not errors, errors=errors)
 
@@ -90,7 +100,20 @@ def build_admin_config_router(
             connections_yaml=request.connections_yaml,
             policy_yaml=request.policy_yaml,
             catalog_yaml=request.catalog_yaml,
+            templates_yaml=request.templates_yaml,
         )
+
+    @router.post("/check-template-schema", response_model=TemplateSchemaCheckResult)
+    async def check_template_schema_endpoint(
+        request: TemplateSchemaCheckRequest,
+        principal: Principal = Depends(get_principal),
+    ):
+        # Reveals live column/table existence (read-like) while resolving
+        # caller-supplied template content (write-like), so it requires both
+        # config scopes — the same reasoning as /simulate and /diff.
+        require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        return await governance.check_template_schema(cfg, principal, request.templates_yaml)
 
     @router.post("/simulate", response_model=CandidatePolicySimulation)
     async def simulate_candidate_endpoint(
@@ -177,6 +200,7 @@ def build_admin_config_router(
                 connections_yaml=request.connections_yaml,
                 policy_yaml=request.policy_yaml,
                 catalog_yaml=request.catalog_yaml,
+                templates_yaml=request.templates_yaml,
                 description=request.description,
             )
         except ConfigValidationError as exc:

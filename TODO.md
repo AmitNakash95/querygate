@@ -79,10 +79,10 @@ order-of-magnitude, not commitments.
 | 45 | ✅ Dedicated non-admin "My access" portal (phase 1: identity, guardrails, mandatory-filter readiness, schema browser; phase 2: personal denial history not started) | M | 22, 31, 33 |
 | 46 | ✅ Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
 | 47 | Safe draft recovery plus config export/import UX | M | 13, 25, 31 |
-| 48 | ✅ Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) (phase 1: file-configured invocable templates + REST/MCP; phase 2: governed create/edit/approve/publish/rollback not started) | L | 6, 22, 25, 32B |
+| 48 | ✅ Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) (phase 1: file-configured invocable templates + REST/MCP; phase 2: governed authoring via the config-versioning plane) | L | 6, 22, 25, 32B |
 | 49 | ✅ Column-value masking/tokenization (not just allow/deny) | L | 6, 27 |
 | 50 | ✅ Per-principal rate limits / query quotas over time (phase 1: in-process rolling-window request/byte quota; phase 2: Redis-backed cross-replica quota not started) | M | 9, 25 |
-| 51 | Typed client-side query-builder SDK (Python + TypeScript) | M (per language) | 20 |
+| 51 | ✅ Typed client-side query-builder SDK (phase 1: Python builder; phase 2: TypeScript + standalone dependency-light distribution not started) | M (per language) | 20 |
 | 52 | Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI) | S (per framework) | 20 |
 | 53 | Independent third-party security audit + published report | S* | 28 |
 | 54 | Compliance control mapping (SOC 2 / ISO 27001 readiness) | L | 23, 25, 28 |
@@ -1292,101 +1292,9 @@ downloaded file or a server-side, authorized, encrypted-at-rest draft store
 with retention/deletion controls and audit events—not invisible browser
 persistence.
 
-### 48. Pre-defined, admin-approved query templates ("Toolbox"-style curated tools)
+### 48. Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) ✅ DONE
 
-**Phase 1 shipped (file-configured, invocable templates); phase 2 (governed
-create/edit/approve/publish/rollback via 32B) not started.**
-
-A new `querygate/templates/` module adds a `QueryTemplate` model — a named,
-parameterized `StructuredQuery` *skeleton* (a raw dict with `{param: name}`
-placeholders in value positions) plus typed parameter slots
-(`type`/`required`/`default`/`min`/`max`/`max_length`/`allowed_values`/
-`is_list`) — loaded from an optional `TEMPLATES_FILE` into a `TemplateStore`
-singleton that mirrors `CatalogStore` (hot-reloadable via the existing
-config-reload; validated by `querygate-validate-config --template-file`; cross-
-checked so every template targets a real connection id). At invocation
-(`templates/binding.py`) the caller's parameters are type/constraint-checked
-against the slots, substituted into the skeleton, and the **result validated as
-a real `StructuredQuery`** and run through the *unchanged*
-`StructuredQueryService` — so a bound template inherits every policy cap,
-allow/deny list, mandatory row filter, schema check, and guardrail an ad-hoc
-query has, and a parameter can never smuggle SQL (there is no SQL) or exceed
-policy (`tests/security/test_adversarial_security.py::
-test_query_template_cannot_exceed_policy`). Surface:
-`GET /api/v1/query-templates` + `POST /api/v1/query-templates/{id}/run` (REST),
-`list_query_templates`/`run_query_template` (MCP), and a read-only "Query
-templates" browse panel in the `/admin/` control plane — all filtered
-per-principal by target-connection visibility (item 22) — an unknown template
-and one on a hidden connection return the same non-enumerating 404. Invocations
-audit distinctly (`operation="run_query_template"`, `template_id`, and the
-parameter *names* — never values, which are stripped from the query shape like
-any literal). `validate-config` also structurally validates each template's
-query skeleton (substituting typed dummy values and validating the result as a
-`StructuredQuery`), so a malformed template is caught at deploy, not only at
-first invocation. Because a bound template runs the identical pipeline, the
-same enforcement is proven through the template path: SQL-injection payloads in
-a parameter value are bound as data not SQL, a denied table/column is rejected,
-and a policy `mandatory_row_filter` is AND-ed in (see the adversarial and
-integration tests below). Documented as QG-26 in `docs/THREAT_MODEL.md`.
-Covered by `tests/unit/test_query_templates.py` (model, binding, structural
-validation), `tests/integration/test_query_template_api.py` (REST pipeline,
-visibility, mandatory-filter enforcement, redaction-safe audit),
-`tests/integration/test_admin_ui.py` (the browse panel), and the MCP
-registration + adversarial (injection/denied-table/cannot-exceed-policy)
-tests.
-
-**Phase 2 (not started):** the governed create/edit/approve/publish/rollback
-workflow. Phase 1 follows the repo's established pattern — every config
-resource (connections/policy/catalog) began file-configured, with the
-governance API layered on later (items 25/32B); file-configured templates are
-declarative config, exactly as safe as `policy.yaml` (and a template can't
-exceed policy). Phase 2 routes template authoring through 32B's existing
-proposal state machine and the same `CatalogFileRepository` lock, so a template
-must never publish itself or skip review — no second catalog file, store, or
-mutation path.
-
-**Original scope (for reference — see above for what shipped in phase 1):**
-
-**Effort: L (3–5 days).** Not a new execution path — the resolved query still
-runs through the full existing pipeline (policy, schema, compiler,
-concurrency, audit). The work is the template model itself (typed parameter
-slots bound into a stored `StructuredQuery` AST), reusing 32B's governance
-state machine for review/approve/publish/rollback, and new discovery/
-invocation surface on REST and MCP.
-
-**Why it matters:** Google's Gen AI Toolbox for Databases popularized a
-pattern this project's own model is a natural fit for: instead of (or in
-addition to) letting an agent compose an arbitrary `StructuredQuery` within
-policy caps, an admin pre-defines a fixed set of named, parameterized
-queries — "get_orders_for_customer(customer_id)", "top_n_products(n,
-category)" — and agents only ever call one of *those* by name with typed
-parameters. This shrinks the effective attack/error surface to a reviewed,
-finite set of query shapes, gives non-technical stakeholders something
-concrete to sign off on ("these are the 12 things this agent can ask"), and
-matches how teams already think about tool-calling for agents. Critically,
-this is additive to QueryGate's existing guarantee, not a new one: there is
-still no raw-SQL field anywhere — a template is just a stored, named,
-parameterized `StructuredQuery` AST, so it inherits every validation and
-guardrail already built for ad-hoc queries.
-
-**What to do:** Add a `QueryTemplate` model (id, description, target
-connection, a `StructuredQuery` AST containing named parameter
-placeholders, and typed/validated parameter slots — type, required,
-min/max, allow-list) stored via the same file-backed, versioned mechanism
-already used for the catalog/config (do not add a second store or mutation
-path, per this file's standing rule for catalog/config governance). Route
-create/edit/approve/publish/rollback through 32B's existing governance gate
-— a template must never publish itself or skip review, same as a catalog
-draft. At invocation time, bind the caller's parameters into the stored AST
-and run the *resulting* `StructuredQuery` through the unchanged
-`StructuredQueryService` pipeline — parameters get no special exemption
-from policy caps, allow/deny lists, or mandatory row filters. Expose
-published templates as individually discoverable/named MCP tools (e.g.
-`list_query_templates`, `run_query_template(id, params)`) and a REST
-endpoint, filtered per-principal the same way item 22 scopes connection
-visibility. Audit template invocations distinctly (template id + param
-shape, never param values or SQL) so operators can see curated-tool usage
-separately from ad-hoc structured-query usage in the same audit stream.
+Named, parameterized `StructuredQuery` templates: file-configured + invocable over REST/MCP (phase 1), with authoring now a governed, versioned, rollbackable change — `templates.yaml` is a fourth document in the item 25 config-versioning plane (validate/preview/stage/apply/rollback + an admin-UI config-editor pane), phase 2. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 48).
 
 ---
 
@@ -1529,9 +1437,76 @@ audit quota rejections the same way other policy denials are audited today.
 
 ### 51. Typed client-side query-builder SDK (Python + TypeScript)
 
-**Effort: M per language.** A thin, generated-or-hand-written typed
-wrapper around the existing `StructuredQuery` Pydantic schema — no
-server-side change; it mirrors a contract that already exists.
+**Phase 1 (Python builder) ✅ DONE.** **Phase 2 (TypeScript sibling +
+standalone dependency-light distribution) not started — split out below
+because the standalone-distribution half is coupled to item 30 phase 2's
+still-unresolved registry decision, and TypeScript is a genuinely separate
+language implementation, not more of the Python work.**
+
+**Phase 1 shipped:** `querygate/client/` — a fluent, typed builder that
+constructs the *same* `query_ast` Pydantic models the server validates, then
+serializes them to the exact REST/MCP wire JSON. Public surface
+(`querygate.client.builder`, re-exported from `querygate.client`):
+
+- `Query.from_(...)` with chainable `.select/.distinct/.join/.where/.group_by/
+  .having/.order_by/.limit/.offset/.top_n/.intent`, terminating in
+  `.build()` (a validated `StructuredQuery`), `.to_dict()`, or `.to_json()`.
+- A predicate DSL: `col("Table.Col")` with Python comparison operators
+  (`==`/`!=`/`<`/`<=`/`>`/`>=`, plus named `.eq/.neq/...`), `.in_/.not_in/
+  .like/.between/.is_null/.is_not_null`, column-to-column comparison
+  (`col("a") > col("b")` → `value_col`), and boolean groups `and_/or_/not_`.
+- Select-item helpers for every non-string member of the `SelectItem` union:
+  `agg.{count,sum,avg,min,max,stddev,variance}`, `date_bucket`, `string_agg`,
+  `array_agg`, `percentile_cont`, `fn_select` (scalar function projection),
+  and `case`/`when`; scalar-function predicate targets via `fn`/`col_fn`;
+  `asc`/`desc` ordering helpers. Scalar-function args and CASE results must be
+  wrapped `col(...)`/`lit(...)` (bare values are rejected as ambiguous), and
+  a predicate helper handed to `.select()` raises a message pointing at
+  `fn_select`.
+
+**No server change, and no duplicated validation** (the CLAUDE.md invariant):
+because `build()` instantiates the real models, an illegal shape (`count(*)`
+with `distinct`, a self-join missing an alias, an out-of-range percentile,
+`between` without two values) raises client-side with the *same* error the
+server would return — and whatever it emits is still fully policy/schema/
+guardrail-checked by `StructuredQueryService` before any row is touched.
+The builder can never drift ahead of or behind the AST because it *is* a
+thin front-end over it.
+
+Covered by `tests/unit/test_client_builder.py` (23 tests): fidelity to
+hand-written wire JSON, round-trip back through the real model, operator/
+value_col/boolean/CASE/top_n/self-join/composite-join coverage, validation
+propagation, and three **drift guards** that fail if the AST grows a
+`StructuredQuery` field, a `SelectItem` variant, or a `CompareOp`/
+`AggregateFn`/`ScalarFn` the builder can't express — the "kept in sync via a
+schema test" acceptance criterion. `examples/client_sdk_python.py` is a
+runnable script (offline build + optional `--send`); its three queries were
+executed end-to-end against a real demo Postgres (HTTP 200) during
+development, and a masked-column variant was confirmed to still get a policy
+`422`, proving the builder adds no trust.
+
+**Ships inside the `querygate` package** for phase 1 — `import` it from an
+installed wheel (`from querygate.client import Query`), and since
+`query_ast/models.py` and `querygate/__init__.py` are pydantic-only the
+import stays light. It is not yet a *separate* dependency-light distribution.
+
+**Explicitly deferred to phase 2:**
+
+- **TypeScript builder.** The same contract in TS with a compile-time-typed
+  `StructuredQuery` — a separate language implementation with its own
+  sync-test strategy (it can't reuse the Python Pydantic models), not more of
+  the Python work.
+- **Standalone, dependency-light distribution** (a `querygate-client` package
+  on PyPI / an npm package) so an adopter can install the builder without the
+  full server dependency closure (`pyodbc`/`asyncpg`/`fastapi`/`redis`/…).
+  This is coupled to **item 30 phase 2**: no package/registry has been chosen
+  or configured, and publishing needs explicit maintainer approval — building
+  a standalone dist with nowhere to publish it is premature. Until then the
+  in-tree `querygate.client` is the shipped, importable, tested surface.
+
+**Effort: M per language.** A thin typed wrapper around the existing
+`StructuredQuery` schema — no server-side change; it mirrors a contract that
+already exists.
 
 **Why it matters:** Adopters today either hand-write `StructuredQuery` JSON
 or read `examples/rest_calls.md` / `examples/mcp_calls.md`'s raw JSON-RPC
@@ -1540,12 +1515,12 @@ typed SDKs in multiple languages with autocomplete and client-side
 validation. This is the single largest lever on integration friction and
 the most concrete ecosystem gap identified against Google's Toolbox.
 
-**What to do:** Generate (or hand-maintain, kept in sync via a schema test)
-a typed builder for `StructuredQuery` in Python and TypeScript — table/
-column references, filters, joins, and aggregations as typed method calls
-rather than raw dict/JSON construction. Ship as an installable package, not
-just an example script, and keep it a pure client-side convenience: it must
-not bypass or duplicate any server-side validation.
+**What to do (phase 2):** Add the TypeScript builder mirroring phase 1's
+Python surface with its own schema-sync test, and — once item 30 phase 2
+chooses a registry — extract the Python builder into a standalone
+dependency-light `querygate-client` distribution, keeping the in-tree
+`querygate.client` importable for existing users. Keep it a pure client-side
+convenience: it must not bypass or duplicate any server-side validation.
 
 ### 52. Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI function-calling)
 
@@ -1872,3 +1847,7 @@ Shipped.** New sibling AST type `ArrayAggSelectItem` (`col`, optional `alias` �
 ### 82. `percentile_cont` aggregate function ✅ DONE
 
 New sibling AST type `PercentileContSelectItem` (`col`, `fraction: float`, optional `alias`), added to the `SelectItem` union. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 82).
+
+### 83. Query-template authoring UX: slot self-consistency, readable dry-run, and on-demand live-schema check ✅ DONE
+
+Parameter-slot self-consistency (a slot's `allowed_values`/`default` must match its declared `type`/bounds, sharing one `scalar_type_error` primitive with runtime binding so they can't drift); attributed, plain-language config dry-run errors (temp paths and pydantic boilerplate stripped, `templates.yaml: …`); and a separate best-effort on-demand live-schema check (`POST /admin/config/check-template-schema` + the admin-UI "Check templates vs. schema" button) that reflects the currently-live connections and reports per-template `ok`/`issues`/`connection_unavailable`/`unreachable` — the column/table existence the offline dry-run deliberately skips. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 83).

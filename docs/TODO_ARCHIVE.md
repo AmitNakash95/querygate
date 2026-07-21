@@ -2218,6 +2218,102 @@ to restrictive values, never infer table/column grants from names, never embed
 credentials or tenant values, and keep generated YAML fully editable/exportable
 for infrastructure-as-code users.
 
+### 48. Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) ✅ DONE
+
+**Phase 1 (file-configured, invocable templates) ✅ DONE. Phase 2 (governed
+create/edit/publish/rollback) ✅ DONE — via the item 25 config-versioning
+plane, not 32B's per-entry proposal state machine (a deliberate governance-
+model decision, see below).**
+
+**Phase 1 shipped:** A `querygate/templates/` module adds a `QueryTemplate`
+model — a named, parameterized `StructuredQuery` *skeleton* (a raw dict with
+`{param: name}` placeholders in value positions) plus typed parameter slots
+(`type`/`required`/`default`/`min`/`max`/`max_length`/`allowed_values`/
+`is_list`) — loaded from an optional `TEMPLATES_FILE` into a `TemplateStore`
+singleton that mirrors `CatalogStore` (hot-reloadable via the existing
+config-reload; validated by `querygate-validate-config --template-file`; cross-
+checked so every template targets a real connection id). At invocation
+(`templates/binding.py`) the caller's parameters are type/constraint-checked
+against the slots, substituted into the skeleton, and the **result validated as
+a real `StructuredQuery`** and run through the *unchanged*
+`StructuredQueryService` — so a bound template inherits every policy cap,
+allow/deny list, mandatory row filter, schema check, and guardrail an ad-hoc
+query has, and a parameter can never smuggle SQL (there is no SQL) or exceed
+policy (`tests/security/test_adversarial_security.py::
+test_query_template_cannot_exceed_policy`). Surface:
+`GET /api/v1/query-templates` + `POST /api/v1/query-templates/{id}/run` (REST),
+`list_query_templates`/`run_query_template` (MCP), and a read-only "Query
+templates" browse panel in the `/admin/` control plane — all filtered
+per-principal by target-connection visibility (item 22) — an unknown template
+and one on a hidden connection return the same non-enumerating 404. Invocations
+audit distinctly (`operation="run_query_template"`, `template_id`, and the
+parameter *names* — never values). Documented as QG-26 in
+`docs/THREAT_MODEL.md`. Covered by `tests/unit/test_query_templates.py`,
+`tests/integration/test_query_template_api.py`, `tests/integration/test_admin_ui.py`,
+plus MCP registration + adversarial tests.
+
+**Phase 2 shipped — governed authoring via the config-versioning plane
+(item 25), not 32B:** `templates.yaml` became a fourth governed configuration
+document alongside `connections.yaml`/`policy.yaml`/`catalog.yaml`. It is now
+carried through the entire `ConfigVersionStore` snapshot lifecycle and the
+`/api/v1/admin/config/*` governance API — `validate`, `preview` (adds a
+`templates` document-change signal), `versions` (stage), `versions/{id}/apply`,
+and rollback — exactly the way an optional `catalog.yaml` already was. A
+version now snapshots its own `templates.yaml`; `apply`/`rollback` reload the
+`TemplateStore` from that snapshot (a pre-phase-2 version with no snapshot
+falls back to the deployment's static `template_file` rather than clobbering
+it to empty). Templates are validated together with the rest of the config
+both at stage and — crucially — re-validated at apply (QG-15's posture, now
+covering templates: a version whose template stopped validating can't be
+silently activated). The admin config editor gained a `templates.yaml` pane
+(a fourth document tab) reusing the existing validate → preview → stage →
+apply → rollback UI with no new mutation path.
+
+**Why the config-versioning plane and not 32B's proposal state machine:** the
+item's original phase-2 sketch said "route through 32B's proposal state
+machine," but query templates are a configuration *document* loaded by
+`config_reload` alongside connections/policy/catalog — not catalog *entries*
+(which carry sensitivity/confidence/provenance/relationship-target fields that
+the 32B model is built around). Routing a config document through the
+catalog-entry proposal machinery would have been a second, awkward mutation
+path — exactly what this repo's standing rule forbids. The config-versioning
+plane already *is* "governed create/edit/publish/rollback" for config
+documents (whole-document staging, validation, atomic apply, rollback, audit,
+no self-publish), so templates joined it as one more document. This satisfies
+the item's "why it matters" — a reviewed, versioned, rollbackable finite set
+of query shapes that non-technical stakeholders can sign off on — with zero
+new governance machinery. A finer-grained *per-template* proposal/approval
+workflow (individual sign-off with separation of duties, mirroring catalog
+governance) was consciously **not** built: it's a possible future nicety, not
+required for governed authoring, and would be the "Option A" alternative in
+this pass's Decision Log entry.
+
+**Coverage (phase 2):** `tests/unit/test_admin_store.py` (templates snapshot
+round-trips and appears in `file_paths`; a template-free version has none),
+`tests/unit/test_admin_service.py` (preview reports the `templates` document
+change), `tests/integration/test_admin_config_governance.py` (a template
+authored through stage→apply becomes invocable on `/query-templates` and a
+rollback removes it; a malformed template — e.g. targeting a nonexistent
+connection — is rejected at stage and never persisted; a security-marked test
+that a *staged* template is not live until a separate apply, proving no
+self-publish), and `tests/integration/test_admin_ui.py` (the `templates.yaml`
+config-editor tab is served). `docs/THREAT_MODEL.md` QG-10 now lists templates
+among the governed documents.
+
+**Why it matters:** Google's Gen AI Toolbox for Databases popularized a
+pattern this project's own model is a natural fit for: instead of (or in
+addition to) letting an agent compose an arbitrary `StructuredQuery` within
+policy caps, an admin pre-defines a fixed set of named, parameterized queries
+and agents only ever call one of *those* by name with typed parameters. This
+shrinks the effective attack/error surface to a reviewed, finite set of query
+shapes, gives non-technical stakeholders something concrete to sign off on,
+and matches how teams already think about tool-calling for agents. It is
+additive to QueryGate's existing guarantee, not a new one: a template is just
+a stored, named, parameterized `StructuredQuery` AST, so it inherits every
+validation and guardrail already built for ad-hoc queries — and phase 2 makes
+authoring it a governed, versioned, rollbackable change rather than a
+hand-edited file.
+
 ### 49. Column-value masking/tokenization (not just allow/deny) ✅ DONE
 
 **Shipped:** a `column_mask` policy primitive (`policy/models.py`:
@@ -3497,3 +3593,91 @@ no-forced-parity principle produces *differentiated* reasoning per
 dialect-capability gap (array/collection-type absence vs.
 window-function-only restriction vs. no-ordered-set-support-at-all) rather
 than a single boilerplate justification copy-pasted three times.
+
+### 83. Query-template authoring UX: slot self-consistency, readable dry-run, and on-demand live-schema check ✅ DONE
+
+Three refinements to query-template authoring (item 48), surfaced by reviewing
+the admin config dry-run — the theme is *convenience and reliability for
+whoever authors templates* (human or not), not new security or correctness (the
+run-time pipeline already protected every case here).
+
+**1. Parameter-slot self-consistency (caught at load/dry-run).** A slot whose
+`allowed_values` or `default` contradicted its declared `type`/bounds (e.g.
+`type: integer` with string `allowed_values`, or a `default` outside its own
+`min`/`max`/`max_length`/`allowed_values`) previously passed validation, then
+could never be invoked — every supplied value failed the enum. `TemplateParameter`
+now rejects such slots when the model loads (so `querygate-validate-config` and
+the admin dry-run both catch them). The type/bounds primitive is factored into
+one `templates/models.scalar_type_error()` shared by both the model's
+self-consistency check and `binding._coerce_scalar`'s run-time value check, so
+the two can never disagree about what a slot accepts; binding kept its exact
+runtime messages.
+
+**2. Readable, attributed config dry-run errors.** The governance dry-run wrote
+each candidate to a throwaway temp dir and surfaced validation errors prefixed
+with that temp path plus raw pydantic boilerplate (the docs URL, the
+`[type=..., input_value=..., input_type=...]` tail). `admin.service._humanize_
+validation_errors` now re-attributes each error to its logical document name
+(`templates.yaml: …`, never the temp path) and strips the noise, keeping the
+human message and field path. The admin dry-run panel wraps multi-line
+messages and states explicitly that column/table existence is checked
+separately, so the offline dry-run's scope is no longer a surprise. (The CLI's
+own verbose `validate_config` output is unchanged — this is admin-surface
+only.)
+
+**3. On-demand live-schema check.** The offline dry-run deliberately never
+opens a DB session (same posture as `explain`/cost-estimation), so it can't
+verify a referenced *column or table exists*. New `POST /admin/config/
+check-template-schema` (+ the admin UI's "Check templates vs. schema" button,
+co-located in the Change-set dry-run panel) fills that gap explicitly:
+`admin.service.check_template_schema` resolves the draft templates (inheriting
+the active version's like the rest of the config plane), binds each with dummy
+values (`binding.dummy_bound_query`, extracted from `validate_template_structure`
+— placeholder values never change which identifiers a query references), and
+runs the **same** `validate_schema` the real pipeline uses (with `principal=None`,
+so the connection resolves by deployment visibility, not a query-time principal
+policy) against the *currently-live* registry. It returns per-template
+`TemplateSchemaCheck` results: `ok`, `issues` (a missing column via
+`QueryValidationError`, or a missing table via `sa.exc.NoSuchTableError`, with
+the specific name), `connection_unavailable` (target isn't a live enabled
+connection), or `unreachable`. It is **best-effort by design** — any
+DB/reflection failure (`sa.exc.SQLAlchemyError`) becomes `unreachable`, never a
+`500` and never echoing a raw driver error — so the fast dry-run stays
+decoupled from database availability while authors still get pre-stage schema
+feedback on demand. Gated by both `admin:config:read` + `admin:config:write`
+(reveals live schema detail while resolving caller content, exactly `/simulate`
+and `/diff`'s reasoning), audited as a redaction-safe `check_template_schema`
+event, and documented as QG-27 in `docs/THREAT_MODEL.md`.
+
+**Why the split (Decision Log, `docs/PRODUCT_GUIDE.md`):** the rejected
+alternative was always-on live schema validation folded into the dry-run.
+Declined because it would couple every config validation to database
+availability (a slow/down DB would block staging otherwise-valid config), for a
+marginal convenience gain over one explicit button. Column/table existence can
+also change after authoring (a later schema change), so the check is
+point-in-time by nature — an on-demand action fits that better than an implied
+guarantee.
+
+**Coverage.** `tests/unit/test_query_templates.py` (slot self-consistency:
+`allowed_values`/`default` vs type, numeric bounds, enum membership, list-default
+elements, plus a valid slot accepted); `tests/unit/test_admin_service.py`
+(the humanizer strips temp paths + pydantic noise); `tests/unit/
+test_template_schema_check.py` (the per-template classifier: ok / missing
+column / missing table / unreachable-is-best-effort-and-never-leaks-the-driver-
+error / unknown-connection / structural-error, with the reflection seam patched
+per the conftest gotcha); `tests/integration/test_admin_config_governance.py`
+(the `/validate` endpoint returns a clean attributed slot error; the
+`/check-template-schema` endpoint flags a missing column end to end; and a
+security-marked test that the endpoint returns `200` — not a `500` — and never
+puts the raw driver string/host/credentials in the body when reflection raises,
+backing the QG-27 claim and adversarially verified to fail if the raw error is
+surfaced); `tests/integration/test_admin_ui.py` (the button + endpoint
+reference are served); and both config-scope security tests now assert the new
+endpoint requires read *and* write. Verified end-to-end
+against a real demo Postgres during development: a valid template → `ok`, a bad
+column → `Column 'ghost_amount' not found in table 'orders'`, a missing table →
+`table 'ghosts' does not exist`, an unknown connection → `connection_unavailable`.
+
+**Effort: S–M**, mostly reuse: one shared scalar validator + one error
+humanizer + one endpoint that composes `dummy_bound_query` with the existing
+`validate_schema`, plus the admin-UI button/panel.

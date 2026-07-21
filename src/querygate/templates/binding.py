@@ -13,43 +13,26 @@ validated AST) or exceed policy.
 from __future__ import annotations
 
 import copy
-import math
 from typing import Any, Dict, Mapping, Optional
 
 from querygate.core.exceptions import QueryValidationError
 from querygate.query_ast.models import StructuredQuery
-from querygate.templates.models import QueryTemplate, TemplateParameter
+from querygate.templates.models import QueryTemplate, TemplateParameter, scalar_type_error
 
 
 def _coerce_scalar(param: TemplateParameter, value: Any) -> Any:
-    """Type-check + constraint-check a single scalar against the slot."""
-    if param.type == "boolean":
-        if not isinstance(value, bool):
-            raise QueryValidationError(f"parameter {param.name!r} must be a boolean")
-        return value
-    # bool is a subclass of int — exclude it from numeric/string types explicitly.
-    if isinstance(value, bool):
-        raise QueryValidationError(f"parameter {param.name!r} must be of type {param.type}")
-    if param.type == "string":
-        if not isinstance(value, str):
-            raise QueryValidationError(f"parameter {param.name!r} must be a string")
-        if param.max_length is not None and len(value) > param.max_length:
-            raise QueryValidationError(
-                f"parameter {param.name!r} exceeds max length {param.max_length}"
-            )
-    elif param.type == "integer":
-        if not isinstance(value, int):
-            raise QueryValidationError(f"parameter {param.name!r} must be an integer")
-    elif param.type == "number":
-        if not isinstance(value, (int, float)):
-            raise QueryValidationError(f"parameter {param.name!r} must be a number")
-        if not math.isfinite(value):
-            raise QueryValidationError(f"parameter {param.name!r} must be finite")
-    if param.type in ("integer", "number"):
-        if param.min is not None and value < param.min:
-            raise QueryValidationError(f"parameter {param.name!r} is below min {param.min}")
-        if param.max is not None and value > param.max:
-            raise QueryValidationError(f"parameter {param.name!r} is above max {param.max}")
+    """Type-check + constraint-check a single supplied scalar against the slot.
+
+    The type/bounds check is `scalar_type_error` — the same primitive the slot's
+    own load-time self-consistency validation uses — so a value the model would
+    reject for a slot and a value binding rejects can never diverge. Enum
+    membership is layered on top here.
+    """
+    reason = scalar_type_error(
+        param.type, value, min=param.min, max=param.max, max_length=param.max_length
+    )
+    if reason is not None:
+        raise QueryValidationError(f"parameter {param.name!r} {reason}")
     if param.allowed_values is not None and value not in param.allowed_values:
         raise QueryValidationError(f"parameter {param.name!r} is not an allowed value")
     return value
@@ -116,24 +99,36 @@ def bind_template(template: QueryTemplate, supplied: Mapping[str, Any]) -> Struc
 _DUMMY_SCALAR = {"string": "x", "integer": 1, "number": 1.0, "boolean": True}
 
 
-def validate_template_structure(template: QueryTemplate) -> Optional[str]:
-    """Deploy-time check that a template's skeleton forms a structurally valid
-    `StructuredQuery` once its placeholders are filled — so `querygate-validate-
-    config` catches a malformed template (a bad field, a wrong-shaped predicate,
-    a placeholder in a position its declared type can't satisfy) before deploy,
-    not only at first invocation. Substitutes a type-appropriate dummy for each
-    parameter and validates the result. Returns an error string, or None if the
-    skeleton is structurally sound. This is a *structural* check only — schema
-    existence and policy remain runtime concerns, evaluated on the real bound
-    query like any other.
+def dummy_bound_query(template: QueryTemplate) -> StructuredQuery:
+    """Bind a type-appropriate dummy for every parameter and return the
+    resulting validated `StructuredQuery`. Placeholder values don't affect which
+    tables/columns the query references, so this yields a real query suitable
+    for both the structural check below and the on-demand live-schema check
+    (`admin.service.check_template_schema`) — neither needs real caller input.
+    Raises on a structurally invalid skeleton (a bad field, a placeholder in a
+    position its type can't satisfy, etc.).
     """
     dummies: Dict[str, Any] = {}
     for param in template.parameters:
         scalar = _DUMMY_SCALAR[param.type]
         dummies[param.name] = [scalar] if param.is_list else scalar
+    bound = _substitute(copy.deepcopy(template.query), dummies)
+    return StructuredQuery.model_validate(bound)
+
+
+def validate_template_structure(template: QueryTemplate) -> Optional[str]:
+    """Deploy-time check that a template's skeleton forms a structurally valid
+    `StructuredQuery` once its placeholders are filled — so `querygate-validate-
+    config` catches a malformed template (a bad field, a wrong-shaped predicate,
+    a placeholder in a position its declared type can't satisfy) before deploy,
+    not only at first invocation. Returns an error string, or None if the
+    skeleton is structurally sound. This is a *structural* check only — schema
+    existence and policy remain runtime concerns, evaluated on the real bound
+    query like any other (the on-demand live-schema check verifies existence
+    separately, against the real database).
+    """
     try:
-        bound = _substitute(copy.deepcopy(template.query), dummies)
-        StructuredQuery.model_validate(bound)
+        dummy_bound_query(template)
     except Exception as exc:
         return f"template {template.id!r} is not a structurally valid query: {exc}"
     return None

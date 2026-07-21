@@ -111,6 +111,7 @@ async def test_preview_endpoint_returns_redacted_document_diff_without_persistin
         "connections": "unchanged",
         "policy": "changed",
         "catalog": "unchanged",
+        "templates": "unchanged",
     }
     assert "max_joins" not in resp.text
     assert len(versions_resp.json()) == 1
@@ -251,6 +252,236 @@ async def test_stage_with_invalid_content_returns_422(app):
             headers=_auth(_ADMIN_KEY),
         )
     assert resp.status_code == 422
+
+
+# --- Governed query templates (item 48 phase 2) ---------------------------- #
+
+_GOVERNED_TEMPLATE_YAML = """
+templates:
+  - id: foo_by_id
+    connection: gov-demo
+    description: Fetch a foo row by id.
+    parameters:
+      - name: foo_id
+        type: integer
+        required: true
+    query:
+      from: foo
+      select:
+        - foo.id
+      where:
+        col: foo.id
+        op: eq
+        value: { param: foo_id }
+      limit: 10
+"""
+
+
+@pytest.mark.asyncio
+async def test_query_template_authored_through_governance_becomes_invocable_then_rolls_back(app):
+    """A query template staged + applied through the config-versioning plane
+    becomes live (listed on /query-templates), and a rollback removes it —
+    proving templates are now a governed document with no self-publish path."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        # No template exists in the bootstrap version.
+        before = await client.get("/api/v1/query-templates", headers=_auth(_ADMIN_KEY))
+        assert before.status_code == 200
+        assert before.json() == []
+
+        # Stage a version that adds the template document.
+        stage_resp = await client.post(
+            "/api/v1/admin/config/versions",
+            json={
+                "templates_yaml": _GOVERNED_TEMPLATE_YAML,
+                "description": "add the foo_by_id curated template",
+            },
+            headers=_auth(_ADMIN_KEY),
+        )
+        assert stage_resp.status_code == 201
+        staged = stage_resp.json()
+        assert staged["templates_yaml"] and "foo_by_id" in staged["templates_yaml"]
+
+        # Staging alone must not make it live — it is not applied yet.
+        still_empty = await client.get("/api/v1/query-templates", headers=_auth(_ADMIN_KEY))
+        assert still_empty.json() == []
+
+        # Apply -> the template is now invocable.
+        apply_resp = await client.post(
+            f"/api/v1/admin/config/versions/{staged['id']}/apply", headers=_auth(_ADMIN_KEY)
+        )
+        assert apply_resp.status_code == 200
+        assert apply_resp.json()["reload"]["template_ids"] == ["foo_by_id"]
+
+        listed = await client.get("/api/v1/query-templates", headers=_auth(_ADMIN_KEY))
+        assert [t["id"] for t in listed.json()] == ["foo_by_id"]
+
+        # Roll back to the template-free version -> it disappears again.
+        rollback_resp = await client.post(
+            "/api/v1/admin/config/versions/1/apply", headers=_auth(_ADMIN_KEY)
+        )
+        assert rollback_resp.status_code == 200
+        gone = await client.get("/api/v1/query-templates", headers=_auth(_ADMIN_KEY))
+        assert gone.json() == []
+
+
+@pytest.mark.asyncio
+async def test_check_template_schema_endpoint_flags_missing_column(app, monkeypatch):
+    """The on-demand live-schema check reflects the connection and reports a
+    template's missing column as `issues` while a valid one is `ok` — end to
+    end through the REST endpoint, with the reflection seam patched."""
+    import sqlalchemy as sa
+
+    from querygate.validation import schema_validation
+
+    def _foo_table():
+        md = sa.MetaData()
+        return sa.Table("foo", md, sa.Column("id", sa.Integer))
+
+    async def fake_load_table(connection_id, table_name, table_connection):
+        if table_name.lower() == "foo":
+            return _foo_table()
+        raise sa.exc.NoSuchTableError(table_name)
+
+    monkeypatch.setattr(schema_validation, "_load_table", fake_load_table)
+
+    # Targets the live registry connection ("demo", from the autouse fixture) —
+    # the schema check reflects the *currently-live* connections, not whatever
+    # the config file happens to name.
+    templates = """
+templates:
+  - id: good
+    connection: demo
+    parameters: []
+    query: {from: foo, select: [foo.id], limit: 5}
+  - id: bad
+    connection: demo
+    parameters: []
+    query: {from: foo, select: [foo.ghost], limit: 5}
+"""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/check-template-schema",
+            json={"templates_yaml": templates},
+            headers=_auth(_ADMIN_KEY),
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["checked"] is True
+    by_id = {r["template_id"]: r for r in body["results"]}
+    assert by_id["good"]["status"] == "ok"
+    assert by_id["bad"]["status"] == "issues"
+    assert any("ghost" in m for m in by_id["bad"]["messages"])
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_check_template_schema_never_500s_or_leaks_a_driver_error(app, monkeypatch):
+    """When reflection fails with a driver error embedding host/credentials, the
+    endpoint returns 200 with an `unreachable` result and a generic message —
+    never a 500, and never the raw driver text (QG-27)."""
+    import sqlalchemy as sa
+
+    from querygate.validation import schema_validation
+
+    async def exploding_load_table(connection_id, table_name, table_connection):
+        raise sa.exc.OperationalError(
+            "SELECT * FROM orders",
+            {},
+            Exception("could not connect: password=SUPERSECRET host=db.internal port=5432"),
+        )
+
+    monkeypatch.setattr(schema_validation, "_load_table", exploding_load_table)
+
+    templates = """
+templates:
+  - id: t
+    connection: demo
+    parameters: []
+    query: {from: orders, select: [orders.id], limit: 5}
+"""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/check-template-schema",
+            json={"templates_yaml": templates},
+            headers=_auth(_ADMIN_KEY),
+        )
+    assert resp.status_code == 200  # best-effort: a down DB is a result, not a 500
+    body = resp.json()
+    assert body["results"][0]["status"] == "unreachable"
+    for leak in ("SUPERSECRET", "password=", "db.internal", "5432"):
+        assert leak not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_dry_run_catches_slot_type_contradiction_with_a_readable_error(app):
+    """A parameter whose declared type contradicts its allowed_values now fails
+    the dry-run (item: slot self-consistency), and the error is attributed to
+    templates.yaml in plain language — no temp path, no pydantic URL/tail."""
+    contradictory = """
+templates:
+  - id: bad_slot
+    connection: gov-demo
+    parameters:
+      - name: status
+        type: integer
+        allowed_values: [pending, completed]
+    query: {from: foo, select: [foo.id], limit: 5}
+"""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/validate",
+            json={"templates_yaml": contradictory},
+            headers=_auth(_ADMIN_KEY),
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["valid"] is False
+    joined = " ".join(body["errors"])
+    # Readable + attributed to the logical document, not the throwaway temp file.
+    assert "templates.yaml:" in joined
+    assert "allowed value 'pending' must be an integer" in joined
+    # Pydantic library noise and the temp path are stripped.
+    assert "/var/folders" not in joined and "/tmp" not in joined
+    assert "pydantic.dev" not in joined
+    assert "input_type=" not in joined
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_staged_template_is_not_live_until_a_separate_apply(app):
+    """A curated template can never publish itself: staging a version that
+    contains it does not change what agents can invoke — only a distinct,
+    separately-authorized apply activates it (same anti-self-publish posture as
+    a catalog draft)."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        stage_resp = await client.post(
+            "/api/v1/admin/config/versions",
+            json={"templates_yaml": _GOVERNED_TEMPLATE_YAML},
+            headers=_auth(_ADMIN_KEY),
+        )
+        assert stage_resp.status_code == 201
+        # The version exists and holds the template, but the live surface is
+        # unchanged — staging is authoring, not activation.
+        listed = await client.get("/api/v1/query-templates", headers=_auth(_ADMIN_KEY))
+        assert listed.json() == []
+        current = await client.get("/api/v1/admin/config/current", headers=_auth(_ADMIN_KEY))
+        assert current.json()["id"] == "1"  # bootstrap version is still active
+
+
+@pytest.mark.asyncio
+async def test_stage_with_malformed_template_is_rejected_not_persisted(app):
+    """A template targeting a connection that does not exist is caught by the
+    same validation connections/policy/catalog get, so it is never staged."""
+    bad_template_yaml = _GOVERNED_TEMPLATE_YAML.replace("gov-demo", "ghost-connection")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/versions",
+            json={"templates_yaml": bad_template_yaml},
+            headers=_auth(_ADMIN_KEY),
+        )
+        versions_resp = await client.get("/api/v1/admin/config/versions", headers=_auth(_ADMIN_KEY))
+    assert resp.status_code == 422
+    assert len(versions_resp.json()) == 1  # only the bootstrap version
 
 
 @pytest.mark.asyncio
