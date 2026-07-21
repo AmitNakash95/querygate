@@ -21,38 +21,29 @@
       </div>
 
       <nav class="nav-list">
-        <button class="nav-item active" type="button" data-view-target="overview">
+        <button class="nav-item active" type="button" data-domain="overview">
           <span class="nav-glyph">01</span><span>Overview</span>
         </button>
-        <button class="nav-item" type="button" data-view-target="connections">
-          <span class="nav-glyph">02</span><span>Schema review</span>
+        <button class="nav-item" type="button" data-domain="connections">
+          <span class="nav-glyph">02</span><span>Connections</span>
         </button>
-        <button class="nav-item" type="button" data-view-target="policy">
-          <span class="nav-glyph">03</span><span>Policy designer</span>
+        <button class="nav-item" type="button" data-domain="policy">
+          <span class="nav-glyph">03</span><span>Policy</span>
         </button>
-        <button class="nav-item" type="button" data-view-target="changes">
-          <span class="nav-glyph">04</span><span>Change set</span><span id="draft-dot" class="draft-dot" hidden></span>
+        <button class="nav-item" type="button" data-domain="catalog">
+          <span class="nav-glyph">04</span><span>Catalog</span><span id="catalog-pending-dot" class="draft-dot" hidden></span>
         </button>
-        <button class="nav-item" type="button" data-view-target="history">
-          <span class="nav-glyph">05</span><span>Versions</span>
+        <button class="nav-item" type="button" data-domain="templates">
+          <span class="nav-glyph">05</span><span>Templates</span>
         </button>
-        <button class="nav-item" type="button" data-view-target="audit">
-          <span class="nav-glyph">06</span><span>Audit trail</span>
+        <button class="nav-item" type="button" data-domain="releases">
+          <span class="nav-glyph">06</span><span>Releases</span><span id="draft-dot" class="draft-dot" hidden></span>
         </button>
-        <button class="nav-item" type="button" data-view-target="catalog">
-          <span class="nav-glyph">07</span><span>Catalog review</span><span id="catalog-pending-dot" class="draft-dot" hidden></span>
+        <button class="nav-item" type="button" data-domain="observability">
+          <span class="nav-glyph">07</span><span>Observability</span>
         </button>
-        <button id="nav-curate" class="nav-item" type="button" data-view-target="curate" hidden>
-          <span class="nav-glyph">08</span><span>Curate catalog</span>
-        </button>
-        <button class="nav-item" type="button" data-view-target="health">
-          <span class="nav-glyph">09</span><span>Connection health</span>
-        </button>
-        <button class="nav-item" type="button" data-view-target="templates">
-          <span class="nav-glyph">10</span><span>Query templates</span>
-        </button>
-        <button class="nav-item" type="button" data-view-target="observability">
-          <span class="nav-glyph">11</span><span>Observability</span>
+        <button class="nav-item" type="button" data-domain="audit">
+          <span class="nav-glyph">08</span><span>Audit</span>
         </button>
       </nav>
 
@@ -77,6 +68,9 @@
           <span id="session-principal" class="principal-chip">No principal</span>
         </div>
       </header>
+
+      <nav id="domain-tabs" class="domain-tabs" role="tablist" aria-label="Domain sections" hidden></nav>
+      <p id="domain-release-note" class="domain-release" hidden></p>
 
       <div id="global-banner" class="banner" role="status" hidden></div>
 
@@ -299,8 +293,12 @@
           <div><p class="eyebrow">Governed proposals</p><h2>Review generated and learned drafts before agents ever see them.</h2><p>Proposals stay quarantined until an authorized reviewer approves and publishes them. Editing, approval, and publication are always separate, actor-attributed steps.</p></div>
           <button id="refresh-catalog" class="button secondary" type="button">Refresh proposals</button>
         </div>
-        <form id="catalog-filters" class="filter-bar">
+        <div class="catalog-connection-bar">
           <label><span>Connection</span><select id="catalog-connection"></select></label>
+        </div>
+
+        <div data-catalog-panel="review">
+        <form id="catalog-filters" class="filter-bar">
           <label><span>Status</span>
             <select id="catalog-status-filter">
               <option value="pending" selected>Pending</option>
@@ -392,9 +390,12 @@
             </div>
           </div>
         </div>
+        </div>
 
+        <div data-catalog-panel="versions" hidden>
         <div class="section-intro catalog-history-head"><div><p class="eyebrow">Catalog version history</p><h2>Every publish and rollback, connection-scoped.</h2></div><button id="refresh-catalog-versions" class="button secondary" type="button">Refresh versions</button></div>
         <div class="table-wrap"><table class="history-table"><thead><tr><th>Version</th><th>Action</th><th>Target</th><th>Fields changed</th><th>Actor</th><th>When</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="catalog-history-body"><tr><td colspan="7" class="empty-cell">Select a connection to load catalog version history.</td></tr></tbody></table></div>
+        </div>
       </section>
 
       <section id="view-curate" class="view" data-view="curate" hidden>
@@ -452,6 +453,29 @@
           <div><p class="eyebrow">Callable queries</p><h2>Named, parameterized queries this principal can run.</h2><p>Curated query templates are the finite set of pre-approved questions an agent may ask by name — filtered by per-connection visibility, the same boundary as schema and catalog, and requiring no special scope. A template is a stored StructuredQuery, never raw SQL, and runs through the same policy and guardrail checks as an ad-hoc query.</p></div>
           <button id="refresh-templates" class="button secondary" type="button">Refresh templates</button>
         </div>
+
+        <article id="template-author" class="panel template-author-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">Author a template</p><h3>Compose a query template into the draft change set</h3></div>
+            <button id="toggle-template-author" class="button primary" type="button" hidden>+ New template</button>
+          </div>
+          <div id="template-author-gate" class="empty-state" hidden>Connect with <code>admin:config:write</code> to author templates into the draft.</div>
+          <form id="template-author-form" class="form-grid" hidden>
+            <p class="span-2 panel-copy">Build a named, parameterized <code>StructuredQuery</code> without hand-writing <code>templates.yaml</code>. The form composes a validated template and merges it into the local <strong>templates.yaml</strong> draft — then validate, stage, and activate it from <strong>Releases</strong>, the same shared-release path as any config change. Raw-YAML editing stays available there as the escape hatch.</p>
+            <label><span>Template id <small>identifier</small></span><input id="template-author-id" type="text" placeholder="recent_orders"></label>
+            <label><span>Connection</span><select id="template-author-connection"></select></label>
+            <label class="span-2"><span>Description <small>optional</small></span><input id="template-author-description" type="text" placeholder="Orders since a given date"></label>
+            <div class="span-2 param-builder">
+              <div class="param-builder-head"><span>Parameter slots</span><button id="add-template-param" class="text-button" type="button">+ Add parameter</button></div>
+              <div id="template-param-rows" class="param-rows"><p class="empty-state">No parameters — a template can be a fixed query with no slots.</p></div>
+            </div>
+            <label class="span-2"><span>Query skeleton <small>StructuredQuery JSON; reference a slot as {"param": name}</small></span><textarea id="template-author-query" class="code-editor" rows="8" spellcheck="false" placeholder='{"from": "orders", "select": ["orders.id"], "where": {"col": "orders.created_at", "op": "gte", "value": {"param": "since"}}}'></textarea></label>
+            <p class="span-2 form-hint">min/max apply to numeric slots; max length to string slots; allowed values are comma-separated. The full template is validated against the same model the loader uses before it enters the draft.</p>
+            <div class="span-2 form-actions"><button id="cancel-template-author" class="button secondary" type="button">Cancel</button><button id="add-template-to-draft" class="button primary" type="submit">Add to draft change set</button></div>
+          </form>
+        </article>
+
+        <div class="section-intro"><div><p class="eyebrow">Callable now</p><h3>Templates this principal can run</h3></div></div>
         <div id="template-cards" class="audit-list"><p class="empty-state">Connect to load query templates.</p></div>
       </section>
 

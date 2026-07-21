@@ -1934,105 +1934,14 @@ Parameter-slot self-consistency (a slot's `allowed_values`/`default` must match 
 
 A guided admin-UI "Curate" panel and a `catalog:author`-gated `POST /{connection}/proposals` endpoint compose a human-authored catalog entry into a validated draft carrying the new `source_class = manual`, routed through the existing catalog governance queue (`CatalogFileRepository`) — not the change-set/`ConfigVersionStore` catalog.yaml tab — so it gets the same quarantine → review → publish (as `verified`) → rollback safety and actor-attributed audit. Separation of duties is scope-based, not identity-based: a principal holding `catalog:review` may approve/publish its own manual proposal (no author≠approver check). **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 84).
 
-### 85. Domain-separated admin UI (group the 9 flat views into Policy / Catalog / Templates / Connections / Releases)
+### 85. Domain-separated admin UI (group the 9 flat views into Policy / Catalog / Templates / Connections / Releases) ✅ DONE
 
-**Effort: M (2–3 days).** Nav + layout refactor of the existing single-page
-admin UI; reuses every existing per-view render function and scope gate. Not a
-rewrite of view logic. Best done AFTER item 84 so the new Curate panel is
-folded into the Catalog domain rather than bolted onto the flat nav.
+The flat admin nav was regrouped into seven domains (Overview / Connections / Policy / Catalog / Templates / Releases / Audit) with a secondary tab bar per multi-view domain — a nav+layout refactor that reuses every per-view render fn and scope gate unchanged, keeps the deep-linkable `/admin/#<view>` hash, folds the item-84 Curate panel into the Catalog domain, and surfaces the shared-release (Connections/Policy/Templates → bundled `ConfigVersionStore`) vs. self-contained-catalog (`CatalogFileRepository`) split as a per-domain release signal. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 85).
 
-**Why it matters:** the admin UI (`admin_ui/index.html` + a single ~75KB
-`app.js`) has grown to 9 flat nav items (Overview, Schema review, Policy
-designer, Change set, Versions, Audit, Catalog review, Connection health, Query
-templates) and will keep growing as structured authoring lands per domain.
-Grouping by domain makes the surface navigable and gives each domain a coherent
-home for its authoring + review + history sub-panels.
+### 87. Extend structured authoring to Policy and Templates (same form→validated-YAML→staged pattern) ✅ DONE
 
-**What to do:**
-1. **Target grouping** (domain → inner tabs):
-   - **Overview** — top-level, cross-cutting, unchanged.
-   - **Connections** — `Schema review` + `Connection health`.
-   - **Policy** — `Designer` + `Templates/presets` + policy simulation.
-   - **Catalog** — `Curate` (item 84) + `Review proposals` + `Versions & rollback`.
-   - **Templates** — `Query templates`.
-   - **Releases** — `Change set` + `Versions` + `Audit trail`.
-2. **Honest structural constraint to preserve in the UI (do not "fix" it):**
-   `ConfigVersionStore` stages policy + connections + catalog.yaml + templates
-   as ONE bundled atomic version (`admin/store.py`, `admin/service.py`), so the
-   change-set/stage/apply surface is inherently cross-domain — it lives in the
-   shared **Releases** domain, and each domain's *authoring* surface feeds it.
-   **Catalog is the exception**: it has its own governance versioning
-   independent of `ConfigVersionStore`, so the Catalog domain is fully
-   self-contained (author → review → publish → rollback all in-domain). The UI
-   must make this distinction legible (catalog = self-contained; other domains'
-   edits = flow into a shared release), not paper over it.
-3. **Front-end mechanics.** Routing is a flat `showView(name)` over the
-   `viewMeta` map (`app.js` ~L5/L130). Extend to a two-level domain→tab map with
-   nested `data-view` targets; reuse existing render fns and the `hasScope`/
-   `canRead`/`canWrite` gating unchanged. Preserve deep-linkable view state.
-4. **Decide during implementation:** whether to split the single `app.js` into
-   per-domain modules as part of this (flagged, not assumed — keep as one file
-   unless the split clearly reduces risk).
-5. **Tests/verify.** Drive the UI (see the `verify`/`run` skills) to confirm
-   every previously-reachable view is still reachable under its new domain and
-   scope gating is unchanged.
+The Templates domain gained a guided authoring form (id/connection/description + a parameter-slot builder + a validated JSON `StructuredQuery` skeleton) that composes a `QueryTemplate` and merges it by id into the draft `templates.yaml` via new `/admin/ui/templates/parse` + `/templates/render` endpoints, flowing through the shared validate → stage → apply → rollback (Releases) — no per-domain publish. Policy already had this via the visual designer, so templates was the deliverable; raw-YAML editing stays as the escape hatch and the shared `QueryTemplateFile` model rejects bad slots at compose time. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 87).
 
-### 87. Extend structured authoring to Policy and Templates (same form→validated-YAML→staged pattern)
+### 86. MCP transport request-body size/depth guard ✅ DONE
 
-**Effort: M–L.** Only pursue after item 84 validates the pattern and item 85
-provides the domain shell. Policy/templates differ from catalog: they have NO
-governance path — their authoring feeds the shared `ConfigVersionStore`
-change-set (Releases domain), staged/applied atomically, not a per-domain
-publish.
-
-**Why it matters:** the same "guided form instead of raw YAML" UX win applies
-to policy layers and query templates, which today are also hand-edited YAML in
-the Change-set `<textarea>`. Reusing the item-84 pattern (structured form →
-compose a validated model → into the draft) removes the same "you must know the
-YAML schema" barrier for the other domains.
-
-**What to do:**
-1. Structured forms in the Policy and Templates domains that compose a
-   validated policy-layer / query-template model (reuse the existing policy
-   `models.py` / templates models and their validators as the schema authority).
-2. Form output merges into the **draft change-set document** for that file and
-   flows through the existing validate → stage → apply → rollback
-   (`ConfigVersionStore`), NOT a new store — consistent with item 85's Releases
-   domain. Reuse the visual policy designer (`#apply-designer` "Apply to draft"
-   in `admin_ui/index.html`) as precedent for form→draft composition.
-3. Keep raw-YAML editing available as the escape hatch for power users; the
-   form is additive, not a replacement.
-4. Tests + `verify` UI drive; docs update per `PRODUCT_GUIDE.md` maintenance
-   protocol.
-
-### 86. MCP transport request-body size/depth guard
-
-**Effort: S.** Surfaced by item 36 phase 2a's malformed-input fuzzing
-(`tests/security/test_malformed_input_fuzzing.py`).
-
-**Why it matters:** The REST surface rejects a JSON body nested past the JSON
-parser's recursion guard with a clean 400 (Starlette catches the decode
-error). The mounted MCP Streamable-HTTP transport does not: its own
-`json.loads(body)` raises `RecursionError`, which the upstream `mcp` library
-catches and returns as a handled JSON-RPC internal-error (`-32603`, generic
-non-sensitive message) — an HTTP 500 rather than a 4xx. The response is
-already handled and leak-free (no traceback/path/driver/credential in the
-body — proven in item 36 phase 2a's
-`test_mcp_deeply_nested_argument_body_is_handled_without_leaking`), so this is
-a robustness/consistency gap, not a disclosure vuln: an absurdly deep or
-oversized MCP body should be rejected as a client error before the transport
-attempts to parse it. Left as a residual risk in `docs/THREAT_MODEL.md`
-(§8) by item 36 phase 2a rather than fixed inline, because a body-size/depth
-cap is a judgment call (its threshold must not reject legitimate large
-batches) that deserves its own small, deliberate pass, not a drive-by change
-bundled into a test tranche.
-
-**What to do:** Add a small ASGI wrapper around the MCP mount
-(`mcp/server.py`'s `authed_mcp`) — mirroring the existing auth-wrapping layer
-— that rejects a request whose declared/streamed body exceeds a configurable
-byte cap (and, if cheap to detect, an excessive nesting depth) with a clean
-`413`/`400` *before* the transport's `json.loads`, so the MCP surface matches
-REST's "malformed input is a clean client error, never a 5xx" posture. Keep
-the cap a named `AppConfig` field with a generous default so normal batches
-are unaffected, and add a regression flipping the phase-2a MCP deep-body test
-from "handled 500" to "clean 4xx".
+`mcp/transport_guard.py`'s `MCPRequestGuardMiddleware` wraps the MCP mount outside auth and rejects an oversized body (`413`) or one nested past a cheap O(n) structural-depth scan (`400`) *before* the transport's `json.loads` — closing the REST/MCP asymmetry where a deeply-nested MCP body used to surface as a handled HTTP 500. Thresholds are configurable (`mcp_max_request_bytes` default 4 MiB, `mcp_max_request_depth` default 100), far above any legitimate batch; the phase-2a deep-body test was flipped from "handled 500" to a clean 4xx and a byte-cap regression added. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 86).

@@ -101,6 +101,7 @@ def setup_mcp(app: "FastAPI", cfg: "AppConfig") -> None:
         return
 
     from querygate.mcp.auth import MCPAuthMiddleware
+    from querygate.mcp.transport_guard import MCPRequestGuardMiddleware
 
     server = create_mcp_server()
     server.settings.transport_security = TransportSecuritySettings(
@@ -110,7 +111,10 @@ def setup_mcp(app: "FastAPI", cfg: "AppConfig") -> None:
     )
     mcp_asgi = server.streamable_http_app()
     authed_mcp = MCPAuthMiddleware(app=mcp_asgi, settings=cfg)
-    app.mount(cfg.mcp_mount_path, authed_mcp)
+    # Guard the body (size/depth) outermost, before auth and before the
+    # transport's json.loads — TODO.md item 86.
+    guarded_mcp = MCPRequestGuardMiddleware(app=authed_mcp, settings=cfg)
+    app.mount(cfg.mcp_mount_path, guarded_mcp)
 
     logger = get_logger()
     logger.info(
