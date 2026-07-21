@@ -485,21 +485,20 @@ async def test_mcp_raw_sql_field_is_rejected_not_ignored(field: str):
 
 
 @pytest.mark.asyncio
-async def test_mcp_deeply_nested_argument_body_is_handled_without_leaking():
+async def test_mcp_deeply_nested_argument_body_is_rejected_as_a_clean_4xx():
     """A tools/call whose arguments contain a JSON body deep enough to trip the
-    parser's recursion guard must be *handled* — a structured JSON-RPC error
-    with no leaked traceback/path/driver text — and must never reach execution.
+    parser's recursion guard must be rejected as a clean client error, never
+    reach execution, and leak nothing.
 
-    Known asymmetry (residual risk, TODO.md item 86): the REST surface rejects
-    such a body with a clean 400 (Starlette catches the decode error), but the
-    upstream MCP Streamable-HTTP transport's `json.loads(body)` raises
-    `RecursionError`, which the transport catches and returns as a JSON-RPC
-    internal-error (`-32603`) with a generic, non-sensitive message — an HTTP
-    500 rather than a 4xx. That is a handled, leak-free response, not a crash,
-    so this test asserts the security property (handled + no internal leak +
-    not executed) and documents the status-code asymmetry rather than asserting
-    a 4xx the transport does not currently produce. Built as a raw string so a
-    normal JSON encoder's own recursion limit isn't what's under test."""
+    TODO.md item 86 closed the asymmetry this test used to document: the REST
+    surface has always rejected such a body with a clean 400, but the MCP
+    Streamable-HTTP transport's own `json.loads(body)` raised `RecursionError`
+    and surfaced it as a handled — but HTTP 500 — JSON-RPC internal error. The
+    `MCPRequestGuardMiddleware` now rejects an over-deep body with a clean 400
+    *before* the transport parses it, so the MCP surface matches REST's
+    "malformed input is a client error, never a 5xx" posture. Built as a raw
+    string so a normal JSON encoder's own recursion limit isn't what's under
+    test."""
     _reset_mcp_session_manager()
     deep_query = _deep_query_raw(50000)
     raw_request = (
@@ -518,9 +517,37 @@ async def test_mcp_deeply_nested_argument_body_is_handled_without_leaking():
         ):
             resp = await client.post("/mcp/", content=raw_request.encode(), headers=_MCP_HEADERS)
 
-    # Handled as a structured JSON-RPC error, not an unhandled crash, and the
-    # generic recursion message carries no server internals.
+    # Clean client error (not a 5xx), leak-free, and never dispatched to the
+    # service.
+    assert 400 <= resp.status_code < 500, f"got {resp.status_code}"
     payload = json.loads(resp.text)
     assert "error" in payload and payload["error"].get("code") is not None, payload
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_oversized_body_is_rejected_as_413_before_execution():
+    """A request body past the configured byte cap is a clean 413 rejected by
+    the transport guard (TODO.md item 86) before auth, before the transport
+    parses it, and before any tool runs — leaking nothing. The cap is lowered
+    here so the test body stays small; the shipped default is far above any
+    legitimate batch."""
+    _reset_mcp_session_manager()
+    big_arguments = {"connection": "demo", "queries": [{"from": "customers", "select": ["x"]}]}
+    raw_request = json.dumps(_mcp_call("run_structured_queries", big_arguments))
+    raw_request += " " * 4096  # pad past the lowered cap without changing shape
+    app = create_app(_mcp_settings(mcp_max_request_bytes=1024))
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", content=raw_request.encode(), headers=_MCP_HEADERS)
+
+    assert resp.status_code == 413, f"got {resp.status_code}: {resp.text[:200]!r}"
     _assert_no_internal_leak(resp.text)
     m_many.assert_not_awaited()
