@@ -224,5 +224,9 @@ __marimo__/
 # macOS
 .DS_Store
 
+# Claude Code: version .claude/ (skills, shared settings) but keep machine-local
+# settings out of the repo.
+.claude/settings.local.json
+
 # Generated demo fixtures (Postgres is the supported runnable demo target)
 examples/demo_db/*.db
