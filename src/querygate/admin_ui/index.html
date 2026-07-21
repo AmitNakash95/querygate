@@ -39,8 +39,11 @@
         <button class="nav-item" type="button" data-domain="releases">
           <span class="nav-glyph">06</span><span>Releases</span><span id="draft-dot" class="draft-dot" hidden></span>
         </button>
+        <button class="nav-item" type="button" data-domain="observability">
+          <span class="nav-glyph">07</span><span>Observability</span>
+        </button>
         <button class="nav-item" type="button" data-domain="audit">
-          <span class="nav-glyph">07</span><span>Audit</span>
+          <span class="nav-glyph">08</span><span>Audit</span>
         </button>
       </nav>
 
@@ -474,6 +477,21 @@
 
         <div class="section-intro"><div><p class="eyebrow">Callable now</p><h3>Templates this principal can run</h3></div></div>
         <div id="template-cards" class="audit-list"><p class="empty-state">Connect to load query templates.</p></div>
+      </section>
+
+      <section id="view-observability" class="view" data-view="observability" hidden>
+        <div class="section-intro">
+          <div><p class="eyebrow">Operational trends</p><h2>Rejection, queue, and cost-estimate trends at a glance.</h2><p>Aggregated from this process's own metrics — which reason rejects the most, whether queue pressure is building, whether the cost-estimate gate is silently failing open. Requires the <code>admin:observability:read</code> scope. This is an honest current-process snapshot, not durable history: counters are cumulative since the process started and reset on restart, and under the default in-process backends they are per-replica. It carries only low-cardinality aggregates — never a query, value, or principal.</p></div>
+          <button id="refresh-observability" class="button secondary" type="button">Refresh</button>
+        </div>
+        <p id="observability-snapshot" class="observability-snapshot" hidden></p>
+        <div id="observability-cards" class="observability-cards"><p class="empty-state">Connect with admin:observability:read to load observability.</p></div>
+        <div class="table-wrap" id="observability-table-wrap" hidden>
+          <table class="history-table">
+            <thead><tr><th>Connection</th><th>Queries</th><th>Rejected</th><th>Top reasons</th><th>Avg duration</th><th>Concurrency</th><th>Cost fail-open</th></tr></thead>
+            <tbody id="observability-body"></tbody>
+          </table>
+        </div>
       </section>
     </main>
   </div>
