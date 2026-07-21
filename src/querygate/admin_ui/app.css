@@ -329,6 +329,12 @@ input:hover, select:hover, textarea:hover { border-color: var(--line-strong); }
 .template-card-meta .status-chip { flex: none; }
 .template-card-caret { color: var(--faint); font-size: 10px; transition: transform .15s ease; }
 .template-card.open .template-card-caret { transform: rotate(90deg); }
+
+.observability-snapshot { margin: 0 0 16px; padding: 9px 13px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--faint); font: 11px/1.5 var(--font-mono); }
+.observability-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.observability-card { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.observability-card-label { color: var(--muted); font-size: 11px; }
+.observability-card-value { font-family: var(--font-serif); font-size: 22px; font-weight: 500; letter-spacing: -.018em; }
 .template-params { display: flex; flex-wrap: wrap; gap: 7px; }
 .template-query { padding: 0 16px 14px; border-top: 1px solid var(--line); }
 .template-query-label { margin: 12px 0 8px; color: var(--muted); font: 10px/1.4 var(--font-mono); letter-spacing: .04em; text-transform: uppercase; }
