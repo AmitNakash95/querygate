@@ -430,6 +430,14 @@ curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/diff \
 curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/blast-radius \
   -d '{"policy_yaml": "default:\n  enabled: true\n  max_limit: 50\n"}'
 
+# Optional, on-demand: check that query templates' tables/columns actually
+# exist in the live database (the fast dry-run above is offline and doesn't).
+# Best-effort per template: ok / issues / connection_unavailable / unreachable —
+# an unreachable database is reported, never a hard failure. Requires both
+# config scopes, like /simulate and /diff.
+curl -X POST -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/config/check-template-schema \
+  -d '{"templates_yaml": "templates:\n  - id: ...\n    ..."}'
+
 # Stage it as a new version (only the fields you send change; everything
 # else inherits from the current active version). templates_yaml is a governed
 # document too (item 48 phase 2): stage a curated query-template change here and

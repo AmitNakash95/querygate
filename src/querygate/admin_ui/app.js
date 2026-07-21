@@ -586,6 +586,52 @@
     }
   }
 
+  const SCHEMA_STATUS_CLASS = {
+    ok: "good",
+    issues: "bad",
+    connection_unavailable: "warning",
+    unreachable: "warning",
+    structural_error: "bad",
+  };
+
+  function renderSchemaCheck(result) {
+    const el = $("#schema-check-result");
+    if (!result.checked) {
+      el.innerHTML = `<p class="empty-state">${escapeHtml(result.note || "Nothing to check.")}</p>`;
+      return;
+    }
+    if (!result.results.length) {
+      el.innerHTML = `<p class="empty-state">No query templates to check.</p>`;
+      return;
+    }
+    el.innerHTML = result.results
+      .map((row) => {
+        const cls = SCHEMA_STATUS_CLASS[row.status] || "neutral";
+        const messages = row.messages.length
+          ? `<ul>${row.messages.map((m) => `<li>${escapeHtml(m)}</li>`).join("")}</ul>`
+          : "";
+        return `<div class="schema-check-row"><span class="status-chip ${cls}">${escapeHtml(row.status.replace(/_/g, " "))}</span> <code>${escapeHtml(row.template_id)}</code> <small>${escapeHtml(row.connection)}</small>${messages}</div>`;
+      })
+      .join("");
+  }
+
+  async function checkSchema() {
+    const button = $("#check-schema");
+    setBusy(button, true, "Checking…");
+    try {
+      const payload = { templates_yaml: state.draftDocuments.templates || null };
+      const result = await api("/admin/config/check-template-schema", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      renderSchemaCheck(result);
+    } catch (error) {
+      $("#schema-check-result").innerHTML = `<ul><li>${escapeHtml(error.message)}</li></ul>`;
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
   async function stageDraft() {
     if (state.validatedFingerprint !== fingerprintDraft()) {
       toast("Validate the current draft before staging.", "bad");
@@ -1439,6 +1485,7 @@
       catch { toast("Clipboard access is unavailable in this browser.", "bad"); }
     });
     $("#validate-draft").addEventListener("click", validateDraft);
+    $("#check-schema").addEventListener("click", checkSchema);
     $("#stage-draft").addEventListener("click", stageDraft);
     $("#discard-draft").addEventListener("click", discardDraft);
     $("#refresh-history").addEventListener("click", () => loadGovernance(true).then(() => toast("Version history refreshed.")).catch((error) => toast(error.message, "bad")));

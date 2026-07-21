@@ -800,6 +800,9 @@ async def test_config_governance_write_endpoints_require_write_scope():
         blast_radius_resp = await client.post(
             "/api/v1/admin/config/blast-radius", json={}, headers=headers
         )
+        schema_check_resp = await client.post(
+            "/api/v1/admin/config/check-template-schema", json={}, headers=headers
+        )
         apply_resp = await client.post("/api/v1/admin/config/versions/1/apply", headers=headers)
 
     assert stage_resp.status_code == 403
@@ -812,6 +815,9 @@ async def test_config_governance_write_endpoints_require_write_scope():
     # Blast-radius shares /diff's scope reasoning exactly (it's an aggregation
     # over the same isolated candidate resolution).
     assert blast_radius_resp.status_code == 403
+    # The live-schema check resolves caller-supplied template content, so
+    # config-read alone is insufficient — it also requires config-write.
+    assert schema_check_resp.status_code == 403
     assert apply_resp.status_code == 403
 
 
@@ -836,6 +842,9 @@ async def test_config_governance_read_endpoints_require_read_scope():
         blast_radius_resp = await client.post(
             "/api/v1/admin/config/blast-radius", json={}, headers=headers
         )
+        schema_check_resp = await client.post(
+            "/api/v1/admin/config/check-template-schema", json={}, headers=headers
+        )
 
     assert list_resp.status_code == 403
     assert current_resp.status_code == 403
@@ -845,6 +854,9 @@ async def test_config_governance_read_endpoints_require_read_scope():
     # config-read alone is insufficient — it also requires config-write.
     assert diff_resp.status_code == 403
     assert blast_radius_resp.status_code == 403
+    # The live-schema check reveals live column/table existence, so config-write
+    # alone is insufficient — it also requires config-read.
+    assert schema_check_resp.status_code == 403
 
 
 @pytest.mark.asyncio

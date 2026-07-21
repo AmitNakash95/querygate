@@ -451,6 +451,19 @@ cost-estimation never open a session. The admin dry-run panel says so, and
 surfaces validation failures attributed to their document (`templates.yaml: …`)
 in plain language rather than raw validator output.
 
+For column/table existence there is a separate, **explicit on-demand check**
+(`POST /admin/config/check-template-schema`, the admin UI's "Check templates
+vs. schema" button): it reflects each template's target connection from the
+*currently-live* registry, binds the skeleton with dummy values, and runs the
+same `validate_schema` the real pipeline uses, reporting per template `ok` /
+`issues` (a missing column/table, named) / `connection_unavailable` /
+`unreachable`. It is deliberately **best-effort** — a database that can't be
+reached yields `unreachable`, never a hard failure — so the fast, offline
+dry-run stays decoupled from database availability while authors still get
+pre-stage schema feedback on demand. Like `simulate`/`diff` it requires both
+config scopes (it reveals live schema detail while resolving caller-supplied
+template content).
+
 **Authoring a template is a governed change (item 48 phase 2).** `templates.yaml`
 is a fourth governed document in the config-versioning plane (see [the admin
 surface](#the-admin-surface-config-as-versioned-history-not-a-live-edited-file)),
@@ -2142,6 +2155,26 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-21 — Query-template validation is layered: offline slot/structural
+  checks in the always-on dry-run, live column/table existence as a separate
+  best-effort on-demand action (TODO.md item 83).** Two deliberate choices.
+  **(1)** Parameter-slot self-consistency (`allowed_values`/`default` must match
+  the declared `type`/bounds) is validated at load/dry-run time in the model
+  itself, sharing one `scalar_type_error` primitive with runtime binding so the
+  two can't disagree — a slot that could never bind (e.g. `type: integer` with
+  string `allowed_values`) is caught before it ships, not left to fail at
+  invocation. **(2)** Column/table existence is *not* folded into the dry-run,
+  which is intentionally offline (no DB session, same posture as
+  `explain`/cost-estimation). Folding it in would couple every config
+  validation to database availability — a slow or down database would block
+  staging otherwise-valid config. Instead it's a distinct, opt-in
+  `check-template-schema` action that reflects the currently-live connections
+  and returns best-effort per-template results (`ok`/`issues`/
+  `connection_unavailable`/`unreachable`); an unreachable database is reported,
+  never a hard failure. The rejected alternative — always-on live schema
+  validation in the dry-run — was declined for that coupling, even though it
+  would be marginally more convenient, because keeping the fast path offline is
+  worth more than saving one button click.
 - **2026-07-21 — Query templates are governed through the config-versioning
   plane (item 25), not 32B's catalog-proposal state machine (TODO.md item 48
   phase 2).** Item 48's original sketch said route template authoring "through
