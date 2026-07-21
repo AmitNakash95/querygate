@@ -1096,3 +1096,79 @@ class TestCrossDialectRendering:
         stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "coalesce(orders.total_amount, 0) >" in compiled
+
+
+class TestMinGroupSize:
+    """k-anonymity guardrail (TODO.md item 88): Policy.min_group_size injects
+    `HAVING count(*) >= k` into aggregate queries so a caller can't single out a
+    group backed by fewer than k rows. Only aggregate queries are affected."""
+
+    def test_injects_having_on_grouped_aggregate(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                AggregateSelectItem(fn="count", col="*", alias="n"),
+            ],
+            group_by=["orders.customer_id"],
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(min_group_size=5))
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "HAVING" in compiled.upper()
+        assert "count(*) >= 5" in compiled.lower()
+
+    def test_injects_having_on_ungrouped_single_group_aggregate(self):
+        # No GROUP BY: the single implicit group (all rows matching WHERE) must
+        # still meet the floor, so a count over a razor-thin filter is suppressed.
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="customers",
+            select=[AggregateSelectItem(fn="count", col="*", alias="n")],
+            where=Predicate(col="customers.id", op="eq", value=1),
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(min_group_size=5))
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "count(*) >= 5" in compiled.lower()
+
+    def test_not_applied_to_plain_non_aggregate_select(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="customers",
+            select=["customers.id", "customers.name"],
+            where=Predicate(col="customers.id", op="eq", value=1),
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(min_group_size=5))
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "having" not in compiled.lower()
+
+    def test_combines_with_caller_having(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                AggregateSelectItem(fn="count", col="*", alias="n"),
+            ],
+            group_by=["orders.customer_id"],
+            having=[Predicate(col="n", op="gte", value=2)],
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(min_group_size=5))
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        # Both the caller's own HAVING and the injected floor are present.
+        assert "count(*) >= 5" in compiled.lower()
+        assert ">= 2" in compiled
+
+    def test_none_is_a_noop(self):
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.customer_id",
+                AggregateSelectItem(fn="count", col="*", alias="n"),
+            ],
+            group_by=["orders.customer_id"],
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(min_group_size=None))
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "having" not in compiled.lower()

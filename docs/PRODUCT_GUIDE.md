@@ -2255,6 +2255,25 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-21 — The `min_group_size` k-anonymity guardrail suppresses
+  small aggregate groups by injecting `HAVING count(*) >= k`, rather than
+  rejecting the query or restricting the AST (TODO.md item 88).** It closes
+  the single-query singling-out form of item 55's R3 residual (a caller
+  aggregating over a razor-thin filter to isolate one individual). Two
+  deliberate choices. **(1) Suppress, don't reject.** QueryGate cannot know a
+  group's actual size without running the query, so a static "reject
+  aggregates that *could* be small" rule would reject nearly every aggregate;
+  instead the compiler injects a `HAVING` floor so under-*k* groups are
+  dropped by the database and compliant ones still return — the exact
+  precedent set by mandatory row filters (policy-driven structure injected
+  into the compiled statement, non-removable), not the "engine synthesizing
+  query structure the agent didn't ask for" anti-pattern, since this is a
+  policy guardrail, not a convenience. **(2) Close only what a per-query floor
+  honestly can.** It stops single-query singling-out but *not* multi-query
+  differencing (subtracting two independently-≥*k* aggregates), which needs
+  query-set auditing or differential privacy. Rather than overclaim
+  "k-anonymity," the guardrail's scope is stated exactly, and multi-query
+  differencing stays a documented residual in `docs/INFERENCE_RISKS.md` (R3).
 - **2026-07-21 — The admin observability overview reports an honest
   single-process snapshot rather than pretending to be a durable
   time-series (TODO.md item 44, phase 1).** `GET
