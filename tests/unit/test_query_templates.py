@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+from querygate.core.config import AppConfig
 from querygate.core.exceptions import QueryValidationError
 from querygate.query_ast.models import StructuredQuery
 from querygate.templates.binding import bind_template, validate_template_structure
@@ -71,6 +72,16 @@ def test_min_max_only_valid_for_numeric():
                 "query": {"from": "orders", "select": ["orders.id"]},
             }
         )
+
+
+def test_documented_TEMPLATES_FILE_env_var_populates_template_file(monkeypatch):
+    """Regression: the documented env var is the plural TEMPLATES_FILE
+    (.env.example, examples/templates.example.yaml, CLI help). Without the
+    field's AliasChoices it only bound the singular TEMPLATE_FILE, so the
+    documented var was silently ignored and no templates ever loaded."""
+    monkeypatch.setenv("TEMPLATES_FILE", "examples/templates.example.yaml")
+    monkeypatch.delenv("TEMPLATE_FILE", raising=False)
+    assert AppConfig().template_file == "examples/templates.example.yaml"
 
 
 def test_template_file_rejects_duplicate_ids():
