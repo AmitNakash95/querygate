@@ -263,7 +263,12 @@ Administrative actions use explicit scopes:
   health (which connection is reachable, when it last succeeded, and a redacted
   failure category — never a connection string or raw driver error); and
 - `admin:connections:test` (independent of the read scope above) triggers an
-  immediate, rate-limited re-check of one connection on demand.
+  immediate, rate-limited re-check of one connection on demand; and
+- `admin:observability:read` returns an aggregated operational overview
+  (query volume, rejection categories, queue/concurrency pressure, and the
+  cost-estimation fail-open rate, globally and per connection) as an honest
+  current-process snapshot — never a query, value, or principal — rendered as
+  the control plane's "Observability" panel.
 
 These privileges should be separated from ordinary query identities. In
 production, authentication is mandatory. Anonymous access is limited to a
