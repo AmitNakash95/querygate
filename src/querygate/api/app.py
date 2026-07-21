@@ -188,8 +188,11 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             )
             response.headers["Referrer-Policy"] = "no-referrer"
             response.headers["X-Content-Type-Options"] = "nosniff"
-            if request.url.path in {"/admin", "/admin/", "/access", "/access/"}:
-                response.headers["Cache-Control"] = "no-store"
+            # no-store for the whole control-plane surface, not just the HTML
+            # entry point: the app.js/app.css assets change with every UI update,
+            # and a browser caching them behind a no-store HTML shell would keep
+            # showing stale UI (and could serve a superseded control plane).
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     @application.get("/health", tags=["health"])
