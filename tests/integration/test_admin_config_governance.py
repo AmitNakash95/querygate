@@ -325,6 +325,55 @@ async def test_query_template_authored_through_governance_becomes_invocable_then
 
 
 @pytest.mark.asyncio
+async def test_check_template_schema_endpoint_flags_missing_column(app, monkeypatch):
+    """The on-demand live-schema check reflects the connection and reports a
+    template's missing column as `issues` while a valid one is `ok` — end to
+    end through the REST endpoint, with the reflection seam patched."""
+    import sqlalchemy as sa
+
+    from querygate.validation import schema_validation
+
+    def _foo_table():
+        md = sa.MetaData()
+        return sa.Table("foo", md, sa.Column("id", sa.Integer))
+
+    async def fake_load_table(connection_id, table_name, table_connection):
+        if table_name.lower() == "foo":
+            return _foo_table()
+        raise sa.exc.NoSuchTableError(table_name)
+
+    monkeypatch.setattr(schema_validation, "_load_table", fake_load_table)
+
+    # Targets the live registry connection ("demo", from the autouse fixture) —
+    # the schema check reflects the *currently-live* connections, not whatever
+    # the config file happens to name.
+    templates = """
+templates:
+  - id: good
+    connection: demo
+    parameters: []
+    query: {from: foo, select: [foo.id], limit: 5}
+  - id: bad
+    connection: demo
+    parameters: []
+    query: {from: foo, select: [foo.ghost], limit: 5}
+"""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/check-template-schema",
+            json={"templates_yaml": templates},
+            headers=_auth(_ADMIN_KEY),
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["checked"] is True
+    by_id = {r["template_id"]: r for r in body["results"]}
+    assert by_id["good"]["status"] == "ok"
+    assert by_id["bad"]["status"] == "issues"
+    assert any("ghost" in m for m in by_id["bad"]["messages"])
+
+
+@pytest.mark.asyncio
 async def test_dry_run_catches_slot_type_contradiction_with_a_readable_error(app):
     """A parameter whose declared type contradicts its allowed_values now fails
     the dry-run (item: slot self-consistency), and the error is attributed to

@@ -15,6 +15,9 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import sqlalchemy as sa
+import yaml
+
 from querygate.admin.access_diff import compute_access_diff
 from querygate.admin.blast_radius import compute_blast_radius_report
 from querygate.admin.models import (
@@ -31,6 +34,8 @@ from querygate.admin.models import (
     MandatoryFilterReadiness,
     PolicyBlastRadiusReport,
     SemanticAccessDiff,
+    TemplateSchemaCheck,
+    TemplateSchemaCheckResult,
 )
 from querygate.admin.store import ConfigVersionStore, get_config_version_store
 from querygate.audit.logger import audit_config_change
@@ -49,8 +54,14 @@ from querygate.core.exceptions import (
 from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE
 from querygate.policy.models import Policy
 from querygate.secrets.resolvers import build_secret_resolver_registry
+from querygate.templates.binding import dummy_bound_query
+from querygate.templates.loader import TemplateStore
+from querygate.templates.models import QueryTemplate
 from querygate.validation.policy_validation import referenced_tables, validate_policy
-from querygate.validation.schema_validation import resolve_query_table_connections
+from querygate.validation.schema_validation import (
+    resolve_query_table_connections,
+    validate_schema,
+)
 
 _SAFE_SIMULATION_VALIDATION_ERROR = (
     "Candidate configuration is invalid; run the config validation endpoint for details "
@@ -544,6 +555,95 @@ def validate_candidate_content(
         if template_file is not None:
             doc_names[template_file] = "templates.yaml"
         return _humanize_validation_errors(errors, doc_names)
+
+
+async def _check_one_template_schema(template: QueryTemplate) -> TemplateSchemaCheck:
+    """Reflect the target connection and verify the template's referenced
+    tables/columns exist. Reuses the exact `validate_schema` the live pipeline
+    runs (with `principal=None`, so the check resolves the connection by its
+    deployment visibility, not a query-time principal policy) against a
+    dummy-bound query — placeholder values never change which identifiers a
+    query references."""
+    base = {"template_id": template.id, "connection": template.connection}
+    try:
+        bound = dummy_bound_query(template)
+    except Exception as exc:  # structurally invalid skeleton — fix in the dry-run
+        return TemplateSchemaCheck(**base, status="structural_error", messages=[str(exc)])
+    try:
+        await validate_schema(bound, template.connection, principal=None)
+    except NotFoundError:
+        return TemplateSchemaCheck(
+            **base,
+            status="connection_unavailable",
+            messages=[
+                f"connection {template.connection!r} is not a live, enabled connection "
+                "to reflect a schema from"
+            ],
+        )
+    except QueryValidationError as exc:  # a missing column, or a structural rule
+        return TemplateSchemaCheck(**base, status="issues", messages=[str(exc)])
+    except sa.exc.NoSuchTableError as exc:  # a referenced table doesn't exist
+        return TemplateSchemaCheck(
+            **base, status="issues", messages=[f"table {str(exc)!r} does not exist"]
+        )
+    except sa.exc.SQLAlchemyError:  # DB unreachable/auth/etc — best-effort, never blocks
+        return TemplateSchemaCheck(
+            **base,
+            status="unreachable",
+            messages=["schema not checked — the connection's database could not be reached"],
+        )
+    return TemplateSchemaCheck(**base, status="ok")
+
+
+async def check_template_schema(
+    cfg: AppConfig, actor: Principal, templates_yaml: Optional[str]
+) -> TemplateSchemaCheckResult:
+    """On-demand check of every query template's referenced tables/columns
+    against the *currently-live* connections' reflected schema — the existence
+    check the offline dry-run deliberately skips (it never opens a DB session,
+    like `explain`/cost-estimation). Best-effort: a connection that can't be
+    reached yields an `unreachable` result, never an error, so a down database
+    can never block staging otherwise-valid config. A field left unset inherits
+    the active version's templates, matching the rest of the config plane."""
+    start = time.monotonic()
+    store = get_config_version_store()
+    _, _, _, resolved_templates = _resolve_candidate(
+        cfg,
+        store,
+        connections_yaml=None,
+        policy_yaml=None,
+        catalog_yaml=None,
+        templates_yaml=templates_yaml,
+    )
+    if resolved_templates is None:
+        return TemplateSchemaCheckResult(checked=False, note="No query templates are configured.")
+    try:
+        template_store = TemplateStore.from_dict(yaml.safe_load(resolved_templates) or {})
+    except Exception:
+        audit_config_change(
+            action="check_template_schema",
+            outcome="rejected",
+            principal=actor.subject,
+            principal_scopes=sorted(actor.scopes),
+            auth_method=actor.auth_method,
+            error_category="validation",
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        return TemplateSchemaCheckResult(
+            checked=False,
+            note="The templates document is not structurally valid — run Validate (dry-run) first.",
+        )
+
+    results = [await _check_one_template_schema(t) for t in template_store.list()]
+    audit_config_change(
+        action="check_template_schema",
+        outcome="success",
+        principal=actor.subject,
+        principal_scopes=sorted(actor.scopes),
+        auth_method=actor.auth_method,
+        duration_ms=int((time.monotonic() - start) * 1000),
+    )
+    return TemplateSchemaCheckResult(checked=True, results=results)
 
 
 def validate(

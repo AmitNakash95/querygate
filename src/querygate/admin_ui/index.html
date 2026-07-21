@@ -257,6 +257,8 @@
           <article class="panel">
             <div class="panel-head"><div><p class="eyebrow">Dry-run result</p><h3>Validation &amp; document preview</h3></div><span id="validation-status" class="status-chip neutral">Not validated</span></div>
             <div id="validation-result" class="validation-result"><p class="empty-state">Run validation before staging. All submitted documents are checked together.</p></div>
+            <div class="schema-check-head"><div><p class="eyebrow">Live schema check</p><small>Verifies query-template tables/columns exist in the live database — the dry-run above does not.</small></div><button id="check-schema" class="button secondary" type="button">Check templates vs. schema</button></div>
+            <div id="schema-check-result" class="validation-result"><p class="empty-state">Optional, on-demand. Best-effort — an unreachable database is reported, not treated as a failure.</p></div>
           </article>
           <article class="panel">
             <div class="panel-head"><div><p class="eyebrow">Stage change</p><h3>Create an immutable version</h3></div></div>

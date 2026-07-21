@@ -99,24 +99,36 @@ def bind_template(template: QueryTemplate, supplied: Mapping[str, Any]) -> Struc
 _DUMMY_SCALAR = {"string": "x", "integer": 1, "number": 1.0, "boolean": True}
 
 
-def validate_template_structure(template: QueryTemplate) -> Optional[str]:
-    """Deploy-time check that a template's skeleton forms a structurally valid
-    `StructuredQuery` once its placeholders are filled — so `querygate-validate-
-    config` catches a malformed template (a bad field, a wrong-shaped predicate,
-    a placeholder in a position its declared type can't satisfy) before deploy,
-    not only at first invocation. Substitutes a type-appropriate dummy for each
-    parameter and validates the result. Returns an error string, or None if the
-    skeleton is structurally sound. This is a *structural* check only — schema
-    existence and policy remain runtime concerns, evaluated on the real bound
-    query like any other.
+def dummy_bound_query(template: QueryTemplate) -> StructuredQuery:
+    """Bind a type-appropriate dummy for every parameter and return the
+    resulting validated `StructuredQuery`. Placeholder values don't affect which
+    tables/columns the query references, so this yields a real query suitable
+    for both the structural check below and the on-demand live-schema check
+    (`admin.service.check_template_schema`) — neither needs real caller input.
+    Raises on a structurally invalid skeleton (a bad field, a placeholder in a
+    position its type can't satisfy, etc.).
     """
     dummies: Dict[str, Any] = {}
     for param in template.parameters:
         scalar = _DUMMY_SCALAR[param.type]
         dummies[param.name] = [scalar] if param.is_list else scalar
+    bound = _substitute(copy.deepcopy(template.query), dummies)
+    return StructuredQuery.model_validate(bound)
+
+
+def validate_template_structure(template: QueryTemplate) -> Optional[str]:
+    """Deploy-time check that a template's skeleton forms a structurally valid
+    `StructuredQuery` once its placeholders are filled — so `querygate-validate-
+    config` catches a malformed template (a bad field, a wrong-shaped predicate,
+    a placeholder in a position its declared type can't satisfy) before deploy,
+    not only at first invocation. Returns an error string, or None if the
+    skeleton is structurally sound. This is a *structural* check only — schema
+    existence and policy remain runtime concerns, evaluated on the real bound
+    query like any other (the on-demand live-schema check verifies existence
+    separately, against the real database).
+    """
     try:
-        bound = _substitute(copy.deepcopy(template.query), dummies)
-        StructuredQuery.model_validate(bound)
+        dummy_bound_query(template)
     except Exception as exc:
         return f"template {template.id!r} is not a structurally valid query: {exc}"
     return None

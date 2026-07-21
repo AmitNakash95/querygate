@@ -2,9 +2,10 @@
 
 Mirrors `catalog/loader.py`'s `CatalogStore`: loaded from a YAML file
 (`TEMPLATES_FILE`), swapped atomically on config reload, and never a second
-mutation path. Templates are declarative configuration in phase 1 — as safe as
-`policy.yaml` (and a template can't exceed policy); the governed
-create/edit/approve/publish workflow is phase 2.
+mutation path. Templates are declarative configuration — as safe as
+`policy.yaml` (and a template can't exceed policy). Authoring is governed
+through the config-versioning plane (item 48 phase 2): `templates.yaml` is a
+staged/validated/rollbackable document there, not a direct mutation endpoint.
 """
 
 from __future__ import annotations

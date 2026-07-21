@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 import math
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import pydantic as pyd
 
@@ -73,6 +73,37 @@ class ConfigPreview(pyd.BaseModel):
             "principal, table, column, and catalog identifiers",
         ]
     )
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class TemplateSchemaCheck(pyd.BaseModel):
+    """Result of checking one query template's referenced tables/columns against
+    a live connection's reflected schema (the on-demand check the offline
+    dry-run deliberately skips)."""
+
+    template_id: str
+    connection: str
+    # ok: every table/column exists. issues: something is missing/invalid.
+    # connection_unavailable: the target connection isn't a live, enabled
+    # connection to reflect. unreachable: the database couldn't be reached, so
+    # existence was not verified (best-effort, never a hard failure).
+    # structural_error: the skeleton isn't a valid query (fix in the dry-run first).
+    status: Literal["ok", "issues", "connection_unavailable", "unreachable", "structural_error"]
+    messages: List[str] = pyd.Field(default_factory=list)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class TemplateSchemaCheckResult(pyd.BaseModel):
+    """Per-template results of the on-demand live-schema check. `checked` is
+    False when there are no templates to check or the document couldn't be
+    parsed (see `note`); a per-connection reflection failure is reported as an
+    `unreachable` result, not an error, so a down database never blocks staging."""
+
+    checked: bool
+    results: List[TemplateSchemaCheck] = pyd.Field(default_factory=list)
+    note: Optional[str] = None
 
     model_config = pyd.ConfigDict(extra="forbid")
 
