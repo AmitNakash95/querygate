@@ -373,6 +373,45 @@ templates:
     assert any("ghost" in m for m in by_id["bad"]["messages"])
 
 
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_check_template_schema_never_500s_or_leaks_a_driver_error(app, monkeypatch):
+    """When reflection fails with a driver error embedding host/credentials, the
+    endpoint returns 200 with an `unreachable` result and a generic message —
+    never a 500, and never the raw driver text (QG-27)."""
+    import sqlalchemy as sa
+
+    from querygate.validation import schema_validation
+
+    async def exploding_load_table(connection_id, table_name, table_connection):
+        raise sa.exc.OperationalError(
+            "SELECT * FROM orders",
+            {},
+            Exception("could not connect: password=SUPERSECRET host=db.internal port=5432"),
+        )
+
+    monkeypatch.setattr(schema_validation, "_load_table", exploding_load_table)
+
+    templates = """
+templates:
+  - id: t
+    connection: demo
+    parameters: []
+    query: {from: orders, select: [orders.id], limit: 5}
+"""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/config/check-template-schema",
+            json={"templates_yaml": templates},
+            headers=_auth(_ADMIN_KEY),
+        )
+    assert resp.status_code == 200  # best-effort: a down DB is a result, not a 500
+    body = resp.json()
+    assert body["results"][0]["status"] == "unreachable"
+    for leak in ("SUPERSECRET", "password=", "db.internal", "5432"):
+        assert leak not in resp.text
+
+
 @pytest.mark.asyncio
 async def test_dry_run_catches_slot_type_contradiction_with_a_readable_error(app):
     """A parameter whose declared type contradicts its allowed_values now fails

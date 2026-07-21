@@ -3663,13 +3663,17 @@ guarantee.
 elements, plus a valid slot accepted); `tests/unit/test_admin_service.py`
 (the humanizer strips temp paths + pydantic noise); `tests/unit/
 test_template_schema_check.py` (the per-template classifier: ok / missing
-column / missing table / unreachable-is-best-effort / unknown-connection /
-structural-error, with the reflection seam patched per the conftest gotcha);
-`tests/integration/test_admin_config_governance.py` (the `/validate` endpoint
-returns a clean attributed slot error; the `/check-template-schema` endpoint
-flags a missing column end to end); `tests/integration/test_admin_ui.py` (the
-button + endpoint reference are served); and both config-scope security tests
-now assert the new endpoint requires read *and* write. Verified end-to-end
+column / missing table / unreachable-is-best-effort-and-never-leaks-the-driver-
+error / unknown-connection / structural-error, with the reflection seam patched
+per the conftest gotcha); `tests/integration/test_admin_config_governance.py`
+(the `/validate` endpoint returns a clean attributed slot error; the
+`/check-template-schema` endpoint flags a missing column end to end; and a
+security-marked test that the endpoint returns `200` — not a `500` — and never
+puts the raw driver string/host/credentials in the body when reflection raises,
+backing the QG-27 claim and adversarially verified to fail if the raw error is
+surfaced); `tests/integration/test_admin_ui.py` (the button + endpoint
+reference are served); and both config-scope security tests now assert the new
+endpoint requires read *and* write. Verified end-to-end
 against a real demo Postgres during development: a valid template → `ok`, a bad
 column → `Column 'ghost_amount' not found in table 'orders'`, a missing table →
 `table 'ghosts' does not exist`, an unknown connection → `connection_unavailable`.
