@@ -3765,3 +3765,179 @@ correctness gap (right versioning path) at once.
 **Docs:** `docs/PRODUCT_GUIDE.md` gained a "Human-authored catalog entries"
 subsection and a Decision Log entry (new `manual` source + governance-path
 rationale + scope-based separation of duties).
+
+### 85. Domain-separated admin UI (group the 9 flat views into Policy / Catalog / Templates / Connections / Releases) ✅ DONE
+
+**Effort: M.** Nav + layout refactor of the existing single-page admin UI
+(`admin_ui/index.html` + a single ~75KB `app.js`); reuses every existing
+per-view render function and scope gate unchanged. Not a rewrite of view
+logic. Done after item 84 so the new Curate panel folds into the Catalog
+domain rather than staying a flat nav slot.
+
+**Why it mattered:** the admin UI had grown to ten flat nav items (Overview,
+Schema review, Policy designer, Change set, Versions, Audit, Catalog review,
+Curate catalog, Connection health, Query templates) and would keep growing as
+structured authoring lands per domain. Grouping by domain makes the surface
+navigable and gives each domain a coherent home for its authoring + review +
+history sub-panels.
+
+**What shipped:**
+1. **Seven domains, secondary tab bar.** The sidebar lists seven domains —
+   **Overview** (standalone), **Connections** (Schema review + Connection
+   health), **Policy** (Designer, with its safe-start presets and simulation
+   as in-view sections), **Catalog** (Curate + Review proposals + Versions &
+   rollback), **Templates** (Query templates), **Releases** (Change set +
+   Versions), and **Audit** (the redaction-safe audit trail, standalone). A
+   secondary tab bar (`#domain-tabs`) renders inside any domain with more than
+   one view; single-tab domains show no bar. (The item's original sketch put
+   Audit under Releases; it was promoted to its own top-level domain since the
+   audit trail is a read-only cross-cutting view, not part of the change-set
+   staging flow.)
+2. **Two-level routing, unchanged render fns.** `app.js` gained an ordered
+   `navModel` (domain → tabs, each tab carrying its `view`/`section`/optional
+   `panel`/optional `scope`) plus `viewToTab`/`viewToDomain` reverse lookups.
+   `showView(name)` was extended from a flat lookup to resolve a view's owning
+   domain and section, render the domain tab bar, and toggle sub-panels — while
+   keeping its signature, the deep-linkable `/admin/#<view>` hash, and every
+   existing lazy-load trigger. `viewMeta` stays the view→`[kicker, title]` map.
+   No per-view render function or `hasScope`/`canRead`/`canWrite` gate changed.
+3. **Catalog's third tab is a sub-panel toggle, not a new view.** Because the
+   proposal list (`loadCatalogProposals`) and version history
+   (`loadCatalogVersions`) both read the same `#catalog-connection` selector,
+   the connection selector was lifted into a shared header row and the review
+   vs. versions content wrapped in `[data-catalog-panel]` blocks that the two
+   tabs (`catalog` / `catalog-versions`) toggle within the one `view-catalog`
+   section — giving the required three-tab Catalog with zero change to any
+   render function.
+4. **Scope gating preserved.** The `catalog:author`-gated Curate panel became a
+   Catalog tab that `renderDomainTabs` omits when the principal lacks the
+   scope (the same gate the old standalone `#nav-curate` button used); `connect`
+   re-renders the active domain's tabs once access is known.
+5. **The structural constraint made legible, not papered over.** Each domain's
+   tab bar shows a one-line release signal: Connections/Policy/Templates read
+   *"edits stage into the shared release"* (they feed the bundled
+   `ConfigVersionStore` atomic version, applied in Releases); Catalog reads
+   *"self-contained governance"* (its own `CatalogFileRepository` versioning,
+   author → review → publish → rollback in-domain); Releases reads *"shared
+   atomic version — policy, connections, catalog.yaml and templates apply
+   together."*
+6. **`app.js` kept as one file.** A per-domain module split was considered and
+   declined: the change never touches the ~1400 lines of view-render logic, so
+   splitting would add risk without reducing it.
+
+**Coverage:** `tests/integration/test_admin_ui.py` updated for the new
+nav labels (Catalog is a `data-domain`; the tab labels and the self-contained
+release copy are asserted in the served `app.js`). Verified end-to-end by
+driving the real `index.html`+`app.js` through a DOM harness (36 checks:
+six-domain sidebar, per-domain tab bars and release notes, catalog sub-panel
+toggle, `#catalog-versions` deep-link, and `catalog:author` tab gating
+with/without the scope).
+
+**Docs:** `docs/PRODUCT_GUIDE.md`'s admin-surface section gained a
+"How the control plane is organized" subsection, plus a Decision Log entry on
+surfacing the shared-release vs. self-contained-catalog split (and the
+nav-only / single-file decisions).
+
+### 86. MCP transport request-body size/depth guard ✅ DONE
+
+**Effort: S.** Closes the REST/MCP status-code asymmetry surfaced by item 36
+phase 2a: the REST surface rejects a malformed body (oversized, or nested past
+the JSON parser's recursion guard) with a clean 4xx, but the mounted MCP
+Streamable-HTTP transport's own `json.loads(body)` raised `RecursionError` and
+surfaced it as a *handled but HTTP 500* JSON-RPC internal error (`-32603`,
+leak-free). A robustness/consistency gap, not a disclosure — deferred by item
+36 to its own deliberate pass because a body cap is a judgment call.
+
+**What shipped:**
+1. **`mcp/transport_guard.py` — `MCPRequestGuardMiddleware`.** A small ASGI
+   wrapper mounted *around* the auth wrapper (outermost, so it runs before auth
+   and before the transport's `json.loads`). HTTP requests are buffered up to
+   the byte cap; a body past the cap is a clean `413`, a body nested past the
+   depth cap is a clean `400`, and anything within both caps is replayed
+   downstream unchanged. Non-HTTP scopes (lifespan, the GET SSE stream,
+   websockets) and `http.disconnect` pass straight through.
+2. **Cheap pre-parse depth scan.** `_structural_depth_exceeds` is an O(n) scan
+   over the raw bytes that counts structural `{`/`[` nesting only — characters
+   inside JSON string literals (respecting `\` escapes) are skipped, so a
+   string value that merely *contains* brackets can't trip the guard — and
+   short-circuits the instant the threshold is crossed, so a malicious deep
+   body is rejected after a few hundred bytes rather than parsed.
+3. **Two configurable `AppConfig` fields** (`mcp_max_request_bytes`, default
+   4 MiB; `mcp_max_request_depth`, default 100), both far above any legitimate
+   batch (policy caps `max_where_depth` at 5), documented in `.env.example`.
+4. **Rejections are redaction-safe:** a generic `{"error":{"code","message"}}`
+   body and a `mcp.transport.rejected` audit log carrying only the reason code
+   and path — never body content.
+
+**Coverage** (`tests/security/test_malformed_input_fuzzing.py`): the phase-2a
+deep-body test was flipped from "handled 500, documents the asymmetry" to
+`test_mcp_deeply_nested_argument_body_is_rejected_as_a_clean_4xx`, and a new
+`test_mcp_oversized_body_is_rejected_as_413_before_execution` covers the byte
+cap; both assert the service was never dispatched and nothing leaked. The
+existing valid-call MCP tests exercise the replay path unchanged. Verified
+end-to-end through the real mounted ASGI transport via httpx (not the tool
+internals): 174 security + credential-redaction tests green.
+
+**Docs:** `docs/THREAT_MODEL.md` §8 updated from residual-risk to resolved;
+`docs/PRODUCT_GUIDE.md`'s MCP-transport section documents the outer guard
+layer.
+
+### 87. Extend structured authoring to Policy and Templates (same form→validated-YAML→staged pattern) ✅ DONE
+
+**Effort: M–L.** Brought the item-84 "guided form instead of raw YAML" pattern
+to the config documents that still lacked it, feeding the shared
+`ConfigVersionStore` change-set (Releases domain) — not a per-domain governance
+publish like catalog.
+
+**Why it mattered:** authoring a query template meant hand-typing it into the
+`templates.yaml` change-set `<textarea>` — knowing the exact keys and the
+parameter-slot schema (type / required / default / numeric & length bounds /
+`allowed_values`, with self-consistency rules). Policy already had the visual
+designer for this; templates did not.
+
+**What shipped:**
+1. **Policy was already covered.** The visual policy designer
+   (`applyDesigner` → `/admin/ui/policy/render`) already composes a validated
+   `Policy` layer into the draft `policy.yaml`; item 85 placed it in the Policy
+   domain. No new policy authoring was needed — the deliverable was templates.
+2. **Two support endpoints** in `api/admin_ui_routes.py`, mirroring
+   `policy/parse`+`policy/render`: `POST /admin/ui/templates/parse` (read-or-
+   write scope) turns a `templates.yaml` body into a structured document, and
+   `POST /admin/ui/templates/render` (write scope) validates a document against
+   the shared `QueryTemplateFile` model and renders it back to YAML. The schema
+   authority is the same model the loader/dry-run uses, so a bad slot (numeric
+   bound on a string type, duplicate id) is a clean 422 at compose time.
+3. **Templates-domain authoring form** (`admin_ui/index.html` + `app.js`):
+   opened on demand from a "+ New template" button (not an always-on form),
+   with template id, connection, description, a repeatable parameter-slot
+   builder (name/type/required/list + min/max/max_length/allowed_values), and
+   the `StructuredQuery` skeleton as validated JSON. On submit it composes a
+   template, merges it by id into the current `templates.yaml` draft through the
+   parse→render round-trip, marks the change-set dirty, and auto-closes/resets —
+   the change then flows through the existing validate → stage → apply →
+   rollback. Gated on `admin:config:write` (a read-only session sees an
+   explanatory gate). Each browse card is also clickable to expand a read-only
+   view of that template's query skeleton — read from the admin's own
+   `templates.yaml` (the agent-facing `/query-templates` projection omits the
+   AST by design). It is server-gated on `admin:config:read`/`write` (the
+   `/admin/ui/templates/parse` scope, so a no-config-scope caller gets a 403
+   and a read-scope prompt, never the AST), reads only content the caller
+   already loaded via `admin:config:read`, is retained in memory only for
+   templates in the caller's visibility-filtered browse list, and is
+   HTML-escaped — no credentials/secrets/rows are ever in a query skeleton, so
+   it discloses nothing beyond what config-read already exposes.
+4. **The query skeleton stays JSON, deliberately** — the parameter slots are
+   the schema-heavy, error-prone part and got the structured builder; a full
+   visual AST builder would be a separate large surface (already served by the
+   typed query-builder SDK and raw editing). Raw `templates.yaml` editing
+   remains as the escape hatch; the form is additive.
+
+**Coverage:** `tests/integration/test_admin_ui.py` gained a parse/render
+round-trip + slot-validation-rejection test and a write-scope-required test.
+Verified end-to-end by driving the real `index.html`+`app.js` through a DOM
+harness (15 checks: form scope-gating, dynamic parameter rows, compose →
+parse → merge → render with typed coercion, and the draft going dirty).
+
+**Docs:** `docs/PRODUCT_GUIDE.md`'s query-templates section documents the
+guided form; a Decision Log entry records the shared-release routing, the
+JSON-skeleton scope call, and that Policy was already covered.
