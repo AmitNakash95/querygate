@@ -3681,3 +3681,87 @@ column → `Column 'ghost_amount' not found in table 'orders'`, a missing table 
 **Effort: S–M**, mostly reuse: one shared scalar validator + one error
 humanizer + one endpoint that composes `dummy_bound_query` with the existing
 `validate_schema`, plus the admin-UI button/panel.
+
+### 84. Structured catalog authoring UI (human-curated entries through the governance queue) ✅ DONE
+
+**Effort: M (2–4 days).** Vertical slice — one new backend proposal source,
+one new endpoint, one new UI panel. Nearly everything is composed from bricks
+that already exist (governance quarantine → approve → publish → rollback,
+audit, `CatalogDraftContent` validators); do not build a second catalog file,
+store, or mutation path.
+
+**Why it matters:** catalog.yaml already carries human-curated content (the
+`verified` source class), but the *only* way a human authors it today is by
+hand-typing raw YAML into the Change-set panel's catalog.yaml `<textarea>`
+(`admin_ui/index.html` `#document-editor`) — no field labels, no key hints,
+no schema help, and it flows through `ConfigVersionStore`, whose snapshot copy
+CLAUDE.md explicitly warns diverges from the live `CATALOG_FILE` that catalog
+governance writes to. This item gives a human a guided "pick a table → fill in
+description/aliases/relationships → submit" form whose output is routed through
+the **catalog governance path** (`CatalogFileRepository`), giving it the same
+staged → reviewed → published → rollback safety and actor-attributed audit the
+agent-generated proposals already get. It closes the UX gap and the
+correctness gap (right versioning path) at once.
+
+**Design decisions (resolved):**
+- Human-authored entries flow through the **governance queue**, NOT the
+  Change-set/`ConfigVersionStore` catalog.yaml tab. This is the CLAUDE.md-
+  compliant path (do not route catalog content through `admin/store`).
+- Authoring is gated on a **distinct `catalog:author` scope**, separate from
+  `catalog:review`, so a deployment *can* keep authoring and approving as
+  different principals — but this is enforced by **scope**, not identity.
+- **Self-approval is allowed.** Separation of duties is permission-based: a
+  principal that holds the approve/publish scope (`catalog:review`) may approve
+  and publish its own manual proposal. There is NO author≠approver identity
+  check. A deployment that wants strict separation grants `catalog:author` and
+  `catalog:review` to different principals; the scopes are the gate.
+
+**What shipped:**
+1. **New proposal source.** `KnowledgeSourceClass.MANUAL` (a proposal-only
+   class, precedence-mapped to VERIFIED for its computed provenance field) and
+   `CatalogDraftProposal._quarantine_inferred_content` extended to admit
+   `source_class = manual` alongside `inferred`/`learned`. A manual proposal
+   stays quarantined as DRAFT until published, at which point
+   `publish_proposal` mints a fresh `verified` entry — publishable-as-verified,
+   never auto-trusted or auto-indexed. The `replacement_decision` downgrade
+   guard is unchanged (verified-over-verified allowed, non-verified/manual
+   candidate over verified rejected).
+2. **New backend mutation.** `governance.create_manual_proposal` composes a
+   `CatalogDraftTarget` + `CatalogDraftContent`, validates the target against
+   the current schema snapshot when one exists, and appends the proposal plus a
+   single-proposal `provider_mode="manual"` generation record (the store
+   invariant requires every proposal to reference a generation record) — all
+   through the same `CatalogFileRepository` lock (`_apply`/`_run_mutation`). No
+   new file, no new store.
+3. **New endpoint** `POST /{connection}/proposals` (manual create) in
+   `api/catalog_governance_routes.py`, gated on `catalog:author`, emitting a
+   redaction-safe `catalog.governance` audit event (`action="manual_create"`).
+   Body: `{object_type, table, column?, to_table?, to_column?, description?,
+   aliases?, default_aggregation?}`. Two deliberate deviations from the item's
+   sketch: `sensitivity` is *not* accepted (a draft's content model
+   structurally has no sensitivity/sampling field — a verified-only,
+   direct-edit concern — and accepting it would weaken the quarantine
+   invariant), and relationship hints are authored as an `object_type =
+   relationship` target rather than a content-embedded list.
+4. **New "Curate" UI panel** (`admin_ui/index.html` + `app.js`): connection →
+   object type → table → optional column → form fields with inline help, the
+   currently-published entry shown beside the form via the existing compare
+   pattern, submit → manual pending proposal that surfaces in the existing
+   Catalog-review workbench (a `manual` source filter was added). Panel/nav
+   visibility gated on `catalog:author`.
+5. **No identity-based approval check** — separation of duties is purely
+   scope-driven; actor attribution (`created_by`/`approved_by`) retained.
+6. **Tests.** Unit (`test_catalog_governance.py`): quarantine validator admits
+   manual, downgrade guard holds, create→approve→publish→verified, self-approve
+   allowed, guardrails (default_aggregation-on-non-table, absent target). Route
+   (`test_catalog_governance_rest.py`): `catalog:author` required to create; a
+   principal holding both scopes can create AND self-approve/publish; the
+   published entry lands as `verified` in the live `CATALOG_FILE` and no
+   `config_versions/**/catalog.yaml` path is introduced.
+7. **Scope wiring.** `catalog:author` added to `core/scopes.py`;
+   `describe_my_querygate_access` reports it automatically (it lists the
+   principal's scopes verbatim).
+
+**Docs:** `docs/PRODUCT_GUIDE.md` gained a "Human-authored catalog entries"
+subsection and a Decision Log entry (new `manual` source + governance-path
+rationale + scope-based separation of duties).
