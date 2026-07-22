@@ -2507,8 +2507,11 @@ reasoning behind them, newest first. Added to incrementally as work happens
   behavioral change without the operator hand-tuning a number per service
   account. The report is bounded (one-pass streamed read, capped principals) and
   carries only the same ids/counts already in the audit event — no SQL, value,
-  table, or column (QG-28). It reuses item 44's observability router and scope;
-  rendering it in the `/admin/` dashboard is phase 2.
+  table, or column (QG-28). It reuses item 44's observability router and scope,
+  and is surfaced as a read-only "Behavioral anomalies" panel in the `/admin/`
+  Observability view (one row per principal-signal, with a color-coded kind
+  badge and a plain-language detail), rendered from the same scoped fetch as
+  the overview.
 - **2026-07-21 — Structured template authoring feeds the shared release, and
   keeps the query skeleton as validated JSON rather than a visual AST builder
   (TODO.md item 87).** Three choices. **(1) It composes into the change-set

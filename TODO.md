@@ -90,7 +90,7 @@ order-of-magnitude, not commitments.
 | 56 | HA / multi-region reference deployment + DR runbook | L | 29 |
 | 57 | Pluggable dialect-adapter architecture | L | 2, 19 |
 | 58 | Published adversarial benchmark vs. raw-SQL agent and Google Toolbox | M | 28, 36 |
-| 59 | ✅ Read-only behavioral anomaly surfacing on the audit stream (phase 1: detection engine + admin REST API; phase 2: dashboard card not started) | M | 32C, 44 |
+| 59 | ✅ Read-only behavioral anomaly surfacing on the audit stream | M | 32C, 44 |
 | 60 | Bug bounty / responsible disclosure program | S | 53 |
 | 61 | ✅ Deduplicate the StructuredQuery JSON Schema across execute/explain/batch tools | S–M | — |
 | 62 | ✅ Consolidate redundant instructional prose into one source of truth | M | 61 (pairs well) |
@@ -1792,73 +1792,9 @@ overhead numbers. Keep the comparison factual and reproducible — per this
 file's own external-market-reference instruction to never misrepresent a
 competitor's documented capabilities.
 
-### 59. Read-only behavioral anomaly surfacing on the audit stream
+### 59. Read-only behavioral anomaly surfacing on the audit stream ✅ DONE
 
-**Phase 1 (detection engine + admin REST API) ✅ DONE.** **Phase 2 (surface
-the signal in item 44's browser dashboard) not started — split out below
-because it is separate front-end work in the 2,300-line admin_ui bundle,
-independent of the backend aggregation, exactly the shape item 44 itself was
-split along.**
-
-**Phase 1 shipped:** `querygate/admin/anomaly.py` — a read-only,
-per-principal anomaly detector over item 23's persisted audit stream, plus
-`GET /api/v1/admin/observability/anomalies` (`admin:observability:read`,
-added to the item 44 router) returning a bounded, redaction-safe
-`AnomalyReport`. Distinct from item 44's overview, which aggregates the
-in-process Prometheus registry into *fleet* counters — this answers a
-*per-principal* question from the durable stream: is one caller's recent
-behavior unusual versus its own preceding baseline, even among queries policy
-*allowed*?
-
-- **Detection (`detect_anomalies`) is a pure function** over a list of
-  `AuditEvent`s + a fixed `now` + `AnomalyThresholds` — no clock, file, or
-  global state — so the full signal space is unit-testable. It splits each
-  principal's events into a recent window `(now - recent, now]` and the equal-
-  or-longer baseline window immediately before it, then flags three signals:
-  `volume_spike` (recent per-second rate ÷ baseline rate ≥ ratio),
-  `rejection_rate_spike` (jump in the *fraction* of a caller's queries policy
-  denied), and `new_connection_access` (a connection reached in the recent
-  window the caller never touched in its baseline). Both windows must clear
-  `min_baseline_events`/`min_recent_events` first, so a brand-new or barely-
-  active caller never trivially "spikes."
-- **Bounded by construction:** `JsonlAuditEventSource` streams the audit file
-  once into a bounded deque (`max_events_scanned`), reusing item 44's audit-
-  viewer read tolerance (malformed lines counted, never fatal; only
-  `query.execution` events, never config/catalog governance events); the
-  report caps principals (`max_principals_reported`, ranked most-severe first)
-  and per-principal new connections, and sets `truncated` honestly when a cap
-  is hit.
-- **Redaction-safe:** every surfaced field (`principal_id`, `connection`,
-  counts, per-minute rates, ratios) is already on the persisted `AuditEvent`
-  and already browsable via item 31's audit viewer; the report carries no SQL,
-  predicate value, row, table, or column, and the model is `extra="forbid"`
-  so a leak field can't be added silently. `test_report_is_redaction_safe`
-  and `test_anomalies_surface_a_spike_from_the_jsonl_stream` assert this
-  against the live serialized schema.
-- **Strictly within the 32C boundary (`CLAUDE.md`):** read-only. There is no
-  write path in the module at all — it never edits a policy, throttles,
-  blocks, or influences execution. Config lives in `AppConfig`
-  (`anomaly_*` fields, all optional with conservative defaults) and
-  `.env.example`; with `AUDIT_SINK_BACKEND=none` the endpoint honestly
-  reports `source="disabled"`.
-
-Covered by `tests/unit/test_anomaly.py` (each signal, the min-volume guards,
-window filtering, unauthenticated grouping, principal-cap ranking/truncation,
-the JSONL source's malformed/out-of-window/bound handling, and redaction) and
-`tests/integration/test_anomaly_api.py` (scope enforcement, disabled-without-
-sink, and a real spike surfaced from a written JSONL file without leaking
-values).
-
-**Why it matters:** Item 44 covers rejection-trend dashboards — denied
-queries. This is distinct: surfacing unusual volume or shape even among
-*allowed* queries per principal (e.g. a sudden order-of-magnitude spike) as
-a passive alert. Must stay strictly within the 32C boundary already fixed
-in `CLAUDE.md`: a read-only signal for a human admin to look at, never an
-autonomous policy edit or a feedback loop back into enforcement.
-
-**What to do (phase 2):** Render the `AnomalyReport` as a signal card/section
-in item 44's observability workspace (`admin_ui/`), reusing the existing
-`admin:observability:read` fetch pattern — no new backend or mutation path.
+Read-only per-principal anomaly detector over the persisted audit stream (`querygate/admin/anomaly.py`) — volume spikes, rejection-rate jumps, and newly-touched connections vs. each caller's own baseline — exposed via `GET /api/v1/admin/observability/anomalies` and a "Behavioral anomalies" panel in the admin Observability view; strictly within the 32C read-only boundary. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 59).
 
 ### 60. Bug bounty / responsible disclosure program
 
