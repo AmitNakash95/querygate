@@ -39,7 +39,7 @@ but must be a deliberate, one-line-reasoned edit, not drift.
 - **Item numbers are permanent and file-global.** Never renumber or reuse a
   number — the repo has ~176 internal "item N" cross-refs plus references
   from CLAUDE.md and tests that must keep resolving. A new item takes the
-  next unused number (currently start at 83).
+  next unused number (currently start at 96).
 - **When an item ships fully** (its `###` heading ends in exactly
   `✅ DONE`, no trailing qualifier), move its full body to
   `docs/TODO_ARCHIVE.md` — insert it in numeric order under a `### N.`
