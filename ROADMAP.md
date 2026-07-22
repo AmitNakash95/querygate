@@ -19,8 +19,18 @@ them in, and why that order maximizes product growth and ROI.**
 
 ## The strategy this order encodes
 
+**This order serves the North Star (`docs/business/NORTH_STAR.md`).** Every item
+here advances one of QueryGate's three pillars — **Structural** (no raw SQL/DML +
+query-shape policy), **Reach** (live operational DB, self-hosted, data never
+leaves), **Proof** (per-human attribution + tamper-evident audit) — or closes a
+table-stakes gap (delegated identity item 90; governed writes item 93), or moves
+the one success metric closer: **a paid design partner passing a security review
+no competitor's passes.** A re-sequence must cite which pillar or gap it serves.
+An item that advances none of them is a signal to question the item, not the
+order.
+
 The 2026-07-22 competitive scan (`docs/business/MARKET_DOMINATION_ANALYSIS.md`,
-`docs/business/COMPETITOR_CUBE.md`) reached one conclusion that drives the whole
+`docs/business/COMPETITORS.md`) reached one conclusion that drives the whole
 sequence: **QueryGate's white space is real, but the thing that converts
 "promising architecture" into "must-buy" is proof, not more features — and the
 gate on everything is landing one paid design partner.**

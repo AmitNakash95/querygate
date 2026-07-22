@@ -56,6 +56,28 @@ but must be a deliberate, one-line-reasoned edit, not drift.
 - The archive is reference-only: never put an open action item there, and
   don't add a second TODO file or a competing index.
 
+## North Star — the product definition for success (the anchor)
+
+`docs/business/NORTH_STAR.md` is the canonical definition of what QueryGate is
+and how it wins; every strategy artifact (ROADMAP.md, the competitor briefs,
+MARKET_DOMINATION_ANALYSIS.md, marketing) reconciles to it. In one line:
+**QueryGate is the enforcement point that governs *what an agent's query or
+write is allowed to be* — by construction, never by inspecting a string —
+against your existing operational databases, self-hosted, with per-human
+proof.** It wins by owning all **three pillars** no competitor combines:
+**Structural** (no raw SQL/DML string + query-shape policy), **Reach** (governs
+your live operational DB, self-hosted, data never leaves), **Proof**
+(per-human attribution + tamper-evident audit).
+
+The **non-goals are product identity, not gaps** — they are why followers can't
+copy us; adding any needs an explicit recorded decision: no `execute_sql`/raw-SQL
+mode, no execution of model-generated code, no stored-procedure path, no
+mandatory semantic/entity-modeling step, no warehouse of our own. When a
+feature, roadmap re-order, or pitch is unclear, check it against NORTH_STAR.md
+(definition → pillars → non-goals → success metric). Success is measured by one
+thing: a paid design partner passing a security review no competitor's passes at
+the operational-query layer.
+
 ## Commands
 
 ```bash
