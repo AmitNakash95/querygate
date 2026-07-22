@@ -1,0 +1,10 @@
+# Connections file used only by scripts/run_dast.py.
+#
+# Deliberately empty: the DAST fuzzer boots the real ASGI app and sweeps the
+# whole documented OpenAPI surface, and the boundary under test is that with
+# NO connection registered every query endpoint rejects at validation (unknown
+# connection / invalid AST) before any DB touch. Pointing the app at this file
+# instead of examples/connections.example.yaml keeps that premise literally true
+# and avoids booting against the demo profile's `${QUERYGATE_DEMO_DB_URL}`
+# reference, which is not set in the DAST run.
+connections: []
