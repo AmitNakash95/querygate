@@ -23,6 +23,8 @@ from querygate.admin import templates as policy_templates
 from querygate.admin.models import (
     CandidatePolicySimulation,
     CandidatePolicySimulationRequest,
+    ConfigChangeSetBundle,
+    ConfigChangeSetImportCheck,
     ConfigPreview,
     ConfigSemanticDiffRequest,
     ConfigVersion,
@@ -187,6 +189,35 @@ def build_admin_config_router(
             )
         except ConfigValidationError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    @router.post("/export", response_model=ConfigChangeSetBundle)
+    async def export_endpoint(
+        request: ConfigChangeRequest, principal: Principal = Depends(get_principal)
+    ):
+        # The bundle echoes only documents the caller submitted (inherited
+        # documents are never resolved into it), so this discloses no active
+        # config content and needs only write scope, like /preview and /versions.
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        return governance.export_change_set(
+            cfg,
+            principal,
+            connections_yaml=request.connections_yaml,
+            policy_yaml=request.policy_yaml,
+            catalog_yaml=request.catalog_yaml,
+            templates_yaml=request.templates_yaml,
+            description=request.description,
+        )
+
+    @router.post("/import", response_model=ConfigChangeSetImportCheck)
+    async def import_endpoint(
+        bundle: ConfigChangeSetBundle, principal: Principal = Depends(get_principal)
+    ):
+        # Validation + drift check only; it never stages or persists. The
+        # response is content-free (a change signal, not YAML), so — like
+        # /preview — write scope is sufficient. Staging still goes through
+        # /versions with the bundle's documents.
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        return await run_in_threadpool(governance.import_change_set, cfg, principal, bundle)
 
     @router.post("/versions", response_model=ConfigVersion, status_code=status.HTTP_201_CREATED)
     async def stage_endpoint(

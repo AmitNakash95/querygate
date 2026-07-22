@@ -9,11 +9,13 @@ Neither of those gets a parallel implementation here.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import sqlalchemy as sa
 import yaml
@@ -25,6 +27,8 @@ from querygate.admin.models import (
     CandidatePolicySimulation,
     CandidatePolicySimulationRequest,
     CandidateSimulationReason,
+    ConfigChangeSetBundle,
+    ConfigChangeSetImportCheck,
     ConfigDocumentPreview,
     ConfigPreview,
     ConfigSemanticDiffRequest,
@@ -814,6 +818,212 @@ def stage(
         description=description,
     )
     return version
+
+
+# --- Config change-set bundles (item 47) -----------------------------------
+
+_DOCUMENT_ORDER: Tuple[str, ...] = ("connections", "policy", "catalog", "templates")
+
+
+def _version_fingerprint(
+    connections_yaml: str,
+    policy_yaml: str,
+    catalog_yaml: Optional[str],
+    templates_yaml: Optional[str],
+) -> str:
+    """A stable content hash over a version's four documents.
+
+    Each document is length-prefixed and a missing (None) document is framed
+    distinctly from an empty-string one, so no combination of contents can
+    collide with another. Used only to detect that an import's base version
+    has drifted — never as a security boundary.
+    """
+    hasher = hashlib.sha256()
+    for value in (connections_yaml, policy_yaml, catalog_yaml, templates_yaml):
+        if value is None:
+            hasher.update(b"\x00none\x00")
+        else:
+            encoded = value.encode("utf-8")
+            hasher.update(f"\x01{len(encoded)}\x02".encode("ascii"))
+            hasher.update(encoded)
+    return hasher.hexdigest()
+
+
+def export_change_set(
+    cfg: AppConfig,
+    principal: Principal,
+    *,
+    connections_yaml: Optional[str],
+    policy_yaml: Optional[str],
+    catalog_yaml: Optional[str],
+    templates_yaml: Optional[str] = None,
+    description: Optional[str],
+) -> ConfigChangeSetBundle:
+    """Package the caller's submitted document deltas into a portable bundle.
+
+    Only the documents actually submitted (non-None) are included — the bundle
+    is a change set, not a full config snapshot — and it is stamped with the
+    current active version's id and content fingerprint so a later import can
+    tell whether the target has drifted. The response echoes only content the
+    caller supplied; inherited (unset) documents are never resolved into it,
+    so this never discloses the active connections/policy content.
+    """
+    store = get_config_version_store()
+    active = _bootstrap(cfg, store)
+
+    submitted: Dict[str, Optional[str]] = {
+        "connections": connections_yaml,
+        "policy": policy_yaml,
+        "catalog": catalog_yaml,
+        "templates": templates_yaml,
+    }
+    documents = {name: value for name, value in submitted.items() if value is not None}
+
+    bundle = ConfigChangeSetBundle(
+        base_version_id=active.id,
+        base_fingerprint=_version_fingerprint(
+            active.connections_yaml,
+            active.policy_yaml,
+            active.catalog_yaml,
+            active.templates_yaml,
+        ),
+        created_at=datetime.now(timezone.utc),
+        description=description,
+        documents=documents,  # type: ignore[arg-type]
+    )
+    audit_config_change(
+        action="export",
+        outcome="success",
+        principal=principal.subject,
+        principal_scopes=sorted(principal.scopes),
+        auth_method=principal.auth_method,
+        version_id=active.id,
+        description=description,
+    )
+    return bundle
+
+
+def import_change_set(
+    cfg: AppConfig,
+    principal: Principal,
+    bundle: ConfigChangeSetBundle,
+) -> ConfigChangeSetImportCheck:
+    """Validate an uploaded change-set bundle and report drift, before staging.
+
+    This never persists anything and never stages on its own — it resolves the
+    bundle's deltas over the current active version, validates the result with
+    the exact loaders the live pipeline uses, and reports a content-free change
+    signal plus whether the active base has drifted from the bundle's
+    fingerprint. Staging still goes through the existing `/versions` endpoint,
+    so there is one governed mutation path, not a shadow store.
+    """
+    start = time.monotonic()
+    store = get_config_version_store()
+    active = _bootstrap(cfg, store)
+
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    total_bytes = sum(len(value.encode("utf-8")) for value in bundle.documents.values())
+    if total_bytes > cfg.config_bundle_max_bytes:
+        errors.append(
+            f"change set is too large ({total_bytes} bytes; the limit is "
+            f"{cfg.config_bundle_max_bytes} bytes)"
+        )
+
+    documents_map = {name: value for name, value in bundle.documents.items()}
+    # Resolve the deltas over the active base (unset documents inherit).
+    resolved_connections = documents_map.get("connections", active.connections_yaml)
+    resolved_policy = documents_map.get("policy", active.policy_yaml)
+    resolved_catalog = documents_map.get("catalog", active.catalog_yaml)
+    resolved_templates = documents_map.get("templates", active.templates_yaml)
+
+    if not errors:
+        errors = validate_candidate_content(
+            cfg, resolved_connections, resolved_policy, resolved_catalog, resolved_templates
+        )
+
+    # Stale-base detection: compare the bundle's recorded base fingerprint with
+    # the target's current active fingerprint. If the caller omitted a
+    # fingerprint we can't judge drift and say so, rather than implying a match.
+    current_fingerprint = _version_fingerprint(
+        active.connections_yaml, active.policy_yaml, active.catalog_yaml, active.templates_yaml
+    )
+    stale_base = False
+    base_conflict_documents: List[str] = []
+    if bundle.base_fingerprint is None:
+        warnings.append(
+            "bundle carries no base fingerprint; drift against the active version "
+            "could not be checked"
+        )
+    elif bundle.base_fingerprint != current_fingerprint:
+        stale_base = True
+        active_docs = {
+            "connections": active.connections_yaml,
+            "policy": active.policy_yaml,
+            "catalog": active.catalog_yaml,
+            "templates": active.templates_yaml,
+        }
+        # Re-derive which base documents moved by fingerprinting the bundle's
+        # base id, if it still exists, against today's active content.
+        base_docs = active_docs
+        try:
+            base_version = (
+                store.get_version(bundle.base_version_id) if bundle.base_version_id else None
+            )
+        except NotFoundError:
+            base_version = None
+        if base_version is not None:
+            base_docs = {
+                "connections": base_version.connections_yaml,
+                "policy": base_version.policy_yaml,
+                "catalog": base_version.catalog_yaml,
+                "templates": base_version.templates_yaml,
+            }
+            for name in _DOCUMENT_ORDER:
+                if base_docs[name] != active_docs[name]:
+                    base_conflict_documents.append(name)
+        warnings.append(
+            "the active version has changed since this change set was created; "
+            "review the differences before staging"
+        )
+
+    documents = [
+        ConfigDocumentPreview(
+            document=name,  # type: ignore[arg-type]
+            change="submitted" if name in documents_map else "inherited",
+        )
+        for name in _DOCUMENT_ORDER
+    ]
+
+    contains_connections = bundle.contains_connections
+    if contains_connections:
+        warnings.append(
+            "this change set includes a connections document, which may contain a "
+            "literal credential — it is never stored in the browser"
+        )
+
+    audit_config_change(
+        action="import",
+        outcome="rejected" if errors else "success",
+        principal=principal.subject,
+        principal_scopes=sorted(principal.scopes),
+        auth_method=principal.auth_method,
+        version_id=bundle.base_version_id,
+        description=bundle.description,
+        error_category="validation" if errors else None,
+        duration_ms=int((time.monotonic() - start) * 1000),
+    )
+    return ConfigChangeSetImportCheck(
+        valid=not errors,
+        errors=errors,
+        documents=documents,
+        stale_base=stale_base,
+        base_conflict_documents=base_conflict_documents,  # type: ignore[arg-type]
+        contains_connections=contains_connections,
+        ready_to_stage=not errors and bool(documents_map),
+        warnings=warnings,
+    )
 
 
 async def apply(
