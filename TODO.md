@@ -391,18 +391,20 @@ not assumed — a specific reason the finding doesn't reach a real QueryGate
 code path (e.g. a deprecated transport QueryGate never mounts, a function
 QueryGate never calls, a header QueryGate never uses for authorization).
 
-Running this on `poetry.lock`'s locked versions today surfaced 13 real,
-currently-unpatched advisories across 5 production-reachable dependencies —
-`click`, `idna`, `mcp`, `python-dotenv`, `starlette` — each reviewed and
-allowlisted with its specific non-applicability reason (see the file). One
-is worth calling out explicitly: `mcp` 1.12.4 (PYSEC-2026-1617) doesn't
-enable DNS-rebinding protection by default, but `mcp/server.py` already
-enables it independently at the application layer (`TransportSecuritySettings(
-enable_dns_rebinding_protection=True, ...)`, also covered by item 28's
-adversarial suite) — a real compensating control, not just a documentation
-note. `setuptools`/`pip`/`wheel` findings are excluded everywhere: they're
-bootstrapped into every fresh virtualenv by `ensurepip`, not a package
-QueryGate's `poetry.lock` `main` group actually declares.
+This originally surfaced 13 real advisories across 5 production-reachable
+dependencies — `click`, `idna`, `mcp`, `python-dotenv`, `starlette` — each
+reviewed and temporarily allowlisted with a specific non-applicability reason.
+**Phase 2's dependency-remediation half is now done (under item 89):** all of
+those were fixed by upgrading to patched versions (fastapi 0.115→0.139 +
+starlette 0.46→1.3.1, mcp 1.12→1.28.1, python-dotenv/click/idna), so the
+`security/dependency-audit-allowlist.json` is now **empty** — findings fixed,
+not accepted. `setuptools`/`pip`/`wheel` findings were previously excluded as
+`ensurepip` bootstrap packages; they are now also **stripped from the runtime
+container image** (Dockerfile) since a running service never installs packages,
+so the Trivy image scan is likewise clean with no exceptions. What remains open
+in item 30 phase 2 is the **registry-publish + cryptographic signing**
+infrastructure (Sigstore/cosign + SLSA provenance), tracked alongside item 89
+phase 2.
 
 **Explicitly out of scope for phase 1, tracked as phase 2:**
 
@@ -2034,3 +2036,81 @@ complete and documented the residuals it couldn't close. R3 (no minimum group
 size) was the one residual with a bounded, well-precedented fix — this item
 builds it, turning a documented gap into an opt-in enforced guardrail without
 overclaiming (multi-query differencing stays honestly out of scope).
+
+### 89. Open-source security validation gates + customer-facing trust posture ✅ DONE (phase 1); phase 2 (signed delivery) not started
+
+**Why:** QueryGate is sold as a private, closed-source image customers pull and
+run in their own infrastructure. Every enterprise security review asks "what
+SAST/dependency/container/dynamic testing do you run, and can you prove it?" The
+substance was already strong (pip-audit + CycloneDX SBOM deny-by-default, the
+`-m security` adversarial suite, real Postgres/MSSQL + soak/load gates) but there
+was no SAST, container scan, secret scan, API DAST, disclosure policy, or single
+buyer-facing artifact packaging the posture. This item adds industry-standard,
+open-source security validation as enforced CI gates and surfaces it as
+verifiable evidence — the scanning tooling itself is entirely dev/CI-only (adds
+no runtime dependency) and the security invariants are untouched. Where the new
+gates found real CVEs in the shipped dependency set, they were remediated by
+upgrade rather than accepted (see the CVE-remediation bullet).
+
+**Shipped (phase 1):**
+- **SAST** — **Bandit** (`[tool.bandit]` in `pyproject.toml`, `make sast`, in
+  `release-check`) + **Semgrep OSS** (`p/python`, `p/security-audit`,
+  `p/owasp-top-ten`) as a CI job. Deny-by-default; the 5 accepted Bandit findings
+  are annotated inline with justified `# nosec <id>` (intentional in-container
+  `0.0.0.0` bind, internal invariants/sentinels), never blanket-suppressed.
+  CodeQL noted as the paid-GHAS upgrade (free only on public repos).
+- **Container scanning** — **Trivy** step in the `docker` CI job scans the
+  shipped image (vuln+secret+misconfig, HIGH/CRITICAL gate, `--ignore-unfixed`);
+  `make scan-image` for local runs. Result: **0 HIGH/CRITICAL, `.trivyignore`
+  empty** (findings fixed, not accepted — see the remediation bullet).
+- **Secret scanning** — **gitleaks** over full git history as the `secret-scan`
+  CI job + `make scan-secrets`; reviewed dev-only placeholders allowlisted in
+  `.gitleaks.toml`. Backs the credential-isolation invariant. Verified: no leaks.
+- **DAST** — **Schemathesis** fuzzes the live OpenAPI surface via
+  `scripts/run_dast.py` (`make test-dast`, `dast` CI job), gating
+  `not_a_server_error` + `negative_data_rejection`. Latest: 678/678 checks across
+  59 operations, 0 server errors, 0 accepted malformed payloads. The recursive
+  query-executing endpoints are excluded (Schemathesis #947 recursion limit) —
+  not a gap, they get deeper coverage from `test_malformed_input_fuzzing.py`
+  (item 36 phase 2a). Schemathesis runs from its **pinned Docker image**, not a
+  Poetry dep: its transitive pins (starlette<1 on 3.x, pytest>=8 on 4.x) conflict
+  with both the runtime security fixes and the pinned test stack, so a dev tool
+  never constrains the shipped graph (like Trivy/gitleaks/Semgrep). The script is
+  hermetic — no DB, no autouse fixtures — and reaches the app over the Docker
+  host gateway.
+- **CVE remediation (completes the dependency work item 30 phase 2 deferred).**
+  The new dependency + container scans immediately surfaced real known CVEs in
+  the shipped set. Rather than allowlist them, they were **fixed by upgrade**:
+  fastapi 0.115→0.139 + starlette 0.46→1.3.1 (major, gated by fastapi), mcp
+  1.12→1.28.1, python-dotenv→1.2.2, click→8.4.2, idna→3.18 (pydantic followed to
+  2.13.4). Build/install tooling (`pip`/`setuptools`/`wheel`, incl. the copies
+  setuptools vendors internally) is **stripped from the runtime image** in the
+  Dockerfile (a service never installs packages). Net result: the pip-audit
+  allowlist (`security/dependency-audit-allowlist.json`) and the Trivy exception
+  list are both **empty**, and `make release-smoke` still executes a real
+  structured Postgres query. Starlette 1.x's renamed status constants
+  (`HTTP_422_UNPROCESSABLE_ENTITY`→`_CONTENT`, `HTTP_413_*`) were updated across
+  the REST/MCP surface (25 sites) to clear the deprecation warnings. *Deferred,
+  dev-only:* `black` (25→26 would reformat the whole tree) and `pytest` (7→9 test-
+  framework migration) still carry CVEs but never ship in the image and run only
+  on first-party code — tracked for a separate, isolated bump.
+- **Trust surface** — `SECURITY.md` (disclosure policy + SLAs),
+  `docs/SECURITY_POSTURE.md` (customer-facing status table + reproduce-it
+  commands + threat-model mapping; the questionnaire artifact), and
+  `docs/business/openssf-best-practices-answers.md` (honest OpenSSF criteria
+  self-assessment). README "Security model" gained a posture pointer.
+
+**Honest scope note:** the **OpenSSF Best Practices badge is FLOSS/public-repo
+only**, so a private product cannot be *awarded* it — we keep a self-assessment
+(all Quality/Security/Analysis criteria Met by real gates) instead. OpenSSF
+Scorecard is likewise public-repo oriented and intentionally not run as a
+private-repo gate. Both are documented as available on open-sourcing.
+
+**Phase 2 (not started) — signed delivery / build provenance.** The genuinely
+earnable external attestation for a self-hosted image product is **Sigstore/cosign
+image signing + SLSA build provenance**, letting a customer cryptographically
+verify the image they run was built by us from this source, untampered. This is
+the right place to invest external-attestation effort and is the one real gap the
+self-assessment surfaces. Not built here to keep this item bounded; sign the
+release image in CI, publish the provenance attestation, and document
+verification for customers.

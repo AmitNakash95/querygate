@@ -171,7 +171,7 @@ def install_exception_handlers(app: FastAPI) -> None:
         """
         content = _scrub_non_finite(jsonable_encoder(exc.errors()))
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": content}
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, content={"detail": content}
         )
 
     @app.exception_handler(NotFoundError)
@@ -185,7 +185,7 @@ def install_exception_handlers(app: FastAPI) -> None:
     async def _capacity_timeout(_request: Request, exc: CapacityTimeoutError) -> JSONResponse:
         return _response(
             exc,
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             headers=admission_headers(
                 admission_id=exc.admission_id,
                 state=exc.admission_state,
@@ -195,7 +195,7 @@ def install_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(ConcurrencyLimitError)
     async def _concurrency(_request: Request, exc: ConcurrencyLimitError) -> JSONResponse:
-        return _response(exc, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        return _response(exc, status.HTTP_422_UNPROCESSABLE_CONTENT)
 
     # Registered separately from (and more specifically than)
     # PolicyViolationError: a per-principal quota rejection (TODO.md item 50) is
@@ -211,15 +211,15 @@ def install_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(PolicyViolationError)
     async def _policy(_request: Request, exc: PolicyViolationError) -> JSONResponse:
-        return _response(exc, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        return _response(exc, status.HTTP_422_UNPROCESSABLE_CONTENT)
 
     @app.exception_handler(QueryValidationError)
     async def _query_validation(_request: Request, exc: QueryValidationError) -> JSONResponse:
-        return _response(exc, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        return _response(exc, status.HTTP_422_UNPROCESSABLE_CONTENT)
 
     @app.exception_handler(ConfigValidationError)
     async def _config_validation(_request: Request, exc: ConfigValidationError) -> JSONResponse:
-        return _response(exc, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        return _response(exc, status.HTTP_422_UNPROCESSABLE_CONTENT)
 
     @app.exception_handler(AuthorizationError)
     async def _authorization(_request: Request, exc: AuthorizationError) -> JSONResponse:

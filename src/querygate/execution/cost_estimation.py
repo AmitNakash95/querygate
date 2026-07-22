@@ -87,7 +87,15 @@ async def estimate_postgres_query_cost(
         return None
 
     try:
-        result = await session.execute(sa.text(f"EXPLAIN (FORMAT JSON) {compiled}"))
+        # `compiled` is QueryGate's own SQLAlchemy-compiled statement (from the
+        # already policy+schema-validated AST), rendered only to prefix EXPLAIN,
+        # which plans but never executes it — not caller-supplied SQL. Semgrep's
+        # avoid-sqlalchemy-text rule is a false positive here (reviewed 2026-07-22).
+        # `# fmt: off` keeps the `# nosemgrep` on the `sa.text(...)` match line.
+        explain_sql = f"EXPLAIN (FORMAT JSON) {compiled}"
+        # fmt: off
+        result = await session.execute(sa.text(explain_sql))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        # fmt: on
         raw_plan = result.scalar()
     except Exception as exc:
         COST_ESTIMATION_UNAVAILABLE_TOTAL.labels(

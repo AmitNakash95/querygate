@@ -438,8 +438,7 @@ def test_diff_masks_invalid_candidate_and_audits_rejection(tmp_path, monkeypatch
         governance.diff_candidate_access(
             cfg,
             _diff_actor(),
-            ConfigSemanticDiffRequest(
-                policy_yaml=f"""
+            ConfigSemanticDiffRequest(policy_yaml=f"""
 default:
   enabled: true
   mandatory_row_filters:
@@ -447,8 +446,7 @@ default:
       column: tenant_id
       value: {marker}
       unsupported_field: true
-"""
-            ),
+"""),
         )
 
     assert marker not in str(exc_info.value)
@@ -537,8 +535,7 @@ def test_blast_radius_masks_invalid_candidate_and_audits_rejection(tmp_path, mon
         governance.compute_blast_radius(
             cfg,
             _diff_actor(),
-            ConfigSemanticDiffRequest(
-                policy_yaml=f"""
+            ConfigSemanticDiffRequest(policy_yaml=f"""
 default:
   enabled: true
   mandatory_row_filters:
@@ -546,8 +543,7 @@ default:
       column: tenant_id
       value: {marker}
       unsupported_field: true
-"""
-            ),
+"""),
         )
 
     assert marker not in str(exc_info.value)

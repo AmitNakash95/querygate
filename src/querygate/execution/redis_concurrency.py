@@ -67,7 +67,9 @@ end
 # Returned by acquire() when Redis is unreachable and fail_open is True —
 # release() recognizes it and skips contacting Redis again rather than
 # risking a second failure/log spam on the way out.
-_FAIL_OPEN_TOKEN = "__querygate_fail_open__"
+_FAIL_OPEN_TOKEN = (
+    "__querygate_fail_open__"  # nosec B105 — internal sentinel token, not a credential
+)
 
 # KEYS[1] = global per-connection queue key
 # KEYS[2] = per-connection-per-principal queue key (unused, but must still be

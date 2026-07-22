@@ -1,0 +1,62 @@
+# gitleaks configuration for QueryGate — secret scanning over the working tree
+# and the full git history.
+#
+# Purpose: prove that no real database connection string, API key, JWT signing
+# key, or other credential has ever been committed. This directly backs
+# QueryGate's credential-isolation invariant (ConnectionProfile carries the real
+# secret, resolved from ${ENV_VAR} at runtime; it is never written to the repo).
+#
+# Philosophy mirrors security/dependency-audit-allowlist.json: deny-by-default.
+# Every allowlist entry below is a *reviewed, intentionally-committed* dev-only
+# placeholder or fixture value — never a real secret. Adding a new allowlist
+# entry is a security review, not a convenience: justify it here or don't add it.
+#
+# Run: `make scan-secrets` (locally) / the `secret-scan` CI job (on every push
+# and PR, over full history via fetch-depth: 0).
+
+[extend]
+# Start from gitleaks' built-in ruleset (AWS keys, GitHub tokens, private keys,
+# generic high-entropy secrets, ...) and only *narrow* it with the allowlist
+# below. Never disable the default rules.
+useDefault = true
+
+[allowlist]
+description = "Reviewed dev-only placeholders and test fixtures — no real secrets"
+# Match the allowlist regexes below against the whole source line, not just the
+# high-entropy substring gitleaks captured — the false positives here are code
+# *referencing* credential config fields, not literal secrets.
+regexTarget = "line"
+
+# Files that exist to *show* the shape of a credential, never to hold a real
+# one. Every value in these is a documented placeholder.
+paths = [
+  '''\.env\.example$''',
+  '''examples/.*''',
+  '''deploy/.*\.example$''',
+  '''tests/.*''',
+  # CI + MSSQL test bootstrap embed a throwaway dev-only SA password by design.
+  '''\.github/workflows/ci\.yml$''',
+  '''tests/integration/setup_mssql_test_db\.py$''',
+  # This config file itself references the very strings it allowlists.
+  '''\.gitleaks\.toml$''',
+]
+
+# Specific dev-only fixture values that may appear outside the paths above
+# (docs, compose files). Each is a non-secret placeholder.
+regexes = [
+  # Local demo Postgres creds (docker-compose seeds these; not a real DB).
+  '''querygate:querygate@''',
+  '''user:pass@''',
+  '''user:password@''',
+  # Throwaway MSSQL developer-edition SA password used only by the test harness.
+  '''QueryGate_Test_Pw1!''',
+  # Obvious "fill me in" placeholders in example env files.
+  '''change-me[-a-z0-9]*''',
+  '''replace-with-a-[-a-z0-9]*''',
+  '''your-db-host''',
+  # Source that *references* credential config fields (not a literal secret):
+  # `ApiKeyAuthenticator(api_keys=cfg.api_keys, subject=cfg.api_key_subject, ...)`
+  # in api/auth.py trips the generic-api-key entropy heuristic on the identifier
+  # `cfg.api_key_subject`. Reviewed 2026-07-22 — no secret, just field wiring.
+  '''cfg\.api_key_subject''',
+]
