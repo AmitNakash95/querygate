@@ -2460,10 +2460,18 @@ behavior unusual versus its own preceding baseline, even among queries policy
 
 Covered by `tests/unit/test_anomaly.py` (each signal, the min-volume guards,
 window filtering, unauthenticated grouping, principal-cap ranking/truncation,
-the JSONL source's malformed/out-of-window/bound handling, and redaction) and
-`tests/integration/test_anomaly_api.py` (scope enforcement, disabled-without-
-sink, and a real spike surfaced from a written JSONL file without leaking
-values).
+threshold validation, exact window-boundary classification, naive-timestamp
+handling, the new-connection per-principal cap, the JSONL source's malformed/
+out-of-window/bound handling, the route config→thresholds/source mapping, and
+redaction) and `tests/integration/test_anomaly_api.py` (scope enforcement,
+disabled-without-sink, a real spike surfaced from a written JSONL file without
+leaking values, and the configured principal cap enforced end-to-end).
+`scripts/anomaly_ui_smoke.py` (`make anomaly-ui-smoke`) is a UI-visualization
+smoke: it seeds a JSONL audit stream, computes the real `AnomalyReport`, and
+renders the *actual* admin UI assets (`index.html`/`app.js`/`app.css`, only the
+network stubbed) in headless Chromium — asserting the real `renderAnomalies()`
+draws every principal, badge, and detail, and writing `dist/anomaly-ui-smoke.png`
+for human inspection (it SKIPs cleanly when no browser is present).
 
 **Why it matters:** Item 44 covers rejection-trend dashboards — denied
 queries. This is distinct: surfacing unusual volume or shape even among
