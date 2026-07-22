@@ -70,12 +70,16 @@ from querygate.query_ast.models import StructuredQuery
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_db, pytest.mark.postgres_live]
 
+# The large domain lives in its OWN database (querygate_stress), never the
+# 5-table querygate_demo used by the demo-schema tests: this session fixture
+# seeds ~8 tables with no teardown, and test_postgres_schema_discovery asserts
+# querygate_demo contains EXACTLY the five demo tables. Sharing one DB made the
+# two mutually exclusive. The dedicated env var (no QUERYGATE_DEMO_DB_URL
+# fallback) is what keeps them isolated; CI creates querygate_stress alongside
+# seeding querygate_demo (see .github/workflows/ci.yml).
 _CONNECTION_STRING = os.environ.get(
-    "QUERYGATE_TEST_POSTGRES_URL",
-    os.environ.get(
-        "QUERYGATE_DEMO_DB_URL",
-        "postgresql+asyncpg://querygate:querygate@localhost:5433/querygate_demo",
-    ),
+    "QUERYGATE_TEST_STRESS_URL",
+    "postgresql+asyncpg://querygate:querygate@localhost:5433/querygate_stress",
 )
 _SCALE = float(os.environ.get("LARGE_STRESS_SCALE", "0.1"))
 _EXAMPLES = "examples"
