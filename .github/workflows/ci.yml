@@ -230,7 +230,7 @@ jobs:
       # `--ignore-unfixed` keeps the gate actionable: it fails only on CVEs that
       # actually have a fix we could pull in. See TODO.md item 89.
       - name: Trivy scan of the shipped image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.24.0
         with:
           image-ref: querygate:release-smoke
           severity: HIGH,CRITICAL
