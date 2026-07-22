@@ -97,6 +97,12 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 - [ ] **36** — Production-grade QA / edge-case test suite. *Hardening before a
   real customer's data and adversaries touch it; raises confidence for the
   pilot without new surface.*
+- [ ] **95** — Discoverable scope catalog + recommended role bundles for IdP
+  integration. *Turns the shipped "bring your IdP" auth (items 10/90) into a
+  turnkey wire-up: a design partner with Okta/Entra/Auth0 can register QG's
+  scopes and roles without reverse-engineering `scopes.py`. Small effort,
+  directly unblocks SSO-based pilot onboarding. **Depends on 10 + 90 (both
+  shipped).***
 
 ### Phase 2 — Enterprise procurement unlocks (pull-driven — do when a partner's security team engages)
 
