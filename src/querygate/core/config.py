@@ -159,6 +159,32 @@ class AppConfig(BaseSettings):
     mcp_max_request_bytes: int = pyd.Field(default=4 * 1024 * 1024, ge=1)
     mcp_max_request_depth: int = pyd.Field(default=100, ge=1)
 
+    # MCP OAuth 2.0 resource-server conformance (TODO.md item 90 phase 2), per the
+    # MCP 2026-07-28 authorization spec. Opt-in and off by default: when disabled,
+    # the MCP surface behaves exactly as before. When enabled the mounted MCP
+    # surface becomes a proper OAuth resource server —
+    #   * publishes RFC 9728 protected-resource metadata at
+    #     `/.well-known/oauth-protected-resource<MCP_MOUNT_PATH>`,
+    #   * enforces RFC 8707 audience binding (a verified token must be issued for
+    #     `mcp_resource_identifier`, blocking confused-deputy token reuse), and
+    #   * answers a missing/invalid credential or an insufficient scope with an
+    #     RFC 6750 `WWW-Authenticate` challenge pointing back at that metadata,
+    #     so a client can perform the RFC 8693 token exchange / step-up.
+    # Requires jwt_enabled (the delegated-identity resolver from phase 1).
+    mcp_oauth_resource_server_enabled: bool = pyd.Field(default=False)
+    # The canonical resource URI clients name as the token audience (RFC 8707).
+    # Published as `resource` in the metadata and required in each token's `aud`.
+    mcp_resource_identifier: str = pyd.Field(default="")
+    # Authorization-server issuer identifiers advertised in the metadata so a
+    # client knows where to obtain a correctly-audienced token.
+    mcp_authorization_servers: list[str] = pyd.Field(default_factory=list)
+    # Scopes a caller must hold to use the MCP surface. Empty = no scope gate
+    # (audience binding still applies). A caller missing any of these gets a
+    # 403 `insufficient_scope` challenge naming the required scopes.
+    mcp_required_scopes: list[str] = pyd.Field(default_factory=list)
+    # Optional human-facing documentation URL advertised in the metadata.
+    mcp_resource_documentation: str = pyd.Field(default="")
+
     # JWT bearer-token auth (core/jwt_auth.JwtAuthenticator) — a second,
     # optional Authenticator alongside the static api_keys above. Shared by
     # both REST and MCP (one identity provider for both surfaces); when
@@ -263,6 +289,8 @@ class AppConfig(BaseSettings):
         "mcp_api_key_scopes",
         "mcp_allowed_hosts",
         "mcp_allowed_origins",
+        "mcp_authorization_servers",
+        "mcp_required_scopes",
         "jwt_algorithms",
         mode="before",
     )
@@ -286,6 +314,22 @@ class AppConfig(BaseSettings):
             )
         if self.jwt_enabled and not self.jwt_jwks_url:
             raise ValueError("JWT_JWKS_URL must be set when JWT_ENABLED=true")
+        if self.mcp_oauth_resource_server_enabled:
+            if not self.jwt_enabled:
+                raise ValueError(
+                    "JWT_ENABLED must be true when MCP_OAUTH_RESOURCE_SERVER_ENABLED=true "
+                    "(audience binding is enforced on verified tokens)"
+                )
+            if not self.mcp_resource_identifier:
+                raise ValueError(
+                    "MCP_RESOURCE_IDENTIFIER must be set when "
+                    "MCP_OAUTH_RESOURCE_SERVER_ENABLED=true"
+                )
+            if not self.mcp_authorization_servers:
+                raise ValueError(
+                    "MCP_AUTHORIZATION_SERVERS must list at least one issuer when "
+                    "MCP_OAUTH_RESOURCE_SERVER_ENABLED=true"
+                )
         if self.concurrency_backend == ConcurrencyBackend.REDIS and not self.concurrency_redis_url:
             raise ValueError("CONCURRENCY_REDIS_URL must be set when CONCURRENCY_BACKEND=redis")
         if self.vault_enabled and not self.vault_addr:

@@ -411,6 +411,25 @@ for. Both fields are identities, never credentials, so the redaction guarantee
 above is unchanged. See the [Decision Log](#decision-log) for why the human maps
 to `subject` (and why that made policy enforcement free).
 
+**MCP as an OAuth 2.0 resource server (opt-in).** For deployments that put the
+MCP surface behind a real authorization server, QueryGate can run it as a
+conformant OAuth 2.0 *resource server* per the MCP `2026-07-28` spec (off by
+default; turn it on with `MCP_OAUTH_RESOURCE_SERVER_ENABLED` once JWT auth is
+configured). Three things then hold. First, it **publishes discovery metadata**
+(RFC 9728) at `/.well-known/oauth-protected-resource/<mcp path>`, so a client
+that gets challenged can find which authorization server issues tokens for this
+resource. Second, it **enforces audience binding** (RFC 8707): a token is only
+accepted if it was minted *for this resource* (its `aud` names QueryGate's
+configured resource identifier), which stops a token issued for some other API
+from being replayed against QueryGate — the "confused deputy" attack the spec
+exists to close. Third, when a caller shows up with no token, a token bound to
+the wrong audience, or a token missing a required scope, QueryGate answers with a
+standards-compliant `WWW-Authenticate` challenge (`invalid_token` /
+`insufficient_scope`) that points back at the metadata — the signal a
+well-behaved client uses to go obtain or *step up* to the right token. Static API
+keys remain a valid, separately-configured trust for service-to-service callers
+and are not subject to audience binding, but still pass the same scope gate.
+
 ### Why this ordering matters
 
 The six stages are ordered from cheapest-and-safest to most-expensive: pure
@@ -2982,3 +3001,15 @@ reasoning behind them, newest first. Added to incrementally as work happens
   that doesn't exist yet; the SBOM, dependency audit, and checksum steps
   already run on every release are treated as the phase-1 supply-chain
   work (`TODO.md` item 30). See [Testing, Release & Operations](#testing-release--operations).
+- **MCP OAuth audience binding is enforced in the MCP resource-server layer,
+  not globally in the JWT verifier.** The JWT authenticator is shared by the
+  REST and MCP surfaces; making it *globally* require one audience would couple
+  the two resources and force REST tokens to name the MCP resource. Instead the
+  MCP middleware validates audience *after* verification, reading the decoded
+  `aud` claim and requiring it to include the MCP resource identifier — so each
+  surface owns its own RFC 8707 binding and enabling MCP OAuth doesn't silently
+  change REST auth. Static API keys carry no `aud` and are treated as an
+  explicitly-configured out-of-band trust: they skip audience binding but still
+  pass the required-scope gate. The whole mode is opt-in
+  (`MCP_OAUTH_RESOURCE_SERVER_ENABLED`) so existing deployments are unaffected.
+  See [The Core Request Pipeline](#the-core-request-pipeline) (`TODO.md` item 90 phase 2).
