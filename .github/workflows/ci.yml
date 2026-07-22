@@ -113,6 +113,28 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction
 
+      # GitHub's `services.postgres` is a bare image — unlike `docker compose
+      # up` it can't mount examples/demo_db/init_postgres.sql into the initdb
+      # hook, so nothing seeds the demo schema. Do it explicitly here (the
+      # Postgres analogue of the mssql-live job's setup_mssql_test_db.py step):
+      #   * querygate_demo  <- the canonical 5-table demo schema the
+      #     array_agg/percentile/cost/schema-discovery tests reflect and query.
+      #   * querygate_stress <- an empty database the large-domain stress suite
+      #     seeds itself (drop+recreate, session-scoped). It MUST be separate
+      #     from querygate_demo: the stress suite leaves ~8 tables behind and
+      #     test_postgres_schema_discovery asserts querygate_demo holds exactly
+      #     the five demo tables, so one shared DB makes them mutually exclusive.
+      - name: Seed demo schema (querygate_demo) + create stress DB (querygate_stress)
+        env:
+          PGPASSWORD: querygate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          psql -h localhost -p 5433 -U querygate -d querygate_demo \
+            -v ON_ERROR_STOP=1 -f examples/demo_db/init_postgres.sql
+          psql -h localhost -p 5433 -U querygate -d querygate_demo \
+            -v ON_ERROR_STOP=1 -c 'CREATE DATABASE querygate_stress OWNER querygate;'
+
       # Every postgres_live test EXCEPT the `load`-marked concurrency/soak
       # ones, run first because they're fast and timing-insensitive. This
       # includes the large-domain stress suite's differential-correctness,
@@ -165,17 +187,25 @@ jobs:
 
       # ODBC Driver 18 for SQL Server — client-side requirement for
       # pyodbc/aioodbc, separate from the MSSQL *server* service container
-      # above. Mirrors the exact steps in Dockerfile's production stage
-      # (fixed as part of TODO.md item 14 after this same key-format issue
-      # broke that build); the Ubuntu version in the packages.microsoft.com
-      # URL may need bumping if this starts failing after a runner image
-      # update — see Dockerfile's comment for the underlying upstream issue.
+      # above. The Microsoft repo is release-specific, so we derive the
+      # runner's actual Ubuntu version instead of hardcoding it: ubuntu-latest
+      # moved 22.04 -> 24.04, and the old jammy prod.list both (a) lacks the
+      # `signed-by=` keyring attribute that 24.04's stricter apt now requires
+      # and (b) pulls jammy libodbc dependencies that conflict on noble — so a
+      # pinned 22.04 URL fails the install outright on the current runner.
+      # Detecting VERSION_ID keeps this correct across future runner bumps.
       - name: Install unixODBC + msodbcsql18
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends unixodbc unixodbc-dev gnupg curl
-          curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
-          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          # Run gpg as the runner user (NOT under sudo) and sudo only the file
+          # write: `sudo gpg --dearmor` inherits the runner's gpg-agent/GPG_TTY
+          # environment and dies with "gpg: cannot open '/dev/tty'" on the
+          # 24.04 runner. Piping to `sudo tee` sidesteps that and writes the
+          # same binary keyring the prod.list's signed-by= expects.
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-prod.gpg > /dev/null
+          ubuntu_ver="$(. /etc/os-release && echo "$VERSION_ID")"
+          curl -sSL "https://packages.microsoft.com/config/ubuntu/${ubuntu_ver}/prod.list" | sudo tee /etc/apt/sources.list.d/mssql-release.list
           sudo apt-get update
           sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18
 
@@ -205,7 +235,7 @@ jobs:
       # `--ignore-unfixed` keeps the gate actionable: it fails only on CVEs that
       # actually have a fix we could pull in. See TODO.md item 89.
       - name: Trivy scan of the shipped image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.24.0
         with:
           image-ref: querygate:release-smoke
           severity: HIGH,CRITICAL
