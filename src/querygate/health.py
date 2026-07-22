@@ -24,7 +24,6 @@ from querygate.connections.engine import get_engine
 from querygate.connections.registry import get_registry
 from querygate.core.logging import get_logger
 
-
 # Stable, credential-free failure categories exposed by the admin
 # connection-status API (TODO.md item 43). Deliberately coarse: the raw driver
 # exception can contain the host, port, database name, or username being

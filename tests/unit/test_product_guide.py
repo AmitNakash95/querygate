@@ -220,19 +220,16 @@ def test_access_summary_excludes_mandatory_filter_for_a_table_the_principal_cann
 
 def _redaction_cfg(tmp_path) -> AppConfig:
     connections_file = tmp_path / "connections.yaml"
-    connections_file.write_text(
-        """
+    connections_file.write_text("""
 connections:
   - id: finance
     dialect: postgresql
     connection_string: postgresql+asyncpg://secret-user:secret-pass@secret-host/private
     description: description-secret-value
     known_tables: [internal_ledger]
-"""
-    )
+""")
     policy_file = tmp_path / "policy.yaml"
-    policy_file.write_text(
-        """
+    policy_file.write_text("""
 default:
   denied_tables: [internal_ledger]
   mandatory_row_filters:
@@ -243,11 +240,9 @@ principals:
   hidden-principal:
     finance:
       enabled: false
-"""
-    )
+""")
     catalog_file = tmp_path / "catalog.yaml"
-    catalog_file.write_text(
-        """
+    catalog_file.write_text("""
 version: 1
 connections:
   finance:
@@ -257,8 +252,7 @@ connections:
         columns:
           private_amount:
             sensitivity: confidential
-"""
-    )
+""")
     return AppConfig(
         environment="localhost",
         connections_file=str(connections_file),

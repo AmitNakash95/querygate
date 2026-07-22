@@ -641,18 +641,14 @@ async def _peak_active_heavy_queries(monitor: AsyncEngine, stop: asyncio.Event) 
     peak = 0
     async with monitor.connect() as conn:
         while not stop.is_set():
-            result = await conn.execute(
-                sa.text(
-                    """
+            result = await conn.execute(sa.text("""
                     SELECT count(*) FROM pg_stat_activity
                     WHERE datname = current_database()
                       AND state = 'active'
                       AND pid <> pg_backend_pid()
                       AND position('order_lines' in query) > 0
                       AND position('percentile_cont' in query) > 0
-                    """
-                )
-            )
+                    """))
             peak = max(peak, int(result.scalar_one()))
             await conn.commit()
             await asyncio.sleep(0.01)

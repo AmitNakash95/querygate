@@ -28,7 +28,6 @@ from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE, ADMIN_CONFIG_WRITE_SC
 from querygate.policy.loader import PolicyStore, get_policy_store
 from querygate.templates.models import QueryTemplateFile
 
-
 _AUDIT_EVENT_ADAPTER = pyd.TypeAdapter(PersistableEvent)
 _AUDIT_EVENT_TYPES = frozenset(
     {"query.execution", "config.governance", "catalog.governance", "connection.probe"}

@@ -101,9 +101,7 @@ async def _create_probes(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         await conn.execute(sa.text(f"DROP VIEW IF EXISTS {_SHORT_PROBE}"))
         await conn.execute(sa.text(f"DROP VIEW IF EXISTS {_TIMEOUT_PROBE}"))
-        await conn.execute(
-            sa.text(
-                f"""
+        await conn.execute(sa.text(f"""
                 CREATE OR REPLACE FUNCTION {_PROBE_FUNCTION}(delay_seconds double precision)
                 RETURNS TABLE(id integer)
                 LANGUAGE plpgsql
@@ -114,9 +112,7 @@ async def _create_probes(engine: AsyncEngine) -> None:
                     RETURN QUERY SELECT 1;
                 END;
                 $probe$
-                """
-            )
-        )
+                """))
         await conn.execute(
             sa.text(
                 f"CREATE VIEW {_SHORT_PROBE} AS "
@@ -179,16 +175,14 @@ async def postgres_load_app():
 
 async def _active_probe_queries(conn: AsyncConnection, probe: str) -> int:
     result = await conn.execute(
-        sa.text(
-            """
+        sa.text("""
             SELECT count(*)
             FROM pg_stat_activity
             WHERE datname = current_database()
               AND state = 'active'
               AND pid <> pg_backend_pid()
               AND position(:probe in query) > 0
-            """
-        ),
+            """),
         {"probe": probe},
     )
     active = int(result.scalar_one())
