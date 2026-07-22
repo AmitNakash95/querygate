@@ -58,7 +58,12 @@ TODO.md is the authority for done-status; ROADMAP.md is the authority for order.
 
 Then **announce**: the last completed roadmap item (where the previous agent
 left off), the next item and why it's next per the roadmap rationale, and any
-items skipped and why.
+items skipped and why. **Also state which North Star pillar or table-stakes gap
+the selected item advances** (`docs/business/NORTH_STAR.md`: Structural / Reach /
+Proof, or delegated-identity / governed-writes, or the success metric). If a
+selected item advances none of them, flag that as a signal to question the item
+with the maintainer before building — the North Star is the check, not an
+afterthought.
 
 ## 3. State remaining session capacity
 
