@@ -1,0 +1,310 @@
+# QueryGate adversarial security benchmark — fixed, versioned attack corpus.
+#
+# This is the publishable subset of QueryGate's internal adversarial QA assets
+# (TODO.md item 28's tests/security/ suite; item 36 edge cases), packaged as a
+# repeatable comparison (item 58). Each case is run against the REAL request
+# pipeline guardrails — policy validation (validation/policy_validation.py) and
+# the SQLAlchemy compiler's parameter binding (compiler/sqlalchemy_compiler.py)
+# — entirely offline (no DB, no network, no LLM), which is what makes the
+# published numbers reproducible.
+#
+# `querygate.blocks` is the declared expectation the runner checks against the
+# real code. `raw_sql_baseline.blocks` is a STRUCTURAL model of a naive gateway
+# that forwards a model-generated SQL string with no AST contract — not a live
+# run of any competitor. `should_block: false` marks a documented residual
+# (docs/INFERENCE_RISKS.md) that QueryGate allows by design; those are reported
+# separately and never counted as a catch, so the benchmark discloses what
+# QueryGate does NOT stop rather than only its wins.
+#
+# See docs/business/SECURITY_BENCHMARK.md for methodology and the scope of the
+# raw-SQL-baseline and Google MCP Toolbox comparisons.
+
+version: 1
+corpus_id: security_boundary_v1
+description: >-
+  Structural boundary attacks (SQL injection neutralization, denied
+  table/column smuggling across every clause, complexity caps, and the AST-only
+  no-raw-SQL invariant) plus documented inference residuals.
+
+cases:
+  # ----- SQL injection is neutralized by parameter binding, not string checks -----
+  - id: sqli-predicate-eq-value
+    category: sql_injection
+    title: Injection payload in an equality predicate is bound, never executed
+    check: bound_parameter
+    dialect: postgresql
+    payload: "x' OR 1=1; DROP TABLE customers; --"
+    tables:
+      customers: [id, email, tenant_id]
+    query:
+      from_table: customers
+      select: [customers.id]
+      where: {col: customers.email, op: eq, value: "x' OR 1=1; DROP TABLE customers; --"}
+    querygate:
+      blocks: true
+      guardrail: compiler parameter binding (value carried as bound data)
+    raw_sql_baseline:
+      blocks: false
+      rationale: >-
+        A string-concatenating passthrough executes the injected statement; the
+        value is SQL text, not a bound parameter.
+
+  - id: sqli-predicate-like-value
+    category: sql_injection
+    title: Injection payload in a LIKE predicate is bound, never executed
+    check: bound_parameter
+    dialect: postgresql
+    payload: "%'; DELETE FROM orders WHERE '1'='1"
+    tables:
+      customers: [id, email]
+    query:
+      from_table: customers
+      select: [customers.id]
+      where: {col: customers.email, op: like, value: "%'; DELETE FROM orders WHERE '1'='1"}
+    querygate:
+      blocks: true
+      guardrail: compiler parameter binding (value carried as bound data)
+    raw_sql_baseline:
+      blocks: false
+      rationale: LIKE pattern is concatenated into the statement by a naive gateway.
+
+  - id: sqli-mssql-predicate-value
+    category: sql_injection
+    title: Injection payload is bound under the MSSQL dialect too
+    check: bound_parameter
+    dialect: mssql
+    payload: "'; EXEC xp_cmdshell 'whoami'; --"
+    tables:
+      customers: [id, email]
+    query:
+      from_table: customers
+      select: [customers.id]
+      where: {col: customers.email, op: eq, value: "'; EXEC xp_cmdshell 'whoami'; --"}
+    querygate:
+      blocks: true
+      guardrail: compiler parameter binding (dialect-independent)
+    raw_sql_baseline:
+      blocks: false
+      rationale: The stacked EXEC executes against a passthrough regardless of dialect.
+
+  # ----- Denied tables cannot be smuggled through any clause -----
+  - id: denied-table-in-where
+    category: policy_denied_table
+    title: A denied table referenced only in WHERE is rejected
+    check: policy_block
+    policy: {denied_tables: [employees]}
+    query:
+      from_table: customers
+      select: [customers.id]
+      where: {col: employees.ssn, op: eq, value: "000-00-0000"}
+    querygate:
+      blocks: true
+      guardrail: policy table allow/deny over every column reference (not just select)
+    raw_sql_baseline:
+      blocks: false
+      rationale: >-
+        No per-query table policy exists; a DB grant is coarse and often allows
+        the table the naive SQL happens to reference.
+
+  - id: denied-table-in-order-by
+    category: policy_denied_table
+    title: A denied table referenced only in ORDER BY is rejected
+    check: policy_block
+    policy: {denied_tables: [employees]}
+    query:
+      from_table: customers
+      select: [customers.id]
+      order_by: [{col: employees.salary, dir: desc}]
+    querygate:
+      blocks: true
+      guardrail: policy table allow/deny over every column reference
+    raw_sql_baseline:
+      blocks: false
+      rationale: No structural check on which tables an ORDER BY expression touches.
+
+  # ----- Denied columns cannot be smuggled through any clause (item 55) -----
+  - id: denied-column-in-select
+    category: policy_denied_column
+    title: A denied column in SELECT is rejected
+    check: policy_block
+    policy: {denied_columns: {customers: [email]}}
+    query:
+      from_table: customers
+      select: [customers.email]
+    querygate:
+      blocks: true
+      guardrail: policy column allow/deny
+    raw_sql_baseline:
+      blocks: false
+      rationale: Column-level grants are rarely configured per agent; the column is returned.
+
+  - id: denied-column-in-where-not-selected
+    category: policy_denied_column
+    title: A denied column used only in WHERE (never selected) is still rejected
+    check: policy_block
+    policy: {denied_columns: {customers: [email]}}
+    query:
+      from_table: customers
+      select: [customers.id]
+      where: {col: customers.email, op: eq, value: target@example.com}
+    querygate:
+      blocks: true
+      guardrail: policy column allow/deny over non-projection references (item 55)
+    raw_sql_baseline:
+      blocks: false
+      rationale: >-
+        A "reference it without selecting it" oracle: the WHERE still leaks the
+        denied column's values one bit at a time and nothing stops it.
+
+  - id: denied-column-in-group-by
+    category: policy_denied_column
+    title: A denied column in GROUP BY is rejected
+    check: policy_block
+    policy: {denied_columns: {customers: [email]}}
+    query:
+      from_table: customers
+      select: [{fn: count, col: "*", alias: n}]
+      group_by: [customers.email]
+    querygate:
+      blocks: true
+      guardrail: policy column allow/deny over grouping keys
+    raw_sql_baseline:
+      blocks: false
+      rationale: Group keys leak the denied column's distinct values; no check.
+
+  - id: denied-column-in-having
+    category: policy_denied_column
+    title: A denied column in HAVING is rejected
+    check: policy_block
+    policy: {denied_columns: {customers: [email]}}
+    query:
+      from_table: customers
+      select: [{fn: count, col: "*", alias: n}]
+      having: [{col: customers.email, op: eq, value: target@example.com}]
+    querygate:
+      blocks: true
+      guardrail: policy column allow/deny over HAVING predicates
+    raw_sql_baseline:
+      blocks: false
+      rationale: HAVING is another inference oracle a passthrough leaves open.
+
+  - id: denied-column-in-order-by
+    category: policy_denied_column
+    title: A denied column in ORDER BY is rejected
+    check: policy_block
+    policy: {denied_columns: {customers: [email]}}
+    query:
+      from_table: customers
+      select: [customers.id]
+      order_by: [{col: customers.email, dir: asc}]
+    querygate:
+      blocks: true
+      guardrail: policy column allow/deny over sort keys
+    raw_sql_baseline:
+      blocks: false
+      rationale: Sort order leaks relative values of the denied column.
+
+  - id: denied-column-in-top-n-partition
+    category: policy_denied_column
+    title: A denied column in a top-N partition is rejected
+    check: policy_block
+    policy: {denied_columns: {customers: [email]}}
+    query:
+      from_table: customers
+      select: [customers.id]
+      top_n:
+        partition_by: [customers.email]
+        order_by: [{col: customers.id, dir: asc}]
+        n: 1
+    querygate:
+      blocks: true
+      guardrail: policy column allow/deny over window partitions
+    raw_sql_baseline:
+      blocks: false
+      rationale: Window partitions over a denied column are another leak path.
+
+  # ----- Complexity / resource caps -----
+  - id: joins-exceed-cap
+    category: complexity_cap
+    title: A query exceeding the max-joins cap is rejected
+    check: policy_block
+    policy: {max_joins: 1}
+    query:
+      from_table: orders
+      select: [orders.id]
+      joins:
+        - {table: customers, "on": [orders.customer_id, customers.id]}
+        - {table: line_items, "on": [orders.id, line_items.order_id]}
+    querygate:
+      blocks: true
+      guardrail: policy max_joins cap
+    raw_sql_baseline:
+      blocks: false
+      rationale: >-
+        A passthrough imposes no query-shape budget; an agent can compose an
+        arbitrarily expensive join fan-out.
+
+  - id: select-columns-exceed-cap
+    category: complexity_cap
+    title: A query exceeding the max-select-columns cap is rejected
+    check: policy_block
+    policy: {max_select_columns: 2}
+    query:
+      from_table: customers
+      select: [customers.id, customers.email, customers.tenant_id]
+    querygate:
+      blocks: true
+      guardrail: policy max_select_columns cap
+    raw_sql_baseline:
+      blocks: false
+      rationale: No structural limit on projection width.
+
+  # ----- The AST-only invariant itself -----
+  - id: no-raw-sql-escape-hatch
+    category: structural_invariant
+    title: No field anywhere in the request AST accepts a raw SQL string
+    check: no_raw_sql_field
+    query: {}
+    querygate:
+      blocks: true
+      guardrail: StructuredQuery AST exposes no raw-SQL escape-hatch field (by construction)
+    raw_sql_baseline:
+      blocks: false
+      rationale: >-
+        The baseline's entire interface IS a raw SQL string; there is nothing to
+        remove.
+
+  # ----- Documented residuals: allowed by design, disclosed honestly -----
+  - id: residual-correlated-permitted-column
+    category: documented_residual
+    title: Reading a permitted column correlated with a denied one is allowed
+    check: policy_allow
+    should_block: false
+    policy: {denied_columns: {customers: [email]}}
+    query:
+      from_table: customers
+      select: [customers.tenant_id]
+      where: {col: customers.tenant_id, op: eq, value: tenant-1}
+    querygate:
+      blocks: false
+      guardrail: none — column policy works on identifiers, not semantic correlation (R1)
+    raw_sql_baseline:
+      blocks: false
+      rationale: Same residual; neither side reasons about semantic correlation.
+
+  - id: residual-single-row-aggregate
+    category: documented_residual
+    title: A count over a razor-thin permitted filter can single out one row
+    check: policy_allow
+    should_block: false
+    policy: {denied_columns: {customers: [email]}}
+    query:
+      from_table: customers
+      select: [{fn: count, col: "*", alias: n}]
+      where: {col: customers.id, op: eq, value: 1}
+    querygate:
+      blocks: false
+      guardrail: none by default — no minimum group size unless policy sets min_group_size (R3)
+    raw_sql_baseline:
+      blocks: false
+      rationale: Same residual; closed only when a QueryGate policy opts into min_group_size.

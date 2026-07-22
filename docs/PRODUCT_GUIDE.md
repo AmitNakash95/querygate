@@ -856,6 +856,29 @@ external attestation that genuinely fits a self-hosted image product and is the
 identified near-term follow-up. Stating the one real gap plainly is itself part
 of the posture.
 
+### The published adversarial benchmark — proof a reviewer can rerun
+
+The assurance gates above run inside CI; a prospect's security reviewer often
+wants to run the proof themselves and see a *number*. That is what the
+**adversarial security benchmark** (`querygate-security-benchmark run`) is: a
+fixed, versioned attack corpus
+([`benchmarks/security_boundary_v1.yaml`](../benchmarks/security_boundary_v1.yaml))
+run against the real request-pipeline guardrails, entirely offline (no
+database, no network, no LLM), so the result is deterministic and reproducible
+in a source checkout. It reports QueryGate's catch rate next to a
+structurally-modeled *raw-SQL-passthrough baseline* — a gateway whose interface
+is a model-generated SQL string forwarded with no AST contract — over SQL
+injection, denied-table/denied-column smuggling across every clause, complexity
+caps, and the no-raw-SQL structural invariant. It also **discloses the
+documented inference residuals** it does *not* block (it never counts those as
+catches), which is the point: an honest, rerunnable benchmark is more
+persuasive than an asserted one. The published methodology, results, and the
+factual (capability-level, non-live) Google MCP Toolbox comparison live in
+[`docs/business/SECURITY_BENCHMARK.md`](business/SECURITY_BENCHMARK.md). A
+*live* LLM/Toolbox head-to-head is a scoped phase-2 follow-up that needs
+external infrastructure; see the [Decision Log](#decision-log) for why the
+baseline is a declared structural model rather than a live competitor run.
+
 ### SQL injection, in one line
 
 Bound parameters make SQL injection impossible by construction — this is
@@ -2476,6 +2499,27 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — The published adversarial benchmark's raw-SQL baseline is a
+  declared structural model, not a live competitor run (TODO.md item 58,
+  phase 1).** Turning the internal adversarial suite into a *publishable*
+  comparison forced a choice about what to measure the raw-SQL baseline against.
+  **Decision:** phase 1 declares, per corpus case, whether a naive gateway that
+  forwards a model-generated SQL string with no AST contract would block the
+  attack — grounded in a structural fact (such a gateway has no per-query
+  table/column policy and no parameter-binding contract), so it is factual and
+  reproducible without running any competitor. The runner drives QueryGate's
+  *real* guardrails (policy validation + compiler parameter binding + the
+  no-raw-SQL AST introspection) offline and deterministically, and the corpus
+  discloses the documented inference residuals it does *not* block rather than
+  counting only wins. **Rejected (for phase 1):** a live head-to-head that
+  executes the corpus against a real LLM composing raw SQL and a comparably
+  configured Google MCP Toolbox deployment. It was deferred, not declined —
+  a fair live run needs a model-provider decision and a GCP/Toolbox environment,
+  and publishing head-to-head numbers off a misconfigured competitor setup would
+  risk misrepresenting a documented capability, which this project forbids. So
+  the live baseline is scoped as phase 2; the Toolbox comparison in phase 1 is
+  capability-level, drawn from Toolbox's documented design. See
+  `docs/business/SECURITY_BENCHMARK.md`.
 - **2026-07-22 — The tamper-evident audit ledger chains at the sink/envelope
   layer, not on the event model (TODO.md item 91, F5).** Building the
   hash-chained ledger, the choice was where the `prev_hash`/sequence/`hash` live.

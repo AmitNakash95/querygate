@@ -133,6 +133,23 @@ end). One logical writer owns the chain head, so run a single replica or give
 each replica its own ledger file. This complements — never replaces — shipping
 events to retained/WORM storage or a SIEM.
 
+### Prove the boundary: the adversarial security benchmark
+
+A fixed, versioned attack corpus, run against the real request-pipeline
+guardrails entirely offline (no DB, no network, no LLM) — the reproducible,
+publishable form of the adversarial "five-minute demo". It reports QueryGate's
+catch rate next to a structurally-modeled raw-SQL-passthrough baseline and
+discloses the documented inference residuals it does *not* block.
+
+```bash
+querygate-security-benchmark run          # human-readable report (exit 0 iff clean)
+querygate-security-benchmark run --json    # machine-readable report
+querygate-security-benchmark list          # list the corpus cases
+```
+
+Methodology, results, and the factual Google MCP Toolbox comparison live in
+[`docs/business/SECURITY_BENCHMARK.md`](docs/business/SECURITY_BENCHMARK.md).
+
 Then, in another terminal:
 
 ```bash
