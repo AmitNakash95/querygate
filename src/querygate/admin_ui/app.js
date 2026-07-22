@@ -121,6 +121,7 @@
     templatePreview: null,
     templateList: [],
     observability: null,
+    anomalies: null,
     templateSources: {},
   };
 
@@ -1786,13 +1787,89 @@
       .join("");
   }
 
+  const ANOMALY_LABELS = {
+    volume_spike: "Volume spike",
+    rejection_rate_spike: "Rejection spike",
+    new_connection_access: "New connection",
+  };
+
+  function obsDuration(seconds) {
+    if (seconds == null) return "—";
+    if (seconds % 86400 === 0) return `${seconds / 86400}d`;
+    if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+    if (seconds % 60 === 0) return `${seconds / 60}m`;
+    return `${seconds}s`;
+  }
+
+  const anomalyRatePerMin = (value) => (value == null ? "—" : `${value.toFixed(1)}/min`);
+
+  // Returns plain text (escaped at insert time), never HTML.
+  function anomalySignalDetail(signal) {
+    if (signal.kind === "volume_spike") {
+      return signal.ratio != null ? `${signal.ratio.toFixed(1)}× its baseline rate` : "elevated volume";
+    }
+    if (signal.kind === "rejection_rate_spike") {
+      return `${obsPercent(signal.recent_rejection_rate)} rejected vs ${obsPercent(signal.baseline_rejection_rate)} baseline`;
+    }
+    if (signal.kind === "new_connection_access") {
+      return `reached ${signal.connection || "?"} — untouched in baseline`;
+    }
+    return "—";
+  }
+
+  function renderAnomalies() {
+    const report = state.anomalies;
+    const note = $("#anomaly-note");
+    const wrap = $("#anomaly-table-wrap");
+    const empty = $("#anomaly-empty");
+    if (!report) {
+      note.hidden = true;
+      wrap.hidden = true;
+      empty.hidden = true;
+      return;
+    }
+    if (report.source === "disabled") {
+      note.hidden = true;
+      wrap.hidden = true;
+      empty.hidden = false;
+      empty.textContent =
+        "Anomaly surfacing is disabled — enable the JSONL audit sink (AUDIT_SINK_BACKEND=jsonl) to compute per-principal baselines.";
+      return;
+    }
+    const windowLabel = `recent ${obsDuration(report.recent_window_seconds)} vs baseline ${obsDuration(report.baseline_window_seconds)}`;
+    note.hidden = false;
+    note.textContent = `${report.note} (${windowLabel}; ${report.events_scanned} events scanned${report.truncated ? ", truncated" : ""}${report.malformed ? `, ${report.malformed} malformed` : ""})`;
+
+    const rows = [];
+    (report.principals || []).forEach((principal) => {
+      principal.signals.forEach((signal, index) => {
+        rows.push(`<tr>
+        <td>${index === 0 ? escapeHtml(principal.principal_id) : ""}</td>
+        <td><span class="anomaly-badge anomaly-${escapeHtml(signal.kind)}">${escapeHtml(ANOMALY_LABELS[signal.kind] || signal.kind)}</span></td>
+        <td>${escapeHtml(anomalySignalDetail(signal))}</td>
+        <td>${signal.recent_count} · ${anomalyRatePerMin(signal.recent_rate_per_min)}</td>
+        <td>${signal.baseline_count} · ${anomalyRatePerMin(signal.baseline_rate_per_min)}</td>
+      </tr>`);
+      });
+    });
+
+    wrap.hidden = rows.length === 0;
+    empty.hidden = rows.length !== 0;
+    if (!rows.length) {
+      empty.textContent = "No anomalies — every caller's recent activity is within its own baseline.";
+    }
+    $("#anomaly-body").innerHTML = rows.join("");
+  }
+
   async function loadObservability() {
     if (!hasScope("admin:observability:read")) {
       state.observability = null;
+      state.anomalies = null;
       $("#observability-snapshot").hidden = true;
       $("#observability-table-wrap").hidden = true;
       $("#observability-cards").innerHTML =
         '<p class="empty-state">Connect with admin:observability:read to load observability.</p>';
+      renderAnomalies();
       return;
     }
     const button = $("#refresh-observability");
@@ -1805,9 +1882,18 @@
       $("#observability-snapshot").hidden = true;
       $("#observability-table-wrap").hidden = true;
       $("#observability-cards").innerHTML = `<p class="empty-state">${escapeHtml(error.message)}</p>`;
-    } finally {
-      setBusy(button, false);
     }
+    try {
+      state.anomalies = await api("/admin/observability/anomalies");
+      renderAnomalies();
+    } catch (error) {
+      state.anomalies = null;
+      $("#anomaly-note").hidden = true;
+      $("#anomaly-table-wrap").hidden = true;
+      $("#anomaly-empty").hidden = false;
+      $("#anomaly-empty").textContent = error.message;
+    }
+    setBusy(button, false);
   }
 
   // --- Query-template authoring (TODO.md item 87) ------------------------
