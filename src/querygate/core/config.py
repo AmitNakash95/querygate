@@ -36,6 +36,10 @@ class AuditSinkBackend(str, Enum):
 
     NONE = "none"
     JSONL = "jsonl"
+    # Tamper-evident hash-chained JSONL ledger (TODO.md item 91). Same event
+    # bodies as JSONL, each wrapped in a chain envelope so edits/deletions/
+    # reordering are detectable via `querygate-audit verify`.
+    JSONL_CHAINED = "jsonl_chained"
 
 
 def _parse_str_list(value: Any) -> Any:
@@ -222,6 +226,14 @@ class AppConfig(BaseSettings):
     audit_sink_backend: AuditSinkBackend = pyd.Field(default=AuditSinkBackend.NONE)
     audit_jsonl_path: str = pyd.Field(default="var/audit/querygate-audit.jsonl")
     audit_jsonl_fsync: bool = pyd.Field(default=False)
+    # Optional secret keying the hash-chained ledger (audit_sink_backend=
+    # jsonl_chained, TODO.md item 91). Set it to make the chain HMAC-SHA256 —
+    # tamper-evident against anyone with file access but not the key. Empty
+    # leaves the chain unkeyed (SHA-256): still detects corruption/reorder/
+    # truncation, but tamper-evidence then relies on externally anchoring the
+    # head hash. Never logged; verification (`querygate-audit verify --hmac-key`)
+    # needs the same value.
+    audit_ledger_hmac_key: str = pyd.Field(default="")
 
     # Read-only per-principal anomaly surfacing over the persisted audit stream
     # (TODO.md item 59). Purely a signal for a human admin — never wired into

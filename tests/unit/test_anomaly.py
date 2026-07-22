@@ -290,6 +290,23 @@ def test_jsonl_source_missing_file_is_empty_not_error(tmp_path):
     assert loaded == [] and malformed == 0 and truncated is False
 
 
+def test_jsonl_source_reads_hash_chained_ledger(tmp_path):
+    # When audit_sink_backend=jsonl_chained (item 91), each line is a chain
+    # envelope wrapping the same query.execution event. The reader must
+    # transparently unwrap it so item 59 anomaly surfacing keeps working.
+    from querygate.audit.sinks import HashChainedAuditSink
+
+    th = _thresholds()
+    path = tmp_path / "ledger.jsonl"
+    sink = HashChainedAuditSink(str(path), key=b"k")
+    for event in _spread(5, start=_NOW - timedelta(seconds=1800), span_seconds=1800):
+        sink.emit(event)
+    source = JsonlAuditEventSource(str(path))
+    loaded, malformed, _ = source.load_query_events(now=_NOW, thresholds=th)
+    assert len(loaded) == 5
+    assert malformed == 0
+
+
 # --- build_anomaly_report --------------------------------------------------
 
 

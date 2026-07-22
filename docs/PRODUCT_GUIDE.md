@@ -378,10 +378,10 @@ degrading the shared database for every other caller.
 Whether the query succeeded or was rejected at any earlier stage, QueryGate
 logs the attempt. `audit_query()` builds a versioned `AuditEvent`
 (`audit/events.py`) and writes it through a pluggable **sink** (`sinks.py`) —
-currently either `NullAuditSink` (discard) or `JsonlAuditSink`, which appends
-one JSON object per line to a file with restrictive permissions (`0o600`),
-designed so log rotation (renaming the file) works without needing to signal
-the running process.
+currently `NullAuditSink` (discard), `JsonlAuditSink`, which appends one JSON
+object per line to a file with restrictive permissions (`0o600`), designed so
+log rotation (renaming the file) works without needing to signal the running
+process, or `HashChainedAuditSink` (the tamper-evident ledger described below).
 
 What makes this event safe to retain and share is what it deliberately
 *excludes*. Per the model's own docstring, an `AuditEvent` has no field for
@@ -410,6 +410,28 @@ human's* policy." Crucially, the identity carried into policy enforcement is the
 for. Both fields are identities, never credentials, so the redaction guarantee
 above is unchanged. See the [Decision Log](#decision-log) for why the human maps
 to `subject` (and why that made policy enforcement free).
+
+**Tamper-evident ledger + per-query receipts (opt-in).** The delegated-identity
+audit answers *who did what*; a tamper-evident ledger answers *and the record
+proving it hasn't been edited*. Set `AUDIT_SINK_BACKEND=jsonl_chained`
+(`audit/ledger.py`, `HashChainedAuditSink`) and every persisted event is wrapped
+in a **hash-chain envelope** — a sequence number and the hash of the previous
+record — so any later edit, deletion, reordering, or insertion breaks the chain
+and is caught by the verify-only tool `querygate-audit verify`. Two honest
+integrity levels: set `AUDIT_LEDGER_HMAC_KEY` and the chain is **HMAC-SHA256** —
+unforgeable by anyone with write access to the file but not the key; leave it
+unset and it is **SHA-256** — still detects corruption/reordering/mid-file
+deletion, with full tamper-evidence then resting on externally anchoring the head
+hash (`verify --expected-head`, which also catches records dropped from the end).
+The chain adds *only* the sequence number and hashes — the embedded event body is
+byte-for-byte the same redaction-safe event, so the guarantee above is untouched.
+`querygate-audit receipt <event_id>` emits a portable, self-contained
+**compliance receipt** proving one query's position in the chain without handing
+over the whole ledger — the "prove to your auditor exactly what this agent did,
+on whose behalf, under which policy, and that the record is intact" artifact. One
+logical writer owns the chain head, so it assumes a single replica (or a
+per-replica ledger file); see the [Decision Log](#decision-log) for why chaining
+lives at the sink/envelope layer rather than on the event model.
 
 **MCP as an OAuth 2.0 resource server (opt-in).** For deployments that put the
 MCP surface behind a real authorization server, QueryGate can run it as a
@@ -2453,6 +2475,33 @@ See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-07-22 — The tamper-evident audit ledger chains at the sink/envelope
+  layer, not on the event model (TODO.md item 91, F5).** Building the
+  hash-chained ledger, the choice was where the `prev_hash`/sequence/`hash` live.
+  **Decision:** they live on a chain *envelope* (`audit/ledger.py`'s
+  `LedgerRecord`, written by `HashChainedAuditSink`) that wraps the unmodified
+  event body — `{seq, prev_hash, event, hash}` — never as new fields on
+  `AuditEvent` (or the other three event models). **Why:** (1) *Redaction
+  invariant stays trivially true.* The embedded `event` is byte-for-byte the same
+  `model_dump(exclude_none=True)` the plain JSONL sink already writes; the chain
+  adds only a sequence number and hashes, so there is no new place for customer
+  data to leak and the QG-12 guarantee needs no re-proof. (2) *One chain over all
+  four event types.* Query, config-governance, catalog-governance, and probe
+  events already share one sink; chaining at the sink covers the whole trail with
+  one head, whereas per-model fields would fragment it. (3) *No circular hashing.*
+  A hash field on the model would have to hash the model excluding itself;
+  enveloping avoids that entirely. The one cost — a second reader shape — is paid
+  by a three-line unwrap in the item-59 anomaly reader (`admin/anomaly.py`), which
+  now transparently reads both bare and enveloped lines. Integrity is honestly
+  tiered: **keyed** (`AUDIT_LEDGER_HMAC_KEY`) → HMAC-SHA256, unforgeable without
+  the key; **unkeyed** → SHA-256, tamper-evident only against an externally
+  anchored head (`verify --expected-head`). Chaining is verify-only (nothing in
+  the request path reads it) and assumes a single logical writer owns the head —
+  documented as a single-replica / per-replica-file constraint rather than
+  engineered into a distributed-consensus ledger, which would be scope no design
+  partner has asked for. Per-query **receipts** (`querygate-audit receipt`) fall
+  out for free: a receipt is just one `LedgerRecord` re-verifiable on its own.
 
 - **2026-07-22 — A GraphQL query interface is a permanent non-goal.** Prompted by
   the "GraphQL is more flexible than REST — would it broaden QueryGate from an AI
