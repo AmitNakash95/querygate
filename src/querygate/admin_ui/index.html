@@ -266,6 +266,18 @@
             <div class="stage-actions"><small>Staging does not activate the version.</small><button id="stage-draft" class="button primary" type="button" disabled>Stage version</button></div>
           </article>
         </div>
+        <div class="stage-grid">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">Portable change set</p><h3>Export &amp; import a bundle</h3></div></div>
+            <p class="validation-note">A change set is a downloadable file carrying only the documents you changed plus a fingerprint of the base version — for moving a reviewed change between environments or recovering a lost draft. It is never a stored server-side draft; importing one validates it and fills the editors, then you stage it normally. A <code>connections.yaml</code> document may carry a literal credential, so it is never kept in browser storage.</p>
+            <div class="stage-actions">
+              <button id="export-change-set" class="button secondary" type="button">Export change set</button>
+              <input id="import-change-set-file" type="file" accept="application/json,.json" hidden />
+              <button id="import-change-set" class="button secondary" type="button">Import change set…</button>
+            </div>
+            <div id="change-set-result" class="validation-result"><p class="empty-state">Export the current draft, or import a previously exported bundle.</p></div>
+          </article>
+        </div>
       </section>
 
       <section id="view-history" class="view" data-view="history" hidden>

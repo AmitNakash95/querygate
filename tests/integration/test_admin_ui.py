@@ -115,6 +115,11 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     assert "admin:observability:read" in response.text
     assert "not durable history" in response.text
     assert "/admin/observability/overview" in script.text
+    # TODO.md item 47: portable change-set export/import + policy-only local recovery.
+    assert 'id="export-change-set"' in response.text
+    assert 'id="import-change-set"' in response.text
+    assert "/admin/config/export" in script.text
+    assert "/admin/config/import" in script.text
 
 
 @pytest.mark.asyncio
@@ -426,6 +431,39 @@ async def test_admin_support_apis_require_config_scope(tmp_path, monkeypatch):
     assert parse.status_code == 403
     assert templates_parse.status_code == 403
     assert templates_render.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_local_draft_recovery_is_policy_only_never_credentials(tmp_path, monkeypatch):
+    """Item 47's security invariant: browser storage holds only the policy
+    document. connections.yaml (which can carry a literal credential), secret
+    references, and bearer tokens are never written to localStorage — full-config
+    recovery goes through the explicitly downloaded change-set file instead."""
+    app = create_app(_settings(tmp_path, monkeypatch))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        script = (await client.get("/admin/app.js")).text
+
+    # Exactly one write to localStorage, and it stores the policy draft only.
+    assert script.count("localStorage.setItem(") == 1
+    assert 'LOCAL_POLICY_KEY = "querygate.admin.policyDraft"' in script
+    # The single setItem call's first argument is the policy key — no other key
+    # (i.e. no connections/token key) is ever persisted.
+    set_item_index = script.index("localStorage.setItem(")
+    set_item_call = script[set_item_index : set_item_index + 80]
+    assert "LOCAL_POLICY_KEY" in set_item_call
+    # The only localStorage write persists the policy document — the save
+    # function never reaches for the connections document (credentials) or a token.
+    save_region = _local_storage_region(script)
+    assert "draftDocuments.connections" not in save_region
+    assert "token" not in save_region.lower()
+    assert "state.draftDocuments.policy" in save_region
+
+
+def _local_storage_region(script: str) -> str:
+    """The savePolicyDraftLocally function body, for asserting what it persists."""
+    start = script.index("function savePolicyDraftLocally")
+    end = script.index("function clearLocalPolicyDraft")
+    return script[start:end]
 
 
 @pytest.mark.asyncio
