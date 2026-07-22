@@ -2113,9 +2113,36 @@ proposal, not an approved task. Each item below preserves every core invariant
 call or policy self-edit); they *strengthen* attribution and governance rather
 than widen the input surface.
 
-### 90. Delegated agent identity (on-behalf-of) carried into policy + dual-identity audit
+### 90. Delegated agent identity (on-behalf-of) carried into policy + dual-identity audit ✅ DONE (phase 1)
 
 **Effort: L. Priority: high (time-sensitive — see below). Feature ref: F1.**
+
+**Status:** Phase 1 (delegated-identity attribution) shipped; phase 2 (MCP OAuth
+resource-server conformance) not started.
+- **Phase 1 ✅ DONE — delegated-identity attribution (the moat).** `core/auth.py`
+  gains an `Actor` delegation chain on `Principal` (`subject` = the human,
+  `actor` = the agent, with a nested `delegated_by` chain and
+  `is_delegated`/`actor_subject`/`delegation_chain` helpers). `core/jwt_auth.py`
+  maps a verified token's RFC 8693 `act` claim into that chain (configurable via
+  `jwt_act_claim`, depth-bounded, malformed-`act`-safe). Because per-principal
+  policy resolution already keys off `Principal.subject`
+  (`policy/loader.PolicyStore.get`), mapping the human to `subject` makes **the
+  human's** policy and `mandatory_row_filters` apply with zero change to the
+  policy layer. `audit/events.AuditEvent` gains `actor_id` + `delegation_chain`
+  (identities only — redaction guarantee unchanged), threaded through
+  `audit/logger.audit_query` and both `execution/service.py` audit call sites, so
+  every query records "Agent A on behalf of User Z under the human's policy."
+  Covered by unit tests in `test_auth.py`, `test_jwt_auth.py`,
+  `test_policy_loader.py` (human's-policy-wins), and `test_audit.py`
+  (dual-identity event, redaction-safe).
+- **Phase 2 — MCP OAuth resource-server conformance (not started).** Implement the
+  MCP `2026-07-28` authorization spec as a proper OAuth resource server: RFC 9728
+  protected-resource metadata, mandatory RFC 8707 audience validation, and
+  `insufficient_scope` step-up (RFC 8693 token-exchange acceptance on the
+  transport). Touches `mcp/auth.py`, `api/auth.py`, `core/jwt_auth.py`
+  (audience-set validation). Also extend actor attribution to the admin-surface
+  audit events (`ConfigChangeEvent`/`CatalogGovernanceEvent`/`ConnectionProbeEvent`)
+  if delegated admin actions are in scope.
 
 **Why it matters (competitive pressure):** The identity market has fully solved
 "delegated identity → API" and is standardizing it *this month* — the MCP
