@@ -23,8 +23,8 @@ them in, and why that order maximizes product growth and ROI.**
 here advances one of QueryGate's three pillars — **Structural** (no raw SQL/DML +
 query-shape policy), **Reach** (live operational DB, self-hosted, data never
 leaves), **Proof** (per-human attribution + tamper-evident audit) — or closes a
-table-stakes gap (delegated identity item 90; governed writes item 93), or moves
-the one success metric closer: **a paid design partner passing a security review
+table-stakes gap (delegated identity — item 90, now shipped; governed writes —
+item 93), or moves the one success metric closer: **a paid design partner passing a security review
 no competitor's passes.** A re-sequence must cite which pillar or gap it serves.
 An item that advances none of them is a signal to question the item, not the
 order.
@@ -64,9 +64,9 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 ### Phase 0 — Moat & proof (highest ROI: wins the security review)
 
 - [x] **90** — Delegated agent identity into policy + dual-identity audit (F1).
-  *The single hottest enterprise requirement with the emptiest data layer;
-  **time-sensitive** — build against the MCP 2026-07-28 delegated-auth spec
-  while it is the fresh, mandated integration surface.*
+  ✅ **Shipped** (RFC 8693 actor→policy, dual-identity audit, MCP OAuth
+  resource-server conformance RFC 9728/8707/6750). The attribution half of the
+  Proof pillar is now realized — advertise it; complete the pillar with item 91.*
 - [ ] **91** — Tamper-evident hash-chained audit ledger + per-query receipts
   (F5). *Pairs with 90 to produce the "prove exactly what every agent did, on
   whose behalf, under which policy" artifact — the literal buying question for
