@@ -62,7 +62,9 @@ class AppConfig(BaseSettings):
         default="localhost"
     )
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = pyd.Field(default="INFO")
-    host_address: str = pyd.Field(default="0.0.0.0")
+    # nosec B104: binds all interfaces *inside* the container by design;
+    # network exposure is controlled at the deployment boundary.
+    host_address: str = pyd.Field(default="0.0.0.0")  # nosec B104
     port: int = pyd.Field(default=8000)
     app_version: str = pyd.Field(default=__version__)
     num_of_workers: int = pyd.Field(default=1)

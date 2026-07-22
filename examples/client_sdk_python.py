@@ -31,7 +31,6 @@ import sys
 
 from querygate.client import Query, agg, and_, case, col, desc, fn_select, lit, when
 
-
 # NOTE: the demo policy (examples/policy.example.yaml) masks orders.total_amount
 # so it may only appear as a bare SELECT projection, and denies customers.email.
 # These examples deliberately stay within that policy so `--send` is a clean

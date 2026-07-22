@@ -121,6 +121,53 @@ format-check: ## Check formatting without making changes
 .PHONY: lint
 lint: format-check ## Alias for format-check (extend with ruff/mypy when added)
 
+# ─── Security scanning ────────────────────────────────────────────────────────
+# All scanners are dev/CI-only — none is a runtime dependency of the shipped
+# image. Each is deny-by-default with a reviewed allowlist, the same posture as
+# the pip-audit dependency gate (security/dependency-audit-allowlist.json).
+# Local targets prefer an installed binary and fall back to the tool's official
+# container image, so they work without a global install. See TODO.md item 89
+# and docs/SECURITY_POSTURE.md.
+
+SCAN_IMAGE ?= querygate:security-scan
+
+.PHONY: scan-image
+scan-image: ## Trivy: scan the built container image for OS+library CVEs, secrets, misconfig (deny-by-default via .trivyignore)
+	docker build -t $(SCAN_IMAGE) .
+	@if command -v trivy >/dev/null 2>&1; then \
+		trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 $(SCAN_IMAGE); \
+	else \
+		echo "trivy not installed; using official aquasec/trivy image"; \
+		docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+			-v $(PWD)/.trivyignore:/.trivyignore aquasec/trivy:latest \
+			image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 $(SCAN_IMAGE); \
+	fi
+
+.PHONY: scan-secrets
+scan-secrets: ## gitleaks: scan the working tree and full git history for committed secrets (allowlist in .gitleaks.toml)
+	@if command -v gitleaks >/dev/null 2>&1; then \
+		gitleaks detect --source . --config .gitleaks.toml --redact --verbose; \
+	else \
+		echo "gitleaks not installed; using official zricethezav/gitleaks image"; \
+		docker run --rm -v $(PWD):/repo zricethezav/gitleaks:latest \
+			detect --source /repo --config /repo/.gitleaks.toml --redact --verbose; \
+	fi
+
+.PHONY: sast
+sast: ## Bandit static security analysis over src/ (config in pyproject.toml [tool.bandit])
+	poetry run bandit -c pyproject.toml -r src/
+
+.PHONY: test-dast
+test-dast: ## Schemathesis: fuzz the OpenAPI surface to prove only the validated AST is accepted (no raw-SQL path)
+	poetry run python scripts/run_dast.py
+
+.PHONY: security-scan
+security-scan: ## Run every locally-runnable security gate (SAST + secrets + dependency audit + DAST)
+	$(MAKE) sast
+	$(MAKE) scan-secrets
+	$(MAKE) sbom
+	$(MAKE) test-dast
+
 # ─── Docs ─────────────────────────────────────────────────────────────────────
 .PHONY: product-guide-html
 product-guide-html: ## Render docs/PRODUCT_GUIDE.md into the browsable docs/product-guide.html
@@ -136,6 +183,7 @@ release-check: ## Run deterministic source/package release gates and build artif
 	poetry check --lock
 	poetry run python scripts/check_release.py
 	$(MAKE) format-check
+	$(MAKE) sast
 	$(MAKE) test
 	QUERYGATE_DEMO_DB_URL=postgresql+asyncpg://user:pass@localhost/demo \
 		poetry run querygate-validate-config

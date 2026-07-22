@@ -352,7 +352,7 @@ def build_catalog_governance_router(
         _require_known_connection(connection)
         if request.batch.connection_id != connection:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="batch.connection_id must match the connection in the URL",
             )
         start = time.monotonic()
@@ -388,7 +388,7 @@ def build_catalog_governance_router(
                 error_category="validation",
                 duration_ms=int((time.monotonic() - start) * 1000),
             )
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
 
         audit_catalog_governance(
             action="generate",
@@ -439,7 +439,7 @@ def build_catalog_governance_router(
                 error_category="validation",
                 duration_ms=int((time.monotonic() - start) * 1000),
             )
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
 
         audit_catalog_governance(
             action="learn",
@@ -506,7 +506,7 @@ def build_catalog_governance_router(
                 default_aggregation=request.default_aggregation,
             )
         except pyd.ValidationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
         update = await _run_mutation(
             action="manual_create",
             scope=CATALOG_AUTHOR_SCOPE,

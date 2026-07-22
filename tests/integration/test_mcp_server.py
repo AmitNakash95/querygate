@@ -211,14 +211,12 @@ async def test_mcp_tools_list_includes_scope_gated_tool_with_scope():
 @pytest.mark.asyncio
 async def test_mcp_configuration_inspection_uses_request_application_config(tmp_path):
     connections_file = tmp_path / "guide-connections.yaml"
-    connections_file.write_text(
-        """
+    connections_file.write_text("""
 connections:
   - id: request-bound-config
     dialect: postgresql
     connection_string: ${REQUEST_BOUND_DATABASE_URL}
-"""
-    )
+""")
     policy_file = tmp_path / "guide-policy.yaml"
     policy_file.write_text("default:\n  enabled: true\n")
     _reset_mcp_session_manager()

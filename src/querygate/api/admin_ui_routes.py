@@ -28,7 +28,6 @@ from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE, ADMIN_CONFIG_WRITE_SC
 from querygate.policy.loader import PolicyStore, get_policy_store
 from querygate.templates.models import QueryTemplateFile
 
-
 _AUDIT_EVENT_ADAPTER = pyd.TypeAdapter(PersistableEvent)
 _AUDIT_EVENT_TYPES = frozenset(
     {"query.execution", "config.governance", "catalog.governance", "connection.probe"}
@@ -186,19 +185,19 @@ def _policy_document(policy_yaml: str) -> Dict[str, Any]:
         raw = yaml.safe_load(policy_yaml) or {}
     except yaml.YAMLError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid policy YAML: {exc}",
         ) from exc
     if not isinstance(raw, dict):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Policy document root must be a mapping.",
         )
     try:
         PolicyStore.from_dict(raw)
     except (TypeError, ValueError) as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid policy document: {exc}",
         ) from exc
     return raw
@@ -215,19 +214,19 @@ def _template_document(templates_yaml: str) -> Dict[str, Any]:
         raw = yaml.safe_load(templates_yaml) or {}
     except yaml.YAMLError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid templates YAML: {exc}",
         ) from exc
     if not isinstance(raw, dict):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Templates document root must be a mapping.",
         )
     try:
         QueryTemplateFile.model_validate(raw)
     except (TypeError, ValueError) as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid templates document: {exc}",
         ) from exc
     return raw
@@ -485,7 +484,7 @@ def build_admin_ui_router(
         require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
         if event_type is not None and event_type not in _AUDIT_EVENT_TYPES:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"Unsupported audit event type: {event_type!r}",
             )
         return _audit_page(
