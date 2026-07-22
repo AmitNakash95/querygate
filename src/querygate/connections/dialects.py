@@ -81,13 +81,20 @@ async def apply_session_guardrails(
     lock_timeout_seconds: int,
     statement_timeout_seconds: int,
 ) -> None:
+    # The interpolated values are Pydantic-validated ints from Policy
+    # (timeout_seconds), never caller input, and `SET LOCAL` / `SET LOCK_TIMEOUT`
+    # take no bind parameters — string interpolation is required here, not a SQL
+    # injection vector. Semgrep's avoid-sqlalchemy-text rule is suppressed inline
+    # per-site with that justification (reviewed 2026-07-22, TODO item 89). The
+    # `# fmt: off` region keeps each `# nosemgrep` on the same line as its
+    # `sa.text(...)` match, which Black would otherwise split apart.
+    # fmt: off
     if dialect == DatabaseDialect.POSTGRESQL:
-        await session.execute(sa.text(f"SET LOCAL lock_timeout = '{lock_timeout_seconds}s'"))
-        await session.execute(
-            sa.text(f"SET LOCAL statement_timeout = '{statement_timeout_seconds}s'")
-        )
+        await session.execute(sa.text(f"SET LOCAL lock_timeout = '{lock_timeout_seconds}s'"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        await session.execute(sa.text(f"SET LOCAL statement_timeout = '{statement_timeout_seconds}s'"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
     elif dialect == DatabaseDialect.MSSQL:
         # LOCK_TIMEOUT is in milliseconds.
-        await session.execute(sa.text(f"SET LOCK_TIMEOUT {lock_timeout_seconds * 1000}"))
+        await session.execute(sa.text(f"SET LOCK_TIMEOUT {lock_timeout_seconds * 1000}"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
         await session.execute(sa.text("SET XACT_ABORT ON"))
         await session.execute(sa.text("SET DEADLOCK_PRIORITY LOW"))
+    # fmt: on

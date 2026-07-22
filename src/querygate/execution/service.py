@@ -226,8 +226,10 @@ def _compile_to_text(stmt: Any, *, include_literals: bool) -> Tuple[str, Optiona
         try:
             literal_compiled = stmt.compile(compile_kwargs={"literal_binds": True})
             return str(literal_compiled), None
-        except Exception:
-            pass  # some param types (e.g. arrays) can't render as literals — fall through
+        except (
+            Exception
+        ):  # nosec B110 — best-effort literal rendering for audit only; some param types (e.g. arrays) can't render as literals, fall through to the parameterized form
+            pass
 
     redacted = {k: "<redacted>" for k in params}
     return str(compiled), (str(redacted) if redacted else None)

@@ -1282,6 +1282,13 @@ Agent (MCP) / Client (REST)
   vulnerability without a reviewed, justified entry in
   `security/dependency-audit-allowlist.json` fails the release
   (deny-by-default). See [`docs/RELEASING.md`](docs/RELEASING.md#software-bill-of-materials-and-dependency-audit).
+- **Continuously scanned, and provable.** Every change runs static analysis
+  (Bandit + Semgrep OSS), full-history secret scanning (gitleaks), container
+  image scanning of the shipped image (Trivy), and OpenAPI fuzzing (Schemathesis)
+  — each deny-by-default. For the full, reproducible security-and-reliability
+  posture (every gate, the command to run it yourself, and the threat-model
+  mapping) see **[docs/SECURITY_POSTURE.md](docs/SECURITY_POSTURE.md)**. To report
+  a vulnerability, see [`SECURITY.md`](SECURITY.md).
 
 ## Built-in product guide
 

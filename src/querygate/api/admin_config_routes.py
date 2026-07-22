@@ -133,7 +133,7 @@ def build_admin_config_router(
                 governance.simulate_candidate_policy, cfg, principal, request
             )
         except ConfigValidationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
 
     @router.post("/diff", response_model=SemanticAccessDiff)
     async def diff_endpoint(
@@ -151,7 +151,7 @@ def build_admin_config_router(
                 governance.diff_candidate_access, cfg, principal, request
             )
         except ConfigValidationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
 
     @router.post("/blast-radius", response_model=PolicyBlastRadiusReport)
     async def blast_radius_endpoint(
@@ -167,7 +167,7 @@ def build_admin_config_router(
         try:
             return await run_in_threadpool(governance.compute_blast_radius, cfg, principal, request)
         except ConfigValidationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
 
     @router.get("/templates", response_model=List[PolicyTemplateSummary])
     async def list_templates_endpoint(principal: Principal = Depends(get_principal)):
@@ -188,7 +188,7 @@ def build_admin_config_router(
                 request.template_id, request.params, request.policy_yaml
             )
         except ConfigValidationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
 
     @router.post("/export", response_model=ConfigChangeSetBundle)
     async def export_endpoint(
@@ -235,7 +235,7 @@ def build_admin_config_router(
                 description=request.description,
             )
         except ConfigValidationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
 
     @router.get("/versions", response_model=List[ConfigVersion])
     async def list_versions_endpoint(principal: Principal = Depends(get_principal)):
@@ -263,7 +263,7 @@ def build_admin_config_router(
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
         except ConfigValidationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
         return ApplyResult(version=version, reload=reload_result)
 
     return router

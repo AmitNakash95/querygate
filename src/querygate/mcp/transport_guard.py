@@ -96,7 +96,7 @@ class MCPRequestGuardMiddleware:
                     await self._reject(
                         scope,
                         send,
-                        status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        status.HTTP_413_CONTENT_TOO_LARGE,
                         "PAYLOAD_TOO_LARGE",
                         "Request body exceeds the configured size limit.",
                         path=scope.get("path"),
@@ -122,7 +122,7 @@ class MCPRequestGuardMiddleware:
                     await self._reject(
                         scope,
                         send,
-                        status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        status.HTTP_413_CONTENT_TOO_LARGE,
                         "PAYLOAD_TOO_LARGE",
                         "Request body exceeds the configured size limit.",
                         path=scope.get("path"),

@@ -48,7 +48,12 @@ def test_checked_in_allowlist_loads_and_references_real_packages():
         generate_sbom._normalize(name) for name, _ in generate_sbom.locked_main_packages()
     }
 
-    assert allowlist, "allowlist should not be empty while known findings are unremediated"
+    # An empty allowlist is the *desired* state: it means every known
+    # vulnerability in the shipped dependency set has been remediated (upgraded
+    # to a fixed version, or the package removed from the runtime image) rather
+    # than accepted with a compensating control (TODO.md item 30 phase 2 /
+    # item 89). Any entry that IS present must still reference a currently-locked
+    # production dependency — no stale entries for packages we no longer ship.
     for vuln_id, entry in allowlist.items():
         assert entry["id"] == vuln_id
         assert generate_sbom._normalize(entry["package"]) in locked_names, (
