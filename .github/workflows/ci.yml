@@ -84,7 +84,7 @@ jobs:
             > /dev/null
 
   postgres-live:
-    name: Real-Postgres tests (timeout + load guardrails)
+    name: Real-Postgres tests (correctness, security, guardrails, soak)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -113,8 +113,24 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction
 
-      - name: pytest -m postgres_live
-        run: poetry run pytest -m postgres_live
+      # Every postgres_live test EXCEPT the `load`-marked concurrency/soak
+      # ones, run first because they're fast and timing-insensitive. This
+      # includes the large-domain stress suite's differential-correctness,
+      # security-at-volume, and log/audit no-leak checks
+      # (tests/integration/test_large_domain_stress.py), which self-seed their
+      # own data and so need nothing beyond the bare Postgres service above.
+      - name: pytest -m "postgres_live and not load"
+        run: poetry run pytest -m "postgres_live and not load"
+
+      # The concurrency-guardrail (pg_sleep probes) + heavy-burst + soak tests.
+      # Kept as a separate, named step so a timing-related failure is obvious.
+      # A few soak rounds is plenty to catch a pool leak or a cap breach on CI
+      # without making the job slow; bump QUERYGATE_LOAD_ROUNDS for a heavier
+      # local/scheduled run.
+      - name: pytest -m "postgres_live and load" (guardrails + burst + soak)
+        run: poetry run pytest -m "postgres_live and load"
+        env:
+          QUERYGATE_LOAD_ROUNDS: "5"
 
   mssql-live:
     name: Real-MSSQL tests (TODO.md item 2)

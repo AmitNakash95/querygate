@@ -88,3 +88,154 @@ connections:
         columns:
           quantity:
             description: "Units of the product purchased in this line item."
+
+  # The larger real-world demo domain (see examples/demo_db/large_schema.py),
+  # exposed by the `retail` connection. This overlay gives describe_table /
+  # search_catalog realistic business descriptions, aliases, relationship
+  # hints, and sensitivity labels to work against — remember it is descriptive
+  # only and never affects validation/compilation/execution (Policy is the
+  # sole enforcement point, so a `pii` label here does not wall a column off —
+  # policy.example.yaml's masks/denies do).
+  retail:
+    tables:
+      accounts:
+        description: "One row per registered customer account."
+        aliases: ["customers", "clients", "users"]
+        default_aggregation: "count(accounts.account_id)"
+        relationships:
+          - to_table: orders_ext
+            column: account_id
+            to_column: account_id
+            description: "The orders this account has placed."
+          - to_table: regions
+            column: region_id
+            to_column: region_id
+            description: "The region this account belongs to."
+        columns:
+          tier:
+            description: "Loyalty tier: bronze, silver, gold, or platinum."
+            aliases: ["loyalty_tier", "membership"]
+          lifetime_value:
+            description: "Cumulative revenue attributed to the account, in base currency."
+            aliases: ["ltv"]
+          national_id:
+            description: "Government-style identifier — masked (hashed) by policy for retail."
+            sensitivity: pii
+            allow_samples: false
+          email:
+            description: "Account email address."
+            sensitivity: pii
+          last_login_at:
+            description: "Timestamp of the account's most recent login; NULL if it never logged in."
+
+      orders_ext:
+        description: "One row per customer order, spanning ~4 years of history."
+        aliases: ["orders", "purchases", "sales"]
+        default_aggregation: "sum(orders_ext.order_total)"
+        relationships:
+          - to_table: accounts
+            column: account_id
+            to_column: account_id
+            description: "The account that placed this order."
+          - to_table: order_lines
+            column: order_id
+            to_column: order_id
+            description: "The line items belonging to this order."
+          - to_table: payments
+            column: order_id
+            to_column: order_id
+            description: "Payment events (captures and refunds) for this order."
+        columns:
+          status:
+            description: "Lifecycle state: pending, paid, shipped, delivered, cancelled, or refunded."
+            aliases: ["order_status"]
+          channel:
+            description: "Acquisition channel: web, mobile, store, or partner."
+          order_total:
+            description: "Order total in the order's currency; equals the sum of its line totals."
+            aliases: ["revenue", "amount"]
+          shipped_at:
+            description: "When the order shipped; NULL until it does."
+
+      order_lines:
+        description: "One row per product line within an order."
+        aliases: ["line_items", "order_items"]
+        relationships:
+          - to_table: orders_ext
+            column: order_id
+            to_column: order_id
+            description: "The order this line belongs to."
+          - to_table: catalog_products
+            column: product_id
+            to_column: product_id
+            description: "The product sold on this line."
+        columns:
+          line_total:
+            description: "Extended price for the line after discount (quantity x unit_price x (1 - discount))."
+          discount_pct:
+            description: "Percentage discount applied to this line, 0-25."
+
+      catalog_products:
+        description: "Product catalog — one row per sellable SKU."
+        aliases: ["products", "catalog", "skus"]
+        relationships:
+          - to_table: suppliers
+            column: supplier_id
+            to_column: supplier_id
+            description: "The supplier that provides this product."
+        columns:
+          category:
+            description: "Top-level merchandising category."
+          subcategory:
+            description: "Second-level merchandising category within `category`."
+          discontinued_at:
+            description: "When the product was discontinued; NULL means still sold."
+          list_price:
+            description: "Advertised selling price; `cost` is what QueryGate paid the supplier."
+
+      payments:
+        description: "Payment events for orders. Amount is negative for refunds/chargebacks."
+        aliases: ["transactions"]
+        relationships:
+          - to_table: orders_ext
+            column: order_id
+            to_column: order_id
+            description: "The order this payment settles."
+        columns:
+          amount:
+            description: "Settled amount; positive for captures, negative for refunds, zero for voids."
+          method:
+            description: "Payment instrument: card, paypal, wire, or store_credit."
+
+      web_events:
+        description: "High-volume clickstream log — one row per user interaction (time-series)."
+        aliases: ["events", "clickstream", "activity"]
+        default_aggregation: "count(web_events.event_id)"
+        relationships:
+          - to_table: accounts
+            column: account_id
+            to_column: account_id
+            description: "The account that generated the event; NULL for anonymous traffic."
+          - to_table: catalog_products
+            column: product_id
+            to_column: product_id
+            description: "The product the event relates to, when applicable."
+        columns:
+          event_type:
+            description: "Interaction kind: page_view, search, add_to_cart, login, or checkout."
+          revenue:
+            description: "Revenue attached to a checkout event; NULL for non-purchase events."
+          occurred_at:
+            description: "When the event happened (has a real time-of-day, not midnight-aligned)."
+
+      suppliers:
+        description: "Product suppliers."
+        columns:
+          rating:
+            description: "Supplier quality rating 2.5-5.0; NULL for a freshly onboarded supplier."
+
+      regions:
+        description: "Geographic sales regions with their base currency."
+        columns:
+          currency:
+            description: "ISO currency code used for orders placed in this region."
