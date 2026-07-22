@@ -61,7 +61,7 @@ order-of-magnitude, not commitments.
 | 27 | ✅ Semantic schema catalog and sensitivity metadata | L | 6, 16 |
 | 28 | ✅ Threat model + adversarial security test suite | M | 1, 6, 8, 10, 11 |
 | 29 | ✅ Production deployment reference stack | M | 4, 9, 12, 13, 14 |
-| 30 | ✅ Distribution, SBOM, and signed release artifacts (phase 1: SBOM + audit; phase 2: publishing + signing not started) | M | 4, 14 |
+| 30 | ✅ Distribution, SBOM, and signed release artifacts (phase 1: SBOM + audit; phase 2: GHCR publish + cosign + SLSA provenance shipped — first executed release + Python package-index remain maintainer-gated) | M | 4, 14 |
 | 31 | ✅ Admin UI / policy designer | XL | 25 |
 | 32 | ✅ Governed adaptive semantic memory for agents (32A ✅; 32B ✅; 32C ✅) | XL | 23, 25, 27, 28 |
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
@@ -393,10 +393,21 @@ A `deploy/` directory with two verified reference stacks — a production-ish Do
 
 ### 30. Distribution, SBOM, and signed release artifacts
 
-**Phase 1 (SBOM + dependency audit + checksums) ✅ DONE.** **Phase 2
-(publishing to a real registry/index + cryptographic signing) not started —
-split out below because it needs infrastructure and credentials this
-environment does not have and this project does not yet operate.**
+**Phase 1 (SBOM + dependency audit + checksums) ✅ DONE.** **Phase 2 —
+signing + provenance mechanism now shipped; two operational bits remain
+maintainer-gated (first executed signed release + Python package-index).** The
+container-image half of "signed release artifacts" is implemented:
+`.github/workflows/release.yml` pushes the image to GHCR, signs it with cosign
+keyless (Sigstore), and attaches a SLSA build-provenance attestation
+(`actions/attest-build-provenance`), both bound to the image digest and
+consumer-verifiable (`cosign verify` / `gh attestation verify` — see
+`docs/RELEASING.md`). Offline artifact integrity is checkable with `make
+verify-release` (`scripts/verify_release.py`) against `dist/SHA256SUMS`. What
+stays open (why this is not fully `✅ DONE`): (a) the *first* signed+attested
+release is only produced when a maintainer deliberately pushes a version tag —
+publishing is never automatic; (b) **Python package-index (PyPI/private)
+publishing** has no index chosen yet — the wheel/sdist are verified by
+`SHA256SUMS` until one is. Both are maintainer decisions, not code work.
 
 **Phase 1 shipped:** `scripts/generate_sbom.py`, run as the last step of
 `make release-check` (and as its own `make sbom` target). It reads
@@ -428,21 +439,25 @@ starlette 0.46→1.3.1, mcp 1.12→1.28.1, python-dotenv/click/idna), so the
 not accepted. `setuptools`/`pip`/`wheel` findings were previously excluded as
 `ensurepip` bootstrap packages; they are now also **stripped from the runtime
 container image** (Dockerfile) since a running service never installs packages,
-so the Trivy image scan is likewise clean with no exceptions. What remains open
-in item 30 phase 2 is the **registry-publish + cryptographic signing**
-infrastructure (Sigstore/cosign + SLSA provenance), tracked alongside item 89
-phase 2.
+so the Trivy image scan is likewise clean with no exceptions. The
+**registry-publish + cryptographic signing + SLSA provenance** infrastructure
+that was open here is now shipped (GHCR + cosign keyless + SLSA attestation in
+`release.yml`, tracked alongside item 89 phase 2); see the phase-2 status note
+at the top of this item for the two operational bits (first executed release +
+package-index) that remain maintainer decisions.
 
-**Explicitly out of scope for phase 1, tracked as phase 2:**
+**Was out of scope for phase 1; status now:**
 
-- **Publishing to a registry.** No package (PyPI/private index) or container
-  registry has been chosen or configured; `docs/RELEASING.md` still describes
-  local-only artifacts, and pushing/publishing requires explicit maintainer
-  approval before it can happen at all.
-- **Cryptographic signing (e.g. Sigstore/cosign keyless signing).** Signing
-  is only meaningful once there's a real published artifact and registry to
-  attach the signature and transparency-log entry to — building it against
-  nothing to sign would be security theater, not a control.
+- **Publishing to a registry.** ✅ Container registry chosen and wired: GHCR
+  (`ghcr.io/${{ github.repository }}`), pushed by `release.yml` on a `v*` tag
+  after a pre-publish Trivy gate. Pushing still requires an explicit maintainer
+  tag push — never automatic on a `main` commit. **A Python package index
+  (PyPI/private) is still not chosen** — the only remaining publish gap.
+- **Cryptographic signing + provenance.** ✅ Shipped. cosign keyless signature
+  (Sigstore, OIDC identity, transparency log) plus a SLSA build-provenance
+  attestation, both digest-bound, produced by `release.yml`. (The earlier
+  "security theater until there's something to sign" concern is resolved now
+  that GHCR is the real published artifact.)
 - **Remediating the 13 allowlisted findings** — i.e. actually upgrading
   `click`/`idna`/`mcp`/`python-dotenv`/`starlette` past their locked versions.
   `mcp` in particular is a core protocol dependency threaded through every
@@ -2072,7 +2087,7 @@ size) was the one residual with a bounded, well-precedented fix — this item
 builds it, turning a documented gap into an opt-in enforced guardrail without
 overclaiming (multi-query differencing stays honestly out of scope).
 
-### 89. Open-source security validation gates + customer-facing trust posture ✅ DONE (phase 1); phase 2 (signed delivery) not started
+### 89. Open-source security validation gates + customer-facing trust posture ✅ DONE (phase 1); phase 2 (signed delivery) mechanism shipped, first release + package-index remain maintainer-gated
 
 **Why:** QueryGate is sold as a private, closed-source image customers pull and
 run in their own infrastructure. Every enterprise security review asks "what
@@ -2141,14 +2156,24 @@ only**, so a private product cannot be *awarded* it — we keep a self-assessmen
 Scorecard is likewise public-repo oriented and intentionally not run as a
 private-repo gate. Both are documented as available on open-sourcing.
 
-**Phase 2 (not started) — signed delivery / build provenance.** The genuinely
-earnable external attestation for a self-hosted image product is **Sigstore/cosign
-image signing + SLSA build provenance**, letting a customer cryptographically
-verify the image they run was built by us from this source, untampered. This is
-the right place to invest external-attestation effort and is the one real gap the
-self-assessment surfaces. Not built here to keep this item bounded; sign the
-release image in CI, publish the provenance attestation, and document
-verification for customers.
+**Phase 2 — signed delivery / build provenance: mechanism shipped.** The
+genuinely earnable external attestation for a self-hosted image product is
+**Sigstore/cosign image signing + SLSA build provenance**, letting a customer
+cryptographically verify the image they run was built by us from this source,
+untampered. `.github/workflows/release.yml` now does both on a `v*` tag push:
+after a pre-publish Trivy gate it pushes to GHCR, signs with cosign keyless
+(Sigstore, OIDC identity, transparency log), and attaches a SLSA build-provenance
+attestation (`actions/attest-build-provenance`, `push-to-registry: true`), both
+bound to the image digest. Consumer verification (`cosign verify` /
+`gh attestation verify`) and offline artifact-integrity checking (`make
+verify-release` over `dist/SHA256SUMS`, `scripts/verify_release.py`) are
+documented in `docs/RELEASING.md`; `docs/SECURITY_POSTURE.md` and the OpenSSF
+self-assessment now record signed delivery as implemented. **Still not fully
+`✅ DONE`** (why this item and item 30 stay phased): the *first* signed+attested
+release is only produced when a maintainer deliberately pushes a version tag
+(publishing is never automatic), and a Python package-index (PyPI/private) has
+not been chosen — the container image is the signed, provenance-attested
+distribution channel today. Both are maintainer decisions, not code work.
 
 ## P6 — Category-defining moats (from competitive-scan, 2026-07-22)
 
