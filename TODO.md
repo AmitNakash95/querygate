@@ -2525,3 +2525,97 @@ parameters. No new caller surface, no AST change, no invariant impact. The big
 analytics "pre-compute the heavy work" win lives in the customer's DB
 (materialized views/indexes), which QueryGate already reads as ordinary tables —
 that is documentation (the analytics-performance note), not this item.
+
+### 96. Unify the AST reference-walk into a single canonical visitor (enforcement hardening)
+
+**Effort: M. Priority: high (robustness/proof; pure refactor, no behavior
+change). Depends on: nothing. Blocks: item 97.**
+
+**Why it matters.** The knowledge "every place in a `StructuredQuery` where a
+table/column reference can appear" is currently duplicated across at least four
+independently hand-maintained walks:
+`validation/policy_validation.py`'s `_iter_column_refs`,
+`_non_projection_column_refs` (whose own docstring admits it is
+"`_iter_column_refs` minus the bare-`str` select branch" — a near-verbatim copy
+kept in lockstep by hand), and `_collect_referenced_tables`, plus
+`validation/schema_validation.py`'s own separate `for join…`/`for item…`
+enumerations. Every time the AST grows a field (a new select-item type, a new
+clause, a nested node), each of these walks must be taught the new position or a
+policy/schema hole opens silently in whichever one was forgotten. That is the
+real robustness debt — not the pipeline being "flat" (it correctly recurses
+already where the AST has depth, i.e. `WhereGroup` nesting via
+`_where_column_refs`/`_iter_where_predicates`/`where_depth`), but that the
+same enumeration lives in N places.
+
+**What to do.** Define one canonical reference visitor over the AST — a single
+authority that yields (position-kind, reference) for every table/column
+reference a query contains — and have policy validation, schema validation, and
+`referenced_tables` all consume it instead of their own bespoke walks. Position
+kind must be rich enough to preserve today's distinctions (bare top-level select
+projection vs. everywhere-else, for the item-49 masked-column rule) so behavior
+is byte-for-byte preserved. Follow the composable-interface doctrine
+(`CLAUDE.md`): one visitor, consumed everywhere; do not scatter new `if`
+branches at call sites.
+
+**Acceptance.** Pure refactor — **zero behavior change**, proven by the existing
+adversarial (`make test-security`), credential-redaction, and full suites
+passing unchanged; no new caller surface, no AST change, no policy semantics
+change. The win is that "where can a reference appear" becomes single-authority,
+so future AST additions (including item 97) are enforced by construction rather
+than by remembering to update four walks. This item is sellable and worth
+shipping on its own even if item 97 never happens.
+
+**Hard boundaries.** Not a rewrite of policy semantics, not a change to any cap
+or allow/deny rule, not a new AST field. If the refactor would change any
+observable validation outcome, it is out of scope for this item — that is a
+separate, deliberately-decided change.
+
+### 97. Bounded nested subqueries (uncorrelated, single-connection, depth-capped)
+
+**Effort: L. Priority: medium (capability extension). Depends on: item 96.
+Requires a recorded Decision Log entry in `docs/PRODUCT_GUIDE.md` before build.**
+
+**Why it matters.** Callers naturally compose queries that scope an initial set
+and filter from it (`FROM (subquery)` / `IN (subquery)`). Today the AST is
+single-level: `from_table` is a table-name string and predicate `value`/
+`value_col`/`in`-list are literals/columns — there is no caller-authored nested
+query. Much of the real demand is already served by joins + `group_by`/`having`
+(semi-joins, aggregate-filters) and by the two-round-trip pattern (query 1
+returns IDs → query 2 filters with `in: [...]`), so this item must clear a
+genuine-marginal-value bar, not be added reflexively. It does **not** cross any
+North Star non-goal: a nested `StructuredQuery` is still a fully validated AST,
+never a raw-SQL string.
+
+**Scope — the minimal safe subset only (reject the rest, per the item-74
+"reject, don't emulate" precedent):**
+- ✅ **Uncorrelated** derived table (`FROM (subquery)`) and/or `IN (subquery)`.
+- ❌ **Correlated** subqueries (inner references an outer row) — this is the
+  sharp cliff that defeats "each query is independently bounded"; reject
+  explicitly with a `QueryValidationError` pointing at joins as the primitive.
+- ❌ **Cross-connection** nesting (a subquery carrying its own `connection`) —
+  can't push to one DB; reject.
+- New cap `max_subquery_depth` (default 1). **All existing caps (max_joins,
+  max_where_depth, max_group_by, top_n, in-list size) apply summed tree-wide**,
+  never per-level — otherwise nesting becomes a cap-multiplier bypass.
+
+**What to do (once item 96 lands, this is small).**
+1. Make the model recursive (e.g. `from_table: str | StructuredQuery`, and/or an
+   `in`-subquery predicate variant). Pydantic recurses for free.
+2. Teach the **one** canonical visitor (item 96) to descend nested queries, so
+   policy + schema enforcement follow automatically. Base-table column refs
+   inside a subquery get the full allow/deny + cap treatment; the outer query
+   resolves against the inner query's *output aliases* (a virtual relation),
+   which must NOT let the outer reach past them into inner base tables.
+3. Schema validation computes the inner query's output column set and threads it
+   through as a virtual relation.
+4. Compiler renders via SQLAlchemy Core `.subquery()` (already used for `top_n`
+   at `compiler/sqlalchemy_compiler.py`); nested scopes need their own column
+   resolution frame.
+5. Full `adversarial-probe` pass — every new node is a new bypass surface;
+   codify each vector as a regression test (esp. cap-evasion-via-nesting and
+   masked/denied column hidden in a subquery).
+
+**Acceptance.** Bounded subset above works end-to-end on Postgres + MSSQL;
+correlated/cross-connection/over-depth all rejected with clear errors; caps
+proven to apply tree-wide by adversarial tests; Decision Log entry recorded.
+No raw-SQL surface, no non-goal crossed.

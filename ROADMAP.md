@@ -97,6 +97,11 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 - [ ] **36** — Production-grade QA / edge-case test suite. *Hardening before a
   real customer's data and adversaries touch it; raises confidence for the
   pilot without new surface.*
+- [ ] **96** — Unify the AST reference-walk into a single canonical visitor.
+  *Pure refactor, no behavior change: collapses the four hand-maintained
+  reference walks into one authority so a policy/schema hole can't open in a
+  forgotten copy. Robustness the pilot benefits from now, and the enabler that
+  makes future AST breadth safe-by-construction. **Blocks 97.***
 - [ ] **95** — Discoverable scope catalog + recommended role bundles for IdP
   integration. *Turns the shipped "bring your IdP" auth (items 10/90) into a
   turnkey wire-up: a design partner with Okta/Entra/Auth0 can register QG's
@@ -141,6 +146,11 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   already encapsulate logic in procs.*
 - [ ] **57** — Pluggable dialect-adapter architecture. *The enabler that turns
   each new store into an adapter (not a project) — do before 19.*
+- [ ] **97** — Bounded nested subqueries (uncorrelated, single-connection,
+  depth-capped). *AST expressiveness: serves the "scope a set then filter from
+  it" shape as a validated node, not a raw-SQL string. Minimal-safe subset only
+  (reject correlated / cross-connection / over-depth); caps summed tree-wide.
+  **Depends on 96; requires a PRODUCT_GUIDE Decision Log entry before build.***
 - [ ] **19** — Additional dialects (MySQL, Snowflake, BigQuery, …). *Removes the
   "QueryGate is narrow" objection. **Depends on 57.***
 
