@@ -86,12 +86,23 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   artifacts** (Sigstore/cosign + SLSA provenance). *One workstream — do signed
   delivery once. The one real external-attestation gap the trust
   self-assessment surfaces; cheap credibility for any security review.*
+  **Mechanism shipped** (`release.yml`: GHCR push + cosign keyless + SLSA
+  build-provenance attestation, both digest-bound; `make verify-release` +
+  consumer `cosign verify`/`gh attestation verify` docs). Box stays `[ ]` until
+  the two maintainer-gated bits — the *first* executed signed release (a
+  deliberate tag push) and a chosen Python package-index — are done.
 - [ ] **56** — HA / multi-region reference deployment + DR runbook (start with a
   supported Helm path). *A pilot has to actually deploy; unblocks the
   "deployed in a day" pilot success criterion.*
 - [ ] **36** — Production-grade QA / edge-case test suite. *Hardening before a
   real customer's data and adversaries touch it; raises confidence for the
   pilot without new surface.*
+- [ ] **95** — Discoverable scope catalog + recommended role bundles for IdP
+  integration. *Turns the shipped "bring your IdP" auth (items 10/90) into a
+  turnkey wire-up: a design partner with Okta/Entra/Auth0 can register QG's
+  scopes and roles without reverse-engineering `scopes.py`. Small effort,
+  directly unblocks SSO-based pilot onboarding. **Depends on 10 + 90 (both
+  shipped).***
 
 ### Phase 2 — Enterprise procurement unlocks (pull-driven — do when a partner's security team engages)
 
