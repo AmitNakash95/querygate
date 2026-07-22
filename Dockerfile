@@ -16,6 +16,14 @@ COPY examples ./examples
 RUN poetry install --no-root --only main \
     && poetry build --format wheel \
     && .venv/bin/pip install --no-deps dist/*.whl \
+    # Strip build/install tooling (pip, setuptools, wheel) from the runtime
+    # venv: a running service never installs packages, and these ship known
+    # CVEs — including the ones setuptools vendors internally
+    # (jaraco.context / wheel). QueryGate resolves package metadata via
+    # importlib.metadata (stdlib), not pkg_resources, so nothing at runtime
+    # needs them. Keeps the shipped image free of HIGH/CRITICAL dependency CVEs
+    # (verified by the CI Trivy gate). See TODO.md item 30 phase 2 / item 89.
+    && .venv/bin/pip uninstall -y pip setuptools wheel \
     && rm -rf $POETRY_CACHE_DIR dist
 
 FROM python:3.11-slim-bookworm AS production
@@ -50,6 +58,20 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+# The base python:3.11-slim image ships pip/setuptools/wheel in the SYSTEM
+# site-packages, and setuptools vendors CVE-bearing copies of jaraco.context /
+# wheel. QueryGate runs entirely from /app/.venv (its entrypoint's shebang
+# targets the venv interpreter) and never uses the system interpreter's tooling,
+# so remove it to keep the shipped image free of HIGH/CRITICAL dependency CVEs.
+# Verified by the CI Trivy gate. See TODO.md item 30 phase 2 / item 89.
+RUN rm -rf /usr/local/lib/python3.11/site-packages/setuptools* \
+    /usr/local/lib/python3.11/site-packages/pip \
+    /usr/local/lib/python3.11/site-packages/pip-* \
+    /usr/local/lib/python3.11/site-packages/wheel \
+    /usr/local/lib/python3.11/site-packages/wheel-* \
+    /usr/local/lib/python3.11/site-packages/pkg_resources \
+    /usr/local/lib/python3.11/site-packages/_distutils_hack \
+    /usr/local/lib/python3.11/site-packages/distutils-precedence.pth
 RUN addgroup --system querygate && adduser --system --ingroup querygate querygate
 COPY --from=builder /app/.venv /app/.venv
 RUN chown -R querygate:querygate /app

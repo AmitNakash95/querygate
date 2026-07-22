@@ -266,7 +266,9 @@ def _predicate_shape(predicate: Predicate) -> Dict[str, Any]:
     if predicate.col is not None:
         shape["column"] = predicate.col
     else:
-        assert predicate.col_fn is not None
+        assert (
+            predicate.col_fn is not None
+        )  # nosec B101 — type-narrowing invariant guaranteed by the preceding else branch
         shape["function"] = predicate.col_fn.fn
         shape["columns"] = [arg.col for arg in predicate.col_fn.args if isinstance(arg, ColArg)]
     return shape
