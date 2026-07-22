@@ -96,10 +96,9 @@
       <h2 id="auth-title">See your own QueryGate access</h2>
       <p>Use your own bearer token. This page shows only what is visible to you — never other principals, raw configuration, or admin controls.</p>
       <label><span>Bearer token</span><input id="auth-token" type="password" autocomplete="off" required placeholder="Paste token"></label>
-      <label class="checkbox-row"><input id="remember-token" type="checkbox"><span>Keep token for this browser tab</span></label>
       <p id="auth-error" class="form-error" role="alert" hidden></p>
       <button class="button primary wide" type="submit">Connect</button>
-      <small>The token is sent only in the Authorization header. It is never written anywhere on the server.</small>
+      <small>The token is kept only in memory for this session — it is cleared when you close or reload the tab, and is never written to browser storage or anywhere on the server. It is sent only in the Authorization header.</small>
     </form>
   </dialog>
 
