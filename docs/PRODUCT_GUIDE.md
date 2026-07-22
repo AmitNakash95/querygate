@@ -942,6 +942,26 @@ files from disk right now" REST endpoint that bypasses the versioned
 workflow entirely (useful if you edited the files directly and want the
 running process to pick them up).
 
+**Moving a reviewed change between environments, and recovering a lost draft
+(item 47).** `POST /admin/config/export` packages the documents an admin is
+currently editing into a portable *change-set bundle* — a plain downloadable
+JSON file carrying only the submitted document deltas plus the id and a
+content *fingerprint* of the base version they were composed against (never
+the base content itself, so export can't be used to read the active
+connections/policy). `POST /admin/config/import` takes such a bundle back,
+re-validates it through the exact same loaders `/validate` uses, and reports
+whether the target's active version has *drifted* from the bundle's
+fingerprint (`stale_base`, with the specific documents that moved) — but it
+never stages or persists anything on its own. Staging still goes through the
+unchanged `/versions` endpoint, so a bundle is a transport format, not an
+ungoverned second config store. Both are `admin:config:write`-scoped and the
+upload is size-capped (`AppConfig.config_bundle_max_bytes`). In the browser,
+the control plane additionally auto-saves an in-progress **policy** draft to
+`localStorage` so a tab crash doesn't lose it — and *only* the policy
+document: `connections.yaml` (which can carry a literal credential), secret
+references, and bearer tokens are never written to browser storage;
+full-config recovery is the explicitly downloaded bundle instead.
+
 A related but separate admin surface, `api/admin_connections_routes.py`,
 answers a different question: not "what is QueryGate configured to connect
 to," but "is that connection actually reachable right now." `GET

@@ -196,6 +196,11 @@ class AppConfig(BaseSettings):
     # POST /admin/reload-config keeps reloading unchanged, for infra-as-code
     # deployments that edit files directly rather than through this API).
     config_governance_dir: str = pyd.Field(default="var/config_versions")
+    # Upper bound on an imported config change-set bundle (item 47). A bundle
+    # carries only submitted document deltas plus a base fingerprint, so this
+    # is far above any legitimate change set; it bounds the import endpoint so
+    # a hostile/oversized upload is a clean client error, never an OOM.
+    config_bundle_max_bytes: int = pyd.Field(default=1024 * 1024, ge=1)
 
     concurrency_backend: ConcurrencyBackend = pyd.Field(default=ConcurrencyBackend.IN_PROCESS)
     concurrency_redis_url: str = pyd.Field(default="")

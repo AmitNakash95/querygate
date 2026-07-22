@@ -77,6 +77,80 @@ class ConfigPreview(pyd.BaseModel):
     model_config = pyd.ConfigDict(extra="forbid")
 
 
+CONFIG_CHANGE_SET_FORMAT = "querygate.config-change-set/1"
+
+
+class ConfigChangeSetBundle(pyd.BaseModel):
+    """A portable, self-contained config change set (item 47).
+
+    Carries only the document deltas an admin actually submitted (each of
+    connections/policy/catalog/templates is present only when it was part of
+    the change), the id and content fingerprint of the base version those
+    deltas were composed against, and a description — enough to move a
+    reviewed change between environments or recover a lost draft, and to
+    detect on re-import that the target's active version has drifted from the
+    base.
+
+    It is a plain downloadable/uploadable artifact, not a stored server-side
+    draft: importing one validates it and hands the deltas back through the
+    existing validate/stage flow — it never becomes an ungoverned shadow
+    config store. A bundle can legitimately contain a `connections` document
+    with a literal credential (that is the caller's own submitted content, on
+    an explicit download), which is exactly why `contains_connections` is
+    surfaced and why the browser never writes this document to localStorage.
+    """
+
+    bundle_format: Literal["querygate.config-change-set/1"] = CONFIG_CHANGE_SET_FORMAT
+    base_version_id: Optional[str] = None
+    base_fingerprint: Optional[str] = None
+    created_at: datetime
+    description: Optional[str] = None
+    # Only the documents the change actually touched. Keys are constrained to
+    # the four governed document names; an empty mapping means "no delta".
+    documents: Dict[Literal["connections", "policy", "catalog", "templates"], str] = pyd.Field(
+        default_factory=dict
+    )
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    @property
+    def contains_connections(self) -> bool:
+        return "connections" in self.documents
+
+
+class ConfigChangeSetImportCheck(pyd.BaseModel):
+    """Result of validating an uploaded change-set bundle before staging.
+
+    Content-free by construction — like `ConfigPreview`, it reports whether
+    the resulting candidate is valid, a per-document change signal, and
+    whether the target's active version has drifted from the bundle's base
+    (`stale_base` + the specific documents that changed underneath), but never
+    echoes YAML, credentials, or identifiers. The browser already holds the
+    uploaded bundle locally, so it populates its editors from that rather than
+    from this response.
+    """
+
+    valid: bool
+    errors: List[str] = pyd.Field(default_factory=list)
+    documents: List["ConfigDocumentPreview"] = pyd.Field(default_factory=list)
+    # True when the active version's content differs from the fingerprint the
+    # bundle was composed against — the caller is importing onto a moved base.
+    stale_base: bool = False
+    # Which base documents changed since the bundle was created (only
+    # meaningful when stale_base is True). Content-free document names only.
+    base_conflict_documents: List[Literal["connections", "policy", "catalog", "templates"]] = (
+        pyd.Field(default_factory=list)
+    )
+    # True when the bundle includes a connections document (may carry a
+    # literal credential) — a signal for the UI to warn and to keep it out of
+    # browser storage, not a disclosure of the content itself.
+    contains_connections: bool = False
+    ready_to_stage: bool = False
+    warnings: List[str] = pyd.Field(default_factory=list)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
 class TemplateSchemaCheck(pyd.BaseModel):
     """Result of checking one query template's referenced tables/columns against
     a live connection's reflected schema (the on-demand check the offline

@@ -680,3 +680,103 @@ async def test_render_template_end_to_end_through_validate_and_stage(app):
         )
         assert staged.status_code == 201
         assert staged.json()["status"] == "staged"
+
+
+@pytest.mark.asyncio
+async def test_export_import_roundtrip_then_stage(app):
+    """A policy change exported to a bundle imports cleanly and can then be
+    staged through the existing /versions endpoint — one governed path."""
+    policy_yaml = "default:\n  enabled: true\n  max_joins: 2\n"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        export_resp = await client.post(
+            "/api/v1/admin/config/export",
+            json={"policy_yaml": policy_yaml, "description": "cap joins"},
+            headers=_auth(_ADMIN_KEY),
+        )
+        assert export_resp.status_code == 200
+        bundle = export_resp.json()
+        assert bundle["bundle_format"] == "querygate.config-change-set/1"
+        assert set(bundle["documents"]) == {"policy"}
+        assert bundle["base_version_id"] == "1"
+        assert bundle["base_fingerprint"]
+
+        import_resp = await client.post(
+            "/api/v1/admin/config/import", json=bundle, headers=_auth(_ADMIN_KEY)
+        )
+        assert import_resp.status_code == 200
+        check = import_resp.json()
+        assert check["valid"] is True
+        assert check["stale_base"] is False
+        assert check["ready_to_stage"] is True
+
+        # Import stages nothing; only the bootstrap version exists.
+        versions = await client.get("/api/v1/admin/config/versions", headers=_auth(_ADMIN_KEY))
+        assert [v["id"] for v in versions.json()] == ["1"]
+
+        # The admin then stages the bundle's documents through the normal path.
+        staged = await client.post(
+            "/api/v1/admin/config/versions",
+            json={
+                "policy_yaml": bundle["documents"]["policy"],
+                "description": bundle["description"],
+            },
+            headers=_auth(_ADMIN_KEY),
+        )
+        assert staged.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_import_surfaces_stale_base_after_active_moves(app):
+    policy_yaml = "default:\n  enabled: true\n  max_joins: 2\n"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        bundle = (
+            await client.post(
+                "/api/v1/admin/config/export",
+                json={"policy_yaml": policy_yaml},
+                headers=_auth(_ADMIN_KEY),
+            )
+        ).json()
+
+        # Move the active base: stage a different policy and apply it.
+        staged = await client.post(
+            "/api/v1/admin/config/versions",
+            json={"policy_yaml": "default:\n  enabled: true\n  max_select_columns: 4\n"},
+            headers=_auth(_ADMIN_KEY),
+        )
+        applied = await client.post(
+            f"/api/v1/admin/config/versions/{staged.json()['id']}/apply",
+            headers=_auth(_ADMIN_KEY),
+        )
+        assert applied.status_code == 200
+
+        check = (
+            await client.post("/api/v1/admin/config/import", json=bundle, headers=_auth(_ADMIN_KEY))
+        ).json()
+        assert check["stale_base"] is True
+        assert check["base_conflict_documents"] == ["policy"]
+        assert any("changed since" in w for w in check["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_import_rejects_oversized_bundle(tmp_path, monkeypatch):
+    monkeypatch.setenv("GOV_TEST_DB_URL", "postgresql+asyncpg://user:pass@localhost/x")
+    connections_file, policy_file = _write_source_files(tmp_path)
+    settings = _settings(connections_file, policy_file)
+    settings = settings.model_copy(update={"config_bundle_max_bytes": 10})
+    app = create_app(settings)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        bundle = {
+            "bundle_format": "querygate.config-change-set/1",
+            "created_at": "2026-07-22T00:00:00Z",
+            "base_version_id": "1",
+            "base_fingerprint": None,
+            "documents": {"policy": "default:\n  enabled: true\n  max_joins: 2\n"},
+        }
+        resp = await client.post(
+            "/api/v1/admin/config/import", json=bundle, headers=_auth(_ADMIN_KEY)
+        )
+    # Oversized is a clean validation failure (200 with valid=false), not a 5xx.
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["valid"] is False
+    assert any("too large" in e for e in body["errors"])

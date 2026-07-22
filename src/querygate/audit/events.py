@@ -36,6 +36,8 @@ ConfigChangeAction = Literal[
     "stage",
     "apply",
     "rollback",
+    "export",
+    "import",
 ]
 CatalogGovernanceAction = Literal[
     "generate",

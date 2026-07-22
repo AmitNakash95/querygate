@@ -516,6 +516,7 @@
       renderEditor();
     }
     syncDirtyState();
+    savePolicyDraftLocally();
     toast(message);
   }
 
@@ -752,6 +753,7 @@
       const payload = draftPayload();
       payload.description = $("#stage-description").value.trim() || null;
       const version = await api("/admin/config/versions", { method: "POST", body: JSON.stringify(payload) });
+      clearLocalPolicyDraft();
       state.versions.push(version);
       renderHistory();
       renderOverview();
@@ -768,10 +770,148 @@
     state.draftDocuments = { ...state.activeDocuments };
     state.validatedFingerprint = null;
     $("#stage-description").value = "";
+    clearLocalPolicyDraft();
     syncDirtyState();
     renderEditor();
     parsePolicyDocument().catch((error) => toast(error.message, "bad"));
     toast("Local draft reset to the active version.");
+  }
+
+  // --- Portable change-set bundles (item 47) --------------------------------
+
+  function downloadJson(filename, data) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function renderChangeSetResult(html) {
+    $("#change-set-result").innerHTML = html;
+  }
+
+  async function exportChangeSet() {
+    if (!canWrite()) { toast("Config-write scope is required to export a change set.", "bad"); return; }
+    const payload = draftPayload();
+    if (!Object.keys(payload).length) {
+      toast("Edit a document before exporting a change set.", "bad");
+      return;
+    }
+    const button = $("#export-change-set");
+    setBusy(button, true, "Exporting…");
+    try {
+      payload.description = $("#stage-description").value.trim() || null;
+      const bundle = await api("/admin/config/export", { method: "POST", body: JSON.stringify(payload) });
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      downloadJson(`querygate-change-set-v${bundle.base_version_id || "0"}-${stamp}.json`, bundle);
+      const docs = Object.keys(bundle.documents || {}).join(", ") || "none";
+      const warning = bundle.documents && bundle.documents.connections
+        ? '<p class="validation-note">This bundle includes connections.yaml, which may contain a literal credential. Store the downloaded file securely.</p>'
+        : "";
+      renderChangeSetResult(`<div class="validation-ok"><span class="status-chip good">Exported</span><p>Documents: ${escapeHtml(docs)} · base v${escapeHtml(String(bundle.base_version_id || "?"))}</p>${warning}</div>`);
+      toast("Change set downloaded.");
+    } catch (error) {
+      renderChangeSetResult(`<ul><li>${escapeHtml(error.message)}</li></ul>`);
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function importChangeSet(file) {
+    if (!canWrite()) { toast("Config-write scope is required to import a change set.", "bad"); return; }
+    let bundle;
+    try {
+      bundle = JSON.parse(await file.text());
+    } catch {
+      renderChangeSetResult('<ul><li>The selected file is not valid JSON.</li></ul>');
+      return;
+    }
+    if (!bundle || bundle.bundle_format !== "querygate.config-change-set/1" || typeof bundle.documents !== "object") {
+      renderChangeSetResult('<ul><li>The selected file is not a QueryGate change set.</li></ul>');
+      return;
+    }
+    const button = $("#import-change-set");
+    setBusy(button, true, "Importing…");
+    try {
+      const check = await api("/admin/config/import", { method: "POST", body: JSON.stringify(bundle) });
+      if (!check.valid) {
+        const items = (check.errors || []).map((error) => `<li>${escapeHtml(error)}</li>`).join("") || "<li>The change set failed validation.</li>";
+        renderChangeSetResult(`<ul>${items}</ul>`);
+        toast("Change set rejected — see details.", "bad");
+        return;
+      }
+      // Populate the editors from the bundle the browser already holds (the
+      // server response is content-free). Only documents present in the bundle
+      // are applied; everything else stays at the active version.
+      documentKeys.forEach((key) => {
+        if (bundle.documents[key] !== undefined) state.draftDocuments[key] = bundle.documents[key];
+      });
+      state.validatedFingerprint = null;
+      savePolicyDraftLocally();
+      syncDirtyState();
+      renderEditor();
+      await parsePolicyDocument().catch((error) => toast(error.message, "bad"));
+      const signal = (check.documents || []).map((d) => `${d.document}: ${d.change}`).join(" · ");
+      const warnings = (check.warnings || []).map((w) => `<li>${escapeHtml(w)}</li>`).join("");
+      const staleChip = check.stale_base
+        ? '<span class="status-chip warning">Base changed</span>'
+        : '<span class="status-chip good">Base current</span>';
+      renderChangeSetResult(`<div class="validation-ok">${staleChip}<p>${escapeHtml(signal)}</p>${warnings ? `<ul>${warnings}</ul>` : ""}<p class="validation-note">The documents were loaded into the draft editors. Validate, then stage as usual.</p></div>`);
+      toast(check.stale_base ? "Imported — the active version has changed; review before staging." : "Change set imported into the draft.");
+    } catch (error) {
+      renderChangeSetResult(`<ul><li>${escapeHtml(error.message)}</li></ul>`);
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  // --- Tab-scoped local recovery — POLICY DRAFT ONLY (item 47) ---------------
+  // Only the policy document is ever written to browser storage. connections.yaml
+  // (which can hold a literal credential), secret references, and bearer tokens
+  // are never persisted here — full-config recovery uses the exported file above.
+  const LOCAL_POLICY_KEY = "querygate.admin.policyDraft";
+
+  function savePolicyDraftLocally() {
+    try {
+      if (state.draftDocuments.policy && documentChanged("policy")) {
+        window.localStorage.setItem(
+          LOCAL_POLICY_KEY,
+          JSON.stringify({ policy: state.draftDocuments.policy, savedAt: new Date().toISOString() })
+        );
+      } else {
+        window.localStorage.removeItem(LOCAL_POLICY_KEY);
+      }
+    } catch { /* storage unavailable/full — recovery is best-effort */ }
+  }
+
+  function clearLocalPolicyDraft() {
+    try { window.localStorage.removeItem(LOCAL_POLICY_KEY); } catch { /* ignore */ }
+  }
+
+  function recoverPolicyDraftLocally() {
+    let saved;
+    try {
+      const raw = window.localStorage.getItem(LOCAL_POLICY_KEY);
+      if (!raw) return;
+      saved = JSON.parse(raw);
+    } catch { return; }
+    if (!saved || typeof saved.policy !== "string") { clearLocalPolicyDraft(); return; }
+    // Only restore when the saved draft is a real, un-staged change and the
+    // in-memory draft isn't already dirty (don't clobber active edits).
+    if (saved.policy === state.activeDocuments.policy || anyDocumentChanged()) return;
+    state.draftDocuments.policy = saved.policy;
+    state.validatedFingerprint = null;
+    syncDirtyState();
+    renderEditor();
+    parsePolicyDocument().catch(() => {});
+    toast("Recovered an unsaved policy draft from this browser.");
   }
 
   function renderHistory() {
@@ -1836,6 +1976,7 @@
       templates: current.templates_yaml || "",
     };
     if (!preserveDraft || !anyDocumentChanged()) state.draftDocuments = { ...state.activeDocuments };
+    if (canWrite()) recoverPolicyDraftLocally();
     renderOverview(configuration);
     renderHistory();
     syncDirtyState();
@@ -1955,7 +2096,7 @@
   }
 
   function disableWriteActions() {
-    ["#apply-designer", "#remove-policy-layer", "#validate-draft", "#stage-draft", "#discard-draft"].forEach((selector) => {
+    ["#apply-designer", "#remove-policy-layer", "#validate-draft", "#stage-draft", "#discard-draft", "#export-change-set", "#import-change-set"].forEach((selector) => {
       const element = $(selector);
       if (element) element.disabled = true;
     });
@@ -2028,6 +2169,7 @@
     $("#document-editor").addEventListener("input", (event) => {
       state.draftDocuments[state.selectedDocument] = event.target.value;
       syncDirtyState();
+      if (state.selectedDocument === "policy") savePolicyDraftLocally();
       renderEditor();
     });
     $("#document-editor").addEventListener("keydown", (event) => {
@@ -2046,6 +2188,13 @@
     $("#check-schema").addEventListener("click", checkSchema);
     $("#stage-draft").addEventListener("click", stageDraft);
     $("#discard-draft").addEventListener("click", discardDraft);
+    $("#export-change-set").addEventListener("click", () => exportChangeSet());
+    $("#import-change-set").addEventListener("click", () => $("#import-change-set-file").click());
+    $("#import-change-set-file").addEventListener("change", (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (file) importChangeSet(file).catch((error) => toast(error.message, "bad"));
+      event.target.value = "";
+    });
     $("#refresh-history").addEventListener("click", () => loadGovernance(true).then(() => toast("Version history refreshed.")).catch((error) => toast(error.message, "bad")));
     $("#history-body").addEventListener("click", (event) => {
       const review = event.target.closest("[data-review-version]");
