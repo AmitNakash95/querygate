@@ -47,6 +47,7 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             backend=conf.audit_sink_backend.value,
             jsonl_path=conf.audit_jsonl_path,
             fsync=conf.audit_jsonl_fsync,
+            ledger_hmac_key=conf.audit_ledger_hmac_key,
         )
 
         health_monitor = HealthMonitor(conf.health_check_interval_seconds)

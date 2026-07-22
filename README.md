@@ -67,7 +67,7 @@ row cap tacked on. QueryGate is structurally different:
 | Concurrency/load control | Rare | Per-connection concurrency semaphore + execution timeout |
 | Rate limits / cost budget | DIY | Per-principal rolling-window request & response-byte quotas (429 + `Retry-After`) |
 | Multi-tenant scoping | DIY | Policy-level `mandatory_row_filters` |
-| Audit trail | Rare | Every query logged plus an optional persisted, redaction-safe JSONL event |
+| Audit trail | Rare | Every query logged plus an optional persisted, redaction-safe JSONL event — optionally a tamper-evident hash-chained ledger with per-query receipts |
 
 ## Quickstart
 
@@ -110,6 +110,28 @@ works without a process signal. Files are created with mode `0600`.
 durability at the cost of latency. A sink-write failure emits
 `audit.sink.write_failed` to stdout but does not report a successfully executed
 database read as failed after the fact.
+
+### Tamper-evident ledger + per-query receipts
+
+Set `AUDIT_SINK_BACKEND=jsonl_chained` for a **tamper-evident hash-chained
+ledger**: each event is wrapped in a chain envelope linking it to the previous
+record's hash, so any later edit, deletion, reordering, or insertion is
+detectable. The embedded event body is identical and just as redaction-safe —
+the chain adds only a sequence number and hashes.
+
+```bash
+querygate-audit verify var/audit/querygate-audit.jsonl        # 0 iff intact
+querygate-audit receipt var/audit/querygate-audit.jsonl <event_id>   # portable compliance receipt
+```
+
+Set `AUDIT_LEDGER_HMAC_KEY` to make the chain HMAC-SHA256 (unforgeable by anyone
+with file access but not the key; pass the same key to `verify --hmac-key-env`).
+Left unset the chain is SHA-256 — it still catches corruption, reordering, and
+mid-file deletion, with full tamper-evidence resting on externally anchoring the
+head hash (`verify --expected-head`, which also catches records dropped from the
+end). One logical writer owns the chain head, so run a single replica or give
+each replica its own ledger file. This complements — never replaces — shipping
+events to retained/WORM storage or a SIEM.
 
 Then, in another terminal:
 
