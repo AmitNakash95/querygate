@@ -98,7 +98,34 @@ order-of-magnitude, not commitments.
 | 64 | ✅ Make full catalog provenance opt-in on describe_table/search_catalog | S–M | 27 |
 | 65 | ✅ Add a response-size cap to get_querygate_guide_topic | XS–S | — |
 | 66 | ✅ CI/test guardrail on total MCP schema+instructions size | S | 61, 62, 63, 64, 65 |
+| 67 | ✅ Restore StructuredQuery field descriptions items 62/64/65 assumed existed | XS | 62, 64, 65 |
+| 68 | ✅ WHERE/HAVING resource-exhaustion guardrail caps | S | — |
+| 69 | ✅ DISTINCT / COUNT(DISTINCT) | S | — |
+| 70 | ✅ Table aliases and self-joins | S | — |
+| 71 | ✅ NOT groups and column-to-column WHERE comparisons | S | — |
+| 72 | ✅ Whitelisted scalar functions and CASE in select (SELECT-only) | S–M | — |
+| 73 | ✅ `DialectAdapter` abstraction (compiler-scoped slice of item 57) | S | 57 |
+| 74 | ✅ NULLS FIRST/LAST ordering | XS | 73 |
+| 75 | ✅ `stddev`/`variance` aggregate functions | XS | 73 |
+| 76 | ✅ Composite (multi-column) join keys | XS | 70 |
+| 77 | ✅ Scalar functions in WHERE/HAVING predicates (`Predicate.col_fn`) | S | 72 |
+| 78 | ✅ Cross-dialect rendering verification pass for items 68–77 | S | 68–77 |
+| 79 | ✅ Extend the property-based fuzzer to the item 68–77 AST surface | S | 36, 68–77 |
+| 80 | ✅ `string_agg` aggregate function | S | 73 |
+| 81 | ✅ `array_agg` aggregate function | S | 73, 80 |
+| 82 | ✅ `percentile_cont` aggregate function | S | 73 |
+| 83 | ✅ Query-template authoring UX (slot self-consistency, dry-run, live-schema check) | M | 48 |
+| 84 | ✅ Structured catalog authoring UI (human-curated entries via governance queue) | M | 27, 31, 32B |
+| 85 | ✅ Domain-separated admin UI (Policy / Catalog / Templates / Connections / Releases) | S–M | 31, 38 |
+| 86 | ✅ MCP transport request-body size/depth guard | S | 36 |
+| 87 | ✅ Extend structured authoring to Policy and Templates | M | 31, 46, 48, 85 |
 | 88 | ✅ Minimum aggregation group size (k-anonymity guardrail) | S–M | 55 |
+| 89 | ✅ Open-source security validation gates + trust posture (phase 1 ✅; phase 2 signed delivery not started) | L | 28, 30 |
+| 90 | ✅ Delegated agent identity (on-behalf-of) into policy + dual-identity audit | M | 8, 10, 23 |
+| 91 | ✅ Tamper-evident hash-chained audit ledger + per-query compliance receipts | M | 23 |
+| 92 | In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) | L | 26, 90, 91 |
+| 93 | Governed Writes — structured, bounded, previewable, reversible agent mutations (decision-gated) | XL | 25, 48, 90, 91 |
+| 94 | Verify/enable prepared-statement plan reuse for template execution | S | 48 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope).
@@ -2118,29 +2145,9 @@ than widen the input surface.
 Delegated-identity attribution (RFC 8693 `act` → `Principal.actor`, the human's policy applies, both identities audited) plus the MCP surface as an opt-in OAuth 2.0 resource server (RFC 9728 metadata, RFC 8707 audience binding, RFC 6750 `WWW-Authenticate` scope/step-up challenges).
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 90).
 
-### 91. Tamper-evident hash-chained audit ledger + per-query compliance receipts
+### 91. Tamper-evident hash-chained audit ledger + per-query compliance receipts ✅ DONE
 
-**Effort: M. Priority: high (compliance moat; pairs with item 90). Feature ref: F5.**
-
-**Why it matters (competitive pressure):** EU AI Act Art. 12/26 (automatic,
-tamper-evident event logging retained ≥6 months) survived the June 2026 Digital
-Omnibus intact, DORA is in force, and ISO 42001 A.6.2.8 is being used as the
-agent-action audit control in certifications. Competitors offer platform logs;
-none offers a tamper-evident, per-human-attributed, portable receipt *at the
-query layer*. QueryGate's own threat model already admits "JSONL is not WORM."
-Combined with item 90 this produces the "prove to your auditor exactly what
-every agent did, on whose behalf, under which policy" artifact that is the
-literal buying question for the fintech/healthcare ICP in `GO_TO_MARKET.md`.
-
-**What to do:** Chain each persisted audit event to the hash of the previous
-(append-only, tamper-evident ledger) with a verify-only chain-validation tool,
-and optionally emit a signed per-query receipt (what policy applied, which
-principal — and with item 90, on whose behalf — what query shape ran, what was
-suppressed/masked). Keep chaining optional and verify-only; add **no** new data
-to the event body (redaction guarantee unchanged — still no SQL, values, rows,
-or credentials). Touches `audit/events.py` (prev-hash field + chain verifier),
-`audit/sinks.py`. Distinct from item 23 (the sink) and item 54 (SOC2 mapping).
-**Invariant:** audit-redaction guarantee preserved exactly.
+Optional `AUDIT_SINK_BACKEND=jsonl_chained` wraps every redaction-safe event in a hash-chain envelope (SHA-256, or HMAC-SHA256 with `AUDIT_LEDGER_HMAC_KEY`) so edits/deletions/reordering/insertion are detectable; `querygate-audit verify` validates a ledger and `querygate-audit receipt` emits a portable per-query compliance receipt. Chaining is envelope-level (no new event data) and verify-only. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 91).
 
 ### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up)
 
