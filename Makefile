@@ -79,6 +79,10 @@ test-security: ## Run the adversarial security regression suite
 anomaly-ui-smoke: ## Render the item-59 anomaly panel with the real admin UI in headless Chromium and assert the visualization (screenshot -> dist/anomaly-ui-smoke.png; SKIPs if no browser)
 	poetry run python scripts/anomaly_ui_smoke.py
 
+.PHONY: seed-anomaly-demo
+seed-anomaly-demo: ## Append demo spike traffic to AUDIT_JSONL_PATH so the live /admin Observability anomaly panel shows real signals (use --reset to truncate first)
+	poetry run python scripts/seed_anomaly_demo.py
+
 .PHONY: test-postgres-live
 test-postgres-live: ## Run tests needing a real Postgres (timeout + load guardrails) — run compose-up first
 	poetry run pytest -m postgres_live
