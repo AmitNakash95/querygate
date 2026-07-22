@@ -37,6 +37,11 @@ dev: run-dev ## Alias for run-dev
 seed-demo-db: ## Generate an optional SQLite fixture for tests/inspection (not a runtime connection)
 	poetry run python examples/demo_db/seed.py
 
+SEED_SCALE ?= 1.0
+.PHONY: seed-large
+seed-large: ## Seed the larger real-world demo domain into the running Postgres (compose-up first). Override SEED_SCALE=0.1 for a fast subset, 5 to stress.
+	SEED_SCALE=$(SEED_SCALE) poetry run python -m examples.demo_db.generate_large --postgres --drop
+
 .PHONY: validate-config
 validate-config: ## Validate connections.yaml/policy.yaml (CONNECTIONS_FILE / POLICY_FILE env vars, or pass ARGS="--connections-file ... --policy-file ...")
 	poetry run querygate-validate-config $(ARGS)
@@ -73,6 +78,10 @@ test-security: ## Run the adversarial security regression suite
 .PHONY: test-postgres-live
 test-postgres-live: ## Run tests needing a real Postgres (timeout + load guardrails) — run compose-up first
 	poetry run pytest -m postgres_live
+
+.PHONY: test-stress
+test-stress: ## Differential-correctness + security-at-volume tests on the large demo domain (real Postgres; compose-up first). Override LARGE_STRESS_SCALE=0.3 for more data.
+	poetry run pytest -m "postgres_live and not load" tests/integration/test_large_domain_stress.py
 
 LOAD_ROUNDS ?= 3
 .PHONY: test-load
