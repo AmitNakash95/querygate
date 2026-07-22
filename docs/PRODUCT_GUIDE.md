@@ -2454,6 +2454,52 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-22 — A GraphQL query interface is a permanent non-goal.** Prompted by
+  the "GraphQL is more flexible than REST — would it broaden QueryGate from an AI
+  gateway into a universal data-access guard?" question. Rejected on two grounds.
+  (1) **It adds no expressiveness.** The REST and MCP transports already carry the
+  *full* `StructuredQuery` AST; the expressiveness ceiling is `AST + policy`, not
+  the transport envelope. GraphQL-over-the-same-AST is no more capable than
+  REST-over-the-same-AST — a different envelope for identical semantics. A *real*
+  GraphQL engine (per-field resolvers hitting the database) is strictly worse: it
+  is a second query-execution path *beside* the one pipeline, bypassing policy →
+  schema → compile → concurrency → audit, which violates the "no other path to a
+  database" invariant — the same class of rejection as `execute_sql` and
+  generated-code execution. (2) **Brand collision.** "GraphQL over your database"
+  is already a category (Hasura engine, PostGraphile, Supabase auto-APIs) — and it
+  is a *developer-productivity* category, not a security one. Adopting it makes
+  buyers evaluate QueryGate on flexibility (where it should not compete) instead
+  of on the query-semantic guarantee (its moat). The legitimate instinct behind
+  the question — *be the enforcement point guarding all access within a client's
+  architecture* — is already served on-thesis by the **P4 verdict endpoint**
+  (`NORTH_STAR.md` leverage move #1: any front door, gateway, or app calls
+  QueryGate for the query-semantic verdict it cannot compute itself) and by the
+  **sole-credential-holder deployment** (below), neither of which requires a new
+  query language or broadens the AI-agent wedge. Reaching non-AI *apps* is a
+  later adoption vector via the typed client SDK (TODO.md item 51) emitting the
+  same AST — an adoption lever after the design-partner proof, never a
+  repositioning of the North Star.
+- **2026-07-22 — Analytics performance is served by DB-side materialized views +
+  query templates, NOT by an in-product cache or stored-procedure execution.**
+  Prompted by the recurring "stored procedures run faster — why not do that?"
+  question. Executing stored procedures is a permanent non-goal: an SP is a
+  stored blob of raw procedural SQL, so invoking one reopens the exact
+  raw-SQL/arbitrary-code path QueryGate exists to remove. The performance concern
+  is answered without it, along two lines. (1) The heavy "pre-compute the work"
+  win belongs in the customer's database: a DBA builds a **materialized view**
+  (plus indexes/partitioning), and QueryGate reads it as an **ordinary table
+  today — zero product change** — so the expensive aggregation runs on the DBA's
+  refresh schedule, not per request; a policy + query template then govern access
+  to the pre-aggregated table. The database owns physical optimization; QueryGate
+  owns the safe boundary. (2) The one durable SP benefit that isn't SP-exclusive
+  — cached execution plans (skip re-parse/re-optimize on repeated calls) — is a
+  **prepared/parameterized-statement** benefit; we already compile with bound
+  parameters and templates are fixed-shape, so we likely already capture much of
+  it, and verifying/tuning it is tracked as the measure-first TODO.md item 94.
+  We deliberately do **not** build an in-product result cache or pre-aggregation
+  cache (that would make QueryGate a stale-data caching engine and duplicate what
+  the DB already does well). See `docs/business/COMPETITOR_CUBE.md` for the
+  companion competitive framing.
 - **2026-07-22 — Delegated agent identity maps the *human* to `Principal.subject`
   and the *agent* to a new `Principal.actor` chain (TODO.md item 90, phase 1).**
   The two-identity, on-behalf-of model (RFC 8693 token exchange; the MCP
