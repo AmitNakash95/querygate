@@ -21,6 +21,45 @@ connections:
     enabled: true
     known_tables: [customers, orders, order_items, products, employees]
 
+  # The larger, real-world-shaped demo domain (see examples/demo_db/
+  # large_schema.py). `retail` and `analytics` are two DISTINCT connection
+  # profiles over the SAME physical database — they exist to exercise
+  # per-connection policy divergence, connection-discovery isolation, column
+  # masking, k-anonymity, and join_group enforcement against a body of data
+  # that behaves like production. Seed it with `make seed-large` after
+  # `docker compose up`.
+  #
+  # `retail` is the broad operational view (everything except the walled-off
+  # `staff` HR table).
+  - id: retail
+    dialect: postgresql
+    connection_string: ${QUERYGATE_DEMO_DB_URL}
+    description: "Operational retail domain — accounts/orders/order_lines/catalog/payments/web_events (large demo)"
+    enabled: true
+    # `staff` is deliberately omitted: it holds HR/PII columns (ssn, salary,
+    # date_of_birth) and is the "wall off the sensitive table" target.
+    known_tables: [regions, suppliers, accounts, catalog_products, orders_ext, order_lines, payments, web_events]
+    join_group: commerce
+
+  # `analytics` is a narrower, read-model-style reporting view over the same
+  # database, given a deliberately TIGHTER policy (see policy.example.yaml):
+  # PII masked/denied, aggregate k-anonymity floor, lower row cap. Use it to
+  # feel how two callers of the same data get different access.
+  - id: analytics
+    dialect: postgresql
+    connection_string: ${QUERYGATE_DEMO_DB_URL}
+    description: "Analytics/reporting view over the retail domain (tighter policy — masked PII, k-anonymity)"
+    enabled: true
+    known_tables: [regions, accounts, orders_ext, order_lines, web_events]
+    # Different join_group from `retail` on purpose: a query that tries to join
+    # a `retail` table to an `analytics` table is rejected at validation
+    # (join_group mismatch), which you can observe on Postgres. Give them the
+    # SAME join_group to allow it — but note cross-connection join *execution*
+    # compiles to three-part `db.dbo.table` names and therefore only runs on
+    # MSSQL (Postgres has no cross-database three-part naming); on Postgres the
+    # shared-group case is validated but not executable.
+    join_group: reporting
+
   # A second example showing an MSSQL connection and a shared join_group —
   # uncomment and adapt once you have a real MSSQL database. Two connections
   # on the same physical SQL Server instance can be joined cross-connection

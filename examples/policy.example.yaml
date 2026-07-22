@@ -140,6 +140,43 @@ connections:
     # multi-query differencing. See docs/INFERENCE_RISKS.md (R3).
     # min_group_size: 5
 
+  # ── retail: the broad operational view of the large demo domain ──────────
+  # Everything except `staff` (the walled-off HR/PII table). PII-shaped
+  # columns on `accounts` are masked rather than denied, so you can see the
+  # "allow the table, reveal only a safe projection of the column" behavior:
+  # `national_id` returns a one-way hash and `phone` returns only its last 4,
+  # both computed inside the compiled query — the database never returns the
+  # raw value to a retail caller.
+  retail:
+    allowed_tables:
+      [regions, suppliers, accounts, catalog_products, orders_ext, order_lines, payments, web_events]
+    column_masks:
+      accounts:
+        - column: national_id
+          kind: hash
+        - column: phone
+          kind: last
+          length: 4
+    max_limit: 500
+
+  # ── analytics: a deliberately TIGHTER reporting view of the same data ────
+  # Same physical database as `retail`, different policy — this is the
+  # "two callers of one dataset get different access" scenario. PII is denied
+  # outright (not just masked), an aggregate k-anonymity floor suppresses any
+  # group backed by fewer than 5 rows, the row cap is lower, and a mandatory
+  # row filter silently scopes every query touching `accounts` to active
+  # accounts only.
+  analytics:
+    allowed_tables: [regions, accounts, orders_ext, order_lines, web_events]
+    denied_columns:
+      accounts: [email, national_id, phone]
+    min_group_size: 5
+    max_limit: 100
+    mandatory_row_filters:
+      - table: accounts
+        column: is_active
+        value: true
+
 # Per-principal overrides — optional, on top of the `default`/`connections`
 # layers above. Uncomment and adapt once callers have distinct identities
 # (a per-key `api_key_subject`, or JWT auth — see AppConfig's `jwt_*`
