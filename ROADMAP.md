@@ -67,10 +67,12 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   ✅ **Shipped** (RFC 8693 actor→policy, dual-identity audit, MCP OAuth
   resource-server conformance RFC 9728/8707/6750). The attribution half of the
   Proof pillar is now realized — advertise it; complete the pillar with item 91.*
-- [ ] **91** — Tamper-evident hash-chained audit ledger + per-query receipts
-  (F5). *Pairs with 90 to produce the "prove exactly what every agent did, on
-  whose behalf, under which policy" artifact — the literal buying question for
-  the fintech/healthcare ICP. Low invariant risk.*
+- [x] **91** — Tamper-evident hash-chained audit ledger + per-query receipts
+  (F5). ✅ **Shipped** (`AUDIT_SINK_BACKEND=jsonl_chained`, SHA-256/HMAC chain,
+  `querygate-audit verify`/`receipt`). *Pairs with 90 to produce the "prove
+  exactly what every agent did, on whose behalf, under which policy" artifact —
+  the literal buying question for the fintech/healthcare ICP. The Proof pillar
+  is now realized end-to-end.*
 - [ ] **58** — Published adversarial benchmark vs. raw-SQL agent / Google
   Toolbox. *The proof artifact that ends "why not Cube/Toolbox?" with evidence
   instead of assertion. High trust-per-effort.*

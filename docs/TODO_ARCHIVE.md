@@ -4140,3 +4140,76 @@ actor+subject fields to `audit/events.py`. Touches `core/auth.py`,
 `core/jwt_auth.py`, `mcp/auth.py`, `api/auth.py`, `audit/events.py`. Extends
 items 8/10/21; pairs with item 91. **Invariant:** none at risk — this
 strengthens attribution.
+
+### 91. Tamper-evident hash-chained audit ledger + per-query compliance receipts ✅ DONE
+
+**Feature ref: F5. Completes the Proof pillar (`docs/business/NORTH_STAR.md`)
+with item 90 — attribution (who, on whose behalf, under which policy) plus
+tamper-evidence (and the record proving it wasn't edited).**
+
+**Shipped.** An optional tamper-evident audit ledger that chains at the
+**sink/envelope layer**, so the redaction guarantee (QG-12) is preserved by
+construction — no new field is added to any event body.
+
+- `audit/ledger.py` (new): the chain primitives and verify-only tooling.
+  `LedgerRecord` is a `{seq, prev_hash, event, hash}` envelope around one
+  unmodified event; `compute_record_hash` binds a record's position, its
+  predecessor's hash, and its event via canonical (sorted-key) JSON, using
+  **HMAC-SHA256** when a key is configured and **SHA-256** otherwise.
+  `verify_chain()` walks a ledger and detects edits (record hash mismatch),
+  deletion/insertion/reordering (sequence gap or `prev_hash` linkage break), a
+  malformed line (fails closed), and — with `expected_head` — records dropped
+  from the *end*. A rotated ledger legitimately starting past genesis is
+  accepted on its incoming link but every subsequent link is still enforced.
+  `Receipt` + `build_receipt`/`verify_receipt`/`extract_receipt_for_event_id`
+  produce a portable, self-contained per-query compliance receipt (one event's
+  chain position, re-verifiable on its own without the rest of the ledger).
+- `audit/sinks.py`: `HashChainedAuditSink` appends chain-envelope JSONL with the
+  same `0o600`/append-only/optional-`fsync` posture as `JsonlAuditSink`, and
+  **recovers the chain head on startup** (tail-reads the last record) so a
+  process restart continues the chain instead of forking it; it refuses to
+  resume a corrupt ledger rather than silently forking. `configure_audit_sink`
+  gained a `jsonl_chained` backend and an optional `ledger_hmac_key`.
+- `core/config.py`: `AuditSinkBackend.JSONL_CHAINED` + `audit_ledger_hmac_key`
+  (never logged); `api/app.py` passes the key through at startup.
+- `admin/anomaly.py`: the item-59 audit reader transparently unwraps a chain
+  envelope, so behavioral anomaly surfacing keeps working under
+  `jsonl_chained` — one tolerant reader, both formats.
+- `querygate-audit` CLI (`audit_cli.py`, new poetry script): `verify` (exit 0
+  iff intact; `--hmac-key-env` reads the key from an env var so it never lands
+  in shell history/process listing; `--expected-head` for tail-truncation) and
+  `receipt <event_id>` (prints the portable receipt).
+
+**Integrity model (documented honestly).** Keyed → HMAC-SHA256, unforgeable by
+anyone with file access but not the key. Unkeyed → SHA-256, which still detects
+corruption/reorder/mid-file deletion, with full tamper-evidence resting on
+externally anchoring the head hash. One logical writer owns the chain head, so
+the ledger assumes a single replica (or a per-replica ledger file) — an honest
+constraint, not a distributed-consensus ledger nobody asked for. Chaining is
+verify-only; nothing in the request pipeline reads it.
+
+**Coverage.** `tests/unit/test_audit_ledger.py` (deterministic/keyed hashing;
+intact keyed+unkeyed chains; genesis-link enforcement; detection of edit,
+deletion, reorder, forged insertion, tail truncation via anchor, malformed
+line; rotated-ledger handling; receipt round-trip keyed/unkeyed + tamper +
+wrong-key/no-key; sink writes a verifiable chain; head recovery across restart;
+refusal to resume a corrupt ledger; the redaction invariant that the envelope
+adds only seq/prev_hash/hash; backend selection). `tests/unit/test_audit_cli.py`
+(verify OK/tamper/missing-file exit codes, keyed verify from env, receipt
+extraction, dispatch). `tests/unit/test_anomaly.py` gained a chained-ledger read
+test. `docs/THREAT_MODEL.md` gained QG-32 and an updated audit-durability
+residual-risk note; `docs/PRODUCT_GUIDE.md` gained a capability subsection and a
+Decision Log entry (why chaining lives at the envelope layer); README and
+`.env.example` document the backend, key, and CLI.
+
+**Decision Log:** why chaining is at the sink/envelope layer, not on the event
+model — see `docs/PRODUCT_GUIDE.md` (2026-07-22 entry).
+
+**Why it matters:** EU AI Act Art. 12/26 (automatic, tamper-evident event
+logging retained ≥6 months), DORA, and ISO 42001 A.6.2.8 all want a
+tamper-evident, per-human-attributed record of agent action. Competitors offer
+platform logs; none offers a tamper-evident, per-human-attributed, portable
+receipt *at the query layer*. Combined with item 90 this is the "prove to your
+auditor exactly what every agent did, on whose behalf, under which policy, and
+that the record is intact" artifact — the literal buying question for the
+fintech/healthcare ICP.
