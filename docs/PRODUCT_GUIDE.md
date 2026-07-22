@@ -2410,6 +2410,46 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-22 — Governed Writes (TODO.md item 93) is designed and specced but
+  DECISION-PENDING; it must not be implemented until a maintainer explicitly
+  approves crossing the read-only line.** *This entry records the design intent
+  and the framing so the eventual go/no-go decision has a durable anchor; it
+  will be updated to "approved" (with date and any scope changes) or "declined"
+  when the decision is made.* The market's biggest unsolved problem is safe
+  agent writes — everyone retreated to read-only-by-default because LLM-authored
+  DML is unsolved (Neon read→write hijack, Supabase removed the write channel,
+  AWS ships a "best-effort, bypassable" write blocklist). QueryGate's read-only
+  posture is the launchpad, not a weakness: the same AST-validation spine that
+  makes reads safe makes a `StructuredWrite` contract (typed insert/update/
+  delete, **no raw DML field anywhere**) possible, carried through the same
+  validate → policy → schema → compile → preview → approve → execute → audit
+  pipeline. **The deliberate framing, and the line we will not cross:** the
+  product claims **governed writes — bounded, previewed, approved, attributed,
+  reversible** (no raw DML, no unqualified UPDATE/DELETE ever, bounded affected-
+  row count, only allowed ops on allowed targets — which eliminates the
+  *catastrophic-shape* class of write by construction), and it explicitly does
+  **not** claim "safe autonomous" or "provably correct" writes. No structural
+  layer can make a well-formed, in-policy write with the *wrong values* correct;
+  that residual is made *reviewable and reversible* (dry-run diff preview,
+  mandatory approval on the diff for sensitive/large writes, dual-identity
+  audit, bounded compensation/undo), never claimed away — we will never repeat
+  PromptQL's unbackable "100%". Reversibility is explicitly **bounded** (a
+  pre-image snapshot cannot unwind cascading triggers/FK actions or
+  already-consumed reads). **Open decisions to resolve before Phase 1 starts:**
+  (a) confirm crossing read-only now vs. later; (b) compensation storage
+  location + retention (in-DB shadow table vs. sink-backed pre-image), which must
+  stay redaction-safe; (c) whether Phase 1's preview tool (execution disabled)
+  ships publicly on its own as a "dry-run planner" ahead of any execution; (d)
+  REST approval-token vs. MCP-elicitation parity expectations. **Invariants
+  preserved regardless:** no caller-controlled raw SQL/DML ever reaches a
+  database (a write is a validated structure, exactly as a read is); audit stays
+  redaction-safe (counts/shapes/hashes, never values/rows); the catalog stays
+  descriptive; all dialect variance goes through `DialectAdapter`
+  (reject-not-emulate). Phasing keeps risk gated: Phase 1 (contract + dry-run
+  preview, execution **disabled**) carries zero write risk and depends on nothing
+  beyond today's code; Phase 2 (gated execution) depends on items 90+91+92;
+  Phase 3 (compensation/undo + upserts + batch + MSSQL parity) depends on
+  Phase 2.
 - **2026-07-22 — Security validation is enforced by open-source CI gates and
   surfaced as a reproducible, buyer-facing posture rather than marketing claims
   (TODO.md item 89).** Added SAST (Bandit + Semgrep OSS), full-history secret
