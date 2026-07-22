@@ -513,6 +513,19 @@ hold regardless of the pipeline, because they're baked into QueryGate's data
 model rather than into a stage that runs and could be skipped, misconfigured,
 or worked around.
 
+> **The pitch, in one breath (for a buyer conversation).** The core guarantee
+> is *structural*: there's no raw-SQL field anywhere — a caller can only submit
+> a validated JSON AST, so injection and denylist arms-races don't apply.
+> Credentials never sit on any returned model, and that's asserted against the
+> live API schema, not by convention. And none of it is "trust us": every
+> guarantee is backed by a deny-by-default CI gate (static analysis, dependency
+> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 191-case
+> adversarial suite), and reviewers get a reproducible packet where each claim
+> names the command that reproduces it. We're also upfront about the edges — no
+> third-party pentest or signed images yet; signing is the identified next
+> step. The whole subject is three things: **structural guarantees, continuous
+> and reproducible proof, and honesty about the gaps.**
+
 ### 1. There is no raw-SQL input, structurally
 
 Every caller — REST or MCP — can only ever submit one shape of thing: a
@@ -728,6 +741,60 @@ a credential, a secret reference, or a token. All of this is regression-locked:
 asserts the shipped script contains no `sessionStorage` use and no token
 storage key, and that the one `localStorage` write only ever persists the
 policy document.
+
+### 6. How we prove it: the CI-gated assurance program
+
+Sections 1–5 are what QueryGate is *designed* to guarantee. This section is
+about how a buyer can know those guarantees actually hold — because for a
+security product, a claim is only worth what its evidence is. QueryGate's
+posture is deliberately **"prove, don't assert"**: every guarantee on this
+page is backed by an open-source, industry-standard check that runs in
+continuous integration on every change, and each check is **deny-by-default**
+— a regression that weakened it would fail the build, not slip through. The
+full, reproducible write-up (each row names the command a reviewer can run in
+a source checkout to see the same result CI does) lives in
+[`docs/SECURITY_POSTURE.md`](SECURITY_POSTURE.md); this is the plain-language
+summary.
+
+The gates fall into three groups:
+
+- **The access boundary itself.** The adversarial security suite (191 cases,
+  `make test-security`) encodes specific known bypass classes as regressions —
+  denied-column inference, undeclared-table smuggling, predicate-as-SQL,
+  schema-discovery leaks, policy-cap breaches, audit no-leak. On top of that,
+  **Schemathesis** (`make test-dast`) property-fuzzes the live OpenAPI schema
+  with malformed and boundary payloads and gates on two rules: no fuzzed
+  request may cause a server error, and every schema-violating input *must* be
+  rejected — the latest run passed with zero server errors and zero accepted
+  malformed payloads. Credential isolation (section 2) is asserted against the
+  live OpenAPI and MCP schemas, so it catches "wired the wrong model into a new
+  endpoint," not just "defined the model wrong."
+- **Supply-chain hygiene** — the questions a security reviewer always asks.
+  **Bandit + Semgrep OSS** run static analysis over the source (SAST);
+  **pip-audit** checks the *exact* shipped dependency set against the CVE
+  database; a **CycloneDX SBOM** is generated per release; **Trivy** scans the
+  shipped container image for OS/library CVEs, embedded secrets, and
+  misconfiguration; and **gitleaks** scans the working tree *and the full git
+  history*, so we can affirmatively prove no credential was ever committed.
+  Every one of these is deny-by-default: any finding fails the build, and the
+  handful of accepted exceptions are recorded with a written justification
+  (`.trivyignore`, `.gitleaks.toml`, inline `# nosec`), never silently muted.
+- **Reliability under real load.** Security guarantees must hold under
+  concurrency, not just in isolation — so `make test-load`/`make test-soak` run
+  the guardrails against a real Postgres and assert caps are never breached and
+  no connection or slot leaks.
+
+**Being honest about attestations matters more than badge-count**, and a buyer
+will respect the precision. QueryGate ships as a private, closed-source
+container image, so the OpenSSF Best Practices *badge* — awarded only to
+public FLOSS repositories — cannot be earned today; instead we keep a genuine
+**self-assessment** against its criteria that attaches to a security
+questionnaire. What we do *not* claim is an independent penetration test, a
+formal certification, or (yet) signed artifact distribution — the last of
+which, **Sigstore/cosign image signing plus SLSA build provenance**, is the
+external attestation that genuinely fits a self-hosted image product and is the
+identified near-term follow-up. Stating the one real gap plainly is itself part
+of the posture.
 
 ### SQL injection, in one line
 
@@ -2318,12 +2385,60 @@ load/soak tests that measure actual concurrent query counts at a real
 Postgres database (via `pg_stat_activity`), not just a mocked concurrency
 limiter. See [Testing, Release & Operations](#testing-release--operations).
 
+**"How do we know the security guarantees actually hold — do you scan for
+vulnerabilities, have an SBOM, check dependencies?"**
+Yes to all three, and it's continuously enforced rather than a point-in-time
+report. Every guarantee is backed by an open-source, deny-by-default check
+that runs in CI on every change: static analysis (Bandit + Semgrep), a
+dependency-CVE audit of the exact shipped set (pip-audit), a CycloneDX SBOM
+per release, container-image scanning (Trivy), full-history secret scanning
+(gitleaks), and OpenAPI fuzzing (Schemathesis) on top of the 191-case
+adversarial suite. A regression that weakened any of them fails the build.
+For a reviewer under NDA, `docs/SECURITY_POSTURE.md` is a reproducible packet
+— every claim names the command that reproduces it. We're also precise about
+what we *don't* claim: no independent penetration test, formal certification,
+or signed-image distribution yet (image signing is the identified next step).
+See [Security Model](#security-model), section 6.
+
 ## Decision Log
 
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-22 — Security validation is enforced by open-source CI gates and
+  surfaced as a reproducible, buyer-facing posture rather than marketing claims
+  (TODO.md item 89).** Added SAST (Bandit + Semgrep OSS), full-history secret
+  scanning (gitleaks), container image scanning of the shipped image (Trivy), and
+  OpenAPI fuzzing (Schemathesis), each **deny-by-default** and mirroring the
+  established pip-audit/SBOM allowlist pattern, plus `SECURITY.md` and a
+  customer-facing `docs/SECURITY_POSTURE.md`. Three deliberate choices. **(1)
+  Prove, don't assert.** Every posture claim points at a command a reviewer can
+  run and a gate that fails CI on regression — a security product's claims must
+  be checkable, not conventional. **(2) Deny-by-default everywhere, with reviewed
+  allowlists.** Each scanner fails the build on any finding; accepted ones are
+  recorded with a written justification (`.trivyignore`, `.gitleaks.toml`, inline
+  `# nosec`), never silently muted — the same posture as the dependency audit.
+  **(3) Honest about badges.** The OpenSSF Best Practices badge is FLOSS/public-
+  repo-only, so a private product cannot be *awarded* it; rather than display a
+  badge we can't earn, we keep an honest criteria self-assessment (all
+  Quality/Security/Analysis criteria Met by real gates) and identify signed
+  delivery (Sigstore/cosign + SLSA provenance) as the genuinely-earnable external
+  attestation for a self-hosted image — the one real gap, tracked as item 89
+  phase 2. The scanning tooling itself adds no runtime dependency (all dev/CI-only)
+  and the security invariants are untouched. Where the new gates surfaced real
+  findings they were **fixed, not accepted**: the container/dependency scans caught
+  known CVEs in the shipped set, so those dependencies were upgraded to fixed
+  versions (fastapi/starlette 1.x, mcp 1.28, python-dotenv, click, idna — the
+  work item 30 phase 2 had deferred) and build/install tooling (pip/setuptools/
+  wheel) was stripped from the runtime image, leaving **both the pip-audit
+  allowlist and the Trivy exception list empty**. Schemathesis is deliberately
+  kept *out* of the dependency lock (run from its pinned Docker image) because its
+  transitive pins conflict with both those runtime fixes and the project's test
+  stack — a dev testing tool must never constrain the shipped graph. DAST is a
+  standalone hermetic script (no DB, no fixtures); the recursive query endpoints
+  are excluded from generic schema fuzzing (Schemathesis #947) because
+  `test_malformed_input_fuzzing.py` already fuzzes that exact surface more deeply.
 - **2026-07-21 — The `min_group_size` k-anonymity guardrail suppresses
   small aggregate groups by injecting `HAVING count(*) >= k`, rather than
   rejecting the query or restricting the AST (TODO.md item 88).** It closes
