@@ -135,9 +135,20 @@ These require an explicit maintainer product decision before any
 implementation (per `CLAUDE.md`). The continuation skill must **skip** them and
 surface them for a human, never auto-start them.
 
-- **P1 · Governed Writes** (`StructuredWrite` contract). Crosses the read-only
-  line. *Note:* Phase 1 (contract + dry-run preview, execution **disabled**) is
-  low-risk and high-leverage — but the scope expansion still needs a decision.
+- **P1 · Governed Writes — item 93** (`StructuredWrite` contract). The flagship
+  structural expansion; crosses the read-only line, so it needs an explicit
+  maintainer product decision (record it in `docs/PRODUCT_GUIDE.md`'s Decision
+  Log) before any code. Fully specced and phased in TODO.md item 93. **Slotting
+  once approved:**
+  - **Phase 1** (contract + dry-run diff preview, execution **disabled**) is
+    low-risk/zero-write-risk and depends on nothing beyond today's code — it can
+    slot **immediately after Phase 0** (right after item 91) once the decision is
+    made, and can even ship on its own as a "dry-run planner."
+  - **Phase 2** (gated execution) **depends on items 90 + 91 + 92**, so it
+    cannot precede the Phase-0 moat and the item-92 approval gate.
+  - **Phase 3** (compensation/undo + upserts + batch + MSSQL parity) depends on
+    Phase 2.
+  Until the decision is made, `roadmap-next` must skip item 93 and surface it.
 - **F4 · Safe NL→StructuredQuery.** Needs a decision on model provider/posture;
   must be an isolated opt-in subsystem, never wired into the catalog/32C.
 - **P2 · Open the StructuredQuery AST as a standard.** A standards-governance

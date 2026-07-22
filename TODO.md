@@ -2195,3 +2195,216 @@ triggers in `policy/models.py`, elicitation in `mcp/`, and the decision in
 (capacity waiting) — neither gates *query execution* on sensitivity/cost.
 **Invariant:** read-only posture and AST-only input unchanged; this only adds a
 pre-execution gate.
+
+## P7 — Governed Writes (flagship structural expansion — decision-gated)
+
+Item 93 is the largest scope expansion on the roadmap and the market's biggest
+unsolved problem (see `docs/business/MARKET_DOMINATION_ANALYSIS.md` §P1). It
+**crosses the product's read-only line** and therefore **requires an explicit
+maintainer product decision before any implementation** — the write-up below is
+a complete design and worklist, not an approved commitment. It preserves every
+core invariant: no caller-controlled raw DML ever reaches a database (a write
+is a validated structure, exactly as a read is), the catalog stays descriptive,
+audit stays redaction-safe. The `roadmap-next` automation must **not** auto-start
+it; a human decides first.
+
+### 93. Governed Writes — structured, bounded, previewable, reversible agent mutations
+
+**Effort: XL (cleanly phaseable; Phase 1 is L and carries zero write risk).
+Priority: flagship. Status: decision-gated (crosses read-only). Depends on:
+90 (dual-identity audit) + 91 (tamper-evident receipts) + 92 (approval gate)
+for Phase 2; Phase 1 (preview only, execution disabled) depends on none of
+them.**
+
+**Why it matters (competitive pressure).** The entire market retreated to
+read-only-by-default because agent writes are unsolved: the Neon incident was a
+read→write control-flow hijack, Supabase's fix was to remove the write channel,
+AWS calls its write-blocklist "best-effort, bypassable," and every DB-vendor MCP
+server ships write behind an opt-out with a disclaimer that injection is
+unsolved in read-write mode. **Nobody has a structural answer** — and a follower
+cannot produce one without first giving up raw SQL, which is their whole
+product. QueryGate's read-only limitation is not a weakness to defend; it is the
+*launchpad*: the same AST-validation spine that makes reads safe is what makes a
+safe write contract possible.
+
+**The guarantee — stated honestly (this is the whole product framing).** Reads
+have a total safety story: worst case you read a row you were already allowed to
+read. Writes have a failure mode reads don't: a well-formed, fully in-policy
+write with the *wrong values* or the wrong (but qualified) `WHERE`. No
+structural layer can make a write *semantically correct*. So QueryGate must
+claim only what it can prove, and prove all of it:
+- **What is guaranteed by construction:** no raw DML string anywhere; every
+  target table/column policy-checked before compilation; no unqualified
+  UPDATE/DELETE ever; bounded affected-row count; only allowed operations on
+  allowed targets; injection can only ever *propose* a validated structure that
+  is then re-validated and capped — it cannot exceed policy or reach raw DML.
+  **This eliminates the catastrophic-shape class of write entirely.**
+- **What is made reviewable and reversible, not impossible:** the residual
+  ("did the agent intend *this specific* change") is handled by a dry-run diff
+  preview, a mandatory approval gate on the diff for sensitive/large writes,
+  dual-identity attribution, and a bounded compensation/undo record.
+- **What is NOT claimed:** "safe autonomous agent writes" / "provably correct
+  writes." The claim is **governed writes: bounded, previewed, approved,
+  attributed, reversible** — a category nobody occupies. Never repeat PromptQL's
+  unbackable "100%".
+
+**System architecture (mirrors the read pipeline component-for-component).**
+Every piece is a sibling of an existing read component, feeding the same
+validate → policy → schema → compile → (preview) → (approve) → execute → audit
+spine. No second enforcement point is invented.
+
+1. **`write_ast/models.py`** — sibling to `query_ast/models.py`. Typed
+   `InsertStatement` (single or multi-row typed rows), `UpdateStatement`,
+   `DeleteStatement`, and (Phase 3) `UpsertStatement`. **No raw-DML field of any
+   kind.** Set-values and predicates reuse the *existing* read AST surface
+   (whitelisted scalar functions, CASE, `Predicate`/filter tree, column refs) —
+   no new expression grammar, no raw fragments. A `Discriminated`-union mutation
+   type, dispatched via a dict-of-types registry like the read
+   `_AGGREGATE_SELECT_ITEM_TYPES`, not scattered `isinstance` branches.
+2. **`policy/models.py` — write policy surface** (new `WritePolicy` block on
+   `Policy`, deny-by-default): per-table allowed operations
+   (insert/update/delete/upsert); write allow-deny for target tables and columns
+   *separate from* read allow-deny (a principal may read a column it may not
+   write); `max_affected_rows` cap per operation; `require_mandatory_where`
+   (default true — reject unqualified UPDATE/DELETE); `require_approval` triggers
+   (row-count threshold and/or catalog `sensitivity` label); `allow_upsert`;
+   compensation/undo policy (max snapshot rows/bytes, TTL); transaction/isolation
+   settings. Loaded generically from `policy.yaml` like every other cap.
+3. **`validation/write_policy_validation.py`** — mirror of
+   `policy_validation.py`, runs first, before any DB touch: every target
+   table/column checked against write allow-deny and *every* column referenced
+   in set-values and predicates (not just the target list); operation-allowed
+   check; mandatory-WHERE enforcement (unqualified UPDATE/DELETE rejected here,
+   structurally); policy-level row-cap declaration.
+4. **`validation/write_schema_validation.py`** — mirror of
+   `schema_validation.py` via cached reflection: target tables/columns exist and
+   types are compatible; refuse writes to generated/identity/computed columns
+   unless explicitly allowed; NOT NULL / PK / FK / unique awareness so a policy
+   violation is caught before the DB rejects it; resolve cross-connection safety
+   (a write targets exactly one connection — no cross-connection write).
+5. **`compiler/sqlalchemy_write_compiler.py`** — compiles the validated write
+   AST + `WritePolicy` into a SQLAlchemy Core `Insert`/`Update`/`Delete`.
+   Dialect-specific behavior (RETURNING support and fallback, upsert idiom —
+   Postgres `ON CONFLICT` vs. MSSQL `MERGE`, identity/OUTPUT handling) lives
+   behind the existing `DialectAdapter` interface (new methods), one concrete
+   adapter per dialect; where a dialect genuinely lacks a capability, the adapter
+   **rejects** with `QueryValidationError` and points at primitives — never
+   emulates (the item-74 doctrine, `dialect-primitive` skill). Everything else is
+   dialect-agnostic Core.
+6. **`execution/write_preview.py` — the dry-run diff engine (killer feature).**
+   Opens a transaction, resolves the exact affected-row set (via matched-row
+   SELECT for UPDATE/DELETE, and RETURNING/OUTPUT where supported), computes a
+   **bounded before/after diff** ("this UPDATE touches 38 rows — here they are,
+   old→new"), then **rolls back**. Never commits in preview mode. Diff is
+   row-capped and column-masking-aware (respects read masking on displayed
+   values). This is the artifact PromptQL/Neon approximate with human clicks;
+   QueryGate makes it structural.
+7. **Execution-time row-cap guard** (`execution/service.py` write path) —
+   belt-and-suspenders with the policy cap: count matched rows *inside the
+   transaction* before mutating; if over `max_affected_rows`, abort and roll
+   back. A concurrent-insert race cannot exceed the cap.
+8. **Approval gate** — reuses item 92's MCP-elicitation + approval-token
+   machinery: a write above the row/sensitivity threshold **pauses for human
+   sign-off on the computed diff** before execution. REST degrades to a
+   "requires approval" rejection carrying an approval token bound to the exact
+   compiled write + diff hash. Approval, approver identity, and decision are
+   audited.
+9. **`execution/compensation.py` — bounded compensation/undo.** Before a gated
+   mutation commits, capture a redaction-aware **pre-image snapshot** of the
+   affected rows (bounded by policy rows/bytes/TTL) and emit a governed rollback
+   operation that re-applies the pre-image under the same pipeline. **Honest
+   limits, documented:** bounded reversibility only — cannot unwind cascading
+   triggers/FK actions or side-effects, and downstream consumers may already
+   have read the changed value. Sell bounded rollback, never a time machine.
+10. **Transaction, concurrency, session guardrails** — writes run through
+    `execution/concurrency.py` (a dedicated write limiter; a write must not be
+    starved by or starve reads) and `connections/engine.py` with
+    write-appropriate session guardrails per `connections/dialects.py` (Postgres
+    `SET LOCAL lock_timeout`/`statement_timeout`; MSSQL `SET LOCK_TIMEOUT` +
+    `XACT_ABORT ON`). One explicit transaction per write; explicit isolation;
+    deadlock/lock-timeout surfaces as a clean typed error, never a partial write.
+11. **`audit/events.py` — write audit event** (redaction-safe, tamper-evident
+    via item 91, dual-identity via item 90): operation, target table, **affected-
+    row count**, whether previewed, whether approved + approver, whether a
+    compensation snapshot was taken (+ its id/hash), what was suppressed/masked.
+    **Never** the set-values, predicate values, row contents, raw DML, or
+    credentials — counts, shapes, and hashes only, exactly like the read event.
+12. **Transport** — a new MCP tool `run_structured_writes(connection,
+    writes=[...], mode=...)` mirroring `run_structured_queries`, with modes
+    `preview` (dry-run diff, no execution — the Phase-1 surface) and `execute`
+    (gated). REST route mirror. **No raw field on either.** Admin-scope-gated
+    like other privileged tools.
+
+**Security invariants and gates (non-negotiable, tested, not asserted).**
+- A credential/raw-DML redaction test (sibling of
+  `test_credential_redaction.py`) asserts against the **live OpenAPI + MCP tool
+  schemas** that no write model, endpoint, or tool exposes any raw-SQL/DML field
+  and that no write event body carries values/rows.
+- The `make test-security` adversarial corpus (extend via the `adversarial-probe`
+  skill / item 36) gains a **write boundary suite**: attempts to smuggle raw DML
+  through a value/predicate; unqualified DELETE/UPDATE; over-cap write; write to
+  a read-only-but-not-write-allowed column; write to a denied table; injection
+  through set-values or WHERE; approval-gate bypass / token replay / token bound
+  to a *different* compiled write; transaction escape / partial-commit on error;
+  oversized multi-row batch; compensation/undo abuse (undo to exfiltrate a
+  pre-image, or replay an undo to re-apply stale state).
+- Property-based fuzzing: extend the item 79/78 fuzzer + cross-dialect
+  rendering verification to the write AST — invariant checks that every
+  generated write compiles or cleanly rejects, never emits raw SQL, and that the
+  row cap and mandatory-WHERE guarantees hold for all inputs.
+
+**Test coverage (comprehensive — the point of this item).**
+- **Unit:** write AST models; write policy validation; write schema validation;
+  write compiler per-dialect rendering (Postgres + MSSQL + SQLite-internal);
+  preview/diff engine; execution row-cap guard; compensation snapshot/rollback.
+- **Integration:** end-to-end against SQLite (compiler/execution seam, like
+  `test_sqlite_end_to_end.py`) for preview and gated execute; dedicated real
+  **Postgres** and **MSSQL** write jobs (insert→verify→update→verify→delete→
+  verify→undo→verify), marked `real_db`.
+- **Security:** the adversarial write suite above under `make test-security`.
+- **Smoke:** extend `make release-smoke` with a real structured **write** round-
+  trip against Postgres (preview a diff, execute a capped insert, verify it, then
+  a governed undo) — proving the shipped image writes safely, not just reads.
+- **Stress / soak:** extend `make test-load` and `make test-soak` with
+  **concurrent write** scenarios — row-cap enforcement under concurrency,
+  transaction isolation and no-partial-write under contention, lock-timeout /
+  deadlock behavior, the approval gate under load, and compensation correctness
+  under concurrent mutations to overlapping rows. A bounded real-Postgres write
+  concurrency gate, matching the existing read load gate's shape.
+- **Cross-dialect:** a rendering-verification pass (like item 78) covering every
+  write operation on every dialect, including the reject-not-emulate cases.
+
+**Phasing (each phase independently shippable).**
+- **Phase 1 — contract + preview, execution DISABLED (L; zero write risk).**
+  `write_ast/` + `WritePolicy` + write policy/schema validation + write compiler
+  + the dry-run diff engine + the `preview` transport mode. No code path can
+  commit a write. Ships an immediately useful "what would this change?" planning
+  tool and validates the whole AST/policy/compiler design against a design
+  partner before any real mutation. Includes: all unit tests, the redaction/
+  no-raw-DML invariant test, the fuzzer + cross-dialect extension, and SQLite +
+  real-DB *preview* integration tests. Depends on nothing beyond today's code.
+- **Phase 2 — gated execution (L–XL).** Single-table insert/update/delete with
+  mandatory WHERE, policy + execution row caps, the item-92 approval gate on the
+  diff, one transaction, dual-identity audit (item 90), tamper-evident write
+  receipt (item 91). Adds: the adversarial write security suite, the
+  `release-smoke` write round-trip, and the write concurrency load gate.
+  **Depends on 90 + 91 + 92.**
+- **Phase 3 — reversibility + breadth (M–L).** Bounded compensation/undo
+  (pre-image snapshot + governed rollback), upserts, multi-row/batch writes, and
+  **MSSQL parity** for the full write surface. Adds: soak tests for compensation
+  under concurrency and the full cross-dialect write verification. **Depends on
+  Phase 2.**
+
+**Product decisions to resolve before Phase 1 starts (the gate).** (a) Confirm
+crossing read-only is desired now vs. later. (b) Compensation storage location
+and retention (in-DB shadow table vs. sink-backed pre-image; bounded by policy)
+— must stay redaction-safe. (c) Whether Phase 1's preview tool ships publicly on
+its own as a "dry-run planner" ahead of any execution. (d) Approval UX for REST
+(token flow) vs. MCP (elicitation) parity expectations. Record the decision as a
+Decision Log entry in `docs/PRODUCT_GUIDE.md` before implementing, per CLAUDE.md.
+
+**Invariant notes.** Preserves "no caller-controlled raw SQL/DML" absolutely — a
+write is a validated structure, never a DML string. Preserves redaction-safe
+audit (counts/shapes/hashes, never values/rows). Reuses, does not duplicate, the
+policy/validation/compile/execute/audit spine. Uses `DialectAdapter` for all
+dialect variance (reject-not-emulate where a dialect lacks a capability).
