@@ -78,7 +78,7 @@ order-of-magnitude, not commitments.
 | 44 | ✅ Admin observability and rejection-trend dashboard (phase 1: admin-scoped aggregated overview API + read-only browser cards panel; phase 2: time-window charts, config/catalog-change trend, external metrics backend not started) | L | 12, 23, 31, 35 |
 | 45 | ✅ Dedicated non-admin "My access" portal (phase 1: identity, guardrails, mandatory-filter readiness, schema browser; phase 2: personal denial history not started) | M | 22, 31, 33 |
 | 46 | ✅ Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
-| 47 | Safe draft recovery plus config export/import UX | M | 13, 25, 31 |
+| 47 | ✅ Safe draft recovery plus config export/import UX (phase 1: change-set export/import + policy-only local recovery; phase 2: server-side encrypted draft store not started) | M | 13, 25, 31 |
 | 48 | ✅ Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) (phase 1: file-configured invocable templates + REST/MCP; phase 2: governed authoring via the config-versioning plane) | L | 6, 22, 25, 32B |
 | 49 | ✅ Column-value masking/tokenization (not just allow/deny) | L | 6, 27 |
 | 50 | ✅ Per-principal rate limits / query quotas over time (phase 1: in-process rolling-window request/byte quota; phase 2: Redis-backed cross-replica quota not started) | M | 9, 25 |
@@ -1349,7 +1349,54 @@ admin navigation; keep `/admin/` explicitly scoped and worded for operators.
 
 Five fixed, code-reviewed presets (`querygate/admin/templates.py`): `deny-by-default`, `reporting-only`, `customer-support`, `tenant-isolated`, `bounded-analytics`. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 46).
 
-### 47. Safe draft recovery plus config export/import UX
+### 47. Safe draft recovery plus config export/import UX ✅ DONE (phase 1)
+
+**Phase 1 (portable change-set bundle export/import + policy-only local
+recovery) ✅ DONE.** **Phase 2 (a server-side, authorized, encrypted-at-rest
+draft store with retention/deletion controls) not started — split out below
+because it is a distinct persistence subsystem with its own
+encryption/retention/audit design, and the file-based bundle already delivers
+cross-environment move and full-config recovery without it.**
+
+**Phase 1 shipped:** a portable *change-set bundle* built entirely on item
+25's existing governance plane (`admin/service.py`), never a shadow store.
+
+- **Model:** `ConfigChangeSetBundle` (`admin/models.py`,
+  `bundle_format="querygate.config-change-set/1"`) carries only the documents
+  an admin actually submitted (a change set, not a full snapshot), plus the id
+  and a sha256 content `base_fingerprint` of the base version those deltas were
+  composed against, plus a description. A `connections` document may
+  legitimately be present (the caller's own submitted content, on an explicit
+  download), which is why `contains_connections` is surfaced.
+- **Export** (`POST /api/v1/admin/config/export`, `export_change_set`) echoes
+  **only** the caller-submitted deltas — an unset document is never resolved
+  into the bundle — so it can never disclose the active connections/policy
+  content. `admin:config:write` scoped, like `/preview` and `/versions`.
+- **Import** (`POST /api/v1/admin/config/import`, `import_change_set`) is
+  validation-only: it re-validates the resolved candidate through the same
+  loaders `/validate` uses, detects a **stale base** via fingerprint
+  (`stale_base` + the specific `base_conflict_documents` that moved), enforces
+  `AppConfig.config_bundle_max_bytes` (default 1 MiB → a clean validation
+  failure, never OOM), and returns a **content-free** change signal. It never
+  stages or persists — staging still goes through the unchanged `/versions`
+  endpoint, so there is one governed mutation path.
+- **UI** (`admin_ui/`, Releases → Change set): Export/Import buttons wired to
+  those endpoints (import fills the draft editors from the locally-held bundle
+  and warns on drift), plus tab-scoped `localStorage` recovery of an
+  in-progress **policy** draft. Only the policy document is ever written to
+  browser storage; `connections.yaml` (credentials), secret references, and
+  bearer tokens never are — full-config recovery uses the downloaded file.
+- Audited as `export`/`import` `config.governance` actions
+  (`audit/events.py`); documented as **QG-30** in `docs/THREAT_MODEL.md`.
+
+Covered by `tests/unit/test_config_change_set.py` (11 cases: delta selection,
+no-active-disclosure, fingerprint stale-base, oversized rejection,
+missing-fingerprint warning, connections flag, import-never-persists),
+`tests/integration/test_admin_config_governance.py` (REST round-trip → stage,
+stale-base after the active moves, oversized rejection),
+`tests/security/test_adversarial_security.py` (export/import require write
+scope), and `tests/integration/test_admin_ui.py` (export/import shell +
+policy-only-localStorage invariant).
 
 **Effort: M (2–3 days).** Basic download/upload is small, but safe recovery
 must handle sensitive connection documents, version/fingerprint metadata,
@@ -1361,15 +1408,13 @@ tab crash or browser restart still loses work. Administrators also need a
 convenient way to move a reviewed change between environments while preserving
 the YAML/CLI path rather than copying text fields by hand.
 
-**What to do:** Add bounded download/upload of a versioned change-set bundle
-containing only the submitted document deltas, base-version fingerprint, and
-description; validate it before preview/stage and surface stale-base conflicts.
-Allow tab-scoped recovery for policy-only drafts, but do **not** persist
-connections YAML, literal credentials, secret references, or bearer tokens in
-`localStorage`/IndexedDB. Full-config recovery should use an explicitly
-downloaded file or a server-side, authorized, encrypted-at-rest draft store
-with retention/deletion controls and audit events—not invisible browser
-persistence.
+**What to do (phase 2):** Add a server-side, authorized, encrypted-at-rest
+draft store with retention/deletion controls and audit events, for
+full-config recovery that survives a lost download and works across devices —
+the heavier alternative this item's original scope named alongside the
+downloaded file. Keep it a governed store with its own retention/deletion and
+audit design; do not let it become a second config-mutation path around the
+existing validate → stage → apply flow.
 
 ### 48. Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) ✅ DONE
 
