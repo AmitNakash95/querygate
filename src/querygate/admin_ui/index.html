@@ -504,6 +504,18 @@
             <tbody id="observability-body"></tbody>
           </table>
         </div>
+
+        <div class="observability-subsection">
+          <div><p class="eyebrow">Behavioral anomalies</p><h3>Unusual per-caller behavior on the audit stream.</h3><p>Each principal's recent activity compared against its <em>own</em> preceding baseline, read from the persisted audit stream — a sudden volume spike, a jump in its rejection rate, or a connection it has never touched before, even among queries policy allowed. This is a read-only signal for a human to investigate: QueryGate never auto-throttles or blocks from it. Requires <code>admin:observability:read</code>. Needs the JSONL audit sink enabled; otherwise it reports as disabled.</p></div>
+        </div>
+        <p id="anomaly-note" class="observability-snapshot" hidden></p>
+        <div class="table-wrap" id="anomaly-table-wrap" hidden>
+          <table class="history-table">
+            <thead><tr><th>Principal</th><th>Signal</th><th>Detail</th><th>Recent</th><th>Baseline</th></tr></thead>
+            <tbody id="anomaly-body"></tbody>
+          </table>
+        </div>
+        <p id="anomaly-empty" class="empty-state" hidden></p>
       </section>
     </main>
   </div>

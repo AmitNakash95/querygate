@@ -113,6 +113,11 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     assert "admin:observability:read" in response.text
     assert "not durable history" in response.text
     assert "/admin/observability/overview" in script.text
+    # TODO.md item 59 phase 2: read-only per-principal anomaly panel in the same
+    # observability domain, over the same admin:observability:read endpoint.
+    assert 'id="anomaly-table-wrap"' in response.text
+    assert "Behavioral anomalies" in response.text
+    assert "/admin/observability/anomalies" in script.text
     # TODO.md item 47: portable change-set export/import + policy-only local recovery.
     assert 'id="export-change-set"' in response.text
     assert 'id="import-change-set"' in response.text
