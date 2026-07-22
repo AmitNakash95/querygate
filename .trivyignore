@@ -1,0 +1,16 @@
+# Trivy vulnerability allowlist for the QueryGate container image.
+#
+# Philosophy mirrors security/dependency-audit-allowlist.json: DENY BY DEFAULT.
+# `make scan-image` / the CI Trivy step fail the build on any HIGH or CRITICAL
+# finding that is NOT listed here. Listing a CVE is a reviewed security
+# decision, not a mute button — every entry MUST carry the CVE id, why it does
+# not affect QueryGate (or the upstream fix status), and a review/tracking ref.
+#
+# There are currently NO active exceptions: the image is free of HIGH/CRITICAL
+# findings because the vulnerable dependencies were *upgraded to fixed versions*
+# (TODO.md item 30 phase 2 / item 89), and build/install tooling
+# (pip/setuptools/wheel, incl. setuptools' vendored jaraco.context/wheel) is
+# stripped from the runtime image in the Dockerfile rather than allowlisted.
+# Prefer that posture — fix or remove, don't accept — for any future finding.
+# If an un-fixable CVE genuinely must be accepted, add it below with the CVE id,
+# justification, and review date, exactly like the pip-audit allowlist does.

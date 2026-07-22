@@ -411,7 +411,9 @@ def _diff_connection(
         return
 
     # Present in both.
-    assert a_profile and a_policy and c_profile and c_policy
+    assert (
+        a_profile and a_policy and c_profile and c_policy
+    )  # nosec B101 — internal invariant for the "present in both" branch, not security control flow
     if a_visible != c_visible:
         diff.add(
             SemanticAccessChange(
