@@ -59,7 +59,7 @@
 | Developers know secure design basics | Met | `docs/THREAT_MODEL.md`; structured-AST-only design |
 | Use of good cryptography (no home-grown) | Met | JWT via `pyjwt[crypto]`; TLS at deployment; no custom crypto |
 | Secrets kept out of source | Met | `${ENV_VAR}` resolution; gitleaks full-history gate (`.gitleaks.toml`) |
-| Delivery protects against MITM | Met (private-repo equivalent) | Image distribution; **signing/provenance is the tracked next step** (item 89) |
+| Delivery protects against MITM | Met | cosign keyless signature + SLSA build-provenance attestation on the published image, both digest-bound (`.github/workflows/release.yml`); consumer verifies with `cosign verify` / `gh attestation verify` (see `docs/RELEASING.md`) |
 | Publicly-known vulnerabilities patched | Met | pip-audit deny-by-default (`security/dependency-audit-allowlist.json`), Trivy image gate |
 | No leaked credentials in releases | Met | gitleaks history scan; credential-redaction unit test vs live schemas |
 
@@ -81,9 +81,12 @@ items are the ones that *require a public repository* (public homepage, public
 VCS, public issue tracker), which are a deliberate product decision, not a
 security gap.
 
-**The one genuine gap** (not a public-repo artifact) is signed delivery: image
-signing + build provenance (Sigstore/cosign + SLSA). It is the highest-value
-external attestation for a self-hosted image product and is tracked as a
-follow-up in TODO.md item 89.
+**Signed delivery — the previously-noted gap — is now closed at the mechanism
+level:** the release workflow signs the published image with cosign keyless
+(Sigstore) and attaches a SLSA build-provenance attestation, both digest-bound
+and consumer-verifiable (`cosign verify` / `gh attestation verify`). What remains
+is operational, not a capability gap: a maintainer cutting the *first* signed
+release (a deliberate tag push) and choosing a Python package-index — tracked in
+TODO.md item 30/89 phase 2.
 
-*Last reviewed: 2026-07-22.*
+*Last reviewed: 2026-07-23.*
