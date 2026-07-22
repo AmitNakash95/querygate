@@ -187,17 +187,20 @@ jobs:
 
       # ODBC Driver 18 for SQL Server — client-side requirement for
       # pyodbc/aioodbc, separate from the MSSQL *server* service container
-      # above. Mirrors the exact steps in Dockerfile's production stage
-      # (fixed as part of TODO.md item 14 after this same key-format issue
-      # broke that build); the Ubuntu version in the packages.microsoft.com
-      # URL may need bumping if this starts failing after a runner image
-      # update — see Dockerfile's comment for the underlying upstream issue.
+      # above. The Microsoft repo is release-specific, so we derive the
+      # runner's actual Ubuntu version instead of hardcoding it: ubuntu-latest
+      # moved 22.04 -> 24.04, and the old jammy prod.list both (a) lacks the
+      # `signed-by=` keyring attribute that 24.04's stricter apt now requires
+      # and (b) pulls jammy libodbc dependencies that conflict on noble — so a
+      # pinned 22.04 URL fails the install outright on the current runner.
+      # Detecting VERSION_ID keeps this correct across future runner bumps.
       - name: Install unixODBC + msodbcsql18
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends unixodbc unixodbc-dev gnupg curl
           curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
-          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          ubuntu_ver="$(. /etc/os-release && echo "$VERSION_ID")"
+          curl -sSL "https://packages.microsoft.com/config/ubuntu/${ubuntu_ver}/prod.list" | sudo tee /etc/apt/sources.list.d/mssql-release.list
           sudo apt-get update
           sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18
 
