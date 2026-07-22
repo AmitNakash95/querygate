@@ -100,6 +100,11 @@ def main() -> int:
     env["QUERYGATE_ENVIRONMENT"] = "development"
     env.setdefault("API_KEYS", "[]")
     env.setdefault("MCP_API_KEYS", "[]")
+    # Boot against an empty connections file so no profile is registered — the
+    # boundary under test. The default (examples/connections.example.yaml)
+    # references ${QUERYGATE_DEMO_DB_URL}, which is intentionally unset here, so
+    # loading it at startup (HealthMonitor priming) would fail the whole run.
+    env.setdefault("CONNECTIONS_FILE", str(ROOT / "scripts" / "dast_connections.yaml"))
     os.environ.update(env)
 
     port = _free_port()
