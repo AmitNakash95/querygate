@@ -1,0 +1,126 @@
+name: Release
+
+# Publish the production container image when a version tag is pushed.
+#
+#   git tag -a v0.1.0 -m "QueryGate v0.1.0"
+#   git push origin v0.1.0
+#
+# This is the CD half that docs/RELEASING.md's "Tagging" section and TODO.md
+# item 30 phase 2 describe as deferred: `make release-check` / `make
+# release-smoke` prove the release locally, the normal CI on `main` already
+# tests + Trivy-scans the image, and *this* workflow is what actually pushes a
+# signed, versioned image to the registry so a customer can pull it.
+#
+# The image is built from the same production Dockerfile CI already uses. It is
+# scanned with Trivy BEFORE it is pushed (deny-by-default, same posture as the
+# `docker` job in ci.yml), then pushed to GHCR and signed with cosign keyless
+# (Sigstore) using the workflow's OIDC identity — no long-lived signing key to
+# manage.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write # push to GHCR
+  id-token: write # cosign keyless signing via OIDC
+
+env:
+  # GHCR path is derived from the repo automatically and lowercased by
+  # docker/metadata-action. For AGitmit/QueryGate this resolves to
+  # ghcr.io/agitmit/querygate.
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  publish:
+    name: Build, scan, push, and sign the release image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail fast if the tag (e.g. v0.1.0) doesn't match the version baked into
+      # the package/pyproject. scripts/check_release.py already asserts
+      # pyproject and __init__ agree; here we assert the tag agrees with them
+      # too, so a published image can never be mislabelled.
+      - name: Verify tag matches package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "tag=$tag package=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match pyproject version $pkg"
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Compute the image tags + OCI labels from the git tag.
+      #   ghcr.io/agitmit/querygate:0.1.0   (exact version)
+      #   ghcr.io/agitmit/querygate:latest  (only on a non-prerelease tag)
+      - name: Compute image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      # Build once into the local docker daemon so we can scan the exact bytes
+      # before anything is published. Cached to GHA so the push step below is a
+      # near-instant re-tag, not a rebuild.
+      - name: Build image (local, for scanning)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: querygate:release-candidate
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Same gate as ci.yml's `docker` job: fail on any fixable HIGH/CRITICAL
+      # vuln, leaked secret, or misconfig that isn't a reviewed exception in
+      # .trivyignore. A failure here stops the release before publishing.
+      - name: Trivy scan (pre-publish gate)
+        uses: aquasecurity/trivy-action@v0.24.0
+        with:
+          image-ref: querygate:release-candidate
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+          scanners: vuln,secret,misconfig
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Re-tag + push using the cache from the build above (no rebuild). Outputs
+      # the registry digest so we sign by immutable digest, not by tag.
+      - name: Push image to GHCR
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless signature (Sigstore) bound to this workflow's OIDC identity and
+      # recorded in the public transparency log. A customer can later verify the
+      # image really came from this repo's release workflow with:
+      #   cosign verify ghcr.io/agitmit/querygate:0.1.0 \
+      #     --certificate-identity-regexp 'https://github.com/AGitmit/QueryGate/.github/workflows/release.yml@.*' \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - name: Sign the image with cosign (keyless)
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
