@@ -776,9 +776,13 @@ The gates fall into three groups:
   shipped container image for OS/library CVEs, embedded secrets, and
   misconfiguration; and **gitleaks** scans the working tree *and the full git
   history*, so we can affirmatively prove no credential was ever committed.
-  Every one of these is deny-by-default: any finding fails the build, and the
-  handful of accepted exceptions are recorded with a written justification
-  (`.trivyignore`, `.gitleaks.toml`, inline `# nosec`), never silently muted.
+  Every one of these is deny-by-default: any finding fails the build. Where the
+  dependency and image scans found real CVEs, they were **fixed by upgrading to
+  patched versions, not accepted** — the pip-audit allowlist and the Trivy
+  exception list (`.trivyignore`) are both **empty**, and `pip-audit` reports no
+  known vulnerabilities across the whole set. The only recorded exceptions are
+  dev-only secret-scan placeholders (`.gitleaks.toml`) and a few reviewed,
+  inline-justified SAST suppressions (`# nosec` / `# nosemgrep`) — never silent.
 - **Reliability under real load.** Security guarantees must hold under
   concurrency, not just in isolation — so `make test-load`/`make test-soak` run
   the guardrails against a real Postgres and assert caps are never breached and
@@ -2415,10 +2419,12 @@ reasoning behind them, newest first. Added to incrementally as work happens
   customer-facing `docs/SECURITY_POSTURE.md`. Three deliberate choices. **(1)
   Prove, don't assert.** Every posture claim points at a command a reviewer can
   run and a gate that fails CI on regression — a security product's claims must
-  be checkable, not conventional. **(2) Deny-by-default everywhere, with reviewed
-  allowlists.** Each scanner fails the build on any finding; accepted ones are
-  recorded with a written justification (`.trivyignore`, `.gitleaks.toml`, inline
-  `# nosec`), never silently muted — the same posture as the dependency audit.
+  be checkable, not conventional. **(2) Deny-by-default everywhere — fix, don't
+  accept.** Each scanner fails the build on any finding. The real CVEs the
+  dependency and image scans surfaced were remediated by upgrade, leaving the
+  pip-audit allowlist and `.trivyignore` **empty**; the only recorded exceptions
+  are dev-only secret-scan placeholders (`.gitleaks.toml`) and a few reviewed,
+  inline-justified SAST suppressions (`# nosec` / `# nosemgrep`), never silent.
   **(3) Honest about badges.** The OpenSSF Best Practices badge is FLOSS/public-
   repo-only, so a private product cannot be *awarded* it; rather than display a
   badge we can't earn, we keep an honest criteria self-assessment (all
