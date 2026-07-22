@@ -992,12 +992,31 @@ async def test_config_governance_write_endpoints_require_write_scope():
         schema_check_resp = await client.post(
             "/api/v1/admin/config/check-template-schema", json={}, headers=headers
         )
+        export_resp = await client.post(
+            "/api/v1/admin/config/export",
+            json={"policy_yaml": "default:\n  enabled: true\n"},
+            headers=headers,
+        )
+        import_resp = await client.post(
+            "/api/v1/admin/config/import",
+            json={
+                "bundle_format": "querygate.config-change-set/1",
+                "created_at": "2026-07-22T00:00:00Z",
+                "documents": {"policy": "default:\n  enabled: true\n"},
+            },
+            headers=headers,
+        )
         apply_resp = await client.post("/api/v1/admin/config/versions/1/apply", headers=headers)
 
     assert stage_resp.status_code == 403
     assert validate_resp.status_code == 403
     assert preview_resp.status_code == 403
     assert simulate_resp.status_code == 403
+    # A change-set bundle is a config mutation carrier — exporting one echoes
+    # only the caller's submitted deltas and importing one validates a
+    # candidate; both are write-scoped, so config-read alone is insufficient.
+    assert export_resp.status_code == 403
+    assert import_resp.status_code == 403
     # The semantic diff echoes resolved policy detail, so config-write alone is
     # insufficient — it also requires config-read (both, like /simulate).
     assert diff_resp.status_code == 403
