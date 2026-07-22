@@ -457,6 +457,11 @@ async def test_local_draft_recovery_is_policy_only_never_credentials(tmp_path, m
     assert "draftDocuments.connections" not in save_region
     assert "token" not in save_region.lower()
     assert "state.draftDocuments.policy" in save_region
+    # The bearer token is in-memory only — never written to any web storage, so
+    # an XSS cannot exfiltrate it from localStorage/sessionStorage. There is no
+    # "remember token" affordance, and no code path stores the token.
+    assert "sessionStorage" not in script
+    assert "querygate_admin_token" not in script
 
 
 def _local_storage_region(script: str) -> str:

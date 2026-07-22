@@ -515,10 +515,9 @@
       <h2 id="auth-title">Connect to the control plane</h2>
       <p>Use a bearer token with <code>admin:config:read</code> to inspect and simulate, and <code>admin:config:write</code> to edit, validate, stage, and activate changes.</p>
       <label><span>Bearer token</span><input id="auth-token" type="password" autocomplete="off" required placeholder="Paste token"></label>
-      <label class="checkbox-row"><input id="remember-token" type="checkbox"><span>Keep token for this browser tab</span></label>
       <p id="auth-error" class="form-error" role="alert" hidden></p>
       <button class="button primary wide" type="submit">Connect securely</button>
-      <small>The token is sent only in the Authorization header. It is never written into a configuration document.</small>
+      <small>The token is kept only in memory for this session — it is cleared when you close or reload the tab, and is never written to browser storage or a configuration document. It is sent only in the Authorization header.</small>
     </form>
   </dialog>
 
