@@ -192,6 +192,20 @@ class AppConfig(BaseSettings):
     audit_jsonl_path: str = pyd.Field(default="var/audit/querygate-audit.jsonl")
     audit_jsonl_fsync: bool = pyd.Field(default=False)
 
+    # Read-only per-principal anomaly surfacing over the persisted audit stream
+    # (TODO.md item 59). Purely a signal for a human admin — never wired into
+    # enforcement. Requires audit_sink_backend=jsonl; with backend=none the
+    # anomaly endpoint honestly reports source="disabled". A caller's recent
+    # window is compared against its own preceding baseline window.
+    anomaly_recent_window_seconds: float = pyd.Field(default=3600.0, gt=0)
+    anomaly_baseline_window_seconds: float = pyd.Field(default=86400.0, gt=0)
+    anomaly_min_baseline_events: int = pyd.Field(default=20, ge=1)
+    anomaly_min_recent_events: int = pyd.Field(default=5, ge=1)
+    anomaly_volume_spike_ratio: float = pyd.Field(default=3.0, gt=1)
+    anomaly_rejection_rate_delta: float = pyd.Field(default=0.3, gt=0, le=1)
+    anomaly_max_events_scanned: int = pyd.Field(default=200_000, ge=1)
+    anomaly_max_principals_reported: int = pyd.Field(default=100, ge=1)
+
     # Config-governance version history (querygate/admin/) — staged/applied/
     # rolled-back snapshots of connections.yaml/policy.yaml/catalog.yaml,
     # separate from the files AppConfig itself points at (which the existing

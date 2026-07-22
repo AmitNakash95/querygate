@@ -2488,6 +2488,27 @@ reasoning behind them, newest first. Added to incrementally as work happens
   charts — a point-in-time snapshot has no stored history to plot, so real
   charts wait on the deferred external metrics backend. The phase-1 boundary is
   deliberately "ship the honest cards, not a dishonest trend line."
+- **2026-07-22 — Behavioral anomaly surfacing over the audit stream is a
+  read-only signal for a human, deliberately *not* an autonomous throttle
+  (TODO.md item 59, phase 1).** `GET /api/v1/admin/observability/anomalies`
+  (`admin:observability:read`) reads item 23's persisted audit stream and, per
+  principal, compares a recent window against that caller's own preceding
+  baseline to flag volume spikes, rejection-rate jumps, and newly-touched
+  connections — including among queries policy *allowed*. **Why read-only,
+  not enforcement:** the tempting next step is to auto-throttle or auto-block a
+  spiking caller, but that would cross the same hard line 32C's usage learning
+  already respects — no signal derived from observed traffic may feed back into
+  enforcement without a human in the loop, or the gateway becomes a system that
+  silently rewrites its own access decisions from noisy behavioral data. So the
+  module has *no write path at all*: it emits a report an admin reads, never a
+  policy change. **Why per-principal-baseline, not a global threshold:** a fixed
+  "N queries/minute is suspicious" bar is wrong for every deployment and every
+  caller; comparing each principal to its own recent history surfaces a genuine
+  behavioral change without the operator hand-tuning a number per service
+  account. The report is bounded (one-pass streamed read, capped principals) and
+  carries only the same ids/counts already in the audit event — no SQL, value,
+  table, or column (QG-28). It reuses item 44's observability router and scope;
+  rendering it in the `/admin/` dashboard is phase 2.
 - **2026-07-21 — Structured template authoring feeds the shared release, and
   keeps the query skeleton as validated JSON rather than a visual AST builder
   (TODO.md item 87).** Three choices. **(1) It composes into the change-set
