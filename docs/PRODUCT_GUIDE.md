@@ -694,6 +694,41 @@ aggregate (like a `count`) can still sometimes infer something about
 individual rows from a narrow-enough filter, since QueryGate protects
 *column and table access*, not statistical inference in general.
 
+### 5. The admin control plane has no token to steal
+
+The `/admin/` and `/access/` browser surfaces are deliberately built so that
+the most valuable thing a browser-based attack could go after — the operator's
+bearer token — is **never in browser storage to begin with**. The token lives
+only in an in-memory variable for the lifetime of the tab; there is no "remember
+me", no `localStorage`, no `sessionStorage`, no cookie. Closing or reloading the
+tab discards it and requires re-authentication.
+
+Why this is a structural strength, not just a setting: the standard way an XSS
+(cross-site scripting) bug turns into an account takeover is by reading a
+session token out of `localStorage`/`sessionStorage` and exfiltrating it. That
+entire class of attack is **removed by construction** here — there is no stored
+token for injected script to read, so even a hypothetical XSS could not steal
+the admin's credential from storage. This is the same "make the bad outcome
+impossible by design rather than guarded against at runtime" posture as the
+no-raw-SQL-field and no-credential-on-a-public-model guarantees elsewhere in
+this document.
+
+To be precise about the boundary (this product does not overclaim): this
+removes *token theft from browser storage*, which is the highest-value XSS
+outcome — it does not by itself make the page immune to XSS. Two other controls
+reduce that surface: a strict Content-Security-Policy on every control-plane
+response (`default-src 'self'; script-src 'self'`, no inline/external scripts,
+`object-src 'none'`, `base-uri 'none'`, `frame-ancestors 'none'`) blocks the
+common script-injection execution vectors, and the single-page app escapes
+untrusted content before rendering it. The only other thing the control plane
+persists in the browser is an in-progress **policy** draft in `localStorage`
+purely so a tab crash doesn't lose edits (item 47) — never `connections.yaml`,
+a credential, a secret reference, or a token. All of this is regression-locked:
+`test_admin_ui.py::test_local_draft_recovery_is_policy_only_never_credentials`
+asserts the shipped script contains no `sessionStorage` use and no token
+storage key, and that the one `localStorage` write only ever persists the
+policy document.
+
 ### SQL injection, in one line
 
 Bound parameters make SQL injection impossible by construction — this is

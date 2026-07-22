@@ -57,6 +57,13 @@ async def test_access_ui_is_served_with_browser_security_headers_and_no_admin_co
         assert admin_only_text not in response.text
         assert admin_only_text not in script.text
 
+    # The caller's bearer token is in-memory only — never written to any web
+    # storage, so an XSS cannot exfiltrate it. No "remember" affordance exists.
+    assert "sessionStorage" not in script.text
+    assert "localStorage" not in script.text
+    assert "querygate_access_token" not in script.text
+    assert 'id="remember-token"' not in response.text
+
 
 @pytest.mark.asyncio
 async def test_access_ui_shell_is_served_without_authentication():
