@@ -53,7 +53,7 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 
 ### Phase 0 — Moat & proof (highest ROI: wins the security review)
 
-- [ ] **90** — Delegated agent identity into policy + dual-identity audit (F1).
+- [x] **90** — Delegated agent identity into policy + dual-identity audit (F1).
   *The single hottest enterprise requirement with the emptiest data layer;
   **time-sensitive** — build against the MCP 2026-07-28 delegated-auth spec
   while it is the fresh, mandated integration surface.*
