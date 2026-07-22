@@ -2411,6 +2411,91 @@ without a live model call; state plainly what wasn't exercised). Resist
 adding a maintained framework-specific SDK layer beyond the example
 itself — that risk was already called out in item 20.
 
+### 59. Read-only behavioral anomaly surfacing on the audit stream ✅ DONE
+
+**Phase 1 (detection engine + admin REST API) ✅ DONE. Phase 2 (surface the
+signal in item 44's browser dashboard) ✅ DONE.**
+
+**Phase 1 shipped:** `querygate/admin/anomaly.py` — a read-only,
+per-principal anomaly detector over item 23's persisted audit stream, plus
+`GET /api/v1/admin/observability/anomalies` (`admin:observability:read`,
+added to the item 44 router) returning a bounded, redaction-safe
+`AnomalyReport`. Distinct from item 44's overview, which aggregates the
+in-process Prometheus registry into *fleet* counters — this answers a
+*per-principal* question from the durable stream: is one caller's recent
+behavior unusual versus its own preceding baseline, even among queries policy
+*allowed*?
+
+- **Detection (`detect_anomalies`) is a pure function** over a list of
+  `AuditEvent`s + a fixed `now` + `AnomalyThresholds` — no clock, file, or
+  global state — so the full signal space is unit-testable. It splits each
+  principal's events into a recent window `(now - recent, now]` and the equal-
+  or-longer baseline window immediately before it, then flags three signals:
+  `volume_spike` (recent per-second rate ÷ baseline rate ≥ ratio),
+  `rejection_rate_spike` (jump in the *fraction* of a caller's queries policy
+  denied), and `new_connection_access` (a connection reached in the recent
+  window the caller never touched in its baseline). Both windows must clear
+  `min_baseline_events`/`min_recent_events` first, so a brand-new or barely-
+  active caller never trivially "spikes."
+- **Bounded by construction:** `JsonlAuditEventSource` streams the audit file
+  once into a bounded deque (`max_events_scanned`), reusing item 44's audit-
+  viewer read tolerance (malformed lines counted, never fatal; only
+  `query.execution` events, never config/catalog governance events); the
+  report caps principals (`max_principals_reported`, ranked most-severe first)
+  and per-principal new connections, and sets `truncated` honestly when a cap
+  is hit.
+- **Redaction-safe:** every surfaced field (`principal_id`, `connection`,
+  counts, per-minute rates, ratios) is already on the persisted `AuditEvent`
+  and already browsable via item 31's audit viewer; the report carries no SQL,
+  predicate value, row, table, or column, and the model is `extra="forbid"`
+  so a leak field can't be added silently. `test_report_is_redaction_safe`
+  and `test_anomalies_surface_a_spike_from_the_jsonl_stream` assert this
+  against the live serialized schema.
+- **Strictly within the 32C boundary (`CLAUDE.md`):** read-only. There is no
+  write path in the module at all — it never edits a policy, throttles,
+  blocks, or influences execution. Config lives in `AppConfig`
+  (`anomaly_*` fields, all optional with conservative defaults) and
+  `.env.example`; with `AUDIT_SINK_BACKEND=none` the endpoint honestly
+  reports `source="disabled"`.
+
+Covered by `tests/unit/test_anomaly.py` (each signal, the min-volume guards,
+window filtering, unauthenticated grouping, principal-cap ranking/truncation,
+threshold validation, exact window-boundary classification, naive-timestamp
+handling, the new-connection per-principal cap, the JSONL source's malformed/
+out-of-window/bound handling, the route config→thresholds/source mapping, and
+redaction) and `tests/integration/test_anomaly_api.py` (scope enforcement,
+disabled-without-sink, a real spike surfaced from a written JSONL file without
+leaking values, and the configured principal cap enforced end-to-end).
+`scripts/anomaly_ui_smoke.py` (`make anomaly-ui-smoke`) is a UI-visualization
+smoke: it seeds a JSONL audit stream, computes the real `AnomalyReport`, and
+renders the *actual* admin UI assets (`index.html`/`app.js`/`app.css`, only the
+network stubbed) in headless Chromium — asserting the real `renderAnomalies()`
+draws every principal, badge, and detail, and writing `dist/anomaly-ui-smoke.png`
+for human inspection (it SKIPs cleanly when no browser is present).
+
+**Why it matters:** Item 44 covers rejection-trend dashboards — denied
+queries. This is distinct: surfacing unusual volume or shape even among
+*allowed* queries per principal (e.g. a sudden order-of-magnitude spike) as
+a passive alert. Must stay strictly within the 32C boundary already fixed
+in `CLAUDE.md`: a read-only signal for a human admin to look at, never an
+autonomous policy edit or a feedback loop back into enforcement.
+
+**Phase 2 shipped:** A "Behavioral anomalies" subsection in the existing
+Observability view of the admin UI (`admin_ui/index.html`/`app.js`/`app.css`),
+rendered from the same `admin:observability:read` fetch pattern as the item 44
+overview — no new backend, scope, or mutation path. `loadObservability()`
+fetches `/admin/observability/anomalies` alongside the overview and
+`renderAnomalies()` draws one row per (principal, signal): a color-coded kind
+badge (volume spike / rejection spike / new connection), a human-readable
+detail (`4.3× its baseline rate`, `81.0% rejected vs 4.0% baseline`,
+`reached payroll-prod — untouched in baseline`), and recent/baseline
+count·rate. `source="disabled"` and the empty case render honest guidance
+strings rather than a blank panel; the report's note plus the window/scanned/
+truncated summary is shown as the same honest snapshot banner the overview
+uses. Asserted by `tests/integration/test_admin_ui.py` (the SPA serves the
+`anomaly-table-wrap` panel, the "Behavioral anomalies" heading, and the
+`/admin/observability/anomalies` fetch).
+
 ### 61. Deduplicate the StructuredQuery JSON Schema across execute/explain/batch tools ✅ DONE
 
 **Shipped:** Confirmed against the MCP spec first (`mcp.types.Tool.inputSchema:
