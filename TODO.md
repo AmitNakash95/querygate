@@ -90,7 +90,7 @@ order-of-magnitude, not commitments.
 | 56 | HA / multi-region reference deployment + DR runbook | L | 29 |
 | 57 | Pluggable dialect-adapter architecture | L | 2, 19 |
 | 58 | Published adversarial benchmark vs. raw-SQL agent and Google Toolbox | M | 28, 36 |
-| 59 | Read-only behavioral anomaly surfacing on the audit stream | M | 32C, 44 |
+| 59 | ✅ Read-only behavioral anomaly surfacing on the audit stream | M | 32C, 44 |
 | 60 | Bug bounty / responsible disclosure program | S | 53 |
 | 61 | ✅ Deduplicate the StructuredQuery JSON Schema across execute/explain/batch tools | S–M | — |
 | 62 | ✅ Consolidate redundant instructional prose into one source of truth | M | 61 (pairs well) |
@@ -1792,24 +1792,9 @@ overhead numbers. Keep the comparison factual and reproducible — per this
 file's own external-market-reference instruction to never misrepresent a
 competitor's documented capabilities.
 
-### 59. Read-only behavioral anomaly surfacing on the audit stream
+### 59. Read-only behavioral anomaly surfacing on the audit stream ✅ DONE
 
-**Effort: M (2–3 days).** A read-only aggregation over the existing
-persisted audit sink (item 23) surfaced in item 44's dashboard — no new
-execution-path or policy-mutation code.
-
-**Why it matters:** Item 44 covers rejection-trend dashboards — denied
-queries. This is distinct: surfacing unusual volume or shape even among
-*allowed* queries per principal (e.g. a sudden order-of-magnitude spike) as
-a passive alert. Must stay strictly within the 32C boundary already fixed
-in `CLAUDE.md`: a read-only signal for a human admin to look at, never an
-autonomous policy edit or a feedback loop back into enforcement.
-
-**What to do:** Add a bounded, per-principal volume/shape baseline computed
-from the persisted redaction-safe audit stream, surface deviations as a
-dashboard signal in item 44's admin workspace, and explicitly do not wire
-it into any automatic policy change, throttle, or block — that would cross
-the 32C boundary this file already treats as a hard line.
+Read-only per-principal anomaly detector over the persisted audit stream (`querygate/admin/anomaly.py`) — volume spikes, rejection-rate jumps, and newly-touched connections vs. each caller's own baseline — exposed via `GET /api/v1/admin/observability/anomalies` and a "Behavioral anomalies" panel in the admin Observability view; strictly within the 32C read-only boundary. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 59).
 
 ### 60. Bug bounty / responsible disclosure program
 
