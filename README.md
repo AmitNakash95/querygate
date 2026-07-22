@@ -123,8 +123,14 @@ See [`examples/rest_calls.md`](examples/rest_calls.md) and
 [`examples/mcp_calls.md`](examples/mcp_calls.md) for full request/response
 examples, including `query`, `query/explain`, and `query/batch`. For wiring
 QueryGate into an agent framework directly instead of raw JSON-RPC/curl, see
-[`examples/claude_agent_sdk_integration.py`](examples/claude_agent_sdk_integration.py)
-(Claude Agent SDK, `pip install claude-agent-sdk`).
+the runnable integration examples — each registers QueryGate as a
+Streamable-HTTP MCP server and lets the framework's agent discover and call the
+tools itself:
+
+- [`examples/claude_agent_sdk_integration.py`](examples/claude_agent_sdk_integration.py) — Claude Agent SDK (`pip install claude-agent-sdk`)
+- [`examples/langchain_integration.py`](examples/langchain_integration.py) — LangChain / LangGraph (`pip install langchain-mcp-adapters langgraph`)
+- [`examples/llamaindex_integration.py`](examples/llamaindex_integration.py) — LlamaIndex (`pip install llama-index-tools-mcp`)
+- [`examples/openai_function_calling_integration.py`](examples/openai_function_calling_integration.py) — OpenAI Chat Completions function-calling (`pip install openai`)
 
 ### Typed Python query builder
 

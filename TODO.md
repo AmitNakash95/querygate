@@ -83,7 +83,7 @@ order-of-magnitude, not commitments.
 | 49 | ✅ Column-value masking/tokenization (not just allow/deny) | L | 6, 27 |
 | 50 | ✅ Per-principal rate limits / query quotas over time (phase 1: in-process rolling-window request/byte quota; phase 2: Redis-backed cross-replica quota not started) | M | 9, 25 |
 | 51 | ✅ Typed client-side query-builder SDK (phase 1: Python builder; phase 2: TypeScript + standalone dependency-light distribution not started) | M (per language) | 20 |
-| 52 | Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI) | S (per framework) | 20 |
+| 52 | ✅ Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI) | S (per framework) | 20 |
 | 53 | Independent third-party security audit + published report | S* | 28 |
 | 54 | Compliance control mapping (SOC 2 / ISO 27001 readiness) | L | 23, 25, 28 |
 | 55 | ✅ Inference/transitive-exposure adversarial test suite | M | 28 |
@@ -1601,22 +1601,9 @@ dependency-light `querygate-client` distribution, keeping the in-tree
 `querygate.client` importable for existing users. Keep it a pure client-side
 convenience: it must not bypass or duplicate any server-side validation.
 
-### 52. Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI function-calling)
+### 52. Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI function-calling) ✅ DONE
 
-**Effort: S per framework.** Same shape as item 20's existing Claude Agent
-SDK example — a runnable script registering QueryGate's MCP tools and
-asking a natural-language question against the demo data.
-
-**Why it matters:** Item 20 deliberately scoped to one framework to avoid
-scope creep. With the core product now stable, closing this gap directly
-addresses the ecosystem-breadth deficit against Google's Toolbox, which
-documents integration with most major agent frameworks out of the box.
-
-**What to do:** Add one example per additional framework, following item
-20's existing verification bar (mechanically verify what can be verified
-without a live model call; state plainly what wasn't exercised). Resist
-adding a maintained framework-specific SDK layer beyond the example
-itself — that risk was already called out in item 20.
+Three runnable MCP integration examples (LangChain/LangGraph, LlamaIndex, OpenAI function-calling) mirroring item 20's shape, with a model-free drift/bridge test and no new runtime dependency. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 52).
 
 ### 53. Independent third-party security audit + published report
 
