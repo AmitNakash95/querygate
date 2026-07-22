@@ -113,6 +113,28 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction
 
+      # GitHub's `services.postgres` is a bare image — unlike `docker compose
+      # up` it can't mount examples/demo_db/init_postgres.sql into the initdb
+      # hook, so nothing seeds the demo schema. Do it explicitly here (the
+      # Postgres analogue of the mssql-live job's setup_mssql_test_db.py step):
+      #   * querygate_demo  <- the canonical 5-table demo schema the
+      #     array_agg/percentile/cost/schema-discovery tests reflect and query.
+      #   * querygate_stress <- an empty database the large-domain stress suite
+      #     seeds itself (drop+recreate, session-scoped). It MUST be separate
+      #     from querygate_demo: the stress suite leaves ~8 tables behind and
+      #     test_postgres_schema_discovery asserts querygate_demo holds exactly
+      #     the five demo tables, so one shared DB makes them mutually exclusive.
+      - name: Seed demo schema (querygate_demo) + create stress DB (querygate_stress)
+        env:
+          PGPASSWORD: querygate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          psql -h localhost -p 5433 -U querygate -d querygate_demo \
+            -v ON_ERROR_STOP=1 -f examples/demo_db/init_postgres.sql
+          psql -h localhost -p 5433 -U querygate -d querygate_demo \
+            -v ON_ERROR_STOP=1 -c 'CREATE DATABASE querygate_stress OWNER querygate;'
+
       # Every postgres_live test EXCEPT the `load`-marked concurrency/soak
       # ones, run first because they're fast and timing-insensitive. This
       # includes the large-domain stress suite's differential-correctness,
