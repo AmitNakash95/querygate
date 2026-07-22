@@ -338,3 +338,139 @@ def test_report_is_redaction_safe():
             baseline_window_seconds=1,
             query_shape={"leak": 1},  # type: ignore[call-arg]
         )
+
+
+# --- thresholds / config validation ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"recent_window_seconds": 0},
+        {"baseline_window_seconds": -1},
+        {"volume_spike_ratio": 1.0},  # must be strictly > 1
+        {"rejection_rate_delta": 0},  # must be > 0
+        {"rejection_rate_delta": 1.5},  # must be <= 1
+        {"min_baseline_events": 0},
+        {"min_recent_events": 0},
+        {"max_events_scanned": 0},
+        {"max_principals_reported": 0},
+        {"max_new_connections_per_principal": 0},
+    ],
+)
+def test_thresholds_reject_out_of_range_values(overrides):
+    with pytest.raises(pyd.ValidationError):
+        AnomalyThresholds(**overrides)
+
+
+# --- source / report edge cases -------------------------------------------
+
+
+def test_jsonl_source_with_no_in_window_events_is_empty_but_still_jsonl(tmp_path):
+    """A configured-but-quiet stream is source="jsonl" with zero events — not
+    "disabled", which specifically means no sink is configured at all."""
+    path = tmp_path / "audit.jsonl"
+    _write_jsonl(path, _spread(5, start=_NOW - timedelta(seconds=50_000), span_seconds=1000))
+    report = build_anomaly_report(
+        JsonlAuditEventSource(str(path)), now=_NOW, thresholds=_thresholds()
+    )
+    assert report.source == "jsonl"
+    assert report.events_scanned == 0
+    assert report.principals == []
+
+
+# --- new-connection cap and baseline guard --------------------------------
+
+
+def test_new_connection_signals_are_capped_per_principal():
+    th = _thresholds(max_new_connections_per_principal=2, volume_spike_ratio=99)
+    baseline_start = _NOW - timedelta(seconds=7200)
+    recent_start = _NOW - timedelta(seconds=3600)
+    events = _spread(15, start=baseline_start, span_seconds=3600, connection="demo")
+    # Reaches five brand-new connections; only the first two (sorted) are kept.
+    for name in ("c1", "c2", "c3", "c4", "c5"):
+        events += _spread(
+            1, start=recent_start + timedelta(seconds=100), span_seconds=50, connection=name
+        )
+    events += _spread(3, start=recent_start, span_seconds=50, connection="demo")
+
+    flagged, _ = detect_anomalies(events, now=_NOW, thresholds=th)
+    new_conns = [s for s in flagged[0].signals if s.kind == "new_connection_access"]
+    assert [s.connection for s in new_conns] == ["c1", "c2"]
+
+
+def test_new_connection_needs_sufficient_baseline_volume():
+    th = _thresholds(min_baseline_events=10)
+    recent_start = _NOW - timedelta(seconds=3600)
+    # Only 5 baseline events (< min) — even reaching a new connection is not judged.
+    events = _spread(5, start=_NOW - timedelta(seconds=7200), span_seconds=3600, connection="demo")
+    events += _spread(4, start=recent_start, span_seconds=1000, connection="payroll")
+    flagged, _ = detect_anomalies(events, now=_NOW, thresholds=th)
+    assert flagged == []
+
+
+# --- window-boundary classification ----------------------------------------
+
+
+def test_window_boundaries_are_classified_deterministically():
+    th = _thresholds(min_baseline_events=10, min_recent_events=3, volume_spike_ratio=1.5)
+    recent_start = _NOW - timedelta(seconds=3600)
+    baseline_start = _NOW - timedelta(seconds=7200)
+    events = _spread(12, start=baseline_start + timedelta(seconds=10), span_seconds=3000)
+    events += _spread(40, start=recent_start + timedelta(seconds=10), span_seconds=3000)
+    # Exactly at recent_start → baseline (occurred > recent_start is False).
+    events.append(_event(at=recent_start))
+    # Exactly at now → recent (occurred > now is False, so it is included).
+    events.append(_event(at=_NOW))
+    # Exactly at baseline_start → excluded (occurred <= baseline_start).
+    events.append(_event(at=baseline_start))
+
+    flagged, _ = detect_anomalies(events, now=_NOW, thresholds=th)
+    assert flagged[0].recent_events == 41  # 40 + the now event
+    assert flagged[0].baseline_events == 13  # 12 + the recent_start event; baseline_start dropped
+
+
+def test_naive_timestamps_are_treated_as_utc():
+    """Persisted events could carry a naive occurred_at; detection must not
+    crash comparing them and must place them by the same window logic."""
+    th = _thresholds()
+    naive_now = _NOW.replace(tzinfo=None)
+    events = [_event(at=naive_now - timedelta(seconds=3600 + 60 * (i + 1))) for i in range(10)]
+    events += [_event(at=naive_now - timedelta(seconds=60 * (i + 1))) for i in range(40)]
+    flagged, _ = detect_anomalies(events, now=_NOW, thresholds=th)
+    assert len(flagged) == 1
+    assert any(s.kind == "volume_spike" for s in flagged[0].signals)
+
+
+# --- route helpers (config → thresholds/source wiring) ---------------------
+
+
+def test_route_helpers_map_config_to_thresholds_and_source(tmp_path):
+    from querygate.api.admin_observability_routes import _anomaly_source, _anomaly_thresholds
+    from querygate.core.config import AppConfig
+
+    audit_path = str(tmp_path / "a.jsonl")
+    cfg = AppConfig(
+        environment="localhost",
+        audit_sink_backend="jsonl",
+        audit_jsonl_path=audit_path,
+        anomaly_recent_window_seconds=1200.0,
+        anomaly_baseline_window_seconds=48000.0,
+        anomaly_min_baseline_events=7,
+        anomaly_volume_spike_ratio=4.5,
+        anomaly_max_principals_reported=33,
+    )
+    th = _anomaly_thresholds(cfg)
+    assert th.recent_window_seconds == 1200.0
+    assert th.baseline_window_seconds == 48000.0
+    assert th.min_baseline_events == 7
+    assert th.volume_spike_ratio == 4.5
+    assert th.max_principals_reported == 33
+
+    source = _anomaly_source(cfg)
+    assert isinstance(source, JsonlAuditEventSource)
+    assert str(source.path) == audit_path
+
+    # No persisted sink → no source (endpoint reports "disabled").
+    cfg_none = AppConfig(environment="localhost", audit_sink_backend="none")
+    assert _anomaly_source(cfg_none) is None

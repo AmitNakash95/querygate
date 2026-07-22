@@ -114,3 +114,49 @@ async def test_anomalies_surface_a_spike_from_the_jsonl_stream(tmp_path):
     assert "ssn" not in blob
     assert "query_shape" not in blob
     assert "customers" not in blob
+
+
+def _write_multi_principal(path, spikers):
+    """spikers: dict of principal_id -> recent event count (baseline fixed at 10)."""
+    now = datetime.now(timezone.utc)
+    with open(path, "w", encoding="utf-8") as handle:
+        for principal, recent in spikers.items():
+            times = [now - timedelta(seconds=3600 + 60 * (i + 1)) for i in range(10)]
+            times += [now - timedelta(seconds=30 + 40 * (i + 1)) for i in range(recent)]
+            for at in times:
+                event = AuditEvent(
+                    occurred_at=at,
+                    principal_id=principal,
+                    connection_id="demo",
+                    policy_decision="allowed",
+                    outcome="success",
+                    query_shape={"from": "t", "select": [{"kind": "column", "column": "c"}]},
+                    duration_ms=1,
+                )
+                handle.write(event.model_dump_json(exclude_none=True) + "\n")
+
+
+@pytest.mark.asyncio
+async def test_anomalies_respect_configured_principal_cap_end_to_end(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    app = create_app(
+        _settings(
+            (_OBS_SCOPE,),
+            backend="jsonl",
+            jsonl_path=str(path),
+            anomaly_recent_window_seconds=3600.0,
+            anomaly_baseline_window_seconds=3600.0,
+            anomaly_min_baseline_events=10,
+            anomaly_min_recent_events=3,
+            anomaly_max_principals_reported=2,
+        )
+    )
+    # Three spiking callers with increasing severity; the cap keeps the top two.
+    _write_multi_principal(path, {"p-lo": 30, "p-mid": 50, "p-hi": 90})
+
+    resp = await _get(app)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["truncated"] is True
+    ids = [p["principal_id"] for p in body["principals"]]
+    assert ids == ["p-hi", "p-mid"]  # ranked most-severe first, weakest dropped
