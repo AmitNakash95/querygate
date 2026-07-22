@@ -198,7 +198,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends unixodbc unixodbc-dev gnupg curl
-          curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+          # Run gpg as the runner user (NOT under sudo) and sudo only the file
+          # write: `sudo gpg --dearmor` inherits the runner's gpg-agent/GPG_TTY
+          # environment and dies with "gpg: cannot open '/dev/tty'" on the
+          # 24.04 runner. Piping to `sudo tee` sidesteps that and writes the
+          # same binary keyring the prod.list's signed-by= expects.
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-prod.gpg > /dev/null
           ubuntu_ver="$(. /etc/os-release && echo "$VERSION_ID")"
           curl -sSL "https://packages.microsoft.com/config/ubuntu/${ubuntu_ver}/prod.list" | sudo tee /etc/apt/sources.list.d/mssql-release.list
           sudo apt-get update
