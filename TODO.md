@@ -1798,7 +1798,30 @@ MSSQL onto it with no behavior change, and only then treat additional
 dialects (item 19) as adapter implementations rather than core-pipeline
 changes.
 
-### 58. Published adversarial benchmark vs. raw-SQL agent and Google Toolbox
+### 58. Published adversarial benchmark vs. raw-SQL agent and Google Toolbox ✅ DONE (phase 1)
+
+**Phase 1 shipped** (offline, deterministic, reproducible): a fixed,
+versioned attack corpus (`benchmarks/security_boundary_v1.yaml`), a runner
+that drives the **real** request-pipeline guardrails (policy validation +
+compiler parameter binding + the AST-only no-raw-SQL structural invariant)
+with no DB/network/LLM, the `querygate-security-benchmark` CLI (`run`/`list`,
+`--json`, exit-0-iff-clean so it can gate CI), and the published report
+`docs/business/SECURITY_BENCHMARK.md`. Current corpus: QueryGate blocks
+**14/14 (100%)** structural boundary attacks vs. a structurally-modeled
+raw-SQL-passthrough baseline at **0/14 (0%)**, with **2** documented
+inference residuals disclosed (never counted as catches) and sub-millisecond
+per-query guardrail overhead. Tests: `tests/unit/test_security_benchmark.py`.
+The baseline is a declared *structural model* of a naive SQL-forwarding
+gateway, not a live competitor run; the Google MCP Toolbox comparison is
+capability-level (from documented design), kept factual per this file's
+external-market-reference instruction.
+
+**Phase 2 — not started (needs external infrastructure).** A *live* baseline:
+run the same corpus against (a) a real LLM composing raw SQL against a seeded
+database and (b) a comparably configured Google MCP Toolbox deployment, and
+publish measured catch-rate/latency for both. Requires a model-provider
+decision + a GCP/Toolbox environment, so it is out of the offline phase-1
+scope. Until it ships, this item is not fully `✅ DONE` and stays inline here.
 
 **Effort: M (2–3 days).** Packaging existing adversarial cases (item 28)
 and QA scenarios (item 36) into a repeatable, publishable comparison, not
