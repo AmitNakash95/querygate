@@ -75,7 +75,10 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   is now realized end-to-end.*
 - [ ] **58** — Published adversarial benchmark vs. raw-SQL agent / Google
   Toolbox. *The proof artifact that ends "why not Cube/Toolbox?" with evidence
-  instead of assertion. High trust-per-effort.*
+  instead of assertion. High trust-per-effort.* **Phase 1 shipped** (offline
+  reproducible corpus + `querygate-security-benchmark` CLI + published report,
+  100% catch vs. 0% modeled raw-SQL baseline); box stays `[ ]` until phase 2's
+  live LLM/Toolbox run (needs external infra).
 
 ### Phase 1 — Pilot-readiness (let one design partner deploy & trust it)
 
