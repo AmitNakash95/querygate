@@ -396,6 +396,21 @@ loudly as its own error but never turns an already-successful query into a
 failed response to the caller — the database work already happened; the
 audit write is best-effort on top of it.
 
+**Delegated identity — "Agent A, on behalf of User Z."** When an agent calls
+QueryGate *on behalf of* a human — the two-identity model the industry is
+standardizing (RFC 8693 token exchange; the MCP `2026-07-28` authorization
+revision) — the audit event records **both** identities: `principal_id` is the
+human on whose behalf the action ran, and `actor_id` (plus the full
+`delegation_chain` for multi-hop delegation) is the agent that ran it. This is
+the artifact an auditor actually asks for: not "some service read this table"
+but "*this named human's* access was exercised *by this agent* under *this
+human's* policy." Crucially, the identity carried into policy enforcement is the
+**human's** — QueryGate applies the human's per-principal policy and
+`mandatory_row_filters`, so an agent can never see more than the person it acts
+for. Both fields are identities, never credentials, so the redaction guarantee
+above is unchanged. See the [Decision Log](#decision-log) for why the human maps
+to `subject` (and why that made policy enforcement free).
+
 ### Why this ordering matters
 
 The six stages are ordered from cheapest-and-safest to most-expensive: pure
@@ -967,6 +982,16 @@ gets identical access; with it, one agent identity can get a tighter
 connection. `policy/loader.py`'s `PolicyStore.get()` resolves all three
 layers at request time, and a connection-specific principal override wins
 over a `"*"` (every-connection) one for the same principal.
+
+For a **delegated** (on-behalf-of) request, the identity this layer keys off is
+deliberately the **human's**, not the agent's: an agent acting for a human
+carries the human as `Principal.subject` (from the token's `sub`) and itself as
+`Principal.actor` (from the RFC 8693 `act` claim), so the `principals` override
+that applies is the *human's*. An agent therefore inherits exactly the human's
+access ceiling — it can never widen it — and both identities are recorded in the
+audit event. See the audit section's "Delegated identity" note and the
+[Decision Log](#decision-log) for why this required no change to policy
+resolution.
 
 ### The admin surface: config as versioned history, not a live-edited file
 
@@ -2410,6 +2435,25 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-22 — Delegated agent identity maps the *human* to `Principal.subject`
+  and the *agent* to a new `Principal.actor` chain (TODO.md item 90, phase 1).**
+  The two-identity, on-behalf-of model (RFC 8693 token exchange; the MCP
+  `2026-07-28` authorization revision) needs QueryGate to carry both the agent
+  and the human into enforcement and audit. The design choice that made this
+  cheap and correct: because per-principal policy resolution already keys off
+  `Principal.subject` (`policy/loader.PolicyStore.get`), we map the **human** —
+  the one whose policy and `mandatory_row_filters` must bind — to `subject`, and
+  add the agent as a separate `actor` (a nested `Actor` chain built from the
+  verified JWT's RFC 8693 `act` claim). The result: the human's policy applies
+  with **zero change to the policy layer**, an agent can never exceed the access
+  of the person it acts for, and the audit event records both (`principal_id` =
+  human, `actor_id`/`delegation_chain` = agent) while staying redaction-safe
+  (identities, never credentials). This is deliberately the *attribution* slice
+  (phase 1); full MCP OAuth resource-server conformance — RFC 9728 protected-
+  resource metadata, mandatory RFC 8707 audience validation, `insufficient_scope`
+  step-up — is phase 2, scoped separately in TODO.md item 90 so the moat (which
+  competitors' warehouse-coupled gateways can't reach on Postgres/MSSQL) ships
+  without waiting on transport-spec work.
 - **2026-07-22 — Governed Writes (TODO.md item 93) is designed and specced but
   DECISION-PENDING; it must not be implemented until a maintainer explicitly
   approves crossing the read-only line.** *This entry records the design intent

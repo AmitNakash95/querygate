@@ -171,6 +171,11 @@ class AppConfig(BaseSettings):
     jwt_algorithms: list[str] = pyd.Field(default_factory=lambda: ["RS256"])
     jwt_subject_claim: str = pyd.Field(default="sub")
     jwt_scopes_claim: str = pyd.Field(default="scope")
+    # RFC 8693 delegation (TODO.md item 90): the claim carrying the actor (the
+    # agent acting on behalf of `jwt_subject_claim`, the human). When present on
+    # a verified token, the human's policy applies and both identities are
+    # audited. Standard name is `act`; configurable for non-standard IdPs.
+    jwt_act_claim: str = pyd.Field(default="act")
     jwt_leeway_seconds: float = pyd.Field(default=0)
 
     # How often each enabled connection is pinged in the background for

@@ -77,6 +77,14 @@ class AuditEvent(pyd.BaseModel):
     principal_id: Optional[str] = None
     auth_method: str = "unknown"
     principal_scopes: List[str] = pyd.Field(default_factory=list)
+    # Delegated on-behalf-of attribution (TODO.md item 90, F1). For a delegated
+    # request `principal_id` is the human on whose behalf the agent acted (and
+    # whose policy applied); `actor_id` is the immediate agent, and
+    # `delegation_chain` the full agent chain (immediate first) for multi-hop
+    # delegation. Both are identities, never credentials — the redaction
+    # guarantee is unchanged. Absent for a non-delegated caller.
+    actor_id: Optional[str] = None
+    delegation_chain: List[str] = pyd.Field(default_factory=list)
     connection_id: str
     policy_decision: AuditDecision
     outcome: Literal["success", "rejected"]

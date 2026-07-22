@@ -9,15 +9,20 @@ signature against a JWKS endpoint and maps its claims to a `Principal`.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any, List, Mapping, Optional
 
 import jwt
 
-from querygate.core.auth import Principal
+from querygate.core.auth import Actor, Principal
 from querygate.core.logging import get_logger
 
 if TYPE_CHECKING:
     from querygate.core.config import AppConfig
+
+# Defence-in-depth bound on how deep a nested `act` (delegation) chain we will
+# walk. The token is IdP-signed so this is not the trust boundary, but a
+# bounded walk keeps a pathological chain from causing unbounded work.
+_MAX_ACT_DEPTH = 16
 
 
 class JwtAuthenticator:
@@ -43,6 +48,7 @@ class JwtAuthenticator:
         algorithms: Optional[List[str]] = None,
         subject_claim: str = "sub",
         scopes_claim: str = "scope",
+        act_claim: str = "act",
         leeway_seconds: float = 0,
     ) -> None:
         self._jwk_client = jwt.PyJWKClient(jwks_url, cache_keys=True)
@@ -51,6 +57,7 @@ class JwtAuthenticator:
         self._algorithms = algorithms or ["RS256"]
         self._subject_claim = subject_claim
         self._scopes_claim = scopes_claim
+        self._act_claim = act_claim
         self._leeway_seconds = leeway_seconds
 
     def authenticate(self, bearer_token: Optional[str]) -> Optional[Principal]:
@@ -75,11 +82,17 @@ class JwtAuthenticator:
         subject = claims.get(self._subject_claim)
         if not subject:
             return None
+        # An RFC 8693 token-exchange access token carries the ultimate subject
+        # (the human) in `sub` and the delegated actor (the agent) in `act`. We
+        # map `sub` -> Principal.subject so *the human's* policy applies, and
+        # `act` -> Principal.actor for dual-identity attribution. Absent `act`,
+        # the caller is non-delegated and behaves exactly as before.
         return Principal(
             subject=str(subject),
             scopes=frozenset(_extract_scopes(claims, self._scopes_claim)),
             claims=claims,
             auth_method="jwt",
+            actor=_extract_actor(claims.get(self._act_claim)),
         )
 
 
@@ -97,8 +110,31 @@ def build_jwt_authenticator(cfg: "AppConfig") -> Optional[JwtAuthenticator]:
         algorithms=cfg.jwt_algorithms,
         subject_claim=cfg.jwt_subject_claim,
         scopes_claim=cfg.jwt_scopes_claim,
+        act_claim=cfg.jwt_act_claim,
         leeway_seconds=cfg.jwt_leeway_seconds,
     )
+
+
+def _extract_actor(act: Any, _depth: int = 0) -> Optional[Actor]:
+    """Build a delegation chain from an RFC 8693 `act` (actor) claim.
+
+    `act` is a JSON object with a `sub` and an optional nested `act` (the prior
+    actor). We walk it iteratively under a depth bound (`_MAX_ACT_DEPTH`) so a
+    pathological nesting can't cause unbounded work, then thread the frames into
+    the immutable `Actor` chain (immediate actor outermost).
+    """
+    subjects: List[str] = []
+    node: Any = act
+    while isinstance(node, Mapping) and len(subjects) < _MAX_ACT_DEPTH:
+        sub = node.get("sub")
+        if not sub:
+            break
+        subjects.append(str(sub))
+        node = node.get("act")
+    actor: Optional[Actor] = None
+    for sub in reversed(subjects):
+        actor = Actor(subject=sub, delegated_by=actor)
+    return actor
 
 
 def _extract_scopes(claims: dict, scopes_claim: str) -> List[str]:

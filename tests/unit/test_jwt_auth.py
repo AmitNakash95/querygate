@@ -182,6 +182,110 @@ def test_composite_authenticator_falls_back_to_jwt():
     assert composite.authenticate("neither-a-key-nor-a-jwt") is None
 
 
+def test_delegation_act_claim_maps_to_actor():
+    # RFC 8693 token-exchange: `sub` is the human on whose behalf the agent
+    # acts; `act.sub` is the agent. The human becomes Principal.subject (so the
+    # human's policy applies), the agent becomes Principal.actor.
+    auth = _authenticator()
+    token = _make_token(
+        {
+            "sub": "user-human",
+            "iss": "https://idp.example.com/",
+            "aud": "querygate",
+            "act": {"sub": "agent-app"},
+        }
+    )
+    principal = auth.authenticate(token)
+    assert principal is not None
+    assert principal.subject == "user-human"
+    assert principal.is_delegated is True
+    assert principal.actor_subject == "agent-app"
+    assert principal.delegation_chain == ["agent-app"]
+
+
+def test_nested_act_claim_preserves_full_chain():
+    # Nested delegation (RFC 8693 §4.1): agent-app is itself delegated by
+    # service-s. Immediate actor first, oldest ancestor last.
+    auth = _authenticator()
+    token = _make_token(
+        {
+            "sub": "user-human",
+            "iss": "https://idp.example.com/",
+            "aud": "querygate",
+            "act": {"sub": "agent-app", "act": {"sub": "service-s"}},
+        }
+    )
+    principal = auth.authenticate(token)
+    assert principal.actor_subject == "agent-app"
+    assert principal.delegation_chain == ["agent-app", "service-s"]
+
+
+def test_no_act_claim_is_not_delegated():
+    auth = _authenticator()
+    token = _make_token({"sub": "user-123", "iss": "https://idp.example.com/", "aud": "querygate"})
+    principal = auth.authenticate(token)
+    assert principal.is_delegated is False
+    assert principal.actor_subject is None
+    assert principal.delegation_chain == []
+
+
+def test_malformed_act_claim_is_ignored():
+    # A non-object `act`, or one missing `sub`, must not authenticate a phantom
+    # actor — it degrades to a non-delegated principal rather than erroring.
+    auth = _authenticator()
+    for bad_act in ("agent-app", 123, {}, {"not_sub": "x"}):
+        token = _make_token(
+            {
+                "sub": "user-123",
+                "iss": "https://idp.example.com/",
+                "aud": "querygate",
+                "act": bad_act,
+            }
+        )
+        principal = auth.authenticate(token)
+        assert principal is not None
+        assert principal.actor is None
+
+
+def test_deeply_nested_act_chain_is_bounded():
+    # A pathological chain deeper than _MAX_ACT_DEPTH is truncated, not walked
+    # unboundedly, and still authenticates the human subject.
+    from querygate.core.jwt_auth import _MAX_ACT_DEPTH
+
+    act: dict = {"sub": "agent-0"}
+    node = act
+    for i in range(1, _MAX_ACT_DEPTH + 10):
+        node["act"] = {"sub": f"agent-{i}"}
+        node = node["act"]
+    auth = _authenticator()
+    token = _make_token(
+        {
+            "sub": "user-human",
+            "iss": "https://idp.example.com/",
+            "aud": "querygate",
+            "act": act,
+        }
+    )
+    principal = auth.authenticate(token)
+    assert principal.subject == "user-human"
+    assert len(principal.delegation_chain) == _MAX_ACT_DEPTH
+    assert principal.delegation_chain[0] == "agent-0"
+
+
+def test_custom_act_claim_name():
+    auth = _authenticator(act_claim="on_behalf_of")
+    token = _make_token(
+        {
+            "sub": "user-human",
+            "iss": "https://idp.example.com/",
+            "aud": "querygate",
+            "on_behalf_of": {"sub": "agent-app"},
+        }
+    )
+    principal = auth.authenticate(token)
+    assert principal.actor_subject == "agent-app"
+
+
 def test_build_jwt_authenticator_returns_none_when_disabled():
     from querygate.core.config import AppConfig
 
