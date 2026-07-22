@@ -22,15 +22,13 @@ _ADMIN_KEY = "ui-admin-key"
 
 def _write_source_files(tmp_path):
     connections_file = tmp_path / "connections.yaml"
-    connections_file.write_text(
-        """
+    connections_file.write_text("""
 connections:
   - id: demo
     dialect: postgresql
     connection_string: ${ADMIN_UI_DB_URL}
     known_tables: [customers, orders]
-"""
-    )
+""")
     policy_file = tmp_path / "policy.yaml"
     policy_file.write_text("default:\n  enabled: true\n")
     return str(connections_file), str(policy_file)

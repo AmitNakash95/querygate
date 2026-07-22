@@ -8,7 +8,6 @@ import tomllib
 import zipfile
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 FORBIDDEN_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".pyc")

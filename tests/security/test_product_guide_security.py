@@ -84,8 +84,7 @@ def test_access_context_is_recomputed_per_principal_without_cross_caller_cache_l
 
 def test_redacted_admin_summary_hides_env_and_vault_references_and_policy_literals(tmp_path):
     connections = tmp_path / "connections.yaml"
-    connections.write_text(
-        """
+    connections.write_text("""
 connections:
   - id: env-backed
     dialect: postgresql
@@ -93,11 +92,9 @@ connections:
   - id: vault-backed
     dialect: postgresql
     connection_string: ${vault:secret/querygate/hidden-path#password}
-"""
-    )
+""")
     policy = tmp_path / "policy.yaml"
-    policy.write_text(
-        """
+    policy.write_text("""
 default:
   mandatory_row_filters:
     - table: hidden_tenant_table
@@ -107,8 +104,7 @@ principals:
   another-hidden-principal:
     env-backed:
       enabled: false
-"""
-    )
+""")
     cfg = AppConfig(
         environment="localhost",
         connections_file=str(connections),
