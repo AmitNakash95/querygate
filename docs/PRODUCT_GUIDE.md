@@ -577,10 +577,11 @@ or worked around.
 > guarantee is backed by a deny-by-default CI gate (static analysis, dependency
 > audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 191-case
 > adversarial suite), and reviewers get a reproducible packet where each claim
-> names the command that reproduces it. We're also upfront about the edges — no
-> third-party pentest or signed images yet; signing is the identified next
-> step. The whole subject is three things: **structural guarantees, continuous
-> and reproducible proof, and honesty about the gaps.**
+> names the command that reproduces it. The published container image is signed
+> (cosign keyless) and carries SLSA build provenance, both consumer-verifiable.
+> We're also upfront about the edges — no third-party pentest yet. The whole
+> subject is three things: **structural guarantees, continuous and reproducible
+> proof, and honesty about the gaps.**
 
 ### 1. There is no raw-SQL input, structurally
 
@@ -849,12 +850,14 @@ will respect the precision. QueryGate ships as a private, closed-source
 container image, so the OpenSSF Best Practices *badge* — awarded only to
 public FLOSS repositories — cannot be earned today; instead we keep a genuine
 **self-assessment** against its criteria that attaches to a security
-questionnaire. What we do *not* claim is an independent penetration test, a
-formal certification, or (yet) signed artifact distribution — the last of
-which, **Sigstore/cosign image signing plus SLSA build provenance**, is the
-external attestation that genuinely fits a self-hosted image product and is the
-identified near-term follow-up. Stating the one real gap plainly is itself part
-of the posture.
+questionnaire. **Signed artifact distribution is now implemented** — the release
+workflow signs the published image with **Sigstore/cosign** (keyless) and
+attaches a **SLSA build-provenance** attestation, both bound to the image digest
+and verifiable by a consumer with `cosign verify` / `gh attestation verify` (see
+`docs/RELEASING.md`); this was the external attestation that genuinely fits a
+self-hosted image product. What we still do *not* claim is an independent
+penetration test or a formal certification. Stating the real gaps plainly is
+itself part of the posture.
 
 ### The published adversarial benchmark — proof a reviewer can rerun
 
@@ -2240,12 +2243,18 @@ them. Rollback policy is simple and deliberate: an already-published tag is
 never moved — a bad release gets a *new*, higher version number that goes
 through every gate again, not a rewritten tag.
 
-Cryptographic artifact signing (e.g. Sigstore/cosign) is intentionally
-deferred — see `docs/RELEASING.md` and `TODO.md` item 30 phase 2 — because
-it needs a real publishing pipeline (a container registry / package index)
-that doesn't exist yet for this project. The SBOM, dependency audit, and
-checksum steps above are the phase-1 supply-chain work and already run on
-every `make release-check`.
+Pushing that tag triggers the release workflow, which builds the image,
+Trivy-scans it (deny-by-default, pre-publish), pushes it to **GHCR**, and then
+**signs it with Sigstore/cosign** (keyless) and attaches a **SLSA
+build-provenance** attestation — both bound to the image digest and verifiable
+by a consumer (`cosign verify` / `gh attestation verify`; see
+`docs/RELEASING.md`). The SBOM, dependency audit, and checksum steps above are
+the phase-1 supply-chain work and run on every `make release-check`;
+`make verify-release` checks a downloaded bundle's integrity offline against
+`dist/SHA256SUMS`. What remains a maintainer step (`TODO.md` item 30/89 phase 2)
+is cutting the *first* signed release (a deliberate tag push, never automatic)
+and choosing a Python package-index — the image is the signed distribution
+channel today.
 
 ### Why so much of this is "adversarial" and "under real load"
 
@@ -2488,10 +2497,11 @@ per release, container-image scanning (Trivy), full-history secret scanning
 (gitleaks), and OpenAPI fuzzing (Schemathesis) on top of the 191-case
 adversarial suite. A regression that weakened any of them fails the build.
 For a reviewer under NDA, `docs/SECURITY_POSTURE.md` is a reproducible packet
-— every claim names the command that reproduces it. We're also precise about
-what we *don't* claim: no independent penetration test, formal certification,
-or signed-image distribution yet (image signing is the identified next step).
-See [Security Model](#security-model), section 6.
+— every claim names the command that reproduces it. The published image is
+signed (Sigstore/cosign keyless) with a SLSA build-provenance attestation,
+verifiable via `cosign verify` / `gh attestation verify`. We're also precise
+about what we *don't* claim: no independent penetration test or formal
+certification. See [Security Model](#security-model), section 6.
 
 ## Decision Log
 
@@ -2499,6 +2509,24 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — Signed delivery attests the container image (the thing we
+  actually publish), not the Python package; publishing stays a manual tag push
+  (TODO.md item 30/89 phase 2).** Completing the signed-delivery gate, two
+  choices were recorded. **(1) Attest what is published.** The release workflow
+  signs the GHCR image with cosign keyless (Sigstore) and attaches a SLSA
+  build-provenance attestation, both bound to the immutable digest — because the
+  container image is how QueryGate is distributed. The Python wheel/sdist are
+  *not* signed/published: no package index (PyPI/private) is chosen, so signing
+  them would attest an artifact nobody pulls. They are covered by
+  `dist/SHA256SUMS` + `make verify-release` (offline integrity) until an index is
+  chosen. This resolves item 30's earlier "signing against nothing is theater"
+  concern — there is now a real published artifact (the image) to sign. **(2)
+  Publishing is never automatic.** The signing/provenance runs only on a
+  maintainer's deliberate `v*` tag push, never on a `main` commit, so a release
+  is always an intentional act. The rejected alternative — auto-publish on merge
+  — was declined because a security product's release must be a deliberate,
+  gated decision, not a side effect of merging. The consumer verifies with
+  `cosign verify` / `gh attestation verify` (commands in `docs/RELEASING.md`).
 - **2026-07-23 — The published adversarial benchmark's raw-SQL baseline is a
   declared structural model, not a live competitor run (TODO.md item 58,
   phase 1).** Turning the internal adversarial suite into a *publishable*
@@ -3135,11 +3163,13 @@ reasoning behind them, newest first. Added to incrementally as work happens
   on the system's own unreviewed guess — so the learner can't "confirm"
   its own unpublished suggestions. See
   [Catalog / Semantic Layer](#catalog--semantic-layer).
-- **Cryptographic release signing (Sigstore/cosign) deliberately deferred.**
-  Requires a real publishing pipeline (container registry / package index)
-  that doesn't exist yet; the SBOM, dependency audit, and checksum steps
-  already run on every release are treated as the phase-1 supply-chain
-  work (`TODO.md` item 30). See [Testing, Release & Operations](#testing-release--operations).
+- **Cryptographic release signing (Sigstore/cosign) — since implemented
+  (2026-07-23).** *Superseded:* this was deferred while no publishing pipeline
+  existed. Once GHCR became the real published artifact, the release workflow
+  gained cosign keyless signing + a SLSA build-provenance attestation; see the
+  2026-07-23 signed-delivery entry above and [Testing, Release &
+  Operations](#testing-release--operations). The SBOM, dependency audit, and
+  checksum steps remain the phase-1 supply-chain work (`TODO.md` item 30).
 - **MCP OAuth audience binding is enforced in the MCP resource-server layer,
   not globally in the JWT verifier.** The JWT authenticator is shared by the
   REST and MCP surfaces; making it *globally* require one audience would couple

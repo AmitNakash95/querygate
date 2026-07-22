@@ -25,6 +25,7 @@ permissions:
   contents: read
   packages: write # push to GHCR
   id-token: write # cosign keyless signing via OIDC
+  attestations: write # SLSA build-provenance attestation (actions/attest-build-provenance)
 
 env:
   # GHCR path is derived from the repo automatically and lowercased by
@@ -124,3 +125,19 @@ jobs:
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # Signed, verifiable SLSA build provenance for the pushed image: an in-toto
+      # attestation, bound to this workflow's OIDC identity via Sigstore and
+      # recorded in the transparency log, that states which repo/workflow/commit
+      # built these exact bytes. Pushed to GHCR next to the image and also stored
+      # in GitHub's attestations API. This is the "SLSA provenance" half of the
+      # signed-delivery gate (the cosign step above is the signing half). A
+      # consumer verifies it by immutable digest with:
+      #   gh attestation verify oci://ghcr.io/agitmit/querygate@<digest> \
+      #     --repo AGitmit/QueryGate
+      - name: Attest SLSA build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
