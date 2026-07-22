@@ -331,6 +331,71 @@ def test_sink_failure_is_logged_but_does_not_raise():
 
 
 @pytest.mark.asyncio
+async def test_delegated_request_audits_both_human_and_agent(tmp_path):
+    # TODO.md item 90: an on-behalf-of query must record the human
+    # (`principal_id`) *and* the agent chain (`actor_id`/`delegation_chain`) —
+    # "Agent A on behalf of User Z" — while staying redaction-safe.
+    from querygate.core.auth import Actor
+
+    path = tmp_path / "delegated.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    table = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("email", sa.String(200)),
+    )
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1, "email": "x@example.com"}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(
+            connection_id="demo",
+            principal=Principal(
+                subject="user-human",
+                auth_method="jwt",
+                actor=Actor(subject="agent-app", delegated_by=Actor(subject="service-s")),
+            ),
+            surface="mcp",
+        )
+        await service.execute(_query_with_sensitive_literals())
+
+    event = json.loads(path.read_text())
+    assert event["principal_id"] == "user-human"  # the human whose policy applied
+    assert event["actor_id"] == "agent-app"  # the immediate agent
+    assert event["delegation_chain"] == ["agent-app", "service-s"]
+    assert event["outcome"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_non_delegated_request_has_no_actor_fields(tmp_path):
+    path = tmp_path / "direct.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    audit_query(
+        connection_id="demo",
+        sql="SELECT 1",
+        query_shape={"from": "customers"},
+        duration_ms=1,
+        principal="agent-a",
+    )
+    event = json.loads(path.read_text())
+    assert event["principal_id"] == "agent-a"
+    # The JSONL sink serializes with exclude_none=True, so a non-delegated
+    # request carries no actor_id at all (never a misleading empty attribution).
+    assert "actor_id" not in event
+    assert event["delegation_chain"] == []
+
+
+@pytest.mark.asyncio
 async def test_rejected_event_has_category_without_exception_or_literals(tmp_path):
     path = tmp_path / "rejected.jsonl"
     set_audit_sink(JsonlAuditSink(str(path)))
