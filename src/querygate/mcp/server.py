@@ -122,5 +122,6 @@ def setup_mcp(app: "FastAPI", cfg: "AppConfig") -> None:
         mount_path=cfg.mcp_mount_path,
         tool_count=len(server._tool_manager._tools),
         auth_mode="api_keys" if cfg.mcp_api_keys else "dev_bypass",
+        oauth_resource_server=cfg.mcp_oauth_resource_server_enabled,
         dns_rebinding_protection=cfg.mcp_dns_rebinding_protection,
     )
