@@ -1074,7 +1074,7 @@ async def test_config_governance_endpoints_reject_unauthenticated_callers():
 
 
 @pytest.mark.asyncio
-async def test_blast_radius_never_leaks_static_filter_values_or_yaml():
+async def test_blast_radius_never_leaks_static_filter_values_or_yaml(monkeypatch):
     """The blast-radius aggregation (TODO item 41) fans a candidate diff out
     across every configured principal — the same redaction guarantee /diff
     already gives one resolution must still hold once it's evaluated many
@@ -1082,6 +1082,12 @@ async def test_blast_radius_never_leaks_static_filter_values_or_yaml():
     never appear anywhere in the aggregated response, including inside a
     per-principal impact entry.
     """
+    # Resolving the *active* config re-reads the default example connections
+    # file, whose demo/retail/analytics profiles reference ${QUERYGATE_DEMO_DB_URL}.
+    # The DB-free suite doesn't set it (and CI has no .env), so provide a dummy
+    # here — blast-radius only validates/resolves policy access and never opens a
+    # connection. Mirrors CI's querygate-validate-config step.
+    monkeypatch.setenv("QUERYGATE_DEMO_DB_URL", "postgresql+asyncpg://u:p@localhost/demo")
     app = create_app(_governance_app(scopes=["admin:config:read", "admin:config:write"]))
     headers = {"Authorization": "Bearer governance-caller-key"}
     marker = "tenant-secret-marker-9f2c"
