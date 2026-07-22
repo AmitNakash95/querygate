@@ -4,6 +4,7 @@
 Regenerate after editing docs/PRODUCT_GUIDE.md:
     poetry run python scripts/generate_product_guide_html.py
 """
+
 import html
 import json
 import re
