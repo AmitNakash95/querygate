@@ -650,14 +650,12 @@ async def test_vault_resolved_secret_never_appears_in_connection_listing_or_erro
     """
     marker = "vault-resolved-super-secret-password-marker"
     connections_file = tmp_path / "connections.yaml"
-    connections_file.write_text(
-        """
+    connections_file.write_text("""
 connections:
   - id: vault-demo
     dialect: postgresql
     connection_string: ${vault:querygate/demo#connection_string}
-"""
-    )
+""")
     policy_file = tmp_path / "policy.yaml"
     policy_file.write_text("default:\n  enabled: true\n")
 

@@ -28,15 +28,13 @@ _ADMIN_KEY = "governance-admin-key"
 
 def _write_source_files(tmp_path):
     connections_file = tmp_path / "connections.yaml"
-    connections_file.write_text(
-        """
+    connections_file.write_text("""
 connections:
   - id: gov-demo
     dialect: postgresql
     connection_string: ${GOV_TEST_DB_URL}
     known_tables: [foo]
-"""
-    )
+""")
     policy_file = tmp_path / "policy.yaml"
     policy_file.write_text("default:\n  enabled: true\n")
     return str(connections_file), str(policy_file)

@@ -54,15 +54,13 @@ def _snapshot() -> ObservedSchemaSnapshot:
 
 def _write_source_files(tmp_path):
     connections_file = tmp_path / "connections.yaml"
-    connections_file.write_text(
-        """
+    connections_file.write_text("""
 connections:
   - id: demo
     dialect: postgresql
     connection_string: ${CATALOG_GOV_TEST_DB_URL}
     known_tables: [customers]
-"""
-    )
+""")
     policy_file = tmp_path / "policy.yaml"
     policy_file.write_text("default:\n  enabled: true\n")
 
@@ -385,15 +383,13 @@ def _relationship_target() -> CatalogDraftTarget:
 
 def _write_source_files_with_usage_signals(tmp_path, *, support: int = 5):
     connections_file = tmp_path / "connections.yaml"
-    connections_file.write_text(
-        """
+    connections_file.write_text("""
 connections:
   - id: demo
     dialect: postgresql
     connection_string: ${CATALOG_GOV_TEST_DB_URL}
     known_tables: [customers, orders]
-"""
-    )
+""")
     policy_file = tmp_path / "policy.yaml"
     policy_file.write_text("default:\n  enabled: true\n")
 

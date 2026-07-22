@@ -594,22 +594,18 @@ async def test_health_endpoint_reports_degraded_when_connection_unreachable(app)
 
 def _write_reload_config_files(tmp_path):
     connections_file = tmp_path / "connections.yaml"
-    connections_file.write_text(
-        """
+    connections_file.write_text("""
 connections:
   - id: reload-demo
     dialect: postgresql
     connection_string: ${TEST_RELOAD_DB_URL}
     known_tables: [foo]
-"""
-    )
+""")
     policy_file = tmp_path / "policy.yaml"
-    policy_file.write_text(
-        """
+    policy_file.write_text("""
 default:
   enabled: true
-"""
-    )
+""")
     return str(connections_file), str(policy_file)
 
 
@@ -659,15 +655,13 @@ async def test_reload_config_swaps_in_catalog_file(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_RELOAD_DB_URL", "postgresql+asyncpg://user:pass@localhost/demo")
     connections_file, policy_file = _write_reload_config_files(tmp_path)
     catalog_file = tmp_path / "catalog.yaml"
-    catalog_file.write_text(
-        """
+    catalog_file.write_text("""
 connections:
   reload-demo:
     tables:
       foo:
         description: "Reloaded catalog entry."
-"""
-    )
+""")
     settings = _settings(
         api_keys=["secret-key"],
         api_key_scopes=["admin:reload-config"],
@@ -687,15 +681,13 @@ connections:
 @pytest.mark.asyncio
 async def test_reload_config_resolves_vault_backed_connection_string(tmp_path):
     connections_file = tmp_path / "connections.yaml"
-    connections_file.write_text(
-        """
+    connections_file.write_text("""
 connections:
   - id: vault-demo
     dialect: postgresql
     connection_string: ${vault:querygate/demo#connection_string}
     known_tables: [foo]
-"""
-    )
+""")
     policy_file = tmp_path / "policy.yaml"
     policy_file.write_text("default:\n  enabled: true\n")
 

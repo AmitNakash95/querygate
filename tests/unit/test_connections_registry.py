@@ -23,14 +23,12 @@ def test_dotenv_interpolation_matches_quickstart(tmp_path, monkeypatch):
         "DOTENV_DB_URL=postgresql+asyncpg://dotenv-user:dotenv-pass@host/db\n"
     )
     connections_file = tmp_path / "connections.yaml"
-    connections_file.write_text(
-        """
+    connections_file.write_text("""
 connections:
   - id: demo
     dialect: postgresql
     connection_string: ${DOTENV_DB_URL}
-"""
-    )
+""")
 
     registry = ConnectionRegistry.from_file(str(connections_file))
 

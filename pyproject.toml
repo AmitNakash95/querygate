@@ -54,13 +54,15 @@ redis = "^8.0.1"
 hvac = "^2.4.0"
 
 [tool.poetry.group.dev.dependencies]
-pytest = "7.4.0"
-pytest-asyncio = "0.21.1"
-pytest-mock = "3.11.1"
-black = "25.1.0"
+# Test stack floored at CVE-fixed versions (pytest PYSEC-2026-1845); pytest 9
+# needs pytest-asyncio 1.x / pytest-mock 3.14+ / pytest-cov 6.1+.
+pytest = ">=9.0.3"
+pytest-asyncio = ">=1.0.0"
+pytest-mock = ">=3.14.0"
+black = ">=26.3.1"
 fakeredis = "^2.36.2"
 lupa = "^2.8"
-pytest-cov = "6.0.0"
+pytest-cov = ">=6.1.0"
 cyclonedx-bom = "^7.3.0"
 pip-audit = "^2.10.1"
 aiosqlite = "^0.22.1"
