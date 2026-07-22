@@ -91,10 +91,46 @@ are absent from tracked product inputs.
    shasum -a 256 -c dist/SHA256SUMS
    ```
 
-Cryptographic signing of published artifacts/images (e.g. Sigstore/cosign keyless signing)
-needs a real publishing pipeline — a container registry and/or package index to attach the
-signature and transparency-log entry to — which does not exist yet for this project; see
-TODO.md item 30's phase 2.
+`make verify-release` (`scripts/verify_release.py`) is the gating, cross-platform
+counterpart to that snippet: it re-computes each artifact's SHA-256 and fails closed on a
+missing manifest, a missing artifact, a digest mismatch, or a malformed manifest — the
+integrity check a consumer runs after downloading a release bundle. It checks *integrity*
+(the bytes are the ones this repo produced), not *authenticity*; authenticity of the
+published container image comes from the signature and provenance described next.
+
+## Signed, provenance-attested container image
+
+The published container image is cryptographically signed and carries SLSA build
+provenance. Both are produced by `.github/workflows/release.yml` when a maintainer pushes a
+version tag (`v*`); the workflow builds the image, Trivy-scans it (deny-by-default,
+pre-publish), pushes it to GHCR, and then:
+
+- **cosign keyless signature (Sigstore).** Signed with the workflow's OIDC identity and
+  recorded in the public transparency log — no long-lived signing key to manage.
+- **SLSA build-provenance attestation** (`actions/attest-build-provenance`). A signed
+  in-toto attestation, bound to the same OIDC identity, stating which repo/workflow/commit
+  built those exact bytes; pushed to GHCR next to the image and stored in GitHub's
+  attestations API.
+
+Both bind to the image's immutable digest, not a mutable tag. A consumer verifies before
+running:
+
+```bash
+# Signature — proves the image came from this repo's release workflow.
+cosign verify ghcr.io/agitmit/querygate:0.1.0 \
+  --certificate-identity-regexp 'https://github.com/AGitmit/QueryGate/.github/workflows/release.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# SLSA build provenance — proves which workflow/commit built these exact bytes.
+gh attestation verify oci://ghcr.io/agitmit/querygate:0.1.0 --repo AGitmit/QueryGate
+```
+
+**Still deferred to a maintainer decision (TODO.md item 30/89 phase 2):** the *first*
+signed+attested release is only produced when a maintainer actually pushes a version tag
+(publishing is never automatic on a commit), and **Python package-index (PyPI/private
+index) publishing** has no index chosen yet — the signing/provenance above cover the
+container image, which is how QueryGate is distributed; the Python wheel/sdist are verified
+by `SHA256SUMS`/`make verify-release` until an index is chosen.
 
 ## Tagging
 
@@ -104,10 +140,10 @@ After every gate passes and the release commit is final:
 git tag -a v0.1.0 -m "QueryGate v0.1.0"
 ```
 
-Tags and artifacts are local until a maintainer explicitly pushes or publishes them.
-Public registry automation and image signing are intentionally deferred to TODO item 30's
-phase 2; the SBOM, dependency audit, and artifact checksums described above are phase 1 and
-already run as part of every `make release-check`.
+Local `make release-check`/`release-smoke` prove the release locally; pushing the `v0.1.0`
+tag is what triggers `.github/workflows/release.yml` to build, scan, push, sign, and attest
+the image. A maintainer pushes the tag deliberately — publishing is never automatic on a
+`main` commit.
 
 ## Rollback
 

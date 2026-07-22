@@ -192,14 +192,20 @@ claim here matters more than badge-count:
   as an internal metric if/when QueryGate is open-sourced; intentionally not run
   as a private-repo CI gate today because most checks are not meaningful without
   a public repo.
-- **Recommended, and genuinely earnable while private — signed images + build
-  provenance.** Because QueryGate is distributed as an image customers pull,
-  **Sigstore/cosign image signing + SLSA build provenance** is the external
-  attestation that actually fits this product: a customer can cryptographically
-  verify the image they run was built by us from this source, untampered. This
-  is a recommended near-term follow-up (tracked in TODO.md item 89) and is the
-  right place to invest external-attestation effort for a closed-source,
-  self-hosted image.
+- **Signed images + build provenance — implemented.** Because QueryGate is
+  distributed as an image customers pull, **Sigstore/cosign image signing + SLSA
+  build provenance** is the external attestation that actually fits this product:
+  a customer can cryptographically verify the image they run was built by us from
+  this source, untampered. The release workflow (`.github/workflows/release.yml`)
+  signs the pushed image with cosign keyless (Sigstore, OIDC identity,
+  transparency log) and attaches an `actions/attest-build-provenance` SLSA
+  attestation, both bound to the image's immutable digest. A consumer verifies
+  with `cosign verify` and `gh attestation verify` — the exact commands are in
+  [docs/RELEASING.md](RELEASING.md). Artifact *integrity* is separately checkable
+  offline with `make verify-release` against `dist/SHA256SUMS`. What remains a
+  maintainer step (TODO.md item 30/89 phase 2) is cutting the *first* signed
+  release (a deliberate tag push, never automatic) and choosing a Python
+  package-index; the signing/provenance mechanism itself is in place.
 
 ## Reproduce the whole posture
 

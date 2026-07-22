@@ -190,6 +190,10 @@ product-guide-html: ## Render docs/PRODUCT_GUIDE.md into the browsable docs/prod
 sbom: ## Generate a CycloneDX SBOM, dependency vulnerability report, and SHA256SUMS from dist/ (run `poetry build` first)
 	poetry run python scripts/generate_sbom.py
 
+.PHONY: verify-release
+verify-release: ## Verify dist/ artifact integrity against dist/SHA256SUMS (the check a consumer runs after download). Pass ARGS="--dist-dir path".
+	poetry run python scripts/verify_release.py $(ARGS)
+
 .PHONY: release-check
 release-check: ## Run deterministic source/package release gates and build artifacts
 	poetry check --lock

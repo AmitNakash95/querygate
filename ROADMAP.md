@@ -86,6 +86,11 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   artifacts** (Sigstore/cosign + SLSA provenance). *One workstream — do signed
   delivery once. The one real external-attestation gap the trust
   self-assessment surfaces; cheap credibility for any security review.*
+  **Mechanism shipped** (`release.yml`: GHCR push + cosign keyless + SLSA
+  build-provenance attestation, both digest-bound; `make verify-release` +
+  consumer `cosign verify`/`gh attestation verify` docs). Box stays `[ ]` until
+  the two maintainer-gated bits — the *first* executed signed release (a
+  deliberate tag push) and a chosen Python package-index — are done.
 - [ ] **56** — HA / multi-region reference deployment + DR runbook (start with a
   supported Helm path). *A pilot has to actually deploy; unblocks the
   "deployed in a day" pilot success criterion.*
