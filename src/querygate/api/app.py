@@ -137,6 +137,14 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
 
         setup_mcp(application, conf)
 
+    if conf.mcp_enabled and conf.mcp_oauth_resource_server_enabled:
+        # RFC 9728 protected-resource metadata (TODO.md item 90 phase 2), served
+        # unauthenticated from the main app so a challenged client can discover
+        # the authorization server(s) for the MCP resource.
+        from querygate.mcp.oauth_metadata import build_oauth_metadata_router
+
+        application.include_router(build_oauth_metadata_router(conf))
+
     principal_dependency = build_principal_dependency(conf)
     application.include_router(
         build_help_router(principal_dependency, conf, prefix=conf.api_v1_prefix)

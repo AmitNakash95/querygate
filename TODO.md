@@ -2113,64 +2113,10 @@ proposal, not an approved task. Each item below preserves every core invariant
 call or policy self-edit); they *strengthen* attribution and governance rather
 than widen the input surface.
 
-### 90. Delegated agent identity (on-behalf-of) carried into policy + dual-identity audit ✅ DONE (phase 1)
+### 90. Delegated agent identity (on-behalf-of) carried into policy + dual-identity audit ✅ DONE
 
-**Effort: L. Priority: high (time-sensitive — see below). Feature ref: F1.**
-
-**Status:** Phase 1 (delegated-identity attribution) shipped; phase 2 (MCP OAuth
-resource-server conformance) not started.
-- **Phase 1 ✅ DONE — delegated-identity attribution (the moat).** `core/auth.py`
-  gains an `Actor` delegation chain on `Principal` (`subject` = the human,
-  `actor` = the agent, with a nested `delegated_by` chain and
-  `is_delegated`/`actor_subject`/`delegation_chain` helpers). `core/jwt_auth.py`
-  maps a verified token's RFC 8693 `act` claim into that chain (configurable via
-  `jwt_act_claim`, depth-bounded, malformed-`act`-safe). Because per-principal
-  policy resolution already keys off `Principal.subject`
-  (`policy/loader.PolicyStore.get`), mapping the human to `subject` makes **the
-  human's** policy and `mandatory_row_filters` apply with zero change to the
-  policy layer. `audit/events.AuditEvent` gains `actor_id` + `delegation_chain`
-  (identities only — redaction guarantee unchanged), threaded through
-  `audit/logger.audit_query` and both `execution/service.py` audit call sites, so
-  every query records "Agent A on behalf of User Z under the human's policy."
-  Covered by unit tests in `test_auth.py`, `test_jwt_auth.py`,
-  `test_policy_loader.py` (human's-policy-wins), and `test_audit.py`
-  (dual-identity event, redaction-safe).
-- **Phase 2 — MCP OAuth resource-server conformance (not started).** Implement the
-  MCP `2026-07-28` authorization spec as a proper OAuth resource server: RFC 9728
-  protected-resource metadata, mandatory RFC 8707 audience validation, and
-  `insufficient_scope` step-up (RFC 8693 token-exchange acceptance on the
-  transport). Touches `mcp/auth.py`, `api/auth.py`, `core/jwt_auth.py`
-  (audience-set validation). Also extend actor attribution to the admin-surface
-  audit events (`ConfigChangeEvent`/`CatalogGovernanceEvent`/`ConnectionProbeEvent`)
-  if delegated admin actions are in scope.
-
-**Why it matters (competitive pressure):** The identity market has fully solved
-"delegated identity → API" and is standardizing it *this month* — the MCP
-`2026-07-28` spec release candidate (verified 2026-07-22: "the largest revision
-of the protocol since launch") rewrites authorization around a two-identity
-delegated model (the agent application **and** the human on whose behalf it
-acts), RFC 8707 audience binding, and RFC 8693 token exchange. But the
-independent competitive finding stands: *almost nobody carries that principal
-into the database session* — only Databricks (Unity Catalog on-behalf-of) and
-Snowflake (caller-rights) do, and only because they own both the gateway and
-the engine. Roughly two-thirds of orgs cannot attribute an agent action to a
-human. This is the single hottest enterprise requirement with the emptiest
-data-layer, and the standard formalizing it lands now — QueryGate is
-warehouse-agnostic, so it can deliver OBO-grade attribution against
-Postgres/MSSQL where the two warehouse vendors cannot reach.
-
-**What to do:** Accept a delegation credential (agent acting *on behalf of* a
-human), resolve **both** identities, apply the **human's** resolved policy and
-`mandatory_row_filters` to the query, and record **both** in the audit event
-("Agent A on behalf of User Z under Policy Y"). Implement the MCP authorization
-spec as a proper OAuth resource server: RFC 9728 protected-resource metadata,
-mandatory RFC 8707 audience validation, `insufficient_scope` step-up. Extend
-`core/auth.py`'s `Principal` to a delegation chain (actor + subject) — a natural
-extension of machinery that already drives per-principal policy — and add
-actor+subject fields to `audit/events.py`. Touches `core/auth.py`,
-`core/jwt_auth.py`, `mcp/auth.py`, `api/auth.py`, `audit/events.py`. Extends
-items 8/10/21; pairs with item 91. **Invariant:** none at risk — this
-strengthens attribution.
+Delegated-identity attribution (RFC 8693 `act` → `Principal.actor`, the human's policy applies, both identities audited) plus the MCP surface as an opt-in OAuth 2.0 resource server (RFC 9728 metadata, RFC 8707 audience binding, RFC 6750 `WWW-Authenticate` scope/step-up challenges).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 90).
 
 ### 91. Tamper-evident hash-chained audit ledger + per-query compliance receipts
 
@@ -2435,3 +2381,43 @@ write is a validated structure, never a DML string. Preserves redaction-safe
 audit (counts/shapes/hashes, never values/rows). Reuses, does not duplicate, the
 policy/validation/compile/execute/audit spine. Uses `DialectAdapter` for all
 dialect variance (reject-not-emulate where a dialect lacks a capability).
+
+### 94. Verify (and, if warranted, enable) prepared-statement plan reuse for template execution
+
+**Effort: S. Priority: opportunistic optimization — measure first; may close as
+"no change needed." Depends on: nothing. Explicitly NOT a pivot.**
+
+**Origin.** Fielding the "stored procedures run more efficiently — why don't we
+do that?" question (see `docs/business/COMPETITOR_CUBE.md`, analytics-performance
+note). Executing stored procedures is a permanent non-goal — it reopens the
+raw-SQL/arbitrary-code path the whole product exists to remove. But the *durable*
+SP performance benefit that isn't SP-exclusive — **cached execution plans**
+(skip re-parse/re-optimize on repeated calls) — is capturable via
+prepared/parameterized statements, and query templates (items 48/87) are the
+ideal shape for it: fixed structure, only parameter values vary, so the DB sees
+the same parameterized statement every call.
+
+**What to do — measure before touching anything.**
+1. Determine whether repeated template (and ad-hoc) reads already get
+   server-side prepared-statement plan reuse *today*. This depends on the driver
+   and pooling: asyncpg prepares/caches statements per connection automatically;
+   psycopg3 only prepares above `prepare_threshold`. We compile with bound
+   parameters already (`execution/service.py`; predicate values are never
+   inlined) and use a pooled `create_async_engine` (`connections/engine.py`) with
+   no explicit prepared-statement config.
+2. If the measurement shows we already benefit → close the item as verified, no
+   change (document the finding, done).
+3. If we're leaving plan reuse on the table → enable/tune it explicitly for the
+   fixed-shape template path only (e.g. driver `prepare_threshold`/prepared-stmt
+   settings), guarding against known pitfalls: parameter sniffing (a cached plan
+   from an unrepresentative first call), and interaction with our per-request
+   session guardrails (`SET LOCAL statement_timeout`/`lock_timeout` in
+   `connections/dialects.py`) and pool recycling.
+
+**Hard boundaries.** This is NOT: a plan cache we build ourselves, a query-result
+cache, pre-aggregation caching, or any SP execution path. It is turning on a
+capability the DB driver already has, for queries we already compile with bound
+parameters. No new caller surface, no AST change, no invariant impact. The big
+analytics "pre-compute the heavy work" win lives in the customer's DB
+(materialized views/indexes), which QueryGate already reads as ordinary tables —
+that is documentation (the analytics-performance note), not this item.

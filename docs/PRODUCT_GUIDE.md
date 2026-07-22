@@ -411,6 +411,25 @@ for. Both fields are identities, never credentials, so the redaction guarantee
 above is unchanged. See the [Decision Log](#decision-log) for why the human maps
 to `subject` (and why that made policy enforcement free).
 
+**MCP as an OAuth 2.0 resource server (opt-in).** For deployments that put the
+MCP surface behind a real authorization server, QueryGate can run it as a
+conformant OAuth 2.0 *resource server* per the MCP `2026-07-28` spec (off by
+default; turn it on with `MCP_OAUTH_RESOURCE_SERVER_ENABLED` once JWT auth is
+configured). Three things then hold. First, it **publishes discovery metadata**
+(RFC 9728) at `/.well-known/oauth-protected-resource/<mcp path>`, so a client
+that gets challenged can find which authorization server issues tokens for this
+resource. Second, it **enforces audience binding** (RFC 8707): a token is only
+accepted if it was minted *for this resource* (its `aud` names QueryGate's
+configured resource identifier), which stops a token issued for some other API
+from being replayed against QueryGate — the "confused deputy" attack the spec
+exists to close. Third, when a caller shows up with no token, a token bound to
+the wrong audience, or a token missing a required scope, QueryGate answers with a
+standards-compliant `WWW-Authenticate` challenge (`invalid_token` /
+`insufficient_scope`) that points back at the metadata — the signal a
+well-behaved client uses to go obtain or *step up* to the right token. Static API
+keys remain a valid, separately-configured trust for service-to-service callers
+and are not subject to audience binding, but still pass the same scope gate.
+
 ### Why this ordering matters
 
 The six stages are ordered from cheapest-and-safest to most-expensive: pure
@@ -2435,6 +2454,52 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-22 — A GraphQL query interface is a permanent non-goal.** Prompted by
+  the "GraphQL is more flexible than REST — would it broaden QueryGate from an AI
+  gateway into a universal data-access guard?" question. Rejected on two grounds.
+  (1) **It adds no expressiveness.** The REST and MCP transports already carry the
+  *full* `StructuredQuery` AST; the expressiveness ceiling is `AST + policy`, not
+  the transport envelope. GraphQL-over-the-same-AST is no more capable than
+  REST-over-the-same-AST — a different envelope for identical semantics. A *real*
+  GraphQL engine (per-field resolvers hitting the database) is strictly worse: it
+  is a second query-execution path *beside* the one pipeline, bypassing policy →
+  schema → compile → concurrency → audit, which violates the "no other path to a
+  database" invariant — the same class of rejection as `execute_sql` and
+  generated-code execution. (2) **Brand collision.** "GraphQL over your database"
+  is already a category (Hasura engine, PostGraphile, Supabase auto-APIs) — and it
+  is a *developer-productivity* category, not a security one. Adopting it makes
+  buyers evaluate QueryGate on flexibility (where it should not compete) instead
+  of on the query-semantic guarantee (its moat). The legitimate instinct behind
+  the question — *be the enforcement point guarding all access within a client's
+  architecture* — is already served on-thesis by the **P4 verdict endpoint**
+  (`NORTH_STAR.md` leverage move #1: any front door, gateway, or app calls
+  QueryGate for the query-semantic verdict it cannot compute itself) and by the
+  **sole-credential-holder deployment** (below), neither of which requires a new
+  query language or broadens the AI-agent wedge. Reaching non-AI *apps* is a
+  later adoption vector via the typed client SDK (TODO.md item 51) emitting the
+  same AST — an adoption lever after the design-partner proof, never a
+  repositioning of the North Star.
+- **2026-07-22 — Analytics performance is served by DB-side materialized views +
+  query templates, NOT by an in-product cache or stored-procedure execution.**
+  Prompted by the recurring "stored procedures run faster — why not do that?"
+  question. Executing stored procedures is a permanent non-goal: an SP is a
+  stored blob of raw procedural SQL, so invoking one reopens the exact
+  raw-SQL/arbitrary-code path QueryGate exists to remove. The performance concern
+  is answered without it, along two lines. (1) The heavy "pre-compute the work"
+  win belongs in the customer's database: a DBA builds a **materialized view**
+  (plus indexes/partitioning), and QueryGate reads it as an **ordinary table
+  today — zero product change** — so the expensive aggregation runs on the DBA's
+  refresh schedule, not per request; a policy + query template then govern access
+  to the pre-aggregated table. The database owns physical optimization; QueryGate
+  owns the safe boundary. (2) The one durable SP benefit that isn't SP-exclusive
+  — cached execution plans (skip re-parse/re-optimize on repeated calls) — is a
+  **prepared/parameterized-statement** benefit; we already compile with bound
+  parameters and templates are fixed-shape, so we likely already capture much of
+  it, and verifying/tuning it is tracked as the measure-first TODO.md item 94.
+  We deliberately do **not** build an in-product result cache or pre-aggregation
+  cache (that would make QueryGate a stale-data caching engine and duplicate what
+  the DB already does well). See `docs/business/COMPETITOR_CUBE.md` for the
+  companion competitive framing.
 - **2026-07-22 — Delegated agent identity maps the *human* to `Principal.subject`
   and the *agent* to a new `Principal.actor` chain (TODO.md item 90, phase 1).**
   The two-identity, on-behalf-of model (RFC 8693 token exchange; the MCP
@@ -2982,3 +3047,15 @@ reasoning behind them, newest first. Added to incrementally as work happens
   that doesn't exist yet; the SBOM, dependency audit, and checksum steps
   already run on every release are treated as the phase-1 supply-chain
   work (`TODO.md` item 30). See [Testing, Release & Operations](#testing-release--operations).
+- **MCP OAuth audience binding is enforced in the MCP resource-server layer,
+  not globally in the JWT verifier.** The JWT authenticator is shared by the
+  REST and MCP surfaces; making it *globally* require one audience would couple
+  the two resources and force REST tokens to name the MCP resource. Instead the
+  MCP middleware validates audience *after* verification, reading the decoded
+  `aud` claim and requiring it to include the MCP resource identifier — so each
+  surface owns its own RFC 8707 binding and enabling MCP OAuth doesn't silently
+  change REST auth. Static API keys carry no `aud` and are treated as an
+  explicitly-configured out-of-band trust: they skip audience binding but still
+  pass the required-scope gate. The whole mode is opt-in
+  (`MCP_OAUTH_RESOURCE_SERVER_ENABLED`) so existing deployments are unaffected.
+  See [The Core Request Pipeline](#the-core-request-pipeline) (`TODO.md` item 90 phase 2).
