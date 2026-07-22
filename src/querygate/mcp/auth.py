@@ -100,6 +100,7 @@ class MCPAuthMiddleware:
         get_logger().debug(
             "mcp.auth.resolved",
             subject=principal.subject,
+            actor=principal.actor_subject,
             scopes=sorted(principal.scopes),
             path=request.url.path,
         )

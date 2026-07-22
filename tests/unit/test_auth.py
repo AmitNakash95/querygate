@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from querygate.core.auth import (
+    Actor,
     AnonymousAuthenticator,
     ApiKeyAuthenticator,
     CompositeAuthenticator,
@@ -25,6 +26,25 @@ def test_principal_is_frozen():
         assert False, "Principal must be immutable"
     except AttributeError:
         pass
+
+
+def test_principal_defaults_to_non_delegated():
+    principal = Principal(subject="svc")
+    assert principal.actor is None
+    assert principal.is_delegated is False
+    assert principal.actor_subject is None
+    assert principal.delegation_chain == []
+
+
+def test_delegated_principal_exposes_actor_and_chain():
+    # subject = the human (whose policy applies); actor = the agent chain.
+    principal = Principal(
+        subject="user-human",
+        actor=Actor(subject="agent-app", delegated_by=Actor(subject="service-s")),
+    )
+    assert principal.is_delegated is True
+    assert principal.actor_subject == "agent-app"
+    assert principal.delegation_chain == ["agent-app", "service-s"]
 
 
 def test_api_key_authenticator_attaches_configured_scopes():

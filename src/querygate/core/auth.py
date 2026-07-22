@@ -9,7 +9,24 @@ from __future__ import annotations
 
 import hmac
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Protocol
+from typing import Any, List, Mapping, Optional, Protocol
+
+
+@dataclass(frozen=True)
+class Actor:
+    """One link in an on-behalf-of delegation chain (TODO.md item 90, F1).
+
+    Models the agent *application* acting on behalf of `Principal.subject`
+    (the human), as carried by the RFC 8693 token-exchange `act` (actor)
+    claim. `delegated_by` is the nested prior actor for multi-hop delegation
+    (RFC 8693 §4.1's nested `act`), so a full "Agent A, itself delegated by
+    Service S, acting for User Z" chain is preserved for attribution. This
+    type carries identity only — never a credential — so it is safe to record
+    in a redaction-safe audit event.
+    """
+
+    subject: str
+    delegated_by: Optional["Actor"] = None
 
 
 @dataclass(frozen=True)
@@ -21,12 +38,45 @@ class Principal:
     per-principal policy (e.g. `mandatory_row_filters.value` resolved from a
     `tenant_id` claim) can populate them without another breaking change to
     this type.
+
+    Delegation (TODO.md item 90): for an on-behalf-of request, `subject` is the
+    **human** on whose behalf the agent acts (so per-principal policy resolution
+    — which keys off `subject`, see `policy/loader.PolicyStore.get` — applies
+    *the human's* policy and `mandatory_row_filters` with no change to the
+    policy layer), and `actor` is the agent acting for them. A non-delegated
+    caller has `actor is None` and behaves exactly as before.
     """
 
     subject: str
     scopes: frozenset[str] = field(default_factory=frozenset)
     claims: Mapping[str, Any] = field(default_factory=dict)
     auth_method: str = "unknown"
+    actor: Optional[Actor] = None
+
+    @property
+    def is_delegated(self) -> bool:
+        """True when this caller is an agent acting on behalf of `subject`."""
+        return self.actor is not None
+
+    @property
+    def actor_subject(self) -> Optional[str]:
+        """The immediate agent acting for `subject`, or None if not delegated."""
+        return self.actor.subject if self.actor is not None else None
+
+    @property
+    def delegation_chain(self) -> List[str]:
+        """Actor subjects, immediate agent first, oldest ancestor last.
+
+        Empty for a non-delegated caller. Recorded in the audit event so an
+        auditor can reconstruct the full "on whose behalf, through which
+        agents" provenance for a query.
+        """
+        chain: List[str] = []
+        current = self.actor
+        while current is not None:
+            chain.append(current.subject)
+            current = current.delegated_by
+        return chain
 
 
 class Authenticator(Protocol):

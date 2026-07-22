@@ -272,6 +272,16 @@ class StructuredQueryService:
     def _auth_method(self) -> str:
         return self._principal.auth_method if self._principal else "unknown"
 
+    @property
+    def _principal_actor(self) -> Optional[str]:
+        # The agent acting on behalf of `_principal_subject` (the human), for a
+        # delegated (RFC 8693) request; None for a direct caller. See item 90.
+        return self._principal.actor_subject if self._principal else None
+
+    @property
+    def _delegation_chain(self) -> Optional[List[str]]:
+        return self._principal.delegation_chain if self._principal else None
+
     def _get_policy(self) -> Policy:
         # Resolves connection-level policy merged with any per-principal
         # override for this caller (see policy/loader.PolicyStore.get) — so
@@ -490,6 +500,8 @@ class StructuredQueryService:
                         duration_ms=int(elapsed_seconds * 1000),
                         principal=self._principal_subject,
                         principal_scopes=self._principal_scopes,
+                        actor=self._principal_actor,
+                        delegation_chain=self._delegation_chain,
                         auth_method=self._auth_method,
                         surface=self._surface,
                         query_shape=query_shape,
@@ -543,6 +555,8 @@ class StructuredQueryService:
                 duration_ms=int((time.monotonic() - start) * 1000),
                 principal=self._principal_subject,
                 principal_scopes=self._principal_scopes,
+                actor=self._principal_actor,
+                delegation_chain=self._delegation_chain,
                 auth_method=self._auth_method,
                 surface=self._surface,
                 query_shape=query_shape,
