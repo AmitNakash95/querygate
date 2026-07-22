@@ -2,7 +2,6 @@
   "use strict";
 
   const API = "/api/v1";
-  const STORAGE_KEY = "querygate_access_token";
 
   const state = {
     token: "",
@@ -185,10 +184,12 @@
     }
   }
 
-  async function connect(token, remember = false) {
+  async function connect(token) {
+    // The bearer token lives only in memory (state.token) for the lifetime of
+    // the tab — never in any web storage — so it cannot be exfiltrated from
+    // browser storage by an XSS. Closing or reloading the tab clears it and
+    // requires re-authentication.
     state.token = token.trim();
-    if (remember && state.token) sessionStorage.setItem(STORAGE_KEY, state.token);
-    else sessionStorage.removeItem(STORAGE_KEY);
     state.access = await api("/help/my-access");
     state.connections = state.access.visible_connections || [];
     setBanner("");
@@ -199,7 +200,6 @@
   }
 
   function disconnect() {
-    sessionStorage.removeItem(STORAGE_KEY);
     state.token = "";
     state.access = null;
     state.connections = [];
@@ -234,7 +234,7 @@
       errorNode.hidden = true;
       setBusy(button, true, "Connecting…");
       try {
-        await connect($("#auth-token").value, $("#remember-token").checked);
+        await connect($("#auth-token").value);
         $("#auth-dialog").close();
         toast(`Connected as ${state.access.principal}.`);
       } catch (error) {
@@ -246,21 +246,8 @@
 
   async function initialize() {
     bindEvents();
-    const savedToken = sessionStorage.getItem(STORAGE_KEY) || "";
-    if (savedToken) {
-      $("#auth-token").value = savedToken;
-      $("#remember-token").checked = true;
-      try {
-        await connect(savedToken, true);
-        toast(`Restored session for ${state.access.principal}.`);
-        return;
-      } catch {
-        sessionStorage.removeItem(STORAGE_KEY);
-        state.token = "";
-        $("#auth-error").textContent = "The saved token is no longer valid.";
-        $("#auth-error").hidden = false;
-      }
-    }
+    // No token is ever persisted, so there is nothing to restore — every load
+    // starts with an in-memory-only authentication prompt.
     $("#auth-dialog").showModal();
   }
 
