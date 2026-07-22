@@ -2099,3 +2099,99 @@ the right place to invest external-attestation effort and is the one real gap th
 self-assessment surfaces. Not built here to keep this item bounded; sign the
 release image in CI, publish the provenance attestation, and document
 verification for customers.
+
+## P6 — Category-defining moats (from competitive-scan, 2026-07-22)
+
+Items 90–92 promote three of the "breakout four" features from
+`docs/business/MARKET_DOMINATION_ANALYSIS.md` (F1/F5/F3) from strategy prose
+into scoped worklist items. The fourth, F2 (minimum-group-size), already
+shipped as item 88. F4 (safe NL→StructuredQuery) is deliberately **not** an
+item yet: it requires an explicit maintainer decision on model provider/posture
+before any build, per `CLAUDE.md`'s catalog/LLM boundary — kept as a strategy
+proposal, not an approved task. Each item below preserves every core invariant
+(no caller-controlled raw SQL, catalog stays descriptive, no autonomous LLM
+call or policy self-edit); they *strengthen* attribution and governance rather
+than widen the input surface.
+
+### 90. Delegated agent identity (on-behalf-of) carried into policy + dual-identity audit
+
+**Effort: L. Priority: high (time-sensitive — see below). Feature ref: F1.**
+
+**Why it matters (competitive pressure):** The identity market has fully solved
+"delegated identity → API" and is standardizing it *this month* — the MCP
+`2026-07-28` spec release candidate (verified 2026-07-22: "the largest revision
+of the protocol since launch") rewrites authorization around a two-identity
+delegated model (the agent application **and** the human on whose behalf it
+acts), RFC 8707 audience binding, and RFC 8693 token exchange. But the
+independent competitive finding stands: *almost nobody carries that principal
+into the database session* — only Databricks (Unity Catalog on-behalf-of) and
+Snowflake (caller-rights) do, and only because they own both the gateway and
+the engine. Roughly two-thirds of orgs cannot attribute an agent action to a
+human. This is the single hottest enterprise requirement with the emptiest
+data-layer, and the standard formalizing it lands now — QueryGate is
+warehouse-agnostic, so it can deliver OBO-grade attribution against
+Postgres/MSSQL where the two warehouse vendors cannot reach.
+
+**What to do:** Accept a delegation credential (agent acting *on behalf of* a
+human), resolve **both** identities, apply the **human's** resolved policy and
+`mandatory_row_filters` to the query, and record **both** in the audit event
+("Agent A on behalf of User Z under Policy Y"). Implement the MCP authorization
+spec as a proper OAuth resource server: RFC 9728 protected-resource metadata,
+mandatory RFC 8707 audience validation, `insufficient_scope` step-up. Extend
+`core/auth.py`'s `Principal` to a delegation chain (actor + subject) — a natural
+extension of machinery that already drives per-principal policy — and add
+actor+subject fields to `audit/events.py`. Touches `core/auth.py`,
+`core/jwt_auth.py`, `mcp/auth.py`, `api/auth.py`, `audit/events.py`. Extends
+items 8/10/21; pairs with item 91. **Invariant:** none at risk — this
+strengthens attribution.
+
+### 91. Tamper-evident hash-chained audit ledger + per-query compliance receipts
+
+**Effort: M. Priority: high (compliance moat; pairs with item 90). Feature ref: F5.**
+
+**Why it matters (competitive pressure):** EU AI Act Art. 12/26 (automatic,
+tamper-evident event logging retained ≥6 months) survived the June 2026 Digital
+Omnibus intact, DORA is in force, and ISO 42001 A.6.2.8 is being used as the
+agent-action audit control in certifications. Competitors offer platform logs;
+none offers a tamper-evident, per-human-attributed, portable receipt *at the
+query layer*. QueryGate's own threat model already admits "JSONL is not WORM."
+Combined with item 90 this produces the "prove to your auditor exactly what
+every agent did, on whose behalf, under which policy" artifact that is the
+literal buying question for the fintech/healthcare ICP in `GO_TO_MARKET.md`.
+
+**What to do:** Chain each persisted audit event to the hash of the previous
+(append-only, tamper-evident ledger) with a verify-only chain-validation tool,
+and optionally emit a signed per-query receipt (what policy applied, which
+principal — and with item 90, on whose behalf — what query shape ran, what was
+suppressed/masked). Keep chaining optional and verify-only; add **no** new data
+to the event body (redaction guarantee unchanged — still no SQL, values, rows,
+or credentials). Touches `audit/events.py` (prev-hash field + chain verifier),
+`audit/sinks.py`. Distinct from item 23 (the sink) and item 54 (SOC2 mapping).
+**Invariant:** audit-redaction guarantee preserved exactly.
+
+### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up)
+
+**Effort: L. Priority: medium (safety moat; sequence after 90/91). Feature ref: F3.**
+
+**Why it matters (competitive pressure):** MCP elicitation is the standardized
+HITL primitive (and the `2026-07-28` spec revision keeps a first-class
+client-interaction path), and Auth0 async-authz (CIBA), PromptQL, and others
+gate *writes*. But **reads are the exfiltration leg of the lethal trifecta**
+every 2025 incident exploited (Supabase, Neon), and no competitor gates *reads*
+on *what the query would actually touch* — because none knows before running
+it. QueryGate uniquely already holds the three signals to decide automatically
+whether a read needs a human: catalog sensitivity labels (32A), the
+pre-execution cost/row estimate (item 26), and the parsed AST.
+
+**What to do:** When a query touches a catalog-labelled sensitive column
+(`sensitivity: pii`) **or** its pre-execution estimate exceeds a policy
+row/cost threshold, pause and require a human approval via MCP elicitation
+before executing; audit the approval and its decision. REST has no elicitation
+channel — degrade there to a "requires approval" rejection with an
+approval-token flow; keep the whole gate opt-in per policy. Gate lives between
+validate and execute (`execution/service.py`), with thresholds/sensitivity
+triggers in `policy/models.py`, elicitation in `mcp/`, and the decision in
+`audit/`. Distinct from item 42 (four-eyes for *config* changes) and item 35
+(capacity waiting) — neither gates *query execution* on sensitivity/cost.
+**Invariant:** read-only posture and AST-only input unchanged; this only adds a
+pre-execution gate.

@@ -26,6 +26,16 @@ write-ups of completed items. Keep them split to keep routine reads cheap
 (TODO.md is read constantly; the archive is loaded only when history is
 needed). The rules:
 
+`ROADMAP.md` is the **execution order** over `TODO.md`: it says which items to
+tackle in which order, and why that order maximizes product growth/ROI. TODO.md
+remains the authority for item *content and `✅ DONE` status*; ROADMAP.md is the
+authority for *order only* and never restates a body. When continuing
+development, prefer the `roadmap-next` skill (works items in ROADMAP.md order,
+deriving "where we left off" from TODO.md's `✅ DONE` markers so it can't drift)
+over ascending-number selection. Keep ROADMAP.md's checkboxes reconciled to
+TODO.md; TODO.md leads, ROADMAP.md follows. Re-sequencing ROADMAP.md is allowed
+but must be a deliberate, one-line-reasoned edit, not drift.
+
 - **Item numbers are permanent and file-global.** Never renumber or reuse a
   number — the repo has ~176 internal "item N" cross-refs plus references
   from CLAUDE.md and tests that must keep resolving. A new item takes the
