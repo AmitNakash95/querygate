@@ -4065,3 +4065,78 @@ parse → merge → render with typed coercion, and the draft going dirty).
 **Docs:** `docs/PRODUCT_GUIDE.md`'s query-templates section documents the
 guided form; a Decision Log entry records the shared-release routing, the
 JSON-skeleton scope call, and that Policy was already covered.
+
+### 90. Delegated agent identity (on-behalf-of) carried into policy + dual-identity audit ✅ DONE
+
+**Effort: L. Priority: high (time-sensitive — see below). Feature ref: F1.**
+
+**Status:** Phase 1 (delegated-identity attribution) and phase 2 (MCP OAuth
+resource-server conformance) both shipped.
+- **Phase 1 ✅ DONE — delegated-identity attribution (the moat).** `core/auth.py`
+  gains an `Actor` delegation chain on `Principal` (`subject` = the human,
+  `actor` = the agent, with a nested `delegated_by` chain and
+  `is_delegated`/`actor_subject`/`delegation_chain` helpers). `core/jwt_auth.py`
+  maps a verified token's RFC 8693 `act` claim into that chain (configurable via
+  `jwt_act_claim`, depth-bounded, malformed-`act`-safe). Because per-principal
+  policy resolution already keys off `Principal.subject`
+  (`policy/loader.PolicyStore.get`), mapping the human to `subject` makes **the
+  human's** policy and `mandatory_row_filters` apply with zero change to the
+  policy layer. `audit/events.AuditEvent` gains `actor_id` + `delegation_chain`
+  (identities only — redaction guarantee unchanged), threaded through
+  `audit/logger.audit_query` and both `execution/service.py` audit call sites, so
+  every query records "Agent A on behalf of User Z under the human's policy."
+  Covered by unit tests in `test_auth.py`, `test_jwt_auth.py`,
+  `test_policy_loader.py` (human's-policy-wins), and `test_audit.py`
+  (dual-identity event, redaction-safe).
+- **Phase 2 ✅ DONE — MCP OAuth resource-server conformance.** The mounted MCP
+  surface is now an opt-in OAuth 2.0 resource server per the MCP `2026-07-28`
+  spec, gated behind `mcp_oauth_resource_server_enabled` (requires `jwt_enabled`;
+  off by default, so existing deployments are unchanged). `mcp/oauth_metadata.py`
+  publishes RFC 9728 protected-resource metadata (`resource`,
+  `authorization_servers`, `bearer_methods_supported`, optional
+  `scopes_supported`/`resource_documentation`), served unauthenticated from the
+  main app at `/.well-known/oauth-protected-resource<MCP_MOUNT_PATH>` (plus a
+  root alias). `mcp/auth.MCPAuthMiddleware` enforces RFC 8707 audience binding on
+  verified tokens (a JWT's `aud` must include `mcp_resource_identifier`, blocking
+  confused-deputy reuse of a token minted for another audience — a `str` or
+  array `aud` is honored, absence fails closed) and a configurable required-scope
+  gate, and answers a missing/invalid credential or insufficient scope with an
+  RFC 6750 `WWW-Authenticate: Bearer …, resource_metadata="…"` challenge
+  (`invalid_token` 401 / `insufficient_scope` 403) so a client can perform the
+  RFC 8693 token exchange / step-up. Static API keys skip audience binding (an
+  out-of-band trust with no `aud`) but still pass the scope gate. New config +
+  `.env.example` entries; covered by `tests/unit/test_mcp_oauth_rs.py` (metadata
+  shape/route, audience binding, scope step-up, unauthenticated challenge, and
+  config validation). **Not in scope / deferred:** extending actor attribution
+  to the admin-surface audit events
+  (`ConfigChangeEvent`/`CatalogGovernanceEvent`/`ConnectionProbeEvent`) — delegated
+  *admin* actions aren't a current requirement; open a fresh item if they become
+  one.
+
+**Why it matters (competitive pressure):** The identity market has fully solved
+"delegated identity → API" and is standardizing it *this month* — the MCP
+`2026-07-28` spec release candidate (verified 2026-07-22: "the largest revision
+of the protocol since launch") rewrites authorization around a two-identity
+delegated model (the agent application **and** the human on whose behalf it
+acts), RFC 8707 audience binding, and RFC 8693 token exchange. But the
+independent competitive finding stands: *almost nobody carries that principal
+into the database session* — only Databricks (Unity Catalog on-behalf-of) and
+Snowflake (caller-rights) do, and only because they own both the gateway and
+the engine. Roughly two-thirds of orgs cannot attribute an agent action to a
+human. This is the single hottest enterprise requirement with the emptiest
+data-layer, and the standard formalizing it lands now — QueryGate is
+warehouse-agnostic, so it can deliver OBO-grade attribution against
+Postgres/MSSQL where the two warehouse vendors cannot reach.
+
+**What to do:** Accept a delegation credential (agent acting *on behalf of* a
+human), resolve **both** identities, apply the **human's** resolved policy and
+`mandatory_row_filters` to the query, and record **both** in the audit event
+("Agent A on behalf of User Z under Policy Y"). Implement the MCP authorization
+spec as a proper OAuth resource server: RFC 9728 protected-resource metadata,
+mandatory RFC 8707 audience validation, `insufficient_scope` step-up. Extend
+`core/auth.py`'s `Principal` to a delegation chain (actor + subject) — a natural
+extension of machinery that already drives per-principal policy — and add
+actor+subject fields to `audit/events.py`. Touches `core/auth.py`,
+`core/jwt_auth.py`, `mcp/auth.py`, `api/auth.py`, `audit/events.py`. Extends
+items 8/10/21; pairs with item 91. **Invariant:** none at risk — this
+strengthens attribution.
