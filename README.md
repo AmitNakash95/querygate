@@ -67,6 +67,7 @@ row cap tacked on. QueryGate is structurally different:
 | Concurrency/load control | Rare | Per-connection concurrency semaphore + execution timeout |
 | Rate limits / cost budget | DIY | Per-principal rolling-window request & response-byte quotas (429 + `Retry-After`) |
 | Multi-tenant scoping | DIY | Policy-level `mandatory_row_filters` |
+| Column-level masking | DIY (or none) | Per-principal `column_masks` (hash/null/last-N/bucket), applied in the compiled SQL |
 | Audit trail | Rare | Every query logged plus an optional persisted, redaction-safe JSONL event — optionally a tamper-evident hash-chained ledger with per-query receipts |
 
 ## Quickstart
@@ -314,6 +315,44 @@ suppressed rather than returned. It is the aggregate analog of a mandatory row
 filter (policy-driven, injected, non-removable) and applies only to aggregate
 queries; it closes single-query singling-out, not multi-query differencing.
 
+### Column-value masking (not just allow/deny)
+
+Allow/deny is binary — a column is either fully readable or fully hidden.
+Some columns need to stay *usable* without exposing the raw value: show the
+last four digits of a card, bucket an age, hash an identifier so it joins
+consistently but never reveals itself. `Policy.column_masks` adds an optional
+per-connection **`column_mask`** primitive that transforms a value **in the
+compiled `SELECT`**, resolved per principal through the same policy merge — so
+one caller can see raw values while another sees them masked on the very same
+connection:
+
+```yaml
+connections:
+  demo:
+    column_masks:
+      customers:
+        - {column: national_id, kind: hash}       # deterministic one-way hash
+        - {column: phone, kind: last, length: 4}  # reveal trailing 4 chars, mask the rest
+      orders:
+        - {column: total_amount, kind: bucket, bucket_size: 100}  # round down to a 100-wide bucket
+```
+
+Four kinds ship: `hash`, `null` (fully blanked but still selectable, unlike a
+denied column), `last` (reveal trailing `length` chars), and `bucket` (round
+a numeric value down to a `bucket_size` multiple). The transform is rendered
+by each dialect's `DialectAdapter.column_mask` (Postgres `md5`/`right`, MSSQL
+`HASHBYTES`/`RIGHT`, `null`/`bucket` dialect-universal) and labeled with the
+original output name, so the response shape is unchanged.
+
+A masked column may appear **only as a bare `select` item**. Using it in a
+`where`, `join`, `order_by`, or `group_by` position — or nesting it inside a
+function/CASE/aggregate — is **rejected**, not silently unmasked: projection-only
+masking would otherwise leave an inference channel (`where ssn = '<guess>'` and
+watch whether a row comes back), the same side-channel the allow/deny walk
+already closes. Masking is audited distinctly from denial — the success event
+carries `masked_columns` (output names only, never the pre-mask value) so
+operators can tell "masked" access apart from "denied" in the one stream.
+
 ### Pre-execution cost estimation (Postgres)
 
 Row limits, timeouts, and concurrency caps are all reactive — they bound a
@@ -427,6 +466,33 @@ Unknown principals then see no connections. The same visibility decision is
 used by REST, MCP, direct schema/query calls, and cross-connection joins.
 Deployment-level `enabled: false` in `connections.yaml` always wins and
 cannot be re-enabled by principal policy.
+
+### Delegated agent identity (on-behalf-of)
+
+When an agent queries *for a specific human*, "who did this?" has two answers:
+the agent that made the call and the person it acted for. QueryGate carries
+both. A verified JWT's RFC 8693 `act` claim is mapped into a delegation chain
+on the `Principal` — `subject` is the human, `actor` is the agent (with a
+nested `delegated_by` chain for multi-hop delegation). Because per-principal
+policy resolution already keys off `Principal.subject`, **the human's** policy
+and `mandatory_row_filters` apply automatically — an agent acting for a
+support rep is bound by that rep's access, not the agent's own. Every audit
+event records both identities (`actor_id` + `delegation_chain`, identities
+only — the redaction guarantee is unchanged), so the trail reads "Agent A, on
+behalf of User Z, under User Z's policy." This is opt-in via `jwt_act_claim`
+and off unless a token actually carries an `act` claim.
+
+The mounted MCP surface can additionally run as an **OAuth 2.0 resource
+server** (`mcp_oauth_resource_server_enabled`, requires `jwt_enabled`, off by
+default). It publishes RFC 9728 protected-resource metadata at
+`/.well-known/oauth-protected-resource<MCP_MOUNT_PATH>`, enforces RFC 8707
+audience binding (a token's `aud` must include `mcp_resource_identifier`,
+blocking confused-deputy reuse of a token minted for another audience), and
+answers a missing/insufficient credential with an RFC 6750
+`WWW-Authenticate: Bearer …, resource_metadata="…"` challenge so a client can
+run the token exchange / scope step-up. Static API keys still work and skip
+audience binding (an out-of-band trust with no `aud`) but still pass the scope
+gate.
 
 ## Config-governance API (staged versions, apply, rollback)
 
@@ -747,6 +813,30 @@ Time-window trend charts (the endpoint is a point-in-time snapshot with no
 stored history), a config/catalog-change trend card (those events live in the
 audit stream, not the metrics registry), and querying an operator-configured
 external metrics backend for durable cross-replica history are follow-ups.
+
+### Per-principal behavioral anomaly surfacing
+
+The overview above answers a *fleet* question from live Prometheus counters.
+`GET /api/v1/admin/observability/anomalies` (same `admin:observability:read`
+scope) answers a *per-principal* one from the durable audit stream: is one
+caller's recent behavior unusual versus its own preceding baseline — even
+among queries policy *allowed*? A read-only detector
+(`querygate/admin/anomaly.py`) compares each principal's recent window against
+its equal-or-longer baseline window and flags three signals: a `volume_spike`
+(recent per-second rate far above baseline), a rejection-rate jump, and a
+newly-touched connection the caller hadn't used before.
+
+```bash
+curl -H "Authorization: Bearer $KEY" $HOST/api/v1/admin/observability/anomalies
+```
+
+Detection is a pure function over audit events plus a fixed `now` and tunable
+thresholds — no clock, file, or global state — so it stays fully testable, and
+the report is bounded and redaction-safe (identities and typed signal kinds,
+never a query, value, table, or column). It is strictly a read-only *surfacing*
+of the existing stream, within item 32C's read-only boundary — it never blocks,
+throttles, or edits policy. The browser control plane renders it as a
+"Behavioral anomalies" panel in the Observability view.
 
 ## Example schema catalog (optional)
 
@@ -1321,6 +1411,15 @@ Agent (MCP) / Client (REST)
   vulnerability without a reviewed, justified entry in
   `security/dependency-audit-allowlist.json` fails the release
   (deny-by-default). See [`docs/RELEASING.md`](docs/RELEASING.md#software-bill-of-materials-and-dependency-audit).
+- **Signed, provenance-attested releases.** On a maintainer-pushed version
+  tag, `.github/workflows/release.yml` builds and pushes the container image to
+  GHCR behind a pre-publish Trivy gate, then **signs it with cosign keyless
+  (Sigstore)** and attaches a **SLSA build-provenance attestation**
+  (`actions/attest-build-provenance`) — both bound to the image digest and
+  consumer-verifiable (`cosign verify` / `gh attestation verify`). Offline
+  artifact integrity is checkable with `make verify-release`
+  (`scripts/verify_release.py`) against `dist/SHA256SUMS`. Publishing is never
+  automatic — it happens only when a maintainer deliberately pushes the tag.
 - **Continuously scanned, and provable.** Every change runs static analysis
   (Bandit + Semgrep OSS), full-history secret scanning (gitleaks), container
   image scanning of the shipped image (Trivy), and OpenAPI fuzzing (Schemathesis)
