@@ -170,9 +170,37 @@ async def test_multi_row_insert_is_atomic_no_partial_write(sqlite_app):
                 "rows": [_row(max_id + 1, "ok"), _row(before[0]["id"], "dup")],
             },
         )
-        assert resp.status_code >= 400  # constraint violation, no success
+        # A constraint violation is the caller's fault -> a clean 422, not a 500,
+        # and the response never leaks the raw driver/schema text.
+        assert resp.status_code == 422, resp.text
+        detail = resp.json()["detail"]
+        assert "constraint" in detail.lower()
+        assert "sqlite" not in detail.lower() and "IntegrityError" not in detail
         after = await _orders(client)
     assert before == after  # neither row landed — the transaction rolled back
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_insert_missing_required_column_is_a_clean_4xx(sqlite_app):
+    # Omitting a NOT NULL column (customer_id) is caught as a precise validation
+    # error before the DB, not surfaced as an opaque 500.
+    _enable_writes()
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        before = await _orders(client)
+        resp = await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "insert",
+                "table": "orders",
+                "rows": [{"id": max(r["id"] for r in before) + 1, "status": "x"}],
+            },
+        )
+        assert resp.status_code == 422, resp.text
+        assert "missing required column" in resp.json()["detail"].lower()
+        assert "customer_id" in resp.json()["detail"]
+        after = await _orders(client)
+    assert before == after
 
 
 @pytest.mark.security
