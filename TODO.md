@@ -2042,10 +2042,15 @@ over-cap rolls back and changes nothing; deny-by-default; approval pause→admit
 threshold off/under, temporal coercion). Invariant preserved: no raw DML,
 deny-by-default, opt-in.
 
-**Deferred to phase 2b:** the row-level old→new diff preview (approval on the
-diff, not just the count), the MCP `run_structured_writes` execute tool, the
-adversarial write security suite under `make test-security`, the `release-smoke`
-write round-trip, and the write concurrency load gate. **Phase 3:**
+**Phase 2b shipped so far:** the **row-level old→new diff preview**
+(`POST /write/preview?include_diff=true` → `WriteDiff`: bounded by
+`WritePolicy.max_diff_rows`, masking-aware, computed by running the DML in a
+rolled-back transaction — `execution/write_preview.py`) and the **adversarial
+write boundary security suite** (`tests/security/test_write_boundary.py` +
+dual-marked execution guarantees, under `make test-security`). **Still open in
+2b:** the MCP `run_structured_writes` execute tool, the `release-smoke` write
+round-trip, and the write concurrency load gate. (Approval still binds to the
+write fingerprint, not the diff hash — a phase-3 refinement.) **Phase 3:**
 compensation/undo, upserts, multi-row batch, MSSQL execution parity, NOT
 NULL/FK/unique pre-validation (2a lets the DB enforce these — a violation rolls
 back cleanly but surfaces as a masked 500 rather than a typed 4xx).
