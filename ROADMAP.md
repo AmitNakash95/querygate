@@ -153,8 +153,9 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   effect legible before it ships.* ✅ **Shipped** (ph1 connection-baseline diff;
   ph2 per-principal is covered by item 41's blast-radius — maintainer decision
   2026-07-23, no new code).
-- [ ] **41** — Policy-change blast-radius analysis. *Completes the config-change
-  safety trio (39/40/41).*
+- [x] **41** — Policy-change blast-radius analysis. *Completes the config-change
+  safety trio (39/40/41).* ✅ **Shipped** (ph1 ranked aggregation + ph2 paginated
+  per-principal evaluation via a `principal_offset`/`next_principal_offset` cursor).
 
 ### Phase 4 — Adoption & breadth (grow once PMF is proven)
 
