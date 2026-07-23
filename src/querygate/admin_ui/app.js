@@ -188,6 +188,19 @@
 
   function canRead() { return hasScope("admin:config:read"); }
   function canWrite() { return hasScope("admin:config:write"); }
+  function canApprove() { return hasScope("admin:config:approve"); }
+
+  // Four-eyes (item 42): distinct approvers who currently approve this staged
+  // version, and a short human summary of its review state.
+  function approvalSummary(version) {
+    const approvals = version.approvals || [];
+    const approvers = [...new Set(approvals.filter((a) => a.decision === "approve").map((a) => a.approver))];
+    const rejecters = [...new Set(approvals.filter((a) => a.decision === "reject").map((a) => a.approver))];
+    const parts = [];
+    if (approvers.length) parts.push(`approved by ${approvers.map(escapeHtml).join(", ")}`);
+    if (rejecters.length) parts.push(`rejected by ${rejecters.map(escapeHtml).join(", ")}`);
+    return { approverCount: approvers.length, text: parts.join("; ") || "awaiting review" };
+  }
 
   function renderDomainTabs(domain, activeView) {
     const bar = $("#domain-tabs");
@@ -923,13 +936,23 @@
     $("#history-body").innerHTML = state.versions.length ? [...state.versions].reverse().map((version) => {
       const statusClass = version.status === "active" ? "good" : version.status === "staged" ? "warning" : "neutral";
       const actionLabel = version.status === "staged" ? "Activate" : version.status === "inactive" ? "Roll back" : "Active";
+      const staged = version.status === "staged";
+      const review = staged ? approvalSummary(version) : null;
+      // Four-eyes buttons (item 42): only a query:approve-holder who is NOT the
+      // author sees them enabled; the server enforces both regardless. Shown
+      // only for staged versions.
+      const isAuthor = state.access?.principal && state.access.principal === version.created_by;
+      const fourEyes = staged && canApprove()
+        ? ` <button class="button secondary" type="button" data-approve-version="${escapeHtml(version.id)}" ${isAuthor ? "disabled title=\"You authored this version — a different reviewer must approve it.\"" : ""}>Approve</button> <button class="button secondary" type="button" data-reject-version="${escapeHtml(version.id)}" ${isAuthor ? "disabled" : ""}>Reject</button>`
+        : "";
+      const reviewChip = staged ? `<br><small class="review-status">${escapeHtml(review.text)}</small>` : "";
       return `<tr>
         <td>v${escapeHtml(version.id)}</td>
-        <td><span class="status-chip ${statusClass}">${escapeHtml(version.status)}</span></td>
+        <td><span class="status-chip ${statusClass}">${escapeHtml(version.status)}</span>${reviewChip}</td>
         <td>${escapeHtml(version.description || "No description")}</td>
         <td title="${escapeHtml(formatDate(version.created_at))}">${escapeHtml(relativeDate(version.created_at))}<br><small>${escapeHtml(version.created_by)}</small></td>
         <td title="${escapeHtml(formatDate(version.applied_at))}">${escapeHtml(relativeDate(version.applied_at))}<br><small>${escapeHtml(version.applied_by || "—")}</small></td>
-        <td><button class="button secondary" type="button" data-review-version="${escapeHtml(version.id)}">Review</button> <button class="button ${version.status === "active" ? "secondary" : "primary"}" type="button" data-apply-version="${escapeHtml(version.id)}" ${version.status === "active" || !canWrite() ? "disabled" : ""}>${actionLabel}</button></td>
+        <td><button class="button secondary" type="button" data-review-version="${escapeHtml(version.id)}">Review</button>${fourEyes} <button class="button ${version.status === "active" ? "secondary" : "primary"}" type="button" data-apply-version="${escapeHtml(version.id)}" ${version.status === "active" || !canWrite() ? "disabled" : ""}>${actionLabel}</button></td>
       </tr>`;
     }).join("") : '<tr><td colspan="6" class="empty-cell">No versions available.</td></tr>';
   }
@@ -968,6 +991,23 @@
     try {
       await api(`/admin/config/versions/${encodeURIComponent(versionId)}/apply`, { method: "POST" });
       toast(rollback ? `Rolled back to v${versionId}.` : `Version v${versionId} is active.`);
+      await loadGovernance(false);
+    } catch (error) {
+      toast(error.message, "bad");
+    }
+  }
+
+  async function reviewDecision(versionId, decision) {
+    const version = state.versions.find((item) => item.id === versionId);
+    if (!version || version.status !== "staged") return;
+    const note = window.prompt(`Optional note for ${decision}ing v${versionId} (max 500 chars):`, "");
+    if (note === null) return; // cancelled
+    try {
+      await api(`/admin/config/versions/${encodeURIComponent(versionId)}/${decision}`, {
+        method: "POST",
+        body: JSON.stringify(note ? { note } : {}),
+      });
+      toast(`${decision === "approve" ? "Approved" : "Rejected"} v${versionId}.`);
       await loadGovernance(false);
     } catch (error) {
       toast(error.message, "bad");
@@ -2286,8 +2326,12 @@
     $("#history-body").addEventListener("click", (event) => {
       const review = event.target.closest("[data-review-version]");
       const apply = event.target.closest("[data-apply-version]");
+      const approve = event.target.closest("[data-approve-version]");
+      const reject = event.target.closest("[data-reject-version]");
       if (review) reviewVersion(review.dataset.reviewVersion);
       if (apply) applyVersion(apply.dataset.applyVersion);
+      if (approve) reviewDecision(approve.dataset.approveVersion, "approve");
+      if (reject) reviewDecision(reject.dataset.rejectVersion, "reject");
     });
     $("#audit-filters").addEventListener("submit", (event) => { event.preventDefault(); loadAudit(false); });
     $("#refresh-audit").addEventListener("click", () => loadAudit(false));
