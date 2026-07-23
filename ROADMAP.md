@@ -125,8 +125,10 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 - [ ] **53** — Independent third-party security audit + published report.
   *External validation enterprise buyers ask for. Needs vendor coordination —
   see "Coordination-gated" note below.*
-- [ ] **60** — Bug bounty / responsible disclosure program. *Cheap, durable
-  trust signal; stand up after 53 clears the obvious issues.*
+- [x] **60** — Bug bounty / responsible disclosure program. *Cheap, durable
+  trust signal; stand up after 53 clears the obvious issues.* ✅ **Shipped**
+  (coordinated-disclosure program in `SECURITY.md`: recognition-only structure +
+  shared remediation flow; paid-bounty tier deliberately deferred to post-item-53).
 
 ### Phase 3 — Governance & safety depth (deepen the moat)
 
