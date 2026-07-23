@@ -162,7 +162,13 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 - [ ] **51** — Typed client-side query-builder SDK (Python + TypeScript).
   *Lowers integration friction for the next wave of adopters.*
 - [ ] **35** — Agent-visible capacity waiting, progress, and cancellation.
-  *Developer-experience polish for real agent workloads.*
+  *Developer-experience polish for real agent workloads.* **Phase 1 + Phase 2
+  shipped** (admission info + queue modes; Redis cross-replica admission state +
+  queue-depth caps). Box stays `[ ]` for **Phase 3, which is design-gated** by
+  the item's own text — MCP progress-notification wire format, a REST async
+  lifecycle (`202` + status/cancel), cancellation semantics (queue-only vs.
+  dialect DB-cancel), and a `429`/`Retry-After` breaking-change evaluation each
+  need a protocol/product decision before build.
 - [ ] **18** — Stored-procedure catalog. *Extends read coverage where customers
   already encapsulate logic in procs.*
 - [x] **57** — Pluggable dialect-adapter architecture. *The enabler that turns
