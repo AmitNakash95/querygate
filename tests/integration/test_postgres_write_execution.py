@@ -37,7 +37,7 @@ def _use_writable_policy(**write_overrides) -> None:
     wp = dict(
         enabled=True,
         allowed_tables=["orders"],
-        allowed_operations=["insert", "update", "delete"],
+        allowed_operations=["insert", "update", "delete", "upsert"],
         max_affected_rows=100000,
     )
     wp.update(write_overrides)
@@ -179,5 +179,41 @@ async def test_delete_then_undo_restores_rows_against_postgres():
         undone = await writer.undo(deleted.compensation_id)
         assert undone.affected_rows == 1
         assert await _status_of(reader, _TEST_ID) == "pg-undo"  # restored
+    finally:
+        await _delete_test_row(writer)
+
+
+@pytest.mark.asyncio
+async def test_upsert_inserts_then_updates_on_conflict_against_postgres():
+    # First upsert inserts; a second upsert on the same PK updates (ON CONFLICT).
+    from querygate.write_ast.models import UpsertStatement
+
+    _use_writable_policy()
+    writer = WriteExecutionService("demo")
+    reader = StructuredQueryService(connection_id="demo")
+    await _delete_test_row(writer)
+    try:
+
+        def _upsert(status):
+            return UpsertStatement(
+                table="orders",
+                rows=[
+                    {
+                        "id": _TEST_ID,
+                        "customer_id": 1,
+                        "status": status,
+                        "total_amount": 3,
+                        "created_at": "2026-01-01T00:00:00",
+                    }
+                ],
+                conflict_columns=["id"],
+                update_columns=["status"],
+            )
+
+        await writer.execute(_upsert("upsert-v1"))
+        assert await _status_of(reader, _TEST_ID) == "upsert-v1"  # inserted
+
+        await writer.execute(_upsert("upsert-v2"))
+        assert await _status_of(reader, _TEST_ID) == "upsert-v2"  # conflict -> updated
     finally:
         await _delete_test_row(writer)

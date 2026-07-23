@@ -42,6 +42,7 @@ from querygate.audit.logger import audit_query
 from querygate.compiler.sqlalchemy_compiler import _compile_where
 from querygate.compiler.write_compiler import _coerce_write_value, compile_write
 from querygate.connections.engine import session_scope
+from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.auth import Principal
 from querygate.core.config import config as app_config
 from querygate.core.exceptions import (
@@ -67,6 +68,7 @@ from querygate.write_ast.models import (
     DeleteStatement,
     InsertStatement,
     UpdateStatement,
+    UpsertStatement,
     WriteStatement,
 )
 
@@ -107,7 +109,7 @@ class WriteBatchItemResult(pyd.BaseModel):
 def _write_shape(statement: WriteStatement, table_name: str) -> dict:
     """A redaction-safe shape of the write for the audit event: op, table, and
     the *names* of written columns — never a value."""
-    if isinstance(statement, InsertStatement):
+    if isinstance(statement, (InsertStatement, UpsertStatement)):
         columns = sorted(statement.rows[0].keys()) if statement.rows else []
     else:
         # UpdateStatement.set is column->value; DeleteStatement writes no columns.
@@ -133,6 +135,14 @@ class WriteExecutionService:
         self._principal = principal
         self._surface = surface
 
+    def _connection_dialect(self) -> str:
+        """The target connection's dialect — selects the upsert idiom (and is
+        harmlessly ignored for dialect-agnostic insert/update/delete)."""
+        profile, _policy = resolve_visible_connection(
+            self._connection_id, principal=self._principal
+        )
+        return profile.dialect
+
     async def execute(
         self, statement: WriteStatement, *, approval_token: Optional[str] = None
     ) -> WriteResult:
@@ -149,7 +159,7 @@ class WriteExecutionService:
             validate_write_policy(statement, policy, self._connection_id)
             _reject_subquery_in_write_where(getattr(statement, "where", None))
             table = await validate_write_schema(statement, self._connection_id, self._principal)
-            dml = compile_write(statement, table)
+            dml = compile_write(statement, table, self._connection_dialect())
             sql = str(dml.compile(compile_kwargs={"literal_binds": False}))
 
             # Writes share the connection's concurrency slot for now; a dedicated
@@ -446,7 +456,7 @@ class WriteExecutionService:
             # cap, so a race between the count and the mutation can't over-write.
             actual = (
                 len(statement.rows)
-                if isinstance(statement, InsertStatement)
+                if isinstance(statement, (InsertStatement, UpsertStatement))
                 else (
                     result.rowcount
                     if result.rowcount is not None and result.rowcount >= 0
@@ -497,6 +507,8 @@ class WriteExecutionService:
         the table lacks the single-column primary key an undo needs to key on."""
         if not write_policy.compensation_enabled or affected > write_policy.max_compensation_rows:
             return None
+        if isinstance(statement, UpsertStatement):
+            return None  # upsert reversibility (per-row insert-or-update) is a later slice
         pk_cols = list(table.primary_key.columns)
         if len(pk_cols) != 1:
             return None  # undo keys on a single-column PK (documented limit)
@@ -544,7 +556,7 @@ class WriteExecutionService:
         return record
 
     async def _count_affected(self, session, statement: WriteStatement, table: sa.Table) -> int:
-        if isinstance(statement, InsertStatement):
+        if isinstance(statement, (InsertStatement, UpsertStatement)):
             return len(statement.rows)
         count_stmt = (
             sa.select(sa.func.count())

@@ -148,7 +148,7 @@ class WritePolicy(pyd.BaseModel):
     enabled: bool = False
     allowed_tables: list[str] = pyd.Field(default_factory=list)
     # Which operations are permitted at all (globally); an empty list means none.
-    allowed_operations: list[Literal["insert", "update", "delete"]] = pyd.Field(
+    allowed_operations: list[Literal["insert", "update", "delete", "upsert"]] = pyd.Field(
         default_factory=list
     )
     # Columns that may never be written, keyed by table ("*" = every table) —

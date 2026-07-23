@@ -26,10 +26,15 @@ from querygate.mcp.auth import get_mcp_caller, get_mcp_config
 from querygate.mcp.elicitation import build_elicitation_resolver
 from querygate.mcp.exceptions import MCPErrorResult, safe_mcp_tool
 from querygate.mcp.server import mcp_server
-from querygate.write_ast.models import DeleteStatement, InsertStatement, UpdateStatement
+from querygate.write_ast.models import (
+    DeleteStatement,
+    InsertStatement,
+    UpdateStatement,
+    UpsertStatement,
+)
 
 _WriteStatement = Annotated[
-    Union[InsertStatement, UpdateStatement, DeleteStatement],
+    Union[InsertStatement, UpdateStatement, DeleteStatement, UpsertStatement],
     Field(discriminator="op"),
 ]
 

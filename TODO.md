@@ -2109,8 +2109,13 @@ verify a governed write on real Postgres (Redis backend); (f) **MSSQL parity** �
 insert/update/delete + undo all proven against a live MSSQL
 (`test_mssql_write_execution.py`: OUTPUT key capture for IDENTITY PKs, and
 delete-undo re-inserts the original key via SQLAlchemy's SET IDENTITY_INSERT).
-Writes are now proven on **all three** engines (SQLite/Postgres/MSSQL). **Phase
-3b remaining:** upserts, multi-statement batch atomicity, approval-binds-to-diff-hash.
+Writes are now proven on **all three** engines (SQLite/Postgres/MSSQL); (g)
+**upserts** — `UpsertStatement` (INSERT ON CONFLICT DO UPDATE) via a per-dialect
+compiler registry (`_UPSERT_COMPILERS`, composable — no inline `if dialect`),
+native on Postgres/SQLite, **rejected on MSSQL** (reject-not-emulate, no
+synthesized MERGE); proven on real Postgres + MSSQL. Upsert-undo is deferred
+(per-row insert-or-update is ambiguous to reverse). **Phase 3b remaining:**
+multi-statement batch atomicity, approval-binds-to-diff-hash.
 
 **Phase 3b — production-grade reversibility hardening (the 10/10 bar; from the
 2026-07-23 design review of the undo mechanism).** Logical pre-image compensation

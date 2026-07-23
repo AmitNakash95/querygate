@@ -20,6 +20,7 @@ from querygate.write_ast.models import (
     DeleteStatement,
     InsertStatement,
     UpdateStatement,
+    UpsertStatement,
     WriteStatement,
 )
 
@@ -36,7 +37,7 @@ def _where_predicates(node: WhereNode) -> Iterator[Predicate]:
 
 
 def _written_columns(statement: WriteStatement) -> list[str]:
-    if isinstance(statement, InsertStatement):
+    if isinstance(statement, (InsertStatement, UpsertStatement)):
         return list(statement.rows[0].keys())  # validated identical across rows
     if isinstance(statement, UpdateStatement):
         return list(statement.set.keys())

@@ -27,7 +27,12 @@ from querygate.execution.approval import (
 )
 from querygate.execution.write_execution import WriteExecutionService, WriteResult
 from querygate.execution.write_preview import WritePreview, WritePreviewService
-from querygate.write_ast.models import DeleteStatement, InsertStatement, UpdateStatement
+from querygate.write_ast.models import (
+    DeleteStatement,
+    InsertStatement,
+    UpdateStatement,
+    UpsertStatement,
+)
 from querygate.execution.service import (
     BatchQueryItemResult,
     ExplainResult,
@@ -261,7 +266,7 @@ def build_router(
     async def preview_write(
         connection: str,
         statement: Annotated[
-            Union[InsertStatement, UpdateStatement, DeleteStatement],
+            Union[InsertStatement, UpdateStatement, DeleteStatement, UpsertStatement],
             pyd.Field(discriminator="op"),
         ],
         principal: Principal = Depends(get_principal),
@@ -291,7 +296,7 @@ def build_router(
     async def execute_write(
         connection: str,
         statement: Annotated[
-            Union[InsertStatement, UpdateStatement, DeleteStatement],
+            Union[InsertStatement, UpdateStatement, DeleteStatement, UpsertStatement],
             pyd.Field(discriminator="op"),
         ],
         principal: Principal = Depends(get_principal),
@@ -320,7 +325,7 @@ def build_router(
     async def approve_write(
         connection: str,
         statement: Annotated[
-            Union[InsertStatement, UpdateStatement, DeleteStatement],
+            Union[InsertStatement, UpdateStatement, DeleteStatement, UpsertStatement],
             pyd.Field(discriminator="op"),
         ],
         principal: Principal = Depends(get_principal),
