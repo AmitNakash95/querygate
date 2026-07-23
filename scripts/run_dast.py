@@ -145,8 +145,8 @@ def main() -> int:
             # FastAPI emits OpenAPI 3.1; Schemathesis 3.x needs this opt-in.
             "--experimental=openapi-3.1",
             # Every endpoint that accepts the *recursive* StructuredQuery AST
-            # (joins/subqueries nest) — query/explain/batch, template-run, and
-            # the admin query-simulate — is excluded here because Schemathesis
+            # (joins/subqueries nest) — query/explain/batch/approve, template-run,
+            # and the admin query-simulate — is excluded here because Schemathesis
             # cannot auto-generate data for recursive references
             # (schemathesis/schemathesis#947). That is not a coverage gap: those
             # exact operations get deeper, purpose-built fuzzing in
@@ -158,7 +158,7 @@ def main() -> int:
             # single --exclude-path-regex takes effect, so all patterns are ORed
             # into one alternation here.
             "--exclude-path-regex",
-            r"(/query(/explain|/batch)?|/query-templates/[^/]+/run|/admin/config/simulate)$",
+            r"(/query(/explain|/batch|/approve)?|/query-templates/[^/]+/run|/admin/config/simulate)$",
             "--checks",
             "not_a_server_error",
             "--checks",

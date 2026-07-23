@@ -190,7 +190,7 @@ def _patched_service() -> tuple:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case_id", list(_MALFORMED_QUERIES))
-@pytest.mark.parametrize("path", ["query", "query/explain"])
+@pytest.mark.parametrize("path", ["query", "query/explain", "query/approve"])
 async def test_rest_malformed_query_rejected_cleanly(case_id: str, path: str):
     payload = _MALFORMED_QUERIES[case_id]
     app = create_app(_settings())
@@ -251,7 +251,7 @@ async def test_rest_malformed_batch_envelope_rejected_cleanly(payload: object):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case_id", list(_RAW_MALFORMED_BODIES))
-@pytest.mark.parametrize("path", ["query", "query/explain", "query/batch"])
+@pytest.mark.parametrize("path", ["query", "query/explain", "query/batch", "query/approve"])
 async def test_rest_raw_malformed_body_rejected_cleanly(case_id: str, path: str):
     body = _RAW_MALFORMED_BODIES[case_id]
     app = create_app(_settings())
@@ -275,7 +275,7 @@ async def test_rest_raw_malformed_body_rejected_cleanly(case_id: str, path: str)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field", _RAW_SQL_SMUGGLE_FIELDS)
-@pytest.mark.parametrize("path", ["query", "query/explain"])
+@pytest.mark.parametrize("path", ["query", "query/explain", "query/approve"])
 async def test_rest_raw_sql_field_is_rejected_not_ignored(field: str, path: str):
     """QG-01: there is no raw-SQL field. A smuggled `sql`/`query`/... field is
     rejected as an unpermitted extra field, never silently dropped, and never
