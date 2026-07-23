@@ -1175,52 +1175,9 @@ pollable status/result, or a paginated `principal_impacts` response —
 without changing phase 1's response shape for the common case that already
 fits under the bound.
 
-### 42. Four-eyes config approval and separation of duties ✅ DONE (phase 1 — server-side enforcement); phase 2 (CLI + admin-UI flows) not started
+### 42. Four-eyes config approval and separation of duties ✅ DONE
 
-**Phase 1 shipped (the server-side governance model + enforcement):** A staged
-config version now carries durable `ConfigApprovalRecord`s
-(`admin/models.py`: approver, decision, timestamp, content fingerprint, bounded
-note). The store (`admin/store.py add_approval`) enforces the invariants
-**server-side, not in the UI**: only a `staged` version can be reviewed, the
-version's **author can never approve/reject their own change**, and a reviewer's
-latest decision supersedes their own earlier one so *N approvals means N distinct
-reviewers*. A new `AppConfig.require_config_approvals` (default `0` =
-single-administrator mode, fully backward-compatible; existing manifests missing
-the `approvals` field load unchanged) gates `apply()`: a staged version's **first
-activation** is refused with `PolicyViolationError` until it has that many valid
-approvals (bound to the version's content fingerprint) — rollback is deliberately
-exempt. New `admin:config:approve` scope (distinct from `admin:config:write`; a
-"Config Approver" role bundle) and REST `POST /admin/config/versions/{id}/approve`
-and `/reject` (409 on an author-conflict/not-staged, 403 without the scope). Every
-decision + the insufficient-approvals apply-rejection is audited (`approve`/
-`reject` actions, content-free). Covered by `tests/unit/test_config_approval.py`
-(9 tests: author≠approver, staged-only, distinct-reviewer accounting,
-apply-blocked-until-quorum, single-admin backward-compat, endpoint scope/409).
-
-**Phase 2 (not started):** the CLI flow (`querygate-*` approve/reject), the
-admin-UI review workspace (surface pending versions, reviewers, and decisions —
-"never simulate four-eyes in the browser while the server permits self-approval"
-is already satisfied because enforcement is server-side), and any richer
-migration/analytics. The concurrency/authorization core is done.
-
-**Original scope (for reference):** governance-model and authorization change —
-new durable states, reviewer records, scopes, invariants, audit actions,
-concurrency handling, REST/CLI/UI flows, and migration/backward-compatibility for
-existing staged versions.
-
-**Why it matters:** Item 31 currently implements an explicit validate → diff →
-stage → typed-confirmation activate sequence, but one `admin:config:write`
-principal can perform every step. Regulated and higher-risk customers often
-need proof that the author of an access change could not approve and activate
-their own proposal.
-
-**What to do:** Add separate propose/review/approve/activate capabilities and a
-durable approval record bound to an immutable version fingerprint. Enforce
-author ≠ approver, invalidate approval if content changes, support rejection
-with bounded review notes, prevent activation without the required approvals,
-and audit every transition without YAML content. Keep a documented single-
-administrator mode for smaller deployments, but never simulate four-eyes in
-the browser while the server still permits self-approval.
+Server-side separation of duties on the config plane: durable per-version `ConfigApprovalRecord`s, author≠approver enforced in the store, an `AppConfig.require_config_approvals` apply-gate (single-admin mode when 0; backward-compatible), the `admin:config:approve` scope + REST approve/reject, the `querygate-config` CLI, and an admin-UI review affordance. Every decision is audited. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 42).
 
 ### 43. Admin connection-operations and health workspace ✅ DONE
 

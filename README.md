@@ -686,7 +686,10 @@ talking to the API directly rather than the UI. Approvals bind to the version's
 content fingerprint, and rollback to a previously-active version stays exempt so
 disaster recovery is never blocked. Every approve/reject and every
 insufficient-approvals rejection is in the audit trail. See
-`docs/SCOPE_CATALOG.md`'s "Config Approver" role.
+`docs/SCOPE_CATALOG.md`'s "Config Approver" role. Reviewers can act from the
+`/admin/` Releases view (Approve/Reject buttons on a staged version) or the
+`querygate-config` CLI (`querygate-config versions` / `approve <id>` /
+`reject <id>`, authenticating with their own token).
 
 ### Validated policy templates and safe-start presets
 
