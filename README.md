@@ -202,8 +202,11 @@ schema-, and guardrail-checked server-side before any row is touched. It adds
 no trust and cannot bypass any guardrail. Predicate operators (`==`, `>`,
 `.in_`, `.between`, `.is_null`), boolean groups (`and_`/`or_`/`not_`),
 aggregates (`agg.*`), `date_bucket`, `string_agg`/`array_agg`,
-`percentile_cont`, scalar functions (`fn`/`fn_select`), `case`/`when`, and
-`top_n` cover the full AST. Runnable end-to-end demo:
+`percentile_cont`, scalar functions (`fn`/`fn_select`), `case`/`when`,
+`top_n`, and a bounded `IN (subquery)` (a predicate's `value_subquery` — a
+nested `StructuredQuery`, not raw SQL; uncorrelated, single-connection,
+depth-capped, with all caps summed tree-wide; item 97) cover the AST.
+Runnable end-to-end demo:
 [`examples/client_sdk_python.py`](examples/client_sdk_python.py)
 (`python examples/client_sdk_python.py` to print bodies; add `--send` with
 `QUERYGATE_API_KEY` set to run them against a local server). A TypeScript

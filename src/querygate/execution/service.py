@@ -305,8 +305,15 @@ class StructuredQueryService:
     ) -> Tuple[sa.Select, int, dict, str]:
         policy = self._get_policy()
         validate_policy(query, policy, connection_id=self._connection_id)
+        # scope_tables collects each nested value_subquery's reflected tables
+        # (item 97), keyed by node id, so the compiler can render IN (subquery).
+        # Empty for a non-nested query.
+        scope_tables: dict = {}
         tables = await validate_schema(
-            query, connection_id=self._connection_id, principal=self._principal
+            query,
+            connection_id=self._connection_id,
+            principal=self._principal,
+            scope_tables=scope_tables,
         )
         # Derived from the live engine, not ConnectionProfile.dialect — the
         # engine's own dialect is what actually executes the compiled SQL,
@@ -315,7 +322,12 @@ class StructuredQueryService:
         # that happens to fail against it).
         dialect = get_engine(self._connection_id).dialect.name
         stmt, limit = compile_structured_query(
-            query, tables, policy, dialect=dialect, principal=self._principal
+            query,
+            tables,
+            policy,
+            dialect=dialect,
+            principal=self._principal,
+            subquery_tables=scope_tables,
         )
         return stmt, limit, tables, dialect
 

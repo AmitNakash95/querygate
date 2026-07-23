@@ -7,7 +7,7 @@ known to exist and be policy-permitted.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import sqlalchemy as sa
 
@@ -91,8 +91,50 @@ def _resolve_scalar_arg(arg: ScalarFunctionArg, tables: Dict[str, sa.Table]) -> 
     return arg.literal
 
 
-def _apply_predicate(col: Any, pred: Predicate, tables: Dict[str, sa.Table]) -> Any:
+class _WhereCtx(NamedTuple):
+    """Everything `_compile_where` needs to render a nested `IN (subquery)`
+    (item 97): the policy/dialect/principal to compile the subquery through the
+    same path, and the per-subquery reflected tables from schema validation
+    (keyed by the subquery node's id)."""
+
+    policy: Policy
+    dialect: str
+    principal: Optional[Principal]
+    subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]]
+
+
+def _compile_in_subquery(pred: Predicate, ctx: Optional["_WhereCtx"]) -> sa.Select:
+    """Compile a Predicate.value_subquery (item 97) into the SELECT that feeds an
+    `IN (...)`. Compiled through the SAME `compile_structured_query` path as any
+    query — so the subquery's tables get their mandatory row filters, min-group
+    guardrail, etc. — using the subquery's OWN reflected tables (an independent,
+    uncorrelated scope). The final LIMIT is stripped (`.limit(None)`): an IN value
+    set must be complete or membership is wrong; the subquery is bounded by its
+    filters and the tree-wide caps, not by a row limit."""
+    if ctx is None or ctx.subquery_tables is None:
+        raise QueryValidationError("IN (subquery) is only supported in a WHERE clause")
+    subq_tables = ctx.subquery_tables.get(id(pred.value_subquery))
+    if subq_tables is None:
+        raise QueryValidationError("Subquery was not schema-validated")
+    stmt, _limit = compile_structured_query(
+        pred.value_subquery,
+        subq_tables,
+        ctx.policy,
+        dialect=ctx.dialect,
+        principal=ctx.principal,
+        subquery_tables=ctx.subquery_tables,
+    )
+    return stmt.limit(None)
+
+
+def _apply_predicate(
+    col: Any, pred: Predicate, tables: Dict[str, sa.Table], ctx: Optional["_WhereCtx"] = None
+) -> Any:
     op = pred.op
+    if pred.value_subquery is not None:
+        # IN (subquery) / NOT IN (subquery) — item 97.
+        subselect = _compile_in_subquery(pred, ctx)
+        return col.in_(subselect) if op == "in" else ~col.in_(subselect)
     # value_col is only valid for eq/neq/lt/lte/gt/gte (enforced at the AST
     # layer), so every other op below always sees pred.value here.
     val = _column(tables, pred.value_col) if pred.value_col is not None else pred.value
@@ -158,16 +200,21 @@ def _ref_output_name(ref: str, alias_map: Dict[str, Any]) -> str:
     return ref
 
 
-def _compile_where(node: WhereNode, tables: Dict[str, sa.Table], alias_map: Dict[str, Any]) -> Any:
+def _compile_where(
+    node: WhereNode,
+    tables: Dict[str, sa.Table],
+    alias_map: Dict[str, Any],
+    ctx: Optional["_WhereCtx"] = None,
+) -> Any:
     if isinstance(node, Predicate):
         target = _resolve_predicate_target(node, tables, alias_map)
-        return _apply_predicate(target, node, tables)
+        return _apply_predicate(target, node, tables, ctx)
 
     if node.not_terms is not None:
-        return sa.not_(_compile_where(node.not_terms, tables, alias_map))
+        return sa.not_(_compile_where(node.not_terms, tables, alias_map, ctx))
 
     children = node.and_terms or node.or_terms or []
-    compiled = [_compile_where(child, tables, alias_map) for child in children]
+    compiled = [_compile_where(child, tables, alias_map, ctx) for child in children]
     if node.and_terms is not None:
         return sa.and_(*compiled)
     return sa.or_(*compiled)
@@ -439,11 +486,17 @@ def compile_structured_query(
     # DatabaseDialect members and falls back to SQLite bucketing otherwise.
     dialect: str = DatabaseDialect.POSTGRESQL,
     principal: Optional[Principal] = None,
+    subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]] = None,
 ) -> Tuple[sa.Select, int]:
     """Compile AST + reflected tables + policy into a Select.
 
-    Returns (statement, effective_limit).
+    Returns (statement, effective_limit). `subquery_tables` (item 97) maps each
+    nested value_subquery node's id to its own reflected tables, so an
+    `IN (subquery)` in the WHERE clause compiles through this same path recursively.
     """
+    where_ctx = _WhereCtx(
+        policy=policy, dialect=dialect, principal=principal, subquery_tables=subquery_tables
+    )
     name_to_physical = effective_name_map(query)
     select_cols, alias_map = _build_select_columns(query, tables, dialect, policy, name_to_physical)
     base = _table_by_name(tables, query.from_alias or query.from_table)
@@ -467,7 +520,7 @@ def compile_structured_query(
     stmt = _apply_mandatory_row_filters(stmt, policy, tables, name_to_physical, principal)
 
     if query.where is not None:
-        stmt = stmt.where(_compile_where(query.where, tables, alias_map={}))
+        stmt = stmt.where(_compile_where(query.where, tables, alias_map={}, ctx=where_ctx))
 
     if query.group_by:
         stmt = stmt.group_by(

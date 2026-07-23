@@ -169,6 +169,9 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   it" shape as a validated node, not a raw-SQL string. Minimal-safe subset only
   (reject correlated / cross-connection / over-depth); caps summed tree-wide.
   **Depends on 96; requires a PRODUCT_GUIDE Decision Log entry before build.***
+  **Phase 1 shipped** (`IN (subquery)`/`NOT IN`, tree-wide caps, full adversarial
+  + e2e coverage, Decision Log recorded); box stays `[ ]` until phase 2
+  (`FROM (subquery)` derived table).
 - [ ] **19** — Additional dialects (MySQL, Snowflake, BigQuery, …). *Removes the
   "QueryGate is narrow" objection. **Depends on 57.***
 

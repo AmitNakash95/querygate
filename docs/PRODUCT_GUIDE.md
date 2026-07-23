@@ -2543,6 +2543,35 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — Bounded nested subqueries are added as a recursive AST node with
+  caps enforced TREE-WIDE, not per-level, and only the uncorrelated/single-
+  connection/depth-capped subset (item 97; maintainer-approved).** The AST gains
+  caller-authored nesting for the first time — a `Predicate.value_subquery` (an
+  `IN (subquery)` value set that is itself a full validated `StructuredQuery`),
+  phase 1. This is a deliberate capability expansion approved by the maintainer,
+  and it crosses **no** North Star non-goal: a subquery is still a fully
+  validated AST, never a raw-SQL string. Three decisions make it safe. **(1)
+  Caps sum tree-wide.** Every count-based cap (`max_select_columns`, `max_joins`,
+  `max_group_by`, `max_where_predicates`, in-list size, `top_n`) is enforced on
+  the **sum across the whole query tree**, and `max_where_depth` per query, so
+  nesting can never be used as a cap-multiplier bypass (the exact attack this
+  node introduces). A new `max_subquery_depth` (default 1) bounds nesting itself.
+  **(2) The canonical visitor (item 96) descends into subqueries**, so column
+  allow/deny and the masked-column rule apply to a subquery's base-table
+  references automatically — a denied/masked column can't hide one level down.
+  Each subquery is an **independent scope**: its column refs resolve to its own
+  from/join tables (a virtual relation), never the outer's, which is *also* what
+  makes it structurally uncorrelated. **(3) Reject, don't emulate** (the item-74
+  precedent): a **correlated** subquery (inner references an outer row), a
+  **cross-connection** subquery, and an **over-depth** subquery are each rejected
+  with a `QueryValidationError` pointing at the primitive to use instead (joins;
+  a separate per-connection query; a shallower shape) rather than being
+  half-supported. Phase 1 ships `IN (subquery)`; `FROM (subquery)` (a derived
+  table the outer selects from) is phase 2, because it additionally needs the
+  outer query to resolve against the inner's *output* aliases without reaching
+  past them into inner base tables. Full local adversarial coverage
+  (`tests/security/`) proves the caps and allow/deny hold through nesting;
+  MSSQL SQL-rendering parity (mechanical, not a security surface) is CI-validated.
 - **2026-07-23 — Four-eyes config approval is enforced server-side, author≠approver
   is structural, and rollback is exempt from the gate (item 42 phase 1).** Adding
   separation of duties to the config plane, three decisions were made. **(1)

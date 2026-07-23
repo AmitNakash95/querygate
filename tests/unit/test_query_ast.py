@@ -233,7 +233,7 @@ class TestStructuredQueryModels:
         assert p.value is None
 
     def test_value_col_and_value_both_set_rejected(self):
-        with pytest.raises(ValueError, match="both"):
+        with pytest.raises(ValueError, match="at most one of"):
             Predicate(col="orders.price", op="gt", value=5, value_col="orders.cost")
 
     def test_value_col_rejected_for_in_op(self):
