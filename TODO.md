@@ -2016,7 +2016,7 @@ is a validated structure, exactly as a read is), the catalog stays descriptive,
 audit stays redaction-safe. The `roadmap-next` automation must **not** auto-start
 it; a human decides first.
 
-### 93. Governed Writes — structured, bounded, previewable, reversible agent mutations ✅ DONE (phase 1 — contract + dry-run preview; phase 2a — gated single-statement execution); phase 2b + phase 3 not started
+### 93. Governed Writes — structured, bounded, previewable, reversible agent mutations ✅ DONE (phase 1 — contract + dry-run preview; phase 2a — gated execution; phase 2b — diff preview + security suite + clean errors + MCP tool + real-Postgres + load gate; phase 3a — bounded reversibility/undo); phase 2b tail (release-smoke write) + phase 3b not started
 
 **Phase 2a shipped (gated write EXECUTION, REST; maintainer-approved, Decision
 Log recorded).** `execution/write_execution.py`'s `WriteExecutionService.execute()`

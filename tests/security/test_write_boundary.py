@@ -13,6 +13,8 @@ cap rolls back, no partial write) are proved against real SQLite in
 
 from __future__ import annotations
 
+import json
+
 import pytest
 import sqlalchemy as sa
 
@@ -27,6 +29,23 @@ from querygate.write_ast.models import DeleteStatement, InsertStatement, UpdateS
 pytestmark = pytest.mark.security
 
 _ATTACK = "x'; DROP TABLE orders; --"
+_RAW_DML_FIELDS = {"sql", "raw_sql", "execute_sql", "dml", "raw", "query", "statement_text"}
+
+
+def _all_property_keys(schema) -> set:
+    """Every property name anywhere in a JSON schema (walks nested/union defs)."""
+    keys: set = set()
+    if isinstance(schema, dict):
+        for name, sub in schema.get("properties", {}).items():
+            keys.add(name)
+            keys |= _all_property_keys(sub)
+        for key, sub in schema.items():
+            if key != "properties":
+                keys |= _all_property_keys(sub)
+    elif isinstance(schema, list):
+        for item in schema:
+            keys |= _all_property_keys(item)
+    return keys
 
 
 def _orders_table() -> sa.Table:
@@ -53,6 +72,27 @@ def _writable(*, policy_kwargs=None, **write_overrides) -> Policy:
 # --------------------------------------------------------------------------- #
 # No raw DML — structurally impossible to express                              #
 # --------------------------------------------------------------------------- #
+
+
+def test_write_statement_json_schemas_expose_no_raw_dml_field_and_forbid_extras():
+    # Schema-level sibling of test_credential_redaction: the live write-statement
+    # schemas (what REST OpenAPI is generated from) expose no raw-SQL/DML property
+    # and forbid smuggled fields — the no-raw-DML invariant, asserted structurally.
+    for cls in (InsertStatement, UpdateStatement, DeleteStatement):
+        schema = cls.model_json_schema()
+        props = _all_property_keys(schema)
+        assert not (_RAW_DML_FIELDS & props), f"{cls.__name__} exposes a raw-DML field: {props}"
+        assert schema.get("additionalProperties") is False  # extra="forbid"
+
+
+def test_mcp_write_tool_schema_exposes_no_raw_dml_field():
+    import querygate.mcp.tools.write  # noqa: F401 — ensure the tool is registered
+    from querygate.mcp.server import create_mcp_server
+
+    server = create_mcp_server()
+    tool = server._tool_manager._tools["run_structured_writes"]
+    schema = json.loads(json.dumps(tool.parameters))  # plain dict
+    assert not (_RAW_DML_FIELDS & _all_property_keys(schema))
 
 
 @pytest.mark.parametrize("field", ["sql", "raw_sql", "execute_sql", "query", "dml"])
