@@ -62,6 +62,13 @@ CATALOG_ROLLBACK_SCOPE = "catalog:rollback"
 CATALOG_EXPORT_SCOPE = "catalog:export"
 CATALOG_DELETE_SCOPE = "catalog:delete"
 
+# In-query human-in-the-loop approval (TODO.md item 92) — a holder can grant an
+# approval token for a specific query that tripped the pre-execution approval
+# gate. Deliberately separate from the query-execution path so the querying
+# agent cannot approve its own expensive/sensitive read; a human/approver holds
+# this.
+QUERY_APPROVE_SCOPE = "query:approve"
+
 
 class ScopeInfo(NamedTuple):
     """One authorization scope: the wire string, the action it gates, and the
@@ -142,6 +149,11 @@ SCOPE_CATALOG: Tuple[ScopeInfo, ...] = (
     ScopeInfo(
         CATALOG_DELETE_SCOPE, "Catalog governance", "Delete catalog content (retention/deletion)"
     ),
+    ScopeInfo(
+        QUERY_APPROVE_SCOPE,
+        "Query approval",
+        "Grant an approval token for a query that tripped the human-in-the-loop gate",
+    ),
 )
 
 # Every scope string this resource understands, derived from SCOPE_CATALOG so it
@@ -196,5 +208,12 @@ ROLE_BUNDLES: Tuple[RoleBundle, ...] = (
         "Catalog Data Steward",
         "Backup/restore and retention of catalog content.",
         (CATALOG_EXPORT_SCOPE, CATALOG_DELETE_SCOPE),
+    ),
+    RoleBundle(
+        "Query Approver",
+        "Reviews and approves individual queries that trip the in-query "
+        "human-in-the-loop gate (sensitive/expensive reads). Kept separate from "
+        "the querying role so an agent cannot approve its own read.",
+        (QUERY_APPROVE_SCOPE,),
     ),
 )

@@ -119,6 +119,24 @@ class QuotaExceededError(PolicyViolationError):
         self.retry_after_seconds = retry_after_seconds
 
 
+class ApprovalRequiredError(PolicyViolationError):
+    """A read tripped the in-query human-in-the-loop approval gate (TODO.md item
+    92): its pre-execution estimate exceeded a policy approval threshold and no
+    valid approval token was supplied, so execution is paused pending a human
+    grant. Subclasses `PolicyViolationError` so existing
+    `except ValueError`/`except PolicyViolationError` handling still treats it as
+    a client-actionable rejection; it is its own type so the REST edge can map it
+    to a distinct `428 Precondition Required` carrying the `fingerprint` (which
+    an approver signs) and the `reasons`, and so `metrics.classify_rejection` can
+    report a dedicated `approval_required` reason.
+    """
+
+    def __init__(self, message: str, *, fingerprint: str, reasons: list[str]) -> None:
+        super().__init__(message)
+        self.fingerprint = fingerprint
+        self.reasons = reasons
+
+
 class QueryValidationError(ValueError):
     """Client-actionable query/schema validation failure.
 
