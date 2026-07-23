@@ -182,7 +182,9 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 
 ### Phase 5 — Catalog & observability depth (lowest marginal ROI — opportunistic)
 
-- [ ] **37** — Automated end-to-end proof of adaptive semantic learning.
+- [x] **37** — Automated end-to-end proof of adaptive semantic learning. ✅
+  **Shipped** (`catalog/adaptive_learning_benchmark.py` drives the real 32C
+  learning lifecycle e2e; reconciled from a shipped-but-unmarked state).
 - [ ] **38 (phase 2)** — Admin UI catalog-governance workspace.
 - [ ] **44 (phase 2)** — Admin observability / rejection-trend dashboard.
 - [ ] **45 (phase 2)** — Non-admin "My access" portal.
