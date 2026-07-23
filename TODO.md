@@ -2102,9 +2102,10 @@ undo** — an UPDATE undo reads each affected row's current changed-column value
 and **refuses** (422) if any drifted from what the write set (or the row is
 gone), so a concurrent change since the write is never silently clobbered.
 **Honest bounded limits:** cannot unwind cascading triggers/FK actions or
-downstream reads. **Phase 3b remaining:** MCP undo parity, `release-smoke` write,
-upserts, multi-statement batch atomicity, MSSQL execution parity,
-approval-binds-to-diff-hash.
+downstream reads; (d) **MCP undo parity** — `undo_structured_write` tool, so an
+agent that wrote over MCP can reverse over MCP. **Phase 3b remaining:**
+`release-smoke` write round-trip, upserts, multi-statement batch atomicity, MSSQL
+execution parity (infra-gated — no local MSSQL), approval-binds-to-diff-hash.
 
 **2026-07-23 review finding — in-flight regression on `compensation.py`, FIXED.**
 A working-tree edit converted `CompensationStore.put/get/consume` to
