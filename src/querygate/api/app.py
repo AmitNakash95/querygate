@@ -79,9 +79,7 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
 
             from querygate.execution.redis_concurrency import RedisConcurrencyLimiter
 
-            from querygate.execution.compensation import init_compensation_store
             from querygate.execution.quota import init_redis_quota_limiter
-            from querygate.execution.redis_compensation import RedisCompensationStore
             from querygate.execution.redis_quota import RedisQuotaLimiter
 
             redis_client = redis_asyncio.Redis.from_url(conf.concurrency_redis_url)
@@ -97,10 +95,6 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             # phase 2), so a principal's rate/byte budget is one shared window
             # across replicas rather than one-per-replica.
             init_redis_quota_limiter(RedisQuotaLimiter(redis_client))
-            # And the cross-replica write-compensation store (item 93 phase 3b),
-            # so POST /write/undo resolves a compensation_id on any replica, not
-            # just the pod that served the write.
-            init_compensation_store(RedisCompensationStore(redis_client))
 
         try:
             if conf.mcp_enabled:

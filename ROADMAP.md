@@ -267,80 +267,21 @@ surface them for a human, never auto-start them.
     execution coverage, and ✅ the **write concurrency load gate** (`-m load`:
     cap holds under contention, concurrent inserts commit exactly). Still open:
     only the `release-smoke` write round-trip.
-  - **Phase 3a** ✅ **shipped** — bounded reversibility (**undo**): a
-    QueryGate-owned TTL'd pre-image store (no operational-DB shadow table) +
-    `POST /write/undo` that re-applies the inverse (atomic, changed-columns-only,
-    compensation-id-authorized) through the governed pipeline; proven on SQLite +
-    real Postgres.
-  - **Phase 3b — take reversibility to 10/10** (the self-review findings that hold
-    it back, in priority order):
-    - [x] **RETURNING capture for server-generated PKs** ✅ — an INSERT that omits
-      a single-column PK now captures the generated key via `RETURNING`, so
-      serial/identity-PK inserts are undoable (was `compensation_id=null`). Proven
-      on SQLite + Postgres.
-    - [x] **Fix the in-flight async-conversion regression (found by the
-      2026-07-23 review)** ✅ — `CompensationStore.put/get/consume` were
-      converted to `async def` in a working-tree edit (prep for the durable
-      store below), but `write_execution.py`'s three call sites were not yet
-      updated to `await` them, so undo was non-functional in a single process,
-      not just across replicas. **Fixed:** all three call sites now `await`
-      the store, and the affected test
-      (`test_write_execution.py::test_compensation_store_ttl_and_single_use`)
-      was converted to `async def` with matching `await`s. `pytest -m unit`
-      now passes 230/230 (see `TODO.md` item 93 Phase 3b note and
-      `TECHNICAL_REVIEW.md` for full evidence).
-    - [ ] **Evict consumed/expired compensation records** — `consume()` only flips
-      `consumed=True` and nothing ever deletes an entry from
-      `InMemoryCompensationStore._records`; every governed write with
-      `compensation_enabled` leaks one record for the process's lifetime. Fix
-      alongside the item above, before building the Redis-backed store.
-    - [x] **Durable cross-replica compensation store** ✅ — `RedisCompensationStore`
-      (async pluggable store; installed when `CONCURRENCY_BACKEND=redis`) makes a
-      `compensation_id` resolvable on any replica, so undo works under HA. Pre-image
-      round-trips through JSON with type re-coercion; fakeredis + real-DB tested;
-      HA/DR matrix flipped to shared.
-    - [x] **Optimistic-concurrency undo** ✅ — an UPDATE undo reads each affected
-      row's current changed-column values and refuses (422) if any drifted from
-      the write's post-image (or the row is gone), instead of silently clobbering.
-    - [x] **MCP undo parity** ✅ — `undo_structured_write(connection,
-      compensation_id)` MCP tool, so an agent that wrote over MCP can also reverse
-      over MCP.
-    - [x] **`release-smoke` write round-trip** ✅ — `make release-smoke` now
-      preview → executes a capped governed write → verifies → undoes → verifies
-      against the shipped image on real Postgres (Redis backend, so the Redis
-      compensation store is exercised in-container).
-    - [x] **MSSQL write execution parity** ✅ — proven against a live MSSQL:
-      insert/update/delete + undo all work, including OUTPUT-based key capture for
-      IDENTITY PKs and SET IDENTITY_INSERT on delete-undo re-insert (SQLAlchemy
-      handles both). `tests/integration/test_mssql_write_execution.py`.
-    - [x] **Upserts** ✅ — `UpsertStatement` (INSERT ON CONFLICT DO UPDATE) via a
-      per-dialect compiler registry; Postgres/SQLite native, MSSQL rejected
-      (reject-not-emulate). Proven on real Postgres + MSSQL. (Upsert-undo deferred.)
-    - [x] **Multi-statement batch atomicity** ✅ — `execute_many(atomic=True)` /
-      the MCP tool's `atomic` flag: all writes in one transaction, all-or-nothing
-      (fail-closed on a gated write; no per-write compensation in atomic mode).
-    - [~] **approval-binds-to-diff-hash** — *deliberately deferred (not building
-      speculatively).* The approval token already binds to the write's full
-      fingerprint (a one-char change invalidates it) and the row-count/sensitivity
-      trigger is re-evaluated at execute; binding to a computed diff-hash would
-      force the execute path to compute the (expensive) diff every time for a
-      TOCTOU window a pilot hasn't asked to close. Revisit if a design partner
-      needs approve-the-exact-data semantics.
-    - **Production-grade reversibility hardening (2026-07-23 design review — the
-      10/10 bar).** Why/acceptance for each is in TODO.md item 93 Phase 3b; do in
-      this order:
-      - [ ] **Row-lock capture + drift check (`SELECT ... FOR UPDATE`)** —
-        correctness: without it the pre-image can mismatch what the write
-        overwrote and the optimistic-concurrency guard has a TOCTOU.
-      - [ ] **Encrypt the compensation pre-image at rest** — the unredacted
-        second copy of sensitive rows is in scope for the security-review metric.
-      - [ ] **Extend optimistic-concurrency refusal to INSERT undo** — INSERT undo
-        still blind-deletes a row another writer changed after the insert.
-      - [ ] **Guarantee (or label) compensation-store durability** — reject an
-        evicting/non-persistent Redis, or offer the opt-in same-DB store.
-      - [ ] **Native row-version token (`xmin`/`rowversion`) + CDC capture path** —
-        detects any concurrent change and scales the capture durably.
-      - [ ] **State the reversibility claim precisely (`claim-verify`)**.
+  - **Phase 3a/3b — reversibility (undo): REMOVED (2026-07-23).** The compensation
+    store, `POST /write/undo`, the MCP `undo_structured_write` tool, the
+    `WritePolicy.compensation_*` fields, and the `compensation_id` result field
+    were deleted — reversibility is no longer a QueryGate capability. Rationale
+    (see `docs/PRODUCT_GUIDE.md` Decision Log + TODO.md item 93): undo forced a
+    second copy of real row values outside the customer's DB — against the
+    least-privilege / data-never-leaves North Star — with unresolved
+    correctness/durability risk and low marginal value once preview + approval
+    exist. The **governance tier is kept and shipped**: preview + diff, gated
+    execution, approval, dual-identity + tamper-evident audit, deny-by-default, the
+    row cap, ✅ **upserts** (Postgres/SQLite native, MSSQL reject-not-emulate), ✅
+    **multi-statement atomic batch**, ✅ **MSSQL write-execution parity**, and the
+    `release-smoke` write round-trip. `approval-binds-to-diff-hash` remains a
+    reasoned deferral (the token binds the full write fingerprint; the trigger
+    re-evaluates at execute).
 - **F4 · Safe NL→StructuredQuery.** Needs a decision on model provider/posture;
   must be an isolated opt-in subsystem, never wired into the catalog/32C.
 - **P2 · Open the StructuredQuery AST as a standard.** A standards-governance
@@ -423,14 +364,9 @@ already-planned initiatives.
   now awaits the `async` `get`/`put`/`consume`; the affected unit test was
   converted to `async def` to match). `pytest -m unit` passes 230/230 with no
   coroutine-never-awaited warnings.
-- [ ] **Item 93 (Phase 3b) regression, part 2** — the consumed-record
-  eviction leak is still open: `consume()` only flags a record, never removes
-  it from the store.
-  - Why: every governed write with `compensation_enabled` leaks a record for
-    the process's lifetime.
-  - Scope: `execution/compensation.py`.
-  - Acceptance criteria: a consumed or expired record is removed from the
-    store, not just flagged; regression test added.
+- [x] **Item 93 (Phase 3b) regression, part 2 — OBSOLETE (2026-07-23).** The
+  consumed-record eviction leak is moot: the compensation store was removed
+  entirely along with the undo mechanism (see item 93). No code remains to leak.
 - [ ] **107** — Batch query execution double-reserves quota on an approval
   retry.
   - Why: an MCP batch item that needs interactive approval consumes two
@@ -473,13 +409,10 @@ already-planned initiatives.
   - Acceptance criteria:
     - A nightly/weekly workflow runs the CVE/SBOM/lockfile checks and
       `make test-soak` against `main` independent of code changes.
-- [ ] **113** — Add metrics for the write-undo/compensation-store feature.
-  - Why: once the item-93 regression above is fixed, undo failures would
-    still be invisible in Prometheus — no operator signal exists today.
-  - Scope: `metrics.py`, `execution/compensation.py`, `execution/write_execution.py`.
-  - Acceptance criteria:
-    - Counters for compensation put/get/consume and undo success/failure
-      exist and are asserted by a unit test.
+- [x] **113 — OBSOLETE (2026-07-23).** Metrics for the write-undo/compensation
+  store are moot: the undo/compensation feature was removed (see item 93).
+  Write-*execution* metrics, if wanted later, would be a fresh, separately-scoped
+  item.
 
 ### Review Phase 3 — Architecture and maintainability
 

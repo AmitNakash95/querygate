@@ -34,7 +34,7 @@ prompt-injected.
 | Supported databases | PostgreSQL and Microsoft SQL Server |
 | Client interfaces | MCP over Streamable HTTP and versioned REST endpoints |
 | Query input | Validated `StructuredQuery` JSON; no raw-SQL input |
-| Data operations | Read-only by default; opt-in, deny-by-default governed writes (typed INSERT/UPDATE/DELETE — previewed with a diff, approval-gated, reversible via bounded undo) when a table/operation is explicitly enabled. No DDL or stored-procedure passthrough in either mode. |
+| Data operations | Read-only by default; opt-in, deny-by-default governed writes (typed INSERT/UPDATE/DELETE — previewed with a diff and approval-gated) when a table/operation is explicitly enabled. No DDL or stored-procedure passthrough in either mode. |
 | Identity | Static bearer keys or JWKS-verified JWTs |
 | Authorization | Default, connection, and principal-specific policy layers |
 | Tenant isolation | Mandatory row filters, including values derived from authenticated JWT claims |

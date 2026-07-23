@@ -62,25 +62,26 @@ print("release smoke passed: container queried real Postgres through the structu
 PY
 
 # ── Governed WRITE round-trip (item 93): preview -> execute a capped insert ->
-# verify -> undo -> verify — proving the shipped image mutates safely, not just
-# reads. Uses a high id it inserts and then reverses, so the seed is untouched.
+# verify -> execute a governed delete -> verify — proving the shipped image
+# mutates safely, not just reads. Uses a high id it inserts then deletes, so the
+# seed is untouched.
 SMOKE_ID=990001
 INSERT_BODY="{\"op\":\"insert\",\"table\":\"orders\",\"rows\":[{\"id\":${SMOKE_ID},\"customer_id\":1,\"status\":\"smoke\",\"total_amount\":1,\"created_at\":\"2026-01-01T00:00:00\"}]}"
+DELETE_BODY="{\"op\":\"delete\",\"table\":\"orders\",\"where\":{\"col\":\"orders.id\",\"op\":\"eq\",\"value\":${SMOKE_ID}}}"
 
 # Dry-run preview mutates nothing.
 curl --fail --silent -H 'Content-Type: application/json' -d "$INSERT_BODY" \
     "$BASE_URL/api/v1/demo/write/preview" >/dev/null
 
-# Execute the write; capture the compensation id.
+# Execute the insert.
 exec_response=$(curl --fail --silent -H 'Content-Type: application/json' -d "$INSERT_BODY" \
     "$BASE_URL/api/v1/demo/write/execute")
-compensation_id=$(EXEC_RESPONSE="$exec_response" python3 -c '
+EXEC_RESPONSE="$exec_response" python3 -c '
 import json, os
 p = json.loads(os.environ["EXEC_RESPONSE"])
 assert p["affected_rows"] == 1, p
-assert p["compensation_id"], p
-print(p["compensation_id"])
-')
+assert p["executed"] is True, p
+'
 
 # Verify the row landed.
 verify=$(curl --fail --silent -H 'Content-Type: application/json' \
@@ -88,13 +89,12 @@ verify=$(curl --fail --silent -H 'Content-Type: application/json' \
     "$BASE_URL/api/v1/demo/query")
 VERIFY="$verify" python3 -c 'import json,os; assert json.loads(os.environ["VERIFY"])["row_count"] == 1'
 
-# Undo it (bounded reversibility) and verify it is gone.
-curl --fail --silent -H 'Content-Type: application/json' \
-    -d "{\"compensation_id\":\"${compensation_id}\"}" \
-    "$BASE_URL/api/v1/demo/write/undo" >/dev/null
+# Clean up with a governed delete and verify it is gone (leaves the seed intact).
+curl --fail --silent -H 'Content-Type: application/json' -d "$DELETE_BODY" \
+    "$BASE_URL/api/v1/demo/write/execute" >/dev/null
 verify2=$(curl --fail --silent -H 'Content-Type: application/json' \
     -d "{\"from\":\"orders\",\"select\":[\"orders.id\"],\"where\":{\"col\":\"orders.id\",\"op\":\"eq\",\"value\":${SMOKE_ID}}}" \
     "$BASE_URL/api/v1/demo/query")
 VERIFY2="$verify2" python3 -c 'import json,os; assert json.loads(os.environ["VERIFY2"])["row_count"] == 0'
 
-echo "release smoke passed: container executed a governed write and reversed it (undo) on real Postgres"
+echo "release smoke passed: container executed a governed write (insert + delete) on real Postgres"

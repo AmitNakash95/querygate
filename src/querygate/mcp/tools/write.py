@@ -19,7 +19,6 @@ from pydantic import BaseModel, Field
 from querygate.execution.write_execution import (
     WriteBatchItemResult,
     WriteExecutionService,
-    WriteResult,
 )
 from querygate.execution.write_preview import WritePreview, WritePreviewService
 from querygate.mcp.auth import get_mcp_caller, get_mcp_config
@@ -45,29 +44,6 @@ class WritePreviewBatchResult(BaseModel):
 
 class WriteExecuteBatchResult(BaseModel):
     results: List[WriteBatchItemResult]
-
-
-@mcp_server.tool(
-    description=(
-        "Reverse a previously-executed governed write, given the compensation_id its "
-        "execute result returned (bounded reversibility, item 93). Re-applies the inverse "
-        "through the same governed write pipeline — validated, capped, audited — so it needs "
-        "no new privilege. Single-use: a compensation_id works once, then is spent. Returns "
-        "a clean error if the id is unknown, expired, already used, for another connection, "
-        "or (for an UPDATE) if a changed row drifted since the write (undo refuses rather "
-        "than clobbering a concurrent change)."
-    )
-)
-@safe_mcp_tool
-async def undo_structured_write(
-    connection: Annotated[str, Field(description="Connection id from list_connections.")],
-    compensation_id: Annotated[
-        str, Field(description="The compensation_id returned by the write's execute result.")
-    ],
-) -> Union[WriteResult, MCPErrorResult]:
-    caller = get_mcp_caller()
-    service = WriteExecutionService(connection_id=connection, principal=caller, surface="mcp")
-    return await service.undo(compensation_id)
 
 
 @mcp_server.tool(
@@ -112,8 +88,7 @@ async def run_structured_writes(
             description=(
                 "execute mode only. false (default): each write is its own transaction, one "
                 "failure doesn't drop the rest. true: all-or-nothing — every write runs in one "
-                "transaction and any failure rolls the whole batch back (no per-write "
-                "compensation/undo in atomic mode)."
+                "transaction and any failure rolls the whole batch back."
             )
         ),
     ] = False,

@@ -1,8 +1,8 @@
 # Policy used only by scripts/release_smoke.sh to exercise a real governed WRITE
-# (and its undo) against the shipped image. Reads stay permissive (as the demo
-# example is); writes are enabled on `orders` with a small cap and bounded
-# reversibility so the smoke can insert -> verify -> undo -> verify. Not a
-# shipped default — the product stays deny-by-default for writes.
+# against the shipped image. Reads stay permissive (as the demo example is);
+# writes are enabled on `orders` with a small cap so the smoke can insert ->
+# verify -> delete -> verify. Not a shipped default — the product stays
+# deny-by-default for writes.
 default:
   enabled: true
   write:
@@ -10,5 +10,3 @@ default:
     allowed_tables: ["orders"]
     allowed_operations: ["insert", "update", "delete"]
     max_affected_rows: 100
-    compensation_enabled: true
-    max_compensation_rows: 100

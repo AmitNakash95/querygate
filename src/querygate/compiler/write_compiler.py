@@ -54,8 +54,8 @@ def _coerce_write_value(column: sa.Column, value: Any) -> Any:
             return _dt.time.fromisoformat(value)
         if pytype is _Decimal:
             # A Numeric column's driver (e.g. asyncpg) wants a Decimal, not a
-            # string — matters when a value round-trips through JSON (a
-            # compensation pre-image restored from the Redis store, item 93).
+            # string — matters when a value arrives through a JSON request body
+            # that carried the number as a string.
             return _Decimal(value)
     except (ValueError, _InvalidOperation):
         return value

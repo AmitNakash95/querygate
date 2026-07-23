@@ -124,7 +124,7 @@ order-of-magnitude, not commitments.
 | 90 | ✅ Delegated agent identity (on-behalf-of) into policy + dual-identity audit | M | 8, 10, 23 |
 | 91 | ✅ Tamper-evident hash-chained audit ledger + per-query compliance receipts | M | 23 |
 | 92 | In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) | L | 26, 90, 91 |
-| 93 | Governed Writes — structured, bounded, previewable, reversible agent mutations (decision-gated) | XL | 25, 48, 90, 91 |
+| 93 | Governed Writes — structured, bounded, previewable, governed agent mutations (decision-gated) | XL | 25, 48, 90, 91 |
 | 94 | Verify/enable prepared-statement plan reuse for template execution | S | 48 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
@@ -1785,15 +1785,26 @@ is a validated structure, exactly as a read is), the catalog stays descriptive,
 audit stays redaction-safe. The `roadmap-next` automation must **not** auto-start
 it; a human decides first.
 
-### 93. Governed Writes — structured, bounded, previewable, reversible agent mutations ✅ DONE (phases 1–3b) — only two reasoned deferrals remain
+### 93. Governed Writes — structured, bounded, previewable, governed agent mutations ✅ DONE (governance tier); reversibility/undo REMOVED 2026-07-23
+
+**⚠️ 2026-07-23 — reversibility/undo REMOVED** (maintainer decision, recorded in
+`docs/PRODUCT_GUIDE.md` Decision Log). Deleted: `execution/compensation.py` +
+`execution/redis_compensation.py`, `POST /{connection}/write/undo`, the MCP
+`undo_structured_write` tool, `WritePolicy.compensation_*`, and the
+`compensation_id` result field. **Why:** undo was the only feature that forced a
+second copy of real row values outside the customer's DB (against the
+least-privilege / data-never-leaves North Star) and carried unresolved
+correctness/durability risk, while adding little value once preview + approval
+exist. **Governed writes keep the governance tier** — preview + diff, gated
+execution, approval, dual-identity + tamper-evident audit, deny-by-default, the
+row cap, upserts, atomic batch. The phase-3a/3b undo narrative below is retained
+as history but no longer describes shipping behavior.
 
 **Comprehensively shipped:** the write sibling of the read pipeline for all four
 operations (INSERT/UPDATE/DELETE/UPSERT), *bounded* (deny-by-default, mandatory
 WHERE, in-txn cap, atomic — single or all-or-nothing batch), *previewed* (dry-run
 + bounded masking-aware old→new diff), *approved* (REST token + MCP elicitation),
-*attributed* (dual-identity, tamper-evident, redaction-safe audit), and
-*reversible* (bounded undo — atomic, changed-columns-only, optimistic-concurrency,
-serial-PK via RETURNING, durable cross-replica Redis store). REST + MCP surfaces,
+*attributed* (dual-identity, tamper-evident, redaction-safe audit). REST + MCP surfaces,
 clean typed errors, an adversarial security suite, and proven on **SQLite +
 real Postgres + real MSSQL + the shipped image + a concurrency load gate**. Only
 two **reasoned deferrals** remain (not "not started" — deliberate, recorded):
@@ -1906,59 +1917,10 @@ to a computed diff-hash would force the execute path to compute the diff every
 time for a TOCTOU window no pilot has asked to close. **Upsert-undo** and this
 are the only open item-93 items, both reasoned deferrals.
 
-**Phase 3b — production-grade reversibility hardening (the 10/10 bar; from the
-2026-07-23 design review of the undo mechanism).** Logical pre-image compensation
-is the *right* primary approach for QueryGate's constraints — no operational-DB
-schema change, no extra privilege, works self-hosted on any dialect — so this
-hardens it rather than replacing it. Treat each "why" as the acceptance
-criteria. In priority order:
-
-1. **Row-lock the pre-image capture and the drift check (`SELECT ... FOR
-   UPDATE`).** `_capture_pre_image` and `_assert_no_update_drift` both `SELECT`
-   without `with_for_update()`. Under READ COMMITTED (Postgres default) another
-   transaction can commit between the capture `SELECT` and the mutating DML, so
-   the recorded pre-image is *not* what the write actually overwrote; and the
-   drift check has its own TOCTOU with the undo UPDATE. This defeats the
-   correctness of both the snapshot *and* the just-shipped optimistic-concurrency
-   guard. *Acceptance:* capture and drift-check lock the affected rows through
-   commit (or governed writes/undo run at REPEATABLE READ); a concurrency test
-   proves the pre-image equals the overwritten value and undo never clobbers an
-   intervening commit.
-2. **Encrypt the compensation pre-image at rest.** The store necessarily holds
-   real, unredacted row values (in memory + Redis) — a second at-rest copy of
-   potentially the most sensitive columns, squarely in scope for the security
-   review that *is* the North Star success metric, and today it puts Redis in
-   that scope unencrypted. *Acceptance:* pre-image values are envelope/KMS-
-   encrypted at rest in both stores; the `trust-evidence` packet documents the
-   store, its TTL bound, and key management.
-3. **Extend optimistic-concurrency refusal to INSERT undo.** The drift guard
-   runs only for `op == "update"`; undoing an INSERT (DELETE by captured key)
-   still blind-deletes a row another writer modified after the insert.
-   *Acceptance:* INSERT undo refuses (never clobbers) when the target row changed
-   since the write; regression test added.
-4. **Guarantee (or honestly label) compensation-store durability.** A Redis with
-   `allkeys-lru`/`maxmemory` eviction or without AOF silently drops compensation
-   records, so undo reliability degrades exactly under load. *Acceptance:* config
-   validation rejects an evicting/non-persistent Redis for the compensation store
-   (or undo is explicitly labeled best-effort there); optionally offer an opt-in
-   same-DB, same-transaction compensation table (durability == the write, no data
-   egress — also mitigates #2), recorded as a Decision Log entry against the
-   "no operational-DB shadow table" decision.
-5. **Native row-version concurrency token + CDC capture path (robustness at
-   scale).** Upgrade optimistic concurrency from app-level `post_values`
-   comparison (changed-columns only) to the DB's own row-version token — Postgres
-   `xmin`, MSSQL `rowversion` — which detects *any* concurrent change and closes
-   the capture race natively; and offer CDC / logical decoding (Postgres logical
-   replication, MSSQL CDC) as a premium, durable, transaction-consistent
-   pre/post-image source for customers who can enable it. *Acceptance:* a
-   version-token guard is captured at write time and enforced on undo; the CDC
-   path is specified in a Decision Log entry before build.
-6. **State the reversibility claim precisely (`claim-verify`).** The defensible
-   claim is "single-statement, bounded-size, compare-and-safe reversal within a
-   TTL window; refuses (never clobbers) on drift; does not reverse
-   triggered/cascaded/derived effects" — never "safe autonomous undo."
-   *Acceptance:* PRODUCT_GUIDE + marketing carry exactly this wording, backed by
-   tests.
+**Phase 3b — reversibility hardening: WITHDRAWN (2026-07-23).** The undo mechanism
+these items would have hardened has been removed (see the note at the top of this
+item and the `docs/PRODUCT_GUIDE.md` Decision Log entry). The hardening action
+list no longer applies.
 
 **2026-07-23 review finding — in-flight regression on `compensation.py`, FIXED.**
 A working-tree edit converted `CompensationStore.put/get/consume` to
@@ -2627,21 +2589,10 @@ independent of code changes; document the cadence in `docs/RELEASING.md`.
 **Effort: S. Priority: medium (closes a real blind window between code
 changes, cheap to add). Depends on: none.**
 
-### 113. No metrics for the write-undo / compensation-store feature
+### 113. No metrics for the write-undo / compensation-store feature ✅ OBSOLETE (2026-07-23)
 
-`metrics.py` instruments concurrency, quota, cost-estimation, and
-catalog-usage-signal buffering, but has no counter/gauge for compensation
-store put/get/consume or undo success/failure (`execution/compensation.py`,
-`execution/write_execution.py`). Once item 93's compensation-store regression
-(tracked inline under item 93 Phase 3b) is fixed, undo failures would still be
-invisible in Prometheus/Grafana — an operator has no signal that undo is
-failing silently for a class of writes until a customer reports it.
-
-**Fix:** add `querygate_compensation_records_total`,
-`querygate_undo_attempts_total{outcome=...}` (or equivalent) counters, wired
-the same way `execution/concurrency.py`'s metrics are; a lightweight unit test
-asserting the counter increments on undo success/failure.
-
-**Effort: XS. Priority: low (observability gap, not a correctness bug).
-Depends on: 93 phase 3b's compensation-store fix (to have something correct
-to measure).**
+**Obsolete: the write-undo/compensation store was removed** (item 93,
+2026-07-23 — see the `docs/PRODUCT_GUIDE.md` Decision Log). There is no
+compensation store or undo path left to instrument, so this observability gap no
+longer exists. If write-*execution* metrics are wanted later, that is a fresh,
+separately-scoped item (not undo-specific).
