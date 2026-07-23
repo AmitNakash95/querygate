@@ -709,3 +709,56 @@ async def test_update_undo_refuses_on_concurrent_change_to_changed_column(sqlite
             },
         )
     assert row.json()["rows"][0]["status"] == "step-2"
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_atomic_batch_is_all_or_nothing(sqlite_app):
+    # execute_many(atomic=True): one failing write rolls the WHOLE batch back;
+    # an all-valid atomic batch commits every write.
+    from querygate.execution.write_execution import WriteExecutionService
+    from querygate.write_ast.models import InsertStatement
+
+    _enable_writes()
+    svc = WriteExecutionService("demo")
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        before = await _orders(client)
+        max_id = max(r["id"] for r in before)
+
+        def _ins(oid, status):
+            return InsertStatement(
+                table="orders",
+                rows=[
+                    {
+                        "id": oid,
+                        "customer_id": 1,
+                        "status": status,
+                        "total_amount": 1,
+                        "created_at": "2026-01-01T00:00:00",
+                    }
+                ],
+            )
+
+        # Second write reuses an existing PK -> the whole atomic batch fails.
+        failed = await svc.execute_many(
+            [_ins(max_id + 1, "atom-a"), _ins(before[0]["id"], "dup")], atomic=True
+        )
+        assert all(item.error is not None for item in failed)  # all-or-nothing failure
+        assert await _orders(client) == before  # nothing committed
+
+        # An all-valid atomic batch commits every write.
+        ok = await svc.execute_many(
+            [_ins(max_id + 1, "atom-a"), _ins(max_id + 2, "atom-b")], atomic=True
+        )
+        assert all(item.executed for item in ok)
+        assert await _count_status(client, "atom-a") == 1
+        assert await _count_status(client, "atom-b") == 1
+        for oid in (max_id + 1, max_id + 2):
+            await client.post(
+                "/api/v1/demo/write/execute",
+                json={
+                    "op": "delete",
+                    "table": "orders",
+                    "where": {"col": "orders.id", "op": "eq", "value": oid},
+                },
+            )
