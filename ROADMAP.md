@@ -225,8 +225,10 @@ surface them for a human, never auto-start them.
     (`include_diff`, bounded + masking-aware, DML rolled back), ✅ the adversarial
     **write security suite** (`make test-security`), ✅ clean typed **4xx** for
     constraint/type violations, and ✅ the **MCP `run_structured_writes` tool**
-    (preview/execute, batch, elicitation approval). Still open: `release-smoke`
-    write round-trip, write concurrency load gate.
+    (preview/execute, batch, elicitation approval), ✅ **real-Postgres** write
+    execution coverage, and ✅ the **write concurrency load gate** (`-m load`:
+    cap holds under contention, concurrent inserts commit exactly). Still open:
+    only the `release-smoke` write round-trip.
   - **Phase 3** (compensation/undo + upserts + batch + MSSQL parity) depends on
     Phase 2.
 - **F4 · Safe NL→StructuredQuery.** Needs a decision on model provider/posture;
