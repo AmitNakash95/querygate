@@ -1696,8 +1696,13 @@ a `Principal`:
 
 - `subject` — who the caller is (a string identifier).
 - `scopes` — a set of permission strings (e.g. `admin:reload-config`), used
-  to gate sensitive operations like config reload or catalog governance (see
-  `src/querygate/core/scopes.py`).
+  to gate sensitive operations like config reload or catalog governance.
+  `src/querygate/core/scopes.py` is the single source of truth for the whole
+  vocabulary: beyond the constants it carries a structured `SCOPE_CATALOG` and
+  recommended `ROLE_BUNDLES`, from which both the RFC 9728 `scopes_supported`
+  metadata and the human reference `docs/SCOPE_CATALOG.md` (via
+  `make scope-catalog`, drift-tested) are generated — so an IdP can wire up
+  QueryGate's scopes and roles without reverse-engineering source (item 95).
 - `claims` — the raw claims from a token, if the auth method produced any
   (empty for a static API key).
 - `auth_method` — which scheme produced this principal (`"api_key"`,
@@ -2283,6 +2288,35 @@ real databases, testing "does this correctly refuse to work, under
 adversarial input and under real concurrent load" is the harder and more
 important bar — and it's the one this test suite is built around.
 
+### Running it highly available (HA / DR)
+
+The Helm chart (`deploy/helm/querygate/`) ships a production HA path, documented
+end-to-end in `deploy/HA_DR.md`. Three things make a multi-replica deployment
+correct rather than merely running:
+
+- **Zero-downtime rollouts and all-replica config reload.** The deployment uses
+  `updateStrategy.maxUnavailable: 0` and stamps a `checksum/config` annotation on
+  the pod template, so a `helm upgrade` that changes connections/policy/catalog
+  rolls *every* replica one at a time behind the readiness gate — capacity never
+  drops, and no replica is left on stale config. This is the multi-replica
+  answer to the fact that the governance API's in-process reload only affects
+  the single replica that served the request.
+- **Honest shared-state boundaries.** The in-flight concurrency cap is a true
+  fleet-wide cap under `CONCURRENCY_BACKEND=redis`; per-principal *quotas* are
+  still enforced per-replica (item 50 phase 2 not shipped), so under N replicas
+  a quota is effectively N×. `deploy/HA_DR.md`'s shared-state matrix states this
+  plainly rather than implying a budget QueryGate doesn't yet enforce.
+- **DR without an app database.** QueryGate owns no configuration database — its
+  durable footprint is config (GitOps-backed), an optional governance PVC, and
+  the audit stream (stdout → your log store). Recovery is a redeploy from a
+  pinned image digest plus the Git config, so the DR runbook targets an RTO of
+  minutes and an RPO of ~zero for config.
+
+Chart HA invariants (the strategy, the change-sensitive checksum, the overlay's
+PDB/zone-spread/Redis, the RWX governance PVC) are asserted against a real
+`helm template` render in `tests/unit/test_helm_ha_deployment.py`, so the
+guarantees above can't silently drift out of the manifests.
+
 ## Glossary of Terms
 
 Alphabetical. Each term links back to the section that covers it in depth.
@@ -2509,6 +2543,95 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — Four-eyes config approval is enforced server-side, author≠approver
+  is structural, and rollback is exempt from the gate (item 42 phase 1).** Adding
+  separation of duties to the config plane, three decisions were made. **(1)
+  Enforcement lives in the store + `apply`, never only the UI.** The store refuses
+  to record a version author's own review and refuses a review of a non-staged
+  version; `apply` refuses a staged version's first activation until it has the
+  configured number of valid approvals. Simulating four-eyes in the browser while
+  the server still permits self-approval (the anti-pattern item 42 explicitly
+  names) is impossible because the browser isn't in the enforcement path. **(2)
+  N approvals means N *distinct* reviewers, bound to content.** A reviewer's
+  latest decision supersedes their own earlier one (no stacking), and each
+  approval carries the version's content fingerprint so it can never count for
+  different content. **(3) Rollback is exempt.** The gate applies only to a staged
+  version's *first* activation — reactivating a previously-active version (DR /
+  rollback) is never blocked on re-approval, because it was approved when first
+  applied and blocking recovery on a quorum would be unsafe. Backward-compatible
+  by default: `require_config_approvals` defaults to 0 (single-administrator mode)
+  and manifests written before the `approvals` field load unchanged. The
+  CLI/admin-UI review flows are phase 2; the authorization core is done.
+- **2026-07-23 — The in-query approval gate uses a stateless, fingerprint-bound
+  HMAC token and a scope separate from execution; phase 1 triggers only on the
+  cost estimate (item 92).** Building the human-in-the-loop gate, three
+  decisions were made deliberately. **(1) Stateless token, not an approval
+  store.** An approval is an HMAC-SHA256 signature over `{query fingerprint,
+  approver, expiry}` — no server-side pending-approval table. It cannot be
+  forged (keyed HMAC), cannot be replayed against a *different* query (the
+  fingerprint is a SHA-256 of the whole AST, so a one-character change
+  invalidates it), and cannot be replayed forever (short expiry). Verification is
+  fail-closed: a missing key, forged signature, expired, mismatched, or malformed
+  token all deny. This avoids adding statefulness to a security product and keeps
+  the gate horizontally-scalable with no shared approval state. **(2) `query:approve`
+  is a distinct scope from querying.** The agent that runs the query must not be
+  able to approve its own sensitive/expensive read, so approval is a separate
+  scope (a "Query Approver" role) — separation of duties by scope, the same
+  posture as catalog governance. **(3) Two triggers, one decision.** The gate
+  fires on either the cost/row estimate (Postgres, reusing the estimate the
+  pipeline already computes) **or** a catalog sensitivity label — a query
+  referencing a `pii`/`confidential`/`internal`-labelled column (found via the
+  item-96 canonical visitor, so a sensitive column in *any* clause counts, and
+  resolving only the static descriptive label, never a row value). Both fold into
+  one set of reasons so a single approval token covers whatever tripped it, and
+  it rejects with `428 Precondition Required` + fingerprint/reasons. The
+  sensitivity trigger is dialect-agnostic (works on MSSQL, no estimate needed).
+  The remaining phase-2 piece is the interactive MCP elicitation channel. The
+  whole gate is opt-in per policy and off by default, so it changes nothing for
+  an existing deployment, preserving the read-only, AST-only invariant (it only
+  *adds* a pre-execution pause).
+- **2026-07-23 — RFC 9728 `scopes_supported` advertises the full scope
+  vocabulary, kept distinct from the `mcp_required_scopes` access gate; role
+  bundles are advisory and generated, never enforced or hand-maintained (item
+  95).** Making "bring your IdP" turnkey required publishing QueryGate's scope
+  vocabulary. Two boundaries were drawn deliberately. **(1) Discovery ≠ gate.**
+  `scopes_supported` now lists the entire vocabulary an IdP might mint tokens
+  for (`core/scopes.py`'s `ALL_SCOPES`, unioned with any custom required scope),
+  while `mcp_required_scopes` stays exactly as-is as the enforced MCP access gate
+  — conflating the two (the prior behavior published only the gate) would have
+  told IdPs a token needs *only* the MCP scope, hiding every admin/catalog scope
+  they must also be able to issue. **(2) Roles are guidance, data-access is
+  not a scope.** `ROLE_BUNDLES` (Analyst/Operator/Config Governor/Catalog
+  Author/Catalog Admin/Catalog Data Steward) are advisory groupings QueryGate
+  never enforces — it enforces individual scopes — and an Analyst deliberately
+  carries *no* scope, because which tables/columns a principal may read stays in
+  `policy.yaml` keyed by `sub`/claim, never in the IdP. Both the wire metadata
+  and `docs/SCOPE_CATALOG.md` are generated from `core/scopes.py` with a drift
+  test (`test_scope_catalog.py`), so a new scope constant that isn't catalogued
+  fails CI rather than silently going undiscoverable. No auth-model change, no
+  QG-owned identity store.
+- **2026-07-23 — The multi-replica config-reload path is GitOps + a rolling
+  restart, not a cross-replica broadcast; per-principal quota stays honestly
+  per-replica (TODO.md item 56).** Building the HA/DR story, two boundaries were
+  decided in the open rather than papered over. **(1) Config propagation.** The
+  governance API's `apply()` reloads only the in-process registries of the single
+  replica that served the request; there is no reload fan-out. Rather than build
+  a cross-replica broadcast (a new distributed-coordination surface in a security
+  product), the chart makes `helm upgrade` the multi-replica path: a
+  `checksum/config` pod annotation rolls every replica behind the readiness gate
+  with `maxUnavailable: 0`. The governance API remains correct for single-replica
+  or staging; the optional RWX `configGovernance` PVC shares *history* across
+  replicas but still requires a roll to propagate an apply — documented, not
+  hidden. **(2) Quota honesty.** The in-flight concurrency cap is fleet-wide via
+  Redis, but per-principal rate/byte quotas (item 50) are still per-replica; the
+  Redis-backed shared budget is item 50 phase 2 (not started). We chose to state
+  the N× multiplication plainly in `deploy/HA_DR.md`'s shared-state matrix and
+  size guidance around it, rather than imply a cross-fleet budget the code does
+  not yet enforce. The rejected alternative — quietly shipping the HA overlay and
+  letting operators assume quotas were global — was declined because a security
+  product's operational claims have to match what the code does. Chart invariants
+  are asserted against a real `helm template` render
+  (`tests/unit/test_helm_ha_deployment.py`) so these guarantees can't drift.
 - **2026-07-23 — Signed delivery attests the container image (the thing we
   actually publish), not the Python package; publishing stays a manual tag push
   (TODO.md item 30/89 phase 2).** Completing the signed-delivery gate, two

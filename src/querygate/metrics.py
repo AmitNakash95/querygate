@@ -24,6 +24,7 @@ from prometheus_client import (
 
 from querygate.core.exceptions import (
     ConcurrencyLimitError,
+    ApprovalRequiredError,
     CostEstimateExceededError,
     PolicyViolationError,
     QueueFullError,
@@ -205,6 +206,10 @@ def classify_rejection(exc: BaseException) -> str:
     # a rate/budget throttle is a distinct operational signal from allow/deny.
     if isinstance(exc, QuotaExceededError):
         return "quota"
+    # Also before PolicyViolationError: a paused-for-approval query (item 92) is
+    # a distinct signal from a hard allow/deny rejection.
+    if isinstance(exc, ApprovalRequiredError):
+        return "approval_required"
     if isinstance(exc, PolicyViolationError):
         return "policy"
     if isinstance(exc, ValueError):

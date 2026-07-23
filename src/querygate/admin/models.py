@@ -26,12 +26,41 @@ class ConfigVersionStatus(str, Enum):
     INACTIVE = "inactive"
 
 
+class ConfigApprovalDecision(str, Enum):
+    APPROVE = "approve"
+    REJECT = "reject"
+
+
+class ConfigApprovalRecord(pyd.BaseModel):
+    """A durable four-eyes review decision on a staged config version (item 42).
+
+    Bound to the version's immutable content fingerprint at decision time, so a
+    decision can never silently apply to different content, and attributed to the
+    reviewer (who must not be the version's author). Notes are bounded so a
+    review can't be used to smuggle large/free-form content into the audit trail.
+    """
+
+    approver: str
+    decision: ConfigApprovalDecision
+    at: datetime
+    content_fingerprint: str
+    note: Optional[str] = pyd.Field(default=None, max_length=500)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
 class ConfigVersion(pyd.BaseModel):
     id: str
     status: ConfigVersionStatus
     created_at: datetime
     created_by: str
     description: Optional[str] = None
+
+    # Four-eyes review decisions (item 42). Empty for single-administrator mode
+    # (AppConfig.require_config_approvals == 0) and for versions staged before
+    # this field existed — a missing field defaults to [] on load, so old
+    # manifests remain readable unchanged.
+    approvals: list[ConfigApprovalRecord] = pyd.Field(default_factory=list)
 
     # Full source YAML, never resolved. Operators should use ${...} references,
     # but the model deliberately treats this as privileged content because a

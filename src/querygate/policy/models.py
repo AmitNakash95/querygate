@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Optional
 
 import pydantic as pyd
 
+from querygate.catalog.models import SensitivityClass
 from querygate.core.exceptions import PolicyViolationError
 
 if TYPE_CHECKING:
@@ -259,6 +260,29 @@ class Policy(pyd.BaseModel):
     max_estimated_cost: Optional[float] = pyd.Field(default=None)
     cost_estimation_mode: CostEstimationMode = pyd.Field(default=CostEstimationMode.ENFORCE)
 
+    # In-query human-in-the-loop approval gate (execution/approval.py, TODO.md
+    # item 92 phase 1). Unset (None, the default for both) means the gate is
+    # off — existing deployments behave identically. When set, a query whose
+    # pre-execution estimate exceeds the threshold is paused with
+    # ApprovalRequiredError unless the caller supplies a valid approval token
+    # (issued by a `query:approve` holder). These are a *softer* gate than
+    # max_estimated_rows/max_estimated_cost above: set them LOWER than the hard
+    # reject caps to mean "ask a human" rather than "refuse". Postgres-only in
+    # phase 1 (same estimate source as cost estimation); the catalog
+    # sensitivity-label trigger and MCP elicitation channel are phase 2.
+    # Enabling the gate requires AppConfig.approval_token_hmac_key to be set,
+    # otherwise no approval could ever be granted (fail-closed).
+    approval_max_estimated_rows: Optional[int] = pyd.Field(default=None)
+    approval_max_estimated_cost: Optional[float] = pyd.Field(default=None)
+    # Sensitivity-label trigger (item 92 phase 2): a query that references a
+    # column (or its table) carrying one of these catalog sensitivity labels
+    # requires approval regardless of its estimated size — the "what it would
+    # touch" half of the gate. Empty (default) means off. Dialect-agnostic and
+    # needs no cost estimate, so it works on MSSQL too. Reads only the static
+    # catalog label (metadata), never a row value — the catalog stays
+    # descriptive, never a query/row-value path.
+    approval_sensitivities: list[SensitivityClass] = pyd.Field(default_factory=list)
+
     # Audit/explain SQL rendering. Default is safe-by-default: SQL text uses
     # bind placeholders and parameter values are redacted, so a WHERE-clause
     # literal (an email, an SSN) never ends up verbatim in the audit log or
@@ -278,6 +302,25 @@ class Policy(pyd.BaseModel):
     @property
     def cost_estimation_enabled(self) -> bool:
         return self.max_estimated_rows is not None or self.max_estimated_cost is not None
+
+    @property
+    def approval_cost_gate_enabled(self) -> bool:
+        return (
+            self.approval_max_estimated_rows is not None
+            or self.approval_max_estimated_cost is not None
+        )
+
+    @property
+    def approval_gate_enabled(self) -> bool:
+        return self.approval_cost_gate_enabled or bool(self.approval_sensitivities)
+
+    @property
+    def estimate_needed(self) -> bool:
+        """Whether `execute()` must obtain the pre-execution estimate — true when
+        the hard cost gate or the cost-based approval gate is configured (the
+        sensitivity-label approval trigger needs no estimate), so the estimate is
+        computed once and fed to both."""
+        return self.cost_estimation_enabled or self.approval_cost_gate_enabled
 
     @property
     def query_quota_enabled(self) -> bool:

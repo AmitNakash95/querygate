@@ -2042,6 +2042,95 @@ see how one policy/configuration change alters the outcome. Every showcased
 configuration, decision, and error is traceable to a tested QueryGate behavior,
 and the page is explicitly labeled as an illustrative mocked experience.
 
+### 39. Draft-aware policy simulation before staging ✅ DONE
+
+**Shipped.** `POST /api/v1/admin/config/simulate`
+(`api/admin_config_routes.py`) accepts optional `connections_yaml`/
+`policy_yaml`/`catalog_yaml` overrides (each unset field inherits from the
+active config-governance version, or straight from the deployment files
+before governance has ever been bootstrapped) plus a target `principal`,
+scalar `claims`, `connection`, `table`, `columns`, and an optional structured
+`query`. The target principal is deliberately independent of the calling
+admin's own identity.
+
+- **Endpoint and evaluation scope:** `admin.service.simulate_candidate_policy`
+  writes the resolved candidate documents to a temporary directory and loads
+  them through `cli.load_config_context` — the same loaders and
+  cross-file/schema-shape validation `/admin/config/validate` and the CLI use
+  — into a fresh, request-local `ConnectionRegistry`/`PolicyStore`/
+  `CatalogStore` (`connections/visibility.py`'s new
+  `resolve_visible_connection_from` and `schema_validation.py`'s new
+  `resolve_query_table_connections(..., connection_resolver=...)` seam let the
+  exact production visibility/join-group/policy code run against those
+  isolated stores instead of the process-global ones). Nothing is installed
+  as a singleton and nothing is written to the config-version store, so the
+  live registry/policy/catalog, concurrent production requests, and any other
+  in-flight simulation are provably unaffected — proven under real concurrent
+  load in `test_candidate_simulation_uses_draft_without_persisting_or_changing_live_policy`
+  (12 interleaved simulate + active-policy-test calls via `asyncio.gather`).
+- **Authorization boundary:** `simulate` is the only `/admin/config/*` action
+  gated on *both* `admin:config:read` and `admin:config:write` together —
+  every other action needs only one. It echoes back semantic policy detail
+  like a read endpoint but also resolves caller-supplied config/secret
+  references like a write endpoint, so a read-only principal can't turn it
+  into a secret-existence oracle.
+- **Redactions:** the response model (`CandidatePolicySimulation`) structurally
+  excludes resolved secret values, static mandatory-filter values, supplied
+  claim values, query predicate values, and compiled SQL — it returns only a
+  typed `allow`/`deny` decision, per-column allow/deny, effective guardrails,
+  mandatory-filter claim *readiness* (never the filter's static value), and
+  typed reason codes. A table the candidate policy hides from the target
+  principal never contributes its mandatory-filter identifiers to the
+  response, even when the caller explicitly names that table
+  (`test_candidate_simulation_does_not_reveal_filters_for_denied_table`). An
+  invalid candidate fails closed with a generic message pointing at
+  `/validate` for detail rather than echoing the offending content
+  (`test_candidate_simulation_masks_invalid_candidate_content`), and is still
+  recorded as a redaction-safe `simulate` audit event
+  (`audit/events.py`/`audit/logger.py` gained `"simulate"` alongside
+  validate/preview/stage/apply/rollback).
+- **UI behavior:** the admin UI's "Test as principal" panel
+  (`admin_ui/app.js`/`index.html`) now posts to `/admin/config/simulate` with
+  the current in-browser draft when the session holds both config scopes,
+  falling back to the existing active-policy `/admin/ui/policy/test` endpoint
+  for read-only sessions — labeled accordingly ("Simulate draft policy
+  access" / "Nothing persisted" vs. the active-policy case) so an admin never
+  mistakes a draft-context decision for the currently enforced one.
+- **Threat-model control:** documented as QG-19 in `docs/THREAT_MODEL.md`,
+  covering the oracle risk, the isolation guarantee, the redaction surface,
+  and the fail-closed invalid-candidate behavior.
+
+Covered by `tests/unit/test_admin_service.py` (isolated-context redaction,
+denied-table mandatory-filter suppression, invalid-candidate masking, query
+allow/deny plus missing mandatory-claim denial) and
+`tests/integration/test_admin_config_governance.py` (concurrent draft vs.
+active-policy isolation over real HTTP) and
+`tests/security/test_adversarial_security.py` (scope enforcement).
+
+**Original scope (for reference — see above for what actually shipped):**
+
+**Effort: M–L (2–5 days).** The current active-policy simulator is small, but
+evaluating an uncommitted candidate safely needs an isolated candidate
+registry/policy/catalog context. It must reuse the real loaders and validation
+logic without swapping process-global runtime state or opening a second,
+behaviorally different policy engine.
+
+**Why it matters:** Item 31's “test as principal” deliberately evaluates only
+the active policy. That proves current behavior, but it cannot answer the most
+important pre-change question: “Will this draft allow or deny the intended
+principal after activation?” Requiring an administrator to activate first and
+test afterward weakens the value of dry-run governance.
+
+**What to do:** Extend config preview with a read-only candidate simulation
+endpoint that accepts the draft documents plus a target principal, scalar
+claims, connection, table, columns, and optionally a structured-query shape.
+Load and cross-validate the candidate in an isolated context, then run the same
+policy/visibility checks production execution uses. Return a typed allow/deny
+decision, effective guardrails, mandatory-filter claim readiness, and safe
+reasons—never resolved secret values, static row-filter values, compiled SQL
+literals, or hidden identifiers. Prove simulation persists nothing and cannot
+alter live request behavior even under concurrent use.
+
 ### 43. Admin connection-operations and health workspace ✅ DONE
 
 **Phase 1 shipped (admin connection-status API); phase 2a shipped (rate-limited
@@ -2410,6 +2499,62 @@ documents integration with most major agent frameworks out of the box.
 without a live model call; state plainly what wasn't exercised). Resist
 adding a maintained framework-specific SDK layer beyond the example
 itself — that risk was already called out in item 20.
+
+### 56. HA / multi-region reference deployment + DR runbook ✅ DONE
+
+**Effort: L (3–5 days).** Built on item 29's reference stack and item 9's
+cross-instance concurrency state; the new work was failover behavior and a
+documented recovery procedure, not a new deployment topology from scratch.
+
+**Why it mattered:** `docs/business/GO_TO_MARKET.md` explicitly said not to
+claim "a production Helm/Kubernetes reference deployment" yet. Item 29's
+reference stack is not the same claim as proven multi-instance failover —
+enterprise buyers evaluating this for production traffic ask for an HA/DR story
+specifically, not just a docker-compose file or a single Helm chart.
+
+**What shipped.**
+
+- **Zero-downtime rollouts + all-replica config reload.** The Helm
+  `deployment.yaml` now sets a configurable `updateStrategy`
+  (`RollingUpdate`, default `maxUnavailable: 0` / `maxSurge: 1`) and stamps a
+  `checksum/config` annotation derived from the rendered ConfigMap onto the pod
+  template. A `helm upgrade` that changes connections/policy/catalog therefore
+  rolls **every** replica one at a time behind the readiness gate — the
+  multi-replica-correct, zero-downtime config-reload path (item 5 + item 56).
+  This closes the real HA gap that `admin/service.py`'s `apply()` reloads only
+  the single replica that served the request (no cross-replica broadcast).
+- **Multi-zone overlay** `deploy/helm/querygate/values-ha.yaml`: autoscaling
+  floor 3, a PodDisruptionBudget, `topologySpreadConstraints` across
+  `topology.kubernetes.io/zone` and `kubernetes.io/hostname`, Redis-backed
+  concurrency kept on, and the chained audit sink selected.
+- **Optional shared config-governance PVC** (`configGovernance.enabled`,
+  `templates/configgovernance-pvc.yaml`) — ReadWriteMany, so the governance API
+  (Path B) has one shared version history across replicas when needed; off by
+  default because GitOps/ConfigMap (Path A) is the recommended multi-replica
+  path and needs no shared volume.
+- **`deploy/HA_DR.md`** — the shared-state correctness matrix (concurrency is a
+  true shared cap under `CONCURRENCY_BACKEND=redis`; **per-principal quota is
+  still per-replica** until item 50 phase 2 — effective budget multiplies by
+  replica count; config-governance and persisted audit are per-replica unless
+  deliberately shared), the zero-downtime config-reload contract, multi-zone and
+  active/active-or-passive multi-region topology, a backup/restore procedure
+  (Git-as-config-backup, governance PVC snapshot, audit-via-log-aggregator), and
+  reference RTO (≈ minutes) / RPO (≈ zero for config) targets, plus a failover
+  drill checklist for the one step only the operator can run.
+- Cross-links from `deploy/README.md` and `deploy/runbook.md`; GO_TO_MARKET
+  claims reconciled (HA/DR deployment now "safe to claim now" with the quota and
+  live-drill caveats; only an enterprise *SLA* remains "do not claim").
+
+**Tests.** `tests/unit/test_helm_ha_deployment.py` renders the actual chart with
+`helm template` and asserts the invariants are real properties of the manifests,
+not prose: zero-downtime strategy, a change-sensitive config checksum (proving a
+config edit actually rolls the pods), the HA overlay's PDB + zone spread + Redis
+concurrency, and the governance PVC being RWX and opt-in. Skips cleanly where
+`helm` is absent; CI images that ship helm exercise it for real.
+
+**Honest remainder (operator-run, by design).** A live multi-zone/multi-region
+failover *drill* against a real cluster is the operator's step — HA_DR.md §5 is
+its checklist. Everything code/chart/doc-preparable is done and tested here.
 
 ### 59. Read-only behavioral anomaly surfacing on the audit stream ✅ DONE
 
@@ -4213,3 +4358,164 @@ receipt *at the query layer*. Combined with item 90 this is the "prove to your
 auditor exactly what every agent did, on whose behalf, under which policy, and
 that the record is intact" artifact — the literal buying question for the
 fintech/healthcare ICP.
+
+### 60. Bug bounty / responsible disclosure program ✅ DONE
+
+**Effort: S (process and policy, not engineering).** Coordination-gated for its
+*paid* tier only — that pairs with item 53 and is explicitly deferred; the
+disclosure program itself is stage-appropriate to ship now.
+
+**Why it mattered:** a public disclosure process is a cheap, durable trust
+signal, and without it a researcher has no responsible channel to report.
+
+**What shipped.** `SECURITY.md` (already carried reporting channel, in/out scope,
+SLAs, supported-version policy, and links to the posture/threat-model) gained the
+two remaining pieces of this item:
+
+- **A recognition/reward structure decision appropriate to the current stage:**
+  coordinated disclosure + public recognition, **no monetary bounty yet** —
+  recorded as a deliberate decision, with the paid-program escalation gated on
+  item 53's audit (paying for findings a first audit would catch is poor use of a
+  bounty). The reporting channel/scope/process are stated to survive that
+  escalation unchanged.
+- **A single remediation process** all reports flow through (researcher, internal
+  adversarial-suite finding, or item-53 audit finding): triage/severity →
+  regression-lock as a failing test in `tests/security/` (the same bar every
+  guardrail meets) → fix + release gates → release & coordinated disclosure.
+
+This satisfies item 60's "publish SECURITY.md + decide a stage-appropriate
+structure + route through a shared remediation process." The only remaining part
+— standing up a *paid* bounty platform after the audit — is the deliberately
+deferred escalation, not a gap.
+
+### 54. Compliance control mapping (SOC 2 / ISO 27001 readiness) ✅ DONE
+
+**Effort: L (mostly documentation and gap analysis).** Coordination-gated: an
+agent can produce the mapping + gap analysis (done here); the independent audit
+engagement (item 53) and org-level process controls are the human/vendor
+remainder, flagged explicitly in the deliverable.
+
+**Why it mattered:** regulated-industry buyers ask "where's your SOC 2" as a
+gating question before evaluating architecture. QueryGate already has most of
+the underlying controls; this item maps what's built to a recognized framework
+rather than building new security features.
+
+**What shipped.** `docs/COMPLIANCE_MAPPING.md` — a control-by-control map to:
+
+- **SOC 2 Common Criteria CC1–CC9** plus the Confidentiality, Availability, and
+  Processing-Integrity series, each row citing a concrete artifact (e.g. CC6.7
+  → `PublicConnectionInfo` + `test_credential_redaction.py`; CC6.8 → cosign/SLSA
+  `release.yml` + `make verify-release`; CC7.3 → `audit/ledger.py` +
+  `querygate-audit verify`; CC7.5/A1 → `deploy/HA_DR.md`; PI1 → the validated-AST
+  pipeline + property-based compiler fuzzing).
+- **ISO/IEC 27001:2022 Annex A** cross-reference for the key domains (access
+  control, logging, cryptography, secure coding, vulnerability management).
+
+Every "Product-provided" row is grounded in a real file/test/CI gate (verified
+to exist before writing). The doc draws an explicit scope boundary —
+product-provided vs. shared-responsibility vs. customer/organization — because
+QueryGate is a self-hosted *component*, not a certified SaaS, so it never claims
+to "be SOC 2 certified"; it maps which controls it *evidences*. Cross-linked
+from `docs/SECURITY_POSTURE.md`'s External attestations section.
+
+**Honest gap analysis (real gaps, not theater):** the audit engagement itself
+(item 53), organizational controls (HR/physical/IR-process/vendor-management/
+access-review cadence), access-review evidence formalization, and the
+not-yet-shipped config separation-of-duties enhancements (items 39–42, correctly
+listed as roadmap not as existing controls). No new product code was added
+because the real gaps are organizational, not code — closing them with product
+features would have been the process theater the item warns against.
+
+### 95. Discoverable scope catalog + recommended role bundles for IdP integration ✅ DONE
+
+**Effort: S. Priority: enterprise-SSO adoption enabler for the shipped JWT/OAuth
+auth (items 8, 10, 90). Depends on: 10 (JWT), 90 (OAuth resource server). Not a
+security-model change — pure discoverability/DX.**
+
+**Origin.** With JWT/JWKS auth (item 10) and the MCP OAuth resource server (item
+90) shipped, "bring your IdP" is the scalable multi-user story, but an
+authorization server had to be told QueryGate's `scope` vocabulary, which lived
+only as constants in `core/scopes.py` — an operator had to reverse-engineer scope
+strings and hand-group them into roles.
+
+**What shipped.**
+
+- **`core/scopes.py` is now the single source of truth**, not just constants: a
+  structured `SCOPE_CATALOG` (`ScopeInfo(scope, category, gates)` per scope) and
+  advisory `ROLE_BUNDLES` (`RoleBundle(name, purpose, scopes)`), plus
+  `ALL_SCOPES` derived from the catalog. Six recommended bundles — Analyst
+  (no scopes; data-policy-governed), Operator, Config Governor, Catalog Author,
+  Catalog Admin, Catalog Data Steward — collectively cover every scope.
+- **Part 1 — machine-discoverable.** `mcp/oauth_metadata.py`'s RFC 9728
+  `scopes_supported` now advertises `sorted(set(ALL_SCOPES) | mcp_required_scopes)`
+  — the full vocabulary an IdP can import — instead of only echoing the required
+  scopes. The `mcp_required_scopes` **access gate** (`mcp/auth.py`) is untouched;
+  discovery and enforcement are kept as the two distinct concepts they are.
+- **Part 2 — human-readable & generated.** `scope_catalog.py` renders a Markdown
+  reference; `querygate-scope-catalog` (poetry script, `make scope-catalog`)
+  writes `docs/SCOPE_CATALOG.md`. Generated from `core/scopes.py`, never
+  hand-maintained.
+- **Docs:** README's auth section and PRODUCT_GUIDE (auth subsection + a Decision
+  Log entry recording the discovery-≠-gate and roles-are-advisory decisions).
+
+**Tests.** `test_scope_catalog.py` asserts every `*_SCOPE` constant is catalogued
+exactly once, `ALL_SCOPES` matches catalog order, bundles reference only known
+scopes and cover all of them, and the committed doc matches the generator
+(drift guard). `test_mcp_oauth_rs.py` updated to assert the full-vocabulary
+`scopes_supported` (present even with no required scopes configured).
+
+**Hard boundaries honored.** No auth-model change, no QG-owned identity/key
+store, no new scope semantics or enforcement path — the IdP still owns
+identities and QG still resolves data-access policy from `sub`/claims. Per-IdP
+click-through quickstarts were explicitly deferred.
+
+### 96. Unify the AST reference-walk into a single canonical visitor (enforcement hardening) ✅ DONE
+
+**Effort: M. Priority: high (robustness/proof; pure refactor, no behavior
+change). Depends on: nothing. Blocks: item 97.**
+
+**Why it mattered.** The knowledge "every place in a `StructuredQuery` where a
+table/column reference can appear" was duplicated across four independently
+hand-maintained walks: `validation/policy_validation.py`'s `_iter_column_refs`,
+`_non_projection_column_refs` (whose own docstring admitted it was
+"`_iter_column_refs` minus the bare-`str` select branch" — a near-verbatim copy
+kept in lockstep by hand), and `_collect_referenced_tables`, plus
+`validation/schema_validation.py`'s own separate `for join…`/`for item…`
+enumerations and `_collect_tables_from_where`. Every time the AST grew a field,
+each walk had to be taught the new position or a policy/schema hole opened
+silently in whichever one was forgotten.
+
+**What shipped.**
+
+- `validation/schema_validation.py` now defines the single canonical reference
+  visitor: `iter_column_refs(query) -> Iterator[ColumnRef]`, where
+  `ColumnRef = (position: RefPosition, ref: str)`. `RefPosition` is a 10-value
+  enum (`SELECT_PROJECTION_BARE`, `SELECT_NESTED`, `JOIN_ON`, `JOIN_EXTRA_ON`,
+  `WHERE`, `GROUP_BY`, `HAVING`, `ORDER_BY`, `TOP_N_PARTITION`, `TOP_N_ORDER`) —
+  rich enough to preserve the one distinction enforcement branches on: a *bare*
+  top-level select projection is the sole position a masked column (item 49) may
+  appear. The single WHERE-tree recursion (`_where_column_refs`) is the visitor's
+  only caller.
+- **policy_validation.py** deleted `_iter_column_refs`,
+  `_non_projection_column_refs`, `_collect_referenced_tables`, and its own
+  `_where_column_refs`. `referenced_tables` now folds from/join structural tables
+  with `iter_column_refs`; `validate_policy` walks the visitor once and feeds
+  both the table/column allow-deny checks and the masked-column rule (the latter
+  by filtering `position is RefPosition.SELECT_PROJECTION_BARE`). The
+  predicate-axis walk `_iter_where_predicates` (for count/in-list caps, not
+  references) deliberately stayed — a different axis.
+- **schema_validation.py**'s `validate_schema` replaced its six inline
+  per-position table-collection loops (and `_collect_tables_from_where`) with a
+  single `for column_ref in iter_column_refs(query)`.
+
+**Zero behavior change**, as required: the full suite (1402 passed), the
+adversarial `make test-security` suite, and `test_credential_redaction.py` all
+pass unchanged; no new caller surface, no AST change, no policy-semantics change.
+`tests/unit/test_reference_visitor.py` (new) pins the position taxonomy and the
+exact reference set per position, plus the alias→physical mapping and the
+item-49 exemption, so a future AST reference position must be taught in the one
+visitor (and this test) rather than in N forgotten copies — which is precisely
+what makes item 97's bounded nested subqueries safe to add by construction.
+
+**Hard boundaries honored.** Not a rewrite of policy semantics, not a change to
+any cap or allow/deny rule, not a new AST field.

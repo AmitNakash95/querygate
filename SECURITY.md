@@ -54,6 +54,44 @@ Out of scope:
 - Denial-of-service by sheer request volume against an unprotected deployment
   (deploy behind the documented rate limits and auth).
 
+## Recognition and reward structure
+
+QueryGate runs a **coordinated-disclosure program with public recognition**,
+sized to the project's current stage:
+
+- **Recognition, not cash (today).** Valid, in-scope reports earn public credit
+  in the release notes / a `SECURITY-HALL-OF-FAME` acknowledgement (with your
+  consent) and coordinated-disclosure handling. There is **no monetary bounty at
+  this stage** — a deliberate decision, not an oversight.
+- **Why staged this way.** A paid bug-bounty program is only stood up *after* an
+  initial independent third-party audit (TODO.md item 53) has cleared the obvious
+  issues — paying for findings a scheduled audit would have caught is poor use of
+  a bounty, and an unaudited surface invites noise. Until then, coordinated
+  disclosure + recognition is the stage-appropriate structure.
+- **Escalation path.** When item 53's audit completes and the surface is
+  hardened, this section is the single place the reward structure changes
+  (e.g. a hosted program with monetary tiers). The reporting channel, scope, and
+  remediation process below do **not** change when that happens.
+
+## How we handle a report (remediation process)
+
+Every report — from a researcher here, an internal adversarial-suite finding, or
+an external audit (item 53) — flows through the **same** path, so nothing is
+triaged twice or lost:
+
+1. **Acknowledge & triage** — confirm receipt, reproduce, and assign a severity
+   (impact × exploitability against the core guarantees above).
+2. **Regression-lock first.** Before or alongside the fix, the issue is captured
+   as a failing test in the adversarial security suite (`tests/security/`) so the
+   exact vector can never silently reopen — the same bar every shipped guardrail
+   is held to (`make test-security`).
+3. **Fix & gate** — remediate, then pass the full release gates
+   (`make release-check`, and `release-smoke` when the change touches
+   packaging/DB execution) before release.
+4. **Release & disclose** — ship the fix in a new versioned image and agree a
+   coordinated public-disclosure timeline with the reporter, crediting them if
+   they wish.
+
 ## Supported versions
 
 QueryGate is distributed as a versioned container image. Security fixes are

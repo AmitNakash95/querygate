@@ -232,54 +232,20 @@ QueryGate now has one repeatable source/package gate (`make release-check`) and 
 
 A REST-only admin API (`/api/v1/admin/config/*`, `api/admin_config_routes.py`) layered on top of the existing hot-reload mechanism (item 5) — never a parallel implementation of it. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 25).
 
-### 95. Discoverable scope catalog + recommended role bundles for IdP integration
+### 95. Discoverable scope catalog + recommended role bundles for IdP integration ✅ DONE
 
-**Effort: S. Priority: enterprise-SSO adoption enabler for the shipped JWT/OAuth
-auth (items 8, 10, 90). Depends on: 10 (JWT), 90 (OAuth resource server). Not a
-security-model change — pure discoverability/DX.**
+Shipped both parts: (1) RFC 9728 `scopes_supported` (`mcp/oauth_metadata.py`)
+now advertises the **entire** vocabulary (`core/scopes.py`'s `ALL_SCOPES`,
+unioned with any custom `mcp_required_scopes`), kept distinct from the unchanged
+required-scope access gate; (2) `core/scopes.py` gained a structured
+`SCOPE_CATALOG` + advisory `ROLE_BUNDLES` (Analyst/Operator/Config Governor/
+Catalog Author/Catalog Admin/Catalog Data Steward), from which
+`querygate-scope-catalog` (`make scope-catalog`) generates `docs/SCOPE_CATALOG.md`
+— drift-tested so it can't diverge, and completeness-tested so every scope
+constant is catalogued and covered by a bundle. No auth-model change; data-access
+grants stay in `policy.yaml` keyed by `sub`/claim (an Analyst carries no scope).
 
-**Origin.** With JWT/JWKS auth (item 10) and the MCP OAuth resource server (item
-90) shipped, "bring your IdP" is the scalable multi-user story. But for an
-authorization server (Auth0/Okta/Entra/Keycloak) to mint a usable token it must
-be told QueryGate's `scope` vocabulary — and that vocabulary lives only as
-constants in `core/scopes.py`. An operator today has to reverse-engineer scope
-strings from source and hand-group them into roles. The *identity* + *data-access
-policy* split means the IdP never needs table/column grants (those stay in
-`policy.yaml`, keyed by `sub`/claim), so the only thing that must reach the IdP
-is the fixed, small scope set — this item makes that one-time registration
-turnkey instead of manual archaeology.
-
-**Two complementary parts (do both — one is the mechanism, one is the guidance):**
-
-1. **Publish the full scope catalog in the RFC 9728 protected-resource metadata**
-   so it is machine-discoverable at the existing `.well-known` endpoint
-   (`mcp/oauth_metadata.py`). `scopes_supported` must list the **entire**
-   vocabulary derived from `core/scopes.py` (all scopes the resource understands),
-   NOT be conflated with `mcp_required_scopes` (the access gate for the MCP
-   surface) — these are two different concepts and the current code publishes only
-   the latter ([oauth_metadata.py:57-58](src/querygate/mcp/oauth_metadata.py#L57-L58)).
-   Keep the required-scope gate exactly as-is; only broaden what `scopes_supported`
-   advertises. An IdP that imports scopes from metadata then needs zero manual typing.
-
-2. **A scope-catalog reference doc generated from `core/scopes.py`** (so it can't
-   drift) listing every scope, the action it gates, and **recommended role
-   bundles** — the human judgment metadata's flat list can't supply (e.g. an
-   "Analyst" read-only bundle, a "Catalog Admin" = `catalog:review`/`edit`/
-   `approve`/`reject`/`publish`/`rollback` bundle, an "Operator" =
-   `admin:reload-config`/`admin:connections:*`/`admin:observability:read` bundle).
-   This is the copy-paste source of truth an operator pastes into their IdP's role
-   definitions; end-user provisioning then reduces to role assignment.
-
-**Hard boundaries.** This does NOT change the auth model, add a QG-owned user or
-key store, or make QG an identity provider — the IdP still owns identities and
-QG still resolves data-access policy from `sub`/claims (`policy/loader.py`,
-`MandatoryRowFilter.from_claim`). No new scope *semantics*, no new enforcement
-path — only exposing the existing vocabulary discoverably and documenting the
-recommended groupings. Explicitly out of scope (defer unless a design partner
-asks): per-IdP click-through quickstarts (Auth0/Okta/Entra/Keycloak walkthroughs)
-— nice polish, not needed for the mechanism to work. The catalog reference must
-be generated from `core/scopes.py`, never a hand-maintained second list that can
-silently diverge.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 95).
 
 ## P2 — hardening and scale
 
@@ -1039,94 +1005,9 @@ the UI must never collapse review, approval, and publication into an automatic
 transition or reveal proposal content to callers with only agent-facing
 catalog access.
 
-### 39. Draft-aware policy simulation before staging
+### 39. Draft-aware policy simulation before staging ✅ DONE
 
-**Shipped.** `POST /api/v1/admin/config/simulate`
-(`api/admin_config_routes.py`) accepts optional `connections_yaml`/
-`policy_yaml`/`catalog_yaml` overrides (each unset field inherits from the
-active config-governance version, or straight from the deployment files
-before governance has ever been bootstrapped) plus a target `principal`,
-scalar `claims`, `connection`, `table`, `columns`, and an optional structured
-`query`. The target principal is deliberately independent of the calling
-admin's own identity.
-
-- **Endpoint and evaluation scope:** `admin.service.simulate_candidate_policy`
-  writes the resolved candidate documents to a temporary directory and loads
-  them through `cli.load_config_context` — the same loaders and
-  cross-file/schema-shape validation `/admin/config/validate` and the CLI use
-  — into a fresh, request-local `ConnectionRegistry`/`PolicyStore`/
-  `CatalogStore` (`connections/visibility.py`'s new
-  `resolve_visible_connection_from` and `schema_validation.py`'s new
-  `resolve_query_table_connections(..., connection_resolver=...)` seam let the
-  exact production visibility/join-group/policy code run against those
-  isolated stores instead of the process-global ones). Nothing is installed
-  as a singleton and nothing is written to the config-version store, so the
-  live registry/policy/catalog, concurrent production requests, and any other
-  in-flight simulation are provably unaffected — proven under real concurrent
-  load in `test_candidate_simulation_uses_draft_without_persisting_or_changing_live_policy`
-  (12 interleaved simulate + active-policy-test calls via `asyncio.gather`).
-- **Authorization boundary:** `simulate` is the only `/admin/config/*` action
-  gated on *both* `admin:config:read` and `admin:config:write` together —
-  every other action needs only one. It echoes back semantic policy detail
-  like a read endpoint but also resolves caller-supplied config/secret
-  references like a write endpoint, so a read-only principal can't turn it
-  into a secret-existence oracle.
-- **Redactions:** the response model (`CandidatePolicySimulation`) structurally
-  excludes resolved secret values, static mandatory-filter values, supplied
-  claim values, query predicate values, and compiled SQL — it returns only a
-  typed `allow`/`deny` decision, per-column allow/deny, effective guardrails,
-  mandatory-filter claim *readiness* (never the filter's static value), and
-  typed reason codes. A table the candidate policy hides from the target
-  principal never contributes its mandatory-filter identifiers to the
-  response, even when the caller explicitly names that table
-  (`test_candidate_simulation_does_not_reveal_filters_for_denied_table`). An
-  invalid candidate fails closed with a generic message pointing at
-  `/validate` for detail rather than echoing the offending content
-  (`test_candidate_simulation_masks_invalid_candidate_content`), and is still
-  recorded as a redaction-safe `simulate` audit event
-  (`audit/events.py`/`audit/logger.py` gained `"simulate"` alongside
-  validate/preview/stage/apply/rollback).
-- **UI behavior:** the admin UI's "Test as principal" panel
-  (`admin_ui/app.js`/`index.html`) now posts to `/admin/config/simulate` with
-  the current in-browser draft when the session holds both config scopes,
-  falling back to the existing active-policy `/admin/ui/policy/test` endpoint
-  for read-only sessions — labeled accordingly ("Simulate draft policy
-  access" / "Nothing persisted" vs. the active-policy case) so an admin never
-  mistakes a draft-context decision for the currently enforced one.
-- **Threat-model control:** documented as QG-19 in `docs/THREAT_MODEL.md`,
-  covering the oracle risk, the isolation guarantee, the redaction surface,
-  and the fail-closed invalid-candidate behavior.
-
-Covered by `tests/unit/test_admin_service.py` (isolated-context redaction,
-denied-table mandatory-filter suppression, invalid-candidate masking, query
-allow/deny plus missing mandatory-claim denial) and
-`tests/integration/test_admin_config_governance.py` (concurrent draft vs.
-active-policy isolation over real HTTP) and
-`tests/security/test_adversarial_security.py` (scope enforcement).
-
-**Original scope (for reference — see above for what actually shipped):**
-
-**Effort: M–L (2–5 days).** The current active-policy simulator is small, but
-evaluating an uncommitted candidate safely needs an isolated candidate
-registry/policy/catalog context. It must reuse the real loaders and validation
-logic without swapping process-global runtime state or opening a second,
-behaviorally different policy engine.
-
-**Why it matters:** Item 31's “test as principal” deliberately evaluates only
-the active policy. That proves current behavior, but it cannot answer the most
-important pre-change question: “Will this draft allow or deny the intended
-principal after activation?” Requiring an administrator to activate first and
-test afterward weakens the value of dry-run governance.
-
-**What to do:** Extend config preview with a read-only candidate simulation
-endpoint that accepts the draft documents plus a target principal, scalar
-claims, connection, table, columns, and optionally a structured-query shape.
-Load and cross-validate the candidate in an isolated context, then run the same
-policy/visibility checks production execution uses. Return a typed allow/deny
-decision, effective guardrails, mandatory-filter claim readiness, and safe
-reasons—never resolved secret values, static row-filter values, compiled SQL
-literals, or hidden identifiers. Prove simulation persists nothing and cannot
-alter live request behavior even under concurrent use.
+`POST /api/v1/admin/config/simulate` evaluates an uncommitted candidate (draft connections/policy/catalog + a target principal) in an isolated, non-persisting registry/policy/catalog context using the real production loaders and visibility/policy code, returning a redaction-safe typed allow/deny + guardrails + mandatory-filter readiness. Gated on both config scopes; threat-model QG-19. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 39).
 
 ### 40. Semantic access diff for config changes
 
@@ -1294,13 +1175,38 @@ pollable status/result, or a paginated `principal_impacts` response —
 without changing phase 1's response shape for the common case that already
 fits under the bound.
 
-### 42. Four-eyes config approval and separation of duties
+### 42. Four-eyes config approval and separation of duties ✅ DONE (phase 1 — server-side enforcement); phase 2 (CLI + admin-UI flows) not started
 
-**Effort: XL (1–3+ weeks).** This is a governance-model and authorization
-change, not a confirmation-dialog feature: it needs new durable states,
-reviewer records, scopes, invariants, audit actions, concurrency handling,
-REST/CLI/UI flows, and migration/backward-compatibility decisions for existing
-staged versions.
+**Phase 1 shipped (the server-side governance model + enforcement):** A staged
+config version now carries durable `ConfigApprovalRecord`s
+(`admin/models.py`: approver, decision, timestamp, content fingerprint, bounded
+note). The store (`admin/store.py add_approval`) enforces the invariants
+**server-side, not in the UI**: only a `staged` version can be reviewed, the
+version's **author can never approve/reject their own change**, and a reviewer's
+latest decision supersedes their own earlier one so *N approvals means N distinct
+reviewers*. A new `AppConfig.require_config_approvals` (default `0` =
+single-administrator mode, fully backward-compatible; existing manifests missing
+the `approvals` field load unchanged) gates `apply()`: a staged version's **first
+activation** is refused with `PolicyViolationError` until it has that many valid
+approvals (bound to the version's content fingerprint) — rollback is deliberately
+exempt. New `admin:config:approve` scope (distinct from `admin:config:write`; a
+"Config Approver" role bundle) and REST `POST /admin/config/versions/{id}/approve`
+and `/reject` (409 on an author-conflict/not-staged, 403 without the scope). Every
+decision + the insufficient-approvals apply-rejection is audited (`approve`/
+`reject` actions, content-free). Covered by `tests/unit/test_config_approval.py`
+(9 tests: author≠approver, staged-only, distinct-reviewer accounting,
+apply-blocked-until-quorum, single-admin backward-compat, endpoint scope/409).
+
+**Phase 2 (not started):** the CLI flow (`querygate-*` approve/reject), the
+admin-UI review workspace (surface pending versions, reviewers, and decisions —
+"never simulate four-eyes in the browser while the server permits self-approval"
+is already satisfied because enforcement is server-side), and any richer
+migration/analytics. The concurrency/authorization core is done.
+
+**Original scope (for reference):** governance-model and authorization change —
+new durable states, reviewer records, scopes, invariants, audit actions,
+concurrency handling, REST/CLI/UI flows, and migration/backward-compatibility for
+existing staged versions.
 
 **Why it matters:** Item 31 currently implements an explicit validate → diff →
 stage → typed-confirmation activate sequence, but one `admin:config:write`
@@ -1762,24 +1668,20 @@ surface once items 28 and 36 are complete. Remediate findings, then publish
 a redacted summary report as a sales asset per the business brief's "core
 sales assets" list.
 
-### 54. Compliance control mapping (SOC 2 / ISO 27001 readiness)
+### 54. Compliance control mapping (SOC 2 / ISO 27001 readiness) ✅ DONE
 
-**Effort: L (mostly documentation and gap analysis; some control-filling
-code, e.g. formalized retention/access-review evidence).**
+Shipped `docs/COMPLIANCE_MAPPING.md`: a control-by-control map of QueryGate's
+product controls to the SOC 2 Common Criteria (CC1–CC9) + Confidentiality/
+Availability/Processing-Integrity series and ISO 27001:2022 Annex A, each row
+backed by a concrete code/test/doc artifact, with an explicit
+product-provided / shared-responsibility / customer-org responsibility split.
+Includes an honest gap analysis (the audit engagement itself, org-level
+controls like HR/physical/IR-process, access-review formalization, and the
+not-yet-shipped config-SoD items 39–42) — real gaps, no process theater.
+Cross-linked from `docs/SECURITY_POSTURE.md`. The coordination-gated remainder
+(the independent audit) is item 53; org-process standup is the deploying org's.
 
-**Why it matters:** Regulated-industry buyers will ask "where's your SOC 2"
-as a gating question in a security review, before they evaluate
-architecture. QueryGate already has most of the underlying controls
-(redaction-safe audit trail from item 23, governed config change management
-from item 25, adversarial test suite from item 28) — this item is mapping
-what's already built to a recognized framework's control list, not building
-new security features from scratch.
-
-**What to do:** Produce a control-mapping document against SOC 2 (or ISO
-27001) trust-service criteria, identify genuine gaps (e.g. formal
-access-review cadence, incident-response runbook), and close only the gaps
-that are real rather than adding process theater around controls that
-already exist.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 54).
 
 ### 55. Inference/transitive-exposure adversarial test suite ✅ DONE
 
@@ -1821,25 +1723,21 @@ exhaustive and regression-locked, and draws the honest line between what the
 engine closes and what remains a policy-configuration or accepted residual
 risk — rather than leaving the inference category silently unaddressed.
 
-### 56. HA / multi-region reference deployment + DR runbook
+### 56. HA / multi-region reference deployment + DR runbook ✅ DONE
 
-**Effort: L (3–5 days).** Builds on item 29's reference stack and item 9's
-cross-instance concurrency state; the new work is failover behavior and a
-documented recovery procedure, not a new deployment topology from scratch.
+Shipped: a zero-downtime Helm chart (`updateStrategy.maxUnavailable: 0` +
+`checksum/config` rolling-restart on config change), an `values-ha.yaml`
+multi-zone overlay (autoscaling floor 3, PDB, zone/host topology spread,
+Redis-shared concurrency), an optional RWX config-governance PVC, and
+`deploy/HA_DR.md` — the shared-state correctness matrix (concurrency shared;
+quota still per-replica until item 50 phase 2; config/audit per-replica unless
+shared), the multi-replica zero-downtime config-reload contract, multi-zone/
+multi-region topology, and a backup/restore + RTO/RPO DR procedure. Chart HA
+invariants are asserted against `helm template` in
+`tests/unit/test_helm_ha_deployment.py`. GO_TO_MARKET claims reconciled. The
+live multi-region failover *drill* is the operator's step (checklist in HA_DR).
 
-**Why it matters:** `docs/business/GO_TO_MARKET.md` explicitly says not to
-claim "a production Helm/Kubernetes reference deployment" yet. Item 29's
-reference stack is not the same claim as proven multi-instance failover —
-enterprise buyers evaluating this for production traffic will ask for an
-HA/DR story specifically, not just a docker-compose file or a single Helm
-chart.
-
-**What to do:** Document (and test) a multi-replica deployment with the
-Redis-backed concurrency/rate-limit state from items 9 and 50 shared
-correctly across instances, a rolling-restart/zero-downtime config-reload
-path building on item 5, and a written disaster-recovery runbook
-(backup/restore for the config-governance store, recovery time
-expectations).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 56).
 
 ### 57. Pluggable dialect-adapter architecture
 
@@ -1910,21 +1808,20 @@ competitor's documented capabilities.
 
 Read-only per-principal anomaly detector over the persisted audit stream (`querygate/admin/anomaly.py`) — volume spikes, rejection-rate jumps, and newly-touched connections vs. each caller's own baseline — exposed via `GET /api/v1/admin/observability/anomalies` and a "Behavioral anomalies" panel in the admin Observability view; strictly within the 32C read-only boundary. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 59).
 
-### 60. Bug bounty / responsible disclosure program
+### 60. Bug bounty / responsible disclosure program ✅ DONE
 
-**Effort: S (process and policy, not engineering).** Pairs with item 53 —
-stand this up once an initial third-party audit has cleared the obvious
-issues, not before.
+Shipped the stage-appropriate coordinated-disclosure program in `SECURITY.md`:
+private reporting channel (GitHub private advisory + maintainer contact), in/out
+scope tied to the core guarantees, acknowledgement/triage SLAs, supported-version
+policy, an explicit **recognition-only reward structure** (deliberately no
+monetary bounty at this stage — the paid tier is a documented post-audit
+escalation), and a **single remediation process** every report (researcher,
+internal adversarial-suite, or item-53 audit) flows through: triage →
+regression-lock in `tests/security/` → fix + release gates → release & coordinated
+disclosure. The paid-bounty-platform activation remains gated on item 53's audit,
+as this item's own sequencing requires.
 
-**Why it matters:** A public disclosure process is a cheap, durable trust
-signal for security-conscious buyers, and closes the gap where currently
-there is no external channel for a researcher to report an issue
-responsibly.
-
-**What to do:** Publish a `SECURITY.md` disclosure policy and scope, decide
-on a bounty/recognition structure appropriate to the project's current
-stage, and route incoming reports through the same remediation process
-established for item 53's audit findings.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 60).
 
 ---
 
@@ -2246,7 +2143,52 @@ Delegated-identity attribution (RFC 8693 `act` → `Principal.actor`, the human'
 
 Optional `AUDIT_SINK_BACKEND=jsonl_chained` wraps every redaction-safe event in a hash-chain envelope (SHA-256, or HMAC-SHA256 with `AUDIT_LEDGER_HMAC_KEY`) so edits/deletions/reordering/insertion are detectable; `querygate-audit verify` validates a ledger and `querygate-audit receipt` emits a portable per-query compliance receipt. Chaining is envelope-level (no new event data) and verify-only. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 91).
 
-### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up)
+### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) ✅ DONE (phases 1 + 2 triggers); MCP-elicitation channel + batch not started
+
+**Phase 2 sensitivity-label trigger shipped:** `Policy.approval_sensitivities`
+(a list of catalog `SensitivityClass` labels, default empty/off) makes a query
+that references a column — or its table — carrying one of those labels require
+approval **regardless of estimated size** and **dialect-agnostically** (no cost
+estimate needed, so it works on MSSQL). `execution/approval.py`'s
+`sensitivity_approval_reasons` enumerates every referenced column via the single
+canonical AST visitor (`iter_column_refs`, item 96 — so a sensitive column in a
+`where`/join/having/etc. triggers it too, not just `select`), resolves each to
+its physical table, and reads only the descriptive catalog's static label (never
+a row value — the catalog stays descriptive). The gate now combines both
+triggers into one decision (`_enforce_approval_gate`), so a single approval token
+covers whatever tripped it; `Policy.approval_cost_gate_enabled` vs.
+`approval_gate_enabled` keep the estimate needed only for the cost trigger.
+Covered by 6 added tests in `tests/unit/test_approval.py`.
+
+**Phase 1 shipped (cost/row-estimate trigger + stateless HMAC approval-token
+grant, REST):** `execution/approval.py` is the gate's decision core —
+`approval_required_reasons(estimate, policy)` (reusing the estimate the pipeline
+already computes), `query_fingerprint(query)` (canonical SHA-256 of the AST), and
+`issue_approval_token`/`verify_approval_token` (HMAC-SHA256, fail-closed on any
+missing-key/forged/expired/wrong-fingerprint/malformed input, constant-time
+compare). New `Policy.approval_max_estimated_rows`/`approval_max_estimated_cost`
+(opt-in, default off; a softer gate *below* the hard `max_estimated_*` caps) and
+`Policy.approval_gate_enabled`/`estimate_needed`. The gate runs in
+`execution/service.py`'s `execute()` right after the cost estimate (Postgres
+only, same estimate source), raising `ApprovalRequiredError` (a
+`PolicyViolationError`; `metrics.classify_rejection` → `approval_required`) when
+triggered and no valid token is supplied, admitting when a token bound to that
+exact query is supplied (audited `approval.required`/`approval.granted`). REST:
+`execute` accepts an `X-QueryGate-Approval` header; `ApprovalRequiredError` maps
+to **428 Precondition Required** with `{fingerprint, reasons}`; a new
+scope-gated `POST /{connection}/query/approve` (scope `query:approve`, in the
+scope catalog + a "Query Approver" role bundle) issues the token. Requires
+`AppConfig.approval_token_hmac_key` (fail-closed 503 if unset). Covered by
+`tests/unit/test_approval.py` (22 tests: token forge/replay/expiry/wrong-key/
+malformed, trigger boundary, gate seam, e2e pause→approve→resubmit, endpoint
+scope/503). **Invariant preserved:** read-only, AST-only, opt-in — a
+default-config deployment is byte-for-byte unchanged.
+
+**Still not started:** the interactive **MCP elicitation** channel (approve
+within one MCP session instead of the REST token round-trip — needs FastMCP
+elicitation wiring) and per-query approval tokens for **batch** (`execute_many`).
+Both triggers (cost + sensitivity) and the REST token flow are done; these two
+are the remaining channel/transport work.
 
 **Effort: L. Priority: medium (safety moat; sequence after 90/91). Feature ref: F3.**
 
@@ -2526,49 +2468,20 @@ analytics "pre-compute the heavy work" win lives in the customer's DB
 (materialized views/indexes), which QueryGate already reads as ordinary tables —
 that is documentation (the analytics-performance note), not this item.
 
-### 96. Unify the AST reference-walk into a single canonical visitor (enforcement hardening)
+### 96. Unify the AST reference-walk into a single canonical visitor (enforcement hardening) ✅ DONE
 
-**Effort: M. Priority: high (robustness/proof; pure refactor, no behavior
-change). Depends on: nothing. Blocks: item 97.**
+Shipped: `validation/schema_validation.py` now defines the single canonical
+`iter_column_refs(query) -> Iterator[ColumnRef]` visitor (with a `RefPosition`
+taxonomy), and policy validation, `referenced_tables`, and schema validation's
+table-collection all consume it. The four hand-maintained parallel walks
+(`_iter_column_refs`, `_non_projection_column_refs`, `_collect_referenced_tables`,
+and schema's `_collect_tables_from_where` + inline per-position loops) are gone.
+Pure refactor, zero behavior change — proven by the adversarial, credential-
+redaction, and full suites passing unchanged (1402 passed), plus a new
+`tests/unit/test_reference_visitor.py` pinning the position taxonomy so a future
+AST reference position is taught in one place. Makes item 97 safe by construction.
 
-**Why it matters.** The knowledge "every place in a `StructuredQuery` where a
-table/column reference can appear" is currently duplicated across at least four
-independently hand-maintained walks:
-`validation/policy_validation.py`'s `_iter_column_refs`,
-`_non_projection_column_refs` (whose own docstring admits it is
-"`_iter_column_refs` minus the bare-`str` select branch" — a near-verbatim copy
-kept in lockstep by hand), and `_collect_referenced_tables`, plus
-`validation/schema_validation.py`'s own separate `for join…`/`for item…`
-enumerations. Every time the AST grows a field (a new select-item type, a new
-clause, a nested node), each of these walks must be taught the new position or a
-policy/schema hole opens silently in whichever one was forgotten. That is the
-real robustness debt — not the pipeline being "flat" (it correctly recurses
-already where the AST has depth, i.e. `WhereGroup` nesting via
-`_where_column_refs`/`_iter_where_predicates`/`where_depth`), but that the
-same enumeration lives in N places.
-
-**What to do.** Define one canonical reference visitor over the AST — a single
-authority that yields (position-kind, reference) for every table/column
-reference a query contains — and have policy validation, schema validation, and
-`referenced_tables` all consume it instead of their own bespoke walks. Position
-kind must be rich enough to preserve today's distinctions (bare top-level select
-projection vs. everywhere-else, for the item-49 masked-column rule) so behavior
-is byte-for-byte preserved. Follow the composable-interface doctrine
-(`CLAUDE.md`): one visitor, consumed everywhere; do not scatter new `if`
-branches at call sites.
-
-**Acceptance.** Pure refactor — **zero behavior change**, proven by the existing
-adversarial (`make test-security`), credential-redaction, and full suites
-passing unchanged; no new caller surface, no AST change, no policy semantics
-change. The win is that "where can a reference appear" becomes single-authority,
-so future AST additions (including item 97) are enforced by construction rather
-than by remembering to update four walks. This item is sellable and worth
-shipping on its own even if item 97 never happens.
-
-**Hard boundaries.** Not a rewrite of policy semantics, not a change to any cap
-or allow/deny rule, not a new AST field. If the refactor would change any
-observable validation outcome, it is out of scope for this item — that is a
-separate, deliberately-decided change.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 96).
 
 ### 97. Bounded nested subqueries (uncorrelated, single-connection, depth-capped)
 

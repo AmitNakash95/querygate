@@ -73,4 +73,7 @@ install` prints afterward.
   `docs/THREAT_MODEL.md`'s deployment requirements.
 
 See `runbook.md` for config reloads, the config-governance API, secret
-rotation, and rollback procedures once something is running.
+rotation, and rollback procedures once something is running, and `HA_DR.md`
+for the highly-available / multi-zone deployment (`helm/querygate/values-ha.yaml`),
+the shared-state correctness matrix (concurrency vs. quota vs. config vs.
+audit), zero-downtime rolling config reloads, and backup/restore + RTO/RPO.
