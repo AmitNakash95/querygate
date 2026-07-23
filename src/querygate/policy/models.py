@@ -163,6 +163,10 @@ class WritePolicy(pyd.BaseModel):
     # require it only for writes touching more than N rows. A softer gate below
     # the hard `max_affected_rows` reject, exactly like the read gate.
     require_approval_over_rows: Optional[int] = pyd.Field(default=None, ge=0)
+    # Row cap on the dry-run diff preview (item 93 phase 2b): a preview shows at
+    # most this many old→new row changes; a larger affected set is reported
+    # truncated. Bounds the value-bearing preview so it can never dump a table.
+    max_diff_rows: int = pyd.Field(default=50, ge=1)
 
     model_config = pyd.ConfigDict(extra="forbid")
 

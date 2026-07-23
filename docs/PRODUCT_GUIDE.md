@@ -2543,6 +2543,25 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — Governed Writes Phase 2b: the dry-run preview gains the bounded
+  old→new row *diff* — the one place a preview deliberately shows values, kept
+  safe by being bounded, masking-aware, and never audited (item 93).** The
+  headline governed-writes feature: `POST /write/preview?include_diff=true`
+  returns exactly which rows an INSERT/UPDATE/DELETE would change and how
+  (`before`/`after` per row), computed by running the DML inside a transaction
+  and **rolling it back** — so even the diff mutates nothing. This is the only
+  QueryGate surface that returns row values, which is the point (a human approves
+  *this specific change*), so three guards make it safe and were chosen
+  deliberately: it is **bounded** by `WritePolicy.max_diff_rows` (a preview can
+  never dump a table — a larger affected set comes back `truncated`); it is
+  **masking-aware** (a column the read policy masks is redacted to `***MASKED***`
+  in the diff, so the value-bearing preview can't become a masking bypass); and
+  it is **transient to the caller only** — the redaction-safe audit event still
+  carries counts/shapes, never these values. UPDATE old→new is read back by
+  single-column primary key after the in-txn DML (real committed shape,
+  DB-side effects included), falling back to applying the SET in Python for a
+  composite/absent PK. Opt-in per request (`include_diff`), so the default
+  preview stays a cheap count.
 - **2026-07-23 — Governed Writes Phase 2a: gated write *execution* is enabled
   (maintainer-approved), still deny-by-default and with no raw DML — a write
   commits only when in-policy, capped inside its own transaction, atomic, and
