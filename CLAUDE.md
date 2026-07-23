@@ -61,6 +61,11 @@ only when historical extraction context is explicitly needed.
   Split to keep routine reads cheap.
 - **`ROADMAP.md`** — the **execution order** over `TODO.md` (authority for *order
   only*; never restates a body). TODO.md leads, ROADMAP.md follows.
+- **`docs/ENGINE_EXPRESSIVENESS_PLAN.md`** — flagship-pillar spec for taking the
+  READ query engine to 10/10 expressiveness with no safety regression (Structural
+  pillar; TODO.md items 99–106, sequenced in ROADMAP.md Phase 4). Authoritative
+  for those items' AST design, per-primitive Definition of Done, and the canonical
+  regression bar. Consult before starting any of items 99–106.
 
 **Item + worklist rules** (the `ship-item` and `roadmap-next`/`next-item` skills
 automate these):
@@ -68,7 +73,7 @@ automate these):
 - **Item numbers are permanent and file-global.** Never renumber or reuse one —
   the repo has ~176 internal "item N" cross-refs plus CLAUDE.md and test
   references that must keep resolving. A new item takes the next unused number
-  (check the highest `### N` heading in TODO.md; currently 98).
+  (check the highest `### N` heading in TODO.md; currently 106).
 - **When an item ships fully** (its `###` heading ends in exactly `✅ DONE`, no
   trailing qualifier): move its full body to `docs/TODO_ARCHIVE.md` in numeric
   order under a `### N.` heading, and leave a stub in `TODO.md` — same heading,
@@ -441,6 +446,20 @@ inline branch elsewhere.
   SQLite is used internally for tests/examples by monkeypatching
   `connections.engine.get_engine`/`session_scope` directly (see
   `test_sqlite_end_to_end.py`), never through the registry.
+- **Converting an in-process store's interface to `async def` (to prep for a
+  future Redis-backed variant, the pattern already used by
+  `execution/concurrency.py`/`redis_concurrency.py` and
+  `execution/quota.py`/`redis_quota.py`) is a two-part change, not one.** A
+  2026-07-23 review caught `execution/compensation.py`'s `CompensationStore`
+  converted to `async def` while its call sites in `execution/write_execution.py`
+  still called it synchronously — every call silently returned an unawaited
+  coroutine instead of raising, so it passed a casual read and only broke a
+  targeted unit test (`test_write_execution.py::test_compensation_store_ttl_and_single_use`).
+  When you make a store's Protocol methods `async`, grep every call site in
+  the same commit, run `pytest -m unit` (a `RuntimeWarning: coroutine ... was
+  never awaited` means you missed one), and extend the `tests/conftest.py`
+  reset fixture to clear the new state — the same discipline the
+  `in_process_limiter()` gotcha above documents for concurrency.
 
 ### What's archived, not active
 
