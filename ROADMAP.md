@@ -290,10 +290,11 @@ surface them for a human, never auto-start them.
       `InMemoryCompensationStore._records`; every governed write with
       `compensation_enabled` leaks one record for the process's lifetime. Fix
       alongside the item above, before building the Redis-backed store.
-    - [ ] **Durable cross-replica compensation store** — the in-process store means
-      undo fails under the multi-replica HA deployment (item 56). Add a Redis-backed
-      `CompensationStore` (mirroring the concurrency/quota Redis variants), treating
-      the pre-image values as sensitive at rest; flip the HA/DR matrix row to shared.
+    - [x] **Durable cross-replica compensation store** ✅ — `RedisCompensationStore`
+      (async pluggable store; installed when `CONCURRENCY_BACKEND=redis`) makes a
+      `compensation_id` resolvable on any replica, so undo works under HA. Pre-image
+      round-trips through JSON with type re-coercion; fakeredis + real-DB tested;
+      HA/DR matrix flipped to shared.
     - [ ] **Optimistic-concurrency undo** — undo silently overwrites a concurrent
       change to a *changed* column. Detect drift (current value ≠ post-write value)
       and refuse-or-flag instead of clobbering.
