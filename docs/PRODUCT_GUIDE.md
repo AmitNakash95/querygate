@@ -2543,6 +2543,36 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — Governed Writes undo semantics (item 93 phase 3a hardening):
+  undo is atomic, restores only the changed columns, and is authorized by the
+  compensation id rather than re-running the approval/op gates.** A self-review
+  of the first undo cut surfaced real gaps; the resolutions are deliberate, not
+  incidental. **(1) Undo is atomic all-or-nothing.** All inverse statements run
+  in ONE transaction (`_apply_undo_atomically`), committing once — a failure
+  reverses nothing and does not consume the compensation record, so undo upholds
+  the same "no partial write" guarantee the forward path does. (The first cut ran
+  each inverse through its own `execute()`/commit, which could half-reverse a
+  multi-row UPDATE and orphan the record.) **(2) Undo restores only the columns
+  the original write changed**, captured as `changed_columns` (the UPDATE's `set`
+  keys) — so an undo's blast radius never exceeds the change it reverses, and a
+  concurrent change to an untouched column is preserved. It still restores the
+  *snapshotted* value of those columns (a concurrent change to a changed column
+  since is overwritten — a documented bounded limit; optimistic-concurrency
+  detection is a later refinement). **(3) Undo is authorized by the
+  compensation id**, which is single-use, TTL'd, connection-scoped, and only ever
+  returned to whoever executed the original governed write. Undo therefore does
+  NOT re-trigger the approval gate (the forward write was already approved; undo
+  restores the lower-risk prior state — otherwise exactly the high-impact writes
+  you most want to reverse would be un-undoable) and does NOT re-check the
+  inverse op against `allowed_operations` (undoing a DELETE is an INSERT;
+  requiring INSERT to be separately enabled would make reversibility unusable).
+  It still enforces deny-by-default (writes enabled + table writable), the
+  affected-row cap, schema truth, and full audit (`undo_structured_write`).
+  **Known bounded limits, documented for callers, not hidden:** the compensation
+  store is process-local, so undo needs single-replica or session affinity
+  (durable cross-replica store is phase 3b — see `deploy/HA_DR.md`); and an
+  INSERT with a server-generated PK returns `compensation_id=null` (not
+  undoable without RETURNING capture — supply the PK to make it reversible).
 - **2026-07-23 — Governed Writes Phase 3a: bounded reversibility (undo) stores
   pre-images in a QueryGate-owned compensation store, NOT an in-DB shadow table,
   and undoes by re-applying through the governed write pipeline (item 93).** The
