@@ -305,8 +305,10 @@ surface them for a human, never auto-start them.
       preview → executes a capped governed write → verifies → undoes → verifies
       against the shipped image on real Postgres (Redis backend, so the Redis
       compensation store is exercised in-container).
-    - [ ] **MSSQL write execution parity** — proven on Postgres+SQLite; unproven on
-      MSSQL (needs a live MSSQL — infra-gated). Add a real MSSQL write+undo job.
+    - [x] **MSSQL write execution parity** ✅ — proven against a live MSSQL:
+      insert/update/delete + undo all work, including OUTPUT-based key capture for
+      IDENTITY PKs and SET IDENTITY_INSERT on delete-undo re-insert (SQLAlchemy
+      handles both). `tests/integration/test_mssql_write_execution.py`.
     - [ ] Upserts, multi-statement batch atomicity, approval-binds-to-diff-hash.
     - **Production-grade reversibility hardening (2026-07-23 design review — the
       10/10 bar).** Why/acceptance for each is in TODO.md item 93 Phase 3b; do in

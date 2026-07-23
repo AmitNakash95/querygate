@@ -2105,9 +2105,12 @@ gone), so a concurrent change since the write is never silently clobbered.
 downstream reads; (d) **MCP undo parity** — `undo_structured_write` tool, so an
 agent that wrote over MCP can reverse over MCP; (e) **`release-smoke` write** —
 `make release-smoke` now proves the shipped image preview→execute→verify→undo→
-verify a governed write on real Postgres (Redis backend). **Phase 3b remaining:**
-upserts, multi-statement batch atomicity, MSSQL execution parity (infra-gated —
-no local MSSQL), approval-binds-to-diff-hash.
+verify a governed write on real Postgres (Redis backend); (f) **MSSQL parity** —
+insert/update/delete + undo all proven against a live MSSQL
+(`test_mssql_write_execution.py`: OUTPUT key capture for IDENTITY PKs, and
+delete-undo re-inserts the original key via SQLAlchemy's SET IDENTITY_INSERT).
+Writes are now proven on **all three** engines (SQLite/Postgres/MSSQL). **Phase
+3b remaining:** upserts, multi-statement batch atomicity, approval-binds-to-diff-hash.
 
 **Phase 3b — production-grade reversibility hardening (the 10/10 bar; from the
 2026-07-23 design review of the undo mechanism).** Logical pre-image compensation
