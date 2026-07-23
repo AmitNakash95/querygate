@@ -2543,6 +2543,25 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — Reversed: `connections/dialects.py`'s inline dialect branching
+  is now a `SessionDialectAdapter`, a SEPARATE async abstract base from the sync
+  compiler `DialectAdapter` (item 57; maintainer-approved).** A prior decision
+  kept `connections/dialects.py`'s `if dialect == ...` branching as a deliberate
+  "lighter-weight" exception to the composable-interface doctrine. With dialect
+  breadth (item 19) now a priority, that exception is reversed: engine-URL/
+  connect-args/query-timeout/session-guardrail behavior is formalized as one
+  concrete `SessionDialectAdapter` per dialect, dispatched via a registry, so
+  adding a dialect is "implement + register", not "find every inline branch".
+  **The deliberate part of the reversal is keeping it a *separate* ABC from the
+  compiler's `DialectAdapter`, not merging them:** the session adapter is *async*
+  (it runs `SET ...` on a live session and hooks pool `connect` events) while the
+  compiler adapter is *sync* (it builds SQL expressions) — one interface spanning
+  both execution models would be awkward, so the pattern is reused (per-dialect
+  class + registry) but the two layers stay distinct. Behavior-preserving (the
+  module functions are kept as thin dispatchers; proven by the unchanged
+  `test_dialects.py` plus a new registry test). The cost-estimation hook the
+  item also mentions stays Postgres-only until MSSQL cost estimation (item 26
+  ph2) exists — that remains the one documented inline-branch exception.
 - **2026-07-23 — Bounded nested subqueries are added as a recursive AST node with
   caps enforced TREE-WIDE, not per-level, and only the uncorrelated/single-
   connection/depth-capped subset (item 97; maintainer-approved).** The AST gains

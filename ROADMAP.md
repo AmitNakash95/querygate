@@ -149,8 +149,10 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   changes; reduces misconfiguration risk in a security product.* ✅ **Shipped**
   (`/admin/config/simulate` — isolated, non-persisting candidate evaluation;
   reconciled from a shipped-but-unmarked state).
-- [ ] **40** — Semantic access diff for config changes. *Makes a policy change's
-  effect legible before it ships.*
+- [x] **40** — Semantic access diff for config changes. *Makes a policy change's
+  effect legible before it ships.* ✅ **Shipped** (ph1 connection-baseline diff;
+  ph2 per-principal is covered by item 41's blast-radius — maintainer decision
+  2026-07-23, no new code).
 - [ ] **41** — Policy-change blast-radius analysis. *Completes the config-change
   safety trio (39/40/41).*
 
@@ -162,8 +164,11 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   *Developer-experience polish for real agent workloads.*
 - [ ] **18** — Stored-procedure catalog. *Extends read coverage where customers
   already encapsulate logic in procs.*
-- [ ] **57** — Pluggable dialect-adapter architecture. *The enabler that turns
-  each new store into an adapter (not a project) — do before 19.*
+- [x] **57** — Pluggable dialect-adapter architecture. *The enabler that turns
+  each new store into an adapter (not a project) — do before 19.* ✅ **Shipped**
+  (sync compiler `DialectAdapter` [item 73] + new async `SessionDialectAdapter`;
+  reverses the prior inline-branching exception. Adding a dialect = implement
+  both + register).
 - [ ] **97** — Bounded nested subqueries (uncorrelated, single-connection,
   depth-capped). *AST expressiveness: serves the "scope a set then filter from
   it" shape as a validated node, not a raw-SQL string. Minimal-safe subset only

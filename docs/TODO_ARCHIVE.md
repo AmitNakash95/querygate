@@ -2612,6 +2612,52 @@ concurrency, and the governance PVC being RWX and opt-in. Skips cleanly where
 failover *drill* against a real cluster is the operator's step — HA_DR.md §5 is
 its checklist. Everything code/chart/doc-preparable is done and tested here.
 
+### 57. Pluggable dialect-adapter architecture ✅ DONE
+
+**Shipped.** Dialect-specific behavior is now behind two formal, registry-
+dispatched abstract bases — one concrete class per dialect, no inline
+`if dialect == ...` branching:
+
+- **Compiler (sync)** — `compiler/dialect_adapters.py`'s `DialectAdapter`
+  (date-bucketing, order-by nulls, stat/string_agg/array_agg/percentile_cont
+  naming, column masking) with Postgres/MSSQL/SQLite classes — shipped as the
+  compiler-scoped slice, item 73.
+- **Engine/session (async)** — `connections/dialects.py`'s new
+  `SessionDialectAdapter` (engine-URL, connect-args, query-timeout registration,
+  per-session guardrails) with `PostgresSessionAdapter`/`MSSQLSessionAdapter`,
+  dispatched via `_SESSION_ADAPTERS`/`get_session_adapter`. Reverses the prior
+  deliberate 'inline branching is fine here' decision (recorded in the
+  PRODUCT_GUIDE Decision Log; CLAUDE.md updated). Kept a SEPARATE ABC from the
+  sync compiler adapter on purpose — async session execution vs. sync SQL
+  building are different execution models. Behavior-preserving (module funcs
+  are thin dispatchers; `test_dialects.py` unchanged + a new registry test).
+
+Adding a dialect (item 19) is now: implement both adapters + register. The one
+remaining gap is the cost-estimation hook's MSSQL side, which is blocked on
+MSSQL estimated-plan support (item 26 ph2), not on the adapter interface.
+
+<details><summary>Original scope</summary>
+
+**Effort: L (interface design); each subsequent dialect then becomes
+independent M-effort work rather than a bespoke project.**
+
+**Why it matters:** Item 19 treats every new dialect as M–XL bespoke work
+gated on core-team bandwidth — the actual long-term bottleneck behind
+QueryGate's biggest competitive gap (database breadth against Google's
+Toolbox and Hasura). `connections/dialects.py` and the compiler's dialect
+dispatch (the 3-way branch in `_date_bucket_expr`) already isolate
+dialect-specific behavior; formalizing that isolation into a stable adapter
+interface is what would let dialect support scale without linearly scaling
+core-team effort.
+
+**What to do:** Extract a formal `DialectAdapter` interface (session
+guardrails, date-bucketing, cost-estimation hook from item 26) from the
+existing 2-dialect implementation, verify it holds by porting Postgres and
+MSSQL onto it with no behavior change, and only then treat additional
+dialects (item 19) as adapter implementations rather than core-pipeline
+changes.
+</details>
+
 ### 59. Read-only behavioral anomaly surfacing on the audit stream ✅ DONE
 
 **Phase 1 (detection engine + admin REST API) ✅ DONE. Phase 2 (surface the

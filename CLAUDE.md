@@ -286,13 +286,17 @@ with no parameters and no internal branching, a plain dict-of-callables
 is the right-weight version of the same idea — wrapping a one-liner in a full
 class is ceremony, not clarity.
 
-Known, deliberate exceptions to this rule, not oversights:
-`connections/dialects.py`'s inline dialect branching (its own docstring
-frames centralizing dialect-specific SQL in one module as the goal — a
-lighter-weight tradeoff, not a gap) and `execution/service.py`'s
+`connections/dialects.py` was formerly a known exception (inline dialect
+branching centralized in one module); as of TODO.md item 57 it is now a
+`SessionDialectAdapter` — one concrete class per dialect dispatched through the
+`_SESSION_ADAPTERS` registry, the async engine/session sibling of the sync
+compiler `DialectAdapter`. So the composable-interface doctrine now holds there
+too; follow it (implement + register an adapter, no inline branch).
+
+One known, deliberate exception remains, not an oversight: `execution/service.py`'s
 Postgres-only cost-estimation gate (MSSQL's estimated-plan mechanism doesn't
-exist yet — TODO.md item 26 phase 2). Don't treat either as precedent for a
-new inline branch elsewhere.
+exist yet — TODO.md item 26 phase 2). Don't treat it as precedent for a new
+inline branch elsewhere.
 
 ### Testing gotchas (see `tests/conftest.py`)
 
