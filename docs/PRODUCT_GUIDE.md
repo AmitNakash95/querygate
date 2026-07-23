@@ -594,9 +594,10 @@ siblings of every read stage: `validate_write_policy` → `validate_write_schema
   table) and returns a `compensation_id`; `POST /{connection}/write/undo`
   re-applies the inverse **through the governed pipeline** in one atomic
   transaction, restoring only the columns the write changed. Bounded, single-use,
-  TTL'd. Known limits (documented, caller-visible): the store is process-local
-  (undo needs single-replica/affinity — see the HA/DR matrix), and an INSERT with
-  a server-generated PK returns `compensation_id=null` (not undoable).
+  TTL'd. The store is process-local by default but **shared across replicas** with
+  `CONCURRENCY_BACKEND=redis` (a `RedisCompensationStore`), so undo works under
+  the HA deployment; and a **server-generated PK is captured via RETURNING**, so
+  serial/identity-PK inserts are undoable too.
 - **Both transports, no raw field on either.** REST routes above, plus the MCP
   `run_structured_writes` tool (`mode=preview|execute`, batch, `include_diff`,
   in-session elicitation approval). Audit is redaction-safe, dual-identity (item
@@ -2594,6 +2595,25 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — Governed Writes Phase 3b: reversibility's two documented limits
+  are closed — serial-PK inserts are undoable (RETURNING) and undo works under HA
+  (a Redis-backed compensation store) (item 93).** The phase-3a self-review left
+  two honest limitations; phase 3b removes them. **(1) RETURNING capture.** An
+  INSERT that omits a single-column PK (serial/identity — the common case) now
+  executes with `RETURNING pk` in the same transaction, so its generated keys are
+  captured and the insert is undoable (was `compensation_id=null`). Supplied-PK
+  inserts are unchanged. **(2) `RedisCompensationStore`.** The `CompensationStore`
+  is now async + pluggable (mirroring the concurrency/quota limiters); when
+  `CONCURRENCY_BACKEND=redis`, `create_app` installs a Redis-backed store, so a
+  `compensation_id` minted on one replica is resolvable on every replica and undo
+  works under the multi-replica HA deployment (item 56) — closing the self-review
+  #1 gap. The pre-image round-trips through Redis as JSON (datetime/Decimal become
+  strings; the compiler's `_coerce_write_value` restores their Python types on
+  undo — verified end-to-end). Sensitivity is stated honestly: the Redis store
+  holds real pre-image values, so it is secured like the concurrency/quota Redis
+  (network isolation + auth; TTL bounds exposure; field-level encryption-at-rest
+  is a further hardening); the redaction-safe audit still carries only the id +
+  counts.
 - **2026-07-23 — Governed Writes undo semantics (item 93 phase 3a hardening):
   undo is atomic, restores only the changed columns, and is authorized by the
   compensation id rather than re-running the approval/op gates.** A self-review

@@ -2090,16 +2090,20 @@ is preserved; and its inverse writes never spawn redo records. Proven on SQLite
 (`test_write_execution_end_to_end.py`: delete/insert/update → undo →
 byte-identical restore; approved-write undoable without re-approval; only-changed-
 columns restored; atomic-not-consumed-on-failure; no redo record; auto-PK insert
-returns `compensation_id=null`) and real Postgres. **Honest bounded limits
-(documented for callers):** cannot unwind cascading triggers/FK actions or
-downstream reads; restores the snapshotted value of the changed columns (a
-concurrent change to a *changed* column since is overwritten — no
-optimistic-concurrency check yet); the store is **process-local** (undo needs
-single-replica/affinity — HA/DR matrix); an INSERT with a server-generated PK is
-not undoable (`compensation_id=null`). **Phase 3b remaining:** durable
-cross-replica compensation store, RETURNING capture for serial-PK inserts,
-optimistic-concurrency undo, upserts, multi-statement batch atomicity, MSSQL
-execution parity, MCP undo parity, approval-binds-to-diff-hash.
+returns `compensation_id=null`) and real Postgres. **Phase 3b shipped so far:**
+(a) **RETURNING capture** — a serial/identity-PK INSERT now captures its
+generated key via `RETURNING` and is undoable (was `compensation_id=null`); (b)
+**durable cross-replica store** — the `CompensationStore` is async + pluggable
+and `RedisCompensationStore` (installed when `CONCURRENCY_BACKEND=redis`) makes a
+`compensation_id` resolvable on any replica, so undo works under HA (pre-image
+round-trips through JSON with type re-coercion; fakeredis + real-DB tested;
+`_coerce_write_value` now also coerces Decimal). **Honest bounded limits:**
+cannot unwind cascading triggers/FK actions or downstream reads; restores the
+snapshotted value of the changed columns (a concurrent change to a *changed*
+column since is overwritten — no optimistic-concurrency check yet). **Phase 3b
+remaining:** optimistic-concurrency undo, MCP undo parity, `release-smoke` write,
+upserts, multi-statement batch atomicity, MSSQL execution parity,
+approval-binds-to-diff-hash.
 
 **2026-07-23 review finding — in-flight regression on `compensation.py`, FIXED.**
 A working-tree edit converted `CompensationStore.put/get/consume` to

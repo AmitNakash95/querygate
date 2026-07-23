@@ -11,6 +11,8 @@ preview transaction, never committed.
 from __future__ import annotations
 
 import datetime as _dt
+from decimal import Decimal as _Decimal
+from decimal import InvalidOperation as _InvalidOperation
 from typing import Any, Dict
 
 import sqlalchemy as sa
@@ -48,7 +50,12 @@ def _coerce_write_value(column: sa.Column, value: Any) -> Any:
             return _dt.date.fromisoformat(value)
         if pytype is _dt.time:
             return _dt.time.fromisoformat(value)
-    except ValueError:
+        if pytype is _Decimal:
+            # A Numeric column's driver (e.g. asyncpg) wants a Decimal, not a
+            # string — matters when a value round-trips through JSON (a
+            # compensation pre-image restored from the Redis store, item 93).
+            return _Decimal(value)
+    except (ValueError, _InvalidOperation):
         return value
     return value
 
