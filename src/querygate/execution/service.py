@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pydantic as pyd
@@ -163,6 +164,15 @@ class BatchQueryItemResult(pyd.BaseModel):
     admission_state: Optional[str] = None
     queue_wait_ms: Optional[int] = None
     error: Optional[str] = None
+
+
+# An injected, transport-specific way to obtain an in-query approval token when
+# a batch query trips the approval gate (item 92). Given the offending query and
+# its `ApprovalRequiredError`, return a valid token to retry with, or `None` to
+# leave the query rejected. The MCP transport supplies one backed by
+# `Context.elicit` (interactive human approval); the service itself stays
+# transport-agnostic and never imports MCP.
+ApprovalResolver = Callable[["StructuredQuery", ApprovalRequiredError], Awaitable[Optional[str]]]
 
 
 class BatchExplainItemResult(pyd.BaseModel):
@@ -673,6 +683,7 @@ class StructuredQueryService:
         queue_mode: Optional[QueueMode] = None,
         wait_timeout_seconds: Optional[float] = None,
         approval_tokens: Optional[Dict[str, str]] = None,
+        approval_resolver: Optional[ApprovalResolver] = None,
     ) -> List[BatchQueryItemResult]:
         """Run each query independently; one failure doesn't drop the rest of the batch.
 
@@ -684,28 +695,73 @@ class StructuredQueryService:
         affecting the rest of the batch. Each token is still verified against
         that exact query's fingerprint inside `execute()`, so a token can't be
         replayed onto a different query in the same batch.
+
+        `approval_resolver` is an optional last-resort way to obtain a token
+        interactively when a query trips the gate and no pre-supplied token
+        covers it — the MCP transport passes one backed by `Context.elicit`. It
+        keeps all batch/error shaping here (one source of truth) while the
+        transport-specific approval interaction is injected, not imported.
         """
         results: List[BatchQueryItemResult] = []
         for query in queries:
-            token = approval_tokens.get(query_fingerprint(query)) if approval_tokens else None
-            try:
-                result = await self.execute(
+            results.append(
+                await self._execute_batch_item(
                     query,
                     queue_mode=queue_mode,
                     wait_timeout_seconds=wait_timeout_seconds,
-                    approval_token=token,
+                    approval_tokens=approval_tokens,
+                    approval_resolver=approval_resolver,
                 )
-                results.append(BatchQueryItemResult(**result.model_dump()))
-            except Exception as exc:
-                results.append(
-                    BatchQueryItemResult(
-                        error=public_error_message(exc),
-                        admission_id=getattr(exc, "admission_id", None),
-                        admission_state=getattr(exc, "admission_state", None),
-                        queue_wait_ms=getattr(exc, "queue_wait_ms", None),
-                    )
-                )
+            )
         return results
+
+    async def _execute_batch_item(
+        self,
+        query: StructuredQuery,
+        *,
+        queue_mode: Optional[QueueMode],
+        wait_timeout_seconds: Optional[float],
+        approval_tokens: Optional[Dict[str, str]],
+        approval_resolver: Optional[ApprovalResolver],
+    ) -> BatchQueryItemResult:
+        token = approval_tokens.get(query_fingerprint(query)) if approval_tokens else None
+        try:
+            result = await self.execute(
+                query,
+                queue_mode=queue_mode,
+                wait_timeout_seconds=wait_timeout_seconds,
+                approval_token=token,
+            )
+            return BatchQueryItemResult(**result.model_dump())
+        except ApprovalRequiredError as exc:
+            # No pre-supplied token covered this query (or it was rejected). Give
+            # an injected resolver (MCP elicitation) one chance to obtain a token
+            # interactively, then retry exactly once with it.
+            if approval_resolver is not None:
+                resolved = await approval_resolver(query, exc)
+                if resolved is not None:
+                    try:
+                        result = await self.execute(
+                            query,
+                            queue_mode=queue_mode,
+                            wait_timeout_seconds=wait_timeout_seconds,
+                            approval_token=resolved,
+                        )
+                        return BatchQueryItemResult(**result.model_dump())
+                    except Exception as retry_exc:  # shaped into the item error below
+                        exc = retry_exc  # type: ignore[assignment]
+            return self._batch_error_item(exc)
+        except Exception as exc:
+            return self._batch_error_item(exc)
+
+    @staticmethod
+    def _batch_error_item(exc: Exception) -> BatchQueryItemResult:
+        return BatchQueryItemResult(
+            error=public_error_message(exc),
+            admission_id=getattr(exc, "admission_id", None),
+            admission_state=getattr(exc, "admission_state", None),
+            queue_wait_ms=getattr(exc, "queue_wait_ms", None),
+        )
 
     @log_execution
     async def explain(self, query: StructuredQuery) -> ExplainResult:

@@ -188,6 +188,15 @@ class AppConfig(BaseSettings):
     mcp_required_scopes: list[str] = pyd.Field(default_factory=list)
     # Optional human-facing documentation URL advertised in the metadata.
     mcp_resource_documentation: str = pyd.Field(default="")
+    # In-query approval gate (item 92): allow an MCP client's human to approve a
+    # sensitive/expensive read *in the querying session* via MCP elicitation,
+    # instead of the out-of-band REST `query:approve` token flow. Off by default
+    # (deny-by-default): an elicitation response carries no authenticated
+    # approver identity, so enabling this is an explicit decision that the
+    # client's human is a trusted approver — bypassing the scope separation REST
+    # enforces. Leave it off to force REST-token-only approval. Only takes effect
+    # when a policy's approval gate is enabled *and* approval_token_hmac_key is set.
+    mcp_elicitation_approval_enabled: bool = pyd.Field(default=False)
 
     # JWT bearer-token auth (core/jwt_auth.JwtAuthenticator) — a second,
     # optional Authenticator alongside the static api_keys above. Shared by

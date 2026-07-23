@@ -135,12 +135,13 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 - [ ] **26** — Query-cost estimation before execution (complete phase 2 / MSSQL;
   Postgres exists). *Underpins 92's cost-gating and dollar budgets; broadens
   an existing guardrail.*
-- [ ] **92** — In-query human-in-the-loop approval for sensitive/expensive reads
+- [x] **92** — In-query human-in-the-loop approval for sensitive/expensive reads
   (F3). *Gates the exfiltration leg of the lethal trifecta on what a read would
-  actually touch — nobody else can, because none knows before running it.*
-  **Shipped: both triggers** (cost/row-estimate + catalog sensitivity-label) +
-  stateless HMAC approval-token grant + `query:approve` scope + REST 428/approve
-  flow, opt-in; box stays `[ ]` until the MCP-elicitation approval channel + batch.
+  actually touch — nobody else can, because none knows before running it.* ✅
+  **Shipped fully:** both triggers (cost/row-estimate + catalog sensitivity-label)
+  + stateless HMAC approval-token grant + `query:approve` scope + REST 428/approve
+  flow + per-query batch tokens + the opt-in MCP `Context.elicit` in-session
+  approval channel. Opt-in and off by default throughout.
 - [x] **42** — Four-eyes config approval and separation of duties. *Governance
   maturity for the config plane.* ✅ **Shipped** (server-side enforcement +
   `admin:config:approve` scope + REST approve/reject + `querygate-config` CLI +
@@ -235,31 +236,24 @@ human/vendor to complete.
 
 ---
 
-## Frontier status (updated 2026-07-23, third pass) — near-frontier; one buildable UI slice + one decision-gated headline remain
+## Frontier status (updated 2026-07-23, fourth pass) — one buildable UI slice left; everything else gated
 
-Three batches shipped everything buildable without a new maintainer decision or
-external resource. **Done across the cycle:** 56, 96, 95, 54, 60, 92 (triggers +
-REST token flow + **batch tokens**), 42 (full); reconciled 39, 40 (covered by
-41), 37; and — after explicit maintainer approval — **97 ph1** (`IN (subquery)`),
-**57** (session dialect adapter, reversing the prior inline-branching decision),
-**93 ph1** (governed-writes dry-run preview, execution disabled), **41 ph2**
-(stateless paginated blast-radius), and **50 ph2** (`RedisQuotaLimiter` —
-cross-replica shared quota). The remaining frontier is essentially gated, with
-exactly two live threads:
+Successive batches shipped everything buildable without a new maintainer
+decision or external resource. **Done across the cycle:** 56, 96, 95, 54, 60,
+**92 (full — triggers + REST token flow + batch tokens + MCP `Context.elicit`
+in-session approval, maintainer-approved)**, 42 (full); reconciled 39, 40
+(covered by 41), 37; and — after explicit maintainer approval — **97 ph1**
+(`IN (subquery)`), **57** (session dialect adapter, reversing the prior
+inline-branching decision), **93 ph1** (governed-writes dry-run preview,
+execution disabled), **41 ph2** (stateless paginated blast-radius), and
+**50 ph2** (`RedisQuotaLimiter` — cross-replica shared quota). The remaining
+frontier is gated, with **one** live buildable thread:
 
 - **Buildable without a decision (low ROI):** **38 ph2** — admin-UI *bulk*
   approve/reject/delete + export/import + browser-triggered generate/learn +
   `review_history` view, all over item 32B's existing scoped routes (no new
   mutation path). Frontend-only; validated by `node --check` + static-markup
   assertions (no browser automation here), Phase 5 lowest-marginal-ROI.
-- **Decision-gated headline:** **92 MCP-elicitation channel** — the last piece
-  of the in-query approval gate. Prescribed in spirit by the item, but carries a
-  real security-posture call: an elicitation response has no authenticated
-  approver identity, so building it decides whether an MCP client's human may
-  approve a sensitive read *in the querying agent's own session* — bypassing the
-  `query:approve` scope separation REST enforces — and whether operators can
-  force REST-token-only. That shapes the SoD guarantee item 92 sells, so it
-  needs the maintainer, not the automation.
 
 Everything else stays gated as before:
 

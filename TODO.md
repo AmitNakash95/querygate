@@ -2000,90 +2000,9 @@ Delegated-identity attribution (RFC 8693 `act` → `Principal.actor`, the human'
 
 Optional `AUDIT_SINK_BACKEND=jsonl_chained` wraps every redaction-safe event in a hash-chain envelope (SHA-256, or HMAC-SHA256 with `AUDIT_LEDGER_HMAC_KEY`) so edits/deletions/reordering/insertion are detectable; `querygate-audit verify` validates a ledger and `querygate-audit receipt` emits a portable per-query compliance receipt. Chaining is envelope-level (no new event data) and verify-only. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 91).
 
-### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) ✅ DONE (phases 1 + 2 triggers + batch tokens); MCP-elicitation channel not started
+### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) ✅ DONE
 
-**Phase 2 sensitivity-label trigger shipped:** `Policy.approval_sensitivities`
-(a list of catalog `SensitivityClass` labels, default empty/off) makes a query
-that references a column — or its table — carrying one of those labels require
-approval **regardless of estimated size** and **dialect-agnostically** (no cost
-estimate needed, so it works on MSSQL). `execution/approval.py`'s
-`sensitivity_approval_reasons` enumerates every referenced column via the single
-canonical AST visitor (`iter_column_refs`, item 96 — so a sensitive column in a
-`where`/join/having/etc. triggers it too, not just `select`), resolves each to
-its physical table, and reads only the descriptive catalog's static label (never
-a row value — the catalog stays descriptive). The gate now combines both
-triggers into one decision (`_enforce_approval_gate`), so a single approval token
-covers whatever tripped it; `Policy.approval_cost_gate_enabled` vs.
-`approval_gate_enabled` keep the estimate needed only for the cost trigger.
-Covered by 6 added tests in `tests/unit/test_approval.py`.
-
-**Phase 1 shipped (cost/row-estimate trigger + stateless HMAC approval-token
-grant, REST):** `execution/approval.py` is the gate's decision core —
-`approval_required_reasons(estimate, policy)` (reusing the estimate the pipeline
-already computes), `query_fingerprint(query)` (canonical SHA-256 of the AST), and
-`issue_approval_token`/`verify_approval_token` (HMAC-SHA256, fail-closed on any
-missing-key/forged/expired/wrong-fingerprint/malformed input, constant-time
-compare). New `Policy.approval_max_estimated_rows`/`approval_max_estimated_cost`
-(opt-in, default off; a softer gate *below* the hard `max_estimated_*` caps) and
-`Policy.approval_gate_enabled`/`estimate_needed`. The gate runs in
-`execution/service.py`'s `execute()` right after the cost estimate (Postgres
-only, same estimate source), raising `ApprovalRequiredError` (a
-`PolicyViolationError`; `metrics.classify_rejection` → `approval_required`) when
-triggered and no valid token is supplied, admitting when a token bound to that
-exact query is supplied (audited `approval.required`/`approval.granted`). REST:
-`execute` accepts an `X-QueryGate-Approval` header; `ApprovalRequiredError` maps
-to **428 Precondition Required** with `{fingerprint, reasons}`; a new
-scope-gated `POST /{connection}/query/approve` (scope `query:approve`, in the
-scope catalog + a "Query Approver" role bundle) issues the token. Requires
-`AppConfig.approval_token_hmac_key` (fail-closed 503 if unset). Covered by
-`tests/unit/test_approval.py` (22 tests: token forge/replay/expiry/wrong-key/
-malformed, trigger boundary, gate seam, e2e pause→approve→resubmit, endpoint
-scope/503). **Invariant preserved:** read-only, AST-only, opt-in — a
-default-config deployment is byte-for-byte unchanged.
-
-**Batch approval tokens shipped (REST):** `execute_many` takes an
-`approval_tokens` map (query fingerprint -> the signed token from
-`POST /query/approve`) and threads each query's token into its `execute()`
-call, so an approval-gated query can now run inside a batch. `BatchQueryRequest`
-carries the map (`POST /query/batch`). A query with no matching token stays
-fail-closed — its `ApprovalRequiredError` surfaces as that batch item's `error`
-without dropping the rest — and each token is still verified against its own
-query's fingerprint in `execute()`, so it can't be replayed onto another query
-in the same batch. Covered by 3 tests (2 service-level in `test_approval.py`, 1
-route-level in `test_rest_api.py`).
-
-**Still not started:** the interactive **MCP elicitation** channel — approve
-within one MCP session (via `Context.elicit`) instead of the REST token
-round-trip. The installed MCP SDK (`mcp.server.fastmcp`) exposes `Context.elicit`,
-so it's feasible; it's the remaining channel/transport work (wiring an
-`ApprovalRequiredError` from the batch MCP tool into an in-session elicitation
-prompt, then minting a token and retrying on approval). Both triggers (cost +
-sensitivity), the REST token flow, and batch tokens are done.
-
-**Effort: L. Priority: medium (safety moat; sequence after 90/91). Feature ref: F3.**
-
-**Why it matters (competitive pressure):** MCP elicitation is the standardized
-HITL primitive (and the `2026-07-28` spec revision keeps a first-class
-client-interaction path), and Auth0 async-authz (CIBA), PromptQL, and others
-gate *writes*. But **reads are the exfiltration leg of the lethal trifecta**
-every 2025 incident exploited (Supabase, Neon), and no competitor gates *reads*
-on *what the query would actually touch* — because none knows before running
-it. QueryGate uniquely already holds the three signals to decide automatically
-whether a read needs a human: catalog sensitivity labels (32A), the
-pre-execution cost/row estimate (item 26), and the parsed AST.
-
-**What to do:** When a query touches a catalog-labelled sensitive column
-(`sensitivity: pii`) **or** its pre-execution estimate exceeds a policy
-row/cost threshold, pause and require a human approval via MCP elicitation
-before executing; audit the approval and its decision. REST has no elicitation
-channel — degrade there to a "requires approval" rejection with an
-approval-token flow; keep the whole gate opt-in per policy. Gate lives between
-validate and execute (`execution/service.py`), with thresholds/sensitivity
-triggers in `policy/models.py`, elicitation in `mcp/`, and the decision in
-`audit/`. Distinct from item 42 (four-eyes for *config* changes) and item 35
-(capacity waiting) — neither gates *query execution* on sensitivity/cost.
-**Invariant:** read-only posture and AST-only input unchanged; this only adds a
-pre-execution gate.
+Cost/row-estimate and catalog-sensitivity triggers pause a gated read; approval is a stateless, fingerprint-bound, short-lived HMAC token via a scope-separated REST flow (428 → `query:approve` → resubmit), threaded per-query through batches, and — opt-in, off by default — obtainable in-session over MCP via `Context.elicit`. Read-only, AST-only, opt-in throughout. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 92).
 
 ## P7 — Governed Writes (flagship structural expansion — decision-gated)
 

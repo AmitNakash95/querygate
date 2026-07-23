@@ -2543,6 +2543,35 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — The MCP elicitation approval channel is opt-in and off by
+  default: a client-human's in-session elicitation response counts as an
+  approval only when the operator explicitly enables it (item 92).** Completing
+  the in-query approval gate, the interactive MCP channel was built so a gated
+  query can be approved *within the querying session* via `Context.elicit`
+  instead of the out-of-band REST `query:approve` token round-trip. The
+  security question this settled: an elicitation response carries **no
+  authenticated approver identity** — it is a form answer from whoever operates
+  the client — so treating it as an approval is a deliberate trust decision, not
+  a default. Three choices were made in the open. **(1) Off by default
+  (`MCP_ELICITATION_APPROVAL_ENABLED=false`).** REST enforces separation of
+  duties structurally (`query:approve` is a distinct scope, so an agent can't
+  approve its own read); the elicitation channel trades that structural
+  separation for a human-in-the-loop one, so an operator must opt in. Left off,
+  a gated MCP query stays fail-closed and the only approval path is the REST
+  token flow. **(2) Separation of duties is preserved by the medium, not a
+  scope.** The querying agent physically cannot satisfy its own gate here —
+  only a *human* answering the client's elicitation prompt can — so the agent
+  can't self-approve even though the approval happens in its own session. That
+  is the whole point of elicitation as the HITL primitive. Deployments where the
+  client's human is *not* a trusted approver leave the channel off. **(3) The
+  minted token is bound and attributed.** On approval the server mints the same
+  fingerprint-bound, short-lived HMAC token the REST flow issues (so it can't be
+  reused for another query), with `approver_subject` recorded as
+  `mcp-elicitation:<caller>` to mark in the audit trail that approval came from
+  an interactive session, not a scoped `query:approve` grant. The channel plugs
+  into `execute_many` through a narrow injected `ApprovalResolver` callback, so
+  the execution service never imports MCP and the batch/error logic stays in one
+  place. Still opt-in, read-only, AST-only — a default deployment is unchanged.
 - **2026-07-23 — Governed Writes Phase 1 (contract + dry-run preview, execution
   DISABLED) is approved and built; the read-only line is crossed for *preview
   only* (item 93; maintainer-approved).** The decision to cross read-only was
