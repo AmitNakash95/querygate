@@ -2103,9 +2103,65 @@ and **refuses** (422) if any drifted from what the write set (or the row is
 gone), so a concurrent change since the write is never silently clobbered.
 **Honest bounded limits:** cannot unwind cascading triggers/FK actions or
 downstream reads; (d) **MCP undo parity** — `undo_structured_write` tool, so an
-agent that wrote over MCP can reverse over MCP. **Phase 3b remaining:**
-`release-smoke` write round-trip, upserts, multi-statement batch atomicity, MSSQL
-execution parity (infra-gated — no local MSSQL), approval-binds-to-diff-hash.
+agent that wrote over MCP can reverse over MCP; (e) **`release-smoke` write** —
+`make release-smoke` now proves the shipped image preview→execute→verify→undo→
+verify a governed write on real Postgres (Redis backend). **Phase 3b remaining:**
+upserts, multi-statement batch atomicity, MSSQL execution parity (infra-gated —
+no local MSSQL), approval-binds-to-diff-hash.
+
+**Phase 3b — production-grade reversibility hardening (the 10/10 bar; from the
+2026-07-23 design review of the undo mechanism).** Logical pre-image compensation
+is the *right* primary approach for QueryGate's constraints — no operational-DB
+schema change, no extra privilege, works self-hosted on any dialect — so this
+hardens it rather than replacing it. Treat each "why" as the acceptance
+criteria. In priority order:
+
+1. **Row-lock the pre-image capture and the drift check (`SELECT ... FOR
+   UPDATE`).** `_capture_pre_image` and `_assert_no_update_drift` both `SELECT`
+   without `with_for_update()`. Under READ COMMITTED (Postgres default) another
+   transaction can commit between the capture `SELECT` and the mutating DML, so
+   the recorded pre-image is *not* what the write actually overwrote; and the
+   drift check has its own TOCTOU with the undo UPDATE. This defeats the
+   correctness of both the snapshot *and* the just-shipped optimistic-concurrency
+   guard. *Acceptance:* capture and drift-check lock the affected rows through
+   commit (or governed writes/undo run at REPEATABLE READ); a concurrency test
+   proves the pre-image equals the overwritten value and undo never clobbers an
+   intervening commit.
+2. **Encrypt the compensation pre-image at rest.** The store necessarily holds
+   real, unredacted row values (in memory + Redis) — a second at-rest copy of
+   potentially the most sensitive columns, squarely in scope for the security
+   review that *is* the North Star success metric, and today it puts Redis in
+   that scope unencrypted. *Acceptance:* pre-image values are envelope/KMS-
+   encrypted at rest in both stores; the `trust-evidence` packet documents the
+   store, its TTL bound, and key management.
+3. **Extend optimistic-concurrency refusal to INSERT undo.** The drift guard
+   runs only for `op == "update"`; undoing an INSERT (DELETE by captured key)
+   still blind-deletes a row another writer modified after the insert.
+   *Acceptance:* INSERT undo refuses (never clobbers) when the target row changed
+   since the write; regression test added.
+4. **Guarantee (or honestly label) compensation-store durability.** A Redis with
+   `allkeys-lru`/`maxmemory` eviction or without AOF silently drops compensation
+   records, so undo reliability degrades exactly under load. *Acceptance:* config
+   validation rejects an evicting/non-persistent Redis for the compensation store
+   (or undo is explicitly labeled best-effort there); optionally offer an opt-in
+   same-DB, same-transaction compensation table (durability == the write, no data
+   egress — also mitigates #2), recorded as a Decision Log entry against the
+   "no operational-DB shadow table" decision.
+5. **Native row-version concurrency token + CDC capture path (robustness at
+   scale).** Upgrade optimistic concurrency from app-level `post_values`
+   comparison (changed-columns only) to the DB's own row-version token — Postgres
+   `xmin`, MSSQL `rowversion` — which detects *any* concurrent change and closes
+   the capture race natively; and offer CDC / logical decoding (Postgres logical
+   replication, MSSQL CDC) as a premium, durable, transaction-consistent
+   pre/post-image source for customers who can enable it. *Acceptance:* a
+   version-token guard is captured at write time and enforced on undo; the CDC
+   path is specified in a Decision Log entry before build.
+6. **State the reversibility claim precisely (`claim-verify`).** The defensible
+   claim is "single-statement, bounded-size, compare-and-safe reversal within a
+   TTL window; refuses (never clobbers) on drift; does not reverse
+   triggered/cascaded/derived effects" — never "safe autonomous undo."
+   *Acceptance:* PRODUCT_GUIDE + marketing carry exactly this wording, backed by
+   tests.
 
 **2026-07-23 review finding — in-flight regression on `compensation.py`, FIXED.**
 A working-tree edit converted `CompensationStore.put/get/consume` to
