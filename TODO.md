@@ -978,13 +978,22 @@ the UI and CI/CD review tooling.
 
 </details>
 
-### 41. Policy-change blast-radius analysis
+### 41. Policy-change blast-radius analysis ✅ DONE
 
 **Phase 1 (bounded, synchronous aggregation) ✅ DONE.** **Phase 2
-(asynchronous/paginated evaluation for deployments with enough configured
-principals to exceed phase 1's bound) not started — split out below because
-it needs a different execution shape (background job plus polling or a
-paginated response), not just a larger cap.**
+(paginated evaluation) ✅ DONE.** Phase 2 took the *paginated-response* option
+(the simpler, stateless of the two shapes the spec offered): `compute_blast_radius_report`
++ `POST /admin/config/blast-radius` accept a `principal_offset` cursor and
+evaluate one deterministically-sorted **page** of configured principals per
+request (page size = the existing `max_principals`), returning `principal_offset`
++ `next_principal_offset` (None on the last page). A deployment with more
+principals than one page now covers *every* principal across successive requests
+instead of the overflow being dropped as `analysis_incomplete`. `highest_risk`
+ranks over the constant baseline + the current page. Covered by
+`tests/unit/test_blast_radius.py` (page bounds + next-offset cursor; paging
+covers every configured principal). A background-job/polling variant was
+deliberately not built — pagination is stateless, needs no job store, and covers
+the same "too many principals for one synchronous pass" case.
 
 **Phase 1 shipped:** `POST /api/v1/admin/config/blast-radius`
 (`api/admin_config_routes.py`) reuses item 40's semantic diff

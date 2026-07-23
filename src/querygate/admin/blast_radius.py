@@ -70,6 +70,7 @@ def compute_blast_radius_report(
     active: "LoadedConfigContext",
     candidate: "LoadedConfigContext",
     *,
+    principal_offset: int = 0,
     max_principals: int = DEFAULT_MAX_PRINCIPALS,
     max_changes_per_principal: int = DEFAULT_MAX_CHANGES_PER_PRINCIPAL,
     max_highest_risk: int = DEFAULT_MAX_HIGHEST_RISK,
@@ -80,15 +81,18 @@ def compute_blast_radius_report(
         set(active.policy_store.principal_override_map())
         | set(candidate.policy_store.principal_override_map())
     )
-    evaluated_subjects = configured[:max_principals]
+    # Phase 2 (TODO item 41): deterministically-sorted configured principals are
+    # evaluated one PAGE at a time. `principal_offset` is the cursor into that
+    # list and `max_principals` the page size; `next_principal_offset` (below)
+    # tells a caller with more configured principals than fit in one page how to
+    # fetch the next page — so a large deployment can cover every principal across
+    # requests instead of the first page being silently dropped as "incomplete".
+    offset = max(principal_offset, 0)
+    evaluated_subjects = configured[offset : offset + max_principals]
+    next_offset = offset + max_principals
+    next_principal_offset = next_offset if next_offset < len(configured) else None
 
     incomplete_reasons = list(baseline.incomplete_reasons)
-    if len(configured) > max_principals:
-        incomplete_reasons.append(
-            f"{len(configured) - max_principals} configured principal(s) beyond the first "
-            f"{max_principals} (sorted by subject) were not individually evaluated; each "
-            "still inherits the baseline diff below unless its own override says otherwise."
-        )
 
     impacts: list[BlastRadiusPrincipalImpact] = []
     ranked = _ranked("baseline", None, baseline.changes)
@@ -129,4 +133,6 @@ def compute_blast_radius_report(
         highest_risk=highest_risk,
         analysis_incomplete=bool(incomplete_reasons),
         incomplete_reasons=incomplete_reasons,
+        principal_offset=offset,
+        next_principal_offset=next_principal_offset,
     )

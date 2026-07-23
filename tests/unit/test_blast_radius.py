@@ -143,17 +143,45 @@ def test_tightening_changes_are_excluded_from_highest_risk():
     assert any(c.direction == "tightening" for c in report.baseline.changes)
 
 
-def test_principal_cap_marks_analysis_incomplete_and_bounds_work():
-    principals = {f"agent-{i}": {"demo": {"max_joins": 2}} for i in range(3)}
+def test_principal_page_bounds_work_and_exposes_next_offset():
+    # Phase 2 (item 41): more principals than one page is NOT "incomplete" —
+    # it's paginated. The first page evaluates `max_principals` and hands back a
+    # next_principal_offset cursor; the last page's cursor is None.
+    principals = {f"agent-{i}": {"demo": {"max_joins": 2}} for i in range(5)}
     active = _ctx(principals=principals)
     candidate = _ctx(principals=principals)
 
-    report = compute_blast_radius_report(active, candidate, max_principals=2)
+    page1 = compute_blast_radius_report(active, candidate, max_principals=2)
+    assert page1.principals_configured == 5
+    assert page1.principals_evaluated == 2
+    assert page1.principal_offset == 0
+    assert page1.next_principal_offset == 2
+    # Pagination is not a truncation — no "configured principal not evaluated" reason.
+    assert not any("were not individually evaluated" in r for r in page1.incomplete_reasons)
 
-    assert report.principals_configured == 3
-    assert report.principals_evaluated == 2
-    assert report.analysis_incomplete is True
-    assert any("configured principal" in reason for reason in report.incomplete_reasons)
+    page3 = compute_blast_radius_report(active, candidate, principal_offset=4, max_principals=2)
+    assert page3.principal_offset == 4
+    assert page3.principals_evaluated == 1  # only agent-4 left
+    assert page3.next_principal_offset is None  # last page
+
+
+def test_paginating_covers_every_configured_principal_exactly_once():
+    principals = {f"agent-{i}": {"demo": {"max_joins": 2}} for i in range(5)}
+    active = _ctx(principals=principals)
+    # Loosen one principal so it produces an impact worth listing.
+    cand_principals = dict(principals)
+    cand_principals["agent-3"] = {"demo": {"max_joins": 9}}
+    candidate = _ctx(principals=cand_principals)
+
+    seen: set = set()
+    offset = 0
+    while offset is not None:
+        page = compute_blast_radius_report(
+            active, candidate, principal_offset=offset, max_principals=2
+        )
+        seen.update(i.principal for i in page.principal_impacts)
+        offset = page.next_principal_offset
+    assert "agent-3" in seen  # the loosened principal surfaced while paging
 
 
 def test_highest_risk_cap_marks_analysis_incomplete():

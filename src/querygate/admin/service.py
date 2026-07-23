@@ -485,7 +485,9 @@ def compute_blast_radius(
         )
         raise
 
-    result = compute_blast_radius_report(active_context, candidate_context)
+    result = compute_blast_radius_report(
+        active_context, candidate_context, principal_offset=request.principal_offset
+    )
     audit_config_change(
         action="blast_radius",
         outcome="success",
