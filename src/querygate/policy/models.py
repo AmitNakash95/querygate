@@ -7,7 +7,7 @@ validation/policy_validation.py before a query is ever compiled or executed.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 import pydantic as pyd
 
@@ -138,6 +138,48 @@ class MandatoryRowFilter(pyd.BaseModel):
         return principal.claims[self.from_claim]
 
 
+class WritePolicy(pyd.BaseModel):
+    """Governed-writes policy (TODO.md item 93). Deny-by-default: writes are OFF
+    unless `enabled` is true AND the target table is in `allowed_tables` AND the
+    operation is in `allowed_operations`. In Phase 1 nothing executes regardless
+    — the write pipeline only ever previews (compiles, runs in a transaction,
+    diffs, rolls back)."""
+
+    enabled: bool = False
+    allowed_tables: list[str] = pyd.Field(default_factory=list)
+    # Which operations are permitted at all (globally); an empty list means none.
+    allowed_operations: list[Literal["insert", "update", "delete"]] = pyd.Field(
+        default_factory=list
+    )
+    # Columns that may never be written, keyed by table ("*" = every table) —
+    # the write analogue of denied_columns (e.g. id, created_at, tenant_id).
+    denied_write_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
+    # Hard cap on how many rows a single previewed/executed write may affect.
+    max_affected_rows: int = pyd.Field(default=100, ge=1)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    def table_writable(self, table_name: str) -> bool:
+        if not self.enabled:
+            return False
+        name = table_name.lower()
+        return any(t.lower() == name for t in self.allowed_tables)
+
+    def operation_allowed(self, op: str) -> bool:
+        return self.enabled and op in self.allowed_operations
+
+    def write_column_allowed(self, table_name: str, column_name: str) -> bool:
+        col = column_name.lower()
+        for key in (table_name.lower(), "*"):
+            for denied in self.denied_write_columns.get(key, []):
+                if denied.lower() == col:
+                    return False
+        # Also honor the read denied_columns for the *_KEY convention? Kept
+        # separate deliberately: a column can be readable but not writable and
+        # vice versa; write policy is its own axis.
+        return True
+
+
 class Policy(pyd.BaseModel):
     # Access and discovery switch. A resolved false value hides the
     # connection from REST/MCP listings and makes direct access behave as if
@@ -151,6 +193,10 @@ class Policy(pyd.BaseModel):
     denied_tables: list[str] = pyd.Field(default_factory=list)
     allowed_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
     denied_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
+
+    # Governed writes (TODO.md item 93), deny-by-default and preview-only in
+    # Phase 1. A read-only deployment leaves this at its default (writes off).
+    write: WritePolicy = pyd.Field(default_factory=WritePolicy)
 
     # Per-column value masks (TODO.md item 49) — keyed by table name with "*"
     # applying to every table, the same convention as allowed/denied_columns.

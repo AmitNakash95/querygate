@@ -6,7 +6,7 @@ StructuredQuery AST, validated against schema + policy before compilation.
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional
+from typing import Annotated, Callable, List, Optional, Union
 
 import pydantic as pyd
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
@@ -21,6 +21,8 @@ from querygate.core.config import AppConfig, config as app_config
 from querygate.core.exceptions import NotFoundError
 from querygate.execution.admission import QueueMode
 from querygate.execution.approval import issue_approval_token, query_fingerprint
+from querygate.execution.write_preview import WritePreview, WritePreviewService
+from querygate.write_ast.models import DeleteStatement, InsertStatement, UpdateStatement
 from querygate.execution.service import (
     BatchQueryItemResult,
     ExplainResult,
@@ -232,6 +234,26 @@ def build_router(
             key=app_config.approval_token_hmac_key,
         )
         return ApprovalGrant(fingerprint=fingerprint, approval_token=token)
+
+    @router.post("/{connection}/write/preview", response_model=WritePreview)
+    async def preview_write(
+        connection: str,
+        statement: Annotated[
+            Union[InsertStatement, UpdateStatement, DeleteStatement],
+            pyd.Field(discriminator="op"),
+        ],
+        principal: Principal = Depends(get_principal),
+    ):
+        """Governed-writes dry-run preview (TODO.md item 93 phase 1): validate a
+        proposed INSERT/UPDATE/DELETE against WritePolicy + schema, compile it,
+        and report the affected-row count + parameterized SQL. **Nothing is ever
+        executed or committed** — there is no write-execution endpoint in phase 1.
+        Gated by WritePolicy (deny-by-default): a read-only deployment returns a
+        clean policy rejection."""
+        _require_connection(connection, principal)
+        service = WritePreviewService(connection_id=connection, principal=principal)
+        with mask_unexpected():
+            return await service.preview(statement)
 
     @router.get("/query-templates", response_model=List[PublicQueryTemplate])
     async def list_query_templates(principal: Principal = Depends(get_principal)):
