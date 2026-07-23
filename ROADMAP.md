@@ -146,8 +146,10 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   durable approval records, author≠approver, `require_config_approvals` apply-gate,
   `admin:config:approve` scope + REST approve/reject); box stays `[ ]` until
   phase 2 (CLI + admin-UI review flows).
-- [ ] **39** — Draft-aware policy simulation before staging. *Safer config
-  changes; reduces misconfiguration risk in a security product.*
+- [x] **39** — Draft-aware policy simulation before staging. *Safer config
+  changes; reduces misconfiguration risk in a security product.* ✅ **Shipped**
+  (`/admin/config/simulate` — isolated, non-persisting candidate evaluation;
+  reconciled from a shipped-but-unmarked state).
 - [ ] **40** — Semantic access diff for config changes. *Makes a policy change's
   effect legible before it ships.*
 - [ ] **41** — Policy-change blast-radius analysis. *Completes the config-change
