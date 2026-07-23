@@ -2543,6 +2543,43 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — Governed Writes Phase 2a: gated write *execution* is enabled
+  (maintainer-approved), still deny-by-default and with no raw DML — a write
+  commits only when in-policy, capped inside its own transaction, atomic, and
+  audited (item 93).** Phase 1 shipped the write contract + dry-run preview with
+  execution disabled; the read-only line is now crossed for *execution*, on
+  explicit maintainer approval, for single-table INSERT/UPDATE/DELETE. The whole
+  point is that crossing it changes the safety *surface* as little as possible —
+  a write reuses the exact validate → policy → schema → compile spine reads use,
+  so the guarantees are structural, not bolted on. What Phase 2a guarantees, and
+  proves in tests: **(1) Deny-by-default.** `WritePolicy.enabled` is false out of
+  the box and a write needs its table in `allowed_tables` and its op in
+  `allowed_operations`; a default deployment cannot write at all. **(2) No raw
+  DML, ever.** Execution runs the *same* validated `write_ast` → `compile_write`
+  Core statement the preview compiles — there is no raw-SQL field or string path,
+  and an injected value can only ever populate a bound parameter. **(3) The
+  affected-row cap is enforced *inside the transaction*.** The service counts
+  matched rows in the same transaction that will mutate them and aborts (rolls
+  back) before mutating if the count exceeds `max_affected_rows` — so a
+  concurrent insert can't push a write over its cap between preview and execute.
+  **(4) One transaction, no partial write.** Each write runs in a single explicit
+  transaction; any error (validation, cap, DB, deadlock) rolls the whole thing
+  back and surfaces a clean typed error — never a half-applied mutation.
+  **(5) The approval gate extends to writes.** Reusing item 92's machinery, a
+  write whose affected-row count crosses `WritePolicy.require_approval_over_rows`
+  pauses for a human: REST returns `428` with the write's fingerprint, and a
+  `query:approve`-scoped grant issues a fingerprint-bound token to resubmit —
+  the agent can't approve its own write. **(6) Redaction-safe, dual-identity,
+  tamper-evident audit.** The write reuses `audit_query` (operation
+  `execute_structured_write`) so it inherits per-human attribution (item 90) and
+  the hash-chained ledger (item 91); the event carries the op, table, affected
+  count, and *parameterized* SQL — never a SET value, predicate literal, or row.
+  **Deliberately deferred to 2b/3** (each its own slice, so this one stays
+  reviewable): the row-level old→new diff preview, the MCP `run_structured_writes`
+  execute tool, the write concurrency load gate + `release-smoke` write round-trip,
+  compensation/undo (bounded reversibility), upserts/multi-row batch, and MSSQL
+  execution parity. The claim remains *governed* writes — bounded, previewed,
+  approved, attributed — never "safe autonomous writes."
 - **2026-07-23 — The MCP elicitation approval channel is opt-in and off by
   default: a client-human's in-session elicitation response counts as an
   approval only when the operator explicitly enables it (item 92).** Completing

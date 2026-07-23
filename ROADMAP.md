@@ -216,8 +216,14 @@ surface them for a human, never auto-start them.
   - **Phase 1** ✅ **shipped** — `write_ast/` + `WritePolicy` + write policy/schema
     validation + write compiler + the dry-run preview + `POST /write/preview`.
     Ships on its own as a "dry-run planner"; no execution path exists.
-  - **Phase 2** (gated execution) **depends on items 90 + 91 + 92** (all shipped)
-    — still requires a deliberate build of the execution/transaction/receipt path.
+  - **Phase 2a** ✅ **shipped (maintainer-approved 2026-07-23)** — gated
+    single-statement INSERT/UPDATE/DELETE *execution*: one transaction, in-txn
+    row cap, item-92 approval gate on the row count, dual-identity (90) +
+    tamper-evident (91) audit, no raw DML, deny-by-default. `WriteExecutionService`
+    + `POST /write/execute` + `POST /write/approve`.
+  - **Phase 2b** (still open) — row-level diff preview + approval on the diff,
+    MCP `run_structured_writes` execute tool, adversarial write security suite,
+    `release-smoke` write round-trip, write concurrency load gate.
   - **Phase 3** (compensation/undo + upserts + batch + MSSQL parity) depends on
     Phase 2.
 - **F4 · Safe NL→StructuredQuery.** Needs a decision on model provider/posture;
