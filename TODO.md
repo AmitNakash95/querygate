@@ -2114,8 +2114,15 @@ Writes are now proven on **all three** engines (SQLite/Postgres/MSSQL); (g)
 compiler registry (`_UPSERT_COMPILERS`, composable — no inline `if dialect`),
 native on Postgres/SQLite, **rejected on MSSQL** (reject-not-emulate, no
 synthesized MERGE); proven on real Postgres + MSSQL. Upsert-undo is deferred
-(per-row insert-or-update is ambiguous to reverse). **Phase 3b remaining:**
-multi-statement batch atomicity, approval-binds-to-diff-hash.
+(per-row insert-or-update is ambiguous to reverse); (h) **multi-statement batch
+atomicity** — `execute_many(atomic=True)` + the MCP tool's `atomic` flag: all
+writes in one transaction, all-or-nothing (fail-closed on a gated write; no
+per-write compensation in atomic mode). **Phase 3b deliberately deferred (not
+built speculatively):** approval-binds-to-diff-hash — the token already binds to
+the write's full fingerprint and the trigger is re-evaluated at execute; binding
+to a computed diff-hash would force the execute path to compute the diff every
+time for a TOCTOU window no pilot has asked to close. **Upsert-undo** and this
+are the only open item-93 items, both reasoned deferrals.
 
 **Phase 3b — production-grade reversibility hardening (the 10/10 bar; from the
 2026-07-23 design review of the undo mechanism).** Logical pre-image compensation
