@@ -235,6 +235,14 @@ class AppConfig(BaseSettings):
     # needs the same value.
     audit_ledger_hmac_key: str = pyd.Field(default="")
 
+    # HMAC key that signs in-query approval tokens (execution/approval.py,
+    # TODO.md item 92). Empty (the default) means the approval gate cannot issue
+    # or verify tokens — a deployment that sets Policy.approval_max_estimated_*
+    # MUST set this, otherwise a triggered query can never be approved
+    # (fail-closed by design). Never logged; the token binds a query fingerprint
+    # + expiry, never a query value or secret.
+    approval_token_hmac_key: str = pyd.Field(default="")
+
     # Read-only per-principal anomaly surfacing over the persisted audit stream
     # (TODO.md item 59). Purely a signal for a human admin — never wired into
     # enforcement. Requires audit_sink_backend=jsonl; with backend=none the
@@ -255,6 +263,15 @@ class AppConfig(BaseSettings):
     # POST /admin/reload-config keeps reloading unchanged, for infra-as-code
     # deployments that edit files directly rather than through this API).
     config_governance_dir: str = pyd.Field(default="var/config_versions")
+
+    # Four-eyes config approval (TODO.md item 42). 0 (default) = single-
+    # administrator mode: a staged version can be applied by any
+    # `admin:config:write` holder, exactly as before. When >= 1, a staged
+    # version cannot be applied until it has at least this many `approve`
+    # decisions from DISTINCT reviewers holding `admin:config:approve`, none of
+    # whom is the version's author (separation of duties enforced server-side,
+    # never only in the UI).
+    require_config_approvals: int = pyd.Field(default=0, ge=0)
     # Upper bound on an imported config change-set bundle (item 47). A bundle
     # carries only submitted document deltas plus a base fingerprint, so this
     # is far above any legitimate change set; it bounds the import endpoint so

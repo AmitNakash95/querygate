@@ -403,6 +403,58 @@ has silently stopped evaluating queries on that connection.
 `querygate_cost_estimation_attempts_total{connection}` is the matching
 denominator for computing a fail-open rate.
 
+### In-query human-in-the-loop approval (phase 1)
+
+Some reads shouldn't run unattended just because they pass policy — a query
+whose pre-execution estimate is very large is the exfiltration leg of the
+"lethal trifecta". QueryGate can **pause** such a read and require a human's
+approval before it executes, gating on *what the query would actually touch*
+rather than after the fact (TODO.md item 92). Opt-in per policy, off by default:
+
+```yaml
+policy:
+  approval_max_estimated_rows: 100000    # softer than max_estimated_rows above
+  approval_max_estimated_cost: 50000     # Postgres planner-cost units
+  approval_sensitivities: [pii]          # or internal/confidential — see below
+```
+
+There are two triggers, and either fires the gate:
+
+- **Cost/size** (`approval_max_estimated_*`): set *below* the hard
+  `max_estimated_*` caps to mean "ask a human" rather than "refuse". Postgres
+  only (reuses the same estimate as cost estimation).
+- **Sensitivity** (`approval_sensitivities`): a query that references a column —
+  or its table — carrying one of these catalog sensitivity labels (`pii`,
+  `confidential`, `internal`) requires approval *regardless of size*, on any
+  dialect. It reads only the descriptive catalog's static label (never a row
+  value) and checks **every** referenced column (a sensitive column used in a
+  `WHERE`/join/grouping trips it too, not just one you `select`).
+
+When a query trips either trigger, execution is paused with
+`428 Precondition Required` carrying a query **fingerprint** and the **reasons**.
+An approver holding the `query:approve` scope (deliberately *not* the querying
+agent — see `docs/SCOPE_CATALOG.md`'s "Query Approver" role) grants a token:
+
+```bash
+# 1. execution pauses -> 428 { "fingerprint": "...", "reasons": [...] }
+# 2. approver (query:approve) mints a short-lived, query-bound token:
+curl -X POST -H "Authorization: Bearer $APPROVER_KEY" \
+  $HOST/api/v1/<connection>/query/approve -d '<the exact same StructuredQuery JSON>'
+# -> { "fingerprint": "...", "approval_token": "..." }
+# 3. caller re-submits the identical query with the token:
+curl -X POST -H "Authorization: Bearer $CALLER_KEY" \
+  -H "X-QueryGate-Approval: <approval_token>" \
+  $HOST/api/v1/<connection>/query -d '<the exact same StructuredQuery JSON>'
+```
+
+The token is a stateless HMAC (set `APPROVAL_TOKEN_HMAC_KEY`) bound to the exact
+query fingerprint and a short expiry — it can't be forged, can't be replayed
+against a *different* query, and can't be replayed indefinitely; any
+missing-key/forged/expired/mismatched token fails closed. The one remaining
+piece is an interactive **MCP elicitation** approval channel (approve inside one
+MCP session instead of the REST round-trip). A deployment that sets no approval
+thresholds or sensitivities is completely unaffected.
+
 ### Per-principal rate limits / query quotas
 
 `max_concurrency` bounds how many queries a principal can have *in flight at
@@ -493,6 +545,16 @@ answers a missing/insufficient credential with an RFC 6750
 run the token exchange / scope step-up. Static API keys still work and skip
 audience binding (an out-of-band trust with no `aud`) but still pass the scope
 gate.
+
+The metadata's RFC 9728 `scopes_supported` advertises QueryGate's **entire**
+scope vocabulary (not just the MCP access gate), so an IdP can import it and
+mint usable tokens with no manual typing. For humans, `docs/SCOPE_CATALOG.md`
+(generated from `core/scopes.py` by `make scope-catalog`, drift-tested) lists
+every scope, the action it gates, and **recommended role bundles**
+(Analyst / Operator / Config Governor / Catalog Author / Catalog Admin /
+Catalog Data Steward) to paste into your IdP's role definitions. Data-access
+grants stay in `policy.yaml` keyed by `sub`/claim — never scopes — so
+provisioning a user reduces to role assignment.
 
 ## Config-governance API (staged versions, apply, rollback)
 
@@ -611,6 +673,20 @@ taxonomy — evaluated once at the connection baseline and once more per
 explicitly configured principal, then ranks the access-expanding results so a
 reviewer sees whether a change is fleet-wide or targeted at a specific caller
 before it's staged.
+
+**Four-eyes approval (optional).** By default one `admin:config:write` principal
+can stage and apply a change (single-administrator mode). Set
+`require_config_approvals` to N ≥ 1 and a staged version cannot be applied until
+N **distinct** reviewers holding the separate `admin:config:approve` scope have
+approved it via `POST /admin/config/versions/{id}/approve` (or `/reject`, with an
+optional bounded note) — and **the version's author can never approve their own
+change**. Enforcement is entirely server-side (the store refuses an author's own
+review and `apply` refuses an under-approved version), so it can't be bypassed by
+talking to the API directly rather than the UI. Approvals bind to the version's
+content fingerprint, and rollback to a previously-active version stays exempt so
+disaster recovery is never blocked. Every approve/reject and every
+insufficient-approvals rejection is in the audit trail. See
+`docs/SCOPE_CATALOG.md`'s "Config Approver" role.
 
 ### Validated policy templates and safe-start presets
 

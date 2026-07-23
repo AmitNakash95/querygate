@@ -206,6 +206,14 @@ claim here matters more than badge-count:
   maintainer step (TODO.md item 30/89 phase 2) is cutting the *first* signed
   release (a deliberate tag push, never automatic) and choosing a Python
   package-index; the signing/provenance mechanism itself is in place.
+- **SOC 2 / ISO 27001 control mapping — available.** A control-by-control map of
+  QueryGate's product controls to the SOC 2 Trust Service Criteria and ISO 27001
+  Annex A, each row backed by a concrete code/test/doc artifact, with an honest
+  product-vs-shared-vs-organization responsibility split, is in
+  [docs/COMPLIANCE_MAPPING.md](COMPLIANCE_MAPPING.md) (TODO.md item 54). It is a
+  readiness baseline for a customer's audit — not a claim that the product is
+  itself certified; the audit engagement (item 53) and org-level controls remain
+  the deploying organization's.
 
 ## Reproduce the whole posture
 

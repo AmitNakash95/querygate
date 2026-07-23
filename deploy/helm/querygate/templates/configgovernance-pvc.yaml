@@ -1,0 +1,22 @@
+{{- if .Values.configGovernance.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "querygate.fullname" . }}-config-governance
+  labels:
+    {{- include "querygate.labels" . | nindent 4 }}
+spec:
+  # ReadWriteMany: every replica mounts the same governance version history, so
+  # the config-governance API (Path B) has one shared source of truth rather
+  # than a divergent per-pod copy. Needs an RWX-capable StorageClass; if your
+  # cluster has none, prefer the GitOps/ConfigMap config path (Path A) and leave
+  # configGovernance.enabled=false. See deploy/HA_DR.md.
+  accessModes:
+    - ReadWriteMany
+  {{- if .Values.configGovernance.storageClassName }}
+  storageClassName: {{ .Values.configGovernance.storageClassName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.configGovernance.size }}
+{{- end }}

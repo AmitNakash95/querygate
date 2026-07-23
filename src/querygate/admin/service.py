@@ -27,6 +27,7 @@ from querygate.admin.models import (
     CandidatePolicySimulation,
     CandidatePolicySimulationRequest,
     CandidateSimulationReason,
+    ConfigApprovalDecision,
     ConfigChangeSetBundle,
     ConfigChangeSetImportCheck,
     ConfigDocumentPreview,
@@ -1059,6 +1060,29 @@ async def apply(
         )
         raise ConfigValidationError("; ".join(errors))
 
+    # Four-eyes gate (item 42): a staged version's FIRST activation needs the
+    # required number of distinct approvals. Rollback (reactivating a version
+    # that was already active) is deliberately exempt — it was approved when
+    # first applied, and gating DR/rollback on re-approval would be unsafe.
+    if action == "apply" and cfg.require_config_approvals > 0:
+        approvals = _count_valid_approvals(version)
+        if approvals < cfg.require_config_approvals:
+            audit_config_change(
+                action=action,
+                outcome="rejected",
+                principal=principal.subject,
+                principal_scopes=sorted(principal.scopes),
+                auth_method=principal.auth_method,
+                version_id=version_id,
+                error_category="insufficient_approvals",
+                duration_ms=int((time.monotonic() - start) * 1000),
+            )
+            raise PolicyViolationError(
+                f"Version {version_id} has {approvals} of the {cfg.require_config_approvals} "
+                "required approvals (from distinct reviewers other than the author) and "
+                "cannot be applied yet."
+            )
+
     paths = store.file_paths(version_id)
     reload_result = await reload_config(
         connections_file=paths.connections,
@@ -1084,6 +1108,87 @@ async def apply(
         duration_ms=int((time.monotonic() - start) * 1000),
     )
     return updated_version, reload_result
+
+
+def _count_valid_approvals(version: ConfigVersion) -> int:
+    """Distinct reviewers who currently *approve* this version's exact content.
+
+    Bound to the version's content fingerprint so an approval can never count
+    for different content (defense-in-depth — staged content is immutable, so
+    the fingerprint always matches today). A reviewer whose latest decision is a
+    rejection does not count (the store already keeps only one record per
+    reviewer). The author is structurally excluded because the store refuses to
+    record an author's own review at all.
+    """
+    fingerprint = _version_fingerprint(
+        version.connections_yaml,
+        version.policy_yaml,
+        version.catalog_yaml,
+        version.templates_yaml,
+    )
+    return len(
+        {
+            a.approver
+            for a in version.approvals
+            if a.decision == ConfigApprovalDecision.APPROVE and a.content_fingerprint == fingerprint
+        }
+    )
+
+
+def approve(
+    cfg: AppConfig,
+    principal: Principal,
+    version_id: str,
+    *,
+    decision: ConfigApprovalDecision,
+    note: Optional[str] = None,
+) -> ConfigVersion:
+    """Record a four-eyes review decision on a staged version (item 42).
+
+    The caller must hold `admin:config:approve` (enforced at the route). The
+    author-≠-approver and staged-only invariants are enforced in the store and
+    surface as `PolicyViolationError`; every decision is audited (content-free).
+    """
+    store = get_config_version_store()
+    version = store.get_version(version_id)  # raises NotFoundError -> 404 at the route
+    start = time.monotonic()
+    fingerprint = _version_fingerprint(
+        version.connections_yaml,
+        version.policy_yaml,
+        version.catalog_yaml,
+        version.templates_yaml,
+    )
+    action = "approve" if decision == ConfigApprovalDecision.APPROVE else "reject"
+    try:
+        updated = store.add_approval(
+            version_id,
+            approver=principal.subject,
+            decision=decision,
+            content_fingerprint=fingerprint,
+            note=note,
+        )
+    except PolicyViolationError:
+        audit_config_change(
+            action=action,
+            outcome="rejected",
+            principal=principal.subject,
+            principal_scopes=sorted(principal.scopes),
+            auth_method=principal.auth_method,
+            version_id=version_id,
+            error_category="separation_of_duties",
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        raise
+    audit_config_change(
+        action=action,
+        outcome="success",
+        principal=principal.subject,
+        principal_scopes=sorted(principal.scopes),
+        auth_method=principal.auth_method,
+        version_id=version_id,
+        duration_ms=int((time.monotonic() - start) * 1000),
+    )
+    return updated
 
 
 def get_current(cfg: AppConfig) -> ConfigVersion:

@@ -6,7 +6,8 @@ validation/policy_validation.py, before this module ever reflects anything.
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Iterator, Optional, Set, Tuple
+import enum
+from typing import Callable, Dict, Iterator, NamedTuple, Optional, Set, Tuple
 
 import sqlalchemy as sa
 
@@ -115,6 +116,100 @@ def predicate_column_refs(pred: Predicate) -> Iterator[str]:
         yield pred.value_col
 
 
+class RefPosition(enum.Enum):
+    """Where in a `StructuredQuery` a Table.Column reference appears.
+
+    Rich enough to preserve the one distinction enforcement actually branches
+    on: a *bare* top-level select projection item is the only position a
+    masked column (TODO.md item 49) is allowed to appear — every other
+    position would leak the raw value. `SELECT_NESTED` is a column inside a
+    scalar-fn/CASE/aggregate select item, which is NOT a bare projection and so
+    is subject to the masked-column rule like any other non-projection ref.
+    """
+
+    SELECT_PROJECTION_BARE = "select_projection_bare"
+    SELECT_NESTED = "select_nested"
+    JOIN_ON = "join_on"
+    JOIN_EXTRA_ON = "join_extra_on"
+    WHERE = "where"
+    GROUP_BY = "group_by"
+    HAVING = "having"
+    ORDER_BY = "order_by"
+    TOP_N_PARTITION = "top_n_partition"
+    TOP_N_ORDER = "top_n_order"
+
+
+class ColumnRef(NamedTuple):
+    position: RefPosition
+    ref: str  # the 'Table.Column' string as written (effective/alias name . column)
+
+
+def _where_column_refs(node: WhereNode) -> Iterator[str]:
+    """Every Table.Column ref inside a (possibly nested) WHERE tree, in
+    document order. The one recursion over the boolean tree — the visitor
+    below is the only caller.
+    """
+    if isinstance(node, Predicate):
+        yield from predicate_column_refs(node)
+        return
+    if node.not_terms is not None:
+        yield from _where_column_refs(node.not_terms)
+        return
+    for child in node.and_terms or node.or_terms or []:
+        yield from _where_column_refs(child)
+
+
+def iter_column_refs(query: StructuredQuery) -> Iterator[ColumnRef]:
+    """THE canonical reference visitor: yield one `ColumnRef(position, ref)` for
+    every genuine Table.Column reference a query contains, across every position
+    where one can appear — select (bare vs. nested), join `on`/`extra_on`,
+    where, group_by, having, order_by, and top_n partition/order.
+
+    This is the single authority `CLAUDE.md`'s composable-interface doctrine
+    asks for: policy validation (column allow/deny + the item-49 masked-column
+    rule), `referenced_tables`, and schema validation's table-collection all
+    consume this instead of each hand-maintaining its own parallel walk, so a
+    new AST reference position is taught here once and enforced everywhere by
+    construction (this is what makes item 97's nested subqueries safe to add).
+
+    Positions that may legitimately reference a *select alias* rather than a
+    real column (group_by, order_by, top_n) yield only their dotted
+    `Table.Column` entries — a bare alias is not a column reference and is
+    filtered here, exactly as the superseded walks did.
+    """
+    for item in query.select:
+        if isinstance(item, str):
+            yield ColumnRef(RefPosition.SELECT_PROJECTION_BARE, item)
+        else:
+            for ref in select_item_column_refs(item):
+                yield ColumnRef(RefPosition.SELECT_NESTED, ref)
+    for join in query.joins:
+        for side in join.on:
+            yield ColumnRef(RefPosition.JOIN_ON, side)
+        for pair in join.extra_on:
+            for side in pair:
+                yield ColumnRef(RefPosition.JOIN_EXTRA_ON, side)
+    if query.where is not None:
+        for ref in _where_column_refs(query.where):
+            yield ColumnRef(RefPosition.WHERE, ref)
+    for col_ref in query.group_by:
+        if "." in col_ref:
+            yield ColumnRef(RefPosition.GROUP_BY, col_ref)
+    for pred in query.having:
+        for ref in predicate_column_refs(pred):
+            yield ColumnRef(RefPosition.HAVING, ref)
+    for order in query.order_by:
+        if "." in order.col:
+            yield ColumnRef(RefPosition.ORDER_BY, order.col)
+    if query.top_n is not None:
+        for ref in query.top_n.partition_by:
+            if "." in ref:
+                yield ColumnRef(RefPosition.TOP_N_PARTITION, ref)
+        for order in query.top_n.order_by:
+            if "." in order.col:
+                yield ColumnRef(RefPosition.TOP_N_ORDER, order.col)
+
+
 def resolve_column(table: sa.Table, column_name: str) -> sa.Column:
     col_map = {c.name.lower(): c for c in table.c}
     key = column_name.lower()
@@ -204,19 +299,6 @@ def _where_depth(node: WhereNode, depth: int = 1) -> int:
 
 def where_depth(node: WhereNode) -> int:
     return _where_depth(node)
-
-
-def _collect_tables_from_where(node: WhereNode, tables: Set[str]) -> None:
-    if isinstance(node, Predicate):
-        for ref in predicate_column_refs(node):
-            table, _ = parse_column_ref(ref)
-            tables.add(table)
-        return
-    if node.not_terms is not None:
-        _collect_tables_from_where(node.not_terms, tables)
-        return
-    for child in node.and_terms or node.or_terms or []:
-        _collect_tables_from_where(child, tables)
 
 
 async def _load_table(connection_id: str, table_name: str, table_connection: str) -> sa.Table:
@@ -311,47 +393,17 @@ async def validate_schema(
     _validate_join_graph(query)
     name_to_physical = effective_name_map(query)
 
+    # Every effective table/alias the query needs reflected: the structural
+    # from/join tables, plus the (effective) table of every column reference the
+    # canonical visitor finds anywhere in the AST. One walk, one authority — see
+    # `iter_column_refs`. (extra_on refs add no new tables, being the same pair
+    # as `on`, but flow through the visitor harmlessly.)
     needed: Set[str] = {query.from_alias or query.from_table}
     for join in query.joins:
         needed.add(join.alias or join.table)
-        for side in join.on:
-            t, _ = parse_column_ref(side)
-            needed.add(t)
-
-    for item in query.select:
-        for ref in select_item_column_refs(item):
-            t, _ = parse_column_ref(ref)
-            needed.add(t)
-
-    for col_ref in query.group_by:
-        # group_by may reference a date_bucket select alias (no table)
-        if "." in col_ref:
-            t, _ = parse_column_ref(col_ref)
-            needed.add(t)
-
-    for order in query.order_by:
-        if "." in order.col:
-            t, _ = parse_column_ref(order.col)
-            needed.add(t)
-
-    if query.where is not None:
-        _collect_tables_from_where(query.where, needed)
-
-    for pred in query.having:
-        # having may reference select aliases (no table) or Table.Col
-        for ref in predicate_column_refs(pred):
-            t, _ = parse_column_ref(ref)
-            needed.add(t)
-
-    if query.top_n is not None:
-        for ref in query.top_n.partition_by:
-            if "." in ref:
-                t, _ = parse_column_ref(ref)
-                needed.add(t)
-        for order in query.top_n.order_by:
-            if "." in order.col:
-                t, _ = parse_column_ref(order.col)
-                needed.add(t)
+    for column_ref in iter_column_refs(query):
+        t, _ = parse_column_ref(column_ref.ref)
+        needed.add(t)
 
     declared_tables = set(name_to_physical)
     undeclared_tables = sorted(name for name in needed if name.lower() not in declared_tables)

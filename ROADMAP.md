@@ -91,33 +91,44 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   consumer `cosign verify`/`gh attestation verify` docs). Box stays `[ ]` until
   the two maintainer-gated bits — the *first* executed signed release (a
   deliberate tag push) and a chosen Python package-index — are done.
-- [ ] **56** — HA / multi-region reference deployment + DR runbook (start with a
+- [x] **56** — HA / multi-region reference deployment + DR runbook (start with a
   supported Helm path). *A pilot has to actually deploy; unblocks the
-  "deployed in a day" pilot success criterion.*
+  "deployed in a day" pilot success criterion.* ✅ **Shipped** (zero-downtime
+  rolling config reload, `values-ha.yaml` multi-zone overlay, `deploy/HA_DR.md`
+  shared-state matrix + DR runbook, chart HA invariants CI-asserted; live
+  failover drill is the operator's step).
 - [ ] **36** — Production-grade QA / edge-case test suite. *Hardening before a
   real customer's data and adversaries touch it; raises confidence for the
   pilot without new surface.*
-- [ ] **96** — Unify the AST reference-walk into a single canonical visitor.
+- [x] **96** — Unify the AST reference-walk into a single canonical visitor.
   *Pure refactor, no behavior change: collapses the four hand-maintained
   reference walks into one authority so a policy/schema hole can't open in a
   forgotten copy. Robustness the pilot benefits from now, and the enabler that
-  makes future AST breadth safe-by-construction. **Blocks 97.***
-- [ ] **95** — Discoverable scope catalog + recommended role bundles for IdP
+  makes future AST breadth safe-by-construction. **Blocks 97.*** ✅ **Shipped**
+  (`iter_column_refs` canonical visitor + `RefPosition` taxonomy; four parallel
+  walks removed; zero behavior change, 1402 tests pass).
+- [x] **95** — Discoverable scope catalog + recommended role bundles for IdP
   integration. *Turns the shipped "bring your IdP" auth (items 10/90) into a
   turnkey wire-up: a design partner with Okta/Entra/Auth0 can register QG's
   scopes and roles without reverse-engineering `scopes.py`. Small effort,
   directly unblocks SSO-based pilot onboarding. **Depends on 10 + 90 (both
-  shipped).***
+  shipped).*** ✅ **Shipped** (full-vocabulary RFC 9728 `scopes_supported` +
+  generated `docs/SCOPE_CATALOG.md` with role bundles, drift-tested).
 
 ### Phase 2 — Enterprise procurement unlocks (pull-driven — do when a partner's security team engages)
 
-- [ ] **54** — Compliance control mapping (SOC 2 / ISO 27001 readiness).
-  *Procurement checkbox; pairs with the audit trail from 91.*
+- [x] **54** — Compliance control mapping (SOC 2 / ISO 27001 readiness).
+  *Procurement checkbox; pairs with the audit trail from 91.* ✅ **Shipped**
+  (`docs/COMPLIANCE_MAPPING.md`: SOC 2 CC1–CC9 + C/A/PI + ISO 27001 Annex A
+  mapped to real artifacts, honest product/shared/org split; audit engagement =
+  item 53).
 - [ ] **53** — Independent third-party security audit + published report.
   *External validation enterprise buyers ask for. Needs vendor coordination —
   see "Coordination-gated" note below.*
-- [ ] **60** — Bug bounty / responsible disclosure program. *Cheap, durable
-  trust signal; stand up after 53 clears the obvious issues.*
+- [x] **60** — Bug bounty / responsible disclosure program. *Cheap, durable
+  trust signal; stand up after 53 clears the obvious issues.* ✅ **Shipped**
+  (coordinated-disclosure program in `SECURITY.md`: recognition-only structure +
+  shared remediation flow; paid-bounty tier deliberately deferred to post-item-53).
 
 ### Phase 3 — Governance & safety depth (deepen the moat)
 
@@ -127,10 +138,18 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 - [ ] **92** — In-query human-in-the-loop approval for sensitive/expensive reads
   (F3). *Gates the exfiltration leg of the lethal trifecta on what a read would
   actually touch — nobody else can, because none knows before running it.*
+  **Shipped: both triggers** (cost/row-estimate + catalog sensitivity-label) +
+  stateless HMAC approval-token grant + `query:approve` scope + REST 428/approve
+  flow, opt-in; box stays `[ ]` until the MCP-elicitation approval channel + batch.
 - [ ] **42** — Four-eyes config approval and separation of duties. *Governance
-  maturity for the config plane.*
-- [ ] **39** — Draft-aware policy simulation before staging. *Safer config
-  changes; reduces misconfiguration risk in a security product.*
+  maturity for the config plane.* **Phase 1 shipped** (server-side enforcement:
+  durable approval records, author≠approver, `require_config_approvals` apply-gate,
+  `admin:config:approve` scope + REST approve/reject); box stays `[ ]` until
+  phase 2 (CLI + admin-UI review flows).
+- [x] **39** — Draft-aware policy simulation before staging. *Safer config
+  changes; reduces misconfiguration risk in a security product.* ✅ **Shipped**
+  (`/admin/config/simulate` — isolated, non-persisting candidate evaluation;
+  reconciled from a shipped-but-unmarked state).
 - [ ] **40** — Semantic access diff for config changes. *Makes a policy change's
   effect legible before it ships.*
 - [ ] **41** — Policy-change blast-radius analysis. *Completes the config-change
@@ -198,6 +217,40 @@ surface them for a human, never auto-start them.
 
 An agent may do the code/doc-preparable parts and clearly flag what needs a
 human/vendor to complete.
+
+---
+
+## Frontier status (2026-07-23) — why each remaining item needs a decision, infra, or its own PR
+
+After the 2026-07-23 batch (56, 96, 95, 54, 60 done; 92 ph1+ph2 triggers; 42
+ph1; 39 reconciled), the roadmap-next automation has reached a frontier: **no
+remaining item is a clean, single-pass, unilaterally-buildable, locally-
+validatable slice.** Each was examined and is blocked as follows — a maintainer
+should pick from these deliberately rather than the automation forcing one:
+
+- **40 ph2** (per-principal semantic diff) — *scope decision needed*: overlaps
+  the shipped **41 ph1** (blast-radius already resolves/ranks per-principal).
+  Decide how a per-principal `/diff` differs from `/blast-radius` before building.
+- **41 ph2** — *async scale infra*: background-job/pagination for >100 configured
+  principals; substantial, low-ROI until a deployment hits that scale.
+- **35 ph2** — *async infra*: `queued`/`running`/`cancelled` states + mid-flight
+  cancellation (a background-execution contract), not a clean slice.
+- **57** — *conflicts with a deliberate CLAUDE.md decision* (`connections/dialects.py`
+  inline branching is an intentional exception) **and** needs MSSQL cost
+  estimation (26 ph2). Needs a maintainer decision before refactoring.
+- **26 ph2 / 36 ph2b / 58 ph2 / 30·89 ph2 / 53** — *infra/vendor/maintainer-gated*
+  (live MSSQL, dual-DB CI, external LLM/Toolbox, deliberate signed-release tag
+  push, external auditor).
+- **18 / 51 / 19 / 37** — *large multi-session features* (stored-proc subsystem +
+  security review; Python+TS SDK; new dialects, needs 57; adaptive-learning e2e
+  proof). Each warrants its own focused PR.
+- **38·44·45·47·50 ph2** — *UI / durable-cross-replica infra phase-2s* (Phase 5,
+  lowest marginal ROI).
+- **93 / F4 / P2 / 97** — *decision-gated*; must not be auto-started (see below).
+
+The `roadmap-next` automation should surface this list and stop, rather than
+force an entangled or ambiguously-scoped change. Delete/trim this note once the
+maintainer re-prioritizes and the frontier moves.
 
 ---
 
