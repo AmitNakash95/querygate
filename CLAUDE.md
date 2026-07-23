@@ -1,60 +1,174 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) working in this repository. These
+instructions override default behavior — follow them exactly.
+
+## Non-negotiables — read first, never violate without an explicit recorded decision
+
+These are the load-bearing invariants. Each links to the section with the full
+rationale; break one only via a written decision in `docs/PRODUCT_GUIDE.md`'s
+Decision Log (or, for product identity, `docs/business/NORTH_STAR.md`).
+
+1. **No caller-controlled raw SQL, ever.** The only thing a caller submits is a
+   validated `StructuredQuery` / write AST. There is no `execute_sql` field,
+   endpoint, or MCP tool, and never will be without a NORTH_STAR decision.
+   → [The one request pipeline](#the-one-request-pipeline), [North Star](#north-star--the-product-definition-for-success-the-anchor)
+2. **No credential on any returned model.** Only `PublicConnectionInfo` leaves
+   REST/MCP; `ConnectionProfile` (which holds the connection string) never does.
+   `test_credential_redaction.py` enforces this against the live schemas.
+   → [Security invariant](#security-invariant)
+3. **Redaction-safe audit only.** Persisted audit events never include SQL,
+   predicate values, rows, exceptions, or credentials. → [pipeline step 6](#the-one-request-pipeline)
+4. **One database path.** Every REST route and MCP tool is a thin wrapper over
+   the single `StructuredQueryService` — no second path to a database exists.
+   → [The one request pipeline](#the-one-request-pipeline)
+5. **One catalog mutation path.** All catalog writes go through the
+   `CatalogFileRepository` lock. No second catalog file/store/DB; drafts never
+   index, merge, or publish without the 32B-1 review gate. → [Catalog](#catalog-descriptive-overlay-single-mutation-path)
+6. **Vary behavior by registered interface, not scattered `if`s.** Dialect /
+   backend / strategy differences go behind a Protocol + one class per variant +
+   a registry — never inline `if X == ...` at call sites. → [Composable interfaces](#composable-single-purpose-interfaces)
+7. **Expose primitives; don't spoon-feed the agent.** Translate an AST operation
+   into each dialect's idiom, but never synthesize query structure the AST
+   didn't ask for, and reject (don't emulate) a capability a dialect genuinely
+   lacks. → [Engine philosophy](#engine-philosophy-expose-primitives-dont-spoon-feed-the-agent)
+8. **The non-goals are product identity.** No raw-SQL mode, no execution of
+   model-generated code, no stored-procedure path, no mandatory semantic
+   modeling step, no warehouse of our own. → [North Star](#north-star--the-product-definition-for-success-the-anchor)
 
 ## What this is
 
 QueryGate is an agent-safe database access gateway: it exposes Postgres/MSSQL
 databases to AI agents over MCP and REST, but the only thing a caller can ever
-submit is a validated `StructuredQuery` JSON AST — there is no raw-SQL field
-or endpoint anywhere in the codebase. See `README.md` for the product pitch,
-`docs/RELEASING.md` for release gates, and `archive/extraction/` only when
-historical extraction context is explicitly needed.
+submit is a validated `StructuredQuery` JSON AST (or a write AST) — there is no
+raw-SQL field or endpoint anywhere in the codebase. See `README.md` for the
+product pitch, `docs/RELEASING.md` for release gates, and `archive/extraction/`
+only when historical extraction context is explicitly needed.
 
-`docs/PRODUCT_GUIDE.md` is a plain-language, human-facing explainer of the
-product's architecture, terms, and technical decisions (also used to answer
-marketing/positioning questions). After finishing any non-trivial task,
-check whether it introduced or changed something worth recording there —
-new architecture, a deliberate tradeoff, a new term/tool, a customer-facing
-capability — and update the relevant section (and its Decision Log) if so.
-Skip this for pure bug fixes, refactors with no behavioral change, or
-test-only changes. See that file's own "Maintenance protocol" section for
-the exact rule.
+**Key docs and their authority:**
 
-`TODO.md` is the live worklist; `docs/TODO_ARCHIVE.md` holds the full
-write-ups of completed items. Keep them split to keep routine reads cheap
-(TODO.md is read constantly; the archive is loaded only when history is
-needed). The rules:
+- **`docs/PRODUCT_GUIDE.md`** — plain-language explainer of architecture, terms,
+  and decisions (also answers marketing/positioning questions). After any
+  non-trivial task, check whether it added/changed architecture, a deliberate
+  tradeoff, a new term/tool, or a customer-facing capability, and if so update
+  the right section and its Decision Log. Skip for pure bug fixes, no-behavior
+  refactors, and test-only changes. Its "Maintenance protocol" section has the
+  exact rule; the `product-guide-sync` skill runs it.
+- **`docs/business/NORTH_STAR.md`** — canonical definition of the product and how
+  it wins. Every strategy artifact reconciles to it. → [North Star](#north-star--the-product-definition-for-success-the-anchor)
+- **`TODO.md`** — the live worklist (authority for item *content* and `✅ DONE`
+  status). `docs/TODO_ARCHIVE.md` holds full write-ups of fully-shipped items.
+  Split to keep routine reads cheap.
+- **`ROADMAP.md`** — the **execution order** over `TODO.md` (authority for *order
+  only*; never restates a body). TODO.md leads, ROADMAP.md follows.
 
-`ROADMAP.md` is the **execution order** over `TODO.md`: it says which items to
-tackle in which order, and why that order maximizes product growth/ROI. TODO.md
-remains the authority for item *content and `✅ DONE` status*; ROADMAP.md is the
-authority for *order only* and never restates a body. When continuing
-development, prefer the `roadmap-next` skill (works items in ROADMAP.md order,
-deriving "where we left off" from TODO.md's `✅ DONE` markers so it can't drift)
-over ascending-number selection. Keep ROADMAP.md's checkboxes reconciled to
-TODO.md; TODO.md leads, ROADMAP.md follows. Re-sequencing ROADMAP.md is allowed
-but must be a deliberate, one-line-reasoned edit, not drift.
+**Item + worklist rules** (the `ship-item` and `roadmap-next`/`next-item` skills
+automate these):
 
-- **Item numbers are permanent and file-global.** Never renumber or reuse a
-  number — the repo has ~176 internal "item N" cross-refs plus references
-  from CLAUDE.md and tests that must keep resolving. A new item takes the
-  next unused number (currently start at 96).
-- **When an item ships fully** (its `###` heading ends in exactly
-  `✅ DONE`, no trailing qualifier), move its full body to
-  `docs/TODO_ARCHIVE.md` — insert it in numeric order under a `### N.`
-  heading — and leave a stub in `TODO.md`: the same heading, one line
-  summarizing what shipped, then
+- **Item numbers are permanent and file-global.** Never renumber or reuse one —
+  the repo has ~176 internal "item N" cross-refs plus CLAUDE.md and test
+  references that must keep resolving. A new item takes the next unused number
+  (check the highest `### N` heading in TODO.md; currently 98).
+- **When an item ships fully** (its `###` heading ends in exactly `✅ DONE`, no
+  trailing qualifier): move its full body to `docs/TODO_ARCHIVE.md` in numeric
+  order under a `### N.` heading, and leave a stub in `TODO.md` — same heading,
+  one line of what shipped, then
   `**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item N).`
 - **Partially-done items stay full inline in TODO.md.** Anything marked
-  `✅ DONE (phase 1)` / with "phase 2 not started" still carries open work,
-  so its body belongs in the live worklist, not the archive. Only stub it
-  once every phase is complete.
-- Update the Quick-scan summary table (it indexes items 1–66; extend it or
-  leave new items table-less as the current file does — the stub/heading is
-  the authoritative per-item anchor either way).
-- The archive is reference-only: never put an open action item there, and
-  don't add a second TODO file or a competing index.
+  `✅ DONE (phase 1)` still carries open work — stub it only once every phase is
+  complete.
+- Keep ROADMAP.md's checkboxes reconciled to TODO.md. Re-sequencing ROADMAP.md
+  is allowed but must be a deliberate, one-line-reasoned edit, not drift.
+- The archive is reference-only: never put an open action item there, and don't
+  add a second TODO file or a competing index.
+
+## Repo map
+
+Source is `src/querygate/`; tests are `tests/{unit,integration,security}/`.
+
+```
+src/querygate/
+  api/            REST transport (routes.py, app.py) — thin wrappers over the service
+  mcp/            MCP transport (tools/*.py) — thin wrappers over the service
+  execution/      service.py = the single pipeline entry; concurrency, quota,
+                  admission, cost_estimation, approval, write_execution/preview
+  validation/     policy_validation.py then schema_validation.py (run in that order)
+  compiler/       sqlalchemy_compiler.py + dialect_adapters.py (DialectAdapter per dialect)
+  query_ast/ write_ast/   the read AST and write/DML AST models
+  connections/    registry, engine, models.py (ConnectionProfile vs PublicConnectionInfo),
+                  dialects.py (SessionDialectAdapter per dialect)
+  policy/ catalog/ schema/   YAML-loaded policy, semantic catalog + governance, reflection
+  core/           auth.py (Authenticator boundary), shared primitives
+  audit/          logger.py + sinks.py (redaction-safe JSONL events)
+  secrets/        SecretResolver per backend
+  admin/ client/ health.py metrics.py   ops surface
+```
+
+Python **>=3.11,<4.0**, Poetry-managed. When a piece of behavior varies by
+backend/dialect/strategy, the pattern is always Protocol + one class per variant
++ registry (see the precedents in [Composable interfaces](#composable-single-purpose-interfaces)).
+
+## Which skill for which task
+
+Prefer these skills over improvising the workflow; they encode the repo's rules.
+
+| When you're… | Use skill |
+| --- | --- |
+| Continuing development in priority order | `roadmap-next` (or `next-item` for capacity-scoped selection) |
+| Marking a fully-shipped item done + archiving it | `ship-item` |
+| Touching the request pipeline, connections models, catalog governance, audit, or any REST/MCP surface | `security-invariant-check` (before commit) |
+| Adding/extending per-dialect SQL rendering | `dialect-primitive` |
+| About to commit a non-trivial change / prep a release | `release-gate` |
+| After a feature/design change touched docs-worthy surface | `product-guide-sync` |
+| Hardening the AST/policy boundary or "try to break it" | `adversarial-probe` |
+| Improving coverage / finding untested code | `test-gap` |
+| Checking that doc/marketing claims are backed by code+test | `claim-verify` |
+| Updating landing page / sales copy after a capability ships | `pitch-sync` |
+| Periodic market check / competitor comparison | `competitive-scan` |
+| Supply-chain / CVE / lockfile audit | `dep-audit` |
+| Whole-repo invariant-drift sweep | `repo-audit` |
+| Assembling a security-review evidence packet | `trust-evidence` |
+
+## Working agreement — definition of done + self-review
+
+A task isn't done when it "works." Before reporting completion on any non-trivial
+change (skip only trivial one-liners, pure formatting, or explicitly-throwaway
+work):
+
+**Definition of done:**
+- `poetry run black src/ tests/` clean, and the relevant test tier green
+  (`pytest -m unit` at minimum; add integration/security/real-db per the surface
+  you touched).
+- `docs/PRODUCT_GUIDE.md` checked (and updated if the change warrants it).
+- Any relevant gate run — use `release-gate` for the ordering and when a smoke
+  test is required.
+- One clean, focused commit (branch first if on `main`); commit/push only when
+  asked.
+
+**Self-review, then act on the gap:**
+1. **Re-read the actual diff** (not your memory of it) against the bar this repo
+   sets — the [Non-negotiables](#non-negotiables--read-first-never-violate-without-an-explicit-recorded-decision),
+   the primitives doctrine, the composable-interface rule, the testing gotchas.
+2. **Rate it honestly, 1–10**, and name the one or two things holding it back. A
+   passing suite is the floor, not a 10. Look specifically for: under-testing, a
+   leaked assumption, a missed edge case, dead/duplicated code, inconsistency
+   with an existing pattern, a doc that now drifts from behavior.
+3. **Close the gap, don't just narrate it.** If the fix is small and safe (a
+   rename, an added test, a tightened type, a doc reconciliation, deleting dead
+   code), **do it now** and re-check — don't ask permission to reach the bar you
+   should have hit. If it's large, risky, or a judgment call (a design change, a
+   new abstraction, anything touching a non-negotiable or a non-goal, or real
+   scope growth), **stop and surface it** with a concrete proposal and let the
+   user decide.
+
+**Be honest, always.** The review is worthless if the rating is inflated or the
+weaknesses are softened. State what you actually found — flaws you introduced,
+things you're unsure about, shortcuts you took, gates you did *not* run — even
+when it looks bad. Never round a 6 up to a 9, and never claim something was
+verified when it wasn't. An accurate low rating with a clear reason is a good
+outcome; a flattering false one is a failed task. If the work genuinely is a
+9–10, say so plainly and why — honesty runs both directions and doesn't mean
+manufacturing criticism.
 
 ## North Star — the product definition for success (the anchor)
 
@@ -150,6 +264,10 @@ in order, for `execute`/`explain`:
    be persisted as a versioned, redaction-safe JSONL event. Persisted events
    never include SQL, predicate values, rows, exceptions, or credentials.
 
+Writes/DML follow the same shape through the write AST (`write_ast/`) and
+`execution/write_execution.py`/`write_preview.py`, gated by approval
+(`execution/approval.py`) — still no raw-SQL string anywhere.
+
 ### Engine philosophy: expose primitives, don't spoon-feed the agent
 
 QueryGate's job is to expose querying that's as expressive and flexible as
@@ -206,53 +324,52 @@ silently kept or silently reverted.
 
 ### Connections and policy are file-configured, not code-configured
 
-`connections/registry.py`, `policy/loader.py`, and `catalog/loader.py` load YAML into process-wide
-stores and support an authorized, atomic hot reload. There is no app-owned
-configuration database yet. See `examples/connections.example.yaml` and
-`examples/policy.example.yaml` for the enforcement shape and
+`connections/registry.py`, `policy/loader.py`, and `catalog/loader.py` load YAML
+into process-wide stores and support an authorized, atomic hot reload. There is
+no app-owned configuration database yet. See `examples/connections.example.yaml`
+and `examples/policy.example.yaml` for the enforcement shape and
 `examples/catalog.example.yaml` for the optional versioned semantic overlay.
 
-Catalog version 2 extends item 27 in place with stable provenance,
-schema-only fingerprints/diffs, compact policy-first retrieval, quarantined
-manual draft proposals, and opt-in schema refresh. Catalog search must filter
-tables, columns, and both relationship endpoints before tokenization/ranking/
-counting. Draft proposals stay separate from published entries and must never
-be indexed or merged without going through the 32B-1 review gate
-(`catalog/governance.py`). Only `disabled` and offline `manual` provider
-modes exist; do not add network/provider execution to 32A. Refresh persists
-atomically and must stale only affected entries while remaining independent
-of query execution. The catalog is descriptive and must never become a
-query execution or row-value search path.
+#### Security invariant
 
-32B is fully shipped — governed review/edit/approve/reject/publish/rollback
-(32B-1) plus export/import (backup/restore) and retention/deletion (32B-2).
-See TODO.md item 32 for the exact scope and `catalog/governance.py`'s module
-docstring. All governance mutations go through the same
-`CatalogFileRepository` lock as refresh/generation; do not add a second
-catalog file, database, or mutation path (in particular, do not route
-catalog content through `admin/store.ConfigVersionStore` — that store
-snapshots its own copy of catalog.yaml in `var/config_versions/`, which
-would silently diverge from the live `CATALOG_FILE` refresh/generate-drafts
-already write to). `version_id` and `generation_id` are file-global, not
-per-connection — `import_connection` must keep remapping them against the
-target catalog's current content; do not "simplify" that away, it exists
-specifically to stop one connection's import from corrupting another
-connection's history. 32C (adaptive usage learning) has shipped
-(`catalog/usage.py`, `catalog/learning.py`,
-`catalog/adaptive_learning_benchmark.py`) — stay bounded by its explicit
-acceptance criteria in TODO.md item 32 (typed redaction-safe signals only,
-per-customer/connection partitioning, no feedback loops, learned content
-must go through the existing 32B review path and can never publish itself)
-when touching it. Do not add a live LLM call, embedding index, or autonomous
-policy edit as a side effect of future work here.
+`connections/models.py` splits `ConnectionProfile` (carries the real connection
+string, resolved from `${ENV_VAR}` in the YAML file) from `PublicConnectionInfo`
+(id/dialect/enabled/description only — no credential field exists on it at all).
+Only `PublicConnectionInfo` is ever returned from REST/MCP.
+`tests/unit/test_credential_redaction.py` asserts this against the live OpenAPI
+schema and MCP tool schemas, not just by convention — keep that test meaningful
+if you touch either model.
 
-**Security invariant**: `connections/models.py` splits `ConnectionProfile`
-(carries the real connection string, resolved from `${ENV_VAR}` in the YAML
-file) from `PublicConnectionInfo` (id/dialect/enabled/description only — no
-credential field exists on it at all). Only `PublicConnectionInfo` is ever
-returned from REST/MCP. `tests/unit/test_credential_redaction.py` asserts
-this against the live OpenAPI schema and MCP tool schemas, not just by
-convention — keep that test meaningful if you touch either model.
+### Catalog: descriptive overlay, single mutation path
+
+The catalog is a descriptive semantic overlay — it **must never** become a query
+execution or row-value search path. Full scope is TODO.md item 32 and
+`catalog/governance.py`'s module docstring; the rules that must hold:
+
+- **Single mutation path.** All catalog writes (refresh, generate, governance
+  edits) go through the same `CatalogFileRepository` lock. Do not add a second
+  catalog file, database, or mutation path. In particular, do **not** route
+  catalog content through `admin/store.ConfigVersionStore` — it snapshots its
+  own copy of catalog.yaml in `var/config_versions/`, which would silently
+  diverge from the live `CATALOG_FILE`.
+- **Drafts are quarantined.** Manual draft proposals stay separate from
+  published entries and must never be indexed or merged without the 32B-1
+  review gate. Search must filter tables, columns, and *both* relationship
+  endpoints before tokenization/ranking/counting.
+- **No network in 32A.** Only `disabled` and offline `manual` provider modes
+  exist. Do not add network/provider execution, a live LLM call, an embedding
+  index, or an autonomous policy edit.
+- **Refresh is atomic and independent** of query execution; it stales only
+  affected entries.
+- **`version_id`/`generation_id` are file-global, not per-connection.**
+  `import_connection` must keep remapping them against the target catalog's
+  current content — do not "simplify" that away; it exists specifically to stop
+  one connection's import from corrupting another's history.
+- **32C (adaptive usage learning) has shipped** (`catalog/usage.py`,
+  `catalog/learning.py`, `catalog/adaptive_learning_benchmark.py`). Stay inside
+  its acceptance criteria: typed redaction-safe signals only,
+  per-customer/connection partitioning, no feedback loops, and learned content
+  must go through the existing 32B review path — it can never publish itself.
 
 ### Auth
 

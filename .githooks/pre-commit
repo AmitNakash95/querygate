@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#
+# QueryGate pre-commit gate — the tool-independent, team-wide Definition-of-Done
+# floor. Runs for every contributor who has enabled it once with:
+#
+#     make install-hooks         # (or: git config core.hooksPath .githooks)
+#
+# Unlike the Claude Code PreToolUse hook in .claude/settings.json (which only
+# gates commits Claude makes), this runs on ANY `git commit` — terminal, IDE,
+# or agent. It enforces: formatting clean + unit tests green, before the commit
+# is created. Bypass a single commit with `git commit --no-verify` if you must.
+#
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+log="$(mktemp -t qg-precommit.XXXXXX)"
+trap 'rm -f "$log"' EXIT
+
+echo "[pre-commit] formatting check (black)…"
+if ! poetry run black --check src/ tests/ >"$log" 2>&1; then
+  echo "[pre-commit] BLOCKED — formatting. Run 'poetry run black src/ tests/' then re-commit." >&2
+  tail -20 "$log" >&2
+  exit 1
+fi
+
+echo "[pre-commit] unit tests (pytest -m unit)…"
+if ! poetry run pytest -m "unit and not real_db" -q -p no:cacheprovider >"$log" 2>&1; then
+  echo "[pre-commit] BLOCKED — unit tests failed. Fix them then re-commit (or --no-verify to bypass)." >&2
+  tail -40 "$log" >&2
+  exit 1
+fi
+
+echo "[pre-commit] OK — formatting clean, unit tests green."
