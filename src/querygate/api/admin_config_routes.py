@@ -23,6 +23,7 @@ from querygate.admin import templates as policy_templates
 from querygate.admin.models import (
     CandidatePolicySimulation,
     CandidatePolicySimulationRequest,
+    ConfigApprovalDecision,
     ConfigChangeSetBundle,
     ConfigChangeSetImportCheck,
     ConfigPreview,
@@ -38,8 +39,12 @@ from querygate.admin.models import (
 from querygate.config_reload import ReloadResult
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
-from querygate.core.exceptions import ConfigValidationError, NotFoundError
-from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE, ADMIN_CONFIG_WRITE_SCOPE
+from querygate.core.exceptions import ConfigValidationError, NotFoundError, PolicyViolationError
+from querygate.core.scopes import (
+    ADMIN_CONFIG_APPROVE_SCOPE,
+    ADMIN_CONFIG_READ_SCOPE,
+    ADMIN_CONFIG_WRITE_SCOPE,
+)
 
 
 class ConfigChangeRequest(pyd.BaseModel):
@@ -69,6 +74,15 @@ class ValidationResult(pyd.BaseModel):
 class ApplyResult(pyd.BaseModel):
     version: ConfigVersion
     reload: ReloadResult
+
+
+class ReviewRequest(pyd.BaseModel):
+    """Body for a four-eyes approve/reject (item 42). Only a bounded free-text
+    note — the decision itself is the endpoint."""
+
+    note: Optional[str] = pyd.Field(default=None, max_length=500)
+
+    model_config = pyd.ConfigDict(extra="forbid")
 
 
 def build_admin_config_router(
@@ -265,5 +279,44 @@ def build_admin_config_router(
         except ConfigValidationError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
         return ApplyResult(version=version, reload=reload_result)
+
+    @router.post("/versions/{version_id}/approve", response_model=ConfigVersion)
+    async def approve_endpoint(
+        version_id: str,
+        request: ReviewRequest = ReviewRequest(),
+        principal: Principal = Depends(get_principal),
+    ):
+        return await _review(version_id, ConfigApprovalDecision.APPROVE, request, principal)
+
+    @router.post("/versions/{version_id}/reject", response_model=ConfigVersion)
+    async def reject_endpoint(
+        version_id: str,
+        request: ReviewRequest = ReviewRequest(),
+        principal: Principal = Depends(get_principal),
+    ):
+        return await _review(version_id, ConfigApprovalDecision.REJECT, request, principal)
+
+    async def _review(
+        version_id: str,
+        decision: ConfigApprovalDecision,
+        request: ReviewRequest,
+        principal: Principal,
+    ) -> ConfigVersion:
+        require_scope(principal, ADMIN_CONFIG_APPROVE_SCOPE)
+        try:
+            return await run_in_threadpool(
+                governance.approve,
+                cfg,
+                principal,
+                version_id,
+                decision=decision,
+                note=request.note,
+            )
+        except NotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        except PolicyViolationError as exc:
+            # author==approver, or the version isn't staged — a state/authorization
+            # conflict, not a malformed request.
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
     return router

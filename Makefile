@@ -46,6 +46,10 @@ seed-large: ## Seed the larger real-world demo domain into the running Postgres 
 validate-config: ## Validate connections.yaml/policy.yaml (CONNECTIONS_FILE / POLICY_FILE env vars, or pass ARGS="--connections-file ... --policy-file ...")
 	poetry run querygate-validate-config $(ARGS)
 
+.PHONY: scope-catalog
+scope-catalog: ## Regenerate docs/SCOPE_CATALOG.md from core/scopes.py (drift-tested)
+	poetry run querygate-scope-catalog --output docs/SCOPE_CATALOG.md
+
 .PHONY: semantic-memory-evaluate
 semantic-memory-evaluate: ## Run the fixed offline semantic-memory 32A benchmark
 	poetry run python -m querygate.catalog_cli evaluate

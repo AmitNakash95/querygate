@@ -26,6 +26,14 @@ needs `helm upgrade` (which recreates pods with the new ConfigMap mounted)
 before this reload has anything new to pick up; a Compose `config/` file
 edit takes effect on the next reload immediately, no restart needed.
 
+**Multi-replica note:** under more than one replica, `POST /admin/reload-config`
+and the governance API (Path B below) reload only the **one** replica that
+receives the request — there is no cross-replica reload broadcast. The
+zero-downtime, all-replica path is the Helm `values` + `helm upgrade` above: the
+chart stamps a `checksum/config` annotation so a changed ConfigMap rolls every
+pod behind the readiness gate with `maxUnavailable: 0`. See `HA_DR.md` for the
+full shared-state matrix and the multi-replica config-reload contract.
+
 The reference Compose/Helm config mounts are read-only, so semantic-memory
 automatic refresh remains disabled there by default. To enable it, place
 `CATALOG_FILE` on a writable persistent mount (one shared file plus its

@@ -34,6 +34,8 @@ ConfigChangeAction = Literal[
     "blast_radius",
     "check_template_schema",
     "stage",
+    "approve",
+    "reject",
     "apply",
     "rollback",
     "export",

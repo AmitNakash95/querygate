@@ -12,41 +12,19 @@ from querygate.core.exceptions import PolicyViolationError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import CaseSelectItem, Predicate, StructuredQuery, WhereNode
 from querygate.validation.schema_validation import (
+    RefPosition,
     effective_name_map,
+    iter_column_refs,
     parse_column_ref,
-    predicate_column_refs,
-    select_item_column_refs,
     where_depth,
 )
 
 
-def _collect_referenced_tables(query: StructuredQuery) -> Set[str]:
-    """Every PHYSICAL table this query touches — column refs are qualified by
-    effective name (alias if given, else table name), so each one is mapped
-    back through `effective_name_map` before being added, ensuring table-
-    level policy is checked against the real table, never an alias.
-    """
-    name_to_physical = effective_name_map(query)
-    tables = {query.from_table, *(join.table for join in query.joins)}
-    for item in query.select:
-        for ref in select_item_column_refs(item):
-            t, _ = parse_column_ref(ref)
-            tables.add(name_to_physical.get(t.lower(), t))
-    return tables
-
-
-def _where_column_refs(node: WhereNode) -> Iterator[str]:
-    if isinstance(node, Predicate):
-        yield from predicate_column_refs(node)
-        return
-    if node.not_terms is not None:
-        yield from _where_column_refs(node.not_terms)
-        return
-    for child in node.and_terms or node.or_terms or []:
-        yield from _where_column_refs(child)
-
-
 def _iter_where_predicates(node: WhereNode) -> Iterator[Predicate]:
+    """Enumerate the Predicate leaves of a WHERE tree — a different axis from
+    the reference visitor (predicates, for count/in-list caps, not column
+    references), so it stays here rather than folding into `iter_column_refs`.
+    """
     if isinstance(node, Predicate):
         yield node
         return
@@ -57,85 +35,21 @@ def _iter_where_predicates(node: WhereNode) -> Iterator[Predicate]:
         yield from _iter_where_predicates(child)
 
 
-def _iter_column_refs(query: StructuredQuery) -> Iterator[str]:
-    """Every Table.Column reference anywhere in the query — select, join
-    keys, where, group_by, having, order_by, top_n — so column-level policy
-    can't be bypassed by filtering/sorting/grouping on a denied column
-    without ever selecting it.
-    """
-    for item in query.select:
-        yield from select_item_column_refs(item)
-    for join in query.joins:
-        yield from join.on
-        for pair in join.extra_on:
-            yield from pair
-    if query.where is not None:
-        yield from _where_column_refs(query.where)
-    for col_ref in query.group_by:
-        if "." in col_ref:
-            yield col_ref
-    for pred in query.having:
-        yield from predicate_column_refs(pred)
-    for order in query.order_by:
-        if "." in order.col:
-            yield order.col
-    if query.top_n is not None:
-        for ref in query.top_n.partition_by:
-            if "." in ref:
-                yield ref
-        for order in query.top_n.order_by:
-            if "." in order.col:
-                yield order.col
-
-
-def _non_projection_column_refs(query: StructuredQuery) -> Iterator[str]:
-    """Every Table.Column reference EXCEPT bare top-level select projection
-    items — the only position a masked column is allowed to appear (TODO.md
-    item 49). This is `_iter_column_refs` minus the bare-`str` select branch:
-    columns nested inside a scalar-fn/CASE/aggregate select item, plus every
-    join key, where, group_by, having, order_by, and top_n reference, all of
-    which would expose a masked column's raw value.
-    """
-    for item in query.select:
-        if isinstance(item, str):
-            continue
-        yield from select_item_column_refs(item)
-    for join in query.joins:
-        yield from join.on
-        for pair in join.extra_on:
-            yield from pair
-    if query.where is not None:
-        yield from _where_column_refs(query.where)
-    for col_ref in query.group_by:
-        if "." in col_ref:
-            yield col_ref
-    for pred in query.having:
-        yield from predicate_column_refs(pred)
-    for order in query.order_by:
-        if "." in order.col:
-            yield order.col
-    if query.top_n is not None:
-        for ref in query.top_n.partition_by:
-            if "." in ref:
-                yield ref
-        for order in query.top_n.order_by:
-            if "." in order.col:
-                yield order.col
-
-
 def referenced_tables(query: StructuredQuery) -> Set[str]:
-    """Return every PHYSICAL table touched by a query using the production
-    policy walk (see `_collect_referenced_tables` — every column ref's
-    effective/alias name is mapped back to its physical table).
+    """Return every PHYSICAL table touched by a query: the structural from/join
+    tables, plus the physical table behind every column reference the canonical
+    visitor (`iter_column_refs`) finds. Each ref's effective/alias name is
+    mapped back through `effective_name_map`, so table-level policy is checked
+    against the real table, never an alias.
 
     Candidate simulation uses this to scope mandatory-filter readiness to the
     same query graph that policy validation sees, without inspecting predicate
     values or compiling SQL.
     """
     name_to_physical = effective_name_map(query)
-    tables = _collect_referenced_tables(query)
-    for ref in _iter_column_refs(query):
-        table, _column = parse_column_ref(ref)
+    tables = {query.from_table, *(join.table for join in query.joins)}
+    for column_ref in iter_column_refs(query):
+        table, _column = parse_column_ref(column_ref.ref)
         tables.add(name_to_physical.get(table.lower(), table))
     return tables
 
@@ -193,7 +107,9 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
                 f"{policy.max_in_list_size} items"
             )
 
-    column_refs = list(_iter_column_refs(query))
+    # One walk of the canonical visitor feeds both the table/column allow-deny
+    # checks and the masked-column rule below — no second parallel enumeration.
+    all_refs = list(iter_column_refs(query))
     tables = referenced_tables(query)
     name_to_physical = effective_name_map(query)
 
@@ -201,25 +117,29 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
         if not policy.table_allowed(table):
             raise PolicyViolationError(f"Table {table!r} is not accessible under the active policy")
 
-    for ref in column_refs:
-        t, c = parse_column_ref(ref)
+    for column_ref in all_refs:
+        t, c = parse_column_ref(column_ref.ref)
         # t is the ref's effective name (an alias, or the table name itself)
         # — always resolve to the PHYSICAL table before checking column
         # policy, so an alias can never be used to dodge a denied column.
         physical_t = name_to_physical.get(t.lower(), t)
         if not policy.column_allowed(physical_t, c):
-            raise PolicyViolationError(f"Column {ref!r} is not accessible under the active policy")
+            raise PolicyViolationError(
+                f"Column {column_ref.ref!r} is not accessible under the active policy"
+            )
 
     # A masked column may only appear as a bare SELECT projection item —
     # anywhere else (filter/join/order/group, or nested in a function/CASE/
     # aggregate) an unmasked reference would leak the real value via inference,
     # so it's rejected rather than silently masked-in-place (TODO.md item 49).
-    for ref in _non_projection_column_refs(query):
-        t, c = parse_column_ref(ref)
+    for column_ref in all_refs:
+        if column_ref.position is RefPosition.SELECT_PROJECTION_BARE:
+            continue
+        t, c = parse_column_ref(column_ref.ref)
         physical_t = name_to_physical.get(t.lower(), t)
         if policy.column_mask(physical_t, c) is not None:
             raise PolicyViolationError(
-                f"Column {ref!r} is masked by policy and can only appear in the select "
+                f"Column {column_ref.ref!r} is masked by policy and can only appear in the select "
                 "projection, not in filters, joins, ordering, grouping, or nested in a function"
             )
 

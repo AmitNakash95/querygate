@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Callable, List, Optional
 
 import pydantic as pyd
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 
 from querygate.api._errors import admission_headers, mask_unexpected, require_scope
 from querygate.config_reload import ReloadResult, reload_config
@@ -17,9 +17,10 @@ from querygate.catalog.retrieval import CatalogSearchResponse
 from querygate.connections.models import PublicConnectionInfo
 from querygate.connections.visibility import list_visible_connections, resolve_visible_connection
 from querygate.core.auth import Principal
-from querygate.core.config import AppConfig
+from querygate.core.config import AppConfig, config as app_config
 from querygate.core.exceptions import NotFoundError
 from querygate.execution.admission import QueueMode
+from querygate.execution.approval import issue_approval_token, query_fingerprint
 from querygate.execution.service import (
     BatchQueryItemResult,
     ExplainResult,
@@ -29,7 +30,7 @@ from querygate.execution.service import (
 )
 from querygate.policy.loader import get_policy
 from querygate.query_ast.models import StructuredQuery
-from querygate.core.scopes import ADMIN_RELOAD_CONFIG_SCOPE
+from querygate.core.scopes import ADMIN_RELOAD_CONFIG_SCOPE, QUERY_APPROVE_SCOPE
 from querygate.secrets.resolvers import build_secret_resolver_registry
 from querygate.templates.binding import bind_template
 from querygate.templates.loader import get_template_store
@@ -45,6 +46,15 @@ class TablesListResult(pyd.BaseModel):
 
 class TemplateRunRequest(pyd.BaseModel):
     parameters: Dict[str, Any] = pyd.Field(default_factory=dict)
+
+
+class ApprovalGrant(pyd.BaseModel):
+    """A granted in-query approval (item 92): the fingerprint of the approved
+    query and the signed token to re-submit it with. No query values, no
+    secret — the token is an opaque HMAC over the fingerprint + expiry."""
+
+    fingerprint: str
+    approval_token: str
 
 
 def _visible_template(connection_id: str, principal: Principal) -> None:
@@ -168,11 +178,18 @@ def build_router(
         principal: Principal = Depends(get_principal),
         queue_mode: Optional[QueueMode] = _QUEUE_MODE_QUERY,
         wait_timeout_seconds: Optional[float] = _WAIT_TIMEOUT_QUERY,
+        approval_token: Optional[str] = Header(default=None, alias="X-QueryGate-Approval"),
     ):
         service = _service(connection, principal)
         with mask_unexpected():
+            # An ApprovalRequiredError propagates to the 428 handler in _errors.py
+            # carrying the fingerprint + reasons; the caller gets a token from
+            # /query/approve and re-submits with the X-QueryGate-Approval header.
             result = await service.execute(
-                query, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
+                query,
+                queue_mode=queue_mode,
+                wait_timeout_seconds=wait_timeout_seconds,
+                approval_token=approval_token,
             )
         response.headers.update(
             admission_headers(
@@ -182,6 +199,39 @@ def build_router(
             )
         )
         return result
+
+    @router.post("/{connection}/query/approve", response_model=ApprovalGrant)
+    async def approve_query(
+        connection: str,
+        query: StructuredQuery,
+        principal: Principal = Depends(get_principal),
+    ):
+        """Grant an approval token for a query that tripped the in-query
+        human-in-the-loop gate (TODO.md item 92). Requires the `query:approve`
+        scope — deliberately distinct from query execution, so an agent cannot
+        approve its own sensitive/expensive read. Returns a short-lived,
+        HMAC-signed token bound to this exact query's fingerprint; the requester
+        re-submits the identical query with it in the `X-QueryGate-Approval`
+        header. Stateless: no approval is stored server-side.
+        """
+        require_scope(principal, QUERY_APPROVE_SCOPE)
+        _require_connection(connection, principal)
+        # The approval HMAC key is a process-level secret (like the audit-ledger
+        # key): read from the shared config singleton, the same object the
+        # per-request service reads when it VERIFIES the token, so the issue and
+        # verify sides can never diverge on the key.
+        if not app_config.approval_token_hmac_key:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Approval grants are not configured (APPROVAL_TOKEN_HMAC_KEY is unset).",
+            )
+        fingerprint = query_fingerprint(query)
+        token = issue_approval_token(
+            fingerprint=fingerprint,
+            approver_subject=principal.subject,
+            key=app_config.approval_token_hmac_key,
+        )
+        return ApprovalGrant(fingerprint=fingerprint, approval_token=token)
 
     @router.get("/query-templates", response_model=List[PublicQueryTemplate])
     async def list_query_templates(principal: Principal = Depends(get_principal)):

@@ -24,8 +24,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-from querygate.admin.models import ConfigVersion, ConfigVersionStatus
-from querygate.core.exceptions import NotFoundError
+from querygate.admin.models import (
+    ConfigApprovalDecision,
+    ConfigApprovalRecord,
+    ConfigVersion,
+    ConfigVersionStatus,
+)
+from querygate.core.exceptions import NotFoundError, PolicyViolationError
 
 
 class ConfigVersionFilePaths(NamedTuple):
@@ -207,6 +212,48 @@ class ConfigVersionStore:
             )
             self._write_manifest(version)
             return version
+
+    def add_approval(
+        self,
+        version_id: str,
+        *,
+        approver: str,
+        decision: ConfigApprovalDecision,
+        content_fingerprint: str,
+        note: Optional[str] = None,
+    ) -> ConfigVersion:
+        """Record a four-eyes review decision (item 42) on a STAGED version.
+
+        Enforces the separation-of-duties invariants server-side: only a staged
+        version can be reviewed, the version's own author can never review it,
+        and a reviewer's decision replaces (never stacks with) their own prior
+        one — so N approvals always means N *distinct* approvers. Raises
+        `PolicyViolationError` on a violated invariant.
+        """
+        with self._lock:
+            version = self._read_manifest(version_id)  # raises NotFoundError
+            if version.status is not ConfigVersionStatus.STAGED:
+                raise PolicyViolationError(
+                    f"Only a staged version can be reviewed; version {version_id} is "
+                    f"{version.status.value}"
+                )
+            if approver == version.created_by:
+                raise PolicyViolationError(
+                    "A config version's author cannot approve or reject their own change "
+                    "(four-eyes separation of duties)"
+                )
+            record = ConfigApprovalRecord(
+                approver=approver,
+                decision=decision,
+                at=datetime.now(timezone.utc),
+                content_fingerprint=content_fingerprint,
+                note=note,
+            )
+            # A reviewer's latest decision supersedes their own earlier one.
+            others = [a for a in version.approvals if a.approver != approver]
+            updated = version.model_copy(update={"approvals": [*others, record]})
+            self._write_manifest(updated)
+            return updated
 
     def mark_active(self, version_id: str, *, actor: str) -> ConfigVersion:
         """Make `version_id` the active version — serves both "apply" (a

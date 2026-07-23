@@ -1,0 +1,78 @@
+# HA / multi-zone overlay for the QueryGate Helm chart.
+#
+# Layer this on top of values.yaml for a highly-available, zone-spread
+# deployment; supply your own connections/policy/secrets/redis separately.
+#
+#   helm upgrade --install querygate ./querygate \
+#     -f values.yaml -f values-ha.yaml \
+#     -f my-values.yaml            # your config/secrets/redis.url
+#
+# What this overlay changes relative to the defaults, and why (full rationale in
+# deploy/HA_DR.md):
+#   - autoscaling on with a floor of 3 replicas, so a single pod loss (or a
+#     zone drain) still leaves a quorum serving traffic.
+#   - a PodDisruptionBudget so voluntary disruptions (node drains, cluster
+#     upgrades) can never take the deployment below minAvailable.
+#   - zone-level topology spread so the scheduler places replicas across
+#     failure domains instead of stacking them on one node/zone.
+#   - Redis-backed concurrency stays on (the default) — mandatory once
+#     replicaCount > 1 so Policy.max_concurrency is a shared cap, not a
+#     per-replica one that silently multiplies. Point redis.url at a real,
+#     itself-HA Redis (managed, or a replicated Redis chart), NOT a single pod.
+#
+# NOTE ON QUOTAS: per-principal rate/byte quotas (item 50) are still enforced
+# per-replica (in-process); the Redis-backed shared-budget variant is item 50
+# phase 2 (not started). Under N replicas the effective quota is up to N times
+# the configured cap. Size Policy quotas with that in mind until phase 2 ships.
+# See deploy/HA_DR.md, "Shared-state correctness matrix".
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+# Zero-downtime rollouts (this is also the default in values.yaml; pinned here
+# so the overlay is self-describing).
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+# Soft zone spread: prefer one replica per zone, but still schedule if a zone is
+# full/unavailable rather than leaving pods Pending. Switch whenUnsatisfiable to
+# DoNotSchedule only if you would rather run degraded than co-locate replicas.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: querygate
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: querygate
+
+redis:
+  enabled: true
+  # Replace with your HA Redis endpoint. A single Redis pod is a single point of
+  # failure for the concurrency cap — use a managed/replicated Redis.
+  url: "redis://redis-master:6379/0"
+
+env:
+  ENVIRONMENT: production
+  LOG_LEVEL: INFO
+  MCP_ENABLED: "false"
+  AUDIT_SINK_BACKEND: jsonl_chained   # tamper-evident ledger (item 91)
+  AUDIT_JSONL_PATH: /app/var/audit/querygate-audit.jsonl
+  CONCURRENCY_BACKEND: redis
+  VAULT_ENABLED: "false"
+  VAULT_KV_MOUNT: secret
