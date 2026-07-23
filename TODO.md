@@ -1339,7 +1339,24 @@ governance, ecosystem reach, and external trust signals. Triage into P2/P3
 
 a `column_mask` policy primitive (`policy/models.py`: `ColumnMask`/`ColumnMaskKind`, field `Policy.column_masks` keyed by table with `"*"` wildcard, resolver… **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 49).
 
-### 50. Per-principal rate limits / query quotas over time ✅ DONE (phase 1)
+### 50. Per-principal rate limits / query quotas over time ✅ DONE
+
+**Phase 2 shipped (Redis cross-replica quota):** `execution/redis_quota.py`'s
+`RedisQuotaLimiter` makes a principal's request/byte rolling-window budget a
+single **shared** budget across replicas, closing the per-replica-multiplication
+gap phase 1 flagged (and that `deploy/HA_DR.md`'s shared-state matrix called
+out). Mirrors `redis_concurrency.py`: a per-(connection, principal) sorted set
+scored by wall-clock time + a parallel bytes hash, one atomic Lua script that
+prunes aged entries, checks the request-count and byte-total caps against the
+true cross-replica window, and records the attempt; `record_bytes` fills in the
+response size afterward (guarded so a late write can't resurrect a pruned entry);
+both keys carry a window-length TTL. The `QuotaLimiter` protocol (and
+`enforce_query_quota`/`record_query_quota_bytes`) went **async** so the Redis
+backend can await its client; the in-process limiter is the unchanged default.
+`create_app` installs it when `concurrency_backend=redis` (same client as the
+concurrency limiter). Tested with fakeredis (`tests/unit/test_redis_quota.py`:
+caps, rolling expiry, per-key isolation, record_bytes, and — standing in for
+cross-replica — two limiter instances sharing one Redis enforcing one budget).
 
 **Shipped (phase 1 — in-process rolling-window quota):** three `Policy`
 fields (`max_requests_per_window`, `max_response_bytes_per_window`,

@@ -50,18 +50,29 @@ QuotaKey = Tuple[str, str]
 
 
 class QuotaReservation:
-    """Opaque token returned by `QuotaLimiter.reserve()` on admission.
+    """Opaque token returned by `QuotaLimiter.reserve()` on admission, passed
+    back to the same limiter's `record_bytes()`.
 
-    Holds a direct reference to the in-window entry so `record_bytes()` can fill
-    in the response size after execution without re-scanning the window. If the
-    entry has already aged out of the window by the time bytes are recorded,
-    updating it is a harmless no-op (it no longer counts toward any total).
+    Carries whichever backend's handle the reserving limiter needs to attribute
+    the response size later: the in-process limiter stores the in-window `_entry`
+    object; the Redis limiter stores the `(key, member)` of the sorted-set entry
+    it added. If the entry has already aged out of the window by the time bytes
+    are recorded, updating it is a harmless no-op (it no longer counts toward any
+    total).
     """
 
-    __slots__ = ("_entry",)
+    __slots__ = ("_entry", "_redis_key", "_redis_member")
 
-    def __init__(self, entry: "_WindowEntry") -> None:
+    def __init__(
+        self,
+        entry: "Optional[_WindowEntry]" = None,
+        *,
+        redis_key: Optional[str] = None,
+        redis_member: Optional[str] = None,
+    ) -> None:
         self._entry = entry
+        self._redis_key = redis_key
+        self._redis_member = redis_member
 
 
 class _WindowEntry:
@@ -73,12 +84,15 @@ class _WindowEntry:
 
 
 class QuotaLimiter(Protocol):
-    """One reserve/record pair per operation `enforce_query_quota` needs —
-    implemented by `InProcessQuotaLimiter` (below); a Redis-backed variant
-    (item 50 phase 2) will satisfy the same shape.
+    """One reserve/record pair per operation `enforce_query_quota` needs.
+    Implemented by `InProcessQuotaLimiter` (single-process) and
+    `RedisQuotaLimiter` (`execution/redis_quota.py`, cross-replica — item 50
+    phase 2), dispatched behind this one interface exactly like the concurrency
+    limiter. Both methods are async so the Redis backend can await its client;
+    the in-process backend just doesn't await anything.
     """
 
-    def reserve(
+    async def reserve(
         self,
         key: QuotaKey,
         *,
@@ -93,7 +107,7 @@ class QuotaLimiter(Protocol):
         """
         ...
 
-    def record_bytes(self, reservation: QuotaReservation, response_bytes: int) -> None:
+    async def record_bytes(self, reservation: QuotaReservation, response_bytes: int) -> None:
         """Attribute a completed response's byte size to its reservation."""
         ...
 
@@ -125,7 +139,7 @@ class InProcessQuotaLimiter:
             self._windows.pop(key, None)
         return entries
 
-    def reserve(
+    async def reserve(
         self,
         key: QuotaKey,
         *,
@@ -165,8 +179,9 @@ class InProcessQuotaLimiter:
         self._windows.setdefault(key, []).append(entry)
         return QuotaReservation(entry)
 
-    def record_bytes(self, reservation: QuotaReservation, response_bytes: int) -> None:
-        reservation._entry.response_bytes = max(0, response_bytes)
+    async def record_bytes(self, reservation: QuotaReservation, response_bytes: int) -> None:
+        if reservation._entry is not None:
+            reservation._entry.response_bytes = max(0, response_bytes)
 
 
 _in_process_limiter = InProcessQuotaLimiter()
@@ -179,6 +194,20 @@ def in_process_quota_limiter() -> InProcessQuotaLimiter:
     which backend is active (mirrors `concurrency.in_process_limiter()`).
     """
     return _in_process_limiter
+
+
+def init_redis_quota_limiter(limiter: QuotaLimiter) -> None:
+    """Install the Redis-backed cross-replica quota limiter as active (item 50
+    phase 2). Called from `create_app` when the Redis backend is selected,
+    mirroring `concurrency.init_redis_limiter`."""
+    global _active_limiter
+    _active_limiter = limiter
+
+
+def clear_redis_quota_limiter() -> None:
+    """Revert to the in-process quota limiter (test teardown / shutdown)."""
+    global _active_limiter
+    _active_limiter = _in_process_limiter
 
 
 def resolve_query_quota(policy: Policy) -> Optional[Tuple[Optional[int], Optional[int], int]]:
@@ -194,7 +223,7 @@ def resolve_query_quota(policy: Policy) -> Optional[Tuple[Optional[int], Optiona
     )
 
 
-def enforce_query_quota(
+async def enforce_query_quota(
     policy: Policy,
     *,
     connection_id: str,
@@ -211,7 +240,7 @@ def enforce_query_quota(
     if quota is None or principal_subject is None:
         return None
     max_requests, max_response_bytes, window_seconds = quota
-    return _active_limiter.reserve(
+    return await _active_limiter.reserve(
         (connection_id, principal_subject),
         max_requests=max_requests,
         max_response_bytes=max_response_bytes,
@@ -219,8 +248,10 @@ def enforce_query_quota(
     )
 
 
-def record_query_quota_bytes(reservation: Optional[QuotaReservation], response_bytes: int) -> None:
+async def record_query_quota_bytes(
+    reservation: Optional[QuotaReservation], response_bytes: int
+) -> None:
     """Attribute a completed response's byte size to its reservation; a no-op
     when the quota was disabled (`reservation is None`)."""
     if reservation is not None:
-        _active_limiter.record_bytes(reservation, response_bytes)
+        await _active_limiter.record_bytes(reservation, response_bytes)

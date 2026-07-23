@@ -509,7 +509,7 @@ class StructuredQueryService:
             # queuing or touching the database, so a rate-limited caller doesn't
             # even consume a concurrency slot. Raises QuotaExceededError (a
             # PolicyViolationError), handled by the outer `except` below.
-            quota_reservation = enforce_query_quota(
+            quota_reservation = await enforce_query_quota(
                 policy,
                 connection_id=self._connection_id,
                 principal_subject=self._principal_subject,
@@ -563,7 +563,7 @@ class StructuredQueryService:
                     response_bytes = len(json.dumps(rows, default=str).encode("utf-8"))
                     # Attribute this response's size to the quota window (item
                     # 50); a no-op when the quota is disabled for this policy.
-                    record_query_quota_bytes(quota_reservation, response_bytes)
+                    await record_query_quota_bytes(quota_reservation, response_bytes)
                     elapsed_seconds = time.monotonic() - start
                     QUEUE_WAIT_SECONDS.labels(
                         connection=self._connection_id, outcome="completed"
