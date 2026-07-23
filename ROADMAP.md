@@ -220,6 +220,40 @@ human/vendor to complete.
 
 ---
 
+## Frontier status (2026-07-23) — why each remaining item needs a decision, infra, or its own PR
+
+After the 2026-07-23 batch (56, 96, 95, 54, 60 done; 92 ph1+ph2 triggers; 42
+ph1; 39 reconciled), the roadmap-next automation has reached a frontier: **no
+remaining item is a clean, single-pass, unilaterally-buildable, locally-
+validatable slice.** Each was examined and is blocked as follows — a maintainer
+should pick from these deliberately rather than the automation forcing one:
+
+- **40 ph2** (per-principal semantic diff) — *scope decision needed*: overlaps
+  the shipped **41 ph1** (blast-radius already resolves/ranks per-principal).
+  Decide how a per-principal `/diff` differs from `/blast-radius` before building.
+- **41 ph2** — *async scale infra*: background-job/pagination for >100 configured
+  principals; substantial, low-ROI until a deployment hits that scale.
+- **35 ph2** — *async infra*: `queued`/`running`/`cancelled` states + mid-flight
+  cancellation (a background-execution contract), not a clean slice.
+- **57** — *conflicts with a deliberate CLAUDE.md decision* (`connections/dialects.py`
+  inline branching is an intentional exception) **and** needs MSSQL cost
+  estimation (26 ph2). Needs a maintainer decision before refactoring.
+- **26 ph2 / 36 ph2b / 58 ph2 / 30·89 ph2 / 53** — *infra/vendor/maintainer-gated*
+  (live MSSQL, dual-DB CI, external LLM/Toolbox, deliberate signed-release tag
+  push, external auditor).
+- **18 / 51 / 19 / 37** — *large multi-session features* (stored-proc subsystem +
+  security review; Python+TS SDK; new dialects, needs 57; adaptive-learning e2e
+  proof). Each warrants its own focused PR.
+- **38·44·45·47·50 ph2** — *UI / durable-cross-replica infra phase-2s* (Phase 5,
+  lowest marginal ROI).
+- **93 / F4 / P2 / 97** — *decision-gated*; must not be auto-started (see below).
+
+The `roadmap-next` automation should surface this list and stop, rather than
+force an entangled or ambiguously-scoped change. Delete/trim this note once the
+maintainer re-prioritizes and the frontier moves.
+
+---
+
 ## How to pick the next item (the algorithm the `roadmap-next` skill follows)
 
 1. Read this file and `TODO.md`. Confirm the git worktree is clean.
