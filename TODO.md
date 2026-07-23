@@ -1009,7 +1009,18 @@ catalog access.
 
 `POST /api/v1/admin/config/simulate` evaluates an uncommitted candidate (draft connections/policy/catalog + a target principal) in an isolated, non-persisting registry/policy/catalog context using the real production loaders and visibility/policy code, returning a redaction-safe typed allow/deny + guardrails + mandatory-filter readiness. Gated on both config scopes; threat-model QG-19. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 39).
 
-### 40. Semantic access diff for config changes
+### 40. Semantic access diff for config changes ✅ DONE
+
+Phase 1 (connection-baseline semantic diff, `POST /admin/config/diff`) shipped.
+**Phase 2 (per-principal resolution) is COVERED by item 41 ph1 (blast-radius)**,
+which reuses the exact same `compute_access_diff(principal=...)` engine and
+returns each configured principal's full itemized change list in
+`principal_impacts[].changes` — the "reporting-agent gains X" statements phase 2
+described — plus ranking. A distinct per-principal `/diff` would only duplicate
+that. Maintainer decision (2026-07-23): mark phase 2 covered, no new code. See
+item 41.
+
+<details><summary>Original phase-1 write-up</summary>
 
 **Phase 1 shipped (connection-baseline layer); phase 2 (per-principal
 resolution) not started.**
@@ -1090,6 +1101,8 @@ groups, and every guardrail; classify each as tightening, loosening, or neutral.
 Keep raw values out of filter diffs, distinguish explicit rules from inherited
 effects, cap result size, and provide stable machine-readable output for both
 the UI and CI/CD review tooling.
+
+</details>
 
 ### 41. Policy-change blast-radius analysis
 
@@ -1696,26 +1709,13 @@ live multi-region failover *drill* is the operator's step (checklist in HA_DR).
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 56).
 
-### 57. Pluggable dialect-adapter architecture
+### 57. Pluggable dialect-adapter architecture ✅ DONE
 
-**Effort: L (interface design); each subsequent dialect then becomes
-independent M-effort work rather than a bespoke project.**
-
-**Why it matters:** Item 19 treats every new dialect as M–XL bespoke work
-gated on core-team bandwidth — the actual long-term bottleneck behind
-QueryGate's biggest competitive gap (database breadth against Google's
-Toolbox and Hasura). `connections/dialects.py` and the compiler's dialect
-dispatch (the 3-way branch in `_date_bucket_expr`) already isolate
-dialect-specific behavior; formalizing that isolation into a stable adapter
-interface is what would let dialect support scale without linearly scaling
-core-team effort.
-
-**What to do:** Extract a formal `DialectAdapter` interface (session
-guardrails, date-bucketing, cost-estimation hook from item 26) from the
-existing 2-dialect implementation, verify it holds by porting Postgres and
-MSSQL onto it with no behavior change, and only then treat additional
-dialects (item 19) as adapter implementations rather than core-pipeline
-changes.
+Dialect-specific behavior is behind two registry-dispatched abstract bases: the
+sync compiler `DialectAdapter` (item 73) and a new async `SessionDialectAdapter`
+(`connections/dialects.py` — engine-URL/connect-args/timeout/guardrails, one
+class per dialect), reversing the prior inline-branching exception. Adding a
+dialect (item 19) = implement both + register. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 57).
 
 ### 58. Published adversarial benchmark vs. raw-SQL agent and Google Toolbox ✅ DONE (phase 1)
 
