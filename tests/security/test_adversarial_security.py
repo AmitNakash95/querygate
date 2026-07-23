@@ -1803,7 +1803,7 @@ async def test_per_principal_quota_refuses_execution_before_touching_the_databas
     # Simulate this principal already having spent its window (two prior
     # queries on this connection) without needing a live DB round-trip.
     for _ in range(2):
-        limiter.reserve(
+        await limiter.reserve(
             ("demo", "noisy-agent"),
             max_requests=2,
             max_response_bytes=None,

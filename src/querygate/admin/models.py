@@ -376,6 +376,10 @@ class ConfigSemanticDiffRequest(pyd.BaseModel):
     connections_yaml: Optional[str] = None
     policy_yaml: Optional[str] = None
     catalog_yaml: Optional[str] = None
+    # Blast-radius pagination cursor (TODO item 41 phase 2); ignored by /diff.
+    # Page through configured principals when there are more than one page's
+    # worth — use the response's `next_principal_offset` for the next request.
+    principal_offset: int = pyd.Field(default=0, ge=0)
 
     model_config = pyd.ConfigDict(extra="forbid")
 
@@ -519,6 +523,12 @@ class PolicyBlastRadiusReport(pyd.BaseModel):
     highest_risk: list[RankedBlastRadiusChange] = pyd.Field(default_factory=list)
     analysis_incomplete: bool = False
     incomplete_reasons: list[str] = pyd.Field(default_factory=list)
+    # Pagination cursor (TODO item 41 phase 2): the offset this page started at,
+    # and the offset to request for the next page (None when the last page of
+    # configured principals has been returned). `principals_evaluated` is this
+    # page's size; `principals_configured` is the total across all pages.
+    principal_offset: int = 0
+    next_principal_offset: Optional[int] = None
     evaluation_scope: Literal["connection_baseline_plus_configured_principals"] = (
         "connection_baseline_plus_configured_principals"
     )

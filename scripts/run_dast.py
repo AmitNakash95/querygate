@@ -144,21 +144,24 @@ def main() -> int:
             container_base,
             # FastAPI emits OpenAPI 3.1; Schemathesis 3.x needs this opt-in.
             "--experimental=openapi-3.1",
-            # Every endpoint that accepts the *recursive* StructuredQuery AST
-            # (joins/subqueries nest) — query/explain/batch/approve, template-run,
-            # and the admin query-simulate — is excluded here because Schemathesis
-            # cannot auto-generate data for recursive references
-            # (schemathesis/schemathesis#947). That is not a coverage gap: those
-            # exact operations get deeper, purpose-built fuzzing in
-            # tests/security/test_malformed_input_fuzzing.py (item 36 phase 2a),
-            # which sweeps the recursive surface for REST *and* MCP and asserts
-            # no 5xx, no internal leak, and that malformed input never reaches
-            # execution. Schemathesis owns the other ~60 documented operations
-            # (admin config/catalog, help, templates, connections). NOTE: only a
-            # single --exclude-path-regex takes effect, so all patterns are ORed
-            # into one alternation here.
+            # Every endpoint that accepts a *recursive* AST is excluded here
+            # because Schemathesis cannot auto-generate data for recursive
+            # references (schemathesis/schemathesis#947):
+            #   * the read StructuredQuery AST (joins/subqueries nest) —
+            #     query/explain/batch/approve, template-run, admin query-simulate;
+            #   * the write AST (nested WhereGroup predicates, subqueries) —
+            #     write/preview, write/execute, write/approve.
+            # That is not a coverage gap: those exact operations get deeper,
+            # purpose-built adversarial coverage in tests/security/ — the read
+            # surface in test_malformed_input_fuzzing.py (item 36 phase 2a, REST
+            # *and* MCP) and the write surface in test_write_boundary.py (item 93)
+            # — which assert no 5xx, no internal leak, and that malformed input
+            # never reaches compilation/execution. Schemathesis owns the other
+            # ~60 documented operations (admin config/catalog, help, templates,
+            # connections). NOTE: only a single --exclude-path-regex takes effect,
+            # so all patterns are ORed into one alternation here.
             "--exclude-path-regex",
-            r"(/query(/explain|/batch|/approve)?|/query-templates/[^/]+/run|/admin/config/simulate)$",
+            r"(/query(/explain|/batch|/approve)?|/write/(preview|execute|approve)|/query-templates/[^/]+/run|/admin/config/simulate)$",
             "--checks",
             "not_a_server_error",
             "--checks",

@@ -370,6 +370,19 @@ class Predicate(pyd.BaseModel):
             "Mutually exclusive with value."
         ),
     )
+    value_subquery: Optional["StructuredQuery"] = pyd.Field(
+        default=None,
+        description=(
+            "For in/not_in only: compare col against the value set produced by a "
+            "nested StructuredQuery (an uncorrelated `IN (subquery)`, TODO.md item 97) "
+            "instead of a literal list. The subquery is itself a fully validated AST — "
+            "never raw SQL — must select exactly one column, must resolve entirely "
+            "against its own from/join tables (uncorrelated), and must stay on the same "
+            "connection. Mutually exclusive with value/value_col. All policy caps apply "
+            "summed across the whole query tree; nesting is bounded by "
+            "Policy.max_subquery_depth."
+        ),
+    )
 
     model_config = pyd.ConfigDict(extra="forbid")
 
@@ -382,13 +395,34 @@ class Predicate(pyd.BaseModel):
     @pyd.model_validator(mode="after")
     def _validate_value_shape(self) -> "Predicate":
         if self.op in ("is_null", "is_not_null"):
-            if self.value is not None or self.value_col is not None:
+            if (
+                self.value is not None
+                or self.value_col is not None
+                or self.value_subquery is not None
+            ):
                 raise ValueError(f"Operator {self.op!r} must not include a value or value_col")
             return self
-        if self.value is not None and self.value_col is not None:
-            raise ValueError("Predicate must not set both 'value' and 'value_col'")
-        if self.value is None and self.value_col is None:
-            raise ValueError(f"Operator {self.op!r} requires a value or value_col")
+        # value_subquery is a third, mutually-exclusive value source, valid only
+        # for in/not_in (a set-membership test).
+        sources = [
+            self.value is not None,
+            self.value_col is not None,
+            self.value_subquery is not None,
+        ]
+        if sum(sources) > 1:
+            raise ValueError(
+                "Predicate must set at most one of 'value', 'value_col', or 'value_subquery'"
+            )
+        if not any(sources):
+            raise ValueError(f"Operator {self.op!r} requires a value, value_col, or value_subquery")
+        if self.value_subquery is not None:
+            if self.op not in ("in", "not_in"):
+                raise ValueError(
+                    f"value_subquery (IN (subquery)) is only valid with in/not_in, not {self.op!r}"
+                )
+            if len(self.value_subquery.select) != 1:
+                raise ValueError("An IN (subquery) must select exactly one column (the value set)")
+            return self
         if self.value_col is not None and self.op not in ("eq", "neq", "lt", "lte", "gt", "gte"):
             raise ValueError(f"value_col is not valid with operator {self.op!r}")
         if self.op == "between":
@@ -434,7 +468,11 @@ class WhereGroup(pyd.BaseModel):
 
 
 WhereNode = Union[Predicate, WhereGroup]
-WhereGroup.model_rebuild()
+# NOTE: model_rebuild for WhereGroup/Predicate/StructuredQuery is deferred to the
+# end of the module — Predicate now references StructuredQuery (value_subquery,
+# item 97), which isn't defined until below, so the whole recursive cycle
+# (StructuredQuery → WhereNode → Predicate → StructuredQuery) can only be resolved
+# once every model in it exists.
 
 
 class OrderBySpec(pyd.BaseModel):
@@ -585,3 +623,12 @@ class StructuredQuery(pyd.BaseModel):
                     "including this one"
                 )
         return self
+
+
+# StructuredQuery references Predicate (via WhereNode) and Predicate now references
+# StructuredQuery (value_subquery) — a recursive cycle (TODO.md item 97). Rebuild
+# all three now that every model in the cycle is defined so the forward refs
+# resolve. Order matters least once all names exist, but do the leaf types first.
+Predicate.model_rebuild()
+WhereGroup.model_rebuild()
+StructuredQuery.model_rebuild()

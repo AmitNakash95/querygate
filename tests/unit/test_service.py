@@ -9,7 +9,7 @@ import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 import sqlalchemy as sa
@@ -145,7 +145,11 @@ async def test_validate_schema_receives_principal_context():
         service = StructuredQueryService(connection_id="demo", principal=principal)
         await service.explain(query)
 
-    validate_schema.assert_awaited_once_with(query, connection_id="demo", principal=principal)
+    # scope_tables (item 97) is a fresh per-call dict threaded to the compiler for
+    # IN (subquery) rendering; the principal context still flows through unchanged.
+    validate_schema.assert_awaited_once_with(
+        query, connection_id="demo", principal=principal, scope_tables=ANY
+    )
 
 
 @pytest.mark.asyncio

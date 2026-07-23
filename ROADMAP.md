@@ -97,9 +97,12 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   rolling config reload, `values-ha.yaml` multi-zone overlay, `deploy/HA_DR.md`
   shared-state matrix + DR runbook, chart HA invariants CI-asserted; live
   failover drill is the operator's step).
-- [ ] **36** — Production-grade QA / edge-case test suite. *Hardening before a
+- [x] **36** — Production-grade QA / edge-case test suite. *Hardening before a
   real customer's data and adversaries touch it; raises confidence for the
-  pilot without new surface.*
+  pilot without new surface.* ✅ **Shipped** (phase 1 policy-cap boundary +
+  compiler fuzzing, phase 2a malformed-input fuzzing, phase 2b cross-dialect
+  differential *execution* — same AST run against live Postgres + MSSQL, rows
+  asserted equal).
 - [x] **96** — Unify the AST reference-walk into a single canonical visitor.
   *Pure refactor, no behavior change: collapses the four hand-maintained
   reference walks into one authority so a policy/schema hole can't open in a
@@ -132,15 +135,17 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 
 ### Phase 3 — Governance & safety depth (deepen the moat)
 
-- [ ] **26** — Query-cost estimation before execution (complete phase 2 / MSSQL;
-  Postgres exists). *Underpins 92's cost-gating and dollar budgets; broadens
-  an existing guardrail.*
-- [ ] **92** — In-query human-in-the-loop approval for sensitive/expensive reads
+- [x] **26** — Query-cost estimation before execution. *Underpins 92's
+  cost-gating and dollar budgets; broadens an existing guardrail.* ✅ **Shipped**
+  (phase 1 Postgres `EXPLAIN`; phase 2 MSSQL `SET SHOWPLAN_XML ON` on a dedicated
+  connection — the cost gate now enforces on both dialects, proven on live MSSQL).
+- [x] **92** — In-query human-in-the-loop approval for sensitive/expensive reads
   (F3). *Gates the exfiltration leg of the lethal trifecta on what a read would
-  actually touch — nobody else can, because none knows before running it.*
-  **Shipped: both triggers** (cost/row-estimate + catalog sensitivity-label) +
-  stateless HMAC approval-token grant + `query:approve` scope + REST 428/approve
-  flow, opt-in; box stays `[ ]` until the MCP-elicitation approval channel + batch.
+  actually touch — nobody else can, because none knows before running it.* ✅
+  **Shipped fully:** both triggers (cost/row-estimate + catalog sensitivity-label)
+  + stateless HMAC approval-token grant + `query:approve` scope + REST 428/approve
+  flow + per-query batch tokens + the opt-in MCP `Context.elicit` in-session
+  approval channel. Opt-in and off by default throughout.
 - [x] **42** — Four-eyes config approval and separation of duties. *Governance
   maturity for the config plane.* ✅ **Shipped** (server-side enforcement +
   `admin:config:approve` scope + REST approve/reject + `querygate-config` CLI +
@@ -149,37 +154,90 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   changes; reduces misconfiguration risk in a security product.* ✅ **Shipped**
   (`/admin/config/simulate` — isolated, non-persisting candidate evaluation;
   reconciled from a shipped-but-unmarked state).
-- [ ] **40** — Semantic access diff for config changes. *Makes a policy change's
-  effect legible before it ships.*
-- [ ] **41** — Policy-change blast-radius analysis. *Completes the config-change
-  safety trio (39/40/41).*
+- [x] **40** — Semantic access diff for config changes. *Makes a policy change's
+  effect legible before it ships.* ✅ **Shipped** (ph1 connection-baseline diff;
+  ph2 per-principal is covered by item 41's blast-radius — maintainer decision
+  2026-07-23, no new code).
+- [x] **41** — Policy-change blast-radius analysis. *Completes the config-change
+  safety trio (39/40/41).* ✅ **Shipped** (ph1 ranked aggregation + ph2 paginated
+  per-principal evaluation via a `principal_offset`/`next_principal_offset` cursor).
 
 ### Phase 4 — Adoption & breadth (grow once PMF is proven)
 
 - [ ] **51** — Typed client-side query-builder SDK (Python + TypeScript).
   *Lowers integration friction for the next wave of adopters.*
 - [ ] **35** — Agent-visible capacity waiting, progress, and cancellation.
-  *Developer-experience polish for real agent workloads.*
+  *Developer-experience polish for real agent workloads.* **Phase 1 + Phase 2
+  shipped** (admission info + queue modes; Redis cross-replica admission state +
+  queue-depth caps). Box stays `[ ]` for **Phase 3, which is design-gated** by
+  the item's own text — MCP progress-notification wire format, a REST async
+  lifecycle (`202` + status/cancel), cancellation semantics (queue-only vs.
+  dialect DB-cancel), and a `429`/`Retry-After` breaking-change evaluation each
+  need a protocol/product decision before build.
 - [ ] **18** — Stored-procedure catalog. *Extends read coverage where customers
   already encapsulate logic in procs.*
-- [ ] **57** — Pluggable dialect-adapter architecture. *The enabler that turns
-  each new store into an adapter (not a project) — do before 19.*
+- [x] **57** — Pluggable dialect-adapter architecture. *The enabler that turns
+  each new store into an adapter (not a project) — do before 19.* ✅ **Shipped**
+  (sync compiler `DialectAdapter` [item 73] + new async `SessionDialectAdapter`;
+  reverses the prior inline-branching exception. Adding a dialect = implement
+  both + register).
 - [ ] **97** — Bounded nested subqueries (uncorrelated, single-connection,
   depth-capped). *AST expressiveness: serves the "scope a set then filter from
   it" shape as a validated node, not a raw-SQL string. Minimal-safe subset only
   (reject correlated / cross-connection / over-depth); caps summed tree-wide.
   **Depends on 96; requires a PRODUCT_GUIDE Decision Log entry before build.***
+  **Phase 1 shipped** (`IN (subquery)`/`NOT IN`, tree-wide caps, full adversarial
+  + e2e coverage, Decision Log recorded); box stays `[ ]` until phase 2
+  (`FROM (subquery)` derived table).
+
+#### ★ Flagship pillar — Expressive Query Engine (items 99–106)
+
+*One coordinated initiative deepening the **Structural** pillar: take the READ
+query engine to 10/10 expressiveness for a fluent SQL author with no safety
+regression (the "no raw SQL, ever" bet only wins if the AST rarely walls off a
+real SQL author). **Deep spec + tests + acceptance:
+[docs/ENGINE_EXPRESSIVENESS_PLAN.md](docs/ENGINE_EXPRESSIVENESS_PLAN.md).** Build
+in the listed order; each item's Definition of Done and the canonical regression
+bar are in the plan (§3, §5). Cross-cutting rule: every new node is visited by the
+item-96 canonical walker and capped summed tree-wide (item 97), or it is not done.*
+
+- [ ] **99** — `HAVING` as `WhereNode` + searched `CASE` condition. *Cheap,
+  low-risk warm-up that proves the visitor/cap-expansion pattern. Depends on 96.*
+- [ ] **100** — ★ Bounded scalar `Expression` substrate (arithmetic, conditional
+  aggregation, nested fns, expression-CASE). *The centerpiece — one closed,
+  depth-capped node unlocks the most walls at once. Depends on 96, 99; **requires
+  a Decision Log entry (non-goal #7 boundary + division) before build.***
+- [ ] **101** — ★ General window functions (`WindowSelectItem`: OVER, LAG/LEAD,
+  frames). *Second expressiveness pillar; running totals / moving averages.
+  Depends on 96 (100 for windowed exprs); **Decision Log entry (frames) before
+  build.***
+- [ ] **102** — `EXTRACT`/date_part + relative-date/interval helpers. *High
+  everyday agent value. Depends on 100; **Decision Log entry (interval cap + TZ).***
+- [ ] **103** — Non-equi/range joins + FULL OUTER / CROSS. *Range/temporal joins.
+  Depends on 96, 99; **Decision Log entry (CROSS gating).***
+- [ ] **104** — Set operations (UNION / INTERSECT / EXCEPT). *New scope container;
+  caps summed across arms. Depends on 96, 97; **Decision Log entry before build.***
+- [ ] **105** — CTE / derived table in FROM (non-recursive; recursive OUT of
+  scope). *Multi-stage single-statement analysis. Depends on 96, 97, 104;
+  **Decision Log entry before build.***
+- [ ] **106** — Correlated / EXISTS / scalar subqueries. *Do last — largest safety
+  surface (breaks the uncorrelated assumption). Depends on 96, 97, 105; **Decision
+  Log entry (correlation scope model) before build.***
 - [ ] **19** — Additional dialects (MySQL, Snowflake, BigQuery, …). *Removes the
   "QueryGate is narrow" objection. **Depends on 57.***
 
 ### Phase 5 — Catalog & observability depth (lowest marginal ROI — opportunistic)
 
-- [ ] **37** — Automated end-to-end proof of adaptive semantic learning.
+- [x] **37** — Automated end-to-end proof of adaptive semantic learning. ✅
+  **Shipped** (`catalog/adaptive_learning_benchmark.py` drives the real 32C
+  learning lifecycle e2e; reconciled from a shipped-but-unmarked state).
 - [ ] **38 (phase 2)** — Admin UI catalog-governance workspace.
 - [ ] **44 (phase 2)** — Admin observability / rejection-trend dashboard.
 - [ ] **45 (phase 2)** — Non-admin "My access" portal.
 - [ ] **47 (phase 2)** — Safe draft recovery + config export/import UX.
-- [ ] **50 (phase 2)** — Per-principal rate limits / query quotas over time.
+- [x] **50 (phase 2)** — Per-principal rate limits / query quotas over time. ✅
+  **Shipped** (`RedisQuotaLimiter` — cross-replica shared quota budget via Lua,
+  closing the per-replica-multiplication gap).
 
 ---
 
@@ -190,19 +248,40 @@ implementation (per `CLAUDE.md`). The continuation skill must **skip** them and
 surface them for a human, never auto-start them.
 
 - **P1 · Governed Writes — item 93** (`StructuredWrite` contract). The flagship
-  structural expansion; crosses the read-only line, so it needs an explicit
-  maintainer product decision (record it in `docs/PRODUCT_GUIDE.md`'s Decision
-  Log) before any code. Fully specced and phased in TODO.md item 93. **Slotting
-  once approved:**
-  - **Phase 1** (contract + dry-run diff preview, execution **disabled**) is
-    low-risk/zero-write-risk and depends on nothing beyond today's code — it can
-    slot **immediately after Phase 0** (right after item 91) once the decision is
-    made, and can even ship on its own as a "dry-run planner."
-  - **Phase 2** (gated execution) **depends on items 90 + 91 + 92**, so it
-    cannot precede the Phase-0 moat and the item-92 approval gate.
-  - **Phase 3** (compensation/undo + upserts + batch + MSSQL parity) depends on
-    Phase 2.
-  Until the decision is made, `roadmap-next` must skip item 93 and surface it.
+  structural expansion; crosses the read-only line. **Decision made (2026-07-23,
+  maintainer-approved) and Phase 1 SHIPPED** — contract + dry-run preview,
+  execution **disabled** (Decision Log recorded in `docs/PRODUCT_GUIDE.md`).
+  - **Phase 1** ✅ **shipped** — `write_ast/` + `WritePolicy` + write policy/schema
+    validation + write compiler + the dry-run preview + `POST /write/preview`.
+    Ships on its own as a "dry-run planner"; no execution path exists.
+  - **Phase 2a** ✅ **shipped (maintainer-approved 2026-07-23)** — gated
+    single-statement INSERT/UPDATE/DELETE *execution*: one transaction, in-txn
+    row cap, item-92 approval gate on the row count, dual-identity (90) +
+    tamper-evident (91) audit, no raw DML, deny-by-default. `WriteExecutionService`
+    + `POST /write/execute` + `POST /write/approve`.
+  - **Phase 2b** (largely shipped) — ✅ row-level old→new **diff preview**
+    (`include_diff`, bounded + masking-aware, DML rolled back), ✅ the adversarial
+    **write security suite** (`make test-security`), ✅ clean typed **4xx** for
+    constraint/type violations, and ✅ the **MCP `run_structured_writes` tool**
+    (preview/execute, batch, elicitation approval), ✅ **real-Postgres** write
+    execution coverage, and ✅ the **write concurrency load gate** (`-m load`:
+    cap holds under contention, concurrent inserts commit exactly). Still open:
+    only the `release-smoke` write round-trip.
+  - **Phase 3a/3b — reversibility (undo): REMOVED (2026-07-23).** The compensation
+    store, `POST /write/undo`, the MCP `undo_structured_write` tool, the
+    `WritePolicy.compensation_*` fields, and the `compensation_id` result field
+    were deleted — reversibility is no longer a QueryGate capability. Rationale
+    (see `docs/PRODUCT_GUIDE.md` Decision Log + TODO.md item 93): undo forced a
+    second copy of real row values outside the customer's DB — against the
+    least-privilege / data-never-leaves North Star — with unresolved
+    correctness/durability risk and low marginal value once preview + approval
+    exist. The **governance tier is kept and shipped**: preview + diff, gated
+    execution, approval, dual-identity + tamper-evident audit, deny-by-default, the
+    row cap, ✅ **upserts** (Postgres/SQLite native, MSSQL reject-not-emulate), ✅
+    **multi-statement atomic batch**, ✅ **MSSQL write-execution parity**, and the
+    `release-smoke` write round-trip. `approval-binds-to-diff-hash` remains a
+    reasoned deferral (the token binds the full write fingerprint; the trigger
+    re-evaluates at execute).
 - **F4 · Safe NL→StructuredQuery.** Needs a decision on model provider/posture;
   must be an isolated opt-in subsystem, never wired into the catalog/32C.
 - **P2 · Open the StructuredQuery AST as a standard.** A standards-governance
@@ -219,37 +298,160 @@ human/vendor to complete.
 
 ---
 
-## Frontier status (2026-07-23) — why each remaining item needs a decision, infra, or its own PR
+## Frontier status (updated 2026-07-23, fourth pass) — one buildable UI slice left; everything else gated
 
-After the 2026-07-23 batch (56, 96, 95, 54, 60 done; 92 ph1+ph2 triggers; 42
-ph1; 39 reconciled), the roadmap-next automation has reached a frontier: **no
-remaining item is a clean, single-pass, unilaterally-buildable, locally-
-validatable slice.** Each was examined and is blocked as follows — a maintainer
-should pick from these deliberately rather than the automation forcing one:
+Successive batches shipped everything buildable without a new maintainer
+decision or external resource. **Done across the cycle:** 56, 96, 95, 54, 60,
+**92 (full — triggers + REST token flow + batch tokens + MCP `Context.elicit`
+in-session approval, maintainer-approved)**, 42 (full); reconciled 39, 40
+(covered by 41), 37; and — after explicit maintainer approval — **97 ph1**
+(`IN (subquery)`), **57** (session dialect adapter, reversing the prior
+inline-branching decision), **93 ph1** (governed-writes dry-run preview,
+execution disabled), **41 ph2** (stateless paginated blast-radius), and
+**50 ph2** (`RedisQuotaLimiter` — cross-replica shared quota). The remaining
+frontier is gated, with **one** live buildable thread:
 
-- **40 ph2** (per-principal semantic diff) — *scope decision needed*: overlaps
-  the shipped **41 ph1** (blast-radius already resolves/ranks per-principal).
-  Decide how a per-principal `/diff` differs from `/blast-radius` before building.
-- **41 ph2** — *async scale infra*: background-job/pagination for >100 configured
-  principals; substantial, low-ROI until a deployment hits that scale.
-- **35 ph2** — *async infra*: `queued`/`running`/`cancelled` states + mid-flight
-  cancellation (a background-execution contract), not a clean slice.
-- **57** — *conflicts with a deliberate CLAUDE.md decision* (`connections/dialects.py`
-  inline branching is an intentional exception) **and** needs MSSQL cost
-  estimation (26 ph2). Needs a maintainer decision before refactoring.
-- **26 ph2 / 36 ph2b / 58 ph2 / 30·89 ph2 / 53** — *infra/vendor/maintainer-gated*
-  (live MSSQL, dual-DB CI, external LLM/Toolbox, deliberate signed-release tag
-  push, external auditor).
-- **18 / 51 / 19 / 37** — *large multi-session features* (stored-proc subsystem +
-  security review; Python+TS SDK; new dialects, needs 57; adaptive-learning e2e
-  proof). Each warrants its own focused PR.
-- **38·44·45·47·50 ph2** — *UI / durable-cross-replica infra phase-2s* (Phase 5,
-  lowest marginal ROI).
-- **93 / F4 / P2 / 97** — *decision-gated*; must not be auto-started (see below).
+- **Buildable without a decision (low ROI):** **38 ph2** — admin-UI *bulk*
+  approve/reject/delete + export/import + browser-triggered generate/learn +
+  `review_history` view, all over item 32B's existing scoped routes (no new
+  mutation path). Frontend-only; validated by `node --check` + static-markup
+  assertions (no browser automation here), Phase 5 lowest-marginal-ROI.
 
-The `roadmap-next` automation should surface this list and stop, rather than
-force an entangled or ambiguously-scoped change. Delete/trim this note once the
+Everything else stays gated as before:
+
+- **93 ph2** (gated write *execution*) — depends on 90+91+92 (all shipped) but
+  crosses from preview to *committing writes*: a deliberate build + product
+  decision, its own PR.
+- **26 ph2 / 36 ph2b / 58 ph2 / 53** — *external infra/vendor*: live MSSQL,
+  Postgres+MSSQL dual-DB CI, external LLM/Toolbox harness, an external auditor.
+- **30·89 ph2** — the *maintainer's signed-release tag push* (+ package-index
+  choice); the mechanism is shipped.
+- **35 ph3** — *design-gated* (agent-visible progress/cancellation posture);
+  phases 1+2 shipped.
+- **18 / 51 ph2 / 19** — *large standalone*: stored-proc subsystem (needs a real
+  security review — procedures have side effects); the TypeScript SDK +
+  standalone distribution (coupled to 30 ph2, not locally validatable); new
+  dialects (need live DBs, now unblocked *architecturally* by 57).
+- **44·45·47 ph2** — *admin-UI / durable-infra phase-2s* needing external metrics
+  history (44), more UI (45), or an encrypted-at-rest draft store (47).
+- **F4 / P2** — *decision-gated*: NL→StructuredQuery (model-provider/posture
+  decision) and opening the AST as a standard (governance commitment).
+
+`roadmap-next` should surface the two live threads (build 38 ph2 if the
+maintainer wants the low-ROI UI slice; get a decision on 92's elicitation SoD
+posture) rather than force a gated/entangled change. Trim this note as the
 maintainer re-prioritizes and the frontier moves.
+
+---
+
+## Technical and Product Improvement Plan (2026-07-23 review)
+
+A full repo-wide due-diligence pass (`TECHNICAL_REVIEW.md`) found this codebase
+to be unusually mature and self-consistent for its stage — the non-negotiables
+hold, the security/auth/catalog boundary checked out clean, and doc claims are
+almost entirely backed by real code and tests. It surfaced one live regression
+in an in-flight change plus a handful of narrow, real gaps, tracked as `TODO.md`
+items 107–113 (the item-93 compensation-store regression is tracked inline in
+item 93's own Phase 3b note, since it's the same feature, not a new item). This
+section sequences that work; it supplements, not replaces, the phase ordering
+above — none of these items change the Phase 0–5 execution order for the
+already-planned initiatives.
+
+### Review Phase 1 — Correctness, security, and production risk
+
+- [x] **Item 93 (Phase 3b) regression, part 1** ✅ — fixed the
+  `CompensationStore` async/await mismatch (`execution/write_execution.py`
+  now awaits the `async` `get`/`put`/`consume`; the affected unit test was
+  converted to `async def` to match). `pytest -m unit` passes 230/230 with no
+  coroutine-never-awaited warnings.
+- [x] **Item 93 (Phase 3b) regression, part 2 — OBSOLETE (2026-07-23).** The
+  consumed-record eviction leak is moot: the compensation store was removed
+  entirely along with the undo mechanism (see item 93). No code remains to leak.
+- [ ] **107** — Batch query execution double-reserves quota on an approval
+  retry.
+  - Why: an MCP batch item that needs interactive approval consumes two
+    quota units for one logical query, silently halving effective throughput
+    for approval-gated callers.
+  - Scope: `execution/service.py` (`_execute_batch_item`, `enforce_query_quota`).
+  - Acceptance criteria:
+    - A test asserts exactly one quota unit is consumed across an
+      approval-required-then-resolved batch item.
+- [ ] **108** — Write-preview diff runs the full DML before the
+  `max_affected_rows` cap is checked.
+  - Why: `include_diff=true` against a broad WHERE forces a real, row-locking
+    UPDATE to run (then rollback) even when the write would be rejected
+    outright as over-cap — a resource-exhaustion / lock-contention risk on a
+    preview-only endpoint.
+  - Scope: `execution/write_preview.py` (`_mutation_diff`).
+  - Acceptance criteria:
+    - An over-cap UPDATE preview with `include_diff=true` short-circuits
+      before running the DML; regression test added.
+- [ ] **109** — MCP `run_structured_writes` has no batch-size cap (the read
+  path's `validate_batch_size` has no write-side equivalent).
+  - Why: a caller can submit an unbounded batch of individually-in-cap writes
+    in one MCP call, well beyond what the read path allows for the same
+    principal.
+  - Scope: `policy/models.py` (`WritePolicy`), `validation/write_policy_validation.py`,
+    `mcp/tools/write.py`.
+  - Acceptance criteria:
+    - `WritePolicy.max_batch_size` exists and is enforced before any
+      statement in an over-size batch is processed; boundary test added.
+
+### Review Phase 2 — Reliability and workflow hardening
+
+- [ ] **112** — Add a scheduled (cron) CI workflow for dependency/security
+  scans and wire `make test-soak` into it.
+  - Why: `.github/workflows/ci.yml` only triggers on `push`/`pull_request` —
+    a CVE disclosed against an already-merged dependency isn't caught until
+    the next incidental change, and the heavier 100-round soak test never
+    runs automatically (only the 5-round `test-load` does).
+  - Scope: `.github/workflows/`, `docs/RELEASING.md`.
+  - Acceptance criteria:
+    - A nightly/weekly workflow runs the CVE/SBOM/lockfile checks and
+      `make test-soak` against `main` independent of code changes.
+- [x] **113 — OBSOLETE (2026-07-23).** Metrics for the write-undo/compensation
+  store are moot: the undo/compensation feature was removed (see item 93).
+  Write-*execution* metrics, if wanted later, would be a fresh, separately-scoped
+  item.
+
+### Review Phase 3 — Architecture and maintainability
+
+- [ ] **110** — Explicitly reject `value_subquery` in a write's WHERE at the
+  write-validation layer instead of relying on the compiler's `ctx=None`
+  default to fail it.
+  - Why: not currently exploitable, but it fails at the wrong layer with a
+    compiler-internal error, and is a latent trap for a future write-compiler
+    change.
+  - Scope: `validation/write_policy_validation.py`.
+  - Acceptance criteria: a `value_subquery` in a write WHERE raises a clean
+    `QueryValidationError` at validation time; regression test added.
+- [ ] **111** — Consolidate the four hand-rolled WHERE-predicate tree walks
+  (`policy_validation.py`, `schema_validation.py`, `write_policy_validation.py`,
+  `write_schema_validation.py`) into one shared helper, mirroring how item 96
+  centralized column-ref walking into `iter_column_refs`.
+  - Why: all four are correct today but could silently drift the next time
+    `WhereNode` grows a new combinator — the exact class of bug item 96 was
+    built to prevent for column refs.
+  - Scope: the four validator modules.
+  - Acceptance criteria: one shared predicate-iterator helper; all four
+    validators' existing test suites pass unchanged (no behavior change).
+
+### Review Phase 4 — Performance, observability, and developer experience
+
+- [x] **Stale security-posture numbers** — `docs/SECURITY_POSTURE.md` claimed
+  "31 threats (QG-01…QG-31)" and "~191" adversarial tests; `docs/THREAT_MODEL.md`
+  actually runs to QG-32 and `pytest -m security --collect-only` collects 259.
+  Corrected directly in `docs/SECURITY_POSTURE.md` and `docs/PRODUCT_GUIDE.md`
+  as part of this review (no TODO item needed — already fixed).
+- Item 113 (metrics) and item 112 (scheduled CI) above are also this phase's
+  content; not repeated here.
+
+**Not turned into tracked items** (reviewed and deliberately left as
+observations in `TECHNICAL_REVIEW.md`, not work items): a potential
+`asyncio.Lock` event-loop-binding risk in `schema/reflection.py`'s
+`_METADATA_LOCKS` cache (no reproduction, no reset path exists but nothing
+currently triggers it — flagged for awareness, matches the documented
+`in_process_limiter().clear()` pattern if it's ever needed).
 
 ---
 

@@ -32,6 +32,8 @@ async def sqlite_app(monkeypatch):
     await create_and_seed_async(engine)
 
     import querygate.execution.service as svc_module
+    import querygate.execution.write_execution as wx_module
+    import querygate.execution.write_preview as wp_module
     import querygate.validation.schema_validation as sv_module
 
     @asynccontextmanager
@@ -39,12 +41,16 @@ async def sqlite_app(monkeypatch):
         async with AsyncSession(engine, expire_on_commit=False) as session:
             yield session
 
-    # Swap the real engine in at the two seams that would otherwise build a
+    # Swap the real engine in at the seams that would otherwise build a
     # Postgres/MSSQL engine from the "demo" connection profile. Session
     # guardrails (Postgres/MSSQL-only SQL) are bypassed along with them.
     monkeypatch.setattr(svc_module, "get_engine", lambda connection_id: engine)
     monkeypatch.setattr(svc_module, "session_scope", _session_scope)
     monkeypatch.setattr(sv_module, "get_engine", lambda connection_id: engine)
+    # Governed-writes preview (item 93) opens its own session for the COUNT(*).
+    monkeypatch.setattr(wp_module, "session_scope", _session_scope)
+    # Governed-writes gated execution (item 93 phase 2) opens its own write txn.
+    monkeypatch.setattr(wx_module, "session_scope", _session_scope)
 
     settings = AppConfig(
         environment="localhost",

@@ -38,7 +38,7 @@ import hashlib
 import hmac
 import json
 import time
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from querygate.catalog.loader import get_catalog_store
 from querygate.catalog.models import SensitivityClass
@@ -138,8 +138,20 @@ def query_fingerprint(query: StructuredQuery) -> str:
     canonical (sorted-key, no-whitespace) JSON of the Pydantic model so the
     fingerprint is deterministic across processes and Python runs.
     """
+    return _model_fingerprint(query)
+
+
+def write_fingerprint(statement: Any) -> str:
+    """Stable SHA-256 fingerprint of a validated write statement (item 93 phase
+    2), so an approval token binds to exactly this write — the write-side sibling
+    of `query_fingerprint`, same canonical-JSON scheme. Typed loosely to avoid
+    coupling the approval module to `write_ast`."""
+    return _model_fingerprint(statement)
+
+
+def _model_fingerprint(model: Any) -> str:
     canonical = json.dumps(
-        query.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        model.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
