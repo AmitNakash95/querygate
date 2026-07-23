@@ -450,7 +450,8 @@ async def validate_schema(
             scope_tables[id(scope)] = scoped_tables
         if depth == 0:
             outer_tables = scoped_tables
-    assert outer_tables is not None  # iter_query_scopes always yields depth 0
+    if outer_tables is None:  # unreachable: iter_query_scopes always yields depth 0
+        raise QueryValidationError("internal error: query had no top-level scope to validate")
     return outer_tables
 
 
