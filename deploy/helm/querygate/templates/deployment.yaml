@@ -8,6 +8,10 @@ spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
+  {{- with .Values.updateStrategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "querygate.selectorLabels" . | nindent 6 }}
@@ -15,10 +19,17 @@ spec:
     metadata:
       labels:
         {{- include "querygate.selectorLabels" . | nindent 8 }}
-      {{- with .Values.podAnnotations }}
       annotations:
+        # Rolling the pods whenever the rendered config changes is what makes a
+        # `helm upgrade` to connections/policy/catalog a zero-downtime, all-
+        # replica config reload (item 5 + item 56): without this the ConfigMap
+        # updates but running pods keep the stale mount. Combined with
+        # updateStrategy (maxUnavailable: 0) below, the new config rolls out one
+        # replica at a time behind the readiness gate, never dropping capacity.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "querygate.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
@@ -54,6 +65,10 @@ spec:
             - name: CONCURRENCY_REDIS_URL
               value: {{ .Values.redis.url | quote }}
             {{- end }}
+            {{- if .Values.configGovernance.enabled }}
+            - name: CONFIG_GOVERNANCE_DIR
+              value: /app/var/config_versions
+            {{- end }}
           envFrom:
             - secretRef:
                 name: {{ include "querygate.secretName" . }}
@@ -81,6 +96,10 @@ spec:
               readOnly: true
             - name: audit
               mountPath: /app/var/audit
+            {{- if .Values.configGovernance.enabled }}
+            - name: config-governance
+              mountPath: /app/var/config_versions
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -92,8 +111,17 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if .Values.configGovernance.enabled }}
+        - name: config-governance
+          persistentVolumeClaim:
+            claimName: {{ include "querygate.fullname" . }}-config-governance
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.affinity }}

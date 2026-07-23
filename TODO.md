@@ -1821,25 +1821,21 @@ exhaustive and regression-locked, and draws the honest line between what the
 engine closes and what remains a policy-configuration or accepted residual
 risk — rather than leaving the inference category silently unaddressed.
 
-### 56. HA / multi-region reference deployment + DR runbook
+### 56. HA / multi-region reference deployment + DR runbook ✅ DONE
 
-**Effort: L (3–5 days).** Builds on item 29's reference stack and item 9's
-cross-instance concurrency state; the new work is failover behavior and a
-documented recovery procedure, not a new deployment topology from scratch.
+Shipped: a zero-downtime Helm chart (`updateStrategy.maxUnavailable: 0` +
+`checksum/config` rolling-restart on config change), an `values-ha.yaml`
+multi-zone overlay (autoscaling floor 3, PDB, zone/host topology spread,
+Redis-shared concurrency), an optional RWX config-governance PVC, and
+`deploy/HA_DR.md` — the shared-state correctness matrix (concurrency shared;
+quota still per-replica until item 50 phase 2; config/audit per-replica unless
+shared), the multi-replica zero-downtime config-reload contract, multi-zone/
+multi-region topology, and a backup/restore + RTO/RPO DR procedure. Chart HA
+invariants are asserted against `helm template` in
+`tests/unit/test_helm_ha_deployment.py`. GO_TO_MARKET claims reconciled. The
+live multi-region failover *drill* is the operator's step (checklist in HA_DR).
 
-**Why it matters:** `docs/business/GO_TO_MARKET.md` explicitly says not to
-claim "a production Helm/Kubernetes reference deployment" yet. Item 29's
-reference stack is not the same claim as proven multi-instance failover —
-enterprise buyers evaluating this for production traffic will ask for an
-HA/DR story specifically, not just a docker-compose file or a single Helm
-chart.
-
-**What to do:** Document (and test) a multi-replica deployment with the
-Redis-backed concurrency/rate-limit state from items 9 and 50 shared
-correctly across instances, a rolling-restart/zero-downtime config-reload
-path building on item 5, and a written disaster-recovery runbook
-(backup/restore for the config-governance store, recovery time
-expectations).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 56).
 
 ### 57. Pluggable dialect-adapter architecture
 

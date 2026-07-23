@@ -2283,6 +2283,35 @@ real databases, testing "does this correctly refuse to work, under
 adversarial input and under real concurrent load" is the harder and more
 important bar — and it's the one this test suite is built around.
 
+### Running it highly available (HA / DR)
+
+The Helm chart (`deploy/helm/querygate/`) ships a production HA path, documented
+end-to-end in `deploy/HA_DR.md`. Three things make a multi-replica deployment
+correct rather than merely running:
+
+- **Zero-downtime rollouts and all-replica config reload.** The deployment uses
+  `updateStrategy.maxUnavailable: 0` and stamps a `checksum/config` annotation on
+  the pod template, so a `helm upgrade` that changes connections/policy/catalog
+  rolls *every* replica one at a time behind the readiness gate — capacity never
+  drops, and no replica is left on stale config. This is the multi-replica
+  answer to the fact that the governance API's in-process reload only affects
+  the single replica that served the request.
+- **Honest shared-state boundaries.** The in-flight concurrency cap is a true
+  fleet-wide cap under `CONCURRENCY_BACKEND=redis`; per-principal *quotas* are
+  still enforced per-replica (item 50 phase 2 not shipped), so under N replicas
+  a quota is effectively N×. `deploy/HA_DR.md`'s shared-state matrix states this
+  plainly rather than implying a budget QueryGate doesn't yet enforce.
+- **DR without an app database.** QueryGate owns no configuration database — its
+  durable footprint is config (GitOps-backed), an optional governance PVC, and
+  the audit stream (stdout → your log store). Recovery is a redeploy from a
+  pinned image digest plus the Git config, so the DR runbook targets an RTO of
+  minutes and an RPO of ~zero for config.
+
+Chart HA invariants (the strategy, the change-sensitive checksum, the overlay's
+PDB/zone-spread/Redis, the RWX governance PVC) are asserted against a real
+`helm template` render in `tests/unit/test_helm_ha_deployment.py`, so the
+guarantees above can't silently drift out of the manifests.
+
 ## Glossary of Terms
 
 Alphabetical. Each term links back to the section that covers it in depth.
@@ -2509,6 +2538,28 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — The multi-replica config-reload path is GitOps + a rolling
+  restart, not a cross-replica broadcast; per-principal quota stays honestly
+  per-replica (TODO.md item 56).** Building the HA/DR story, two boundaries were
+  decided in the open rather than papered over. **(1) Config propagation.** The
+  governance API's `apply()` reloads only the in-process registries of the single
+  replica that served the request; there is no reload fan-out. Rather than build
+  a cross-replica broadcast (a new distributed-coordination surface in a security
+  product), the chart makes `helm upgrade` the multi-replica path: a
+  `checksum/config` pod annotation rolls every replica behind the readiness gate
+  with `maxUnavailable: 0`. The governance API remains correct for single-replica
+  or staging; the optional RWX `configGovernance` PVC shares *history* across
+  replicas but still requires a roll to propagate an apply — documented, not
+  hidden. **(2) Quota honesty.** The in-flight concurrency cap is fleet-wide via
+  Redis, but per-principal rate/byte quotas (item 50) are still per-replica; the
+  Redis-backed shared budget is item 50 phase 2 (not started). We chose to state
+  the N× multiplication plainly in `deploy/HA_DR.md`'s shared-state matrix and
+  size guidance around it, rather than imply a cross-fleet budget the code does
+  not yet enforce. The rejected alternative — quietly shipping the HA overlay and
+  letting operators assume quotas were global — was declined because a security
+  product's operational claims have to match what the code does. Chart invariants
+  are asserted against a real `helm template` render
+  (`tests/unit/test_helm_ha_deployment.py`) so these guarantees can't drift.
 - **2026-07-23 — Signed delivery attests the container image (the thing we
   actually publish), not the Python package; publishing stays a manual tag push
   (TODO.md item 30/89 phase 2).** Completing the signed-delivery gate, two

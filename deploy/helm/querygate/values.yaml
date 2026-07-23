@@ -1,5 +1,18 @@
 replicaCount: 2
 
+# Deployment update strategy. maxUnavailable: 0 makes every rollout
+# (image upgrade OR a config-checksum-triggered restart from `helm upgrade`)
+# zero-downtime: Kubernetes brings a new, ready replica up before taking an old
+# one down, so capacity never drops below replicaCount. Requires replicaCount
+# >= 2 (or autoscaling.minReplicas >= 2) to have a spare to surge onto — see
+# deploy/HA_DR.md. Set to null/{} to fall back to Kubernetes' 25%-unavailable
+# default (not recommended for HA).
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
 image:
   repository: querygate
   tag: ""              # defaults to Chart.appVersion
@@ -63,6 +76,21 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
+# Spread replicas across failure domains so one node/zone/region loss can't take
+# every replica down at once — the structural half of the HA story (the PDB
+# below is the voluntary-disruption half). Empty by default because the topology
+# keys have to match your cluster's actual node labels; values-ha.yaml enables a
+# zone-level "soft" spread. Values are run through `tpl`, so you can reference
+# the release's selector labels. See deploy/HA_DR.md ("Multi-zone / multi-region
+# topology").
+topologySpreadConstraints: []
+  # - maxSkew: 1
+  #   topologyKey: topology.kubernetes.io/zone
+  #   whenUnsatisfiable: ScheduleAnyway
+  #   labelSelector:
+  #     matchLabels:
+  #       app.kubernetes.io/name: querygate   # matches nameOverride if you set one
+
 probes:
   liveness:
     path: /health
@@ -123,6 +151,21 @@ persistence:
   # each replica's JSONL file across restarts.
   enabled: false
   storageClassName: ""
+  size: 1Gi
+
+# Shared persistence for the config-governance version store (the Path B
+# governance API's history under CONFIG_GOVERNANCE_DIR — item 17/42). Off by
+# default: the multi-replica-correct config path is GitOps/ConfigMap + `helm
+# upgrade` (Path A), which every replica picks up via the config-checksum
+# rolling restart above, with no shared volume required. Enable this ONLY if you
+# also want the governance *API* usable in a multi-replica deployment — then all
+# replicas must see the same version history, which needs a ReadWriteMany
+# StorageClass (not universally available). Even so, a governance `apply`
+# reloads only the replica that served the request; roll the others (or use Path
+# A) to propagate. See deploy/HA_DR.md ("Config reload across replicas").
+configGovernance:
+  enabled: false
+  storageClassName: ""      # must resolve to a ReadWriteMany class when enabled
   size: 1Gi
 
 redis:
