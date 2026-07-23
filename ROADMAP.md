@@ -309,7 +309,10 @@ surface them for a human, never auto-start them.
       insert/update/delete + undo all work, including OUTPUT-based key capture for
       IDENTITY PKs and SET IDENTITY_INSERT on delete-undo re-insert (SQLAlchemy
       handles both). `tests/integration/test_mssql_write_execution.py`.
-    - [ ] Upserts, multi-statement batch atomicity, approval-binds-to-diff-hash.
+    - [x] **Upserts** ✅ — `UpsertStatement` (INSERT ON CONFLICT DO UPDATE) via a
+      per-dialect compiler registry; Postgres/SQLite native, MSSQL rejected
+      (reject-not-emulate). Proven on real Postgres + MSSQL. (Upsert-undo deferred.)
+    - [ ] Multi-statement batch atomicity, approval-binds-to-diff-hash.
     - **Production-grade reversibility hardening (2026-07-23 design review — the
       10/10 bar).** Why/acceptance for each is in TODO.md item 93 Phase 3b; do in
       this order:

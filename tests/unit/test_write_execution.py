@@ -157,3 +157,43 @@ def test_coerce_leaves_non_temporal_and_bad_values_untouched():
     assert _coerce_write_value(sa.Column("s", sa.String), "hello") == "hello"
     # A non-string value is never touched.
     assert _coerce_write_value(dt_col, 12345) == 12345
+
+
+def test_upsert_compiles_on_conflict_for_postgres_and_rejects_mssql():
+    from sqlalchemy.dialects import postgresql
+
+    from querygate.compiler.write_compiler import compile_write
+    from querygate.core.exceptions import QueryValidationError
+    from querygate.write_ast.models import UpsertStatement
+
+    table = sa.Table(
+        "orders",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("status", sa.String(20)),
+    )
+    stmt = UpsertStatement(
+        table="orders",
+        rows=[{"id": 1, "status": "x"}],
+        conflict_columns=["id"],
+        update_columns=["status"],
+    )
+    dml = compile_write(stmt, table, "postgresql")
+    rendered = str(dml.compile(dialect=postgresql.dialect())).upper()
+    assert "ON CONFLICT" in rendered and "DO UPDATE" in rendered
+
+    # MSSQL has no ON CONFLICT — reject, don't emulate.
+    with pytest.raises(QueryValidationError):
+        compile_write(stmt, table, "mssql")
+
+
+def test_upsert_statement_rejects_update_column_that_is_a_conflict_column():
+    from querygate.write_ast.models import UpsertStatement
+
+    with pytest.raises(Exception):
+        UpsertStatement(
+            table="orders",
+            rows=[{"id": 1, "status": "x"}],
+            conflict_columns=["id"],
+            update_columns=["id"],  # cannot update the conflict key
+        )

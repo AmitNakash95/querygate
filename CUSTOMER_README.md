@@ -15,9 +15,11 @@ them a raw-SQL tool.
 
 Callers submit a constrained JSON query object called a `StructuredQuery`.
 QueryGate checks that object against the authenticated caller's policy and the
-database's reflected schema, compiles it into a parameterized, read-only
-statement, executes it within configured resource limits, and returns a bounded
-result.
+database's reflected schema, compiles it into parameterized SQL, executes it
+within configured resource limits, and returns a bounded result. Every
+deployment starts read-only; an operator can separately opt in to a governed
+write path (typed INSERT/UPDATE/DELETE — never a raw-DML string) for specific
+tables, described below.
 
 QueryGate is not a general database proxy and is not a replacement for database
 permissions. It is an additional policy and execution boundary designed for
@@ -32,7 +34,7 @@ prompt-injected.
 | Supported databases | PostgreSQL and Microsoft SQL Server |
 | Client interfaces | MCP over Streamable HTTP and versioned REST endpoints |
 | Query input | Validated `StructuredQuery` JSON; no raw-SQL input |
-| Data operations | Read-only; no insert, update, delete, DDL, or stored-procedure passthrough |
+| Data operations | Read-only by default; opt-in, deny-by-default governed writes (typed INSERT/UPDATE/DELETE — previewed with a diff, approval-gated, reversible via bounded undo) when a table/operation is explicitly enabled. No DDL or stored-procedure passthrough in either mode. |
 | Identity | Static bearer keys or JWKS-verified JWTs |
 | Authorization | Default, connection, and principal-specific policy layers |
 | Tenant isolation | Mandatory row filters, including values derived from authenticated JWT claims |
@@ -417,8 +419,11 @@ rotation, health, metrics, and audit procedures.
 QueryGate adds controls at the application boundary, but a secure deployment
 still depends on customer configuration and infrastructure:
 
-- Database credentials should remain read-only and least-privileged even
-  though the QueryGate input model is read-only.
+- Database credentials should stay least-privileged regardless of the
+  application-layer policy: read-only for connections with no `WritePolicy`
+  enabled, and scoped to only the tables/operations governed writes actually
+  need otherwise. Least privilege at the database is the final line of
+  defense if QueryGate's own policy were ever misconfigured.
 - TLS, firewalling, identity-provider security, host hardening, and Redis/Vault
   security remain customer responsibilities.
 - Policy prevents use of denied identifiers; it does not prevent inference

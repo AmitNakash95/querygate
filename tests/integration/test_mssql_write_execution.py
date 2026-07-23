@@ -45,7 +45,7 @@ def _use_writable_policy(**write_overrides) -> None:
     wp = dict(
         enabled=True,
         allowed_tables=["orders"],
-        allowed_operations=["insert", "update", "delete"],
+        allowed_operations=["insert", "update", "delete", "upsert"],
         max_affected_rows=100000,
         compensation_enabled=True,
         max_compensation_rows=100,
@@ -202,3 +202,32 @@ async def test_delete_then_undo_against_mssql():
         await writer.execute(
             DeleteStatement(table="orders", where=Predicate(col="orders.id", op="eq", value=target))
         )
+
+
+@pytest.mark.asyncio
+async def test_upsert_is_rejected_on_mssql():
+    # MSSQL has no ON CONFLICT — upsert is policy-allowed but rejected at compile
+    # (reject-not-emulate), with a clean, actionable error.
+    from querygate.core.exceptions import QueryValidationError
+    from querygate.write_ast.models import UpsertStatement
+
+    _use_writable_policy()
+    writer = WriteExecutionService("mssql_demo")
+    with pytest.raises(QueryValidationError) as ei:
+        await writer.execute(
+            UpsertStatement(
+                table="orders",
+                rows=[
+                    {
+                        "id": 1,
+                        "customer_id": 1,
+                        "status": "x",
+                        "total_amount": 1,
+                        "created_at": "2026-01-01T00:00:00",
+                    }
+                ],
+                conflict_columns=["id"],
+                update_columns=["status"],
+            )
+        )
+    assert "mssql" in str(ei.value).lower()

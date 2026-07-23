@@ -562,8 +562,10 @@ the one config document that still lacked it.
 ### Governed Writes (the write pipeline)
 
 Governed writes (TODO.md item 93) extend the same spine to **mutations** —
-INSERT / UPDATE / DELETE — without ever crossing the core invariant: a write is a
-**typed AST**, never a raw-DML string. `write_ast/` mirrors `query_ast/`
+INSERT / UPDATE / DELETE / UPSERT — without ever crossing the core invariant: a
+write is a **typed AST**, never a raw-DML string. (UPSERT compiles to native
+`ON CONFLICT DO UPDATE` on Postgres/SQLite and is rejected on MSSQL, which has no
+such clause — reject-not-emulate.) `write_ast/` mirrors `query_ast/`
 (`InsertStatement`/`UpdateStatement`/`DeleteStatement`, discriminated on `op`),
 an UPDATE/DELETE **structurally requires** a WHERE (an unqualified one cannot be
 expressed), and set-values and predicates reuse the read AST — so an injected
@@ -627,7 +629,7 @@ or worked around.
 > Credentials never sit on any returned model, and that's asserted against the
 > live API schema, not by convention. And none of it is "trust us": every
 > guarantee is backed by a deny-by-default CI gate (static analysis, dependency
-> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 259-case
+> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 260-case
 > adversarial suite), and reviewers get a reproducible packet where each claim
 > names the command that reproduces it. The published container image is signed
 > (cosign keyless) and carries SLSA build provenance, both consumer-verifiable.
@@ -867,7 +869,7 @@ summary.
 
 The gates fall into three groups:
 
-- **The access boundary itself.** The adversarial security suite (259 cases,
+- **The access boundary itself.** The adversarial security suite (260 cases,
   `make test-security`) encodes specific known bypass classes as regressions —
   denied-column inference, undeclared-table smuggling, predicate-as-SQL,
   schema-discovery leaks, policy-cap breaches, audit no-leak. On top of that,
@@ -2580,7 +2582,7 @@ report. Every guarantee is backed by an open-source, deny-by-default check
 that runs in CI on every change: static analysis (Bandit + Semgrep), a
 dependency-CVE audit of the exact shipped set (pip-audit), a CycloneDX SBOM
 per release, container-image scanning (Trivy), full-history secret scanning
-(gitleaks), and OpenAPI fuzzing (Schemathesis) on top of the 259-case
+(gitleaks), and OpenAPI fuzzing (Schemathesis) on top of the 260-case
 adversarial suite. A regression that weakened any of them fails the build.
 For a reviewer under NDA, `docs/SECURITY_POSTURE.md` is a reproducible packet
 — every claim names the command that reproduces it. The published image is
@@ -2595,6 +2597,21 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — Governed Writes Phase 3b: upserts (INSERT ON CONFLICT DO UPDATE)
+  ship for Postgres/SQLite and are *rejected* on MSSQL — reject-not-emulate, no
+  synthesized MERGE (item 93).** A new `UpsertStatement` (insert rows, but on a
+  unique/PK conflict on `conflict_columns`, update `update_columns`) compiles to
+  the native construct via a per-dialect compiler **registry**
+  (`compiler/write_compiler.py` `_UPSERT_COMPILERS` — no inline `if dialect ==`,
+  per the composable-interface rule). MSSQL has no `ON CONFLICT`; rather than
+  emulate a `MERGE` the caller never expressed, it is rejected with a clear error
+  pointing at the primitives (a separate governed update-then-insert) — the same
+  item-74 posture as `array_agg` and MSSQL `NULLS`. Still no raw DML: the conflict
+  target and updated columns are validated identifiers, and the values are bound
+  parameters. Proven on real Postgres (insert-then-update-on-conflict) and MSSQL
+  (rejection). **Bounded limit:** an upsert is *not* undoable yet
+  (`compensation_id=null`) — its per-row insert-or-update outcome makes the
+  inverse ambiguous, a later slice; the other three operations remain reversible.
 - **2026-07-23 — Governed Writes Phase 3b: reversibility's documented limits are
   closed — serial-PK inserts are undoable (RETURNING), undo works under HA (a
   Redis-backed compensation store), and an UPDATE undo refuses on drift instead
