@@ -7,7 +7,7 @@ validation/policy_validation.py before a query is ever compiled or executed.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 import pydantic as pyd
 
@@ -138,6 +138,59 @@ class MandatoryRowFilter(pyd.BaseModel):
         return principal.claims[self.from_claim]
 
 
+class WritePolicy(pyd.BaseModel):
+    """Governed-writes policy (TODO.md item 93). Deny-by-default: writes are OFF
+    unless `enabled` is true AND the target table is in `allowed_tables` AND the
+    operation is in `allowed_operations`. In Phase 1 nothing executes regardless
+    — the write pipeline only ever previews (compiles, runs in a transaction,
+    diffs, rolls back)."""
+
+    enabled: bool = False
+    allowed_tables: list[str] = pyd.Field(default_factory=list)
+    # Which operations are permitted at all (globally); an empty list means none.
+    allowed_operations: list[Literal["insert", "update", "delete", "upsert"]] = pyd.Field(
+        default_factory=list
+    )
+    # Columns that may never be written, keyed by table ("*" = every table) —
+    # the write analogue of denied_columns (e.g. id, created_at, tenant_id).
+    denied_write_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
+    # Hard cap on how many rows a single previewed/executed write may affect.
+    max_affected_rows: int = pyd.Field(default=100, ge=1)
+    # In-query approval trigger for writes (item 93 phase 2, reuses item 92): a
+    # write whose affected-row count exceeds this pauses for a human sign-off
+    # before it commits (REST 428 -> query:approve token -> resubmit). None =
+    # no approval gate on writes; 0 = require approval for *every* write; N =
+    # require it only for writes touching more than N rows. A softer gate below
+    # the hard `max_affected_rows` reject, exactly like the read gate.
+    require_approval_over_rows: Optional[int] = pyd.Field(default=None, ge=0)
+    # Row cap on the dry-run diff preview (item 93 phase 2b): a preview shows at
+    # most this many old→new row changes; a larger affected set is reported
+    # truncated. Bounds the value-bearing preview so it can never dump a table.
+    max_diff_rows: int = pyd.Field(default=50, ge=1)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    def table_writable(self, table_name: str) -> bool:
+        if not self.enabled:
+            return False
+        name = table_name.lower()
+        return any(t.lower() == name for t in self.allowed_tables)
+
+    def operation_allowed(self, op: str) -> bool:
+        return self.enabled and op in self.allowed_operations
+
+    def write_column_allowed(self, table_name: str, column_name: str) -> bool:
+        col = column_name.lower()
+        for key in (table_name.lower(), "*"):
+            for denied in self.denied_write_columns.get(key, []):
+                if denied.lower() == col:
+                    return False
+        # Also honor the read denied_columns for the *_KEY convention? Kept
+        # separate deliberately: a column can be readable but not writable and
+        # vice versa; write policy is its own axis.
+        return True
+
+
 class Policy(pyd.BaseModel):
     # Access and discovery switch. A resolved false value hides the
     # connection from REST/MCP listings and makes direct access behave as if
@@ -152,6 +205,10 @@ class Policy(pyd.BaseModel):
     allowed_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
     denied_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
 
+    # Governed writes (TODO.md item 93), deny-by-default and preview-only in
+    # Phase 1. A read-only deployment leaves this at its default (writes off).
+    write: WritePolicy = pyd.Field(default_factory=WritePolicy)
+
     # Per-column value masks (TODO.md item 49) — keyed by table name with "*"
     # applying to every table, the same convention as allowed/denied_columns.
     # A mask grants partial visibility of a column that is otherwise permitted;
@@ -164,6 +221,13 @@ class Policy(pyd.BaseModel):
     max_select_columns: int = pyd.Field(default=30)
     max_where_depth: int = pyd.Field(default=5)
     max_group_by: int = pyd.Field(default=10)
+    # Bounds caller-authored subquery nesting (Predicate.value_subquery, an
+    # `IN (subquery)`; TODO.md item 97). Default 1 = at most one level of nesting.
+    # 0 disables nested subqueries entirely. All the count caps above
+    # (max_joins/max_select_columns/max_group_by/max_where_predicates/top_n) are
+    # additionally enforced SUMMED across the whole query tree, so nesting can
+    # never multiply the effective cap.
+    max_subquery_depth: int = pyd.Field(default=1, ge=0)
     max_limit: int = pyd.Field(default=100)
     max_limit_aggregate: int = pyd.Field(default=1000)
     default_limit: int = pyd.Field(default=50)

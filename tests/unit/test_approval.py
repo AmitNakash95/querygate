@@ -314,6 +314,77 @@ async def test_execute_pauses_then_admits_after_approval(monkeypatch):
     assert result.row_count == 1
 
 
+@pytest.mark.asyncio
+async def test_execute_many_admits_only_the_query_its_token_matches(monkeypatch):
+    # A batch where every query trips the gate: only the query whose fingerprint
+    # is in approval_tokens runs; the others stay fail-closed as per-item errors.
+    monkeypatch.setattr(svc.app_config, "approval_token_hmac_key", _KEY)
+    set_policy_store(PolicyStore(default=Policy(approval_max_estimated_rows=100), overrides={}))
+    table = sa.Table("orders", sa.MetaData(), sa.Column("id", sa.Integer, primary_key=True))
+    approved = StructuredQuery(from_table="orders", select=["orders.id"], limit=10)
+    other = StructuredQuery(from_table="orders", select=["orders.id"], limit=20)
+
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    estimate = QueryCostEstimate(estimated_rows=500, estimated_total_cost=None)
+    token = issue_approval_token(
+        fingerprint=query_fingerprint(approved), approver_subject="a", key=_KEY
+    )
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"orders": table})),
+        patch.object(svc, "session_scope", _scope),
+        patch.object(svc, "estimate_postgres_query_cost", AsyncMock(return_value=estimate)),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        results = await service.execute_many(
+            [approved, other],
+            approval_tokens={query_fingerprint(approved): token},
+        )
+    assert results[0].row_count == 1 and results[0].error is None
+    # The token is bound to `approved`'s fingerprint, so `other` — with a
+    # different fingerprint and no token of its own — stays gated.
+    assert results[1].row_count is None and results[1].error is not None
+
+
+@pytest.mark.asyncio
+async def test_execute_many_rejects_a_token_replayed_onto_another_query(monkeypatch):
+    # A token minted for one query must not admit a different query in the batch,
+    # even though the map lookup would never hand it over — assert the per-query
+    # fingerprint binding in execute() is the real guard, not the map key.
+    monkeypatch.setattr(svc.app_config, "approval_token_hmac_key", _KEY)
+    set_policy_store(PolicyStore(default=Policy(approval_max_estimated_rows=100), overrides={}))
+    table = sa.Table("orders", sa.MetaData(), sa.Column("id", sa.Integer, primary_key=True))
+    approved = StructuredQuery(from_table="orders", select=["orders.id"], limit=10)
+    other = StructuredQuery(from_table="orders", select=["orders.id"], limit=20)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield AsyncMock()
+
+    estimate = QueryCostEstimate(estimated_rows=500, estimated_total_cost=None)
+    token = issue_approval_token(
+        fingerprint=query_fingerprint(approved), approver_subject="a", key=_KEY
+    )
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"orders": table})),
+        patch.object(svc, "session_scope", _scope),
+        patch.object(svc, "estimate_postgres_query_cost", AsyncMock(return_value=estimate)),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        # Deliberately hand `other`'s fingerprint the approved query's token.
+        results = await service.execute_many(
+            [other], approval_tokens={query_fingerprint(other): token}
+        )
+    assert results[0].error is not None
+
+
 _KEY_APIKEY = "approver-key"
 
 

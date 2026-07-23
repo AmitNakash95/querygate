@@ -159,6 +159,42 @@ def _where_column_refs(node: WhereNode) -> Iterator[str]:
         yield from _where_column_refs(child)
 
 
+def iter_where_and_having_predicates(query: StructuredQuery) -> Iterator[Predicate]:
+    """Every Predicate in a query's own WHERE tree and HAVING list (this scope
+    only — does NOT descend into a predicate's `value_subquery`, which is a
+    separate scope). The one place a `value_subquery` (item 97) can be attached."""
+    if query.where is not None:
+        yield from _where_predicates(query.where)
+    yield from query.having
+
+
+def _where_predicates(node: WhereNode) -> Iterator[Predicate]:
+    if isinstance(node, Predicate):
+        yield node
+        return
+    if node.not_terms is not None:
+        yield from _where_predicates(node.not_terms)
+        return
+    for child in node.and_terms or node.or_terms or []:
+        yield from _where_predicates(child)
+
+
+def iter_query_scopes(
+    query: StructuredQuery, _depth: int = 0
+) -> Iterator[Tuple[int, StructuredQuery]]:
+    """Yield `(depth, query)` for the outer query (depth 0) and every nested
+    `value_subquery` (item 97), depth-first. Each yielded query is an INDEPENDENT
+    validation scope: its column references resolve against its own from/join
+    tables (never an outer scope's), which is exactly what makes an `IN (subquery)`
+    structurally uncorrelated. Policy and schema validation walk these scopes so
+    a subquery gets the full allow/deny + cap treatment, and so caps can be summed
+    tree-wide (never per-level) to stop nesting being a cap-multiplier bypass."""
+    yield (_depth, query)
+    for pred in iter_where_and_having_predicates(query):
+        if pred.value_subquery is not None:
+            yield from iter_query_scopes(pred.value_subquery, _depth + 1)
+
+
 def iter_column_refs(query: StructuredQuery) -> Iterator[ColumnRef]:
     """THE canonical reference visitor: yield one `ColumnRef(position, ref)` for
     every genuine Table.Column reference a query contains, across every position
@@ -382,13 +418,49 @@ def _validate_join_graph(query: StructuredQuery) -> None:
 
 
 async def validate_schema(
+    query: StructuredQuery,
+    connection_id: str,
+    principal: Optional[Principal] = None,
+    *,
+    scope_tables: Optional[Dict[int, Dict[str, sa.Table]]] = None,
+) -> Dict[str, sa.Table]:
+    """Reflect + verify every table/column the query — and every nested
+    value_subquery (item 97) — references exists.
+
+    Returns the OUTER query's reflected tables, keyed by the name the query used,
+    for the compiler. If `scope_tables` is provided, it is populated with each
+    scope's reflected tables keyed by that scope query's `id`, so the compiler can
+    recursively render `IN (subquery)`. Each subquery is validated as an
+    independent scope (its refs resolve to its own tables — undeclared-table
+    rejection is exactly what makes a correlated reference to an outer table fail),
+    and a subquery is required to stay single-connection (cross-connection nesting
+    is rejected, per item 97's minimal-safe subset)."""
+    outer_tables: Optional[Dict[str, sa.Table]] = None
+    for depth, scope in iter_query_scopes(query):
+        if depth > 0:
+            for join in scope.joins:
+                if join.connection is not None and join.connection != connection_id:
+                    raise QueryValidationError(
+                        f"cross-connection subquery: a nested IN (subquery) may not join to "
+                        f"another connection ({join.connection!r}) — run a separate query per "
+                        "connection and combine results instead (item 97)."
+                    )
+        scoped_tables = await _reflect_and_validate_scope(scope, connection_id, principal)
+        if scope_tables is not None:
+            scope_tables[id(scope)] = scoped_tables
+        if depth == 0:
+            outer_tables = scoped_tables
+    if outer_tables is None:  # unreachable: iter_query_scopes always yields depth 0
+        raise QueryValidationError("internal error: query had no top-level scope to validate")
+    return outer_tables
+
+
+async def _reflect_and_validate_scope(
     query: StructuredQuery, connection_id: str, principal: Optional[Principal] = None
 ) -> Dict[str, sa.Table]:
-    """Reflect + verify every table/column the query references exists.
-
-    Returns the reflected tables, keyed by the name the query used, for the
-    compiler.
-    """
+    """Reflect + verify one query scope (the outer query, or a single subquery),
+    independent of any other scope — its column refs resolve only against its own
+    from/join tables."""
     table_connection = resolve_query_table_connections(query, connection_id, principal=principal)
     _validate_join_graph(query)
     name_to_physical = effective_name_map(query)

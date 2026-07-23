@@ -1,0 +1,12 @@
+# Policy used only by scripts/release_smoke.sh to exercise a real governed WRITE
+# against the shipped image. Reads stay permissive (as the demo example is);
+# writes are enabled on `orders` with a small cap so the smoke can insert ->
+# verify -> delete -> verify. Not a shipped default — the product stays
+# deny-by-default for writes.
+default:
+  enabled: true
+  write:
+    enabled: true
+    allowed_tables: ["orders"]
+    allowed_operations: ["insert", "update", "delete"]
+    max_affected_rows: 100

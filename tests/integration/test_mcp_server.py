@@ -36,6 +36,7 @@ _EXPECTED_TOOLS = {
     "describe_table",
     "search_catalog",
     "run_structured_queries",
+    "run_structured_writes",
     "search_querygate_guide",
     "get_querygate_guide_topic",
     "get_querygate_setup_checklist",

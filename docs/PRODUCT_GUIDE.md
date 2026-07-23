@@ -559,6 +559,58 @@ designer, which already composed a validated `Policy` layer into the draft the
 same way; item 87 brought that "form instead of YAML" ergonomics to templates,
 the one config document that still lacked it.
 
+### Governed Writes (the write pipeline)
+
+Governed writes (TODO.md item 93) extend the same spine to **mutations** —
+INSERT / UPDATE / DELETE / UPSERT — without ever crossing the core invariant: a
+write is a **typed AST**, never a raw-DML string. (UPSERT compiles to native
+`ON CONFLICT DO UPDATE` on Postgres/SQLite and is rejected on MSSQL, which has no
+such clause — reject-not-emulate.) `write_ast/` mirrors `query_ast/`
+(`InsertStatement`/`UpdateStatement`/`DeleteStatement`, discriminated on `op`),
+an UPDATE/DELETE **structurally requires** a WHERE (an unqualified one cannot be
+expressed), and set-values and predicates reuse the read AST — so an injected
+value can only ever land in a bound parameter. A write flows through the write
+siblings of every read stage: `validate_write_policy` → `validate_write_schema` →
+`compile_write` (SQLAlchemy Core `insert()/update()/delete()`) → execute → audit.
+
+- **WritePolicy is deny-by-default.** Writes are off unless enabled, and then only
+  for allowed tables/operations, with a `max_affected_rows` cap and per-column
+  write allow/deny (separate from read allow/deny). A default deployment cannot
+  write at all.
+- **Preview, and the old→new diff.** `POST /{connection}/write/preview` validates,
+  compiles, and reports the affected-row count + parameterized SQL, all without
+  mutating. `?include_diff=true` adds the killer feature: the bounded, old→new row
+  diff of exactly what would change — computed by running the DML in a
+  **rolled-back** transaction. The diff is the one write surface that returns row
+  values, so it is bounded (`max_diff_rows`), masking-aware (a read-masked column
+  is redacted), and never audited.
+- **Gated execution.** `POST /{connection}/write/execute` commits in a single
+  transaction: it counts matched rows *in that transaction*, aborts before
+  mutating if over the cap (and re-checks the statement's own rowcount so a race
+  can't over-write), runs the item-92 approval gate on the row count (REST token
+  or MCP elicitation), and rolls the whole thing back on any error — never a
+  partial write. A constraint/type violation surfaces as a clean typed 4xx, not a
+  500 or a raw-driver leak.
+- **No undo — by design.** QueryGate deliberately does not snapshot rows to offer
+  a rollback: a second copy of the customer's data outside its source of truth is
+  exactly the footprint an operational-database gateway should not add, and it
+  would place unredacted row values in a second store. The safety model is
+  *prevention*, not reversal — the diff preview and the approval gate put a human
+  in front of the exact change before it commits. See the Decision Log entry that
+  records removing the earlier compensation/undo mechanism.
+- **Both transports, no raw field on either.** REST routes above, plus the MCP
+  `run_structured_writes` tool (`mode=preview|execute`, batch, `include_diff`,
+  in-session elicitation approval). Audit is redaction-safe, dual-identity (item
+  90), tamper-evident (item 91): op/table/affected-count only, never a value.
+
+The claim is deliberately **governed** writes — *bounded, previewed, approved,
+attributed* — never "safe autonomous writes." What's guaranteed by
+construction (no raw DML, every target policy-checked, no unqualified
+UPDATE/DELETE, bounded rows) eliminates the catastrophic-shape class; the residual
+("did the agent intend *this* change") is what preview + approval make
+reviewable and attributable. See the Decision Log for the approval authorization
+model and the honest bounded limits.
+
 ## Security Model
 
 The [Core Request Pipeline](#the-core-request-pipeline) section explains what
@@ -575,7 +627,7 @@ or worked around.
 > Credentials never sit on any returned model, and that's asserted against the
 > live API schema, not by convention. And none of it is "trust us": every
 > guarantee is backed by a deny-by-default CI gate (static analysis, dependency
-> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 191-case
+> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 260-case
 > adversarial suite), and reviewers get a reproducible packet where each claim
 > names the command that reproduces it. The published container image is signed
 > (cosign keyless) and carries SLSA build provenance, both consumer-verifiable.
@@ -815,7 +867,7 @@ summary.
 
 The gates fall into three groups:
 
-- **The access boundary itself.** The adversarial security suite (191 cases,
+- **The access boundary itself.** The adversarial security suite (260 cases,
   `make test-security`) encodes specific known bypass classes as regressions —
   denied-column inference, undeclared-table smuggling, predicate-as-SQL,
   schema-discovery leaks, policy-cap breaches, audit no-leak. On top of that,
@@ -2528,7 +2580,7 @@ report. Every guarantee is backed by an open-source, deny-by-default check
 that runs in CI on every change: static analysis (Bandit + Semgrep), a
 dependency-CVE audit of the exact shipped set (pip-audit), a CycloneDX SBOM
 per release, container-image scanning (Trivy), full-history secret scanning
-(gitleaks), and OpenAPI fuzzing (Schemathesis) on top of the 191-case
+(gitleaks), and OpenAPI fuzzing (Schemathesis) on top of the 260-case
 adversarial suite. A regression that weakened any of them fails the build.
 For a reviewer under NDA, `docs/SECURITY_POSTURE.md` is a reproducible packet
 — every claim names the command that reproduces it. The published image is
@@ -2543,6 +2595,283 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — REMOVED: the governed-write undo/compensation mechanism (item
+  93). Reversibility is no longer a QueryGate capability; governed writes keep the
+  preview → approve → attribute → audit governance tier.** This supersedes the
+  earlier phase-3a/3b reversibility entries below (bounded reversibility, undo
+  semantics, the Redis-backed compensation store, RETURNING capture) — retained
+  as history, but they no longer describe shipping behavior. **Why removed.** Undo
+  was the only part of the write feature that forced QueryGate to keep a second
+  copy of the customer's *actual row values* outside their database (an
+  in-process/Redis compensation store). That (a) placed unredacted sensitive data
+  in a second store and expanded the compliance/attack surface — squarely against
+  the North Star's least-privilege, data-never-leaves posture — and (b) opened a
+  run of correctness landmines a security product cannot ship casually
+  (capture/undo isolation races, blind-clobber of concurrent writes, store
+  durability). Its marginal value is low once preview + approval exist: a human
+  has already seen and approved the exact diff, so a rollback net is a
+  nice-to-have, not the point. Removing it **reclaims the core security
+  proposition — QueryGate never persists your data outside its source of truth**
+  — while keeping the differentiator: a bounded, previewed, human-approved,
+  attributed, audited write with no raw DML. **Removed:**
+  `execution/compensation.py` + `execution/redis_compensation.py`,
+  `WritePolicy.compensation_enabled`/`max_compensation_rows`/`compensation_ttl_seconds`,
+  `POST /{connection}/write/undo`, the MCP `undo_structured_write` tool, and the
+  `compensation_id` field on write results. **Unchanged:** preview + diff, gated
+  execution, the approval gate, dual-identity + tamper-evident audit,
+  deny-by-default, the affected-row cap. If durable reversibility is ever
+  revisited, the correct path is the customer's *own* database history (temporal
+  tables / CDC), never a QueryGate-owned copy — a fresh decision, not a revival of
+  this mechanism.
+- **2026-07-23 — Governed Writes Phase 3b: upserts (INSERT ON CONFLICT DO UPDATE)
+  ship for Postgres/SQLite and are *rejected* on MSSQL — reject-not-emulate, no
+  synthesized MERGE (item 93).** A new `UpsertStatement` (insert rows, but on a
+  unique/PK conflict on `conflict_columns`, update `update_columns`) compiles to
+  the native construct via a per-dialect compiler **registry**
+  (`compiler/write_compiler.py` `_UPSERT_COMPILERS` — no inline `if dialect ==`,
+  per the composable-interface rule). MSSQL has no `ON CONFLICT`; rather than
+  emulate a `MERGE` the caller never expressed, it is rejected with a clear error
+  pointing at the primitives (a separate governed update-then-insert) — the same
+  item-74 posture as `array_agg` and MSSQL `NULLS`. Still no raw DML: the conflict
+  target and updated columns are validated identifiers, and the values are bound
+  parameters. Proven on real Postgres (insert-then-update-on-conflict) and MSSQL
+  (rejection).
+- **2026-07-23 — Governed Writes Phase 3b: reversibility's documented limits are
+  closed — serial-PK inserts are undoable (RETURNING), undo works under HA (a
+  Redis-backed compensation store), and an UPDATE undo refuses on drift instead
+  of silently clobbering (item 93).** **(3) Optimistic concurrency.** An UPDATE
+  undo reads each affected row's current changed-column values and **refuses**
+  (422) if any differs from what the write set — or the row no longer exists — so
+  a concurrent change since the write is never silently overwritten; the pre-3b
+  behavior clobbered the snapshot value. The phase-3a self-review left
+  two honest limitations; phase 3b removes them. **(1) RETURNING capture.** An
+  INSERT that omits a single-column PK (serial/identity — the common case) now
+  executes with `RETURNING pk` in the same transaction, so its generated keys are
+  captured and the insert is undoable (was `compensation_id=null`). Supplied-PK
+  inserts are unchanged. **(2) `RedisCompensationStore`.** The `CompensationStore`
+  is now async + pluggable (mirroring the concurrency/quota limiters); when
+  `CONCURRENCY_BACKEND=redis`, `create_app` installs a Redis-backed store, so a
+  `compensation_id` minted on one replica is resolvable on every replica and undo
+  works under the multi-replica HA deployment (item 56) — closing the self-review
+  #1 gap. The pre-image round-trips through Redis as JSON (datetime/Decimal become
+  strings; the compiler's `_coerce_write_value` restores their Python types on
+  undo — verified end-to-end). Sensitivity is stated honestly: the Redis store
+  holds real pre-image values, so it is secured like the concurrency/quota Redis
+  (network isolation + auth; TTL bounds exposure; field-level encryption-at-rest
+  is a further hardening); the redaction-safe audit still carries only the id +
+  counts.
+- **2026-07-23 — Governed Writes undo semantics (item 93 phase 3a hardening):
+  undo is atomic, restores only the changed columns, and is authorized by the
+  compensation id rather than re-running the approval/op gates.** A self-review
+  of the first undo cut surfaced real gaps; the resolutions are deliberate, not
+  incidental. **(1) Undo is atomic all-or-nothing.** All inverse statements run
+  in ONE transaction (`_apply_undo_atomically`), committing once — a failure
+  reverses nothing and does not consume the compensation record, so undo upholds
+  the same "no partial write" guarantee the forward path does. (The first cut ran
+  each inverse through its own `execute()`/commit, which could half-reverse a
+  multi-row UPDATE and orphan the record.) **(2) Undo restores only the columns
+  the original write changed**, captured as `changed_columns` (the UPDATE's `set`
+  keys) — so an undo's blast radius never exceeds the change it reverses, and a
+  concurrent change to an untouched column is preserved. It still restores the
+  *snapshotted* value of those columns (a concurrent change to a changed column
+  since is overwritten — a documented bounded limit; optimistic-concurrency
+  detection is a later refinement). **(3) Undo is authorized by the
+  compensation id**, which is single-use, TTL'd, connection-scoped, and only ever
+  returned to whoever executed the original governed write. Undo therefore does
+  NOT re-trigger the approval gate (the forward write was already approved; undo
+  restores the lower-risk prior state — otherwise exactly the high-impact writes
+  you most want to reverse would be un-undoable) and does NOT re-check the
+  inverse op against `allowed_operations` (undoing a DELETE is an INSERT;
+  requiring INSERT to be separately enabled would make reversibility unusable).
+  It still enforces deny-by-default (writes enabled + table writable), the
+  affected-row cap, schema truth, and full audit (`undo_structured_write`).
+  **Known bounded limits, documented for callers, not hidden:** the compensation
+  store is process-local, so undo needs single-replica or session affinity
+  (durable cross-replica store is phase 3b — see `deploy/HA_DR.md`); and an
+  INSERT with a server-generated PK returns `compensation_id=null` (not
+  undoable without RETURNING capture — supply the PK to make it reversible).
+- **2026-07-23 — Governed Writes Phase 3a: bounded reversibility (undo) stores
+  pre-images in a QueryGate-owned compensation store, NOT an in-DB shadow table,
+  and undoes by re-applying through the governed write pipeline (item 93).** The
+  "reversible" pillar. Two storage designs were on the table; the choice is the
+  gate this phase required. **(1) Rejected: an in-DB shadow table.** Snapshotting
+  pre-images into a table in the customer's operational database would keep undo
+  transactionally atomic with the write, but it demands DDL + write privilege on
+  the operational DB *beyond* the governed-write target tables — a large,
+  invasive expansion of QueryGate's footprint that contradicts the North Star
+  (least-privilege, we don't own or mutate your storage's shape). **(2) Chosen: a
+  QueryGate-owned, bounded, TTL'd compensation store.** Before a gated mutation
+  commits, QueryGate captures a bounded pre-image of the affected rows (UPDATE/
+  DELETE) or the inserted keys (INSERT) into its *own* store (a `CompensationStore`
+  protocol, in-memory default, mirroring the audit-sink pattern), and returns a
+  `compensation_id`. Undo (`POST /write/undo`, scope-gated) reads that record and
+  re-applies the inverse **as an ordinary governed write** — a DELETE-undo
+  re-INSERTs the captured rows, an INSERT-undo DELETEs by key, an UPDATE-undo
+  restores the old values by primary key — so the undo is itself validated,
+  capped, and audited; no new privilege or bypass path exists. **Honest limits,
+  documented, not hidden:** bounded reversibility only — it cannot unwind
+  cascading triggers/FK actions or side effects, and a downstream consumer may
+  already have read the changed value; a snapshot is capped by policy
+  (rows/bytes) and expires (TTL). **Redaction posture:** a pre-image necessarily
+  holds real row *values* (you cannot restore what you redact), so the
+  compensation store is a distinct, access-controlled, short-lived store — the
+  redaction-safe **audit** stream still carries only the `compensation_id` +
+  counts, never the values, preserving that invariant.
+- **2026-07-23 — Governed Writes Phase 2b: the dry-run preview gains the bounded
+  old→new row *diff* — the one place a preview deliberately shows values, kept
+  safe by being bounded, masking-aware, and never audited (item 93).** The
+  headline governed-writes feature: `POST /write/preview?include_diff=true`
+  returns exactly which rows an INSERT/UPDATE/DELETE would change and how
+  (`before`/`after` per row), computed by running the DML inside a transaction
+  and **rolling it back** — so even the diff mutates nothing. This is the only
+  QueryGate surface that returns row values, which is the point (a human approves
+  *this specific change*), so three guards make it safe and were chosen
+  deliberately: it is **bounded** by `WritePolicy.max_diff_rows` (a preview can
+  never dump a table — a larger affected set comes back `truncated`); it is
+  **masking-aware** (a column the read policy masks is redacted to `***MASKED***`
+  in the diff, so the value-bearing preview can't become a masking bypass); and
+  it is **transient to the caller only** — the redaction-safe audit event still
+  carries counts/shapes, never these values. UPDATE old→new is read back by
+  single-column primary key after the in-txn DML (real committed shape,
+  DB-side effects included), falling back to applying the SET in Python for a
+  composite/absent PK. Opt-in per request (`include_diff`), so the default
+  preview stays a cheap count.
+- **2026-07-23 — Governed Writes Phase 2a: gated write *execution* is enabled
+  (maintainer-approved), still deny-by-default and with no raw DML — a write
+  commits only when in-policy, capped inside its own transaction, atomic, and
+  audited (item 93).** Phase 1 shipped the write contract + dry-run preview with
+  execution disabled; the read-only line is now crossed for *execution*, on
+  explicit maintainer approval, for single-table INSERT/UPDATE/DELETE. The whole
+  point is that crossing it changes the safety *surface* as little as possible —
+  a write reuses the exact validate → policy → schema → compile spine reads use,
+  so the guarantees are structural, not bolted on. What Phase 2a guarantees, and
+  proves in tests: **(1) Deny-by-default.** `WritePolicy.enabled` is false out of
+  the box and a write needs its table in `allowed_tables` and its op in
+  `allowed_operations`; a default deployment cannot write at all. **(2) No raw
+  DML, ever.** Execution runs the *same* validated `write_ast` → `compile_write`
+  Core statement the preview compiles — there is no raw-SQL field or string path,
+  and an injected value can only ever populate a bound parameter. **(3) The
+  affected-row cap is enforced *inside the transaction*.** The service counts
+  matched rows in the same transaction that will mutate them and aborts (rolls
+  back) before mutating if the count exceeds `max_affected_rows` — so a
+  concurrent insert can't push a write over its cap between preview and execute.
+  **(4) One transaction, no partial write.** Each write runs in a single explicit
+  transaction; any error (validation, cap, DB, deadlock) rolls the whole thing
+  back and surfaces a clean typed error — never a half-applied mutation.
+  **(5) The approval gate extends to writes.** Reusing item 92's machinery, a
+  write whose affected-row count crosses `WritePolicy.require_approval_over_rows`
+  pauses for a human: REST returns `428` with the write's fingerprint, and a
+  `query:approve`-scoped grant issues a fingerprint-bound token to resubmit —
+  the agent can't approve its own write. **(6) Redaction-safe, dual-identity,
+  tamper-evident audit.** The write reuses `audit_query` (operation
+  `execute_structured_write`) so it inherits per-human attribution (item 90) and
+  the hash-chained ledger (item 91); the event carries the op, table, affected
+  count, and *parameterized* SQL — never a SET value, predicate literal, or row.
+  **Deliberately deferred to 2b/3** (each its own slice, so this one stays
+  reviewable): the row-level old→new diff preview, the MCP `run_structured_writes`
+  execute tool, the write concurrency load gate + `release-smoke` write round-trip,
+  compensation/undo (bounded reversibility), upserts/multi-row batch, and MSSQL
+  execution parity. The claim remains *governed* writes — bounded, previewed,
+  approved, attributed — never "safe autonomous writes."
+- **2026-07-23 — The MCP elicitation approval channel is opt-in and off by
+  default: a client-human's in-session elicitation response counts as an
+  approval only when the operator explicitly enables it (item 92).** Completing
+  the in-query approval gate, the interactive MCP channel was built so a gated
+  query can be approved *within the querying session* via `Context.elicit`
+  instead of the out-of-band REST `query:approve` token round-trip. The
+  security question this settled: an elicitation response carries **no
+  authenticated approver identity** — it is a form answer from whoever operates
+  the client — so treating it as an approval is a deliberate trust decision, not
+  a default. Three choices were made in the open. **(1) Off by default
+  (`MCP_ELICITATION_APPROVAL_ENABLED=false`).** REST enforces separation of
+  duties structurally (`query:approve` is a distinct scope, so an agent can't
+  approve its own read); the elicitation channel trades that structural
+  separation for a human-in-the-loop one, so an operator must opt in. Left off,
+  a gated MCP query stays fail-closed and the only approval path is the REST
+  token flow. **(2) Separation of duties is preserved by the medium, not a
+  scope.** The querying agent physically cannot satisfy its own gate here —
+  only a *human* answering the client's elicitation prompt can — so the agent
+  can't self-approve even though the approval happens in its own session. That
+  is the whole point of elicitation as the HITL primitive. Deployments where the
+  client's human is *not* a trusted approver leave the channel off. **(3) The
+  minted token is bound and attributed.** On approval the server mints the same
+  fingerprint-bound, short-lived HMAC token the REST flow issues (so it can't be
+  reused for another query), with `approver_subject` recorded as
+  `mcp-elicitation:<caller>` to mark in the audit trail that approval came from
+  an interactive session, not a scoped `query:approve` grant. The channel plugs
+  into `execute_many` through a narrow injected `ApprovalResolver` callback, so
+  the execution service never imports MCP and the batch/error logic stays in one
+  place. Still opt-in, read-only, AST-only — a default deployment is unchanged.
+- **2026-07-23 — Governed Writes Phase 1 (contract + dry-run preview, execution
+  DISABLED) is approved and built; the read-only line is crossed for *preview
+  only* (item 93; maintainer-approved).** The decision to cross read-only was
+  made explicitly for Phase 1's zero-write-risk surface. What ships: a
+  `write_ast/` contract (`InsertStatement`/`UpdateStatement`/`DeleteStatement`,
+  a discriminated union dispatched via a type registry — **no raw-DML field of
+  any kind**; SET-values and predicates reuse the *existing* read AST surface —
+  whitelisted scalar functions + the `Predicate` filter tree), a `WritePolicy`
+  (opt-in `writes_enabled`, per-table allowed operations, allowed write
+  columns, `max_affected_rows`), write policy + schema validation mirroring the
+  read validators, a write compiler, and a **dry-run diff engine** that runs the
+  compiled write inside a transaction, computes a bounded before/after diff, and
+  **ROLLS BACK** — no code path can commit. Two structural guarantees carry the
+  safety story: (1) `UPDATE`/`DELETE` **require** a WHERE clause (an unqualified
+  mutation is impossible by construction, not by lint), and (2) the affected-row
+  count is capped by policy. The claim is deliberately bounded — "governed
+  writes: bounded, previewed, approved, attributed, reversible", never "safe
+  autonomous writes" or a "100%". **What is NOT in Phase 1:** any execution/
+  commit path (Phase 2, gated on items 90/91/92), compensation/undo (Phase 3),
+  upserts/batch/MSSQL-parity (Phase 3). The preview is immediately useful on its
+  own as a "what would this change?" planner and validates the whole
+  AST/policy/compiler design before any real mutation.
+- **2026-07-23 — Reversed: `connections/dialects.py`'s inline dialect branching
+  is now a `SessionDialectAdapter`, a SEPARATE async abstract base from the sync
+  compiler `DialectAdapter` (item 57; maintainer-approved).** A prior decision
+  kept `connections/dialects.py`'s `if dialect == ...` branching as a deliberate
+  "lighter-weight" exception to the composable-interface doctrine. With dialect
+  breadth (item 19) now a priority, that exception is reversed: engine-URL/
+  connect-args/query-timeout/session-guardrail behavior is formalized as one
+  concrete `SessionDialectAdapter` per dialect, dispatched via a registry, so
+  adding a dialect is "implement + register", not "find every inline branch".
+  **The deliberate part of the reversal is keeping it a *separate* ABC from the
+  compiler's `DialectAdapter`, not merging them:** the session adapter is *async*
+  (it runs `SET ...` on a live session and hooks pool `connect` events) while the
+  compiler adapter is *sync* (it builds SQL expressions) — one interface spanning
+  both execution models would be awkward, so the pattern is reused (per-dialect
+  class + registry) but the two layers stay distinct. Behavior-preserving (the
+  module functions are kept as thin dispatchers; proven by the unchanged
+  `test_dialects.py` plus a new registry test). The cost-estimation hook the
+  item also mentions stays Postgres-only until MSSQL cost estimation (item 26
+  ph2) exists — that remains the one documented inline-branch exception.
+- **2026-07-23 — Bounded nested subqueries are added as a recursive AST node with
+  caps enforced TREE-WIDE, not per-level, and only the uncorrelated/single-
+  connection/depth-capped subset (item 97; maintainer-approved).** The AST gains
+  caller-authored nesting for the first time — a `Predicate.value_subquery` (an
+  `IN (subquery)` value set that is itself a full validated `StructuredQuery`),
+  phase 1. This is a deliberate capability expansion approved by the maintainer,
+  and it crosses **no** North Star non-goal: a subquery is still a fully
+  validated AST, never a raw-SQL string. Three decisions make it safe. **(1)
+  Caps sum tree-wide.** Every count-based cap (`max_select_columns`, `max_joins`,
+  `max_group_by`, `max_where_predicates`, in-list size, `top_n`) is enforced on
+  the **sum across the whole query tree**, and `max_where_depth` per query, so
+  nesting can never be used as a cap-multiplier bypass (the exact attack this
+  node introduces). A new `max_subquery_depth` (default 1) bounds nesting itself.
+  **(2) The canonical visitor (item 96) descends into subqueries**, so column
+  allow/deny and the masked-column rule apply to a subquery's base-table
+  references automatically — a denied/masked column can't hide one level down.
+  Each subquery is an **independent scope**: its column refs resolve to its own
+  from/join tables (a virtual relation), never the outer's, which is *also* what
+  makes it structurally uncorrelated. **(3) Reject, don't emulate** (the item-74
+  precedent): a **correlated** subquery (inner references an outer row), a
+  **cross-connection** subquery, and an **over-depth** subquery are each rejected
+  with a `QueryValidationError` pointing at the primitive to use instead (joins;
+  a separate per-connection query; a shallower shape) rather than being
+  half-supported. Phase 1 ships `IN (subquery)`; `FROM (subquery)` (a derived
+  table the outer selects from) is phase 2, because it additionally needs the
+  outer query to resolve against the inner's *output* aliases without reaching
+  past them into inner base tables. Full local adversarial coverage
+  (`tests/security/`) proves the caps and allow/deny hold through nesting;
+  MSSQL SQL-rendering parity (mechanical, not a security surface) is CI-validated.
 - **2026-07-23 — Four-eyes config approval is enforced server-side, author≠approver
   is structural, and rollback is exempt from the gate (item 42 phase 1).** Adding
   separation of duties to the config plane, three decisions were made. **(1)
@@ -2586,10 +2915,15 @@ reasoning behind them, newest first. Added to incrementally as work happens
   one set of reasons so a single approval token covers whatever tripped it, and
   it rejects with `428 Precondition Required` + fingerprint/reasons. The
   sensitivity trigger is dialect-agnostic (works on MSSQL, no estimate needed).
-  The remaining phase-2 piece is the interactive MCP elicitation channel. The
-  whole gate is opt-in per policy and off by default, so it changes nothing for
-  an existing deployment, preserving the read-only, AST-only invariant (it only
-  *adds* a pre-execution pause).
+  The same fingerprint→token flow extends to **batch** (`POST /query/batch`
+  carries a `fingerprint → token` map): a batch can run an approval-gated query
+  while an unapproved one in the same batch stays fail-closed as that item's
+  error, and each token is still bound to its own query's fingerprint so it
+  can't be replayed onto another query in the batch. The remaining phase-2 piece
+  is the interactive MCP elicitation channel. The whole gate is opt-in per policy
+  and off by default, so it changes nothing for an existing deployment,
+  preserving the read-only, AST-only invariant (it only *adds* a pre-execution
+  pause).
 - **2026-07-23 — RFC 9728 `scopes_supported` advertises the full scope
   vocabulary, kept distinct from the `mcp_required_scopes` access gate; role
   bundles are advisory and generated, never enforced or hand-maintained (item

@@ -124,7 +124,7 @@ order-of-magnitude, not commitments.
 | 90 | ✅ Delegated agent identity (on-behalf-of) into policy + dual-identity audit | M | 8, 10, 23 |
 | 91 | ✅ Tamper-evident hash-chained audit ledger + per-query compliance receipts | M | 23 |
 | 92 | In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) | L | 26, 90, 91 |
-| 93 | Governed Writes — structured, bounded, previewable, reversible agent mutations (decision-gated) | XL | 25, 48, 90, 91 |
+| 93 | Governed Writes — structured, bounded, previewable, governed agent mutations (decision-gated) | XL | 25, 48, 90, 91 |
 | 94 | Verify/enable prepared-statement plan reuse for template execution | S | 48 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
@@ -273,126 +273,9 @@ the estimate's own warning was correct — the MSSQL ODBC apt-install step had r
 
 `querygate-validate-config` (registered as a poetry script, `make validate-config`) loads both files through the same Pydantic validation the app uses at runtime and… **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 17).
 
-### 26. Query-cost estimation before execution
+### 26. Query-cost estimation before execution ✅ DONE
 
-**Phase 1 (Postgres `EXPLAIN`-based estimation) ✅ DONE.** **Phase 2 (MSSQL
-estimated-plan equivalent) not started — split out below because it needs a
-different connection-lifecycle shape than phase 1's, not just more test
-coverage.**
-
-**Phase 1 shipped:** `execution/cost_estimation.py`'s
-`estimate_postgres_query_cost()` plans (never runs) the already-validated,
-already-compiled `Select` with `EXPLAIN (FORMAT JSON)` — the statement is
-rendered once with `literal_binds=True` (the same fallback-on-failure
-pattern `execution/service.py`'s `_compile_to_text` already uses) so the
-whole EXPLAIN is one self-contained string; no data is exposed by doing this
-since EXPLAIN never executes the statement. It reads the root plan node's
-`Plan Rows`/`Total Cost` and hands them to `enforce_cost_estimate()`, which
-raises a new `CostEstimateExceededError` (subclasses `PolicyViolationError`,
-mirroring `ConcurrencyLimitError`'s rationale — same client-error handling,
-but its own metrics reason: `querygate_queries_rejected_total{reason="cost_estimate"}`,
-broken out from the coarser `policy` bucket) with a message that tells the
-agent what to do next ("narrow the query with additional filters, a smaller
-limit/top_n, or a more selective time range"), not just that it was denied.
-
-New `Policy.max_estimated_rows`/`max_estimated_cost` (both `Optional`,
-default `None` — unset means fully disabled, zero behavior change for
-existing deployments) gate this in `StructuredQueryService.execute()`,
-inside the same session/transaction already opened for the real query — one
-extra round-trip, not a second connection. Deliberately **not** wired into
-`explain_structured_query`: that call has an existing, tested invariant
-(`test_explain_does_not_open_a_db_session`) that it never touches the
-database at all, staying a pure, always-cheap compile preview; adding a live
-EXPLAIN round-trip there would break that contract for a feature explicitly
-scoped to gating `execute()`.
-
-**Fail-open by design, not fail-closed:** if EXPLAIN can't be obtained or
-parsed for a given query (an unusual construct that can't render with
-literal binds, an unexpected plan shape), `estimate_postgres_query_cost()`
-logs a warning and returns `None` rather than raising — the query proceeds
-and is still bounded by every existing reactive guardrail (row caps,
-timeout, concurrency, response-byte cap). This is a deliberate trade-off:
-the feature adds proactive rejection of *likely* full scans/join
-explosions without becoming a new way to accidentally block legitimate
-traffic on an EXPLAIN edge case.
-
-**Follow-up shipped in this same pass — fail-open observability and a
-calibration mode, so the two honest caveats above ("fails open" and
-"thresholds aren't portable, so they need per-deployment tuning") aren't
-silent gaps:**
-
-- `querygate_cost_estimation_attempts_total{connection}` and
-  `querygate_cost_estimation_unavailable_total{connection,reason}` (reason:
-  `compile_failed`/`explain_failed`/`plan_parse_failed`) make the fail-open
-  path observable instead of only a stdout warning — an operator can alert
-  on the unavailable counter climbing, which means the gate has silently
-  stopped evaluating queries on that connection, rather than discovering it
-  after the fact.
-- New `Policy.cost_estimation_mode` (`CostEstimationMode`, default
-  `ENFORCE`) adds `OBSERVE`: the estimate is still computed and compared
-  against the threshold, but a would-be rejection is only recorded (a
-  `cost_estimation.observed_would_reject` log line plus
-  `querygate_cost_estimation_would_reject_total{connection}`), never
-  raised. `execution/cost_estimation.py`'s `cost_estimate_violations()` is
-  the single source of truth both `enforce_cost_estimate()` (ENFORCE) and
-  `StructuredQueryService._observe_cost_estimate()` (OBSERVE) build on, so
-  the two modes can never disagree about what counts as a violation. Lets
-  an operator calibrate `max_estimated_rows`/`max_estimated_cost` against
-  real production traffic before switching a connection to `ENFORCE`,
-  instead of guessing a threshold from documentation on day one.
-
-Covered by `tests/unit/test_cost_estimation.py` (attempts/unavailable
-metrics per failure path, `cost_estimate_violations`/
-`format_cost_estimate_violation_message`), `tests/unit/test_service.py`
-(OBSERVE mode runs the query instead of rejecting; does not flag a query
-within threshold), and a real-Postgres
-`test_observe_mode_runs_the_query_and_records_would_reject` in
-`tests/integration/test_postgres_cost_estimation.py`.
-
-MSSQL is explicitly a no-op, not an error: a policy with these fields set on
-an MSSQL connection is valid and simply has no effect there (see the phase 2
-write-up below for why). Covered by `tests/unit/test_cost_estimation.py`
-(estimator parsing success/failure/fail-open paths, `enforce_cost_estimate`
-threshold combinations), the wiring tests in `tests/unit/test_service.py`
-(estimation disabled by default, MSSQL no-op, execute rejects over threshold
-while explain never opens a session), and
-`tests/integration/test_postgres_cost_estimation.py` against a real
-Postgres — a genuinely large sequential-scan-shaped query is rejected under
-a small `max_estimated_rows`, a selective indexed query passes under the
-same policy, and disabling the gate (the default) never issues an EXPLAIN at
-all. `docs/THREAT_MODEL.md`'s QG-08 row and residual-risk section were
-updated; `help/service.py`'s redacted policy summary now reports these new
-guardrail values (including `cost_estimation_mode`) like every other cap.
-
-**Phase 2 — MSSQL estimated-plan equivalent, not started:** SQL Server's
-`SET SHOWPLAN_XML ON` can't be prefixed onto an already-compiled statement
-the way Postgres's inline `EXPLAIN (FORMAT JSON) <query>` can — once
-SHOWPLAN mode is set, it must be the *only* statement in its batch (the
-query being planned can't run in the same batch as the `SET`), so getting an
-estimated MSSQL plan needs a dedicated connection/session lifecycle (open a
-connection, `SET SHOWPLAN_XML ON`, run the query text to get its plan
-without execution, then discard that connection rather than reusing it for
-the real query) rather than one extra statement inside the existing session.
-That's a genuinely different code shape, not a bigger version of phase 1's
-approach — tracked here as its own follow-up.
-
-**Effort: L (3–5 days for one dialect, longer cross-dialect).** The hard
-part is not calling `EXPLAIN`; it is turning dialect-specific plan output
-into a conservative, understandable policy decision without blocking safe
-queries unnecessarily.
-
-**Why it matters:** Row limits, timeouts, and concurrency caps are reactive
-guardrails. A 10/10 gateway should also be proactive: reject or warn on
-queries that are likely to full-scan huge tables, explode joins, or stress a
-production database before they run. This is a differentiator against
-generic MCP database connectors.
-
-**What to do (phase 2):** Add an MSSQL estimated-plan path with its own
-connection lifecycle (`SET SHOWPLAN_XML ON` in a dedicated session), extract
-comparable row/cost signals from the returned plan XML, and reuse the same
-`Policy.max_estimated_rows`/`max_estimated_cost` gate and
-`CostEstimateExceededError` phase 1 already established rather than
-inventing a parallel mechanism.
+Proactive pre-execution cost gate: plan (never run) the compiled query with the DB's own planner and reject it if the estimated rows/cost exceed policy. Phase 1 Postgres `EXPLAIN (FORMAT JSON)` (in-session, fail-open, OBSERVE/ENFORCE modes + metrics); phase 2 MSSQL `SET SHOWPLAN_XML ON` on a dedicated connection — both dispatched by `StructuredQueryService._estimate_cost`. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 26).
 
 ### 27. Semantic schema catalog and sensitivity metadata ✅ DONE
 
@@ -647,253 +530,13 @@ phase 3 answers the rest.
 
 This is the first independently deployable slice of 32B, built entirely on 32A's existing `querygate/catalog/` models, `CatalogStore`, and `CatalogFileRepository` — no second… **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 32).
 
-### 36. Extensive production-grade QA project / edge-case test suite
+### 36. Extensive production-grade QA project / edge-case test suite ✅ DONE
 
-**Phase 1 (policy-cap boundary tests + property-based compiler fuzzing) ✅
-DONE.** **Phase 2a (REST/MCP malformed-input fuzzing) ✅ DONE.** **Phase 2b
-(cross-dialect differential tests) not started — split out below because it
-needs a live/mocked second-dialect comparison harness, not just more
-Hypothesis strategies on the existing compiler tests.** Phase 2 was split
-into 2a/2b because the two halves have unrelated infrastructure: malformed-
-input fuzzing is a fully in-process JSON-boundary sweep, while cross-dialect
-differential *execution* comparison needs both a live Postgres and a live
-MSSQL to compare real results — a heavy dual-DB harness. (Compile-time
-cross-dialect *rendering* was already covered by item 78.)
+Phase 1 (policy-cap boundary + property-based compiler fuzzing), phase 2a (REST/MCP malformed-input fuzzing), and phase 2b (cross-dialect differential EXECUTION: same StructuredQuery run against live Postgres + MSSQL, rows asserted equal) all shipped. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 36).
 
-**Phase 1 shipped:** `tests/unit/test_policy_boundaries.py` proves the
-sharper boundary claim `tests/unit/test_policy_validation.py` didn't: for
-every cap `validate_policy` enforces (`max_joins`, `max_select_columns`,
-`max_group_by`, `max_where_depth`, `top_n.n`/`max_top_n`,
-`top_n.partition_by`/`max_partition_by`, `max_batch_size`), a query at
-exactly the configured limit passes and one unit past it is rejected — not
-just "some over-cap value fails." `max_top_n` and `max_partition_by` had no
-coverage at all before this file.
+### 37. Automated end-to-end proof of adaptive semantic learning ✅ DONE
 
-`tests/unit/test_compiler_properties.py` adds Hypothesis property-based
-fuzzing of `compiler/sqlalchemy_compiler.py`: generated strategies produce
-many random-but-valid `StructuredQuery` combinations across three shapes
-(plain row-select with optional join/where/order_by, aggregate
-GROUP BY/HAVING, and `top_n` per-partition ranking over either shape) and
-assert the compiler never raises, always renders to valid SQL text (both the
-normal bind-parameterized form and the `literal_binds=True` form the
-audit/explain path uses), and always returns `limit >= 1`. A fourth property
-test proves a `MandatoryRowFilter` on the `from_table` survives every random
-shape — the multi-tenant isolation guarantee must never silently drop out
-for an AST combination hand-written tests didn't happen to construct. Added
-`hypothesis` as a dev dependency (`pyproject.toml`/`poetry.lock`).
-
-**Phase 2a shipped:** `tests/security/test_malformed_input_fuzzing.py`
-(security-marked, in the default suite) sweeps the input-parsing/schema
-boundary of both transports with a broad corpus of malformed-but-plausible
-JSON — wrong body/field types, missing/extra fields (including the
-no-raw-SQL `sql`/`raw_sql`/`query`/... smuggle set, QG-01), invalid enum
-values, invalid/empty JSON, non-finite numbers, and `where` trees deep
-enough to trip the JSON parser's recursion guard — and asserts, for REST
-(`/query`, `/query/explain`, `/query/batch`) and MCP (`run_structured_queries`
-via a real `tools/call`): the input is rejected with a clean client error
-(never a 5xx crash), the error body never leaks a server internal (traceback,
-file path, driver/SQLAlchemy text, `NoSuchTableError`, or a connection-string
-credential — QG-07), and the `StructuredQueryService` execute/explain/batch
-methods are patched and asserted *un-called* so malformed input provably
-never reaches the database (QG-01). A mirror case proves an extreme-but-valid
-literal is accepted (not spuriously size-rejected), so the suite tests
-*malformed* shapes, not merely large ones. Policy-cap rejection (over-depth/
-size/batch) is intentionally left to phase 1's `test_policy_boundaries.py`.
-
-Two real robustness gaps the suite surfaced (per this item's "where a real
-gap is found, fix it or record it — don't leave it silent" posture):
-
-- **Fixed — non-finite numbers 500'd at the REST boundary.** `NaN`/`Infinity`
-  (accepted by Python's json parser, not valid JSON) in a numeric field made
-  the *validation-error* response fail to encode (Starlette's `JSONResponse`
-  renders with `allow_nan=False`) and surface as a 500 — leaking a traceback
-  under `debug=True`. `api/_errors.py` now registers a `RequestValidationError`
-  handler that scrubs non-finite floats out of the echoed error, so it is a
-  clean 422. Adversarially confirmed to 500 before the handler existed.
-- **Recorded as residual risk (item 86) — MCP transport 500 on a pathological
-  deep body.** REST rejects a `where` nested past the parser's recursion guard
-  with a clean 400, but the upstream MCP Streamable-HTTP transport's
-  `json.loads` raises `RecursionError`, which it catches and returns as a
-  handled JSON-RPC internal-error (`-32603`, generic non-sensitive message) —
-  an HTTP 500 rather than a 4xx. Handled and leak-free, so the test asserts
-  the security property (handled + no leak + not executed) and item 86 tracks
-  the transport-level body-size/depth guard that would make it a 4xx.
-
-**Explicitly out of scope for this pass, tracked as phase 2b:**
-cross-dialect differential tests (same AST compiled and *executed* against a
-live Postgres and a live MSSQL, asserting equivalent results where the AST
-doesn't invoke dialect-specific behavior) — needs the dual-live-DB harness
-noted above.
-
-**Effort: L (3–5 days) for the full item; phase 1 above was closer to a
-focused 1-day slice.** Not a new subsystem, but a wide sweep across the
-whole request pipeline: it touches `tests/unit/`, `tests/integration/`, and
-`tests/security/` all at once, plus potentially a new `tests/property/` or
-`tests/fuzz/` directory. Sizing is closer to item 15/28 (dedicated test
-tranches) than to a single-module fix — the work is breadth, not depth in
-any one file.
-
-**Why it matters:** Existing suites are strong but each targets one concern
-— `tests/security/test_adversarial_security.py` (item 28) covers
-authz/policy-bypass attack shapes, `tests/integration/test_postgres_load_guardrails.py`
-(item 15) covers concurrency/timeout under load, and the per-module unit
-suites cover correctness of one component at a time. Nothing currently
-sweeps the `StructuredQuery` AST's own input space systematically — deeply
-nested boolean `where` trees at/past `Policy.max_where_depth`, every
-`join`/`group_by`/`top_n` combination at its cap boundary, Unicode/NULL/
-empty-string/extreme-numeric literal values, empty result sets, single-row
-vs. maximum-row responses, and malformed-but-schema-valid AST shapes that
-existing tests haven't happened to construct. A gateway whose entire safety
-argument rests on "callers can only submit a validated AST" needs the
-validator itself proven against the full shape of that AST, not just the
-shapes today's tests happened to write.
-
-**What to do:** Audit `tests/unit/`, `tests/integration/`, and
-`tests/security/` for gaps against the full `StructuredQuery`/`Policy` model
-(`compiler/ast.py`, `policy/models.py`) rather than assuming coverage
-percentage implies scenario coverage — a query that never exercises a cap
-boundary can still hit a line of code. Concretely: boundary values for every
-`Policy` cap (max joins/select/where-depth/group-by/top_n, batch size,
-response bytes) both just-under and just-over; property-based testing
-(e.g. `hypothesis`) generating random valid `StructuredQuery` ASTs to catch
-compiler crashes or SQL-generation bugs that hand-written cases miss;
-cross-dialect differential tests (same AST against Postgres and MSSQL,
-asserting equivalent results where the AST doesn't invoke dialect-specific
-behavior); and malformed-input fuzzing at the REST/MCP JSON boundary (wrong
-types, extra fields, deeply nested `where`, huge string literals) to prove
-schema validation rejects cleanly rather than 500ing. Track coverage
-gaps explicitly rather than chasing a single aggregate `--cov` number, since
-line coverage alone doesn't prove edge cases were exercised.
-
-### 37. Automated end-to-end proof of adaptive semantic learning
-
-**Shipped.** `querygate/catalog/adaptive_learning_benchmark.py` plus the
-packaged fixture `querygate/catalog/benchmark_data/adaptive_learning_v1.yaml`
-drive the real persisted components — `CatalogStore`/`CatalogFileRepository`,
-`catalog.usage.record_usage_signals`/`should_emit_signal`,
-`catalog.learning.generate_learned_relationship_proposals`,
-`catalog.governance`'s unmodified review/publish/rollback state machine,
-`catalog.retrieval.search_catalog`, `catalog.refresh.refresh_catalog_schema`,
-`validation.policy_validation.validate_policy`, and a real (mocked-session)
-`StructuredQueryService` — through the complete lifecycle, exactly matching
-the six-step "what to build" list below:
-
-1. The fixture's initial catalog has no relationship hint for
-   `orders.customer_id -> customers.id` at all; the task query
-   deterministically fails before learning (`baseline_correct=False`),
-   proving the fixture was not pre-seeded with the answer.
-2. Usage evidence uses fixed evidence-reference ids and a single fake-clock
-   timestamp (`_FAKE_CLOCK`, never `datetime.now()`), and covers every
-   required control: below-threshold support, a conflicting pair (two
-   competing targets for the same source column, tied under the conflict
-   margin), repeated-single-principal (20 signals, one principal, must not
-   inflate support), cross-connection (the same relationship recorded under
-   a second connection id), a denied-object query (proven to raise
-   `PolicyViolationError` before any execution — so no signal for it can
-   ever exist), and an unreviewed-guidance target (proven via the real
-   `should_emit_signal` gate returning `False`).
-3. The real learner produces exactly one `learned` proposal for the
-   expected relationship and none for any control; a direct replay against
-   byte-identical evidence resolves to `"idempotent"` through the
-   deterministic generation-id path specifically (not merely avoiding a
-   visible duplicate via the separate open-proposal dedup guard); two
-   independent `CatalogFileRepository` handles racing the same file
-   ("two-worker" execution) still serialize to exactly one proposal.
-4. The pending proposal is proven not agent-visible
-   (`search_catalog` still fails the task). A disposable copy of the store
-   is rejected by a named reviewer actor and proven to leave behavior
-   unchanged; the main store is then approved and published by a
-   *different* actor than the learner, and the published entry's
-   provenance/version record is checked for actor attribution rather than
-   self-publication.
-5. After publication, a fresh reload (`CatalogStore.from_file`, not the
-   in-memory object) finds the relationship with `freshness=current`, and
-   discovery-call reduction (`1 - 1/baseline_discovery_calls`) is checked
-   against a compiled, non-fixture-tunable threshold. Principal-safe
-   filtering is proven on the same published content: visible under the
-   default policy, hidden under a policy denying the relationship's target
-   table.
-6. A real schema change (dropping the referenced column) is run through
-   `refresh_catalog_schema` and proven to stale only the affected
-   relationship while a separate manually-verified, unrelated entry stays
-   `verified`. A real rollback reverts the publish and the task
-   demonstrably regresses to the baseline again. A genuine learner failure
-   (a store missing its schema snapshot) is proven not to block a real
-   `StructuredQueryService.execute()` call. Every post-rollback assertion is
-   repeated against one final fresh reload, not just in-memory state.
-
-Every check was adversarially verified during development by deliberately
-breaking one real invariant at a time (the anti-feedback-loop gate, the
-conflict margin, the support threshold, rollback, policy enforcement,
-cross-connection isolation, and query execution itself) and confirming the
-report's `security_violations`/`rollback_correct`/
-`ordinary_query_unaffected_by_learner_failure` fields actually flip — this
-is not a checker that always reports success. Covered by
-`tests/integration/test_adaptive_learning_benchmark.py`, including seven
-tests that each break one real invariant and assert the checker notices.
-
-**Acceptance gate — met:** `make adaptive-learning-test` (wrapping
-`poetry run python -m querygate.catalog_cli adaptive-learning-test`) is a
-single deterministic command, wired into `make release-check` right after
-the 32A `evaluate` benchmark. It runs with no live model, external network,
-wall-clock sleep (every timestamp is the fixed `_FAKE_CLOCK` constant), or
-production row access, and exits non-zero on failure. Thresholds
-(`MIN_DISCOVERY_CALL_REDUCTION`, `MAX_DUPLICATE_PROPOSALS`,
-`MAX_SECURITY_VIOLATIONS`) are compiled constants in
-`adaptive_learning_benchmark.py`, not fixture fields.
-
-**Original scope (for reference — see above for what actually shipped):**
-
-**Why it matters:** The shipped `semantic_memory_v1.yaml` benchmark is a
-deterministic test of retrieval from a static catalog. It does not feed usage
-signals, produce a learned proposal, exercise human approval/publication, or
-prove that a later request benefits from earlier safe usage. It therefore must
-not be cited as an automated test of "self learning." A real test needs to
-prove the state transition and the behavioral improvement while also proving
-that the learning path cannot become an authorization or data-exfiltration
-path.
-
-**What to build:** Add a versioned, network-free scenario fixture (for example
-`benchmarks/adaptive_learning_v1.yaml`) and an integration test/runner that
-drives the real persisted components through the complete lifecycle:
-
-1. Start from a catalog that demonstrably lacks the expected business term or
-   preferred relationship, then run the unfamiliar task with learning disabled
-   and record the deterministic baseline result and discovery-call count.
-2. Submit only typed, redaction-safe normalized usage events with fixed ids and
-   a fake clock. Include enough independent successful evidence to cross the
-   predeclared support/confidence threshold, plus below-threshold, conflicting,
-   repeated-generated-guidance, denied-object, cross-principal, and
-   cross-connection controls that must not contribute.
-3. Run the real learner and assert that it creates exactly one `learned` draft
-   with bounded evidence summaries, support/confidence, provenance, and no row
-   values, credentials, query literals, natural-language history, raw errors,
-   or policy-hidden identifiers. Replay and two-worker execution must be
-   idempotent and must not double-count evidence or duplicate the proposal.
-4. Prove the proposal is not agent-visible and cannot alter access, mandatory
-   filters, sensitivity, or query execution before review. Exercise item 32B's
-   authorized review/publish path as a separate test actor; rejection must
-   leave behavior unchanged, while approval must retain provenance and an
-   auditable transition rather than allowing the learner to publish itself.
-5. Repeat the original task after approved publication and require the correct
-   table/relationship outcome with a predeclared material reduction in
-   discovery calls versus the baseline. Citations must identify the governed
-   catalog version and freshness. A control run with learning disabled or
-   insufficient support must show no improvement, proving the fixture was not
-   simply pre-seeded with the answer.
-6. Change the relevant schema and policy and assert selective staleness,
-   principal-safe filtering, rollback behavior, and unchanged ordinary query
-   availability when the learner fails. Restart/reload the persisted state and
-   repeat the assertions so the test is not only an in-memory happy path.
-
-**Acceptance gate:** expose one deterministic command such as
-`make adaptive-learning-test`, run it from `make release-check` once 32C is
-shipped, and keep its thresholds in source rather than fixture-tunable. It must
-run without a live model, external network, wall-clock sleeps, or production
-row access; fail on any learned-content auto-publication or policy disclosure;
-and report baseline-versus-learned correctness, discovery-call reduction,
-stale detection, duplicate proposals, and security violations. Do not make a
-"self-learning" product claim until this test and the adversarial suite pass.
+`catalog/adaptive_learning_benchmark.py` + a packaged fixture drive the real persisted 32C learning lifecycle (usage signals → learned proposal → governed review/publish/rollback → agent-visible retrieval) end-to-end, with every control (below-threshold, conflict, single-principal, cross-connection, denied-object, unreviewed-guidance) and determinism/idempotency/two-worker proofs; run by `tests/integration/test_adaptive_learning_benchmark.py`. Reconciled from a shipped-but-unmarked state. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 37).
 
 ### 38. Admin UI catalog-governance workspace (phase 1 ✅; phase 2 not started)
 
@@ -1009,7 +652,18 @@ catalog access.
 
 `POST /api/v1/admin/config/simulate` evaluates an uncommitted candidate (draft connections/policy/catalog + a target principal) in an isolated, non-persisting registry/policy/catalog context using the real production loaders and visibility/policy code, returning a redaction-safe typed allow/deny + guardrails + mandatory-filter readiness. Gated on both config scopes; threat-model QG-19. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 39).
 
-### 40. Semantic access diff for config changes
+### 40. Semantic access diff for config changes ✅ DONE
+
+Phase 1 (connection-baseline semantic diff, `POST /admin/config/diff`) shipped.
+**Phase 2 (per-principal resolution) is COVERED by item 41 ph1 (blast-radius)**,
+which reuses the exact same `compute_access_diff(principal=...)` engine and
+returns each configured principal's full itemized change list in
+`principal_impacts[].changes` — the "reporting-agent gains X" statements phase 2
+described — plus ranking. A distinct per-principal `/diff` would only duplicate
+that. Maintainer decision (2026-07-23): mark phase 2 covered, no new code. See
+item 41.
+
+<details><summary>Original phase-1 write-up</summary>
 
 **Phase 1 shipped (connection-baseline layer); phase 2 (per-principal
 resolution) not started.**
@@ -1091,13 +745,24 @@ Keep raw values out of filter diffs, distinguish explicit rules from inherited
 effects, cap result size, and provide stable machine-readable output for both
 the UI and CI/CD review tooling.
 
-### 41. Policy-change blast-radius analysis
+</details>
+
+### 41. Policy-change blast-radius analysis ✅ DONE
 
 **Phase 1 (bounded, synchronous aggregation) ✅ DONE.** **Phase 2
-(asynchronous/paginated evaluation for deployments with enough configured
-principals to exceed phase 1's bound) not started — split out below because
-it needs a different execution shape (background job plus polling or a
-paginated response), not just a larger cap.**
+(paginated evaluation) ✅ DONE.** Phase 2 took the *paginated-response* option
+(the simpler, stateless of the two shapes the spec offered): `compute_blast_radius_report`
++ `POST /admin/config/blast-radius` accept a `principal_offset` cursor and
+evaluate one deterministically-sorted **page** of configured principals per
+request (page size = the existing `max_principals`), returning `principal_offset`
++ `next_principal_offset` (None on the last page). A deployment with more
+principals than one page now covers *every* principal across successive requests
+instead of the overflow being dropped as `analysis_incomplete`. `highest_risk`
+ranks over the constant baseline + the current page. Covered by
+`tests/unit/test_blast_radius.py` (page bounds + next-offset cursor; paging
+covers every configured principal). A background-job/polling variant was
+deliberately not built — pagination is stateless, needs no job store, and covers
+the same "too many principals for one synchronous pass" case.
 
 **Phase 1 shipped:** `POST /api/v1/admin/config/blast-radius`
 (`api/admin_config_routes.py`) reuses item 40's semantic diff
@@ -1443,7 +1108,24 @@ governance, ecosystem reach, and external trust signals. Triage into P2/P3
 
 a `column_mask` policy primitive (`policy/models.py`: `ColumnMask`/`ColumnMaskKind`, field `Policy.column_masks` keyed by table with `"*"` wildcard, resolver… **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 49).
 
-### 50. Per-principal rate limits / query quotas over time ✅ DONE (phase 1)
+### 50. Per-principal rate limits / query quotas over time ✅ DONE
+
+**Phase 2 shipped (Redis cross-replica quota):** `execution/redis_quota.py`'s
+`RedisQuotaLimiter` makes a principal's request/byte rolling-window budget a
+single **shared** budget across replicas, closing the per-replica-multiplication
+gap phase 1 flagged (and that `deploy/HA_DR.md`'s shared-state matrix called
+out). Mirrors `redis_concurrency.py`: a per-(connection, principal) sorted set
+scored by wall-clock time + a parallel bytes hash, one atomic Lua script that
+prunes aged entries, checks the request-count and byte-total caps against the
+true cross-replica window, and records the attempt; `record_bytes` fills in the
+response size afterward (guarded so a late write can't resurrect a pruned entry);
+both keys carry a window-length TTL. The `QuotaLimiter` protocol (and
+`enforce_query_quota`/`record_query_quota_bytes`) went **async** so the Redis
+backend can await its client; the in-process limiter is the unchanged default.
+`create_app` installs it when `concurrency_backend=redis` (same client as the
+concurrency limiter). Tested with fakeredis (`tests/unit/test_redis_quota.py`:
+caps, rolling expiry, per-key isolation, record_bytes, and — standing in for
+cross-replica — two limiter instances sharing one Redis enforcing one budget).
 
 **Shipped (phase 1 — in-process rolling-window quota):** three `Policy`
 fields (`max_requests_per_window`, `max_response_bytes_per_window`,
@@ -1696,26 +1378,13 @@ live multi-region failover *drill* is the operator's step (checklist in HA_DR).
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 56).
 
-### 57. Pluggable dialect-adapter architecture
+### 57. Pluggable dialect-adapter architecture ✅ DONE
 
-**Effort: L (interface design); each subsequent dialect then becomes
-independent M-effort work rather than a bespoke project.**
-
-**Why it matters:** Item 19 treats every new dialect as M–XL bespoke work
-gated on core-team bandwidth — the actual long-term bottleneck behind
-QueryGate's biggest competitive gap (database breadth against Google's
-Toolbox and Hasura). `connections/dialects.py` and the compiler's dialect
-dispatch (the 3-way branch in `_date_bucket_expr`) already isolate
-dialect-specific behavior; formalizing that isolation into a stable adapter
-interface is what would let dialect support scale without linearly scaling
-core-team effort.
-
-**What to do:** Extract a formal `DialectAdapter` interface (session
-guardrails, date-bucketing, cost-estimation hook from item 26) from the
-existing 2-dialect implementation, verify it holds by porting Postgres and
-MSSQL onto it with no behavior change, and only then treat additional
-dialects (item 19) as adapter implementations rather than core-pipeline
-changes.
+Dialect-specific behavior is behind two registry-dispatched abstract bases: the
+sync compiler `DialectAdapter` (item 73) and a new async `SessionDialectAdapter`
+(`connections/dialects.py` — engine-URL/connect-args/timeout/guardrails, one
+class per dialect), reversing the prior inline-branching exception. Adding a
+dialect (item 19) = implement both + register. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 57).
 
 ### 58. Published adversarial benchmark vs. raw-SQL agent and Google Toolbox ✅ DONE (phase 1)
 
@@ -2100,77 +1769,9 @@ Delegated-identity attribution (RFC 8693 `act` → `Principal.actor`, the human'
 
 Optional `AUDIT_SINK_BACKEND=jsonl_chained` wraps every redaction-safe event in a hash-chain envelope (SHA-256, or HMAC-SHA256 with `AUDIT_LEDGER_HMAC_KEY`) so edits/deletions/reordering/insertion are detectable; `querygate-audit verify` validates a ledger and `querygate-audit receipt` emits a portable per-query compliance receipt. Chaining is envelope-level (no new event data) and verify-only. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 91).
 
-### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) ✅ DONE (phases 1 + 2 triggers); MCP-elicitation channel + batch not started
+### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) ✅ DONE
 
-**Phase 2 sensitivity-label trigger shipped:** `Policy.approval_sensitivities`
-(a list of catalog `SensitivityClass` labels, default empty/off) makes a query
-that references a column — or its table — carrying one of those labels require
-approval **regardless of estimated size** and **dialect-agnostically** (no cost
-estimate needed, so it works on MSSQL). `execution/approval.py`'s
-`sensitivity_approval_reasons` enumerates every referenced column via the single
-canonical AST visitor (`iter_column_refs`, item 96 — so a sensitive column in a
-`where`/join/having/etc. triggers it too, not just `select`), resolves each to
-its physical table, and reads only the descriptive catalog's static label (never
-a row value — the catalog stays descriptive). The gate now combines both
-triggers into one decision (`_enforce_approval_gate`), so a single approval token
-covers whatever tripped it; `Policy.approval_cost_gate_enabled` vs.
-`approval_gate_enabled` keep the estimate needed only for the cost trigger.
-Covered by 6 added tests in `tests/unit/test_approval.py`.
-
-**Phase 1 shipped (cost/row-estimate trigger + stateless HMAC approval-token
-grant, REST):** `execution/approval.py` is the gate's decision core —
-`approval_required_reasons(estimate, policy)` (reusing the estimate the pipeline
-already computes), `query_fingerprint(query)` (canonical SHA-256 of the AST), and
-`issue_approval_token`/`verify_approval_token` (HMAC-SHA256, fail-closed on any
-missing-key/forged/expired/wrong-fingerprint/malformed input, constant-time
-compare). New `Policy.approval_max_estimated_rows`/`approval_max_estimated_cost`
-(opt-in, default off; a softer gate *below* the hard `max_estimated_*` caps) and
-`Policy.approval_gate_enabled`/`estimate_needed`. The gate runs in
-`execution/service.py`'s `execute()` right after the cost estimate (Postgres
-only, same estimate source), raising `ApprovalRequiredError` (a
-`PolicyViolationError`; `metrics.classify_rejection` → `approval_required`) when
-triggered and no valid token is supplied, admitting when a token bound to that
-exact query is supplied (audited `approval.required`/`approval.granted`). REST:
-`execute` accepts an `X-QueryGate-Approval` header; `ApprovalRequiredError` maps
-to **428 Precondition Required** with `{fingerprint, reasons}`; a new
-scope-gated `POST /{connection}/query/approve` (scope `query:approve`, in the
-scope catalog + a "Query Approver" role bundle) issues the token. Requires
-`AppConfig.approval_token_hmac_key` (fail-closed 503 if unset). Covered by
-`tests/unit/test_approval.py` (22 tests: token forge/replay/expiry/wrong-key/
-malformed, trigger boundary, gate seam, e2e pause→approve→resubmit, endpoint
-scope/503). **Invariant preserved:** read-only, AST-only, opt-in — a
-default-config deployment is byte-for-byte unchanged.
-
-**Still not started:** the interactive **MCP elicitation** channel (approve
-within one MCP session instead of the REST token round-trip — needs FastMCP
-elicitation wiring) and per-query approval tokens for **batch** (`execute_many`).
-Both triggers (cost + sensitivity) and the REST token flow are done; these two
-are the remaining channel/transport work.
-
-**Effort: L. Priority: medium (safety moat; sequence after 90/91). Feature ref: F3.**
-
-**Why it matters (competitive pressure):** MCP elicitation is the standardized
-HITL primitive (and the `2026-07-28` spec revision keeps a first-class
-client-interaction path), and Auth0 async-authz (CIBA), PromptQL, and others
-gate *writes*. But **reads are the exfiltration leg of the lethal trifecta**
-every 2025 incident exploited (Supabase, Neon), and no competitor gates *reads*
-on *what the query would actually touch* — because none knows before running
-it. QueryGate uniquely already holds the three signals to decide automatically
-whether a read needs a human: catalog sensitivity labels (32A), the
-pre-execution cost/row estimate (item 26), and the parsed AST.
-
-**What to do:** When a query touches a catalog-labelled sensitive column
-(`sensitivity: pii`) **or** its pre-execution estimate exceeds a policy
-row/cost threshold, pause and require a human approval via MCP elicitation
-before executing; audit the approval and its decision. REST has no elicitation
-channel — degrade there to a "requires approval" rejection with an
-approval-token flow; keep the whole gate opt-in per policy. Gate lives between
-validate and execute (`execution/service.py`), with thresholds/sensitivity
-triggers in `policy/models.py`, elicitation in `mcp/`, and the decision in
-`audit/`. Distinct from item 42 (four-eyes for *config* changes) and item 35
-(capacity waiting) — neither gates *query execution* on sensitivity/cost.
-**Invariant:** read-only posture and AST-only input unchanged; this only adds a
-pre-execution gate.
+Cost/row-estimate and catalog-sensitivity triggers pause a gated read; approval is a stateless, fingerprint-bound, short-lived HMAC token via a scope-separated REST flow (428 → `query:approve` → resubmit), threaded per-query through batches, and — opt-in, off by default — obtainable in-session over MCP via `Context.elicit`. Read-only, AST-only, opt-in throughout. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 92).
 
 ## P7 — Governed Writes (flagship structural expansion — decision-gated)
 
@@ -2184,7 +1785,199 @@ is a validated structure, exactly as a read is), the catalog stays descriptive,
 audit stays redaction-safe. The `roadmap-next` automation must **not** auto-start
 it; a human decides first.
 
-### 93. Governed Writes — structured, bounded, previewable, reversible agent mutations
+### 93. Governed Writes — structured, bounded, previewable, governed agent mutations ✅ DONE (governance tier); reversibility/undo REMOVED 2026-07-23
+
+**⚠️ 2026-07-23 — reversibility/undo REMOVED** (maintainer decision, recorded in
+`docs/PRODUCT_GUIDE.md` Decision Log). Deleted: `execution/compensation.py` +
+`execution/redis_compensation.py`, `POST /{connection}/write/undo`, the MCP
+`undo_structured_write` tool, `WritePolicy.compensation_*`, and the
+`compensation_id` result field. **Why:** undo was the only feature that forced a
+second copy of real row values outside the customer's DB (against the
+least-privilege / data-never-leaves North Star) and carried unresolved
+correctness/durability risk, while adding little value once preview + approval
+exist. **Governed writes keep the governance tier** — preview + diff, gated
+execution, approval, dual-identity + tamper-evident audit, deny-by-default, the
+row cap, upserts, atomic batch. The phase-3a/3b undo narrative below is retained
+as history but no longer describes shipping behavior.
+
+**Comprehensively shipped:** the write sibling of the read pipeline for all four
+operations (INSERT/UPDATE/DELETE/UPSERT), *bounded* (deny-by-default, mandatory
+WHERE, in-txn cap, atomic — single or all-or-nothing batch), *previewed* (dry-run
++ bounded masking-aware old→new diff), *approved* (REST token + MCP elicitation),
+*attributed* (dual-identity, tamper-evident, redaction-safe audit). REST + MCP surfaces,
+clean typed errors, an adversarial security suite, and proven on **SQLite +
+real Postgres + real MSSQL + the shipped image + a concurrency load gate**. Only
+two **reasoned deferrals** remain (not "not started" — deliberate, recorded):
+upsert-undo (per-row insert-or-update is ambiguous to reverse) and
+approval-binds-to-diff-hash (over-engineering vs the current fingerprint binding).
+
+**Phase 2a shipped (gated write EXECUTION, REST; maintainer-approved, Decision
+Log recorded).** `execution/write_execution.py`'s `WriteExecutionService.execute()`
+actually commits a single-table INSERT/UPDATE/DELETE — but only via the *same*
+validated `write_ast` → `compile_write` Core statement the preview compiles (no
+raw-DML path), and only when in policy and within cap. One transaction (the one
+`session_scope` opens): count matched rows in-txn → reject if over
+`max_affected_rows` *before* mutating → item-92 approval gate (new
+`WritePolicy.require_approval_over_rows`, fingerprint-bound token via
+`write_fingerprint`) → execute → re-check the statement's own rowcount against the
+cap → commit; any raise rolls the whole thing back (no partial write). Runs
+through the concurrency limiter. Redaction-safe, dual-identity (item 90),
+tamper-evident (item 91) audit by reusing `audit_query` (operation
+`execute_structured_write`) — op/table/affected-count/parameterized-SQL only,
+never a value or row. REST `POST /{connection}/write/execute` (+ 428→approval)
+and `POST /{connection}/write/approve` (`query:approve`-scoped, `write_fingerprint`
+token). `compiler/write_compiler.py` now coerces a JSON temporal string to the
+column's Python `datetime`/`date`/`time` so an INSERT/UPDATE of a typed column
+binds. Covered by `tests/integration/test_write_execution_end_to_end.py` (4:
+real-SQLite insert→verify→update→verify→delete→verify round-trip commits;
+over-cap rolls back and changes nothing; deny-by-default; approval pause→admit)
++ `tests/unit/test_write_execution.py` (5: approval fingerprint binding/replay,
+threshold off/under, temporal coercion). Invariant preserved: no raw DML,
+deny-by-default, opt-in.
+
+**Phase 2b shipped so far:** the **row-level old→new diff preview**
+(`POST /write/preview?include_diff=true` → `WriteDiff`: bounded by
+`WritePolicy.max_diff_rows`, masking-aware, computed by running the DML in a
+rolled-back transaction — `execution/write_preview.py`) and the **adversarial
+write boundary security suite** (`tests/security/test_write_boundary.py` +
+dual-marked execution guarantees, under `make test-security`), and the **MCP
+`run_structured_writes` tool** (`mcp/tools/write.py`: preview/execute modes,
+batch, `include_diff`, and the in-session elicitation approval channel for a
+gated write — the elicitation resolver was factored into shared
+`mcp/elicitation.py`, now serving both the read and write tools;
+`WriteExecutionService.execute_many` is the batch/resolver seam), and the
+**write concurrency load gate** (`tests/integration/test_postgres_write_load.py`,
+`-m load`: 8 concurrent over-cap writes all reject and change nothing; 12
+concurrent within-cap inserts commit exactly once each). **Still open in 2b:**
+only the `release-smoke` write round-trip (extend the smoke image test with a
+real capped write). (Approval still binds to the write fingerprint, not the diff
+hash — a phase-3 refinement.) Write execution is also proved against a **real
+Postgres**
+(`tests/integration/test_postgres_write_execution.py`, `real_db`/`postgres_live`:
+self-cleaning insert→verify→update→verify→delete→verify round-trip + over-cap
+rollback), not just SQLite. Also shipped in 2b:
+**constraint handling** — an INSERT missing a NOT NULL column is caught with a
+precise pre-DB validation error, and any DB constraint/type violation
+(NOT NULL/FK/unique/mistyped) maps to a clean typed 422 (rolled back, no raw
+driver text leaked) instead of a masked 500.
+
+**Phase 3a shipped — bounded reversibility (undo).** `execution/compensation.py`:
+a `CompensationStore` (in-memory default, TTL'd, mirroring the audit-sink
+pattern) holds a bounded pre-image — NOT a shadow table in the operational DB
+(Decision Log records why: minimal footprint, no extra DB privilege). When
+`WritePolicy.compensation_enabled`, a gated write captures the pre-image within
+its transaction (UPDATE/DELETE rows, or INSERT keys), commits, then records it and
+returns a `compensation_id`. `WriteExecutionService.undo()` (REST
+`POST /write/undo`) re-applies the inverse in **one transaction**
+(`_apply_undo_atomically`) — re-INSERT deleted rows / DELETE inserted keys /
+restore each UPDATE's *changed columns* by PK — so undo is **atomic
+all-or-nothing** (a failure reverses nothing and doesn't consume the record),
+bounded, capped, and audited (`undo_structured_write`). **Undo semantics
+(self-review hardened, Decision Log recorded):** authorized by the single-use,
+TTL'd, connection-scoped `compensation_id`, so undo deliberately bypasses the
+approval gate (the forward write was already approved; the prior state is
+lower-risk) and the op-allowed re-check (undoing a DELETE is an INSERT), while
+still enforcing deny-by-default + cap + schema + audit; it restores **only the
+columns the original write changed**, so an untouched column's concurrent change
+is preserved; and its inverse writes never spawn redo records. Proven on SQLite
+(`test_write_execution_end_to_end.py`: delete/insert/update → undo →
+byte-identical restore; approved-write undoable without re-approval; only-changed-
+columns restored; atomic-not-consumed-on-failure; no redo record; auto-PK insert
+returns `compensation_id=null`) and real Postgres. **Phase 3b shipped so far:**
+(a) **RETURNING capture** — a serial/identity-PK INSERT now captures its
+generated key via `RETURNING` and is undoable (was `compensation_id=null`); (b)
+**durable cross-replica store** — the `CompensationStore` is async + pluggable
+and `RedisCompensationStore` (installed when `CONCURRENCY_BACKEND=redis`) makes a
+`compensation_id` resolvable on any replica, so undo works under HA (pre-image
+round-trips through JSON with type re-coercion; fakeredis + real-DB tested;
+`_coerce_write_value` now also coerces Decimal); (c) **optimistic-concurrency
+undo** — an UPDATE undo reads each affected row's current changed-column values
+and **refuses** (422) if any drifted from what the write set (or the row is
+gone), so a concurrent change since the write is never silently clobbered.
+**Honest bounded limits:** cannot unwind cascading triggers/FK actions or
+downstream reads; (d) **MCP undo parity** — `undo_structured_write` tool, so an
+agent that wrote over MCP can reverse over MCP; (e) **`release-smoke` write** —
+`make release-smoke` now proves the shipped image preview→execute→verify→undo→
+verify a governed write on real Postgres (Redis backend); (f) **MSSQL parity** —
+insert/update/delete + undo all proven against a live MSSQL
+(`test_mssql_write_execution.py`: OUTPUT key capture for IDENTITY PKs, and
+delete-undo re-inserts the original key via SQLAlchemy's SET IDENTITY_INSERT).
+Writes are now proven on **all three** engines (SQLite/Postgres/MSSQL); (g)
+**upserts** — `UpsertStatement` (INSERT ON CONFLICT DO UPDATE) via a per-dialect
+compiler registry (`_UPSERT_COMPILERS`, composable — no inline `if dialect`),
+native on Postgres/SQLite, **rejected on MSSQL** (reject-not-emulate, no
+synthesized MERGE); proven on real Postgres + MSSQL. Upsert-undo is deferred
+(per-row insert-or-update is ambiguous to reverse); (h) **multi-statement batch
+atomicity** — `execute_many(atomic=True)` + the MCP tool's `atomic` flag: all
+writes in one transaction, all-or-nothing (fail-closed on a gated write; no
+per-write compensation in atomic mode). **Phase 3b deliberately deferred (not
+built speculatively):** approval-binds-to-diff-hash — the token already binds to
+the write's full fingerprint and the trigger is re-evaluated at execute; binding
+to a computed diff-hash would force the execute path to compute the diff every
+time for a TOCTOU window no pilot has asked to close. **Upsert-undo** and this
+are the only open item-93 items, both reasoned deferrals.
+
+**Phase 3b — reversibility hardening: WITHDRAWN (2026-07-23).** The undo mechanism
+these items would have hardened has been removed (see the note at the top of this
+item and the `docs/PRODUCT_GUIDE.md` Decision Log entry). The hardening action
+list no longer applies.
+
+**2026-07-23 review finding — in-flight regression on `compensation.py`, FIXED.**
+A working-tree edit converted `CompensationStore.put/get/consume` to
+`async def` (prep for the Redis-backed durable store above), but
+`execution/write_execution.py`'s three call sites
+(`get_compensation_store().get(...)` line ~207, `.consume(...)` line ~217,
+`.put(...)` line ~427) were not yet updated to `await` them when the review
+found this — `get()` returned an un-awaited coroutine so `record.connection_id`
+raised `AttributeError`, and `put()`'s coroutine was silently discarded (never
+stored); undo did not work at all in a single process, not just across
+replicas. **Fixed:** all three call sites now `await` the store, and
+`tests/unit/test_write_execution.py::test_compensation_store_ttl_and_single_use`
+(which itself called the now-async store synchronously) was converted to
+`async def` with matching `await`s. Re-verified: `pytest -m unit` → 230
+passed, 0 failed. **Still open, separate from the above:**
+`InMemoryCompensationStore.consume()` only sets `record.consumed = True` and
+never removes the entry from `self._records` — every governed write with
+`compensation_enabled` leaks one record for the life of the process even after
+TTL expiry, since `get()` filters expired/consumed records out of *reads* but
+nothing ever evicts them from the dict. Fix this eviction gap before building
+the Redis-backed store.
+
+**Phase 1 shipped (maintainer-approved; Decision Log recorded).** The write
+sibling of the read pipeline, preview-only — **no code path executes or commits
+a write.** `write_ast/models.py`: `InsertStatement`/`UpdateStatement`/
+`DeleteStatement` (discriminated union on `op`, dispatched via
+`_WRITE_STATEMENT_TYPES`), **no raw-DML field anywhere**, WHERE reuses the read
+`Predicate` tree; `UPDATE`/`DELETE` **require** a WHERE (structural — can't be
+constructed without one). `policy/models.py` `WritePolicy` (deny-by-default:
+`enabled=False`, per-table `allowed_tables`/`allowed_operations`,
+`denied_write_columns`, `max_affected_rows`). `validation/write_policy_validation.py`
++ `validation/write_schema_validation.py` mirror the read validators (written
+columns write-allowed + exist; a write's WHERE columns subject to the READ
+allow/deny + masked-column rules; single-target-table only).
+`compiler/write_compiler.py` builds Core `insert()`/`update()`/`delete()` (WHERE
+via the read `_compile_where` — bound params, no raw SQL). `execution/write_preview.py`
+`WritePreviewService.preview()` validates → compiles → reports a redaction-safe
+`WritePreview` (op, table, affected-row count via a policy-checked `COUNT(*)`,
+within-cap, **parameterized** SQL, `executed=False`) — no DML runs. REST
+`POST /{connection}/write/preview` (discriminated-union body). Covered by
+`tests/unit/test_governed_writes.py` (14: no-raw-DML invariant, structural
+mandatory-WHERE, deny-by-default, WHERE read-policy, parameterized DML) +
+`tests/integration/test_write_preview_end_to_end.py` (3: real-SQLite preview
+reports the right count AND **changes nothing** — before == after — plus
+deny-by-default). The `IN (subquery)` (item 97) is rejected in a write WHERE for
+phase 1.
+
+**Phase 2b–3 (not started):** phase 2a above shipped the core gated *execution*
+(single transaction, in-txn row cap, item-92 approval on the row *count*,
+dual-identity audit [90], tamper-evident audit [91]). Still open — **phase 2b:**
+the transactional row-level old→new *diff* preview (the current preview reports
+the affected *count* + parameterized SQL; the killer per-row diff runs the DML in
+a rolled-back txn) and approval on that diff, the MCP `run_structured_writes`
+execute tool, the adversarial write security suite, the `release-smoke` write
+round-trip, and the write concurrency load gate; **phase 3:** reversibility/
+compensation + upserts + batch + MSSQL parity + scalar-function/CASE SET-values +
+NOT NULL/FK/unique pre-validation.
 
 **Effort: XL (cleanly phaseable; Phase 1 is L and carries zero write risk).
 Priority: flagship. Status: decision-gated (crosses read-only). Depends on:
@@ -2440,7 +2233,35 @@ AST reference position is taught in one place. Makes item 97 safe by constructio
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 96).
 
-### 97. Bounded nested subqueries (uncorrelated, single-connection, depth-capped)
+### 97. Bounded nested subqueries (uncorrelated, single-connection, depth-capped) ✅ DONE (phase 1 — IN (subquery)); phase 2 (FROM (subquery) derived table) not started
+
+**Phase 1 shipped — `IN (subquery)` / `NOT IN (subquery)`:** `Predicate.value_subquery`
+is a nested `StructuredQuery` (recursive AST via `model_rebuild`), valid only for
+`in`/`not_in`, mutually exclusive with value/value_col, must select exactly one
+column. `Policy.max_subquery_depth` (default 1) bounds nesting. The single
+canonical scope-walker `schema_validation.iter_query_scopes` enumerates the outer
+query + every subquery as **independent scopes**; policy validation enforces the
+count caps (select/joins/group_by/where-predicates/top_n) **summed tree-wide**
+(so nesting can't multiply a cap — the core threat), plus per-scope column
+allow/deny + masking (a denied/masked column can't hide one level down), and
+rejects: over-depth, a masked column as the subquery's IN-output, and
+`value_subquery` outside a WHERE clause (HAVING/CASE rejected). Schema validation
+validates each subquery scope independently (a correlated reference to an outer
+table fails as undeclared-in-scope) and rejects cross-connection subqueries. The
+compiler renders `col.in_(subselect)` via the same compile path (so the subquery
+gets mandatory row filters + min-group guardrail), stripping the subquery LIMIT
+so IN membership is complete. Covered by `tests/security/test_subquery_boundary.py`
+(13 adversarial: cap-evasion-via-nesting per cap, denied/masked-in-subquery,
+correlated, cross-connection, over-depth, HAVING/CASE) + `tests/integration/
+test_subquery_end_to_end.py` (real-SQLite IN/NOT-IN match an equivalent join).
+Renders as standard SQL IN(subquery) on Postgres+MSSQL (no dialect-specific
+code); MSSQL execution parity is CI-validated. Decision Log entry recorded.
+
+**Phase 2 (not started):** `FROM (subquery)` — a derived table the outer query
+selects *from*. Additionally needs the outer query to resolve against the inner
+query's OUTPUT aliases (a virtual relation) without reaching past them into inner
+base tables; deferred as a distinct, harder slice. HAVING/CASE `IN (subquery)`
+also deferred.
 
 **Effort: L. Priority: medium (capability extension). Depends on: item 96.
 Requires a recorded Decision Log entry in `docs/PRODUCT_GUIDE.md` before build.**
@@ -2489,3 +2310,289 @@ never a raw-SQL string.
 correlated/cross-connection/over-depth all rejected with clear errors; caps
 proven to apply tree-wide by adversarial tests; Decision Log entry recorded.
 No raw-SQL surface, no non-goal crossed.
+
+---
+
+## Flagship pillar — Expressive Query Engine (items 99–106)
+
+Items 99–106 are one coordinated initiative: take the READ structured query
+engine to 10/10 expressiveness for a fluent SQL author **without weakening any
+safety invariant** — the deepening of the North Star **Structural** pillar (the
+"no raw SQL, ever" bet only wins if the AST rarely walls off a real SQL author).
+The deep, authoritative design/test/validation spec lives in
+**[docs/ENGINE_EXPRESSIVENESS_PLAN.md](docs/ENGINE_EXPRESSIVENESS_PLAN.md)** — each
+item below is scoped there (§4) with its AST shape, compiler seam, validation
+wiring, caps, dialect handling, adversarial cases, and per-item Definition of
+Done. Build them in the order 99 → 106; the plan's §3 checklist and §5 canonical
+regression bar are mandatory acceptance gates for every item.
+
+The unifying safety rule (plan §1, §3): **every new node must be wired into the
+canonical reference visitor (item 96) or its column refs bypass policy allow/deny
++ masking**, and **every new cost-bearing count must be capped summed tree-wide
+(item 97)**. Reject-don't-emulate (item 74) governs all per-dialect gaps.
+
+### 99. Query engine: `HAVING` as `WhereNode` + searched `CASE` condition
+
+OR-logic over aggregate conditions (`HAVING SUM(x) > 10 OR COUNT(*) < 3`) and
+multi-condition CASE branches (`CASE WHEN a > 0 AND b < 5 THEN …`). Change
+`StructuredQuery.having: List[Predicate]` → `Optional[WhereNode]` and
+`CaseWhen.when: Predicate` → `WhereNode`, reusing the existing (already-safe)
+`_compile_where` / `where_depth` / visitor machinery; bounded by existing
+`max_where_depth` / `max_where_predicates` / `max_case_branches`. The low-risk
+warm-up that proves the visitor/cap-expansion pattern before the substrate lands.
+
+**Effort: S. Priority: high (flagship pillar; cheap first step). Depends on:
+item 96.** Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 0.**
+
+### 100. Query engine: bounded scalar `Expression` substrate ★
+
+The centerpiece. Introduce one **closed, depth-capped** recursive `Expression`
+union (column | literal | binary-op `+ - * /` | function-call with nesting | CASE)
+used everywhere a scalar value is expected, and give aggregates an `Expression`
+argument. Unlocks — in one item — arithmetic (`quantity * unit_price`), conditional
+aggregation (`SUM(CASE WHEN status='paid' THEN amount END)`), nested functions
+(`lower(trim(x))`), expression-valued CASE, computed group/order keys, and a batch
+of scalar fns (`cast`/`round`/`floor`/`ceil`/`abs`/`substring`/`nullif`/`replace`).
+Arithmetic + conditional aggregation are deliberately ONE item (shared substrate) —
+do not split. New caps `max_expression_depth` / `max_expression_nodes` summed
+tree-wide; guarded division; visitor recursion into every `Expression` is the
+make-or-break safety step.
+
+**Effort: XL. Priority: high (flagship pillar; highest expressiveness unlock).
+Depends on: items 96, 99. Requires a recorded Decision Log entry in
+`docs/PRODUCT_GUIDE.md` before build** — the bounded-vs-open-ended-grammar boundary
+(non-goal #7) and division semantics (plan §8, entries 1–2). Full spec +
+acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 1.**
+
+### 101. Query engine: general window functions (`WindowSelectItem`) ★
+
+Generalize windowing beyond `top_n`'s rank-and-filter: a first-class
+`WindowSelectItem` for `SUM/AVG/… OVER`, `LAG/LEAD/NTILE/FIRST_VALUE/LAST_VALUE`,
+with `PARTITION BY`, `ORDER BY`, and `ROWS/RANGE` frames — unlocking running
+totals, moving averages, percent-of-total (with item 100), gap/island analysis.
+Reuses `_apply_top_n`'s subquery-materialization insight (OVER can't reference a
+peer SELECT alias). New cap `max_window_specs` + a frame bound; window `arg` reuses
+item 100's `Expression`. Assert each fn/frame **runs** on real Postgres AND MSSQL
+(the "renders fine, breaks live" trap — items 75/82), reject-don't-emulate where a
+dialect genuinely lacks a form.
+
+**Effort: L. Priority: high (flagship pillar; second expressiveness pillar).
+Depends on: items 96; 100 for windowed expressions. Requires a Decision Log entry
+(default frame + unbounded-frame cap; plan §8 entry 3) before build.** Full spec +
+acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 2.**
+
+### 102. Query engine: `EXTRACT`/date_part + relative-date/interval helpers
+
+`EXTRACT(dow/hour/year …)` and native relative-date filtering
+(`created_at > now() - interval '7 days'`) so an agent needn't hand-compute a
+timestamp literal. Extends item 100's `FunctionExpr`; interval magnitude is a
+**capped** literal (`max_interval_days`), not free. Per-dialect `DialectAdapter`
+methods (`EXTRACT` vs `DATEPART`, `now()` vs `SYSUTCDATETIME`, `- interval` vs
+`DATEADD`). Note in docs that relative-date filtering is already composable today
+via a computed literal — this is native convenience, prioritized accordingly.
+
+**Effort: M. Priority: medium (flagship pillar; high everyday value). Depends on:
+item 100. Requires a Decision Log entry (interval cap + timezone semantics; plan §8
+entry 4).** Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 3a.**
+
+### 103. Query engine: non-equi/range joins + FULL OUTER / CROSS
+
+Generalize `JoinSpec` from equality-pairs to an optional `condition: WhereNode`
+(range/temporal joins, e.g. `ON price BETWEEN band.lo AND band.hi`), keeping the
+equality `on` form as sugar; add `"full"` and `"cross"` `JoinType`s. `CROSS`
+(cartesian) is a cost lever — gate behind a policy flag (`allow_cross_join`,
+default off) + row cap. Non-equi conditions count as join predicates in the caps.
+
+**Effort: M. Priority: medium (flagship pillar). Depends on: items 96, 99 (WhereNode
+join condition). Requires a Decision Log entry (CROSS gating; plan §8 entry 5).**
+Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 3b.**
+
+### 104. Query engine: set operations (UNION / INTERSECT / EXCEPT)
+
+A new top-level shape wrapping N `StructuredQuery` arms + op + `all: bool`, with
+matching select arity. A new **scope container**: extend `iter_query_scopes` so each
+arm is validated as its own scope (mirror item 97 exactly), all caps summed across
+arms, and mandatory row filters + k-anon min-group applied to every arm (a set op
+must not be a channel to dodge a per-table filter). New cap `max_set_op_arms`.
+
+**Effort: L. Priority: medium (flagship pillar). Depends on: items 96, 97. Requires
+a recorded Decision Log entry before build.** Full spec + acceptance:
+**ENGINE_EXPRESSIVENESS_PLAN.md Phase 4a.**
+
+### 105. Query engine: CTE / derived table in FROM (non-recursive)
+
+Allow `from`/`JoinSpec.table` to be a named subquery (a `StructuredQuery` + alias)
+in addition to a physical table — enabling aggregate-then-join / dedup-then-rank in
+one statement. Generalizes item 97's `subquery_tables` plumbing and
+`effective_name_map`; new cap `max_cte_count` + reuse `max_subquery_depth`. A CTE
+must not become a channel to reach a denied table, dodge a mandatory row filter, or
+surface a masked column as a non-projection input. **Recursive CTE is explicitly
+OUT of scope** (unbounded recursion = DoS) pending a separately-recorded hard
+iteration cap.
+
+**Effort: XL. Priority: medium (flagship pillar). Depends on: items 96, 97, 104.
+Requires a recorded Decision Log entry before build.** Full spec + acceptance:
+**ENGINE_EXPRESSIVENESS_PLAN.md Phase 4b.**
+
+### 106. Query engine: correlated / EXISTS / scalar subqueries
+
+`EXISTS`/`NOT EXISTS`, correlated subqueries, and scalar subqueries
+(`= (SELECT …)`, subquery in SELECT/HAVING). Highest-risk item: it breaks the
+**uncorrelated** assumption the entire current subquery layer rests on (item 97's
+`_compile_in_subquery` resolves against the subquery's own tables only).
+Correlation must be limited to a **declared, capped** set of outer refs so the
+visitor can enforce policy/masking on them against the outer scope; scalar-subquery
+arity enforced; depth/count caps stay summed tree-wide. Note: scalar-aggregate
+comparison is often achievable today via two round-trips — document that recipe.
+
+**Effort: XL. Priority: medium-low (flagship pillar; do last — largest safety
+surface). Depends on: items 96, 97, 105. Requires a recorded Decision Log entry in
+`docs/PRODUCT_GUIDE.md` before build** (correlation scope model; plan §8 entry 7).
+Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 5.**
+
+---
+
+## Findings from the 2026-07-23 technical/product review
+
+Items 107–113 came out of a full-repo due-diligence pass (see
+`TECHNICAL_REVIEW.md` for the full write-up and evidence). Item 93's own
+compensation-store regression is tracked inline in item 93's Phase 3b note
+above, not here, since it's the same feature. These are otherwise-solid,
+narrowly-scoped fixes/hardenings the review surfaced — not a restatement of
+already-tracked open work.
+
+### 107. Batch query execution double-reserves quota on an approval retry
+
+`StructuredQueryService._execute_batch_item`
+(`execution/service.py:718-753`) calls `self.execute()` a first time, and
+`execute()` reserves the per-principal query quota
+(`enforce_query_quota`, `execution/service.py:522`) *before* the item-92
+approval gate runs later in the same call. When the first attempt raises
+`ApprovalRequiredError` and an `approval_resolver` (MCP elicitation) obtains a
+token, `_execute_batch_item` retries by calling `self.execute()` a *second*
+time — reserving and recording quota again for what is logically one
+approved query. A principal running interactive-approval batches over MCP
+sees roughly double the quota consumption of an equivalent non-approval
+workload, silently halving effective throughput. Not covered by
+`test_admission.py`, `test_query_quota.py`, `test_approval.py`, or
+`test_mcp_elicitation_approval.py` — none exercise a quota assertion across
+the approval-retry path specifically.
+
+**Fix:** thread the already-obtained `quota_reservation` (or a "quota already
+reserved for this fingerprint" flag) through the retry call so the second
+`execute()` doesn't re-reserve, and add a test asserting exactly one quota
+unit is consumed across an approval-required-then-retried batch item.
+
+**Effort: S. Priority: medium (real throughput bug, narrow blast radius).
+Depends on: none.**
+
+### 108. Write-preview diff runs the full DML before the affected-row cap is checked
+
+`WritePreviewService.preview()` (`execution/write_preview.py:106-152`) computes
+`affected` via a policy-checked `COUNT(*)`, but when `include_diff=True` it
+unconditionally calls `_mutation_diff`, which — for `UpdateStatement` — executes
+the *real* UPDATE (`await session.execute(dml)`, `write_preview.py:203`) inside
+the (later-rolled-back) transaction to compute an old→new diff, regardless of
+whether `affected` already exceeds `WritePolicy.max_affected_rows`. Only the
+*rows shown in the diff response* are capped by `max_diff_rows`
+(`write_preview.py:166,185`) — the actual row-locking UPDATE against every
+matching row still runs first. A caller can request `include_diff=true` against
+a broad WHERE clause to force a full-table UPDATE (row locks, WAL/redo
+activity, lock contention with concurrent writers) purely to preview a write
+that would be rejected outright as over-cap. No test exercises
+`include_diff=true` together with an over-`max_affected_rows` predicate.
+
+**Fix:** short-circuit `_mutation_diff` (return `within_affected_cap=False`,
+`diff=None` or a truncated/est.-only diff) when `affected > max_affected_rows`,
+before running the DML; add a regression test for an over-cap UPDATE preview
+with `include_diff=true`.
+
+**Effort: S. Priority: medium (resource-exhaustion / lock-contention risk on a
+preview-only endpoint). Depends on: none.**
+
+### 109. MCP `run_structured_writes` has no batch-size cap
+
+`mcp/tools/write.py` accepts an unbounded `writes: List[...]` with no
+equivalent of the read path's `validate_batch_size(len(queries), policy)`
+(`mcp/tools/query.py:128`, backed by `validation/policy_validation.py`).
+`WritePolicy` has no `max_batch_size`-style field at all. A caller can submit
+an arbitrarily large batch of individually-in-cap writes in a single MCP call,
+each running through the full validate→compile→execute pipeline sequentially —
+an easy way to multiply cost/lock-time per call well beyond what the read
+path allows for the same principal.
+
+**Fix:** add `WritePolicy.max_batch_size` (mirroring the read policy's cap) and
+enforce it in `write_policy_validation.py` before any statement in the batch is
+processed; test both the read-parity cap and the boundary case.
+
+**Effort: S. Priority: medium-high (write path currently has weaker sizing
+guardrails than the read path it was modeled on). Depends on: none.**
+
+### 110. `value_subquery` in a write's WHERE is validated at the wrong layer
+
+`UpdateStatement`/`DeleteStatement` reuse the read `WhereNode`, so a
+`Predicate.value_subquery` (item 97) is structurally legal there, but neither
+`write_policy_validation.py` nor `write_schema_validation.py` inspects it —
+it only fails later, inside `compiler/write_compiler.py`'s `_compile_where`,
+because the compiler always passes `ctx=None` for writes. This isn't
+currently exploitable (the compiler-level failure is safe), but it fails at
+the wrong layer with a compiler-internal error instead of a clean policy/
+schema-validation rejection, and it's a latent trap: a future write-compiler
+change that ever passes a non-`None` `ctx` (e.g. to support a write-side
+subquery feature) would silently reopen a bypass this layer was never built
+to check.
+
+**Fix:** explicitly reject `value_subquery` predicates in a write's WHERE at
+`write_policy_validation.py` (mirroring how the read side scopes subqueries),
+with a clear `QueryValidationError`, and add a regression test.
+
+**Effort: XS. Priority: low-medium (defense-in-depth / clear error, not a live
+bypass). Depends on: none.**
+
+### 111. Duplicated WHERE-predicate tree walk across four validators
+
+`validation/policy_validation.py`, `schema_validation.py`,
+`write_policy_validation.py`, and `write_schema_validation.py` each hand-roll
+their own recursive WHERE-boolean-tree enumerator, rather than sharing one
+implementation the way item 96 centralized column-ref walking into
+`iter_column_refs`. All four are correct today, but the read/write validator
+pairs could silently drift the next time `WhereNode` grows a new combinator
+(a new node type would need updating in four places, easy to miss one) — the
+exact class of bug item 96 was built to prevent for column refs.
+
+**Fix:** extract one shared WHERE-tree-walk helper (predicate iterator) used
+by all four validators, analogous to `iter_column_refs`; no behavior change,
+covered by the existing validator test suites passing unchanged.
+
+**Effort: S. Priority: low (maintainability/drift-prevention, not a live bug).
+Depends on: none.**
+
+### 112. No scheduled (cron) CI run — dependency/security scans only fire on push/PR
+
+`.github/workflows/ci.yml`'s only triggers are `push: branches: [main]` and
+`pull_request` — there is no `schedule:` trigger anywhere in
+`.github/workflows/`. SBOM/CVE audit, image scanning, secret scanning, and the
+adversarial/DAST suites therefore only run when someone happens to open a PR
+or push to `main`. A CVE disclosed against an already-merged, unchanged
+dependency isn't caught until the next incidental change touches the repo.
+Separately, `make test-soak` (`Makefile:112-115`, `SOAK_ROUNDS=100`) is never
+invoked by CI at all — only `make test-load`'s lighter `QUERYGATE_LOAD_ROUNDS=5`
+runs in the `postgres-live` job (`ci.yml:150-155`); a slow-degradation or
+pool-leak regression that only surfaces after dozens of rounds passes every PR
+and is caught only if a maintainer remembers to run `test-soak` manually
+before a release.
+
+**Fix:** add a nightly/weekly `schedule:` workflow that runs `dep-audit`-class
+checks (CVE/SBOM/lockfile drift) and `make test-soak` against `main`
+independent of code changes; document the cadence in `docs/RELEASING.md`.
+
+**Effort: S. Priority: medium (closes a real blind window between code
+changes, cheap to add). Depends on: none.**
+
+### 113. No metrics for the write-undo / compensation-store feature ✅ OBSOLETE (2026-07-23)
+
+**Obsolete: the write-undo/compensation store was removed** (item 93,
+2026-07-23 — see the `docs/PRODUCT_GUIDE.md` Decision Log). There is no
+compensation store or undo path left to instrument, so this observability gap no
+longer exists. If write-*execution* metrics are wanted later, that is a fresh,
+separately-scoped item (not undo-specific).

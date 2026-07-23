@@ -6,11 +6,13 @@ mcp/tools/connections.py for why.
 
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
+from mcp.server.fastmcp import Context
 from pydantic import BaseModel, Field
 
 from querygate.execution.admission import QueueMode
 from querygate.execution.service import StructuredQueryService
-from querygate.mcp.auth import get_mcp_caller
+from querygate.mcp.auth import get_mcp_caller, get_mcp_config
+from querygate.mcp.elicitation import build_elicitation_resolver
 from querygate.mcp.exceptions import MCPErrorResult, safe_mcp_tool
 from querygate.mcp.server import mcp_server
 from querygate.policy.loader import get_policy
@@ -120,6 +122,7 @@ async def run_structured_queries(
     ] = "execute",
     queue_mode: Annotated[Optional[QueueMode], _QUEUE_MODE_FIELD] = None,
     wait_timeout_seconds: Annotated[Optional[float], _WAIT_TIMEOUT_FIELD] = None,
+    ctx: Context = None,
 ) -> Union[BatchQueryToolResult, BatchExplainToolResult, MCPErrorResult]:
     caller = get_mcp_caller()
     validate_batch_size(len(queries), get_policy(connection, principal=caller))
@@ -129,8 +132,19 @@ async def run_structured_queries(
         return BatchExplainToolResult(
             results=[BatchExplainItemToolResult(**r.model_dump()) for r in explain_results]
         )
+    # In-query human-in-the-loop approval (item 92): if a query trips the gate,
+    # ask the client's human to approve it in-session via elicitation instead of
+    # the out-of-band REST token flow. Opt-in and off by default (see
+    # AppConfig.mcp_elicitation_approval_enabled); when off, resolver is None and
+    # a gated query stays fail-closed as that item's error.
+    resolver = (
+        build_elicitation_resolver(ctx, caller, get_mcp_config()) if ctx is not None else None
+    )
     results = await service.execute_many(
-        queries, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
+        queries,
+        queue_mode=queue_mode,
+        wait_timeout_seconds=wait_timeout_seconds,
+        approval_resolver=resolver,
     )
     return BatchQueryToolResult(
         results=[BatchQueryItemToolResult(**r.model_dump()) for r in results]

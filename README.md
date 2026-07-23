@@ -202,8 +202,11 @@ schema-, and guardrail-checked server-side before any row is touched. It adds
 no trust and cannot bypass any guardrail. Predicate operators (`==`, `>`,
 `.in_`, `.between`, `.is_null`), boolean groups (`and_`/`or_`/`not_`),
 aggregates (`agg.*`), `date_bucket`, `string_agg`/`array_agg`,
-`percentile_cont`, scalar functions (`fn`/`fn_select`), `case`/`when`, and
-`top_n` cover the full AST. Runnable end-to-end demo:
+`percentile_cont`, scalar functions (`fn`/`fn_select`), `case`/`when`,
+`top_n`, and a bounded `IN (subquery)` (a predicate's `value_subquery` — a
+nested `StructuredQuery`, not raw SQL; uncorrelated, single-connection,
+depth-capped, with all caps summed tree-wide; item 97) cover the AST.
+Runnable end-to-end demo:
 [`examples/client_sdk_python.py`](examples/client_sdk_python.py)
 (`python examples/client_sdk_python.py` to print bodies; add `--send` with
 `QUERYGATE_API_KEY` set to run them against a local server). A TypeScript
@@ -454,6 +457,61 @@ missing-key/forged/expired/mismatched token fails closed. The one remaining
 piece is an interactive **MCP elicitation** approval channel (approve inside one
 MCP session instead of the REST round-trip). A deployment that sets no approval
 thresholds or sensitivities is completely unaffected.
+
+### Governed writes — preview, execute, approve, diff
+
+QueryGate is read-only until an operator explicitly turns writes on: every
+deployment starts with `WritePolicy.enabled=false`, and there is still no
+`sql`/raw-DML field anywhere in either transport. When writes are enabled, a
+caller can only ever submit a typed `InsertStatement`/`UpdateStatement`/
+`DeleteStatement` — never a SQL string — and an `UPDATE`/`DELETE` *cannot be
+constructed without a `WHERE`* (an unqualified mutation is impossible by
+construction, not just discouraged). Every write is checked against the same
+deny-by-default `WritePolicy` used for reads (`allowed_tables`,
+`allowed_operations`, `denied_write_columns`, `max_affected_rows`) before it
+is compiled to bound-parameter SQLAlchemy Core DML.
+
+```bash
+# 1. Preview: compiles, but never mutates. include_diff=true adds the exact
+#    before/after row values (computed inside a transaction that always rolls
+#    back), bounded by max_diff_rows and masking-aware.
+curl -X POST -H "Authorization: Bearer $CALLER_KEY" \
+  "$HOST/api/v1/<connection>/write/preview?include_diff=true" \
+  -d '{"op":"update","table":"orders","set":{"status":"shipped"},"where":{"col":"orders.id","op":"eq","value":42}}'
+# -> { "executed": false, "affected_rows": 1, "sql": "...", "diff": {"before":[...],"after":[...]} }
+
+# 2. Execute: one transaction — counts matched rows, aborts before mutating if
+#    over max_affected_rows, runs the approval gate if the row count crosses
+#    approval_max_affected_rows, commits, and rolls back whole on any error.
+curl -X POST -H "Authorization: Bearer $CALLER_KEY" \
+  "$HOST/api/v1/<connection>/write/execute" -d '<the same write JSON>'
+# -> { "executed": true, "affected_rows": 1 }
+```
+
+**No undo — by design.** QueryGate deliberately does not snapshot rows to offer
+a rollback. Keeping a second copy of your data outside its source of truth is
+exactly the footprint an operational-database gateway should not add. The safety
+story is *prevention*, not reversal: the diff preview and the approval gate put a
+human in front of the exact change before it commits, deny-by-default and the
+affected-row cap make a catastrophic-shape write impossible, and every write is
+attributed and audited.
+
+**Both transports, same guarantees.** REST is the routes above; MCP has one
+`run_structured_writes` tool (`mode=preview|execute`, batch, `include_diff`,
+plus in-session elicitation approval instead of the REST 428/approve
+round-trip). Every write is audited exactly like a read — redaction-safe,
+dual-identity (on-behalf-of), tamper-evident when chained audit is enabled —
+recording the operation, table, and affected-row count, **never** a value or
+row. A deployment that never sets `WritePolicy.enabled=true` is unaffected:
+every write endpoint returns a clean policy rejection, and the database stays
+read-only in practice as well as by default.
+
+The claim is deliberately **governed**, not "safe autonomous writes": what's
+guaranteed by construction (no raw DML, every target policy-checked, no
+unqualified UPDATE/DELETE, bounded rows) rules out the catastrophic-shape
+class; preview and approval are what make the remaining question — "did the
+agent intend *this* change" — reviewable and attributable rather than
+unattended.
 
 ### Per-principal rate limits / query quotas
 
@@ -1574,8 +1632,10 @@ Being upfront about what's not done yet:
   with read scope; write-only callers see submitted/inherited so write scope
   cannot become read scope. No admin UI either — the governance mutation API
   is REST-only for now.
-- **No write operations** — by design. QueryGate is read-only; there is no
-  insert/update/delete path anywhere in the AST or compiler.
+- **Writes are opt-in and deny-by-default, not absent** — see "Governed
+  writes" above. `WritePolicy.enabled` is `false` until an operator turns it
+  on per table/operation, so a default deployment is read-only in practice;
+  there is still no raw-DML string field on either transport.
 - **Pre-execution cost estimation is Postgres-only** — `max_estimated_rows`/
   `max_estimated_cost` (above) have no effect on an MSSQL connection yet;
   MSSQL's estimated-plan mechanism needs its own connection lifecycle that

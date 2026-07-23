@@ -79,6 +79,9 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
 
             from querygate.execution.redis_concurrency import RedisConcurrencyLimiter
 
+            from querygate.execution.quota import init_redis_quota_limiter
+            from querygate.execution.redis_quota import RedisQuotaLimiter
+
             redis_client = redis_asyncio.Redis.from_url(conf.concurrency_redis_url)
             init_redis_limiter(
                 RedisConcurrencyLimiter(
@@ -88,6 +91,10 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                     fail_open=conf.concurrency_redis_fail_open,
                 )
             )
+            # Same Redis backs the cross-replica per-principal quota (item 50
+            # phase 2), so a principal's rate/byte budget is one shared window
+            # across replicas rather than one-per-replica.
+            init_redis_quota_limiter(RedisQuotaLimiter(redis_client))
 
         try:
             if conf.mcp_enabled:
