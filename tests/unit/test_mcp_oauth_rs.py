@@ -20,6 +20,7 @@ from starlette.requests import Request
 
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
+from querygate.core.scopes import ALL_SCOPES
 from querygate.mcp.auth import MCPAuthMiddleware
 from querygate.mcp.oauth_metadata import (
     WELL_KNOWN_PREFIX,
@@ -109,13 +110,17 @@ def test_metadata_document_shape():
     assert doc["resource"] == _RESOURCE
     assert doc["authorization_servers"] == [_ISSUER]
     assert doc["bearer_methods_supported"] == ["header"]
-    assert doc["scopes_supported"] == ["mcp:query"]
+    # scopes_supported advertises the FULL vocabulary (item 95), unioned with any
+    # custom required scope, so an IdP can import the whole set.
+    assert doc["scopes_supported"] == sorted(set(ALL_SCOPES) | {"mcp:query"})
     assert doc["resource_documentation"] == "https://docs.example.com/mcp"
 
 
-def test_metadata_document_omits_optional_fields_when_unset():
+def test_metadata_publishes_full_vocabulary_even_without_required_scopes():
+    # Unlike the old behavior (scopes_supported present only when required scopes
+    # were configured), the full catalog is always advertised now.
     doc = build_protected_resource_metadata(_rs_config())
-    assert "scopes_supported" not in doc
+    assert doc["scopes_supported"] == sorted(ALL_SCOPES)
     assert "resource_documentation" not in doc
 
 

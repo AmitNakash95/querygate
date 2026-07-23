@@ -107,12 +107,13 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   makes future AST breadth safe-by-construction. **Blocks 97.*** ✅ **Shipped**
   (`iter_column_refs` canonical visitor + `RefPosition` taxonomy; four parallel
   walks removed; zero behavior change, 1402 tests pass).
-- [ ] **95** — Discoverable scope catalog + recommended role bundles for IdP
+- [x] **95** — Discoverable scope catalog + recommended role bundles for IdP
   integration. *Turns the shipped "bring your IdP" auth (items 10/90) into a
   turnkey wire-up: a design partner with Okta/Entra/Auth0 can register QG's
   scopes and roles without reverse-engineering `scopes.py`. Small effort,
   directly unblocks SSO-based pilot onboarding. **Depends on 10 + 90 (both
-  shipped).***
+  shipped).*** ✅ **Shipped** (full-vocabulary RFC 9728 `scopes_supported` +
+  generated `docs/SCOPE_CATALOG.md` with role bundles, drift-tested).
 
 ### Phase 2 — Enterprise procurement unlocks (pull-driven — do when a partner's security team engages)
 

@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Any, Dict
 
 from fastapi import APIRouter
 
+from querygate.core.scopes import ALL_SCOPES
+
 if TYPE_CHECKING:
     from querygate.core.config import AppConfig
 
@@ -53,9 +55,15 @@ def build_protected_resource_metadata(cfg: "AppConfig") -> Dict[str, Any]:
         # RFC 6750 §2.1: this resource only accepts the token in the
         # Authorization request header, never a query/form parameter.
         "bearer_methods_supported": ["header"],
+        # RFC 9728 `scopes_supported` advertises the ENTIRE scope vocabulary this
+        # resource understands (TODO.md item 95) so an IdP can import it and mint
+        # usable tokens with zero manual archaeology. This is deliberately NOT
+        # `mcp_required_scopes` — that is the access *gate* for the MCP surface
+        # (enforced in mcp/auth.py) and stays exactly as configured. A custom
+        # required scope an operator set that isn't in the built-in catalog is
+        # still surfaced here via the union, so discovery never hides a gate.
+        "scopes_supported": sorted(set(ALL_SCOPES) | set(cfg.mcp_required_scopes)),
     }
-    if cfg.mcp_required_scopes:
-        metadata["scopes_supported"] = list(cfg.mcp_required_scopes)
     if cfg.mcp_resource_documentation:
         metadata["resource_documentation"] = cfg.mcp_resource_documentation
     return metadata

@@ -1696,8 +1696,13 @@ a `Principal`:
 
 - `subject` — who the caller is (a string identifier).
 - `scopes` — a set of permission strings (e.g. `admin:reload-config`), used
-  to gate sensitive operations like config reload or catalog governance (see
-  `src/querygate/core/scopes.py`).
+  to gate sensitive operations like config reload or catalog governance.
+  `src/querygate/core/scopes.py` is the single source of truth for the whole
+  vocabulary: beyond the constants it carries a structured `SCOPE_CATALOG` and
+  recommended `ROLE_BUNDLES`, from which both the RFC 9728 `scopes_supported`
+  metadata and the human reference `docs/SCOPE_CATALOG.md` (via
+  `make scope-catalog`, drift-tested) are generated — so an IdP can wire up
+  QueryGate's scopes and roles without reverse-engineering source (item 95).
 - `claims` — the raw claims from a token, if the auth method produced any
   (empty for a static API key).
 - `auth_method` — which scheme produced this principal (`"api_key"`,
@@ -2538,6 +2543,26 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — RFC 9728 `scopes_supported` advertises the full scope
+  vocabulary, kept distinct from the `mcp_required_scopes` access gate; role
+  bundles are advisory and generated, never enforced or hand-maintained (item
+  95).** Making "bring your IdP" turnkey required publishing QueryGate's scope
+  vocabulary. Two boundaries were drawn deliberately. **(1) Discovery ≠ gate.**
+  `scopes_supported` now lists the entire vocabulary an IdP might mint tokens
+  for (`core/scopes.py`'s `ALL_SCOPES`, unioned with any custom required scope),
+  while `mcp_required_scopes` stays exactly as-is as the enforced MCP access gate
+  — conflating the two (the prior behavior published only the gate) would have
+  told IdPs a token needs *only* the MCP scope, hiding every admin/catalog scope
+  they must also be able to issue. **(2) Roles are guidance, data-access is
+  not a scope.** `ROLE_BUNDLES` (Analyst/Operator/Config Governor/Catalog
+  Author/Catalog Admin/Catalog Data Steward) are advisory groupings QueryGate
+  never enforces — it enforces individual scopes — and an Analyst deliberately
+  carries *no* scope, because which tables/columns a principal may read stays in
+  `policy.yaml` keyed by `sub`/claim, never in the IdP. Both the wire metadata
+  and `docs/SCOPE_CATALOG.md` are generated from `core/scopes.py` with a drift
+  test (`test_scope_catalog.py`), so a new scope constant that isn't catalogued
+  fails CI rather than silently going undiscoverable. No auth-model change, no
+  QG-owned identity store.
 - **2026-07-23 — The multi-replica config-reload path is GitOps + a rolling
   restart, not a cross-replica broadcast; per-principal quota stays honestly
   per-replica (TODO.md item 56).** Building the HA/DR story, two boundaries were
