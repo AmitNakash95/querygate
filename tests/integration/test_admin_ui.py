@@ -486,3 +486,23 @@ async def test_query_templates_endpoint_is_reachable_and_needs_no_config_scope(
         response = await client.get("/api/v1/query-templates", headers=_auth())
     assert response.status_code == 200
     assert isinstance(response.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_four_eyes_review_ui_is_wired_and_scope_gated(tmp_path, monkeypatch):
+    """Item 42 phase 2: the versions view surfaces four-eyes review — approval
+    status per staged version, Approve/Reject buttons gated on the
+    admin:config:approve scope (canApprove), calling the /approve and /reject
+    endpoints. Server enforcement (item 42 ph1) is unchanged; this only makes the
+    flow visible/usable in the browser."""
+    app = create_app(_settings(tmp_path, monkeypatch))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        script = (await client.get("/admin/app.js")).text
+    # Scope gate: approve buttons are shown only to an admin:config:approve holder.
+    assert 'canApprove() { return hasScope("admin:config:approve"); }' in script
+    # The buttons and their endpoints are wired.
+    assert "data-approve-version" in script and "data-reject-version" in script
+    assert "/approve" in script and "/reject" in script
+    assert "reviewDecision(" in script
+    # Approval status is surfaced per staged version.
+    assert "approvalSummary(" in script

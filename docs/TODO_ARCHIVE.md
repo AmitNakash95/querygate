@@ -2131,6 +2131,62 @@ reasons—never resolved secret values, static row-filter values, compiled SQL
 literals, or hidden identifiers. Prove simulation persists nothing and cannot
 alter live request behavior even under concurrent use.
 
+### 42. Four-eyes config approval and separation of duties ✅ DONE
+
+**Phase 1 shipped (the server-side governance model + enforcement):** A staged
+config version now carries durable `ConfigApprovalRecord`s
+(`admin/models.py`: approver, decision, timestamp, content fingerprint, bounded
+note). The store (`admin/store.py add_approval`) enforces the invariants
+**server-side, not in the UI**: only a `staged` version can be reviewed, the
+version's **author can never approve/reject their own change**, and a reviewer's
+latest decision supersedes their own earlier one so *N approvals means N distinct
+reviewers*. A new `AppConfig.require_config_approvals` (default `0` =
+single-administrator mode, fully backward-compatible; existing manifests missing
+the `approvals` field load unchanged) gates `apply()`: a staged version's **first
+activation** is refused with `PolicyViolationError` until it has that many valid
+approvals (bound to the version's content fingerprint) — rollback is deliberately
+exempt. New `admin:config:approve` scope (distinct from `admin:config:write`; a
+"Config Approver" role bundle) and REST `POST /admin/config/versions/{id}/approve`
+and `/reject` (409 on an author-conflict/not-staged, 403 without the scope). Every
+decision + the insufficient-approvals apply-rejection is audited (`approve`/
+`reject` actions, content-free). Covered by `tests/unit/test_config_approval.py`
+(9 tests: author≠approver, staged-only, distinct-reviewer accounting,
+apply-blocked-until-quorum, single-admin backward-compat, endpoint scope/409).
+
+**Phase 2 shipped (CLI + admin-UI review flows):** `querygate-config` (new
+`config_cli.py`, an authenticated thin HTTP client over `/admin/config/*`) adds
+`versions` (list with approval status), `approve <id>`, and `reject <id>` — the
+caller's own bearer token authenticates the reviewer, so the server enforces the
+same scope/author≠approver/audit; no new authority. The admin-UI Releases view
+now shows each staged version's approval status (reviewers + decisions) and,
+for an `admin:config:approve` holder, Approve/Reject buttons that call the
+endpoints (`app.js` `canApprove`/`approvalSummary`/`reviewDecision`); the
+author's own buttons are disabled client-side as a hint, with server enforcement
+unchanged. "Never simulate four-eyes in the browser while the server permits
+self-approval" holds by construction — enforcement is server-side (ph1).
+Covered by `tests/unit/test_config_cli.py` (6: request shape, approval-status
+render, 403/409 surfacing) and `tests/integration/test_admin_ui.py`
+(`test_four_eyes_review_ui_is_wired_and_scope_gated`).
+
+**Original scope (for reference):** governance-model and authorization change —
+new durable states, reviewer records, scopes, invariants, audit actions,
+concurrency handling, REST/CLI/UI flows, and migration/backward-compatibility for
+existing staged versions.
+
+**Why it matters:** Item 31 currently implements an explicit validate → diff →
+stage → typed-confirmation activate sequence, but one `admin:config:write`
+principal can perform every step. Regulated and higher-risk customers often
+need proof that the author of an access change could not approve and activate
+their own proposal.
+
+**What to do:** Add separate propose/review/approve/activate capabilities and a
+durable approval record bound to an immutable version fingerprint. Enforce
+author ≠ approver, invalidate approval if content changes, support rejection
+with bounded review notes, prevent activation without the required approvals,
+and audit every transition without YAML content. Keep a documented single-
+administrator mode for smaller deployments, but never simulate four-eyes in
+the browser while the server still permits self-approval.
+
 ### 43. Admin connection-operations and health workspace ✅ DONE
 
 **Phase 1 shipped (admin connection-status API); phase 2a shipped (rate-limited
