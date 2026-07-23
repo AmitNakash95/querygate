@@ -494,6 +494,16 @@ run the token exchange / scope step-up. Static API keys still work and skip
 audience binding (an out-of-band trust with no `aud`) but still pass the scope
 gate.
 
+The metadata's RFC 9728 `scopes_supported` advertises QueryGate's **entire**
+scope vocabulary (not just the MCP access gate), so an IdP can import it and
+mint usable tokens with no manual typing. For humans, `docs/SCOPE_CATALOG.md`
+(generated from `core/scopes.py` by `make scope-catalog`, drift-tested) lists
+every scope, the action it gates, and **recommended role bundles**
+(Analyst / Operator / Config Governor / Catalog Author / Catalog Admin /
+Catalog Data Steward) to paste into your IdP's role definitions. Data-access
+grants stay in `policy.yaml` keyed by `sub`/claim — never scopes — so
+provisioning a user reduces to role assignment.
+
 ## Config-governance API (staged versions, apply, rollback)
 
 `POST /api/v1/admin/reload-config` (above) reloads whatever
