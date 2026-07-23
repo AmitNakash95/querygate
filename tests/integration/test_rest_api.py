@@ -414,6 +414,29 @@ async def test_batch_query_passes_queue_mode_and_wait_timeout_to_service(app):
 
 
 @pytest.mark.asyncio
+async def test_batch_query_passes_approval_tokens_to_service(app):
+    """The batch route threads per-query approval grants (item 92) through to
+    execute_many, so an approval-gated query can run inside a batch."""
+    results = [
+        BatchQueryItemResult(rows=[{"id": 1}], row_count=1, truncated=False, limit=5, offset=0)
+    ]
+    with patch(
+        f"{_SERVICE}.execute_many", new_callable=AsyncMock, return_value=results
+    ) as mock_execute_many:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                "/api/v1/demo/query/batch",
+                json={
+                    "queries": [{"from": "customers", "select": ["customers.id"], "limit": 5}],
+                    "approval_tokens": {"deadbeef": "signed-token"},
+                },
+            )
+    assert resp.status_code == 200
+    _queries_arg, kwargs = mock_execute_many.call_args
+    assert kwargs["approval_tokens"] == {"deadbeef": "signed-token"}
+
+
+@pytest.mark.asyncio
 async def test_batch_query_uses_per_principal_max_batch_size(app):
     """Regression: batch-size validation used to read only the connection
     policy, so a tighter principal override could be bypassed before

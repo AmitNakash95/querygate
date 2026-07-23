@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pydantic as pyd
 import sqlalchemy as sa
@@ -672,13 +672,28 @@ class StructuredQueryService:
         *,
         queue_mode: Optional[QueueMode] = None,
         wait_timeout_seconds: Optional[float] = None,
+        approval_tokens: Optional[Dict[str, str]] = None,
     ) -> List[BatchQueryItemResult]:
-        """Run each query independently; one failure doesn't drop the rest of the batch."""
+        """Run each query independently; one failure doesn't drop the rest of the batch.
+
+        `approval_tokens` maps a query fingerprint to its in-query approval token
+        (item 92), so a batch can carry the per-query grants an approval-gated
+        query needs — the REST token-flow analogue for `execute()`'s
+        `approval_token`. A query with no matching token stays fail-closed: it
+        surfaces its own `ApprovalRequiredError` as that item's `error` without
+        affecting the rest of the batch. Each token is still verified against
+        that exact query's fingerprint inside `execute()`, so a token can't be
+        replayed onto a different query in the same batch.
+        """
         results: List[BatchQueryItemResult] = []
         for query in queries:
+            token = approval_tokens.get(query_fingerprint(query)) if approval_tokens else None
             try:
                 result = await self.execute(
-                    query, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
+                    query,
+                    queue_mode=queue_mode,
+                    wait_timeout_seconds=wait_timeout_seconds,
+                    approval_token=token,
                 )
                 results.append(BatchQueryItemResult(**result.model_dump()))
             except Exception as exc:

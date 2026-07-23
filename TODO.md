@@ -2000,7 +2000,7 @@ Delegated-identity attribution (RFC 8693 `act` → `Principal.actor`, the human'
 
 Optional `AUDIT_SINK_BACKEND=jsonl_chained` wraps every redaction-safe event in a hash-chain envelope (SHA-256, or HMAC-SHA256 with `AUDIT_LEDGER_HMAC_KEY`) so edits/deletions/reordering/insertion are detectable; `querygate-audit verify` validates a ledger and `querygate-audit receipt` emits a portable per-query compliance receipt. Chaining is envelope-level (no new event data) and verify-only. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 91).
 
-### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) ✅ DONE (phases 1 + 2 triggers); MCP-elicitation channel + batch not started
+### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) ✅ DONE (phases 1 + 2 triggers + batch tokens); MCP-elicitation channel not started
 
 **Phase 2 sensitivity-label trigger shipped:** `Policy.approval_sensitivities`
 (a list of catalog `SensitivityClass` labels, default empty/off) makes a query
@@ -2041,11 +2041,24 @@ malformed, trigger boundary, gate seam, e2e pause→approve→resubmit, endpoint
 scope/503). **Invariant preserved:** read-only, AST-only, opt-in — a
 default-config deployment is byte-for-byte unchanged.
 
-**Still not started:** the interactive **MCP elicitation** channel (approve
-within one MCP session instead of the REST token round-trip — needs FastMCP
-elicitation wiring) and per-query approval tokens for **batch** (`execute_many`).
-Both triggers (cost + sensitivity) and the REST token flow are done; these two
-are the remaining channel/transport work.
+**Batch approval tokens shipped (REST):** `execute_many` takes an
+`approval_tokens` map (query fingerprint -> the signed token from
+`POST /query/approve`) and threads each query's token into its `execute()`
+call, so an approval-gated query can now run inside a batch. `BatchQueryRequest`
+carries the map (`POST /query/batch`). A query with no matching token stays
+fail-closed — its `ApprovalRequiredError` surfaces as that batch item's `error`
+without dropping the rest — and each token is still verified against its own
+query's fingerprint in `execute()`, so it can't be replayed onto another query
+in the same batch. Covered by 3 tests (2 service-level in `test_approval.py`, 1
+route-level in `test_rest_api.py`).
+
+**Still not started:** the interactive **MCP elicitation** channel — approve
+within one MCP session (via `Context.elicit`) instead of the REST token
+round-trip. The installed MCP SDK (`mcp.server.fastmcp`) exposes `Context.elicit`,
+so it's feasible; it's the remaining channel/transport work (wiring an
+`ApprovalRequiredError` from the batch MCP tool into an in-session elicitation
+prompt, then minting a token and retrying on approval). Both triggers (cost +
+sensitivity), the REST token flow, and batch tokens are done.
 
 **Effort: L. Priority: medium (safety moat; sequence after 90/91). Feature ref: F3.**
 
