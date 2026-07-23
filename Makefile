@@ -21,6 +21,11 @@ deps: ## Install/update Python dependencies via Poetry
 deps-update: ## Update all dependencies to latest allowed versions
 	poetry update
 
+.PHONY: install-hooks
+install-hooks: ## Enable the committed git pre-commit gate (black + unit tests) for this clone — run once per contributor
+	git config core.hooksPath .githooks
+	@echo "Enabled .githooks/pre-commit — 'git commit' now runs black --check + unit tests. Bypass a commit with --no-verify."
+
 # ─── App ──────────────────────────────────────────────────────────────────────
 .PHONY: run
 run: ## Start the app (uses poetry run → uvicorn via querygate.run)
