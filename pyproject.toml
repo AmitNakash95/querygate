@@ -56,6 +56,7 @@ prometheus-client = "^0.25.0"
 pyjwt = {extras = ["crypto"], version = "^2.13.0"}
 redis = "^8.0.1"
 hvac = "^2.4.0"
+defusedxml = "^0.7.1"
 
 [tool.poetry.group.dev.dependencies]
 # Test stack floored at CVE-fixed versions (pytest PYSEC-2026-1845); pytest 9

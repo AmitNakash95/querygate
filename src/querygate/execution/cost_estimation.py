@@ -1,21 +1,20 @@
-"""Postgres EXPLAIN-based pre-execution query-cost estimation (TODO.md item 26).
+"""Pre-execution query-cost estimation (TODO.md item 26).
 
 Row limits, timeouts, and concurrency caps (the rest of `execution/`) are all
 *reactive*: they bound a query only once it's already running. This module
-adds a *proactive* check — plan the compiled query with Postgres's own query
+adds a *proactive* check — plan the compiled query with the database's own query
 planner, without ever running it, and reject it before it touches real data
 if the planner's own row/cost estimate is past a configured threshold.
 
-Scope for this first pass is deliberately Postgres-only. MSSQL's equivalent
-(`SET SHOWPLAN_XML ON`) can't be composed the way Postgres's inline
-`EXPLAIN (FORMAT JSON) <query>` is here: SHOWPLAN mode must be the only
-statement in its batch — no other statement, including the query it's
-meant to plan, can run in the same batch once it's set — so getting an
-estimated MSSQL plan needs its own dedicated connection/session lifecycle,
-not a one-line prefix on the already-compiled statement. Tracked as
-follow-up work in TODO.md item 26; a policy with `max_estimated_rows`/
-`max_estimated_cost` set on an MSSQL connection is accepted but has no
-effect there.
+Both supported dialects are covered. **Postgres** (phase 1) plans inline in the
+already-open session with `EXPLAIN (FORMAT JSON) <query>`. **MSSQL** (phase 2)
+can't be composed that way — `SET SHOWPLAN_XML ON` must be the only statement in
+its batch and applies to the whole connection until turned off — so
+`estimate_mssql_query_cost` uses a **dedicated connection** (SET ON, plan the
+query without running it, SET OFF) and parses the estimated rows/subtree cost out
+of the SHOWPLAN XML. A policy with `max_estimated_rows`/`max_estimated_cost` now
+enforces on either dialect (any *other* dialect has no estimator and proceeds
+under the reactive guardrails).
 
 Fail-open by design (see `estimate_postgres_query_cost`), and observable by
 design too: every path that can't produce an estimate increments
@@ -32,9 +31,11 @@ import json
 from dataclasses import dataclass
 from typing import Optional
 
+import defusedxml.ElementTree as ET
+
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects import mssql, postgresql
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from querygate.core.exceptions import CostEstimateExceededError
 from querygate.core.logging import get_logger
@@ -125,6 +126,82 @@ async def estimate_postgres_query_cost(
         estimated_total_cost=(
             float(estimated_total_cost) if estimated_total_cost is not None else None
         ),
+    )
+
+
+def _parse_showplan_xml(raw: str) -> tuple[Optional[int], Optional[float]]:
+    """Pull the root statement's estimated rows/cost out of an MSSQL SHOWPLAN_XML
+    document — the first element carrying the `StatementSubTreeCost`/
+    `StatementEstRows` attributes (namespace-agnostic)."""
+    root = ET.fromstring(raw)
+    for element in root.iter():
+        if "StatementSubTreeCost" in element.attrib or "StatementEstRows" in element.attrib:
+            rows = element.attrib.get("StatementEstRows")
+            cost = element.attrib.get("StatementSubTreeCost")
+            return (
+                int(float(rows)) if rows is not None else None,
+                float(cost) if cost is not None else None,
+            )
+    return (None, None)
+
+
+async def estimate_mssql_query_cost(
+    engine: AsyncEngine, stmt: sa.Select, *, connection_id: str
+) -> Optional[QueryCostEstimate]:
+    """Plan `stmt` with SQL Server's `SET SHOWPLAN_XML ON` and return the root
+    statement's estimated rows / subtree cost.
+
+    Unlike Postgres's inline `EXPLAIN (FORMAT JSON) <query>`, SHOWPLAN mode must
+    be the only thing in its batch and applies to the whole connection until
+    turned off — so this uses a **dedicated connection** (SET ON, plan the query
+    without running it, SET OFF), never the session running the real query.
+    Same fail-open, observable-by-design contract as the Postgres estimator:
+    never raises, and every unavailable path increments the unavailable counter."""
+    COST_ESTIMATION_ATTEMPTS_TOTAL.labels(connection=connection_id).inc()
+
+    try:
+        compiled = stmt.compile(dialect=mssql.dialect(), compile_kwargs={"literal_binds": True})
+    except Exception as exc:
+        COST_ESTIMATION_UNAVAILABLE_TOTAL.labels(
+            connection=connection_id, reason="compile_failed"
+        ).inc()
+        get_logger().bind(func="estimate_mssql_query_cost").warning(
+            "cost_estimation.compile_failed", error=f"{type(exc).__name__}: {exc}"
+        )
+        return None
+
+    try:
+        async with engine.connect() as conn:
+            # SHOWPLAN_XML ON is its own batch; the next statement is *planned*,
+            # not executed, and returns the plan XML; then turn it off.
+            await conn.exec_driver_sql("SET SHOWPLAN_XML ON")
+            try:
+                result = await conn.exec_driver_sql(str(compiled))
+                raw_plan = result.scalar()
+            finally:
+                await conn.exec_driver_sql("SET SHOWPLAN_XML OFF")
+    except Exception as exc:
+        COST_ESTIMATION_UNAVAILABLE_TOTAL.labels(
+            connection=connection_id, reason="explain_failed"
+        ).inc()
+        get_logger().bind(func="estimate_mssql_query_cost").warning(
+            "cost_estimation.explain_failed", error=f"{type(exc).__name__}: {exc}"
+        )
+        return None
+
+    try:
+        estimated_rows, estimated_total_cost = _parse_showplan_xml(raw_plan)
+    except Exception as exc:
+        COST_ESTIMATION_UNAVAILABLE_TOTAL.labels(
+            connection=connection_id, reason="plan_parse_failed"
+        ).inc()
+        get_logger().bind(func="estimate_mssql_query_cost").warning(
+            "cost_estimation.plan_parse_failed", error=f"{type(exc).__name__}: {exc}"
+        )
+        return None
+
+    return QueryCostEstimate(
+        estimated_rows=estimated_rows, estimated_total_cost=estimated_total_cost
     )
 
 

@@ -415,10 +415,12 @@ branching centralized in one module); as of TODO.md item 57 it is now a
 compiler `DialectAdapter`. So the composable-interface doctrine now holds there
 too; follow it (implement + register an adapter, no inline branch).
 
-One known, deliberate exception remains, not an oversight: `execution/service.py`'s
-Postgres-only cost-estimation gate (MSSQL's estimated-plan mechanism doesn't
-exist yet — TODO.md item 26 phase 2). Don't treat it as precedent for a new
-inline branch elsewhere.
+The former Postgres-only cost-estimation exception is resolved (TODO.md item 26
+phase 2): `execution/cost_estimation.py` now has both `estimate_postgres_query_cost`
+(inline `EXPLAIN` in-session) and `estimate_mssql_query_cost` (dedicated
+`SET SHOWPLAN_XML ON` connection), dispatched by `StructuredQueryService._estimate_cost`
+— a per-dialect method, not scattered `if dialect ==` at call sites. A dialect
+without an estimator returns None (proceeds under the reactive guardrails).
 
 ### Testing gotchas (see `tests/conftest.py`)
 
