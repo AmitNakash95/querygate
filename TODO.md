@@ -2052,10 +2052,14 @@ dual-marked execution guarantees, under `make test-security`), and the **MCP
 batch, `include_diff`, and the in-session elicitation approval channel for a
 gated write — the elicitation resolver was factored into shared
 `mcp/elicitation.py`, now serving both the read and write tools;
-`WriteExecutionService.execute_many` is the batch/resolver seam). **Still open in
-2b:** the `release-smoke` write round-trip and the write concurrency load gate.
-(Approval still binds to the write fingerprint, not the diff hash — a phase-3
-refinement.) Write execution is also proved against a **real Postgres**
+`WriteExecutionService.execute_many` is the batch/resolver seam), and the
+**write concurrency load gate** (`tests/integration/test_postgres_write_load.py`,
+`-m load`: 8 concurrent over-cap writes all reject and change nothing; 12
+concurrent within-cap inserts commit exactly once each). **Still open in 2b:**
+only the `release-smoke` write round-trip (extend the smoke image test with a
+real capped write). (Approval still binds to the write fingerprint, not the diff
+hash — a phase-3 refinement.) Write execution is also proved against a **real
+Postgres**
 (`tests/integration/test_postgres_write_execution.py`, `real_db`/`postgres_live`:
 self-cleaning insert→verify→update→verify→delete→verify round-trip + over-cap
 rollback), not just SQLite. Also shipped in 2b:
