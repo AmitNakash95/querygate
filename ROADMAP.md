@@ -196,7 +196,9 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 - [ ] **44 (phase 2)** — Admin observability / rejection-trend dashboard.
 - [ ] **45 (phase 2)** — Non-admin "My access" portal.
 - [ ] **47 (phase 2)** — Safe draft recovery + config export/import UX.
-- [ ] **50 (phase 2)** — Per-principal rate limits / query quotas over time.
+- [x] **50 (phase 2)** — Per-principal rate limits / query quotas over time. ✅
+  **Shipped** (`RedisQuotaLimiter` — cross-replica shared quota budget via Lua,
+  closing the per-replica-multiplication gap).
 
 ---
 

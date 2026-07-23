@@ -69,8 +69,10 @@ def test_resolve_query_quota_returns_tuple():
 # ---------------------------------------------------------------------------
 
 
-def _reserve(limiter, key=("demo", "agent"), *, max_requests=None, max_bytes=None, window=60, now):
-    return limiter.reserve(
+async def _reserve(
+    limiter, key=("demo", "agent"), *, max_requests=None, max_bytes=None, window=60, now
+):
+    return await limiter.reserve(
         key,
         max_requests=max_requests,
         max_response_bytes=max_bytes,
@@ -79,43 +81,47 @@ def _reserve(limiter, key=("demo", "agent"), *, max_requests=None, max_bytes=Non
     )
 
 
-def test_request_quota_admits_up_to_cap_then_rejects():
+@pytest.mark.asyncio
+async def test_request_quota_admits_up_to_cap_then_rejects():
     limiter = InProcessQuotaLimiter()
-    _reserve(limiter, max_requests=2, window=30, now=100.0)
-    _reserve(limiter, max_requests=2, window=30, now=100.0)
+    await _reserve(limiter, max_requests=2, window=30, now=100.0)
+    await _reserve(limiter, max_requests=2, window=30, now=100.0)
     with pytest.raises(QuotaExceededError) as excinfo:
-        _reserve(limiter, max_requests=2, window=30, now=100.0)
+        await _reserve(limiter, max_requests=2, window=30, now=100.0)
     assert excinfo.value.quota_kind == "requests"
     assert excinfo.value.retry_after_seconds == 30
 
 
-def test_request_quota_window_rolls_forward():
+@pytest.mark.asyncio
+async def test_request_quota_window_rolls_forward():
     limiter = InProcessQuotaLimiter()
-    _reserve(limiter, max_requests=1, window=30, now=100.0)
+    await _reserve(limiter, max_requests=1, window=30, now=100.0)
     with pytest.raises(QuotaExceededError):
-        _reserve(limiter, max_requests=1, window=30, now=110.0)
+        await _reserve(limiter, max_requests=1, window=30, now=110.0)
     # Once the first attempt ages past the window, capacity frees up again.
-    _reserve(limiter, max_requests=1, window=30, now=131.0)
+    await _reserve(limiter, max_requests=1, window=30, now=131.0)
 
 
-def test_retry_after_reflects_oldest_entry_age():
+@pytest.mark.asyncio
+async def test_retry_after_reflects_oldest_entry_age():
     limiter = InProcessQuotaLimiter()
-    _reserve(limiter, max_requests=1, window=60, now=100.0)
+    await _reserve(limiter, max_requests=1, window=60, now=100.0)
     with pytest.raises(QuotaExceededError) as excinfo:
-        _reserve(limiter, max_requests=1, window=60, now=140.0)
+        await _reserve(limiter, max_requests=1, window=60, now=140.0)
     # oldest entry at t=100, window 60 -> frees at t=160, now=140 -> ~20s.
     assert excinfo.value.retry_after_seconds == 20
 
 
-def test_principals_and_connections_have_independent_windows():
+@pytest.mark.asyncio
+async def test_principals_and_connections_have_independent_windows():
     limiter = InProcessQuotaLimiter()
-    _reserve(limiter, ("demo", "a"), max_requests=1, window=30, now=100.0)
+    await _reserve(limiter, ("demo", "a"), max_requests=1, window=30, now=100.0)
     # Same connection, different principal: independent budget.
-    _reserve(limiter, ("demo", "b"), max_requests=1, window=30, now=100.0)
+    await _reserve(limiter, ("demo", "b"), max_requests=1, window=30, now=100.0)
     # Same principal, different connection: independent budget.
-    _reserve(limiter, ("other", "a"), max_requests=1, window=30, now=100.0)
+    await _reserve(limiter, ("other", "a"), max_requests=1, window=30, now=100.0)
     with pytest.raises(QuotaExceededError):
-        _reserve(limiter, ("demo", "a"), max_requests=1, window=30, now=100.0)
+        await _reserve(limiter, ("demo", "a"), max_requests=1, window=30, now=100.0)
 
 
 # ---------------------------------------------------------------------------
@@ -123,44 +129,48 @@ def test_principals_and_connections_have_independent_windows():
 # ---------------------------------------------------------------------------
 
 
-def test_byte_quota_rejects_once_window_total_reaches_cap():
+@pytest.mark.asyncio
+async def test_byte_quota_rejects_once_window_total_reaches_cap():
     limiter = InProcessQuotaLimiter()
-    r1 = _reserve(limiter, max_bytes=1000, window=30, now=100.0)
-    record_query_quota_bytes(r1, 600)
-    r2 = _reserve(limiter, max_bytes=1000, window=30, now=100.0)  # total 600 < 1000, admitted
-    record_query_quota_bytes(r2, 600)  # window now holds 1200 bytes
+    r1 = await _reserve(limiter, max_bytes=1000, window=30, now=100.0)
+    await limiter.record_bytes(r1, 600)
+    r2 = await _reserve(limiter, max_bytes=1000, window=30, now=100.0)  # total 600 < 1000, admitted
+    await limiter.record_bytes(r2, 600)  # window now holds 1200 bytes
     with pytest.raises(QuotaExceededError) as excinfo:
-        _reserve(limiter, max_bytes=1000, window=30, now=100.0)
+        await _reserve(limiter, max_bytes=1000, window=30, now=100.0)
     assert excinfo.value.quota_kind == "bytes"
 
 
-def test_byte_quota_window_rolls_forward():
+@pytest.mark.asyncio
+async def test_byte_quota_window_rolls_forward():
     limiter = InProcessQuotaLimiter()
-    r1 = _reserve(limiter, max_bytes=100, window=30, now=100.0)
-    record_query_quota_bytes(r1, 500)
+    r1 = await _reserve(limiter, max_bytes=100, window=30, now=100.0)
+    await limiter.record_bytes(r1, 500)
     with pytest.raises(QuotaExceededError):
-        _reserve(limiter, max_bytes=100, window=30, now=110.0)
+        await _reserve(limiter, max_bytes=100, window=30, now=110.0)
     # Old byte weight ages out with its entry.
-    _reserve(limiter, max_bytes=100, window=30, now=131.0)
+    await _reserve(limiter, max_bytes=100, window=30, now=131.0)
 
 
-def test_request_cap_checked_before_byte_cap():
+@pytest.mark.asyncio
+async def test_request_cap_checked_before_byte_cap():
     limiter = InProcessQuotaLimiter()
-    r1 = _reserve(limiter, max_requests=1, max_bytes=100, window=30, now=100.0)
-    record_query_quota_bytes(r1, 999)
+    r1 = await _reserve(limiter, max_requests=1, max_bytes=100, window=30, now=100.0)
+    await limiter.record_bytes(r1, 999)
     # Both caps are now exceeded; the request cap wins the classification.
     with pytest.raises(QuotaExceededError) as excinfo:
-        _reserve(limiter, max_requests=1, max_bytes=100, window=30, now=100.0)
+        await _reserve(limiter, max_requests=1, max_bytes=100, window=30, now=100.0)
     assert excinfo.value.quota_kind == "requests"
 
 
-def test_record_bytes_on_aged_out_reservation_is_harmless():
+@pytest.mark.asyncio
+async def test_record_bytes_on_aged_out_reservation_is_harmless():
     limiter = InProcessQuotaLimiter()
-    r1 = _reserve(limiter, max_bytes=1000, window=30, now=100.0)
+    r1 = await _reserve(limiter, max_bytes=1000, window=30, now=100.0)
     # Advance past the window so r1's entry is pruned on the next reserve.
-    _reserve(limiter, max_bytes=1000, window=30, now=200.0)
-    record_query_quota_bytes(r1, 5000)  # must not raise or resurrect the total
-    _reserve(limiter, max_bytes=1000, window=30, now=200.0)  # still admitted
+    await _reserve(limiter, max_bytes=1000, window=30, now=200.0)
+    await limiter.record_bytes(r1, 5000)  # must not raise or resurrect the total
+    await _reserve(limiter, max_bytes=1000, window=30, now=200.0)  # still admitted
 
 
 # ---------------------------------------------------------------------------
@@ -168,24 +178,29 @@ def test_record_bytes_on_aged_out_reservation_is_harmless():
 # ---------------------------------------------------------------------------
 
 
-def test_enforce_returns_none_when_disabled():
-    assert enforce_query_quota(Policy(), connection_id="demo", principal_subject="agent") is None
+@pytest.mark.asyncio
+async def test_enforce_returns_none_when_disabled():
+    assert (
+        await enforce_query_quota(Policy(), connection_id="demo", principal_subject="agent") is None
+    )
 
 
-def test_enforce_skips_unauthenticated_caller():
+@pytest.mark.asyncio
+async def test_enforce_skips_unauthenticated_caller():
     policy = Policy(max_requests_per_window=1)
     # No principal to attribute usage to -> quota is skipped, not applied to a
     # shared anonymous bucket. Repeated calls never reject.
-    assert enforce_query_quota(policy, connection_id="demo", principal_subject=None) is None
-    assert enforce_query_quota(policy, connection_id="demo", principal_subject=None) is None
+    assert await enforce_query_quota(policy, connection_id="demo", principal_subject=None) is None
+    assert await enforce_query_quota(policy, connection_id="demo", principal_subject=None) is None
 
 
-def test_enforce_reserves_and_rejects_over_cap(monkeypatch):
+@pytest.mark.asyncio
+async def test_enforce_reserves_and_rejects_over_cap(monkeypatch):
     policy = Policy(max_requests_per_window=1, quota_window_seconds=60)
-    first = enforce_query_quota(policy, connection_id="demo", principal_subject="agent")
+    first = await enforce_query_quota(policy, connection_id="demo", principal_subject="agent")
     assert isinstance(first, QuotaReservation)
     with pytest.raises(QuotaExceededError):
-        enforce_query_quota(policy, connection_id="demo", principal_subject="agent")
+        await enforce_query_quota(policy, connection_id="demo", principal_subject="agent")
 
 
 # ---------------------------------------------------------------------------
