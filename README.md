@@ -403,6 +403,46 @@ has silently stopped evaluating queries on that connection.
 `querygate_cost_estimation_attempts_total{connection}` is the matching
 denominator for computing a fail-open rate.
 
+### In-query human-in-the-loop approval (phase 1)
+
+Some reads shouldn't run unattended just because they pass policy — a query
+whose pre-execution estimate is very large is the exfiltration leg of the
+"lethal trifecta". QueryGate can **pause** such a read and require a human's
+approval before it executes, gating on *what the query would actually touch*
+rather than after the fact (TODO.md item 92). Opt-in per policy, off by default:
+
+```yaml
+policy:
+  approval_max_estimated_rows: 100000    # softer than max_estimated_rows above
+  approval_max_estimated_cost: 50000     # Postgres planner-cost units
+```
+
+Set these *below* the hard `max_estimated_*` caps to mean "ask a human" rather
+than "refuse". When a query trips the threshold, execution is paused with
+`428 Precondition Required` carrying a query **fingerprint** and the **reasons**.
+An approver holding the `query:approve` scope (deliberately *not* the querying
+agent — see `docs/SCOPE_CATALOG.md`'s "Query Approver" role) grants a token:
+
+```bash
+# 1. execution pauses -> 428 { "fingerprint": "...", "reasons": [...] }
+# 2. approver (query:approve) mints a short-lived, query-bound token:
+curl -X POST -H "Authorization: Bearer $APPROVER_KEY" \
+  $HOST/api/v1/<connection>/query/approve -d '<the exact same StructuredQuery JSON>'
+# -> { "fingerprint": "...", "approval_token": "..." }
+# 3. caller re-submits the identical query with the token:
+curl -X POST -H "Authorization: Bearer $CALLER_KEY" \
+  -H "X-QueryGate-Approval: <approval_token>" \
+  $HOST/api/v1/<connection>/query -d '<the exact same StructuredQuery JSON>'
+```
+
+The token is a stateless HMAC (set `APPROVAL_TOKEN_HMAC_KEY`) bound to the exact
+query fingerprint and a short expiry — it can't be forged, can't be replayed
+against a *different* query, and can't be replayed indefinitely; any
+missing-key/forged/expired/mismatched token fails closed. Phase 1 triggers on the
+Postgres cost/row estimate; the catalog **sensitivity-label** trigger and an
+interactive **MCP elicitation** approval channel are phase 2. A deployment that
+sets no approval thresholds is completely unaffected.
+
 ### Per-principal rate limits / query quotas
 
 `max_concurrency` bounds how many queries a principal can have *in flight at

@@ -235,6 +235,14 @@ class AppConfig(BaseSettings):
     # needs the same value.
     audit_ledger_hmac_key: str = pyd.Field(default="")
 
+    # HMAC key that signs in-query approval tokens (execution/approval.py,
+    # TODO.md item 92). Empty (the default) means the approval gate cannot issue
+    # or verify tokens — a deployment that sets Policy.approval_max_estimated_*
+    # MUST set this, otherwise a triggered query can never be approved
+    # (fail-closed by design). Never logged; the token binds a query fingerprint
+    # + expiry, never a query value or secret.
+    approval_token_hmac_key: str = pyd.Field(default="")
+
     # Read-only per-principal anomaly surfacing over the persisted audit stream
     # (TODO.md item 59). Purely a signal for a human admin — never wired into
     # enforcement. Requires audit_sink_backend=jsonl; with backend=none the

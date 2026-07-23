@@ -62,6 +62,12 @@ scope, only a valid identity.
 | `catalog:export` | Export the catalog (backup / data portability) |
 | `catalog:delete` | Delete catalog content (retention/deletion) |
 
+### Query approval
+
+| Scope | Gates |
+|---|---|
+| `query:approve` | Grant an approval token for a query that tripped the human-in-the-loop gate |
+
 ## Recommended role bundles
 
 Advisory groupings — QueryGate enforces individual scopes, not roles. Register each as a role in your IdP and grant it the listed scopes; provisioning a user is then a role assignment.
@@ -113,3 +119,9 @@ Backup/restore and retention of catalog content.
 
 - `catalog:export`
 - `catalog:delete`
+
+### Query Approver
+
+Reviews and approves individual queries that trip the in-query human-in-the-loop gate (sensitive/expensive reads). Kept separate from the querying role so an agent cannot approve its own read.
+
+- `query:approve`
