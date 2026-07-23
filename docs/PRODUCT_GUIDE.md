@@ -2595,9 +2595,14 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
-- **2026-07-23 — Governed Writes Phase 3b: reversibility's two documented limits
-  are closed — serial-PK inserts are undoable (RETURNING) and undo works under HA
-  (a Redis-backed compensation store) (item 93).** The phase-3a self-review left
+- **2026-07-23 — Governed Writes Phase 3b: reversibility's documented limits are
+  closed — serial-PK inserts are undoable (RETURNING), undo works under HA (a
+  Redis-backed compensation store), and an UPDATE undo refuses on drift instead
+  of silently clobbering (item 93).** **(3) Optimistic concurrency.** An UPDATE
+  undo reads each affected row's current changed-column values and **refuses**
+  (422) if any differs from what the write set — or the row no longer exists — so
+  a concurrent change since the write is never silently overwritten; the pre-3b
+  behavior clobbered the snapshot value. The phase-3a self-review left
   two honest limitations; phase 3b removes them. **(1) RETURNING capture.** An
   INSERT that omits a single-column PK (serial/identity — the common case) now
   executes with `RETURNING pk` in the same transaction, so its generated keys are

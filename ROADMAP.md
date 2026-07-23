@@ -295,9 +295,9 @@ surface them for a human, never auto-start them.
       `compensation_id` resolvable on any replica, so undo works under HA. Pre-image
       round-trips through JSON with type re-coercion; fakeredis + real-DB tested;
       HA/DR matrix flipped to shared.
-    - [ ] **Optimistic-concurrency undo** — undo silently overwrites a concurrent
-      change to a *changed* column. Detect drift (current value ≠ post-write value)
-      and refuse-or-flag instead of clobbering.
+    - [x] **Optimistic-concurrency undo** ✅ — an UPDATE undo reads each affected
+      row's current changed-column values and refuses (422) if any drifted from
+      the write's post-image (or the row is gone), instead of silently clobbering.
     - [ ] **MCP undo parity** — undo is REST-only; add an undo path to the MCP
       surface so an agent that wrote over MCP can also reverse over MCP.
     - [ ] **`release-smoke` write round-trip** — extend `make release-smoke` with a

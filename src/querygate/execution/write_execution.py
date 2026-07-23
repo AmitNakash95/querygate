@@ -40,7 +40,7 @@ from sqlalchemy.exc import DataError, IntegrityError, StatementError
 from querygate.audit.events import AuditSurface
 from querygate.audit.logger import audit_query
 from querygate.compiler.sqlalchemy_compiler import _compile_where
-from querygate.compiler.write_compiler import compile_write
+from querygate.compiler.write_compiler import _coerce_write_value, compile_write
 from querygate.connections.engine import session_scope
 from querygate.core.auth import Principal
 from querygate.core.config import config as app_config
@@ -210,7 +210,7 @@ class WriteExecutionService:
                 "unknown, expired, already-used, or wrong-connection compensation id"
             )
         try:
-            total = await self._apply_undo_atomically(self._build_undo(record), record.table)
+            total = await self._apply_undo_atomically(record)
         except Exception as exc:
             self._audit_undo(record, affected_rows=None, rejected=True, error=exc)
             raise
@@ -248,18 +248,18 @@ class WriteExecutionService:
             )
         return statements
 
-    async def _apply_undo_atomically(
-        self, statements: List[WriteStatement], table_name: str
-    ) -> int:
+    async def _apply_undo_atomically(self, record: CompensationRecord) -> int:
         """Apply every inverse statement in ONE transaction, committing once — any
         failure rolls the whole undo back (atomic). Deny-by-default and the
         affected-row cap still hold; the approval and op-allowed gates are
         deliberately bypassed (see `undo`). Does not capture new compensation, so
-        an undo never spawns orphaned redo records."""
+        an undo never spawns orphaned redo records. For an UPDATE, refuses if a
+        changed row drifted from the write's post-image (optimistic concurrency)."""
+        statements = self._build_undo(record)
         policy = get_policy(self._connection_id, principal=self._principal)
-        if not policy.write.table_writable(table_name):
+        if not policy.write.table_writable(record.table):
             raise QueryValidationError(
-                f"writes are not enabled for table {table_name!r}; cannot undo"
+                f"writes are not enabled for table {record.table!r}; cannot undo"
             )
         cap = policy.write.max_affected_rows
         total = 0
@@ -272,6 +272,8 @@ class WriteExecutionService:
             max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
         ):
             async with session_scope(self._connection_id, policy=policy) as session:
+                if record.op == "update" and record.post_values:
+                    await self._assert_no_update_drift(session, record)
                 for stmt in statements:
                     table = await validate_write_schema(stmt, self._connection_id, self._principal)
                     dml = compile_write(stmt, table)
@@ -291,6 +293,44 @@ class WriteExecutionService:
                     total += len(stmt.rows) if isinstance(stmt, InsertStatement) else affected
                 await session.commit()
         return total
+
+    async def _assert_no_update_drift(self, session, record: CompensationRecord) -> None:
+        """Optimistic concurrency for UPDATE undo: read each affected row's current
+        changed-column values and refuse the undo if any differs from what the
+        write set (or the row is gone) — so a concurrent change since the write is
+        never silently overwritten."""
+        table = await validate_write_schema(
+            UpdateStatement(
+                table=record.table,
+                set={c: record.post_values[c] for c in record.changed_columns},
+                where=Predicate(
+                    col=f"{record.table}.{record.pk_column}",
+                    op="eq",
+                    value=record.pre_image[0][record.pk_column],
+                ),
+            ),
+            self._connection_id,
+            self._principal,
+        )
+        pk = record.pk_column
+        keys = [row[pk] for row in record.pre_image]
+        cols = [table.c[pk]] + [table.c[c] for c in record.changed_columns if c in table.c]
+        rows = (await session.execute(sa.select(*cols).where(table.c[pk].in_(keys)))).mappings()
+        current = {row[pk]: dict(row) for row in rows}
+        for snapshot in record.pre_image:
+            cur = current.get(snapshot[pk])
+            if cur is None:
+                raise QueryValidationError(
+                    "a row changed since the write (it no longer exists); undo refused "
+                    "to avoid clobbering a concurrent change"
+                )
+            for col in record.changed_columns:
+                expected = _coerce_write_value(table.c[col], record.post_values[col])
+                if cur[col] != expected:
+                    raise QueryValidationError(
+                        "a row changed since the write; undo refused to avoid clobbering "
+                        "a concurrent change (optimistic concurrency)"
+                    )
 
     async def execute_many(
         self,
@@ -485,6 +525,8 @@ class WriteExecutionService:
             # Snapshot ONLY the primary key + the columns this UPDATE changes, so
             # undo restores exactly what was changed and nothing else.
             record.changed_columns = [c for c in statement.set.keys() if c != pk]
+            # The values the write sets — undo refuses if the row drifted from these.
+            record.post_values = {c: statement.set[c] for c in record.changed_columns}
             cols = [table.c[pk]] + [table.c[c] for c in record.changed_columns if c in table.c]
             pre_stmt = (
                 sa.select(*cols)
