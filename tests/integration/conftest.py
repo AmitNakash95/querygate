@@ -32,6 +32,7 @@ async def sqlite_app(monkeypatch):
     await create_and_seed_async(engine)
 
     import querygate.execution.service as svc_module
+    import querygate.execution.write_execution as wx_module
     import querygate.execution.write_preview as wp_module
     import querygate.validation.schema_validation as sv_module
 
@@ -48,6 +49,8 @@ async def sqlite_app(monkeypatch):
     monkeypatch.setattr(sv_module, "get_engine", lambda connection_id: engine)
     # Governed-writes preview (item 93) opens its own session for the COUNT(*).
     monkeypatch.setattr(wp_module, "session_scope", _session_scope)
+    # Governed-writes gated execution (item 93 phase 2) opens its own write txn.
+    monkeypatch.setattr(wx_module, "session_scope", _session_scope)
 
     settings = AppConfig(
         environment="localhost",

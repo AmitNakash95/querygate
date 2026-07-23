@@ -2016,7 +2016,39 @@ is a validated structure, exactly as a read is), the catalog stays descriptive,
 audit stays redaction-safe. The `roadmap-next` automation must **not** auto-start
 it; a human decides first.
 
-### 93. Governed Writes — structured, bounded, previewable, reversible agent mutations ✅ DONE (phase 1 — contract + dry-run preview, execution DISABLED); phases 2–3 not started
+### 93. Governed Writes — structured, bounded, previewable, reversible agent mutations ✅ DONE (phase 1 — contract + dry-run preview; phase 2a — gated single-statement execution); phase 2b + phase 3 not started
+
+**Phase 2a shipped (gated write EXECUTION, REST; maintainer-approved, Decision
+Log recorded).** `execution/write_execution.py`'s `WriteExecutionService.execute()`
+actually commits a single-table INSERT/UPDATE/DELETE — but only via the *same*
+validated `write_ast` → `compile_write` Core statement the preview compiles (no
+raw-DML path), and only when in policy and within cap. One transaction (the one
+`session_scope` opens): count matched rows in-txn → reject if over
+`max_affected_rows` *before* mutating → item-92 approval gate (new
+`WritePolicy.require_approval_over_rows`, fingerprint-bound token via
+`write_fingerprint`) → execute → re-check the statement's own rowcount against the
+cap → commit; any raise rolls the whole thing back (no partial write). Runs
+through the concurrency limiter. Redaction-safe, dual-identity (item 90),
+tamper-evident (item 91) audit by reusing `audit_query` (operation
+`execute_structured_write`) — op/table/affected-count/parameterized-SQL only,
+never a value or row. REST `POST /{connection}/write/execute` (+ 428→approval)
+and `POST /{connection}/write/approve` (`query:approve`-scoped, `write_fingerprint`
+token). `compiler/write_compiler.py` now coerces a JSON temporal string to the
+column's Python `datetime`/`date`/`time` so an INSERT/UPDATE of a typed column
+binds. Covered by `tests/integration/test_write_execution_end_to_end.py` (4:
+real-SQLite insert→verify→update→verify→delete→verify round-trip commits;
+over-cap rolls back and changes nothing; deny-by-default; approval pause→admit)
++ `tests/unit/test_write_execution.py` (5: approval fingerprint binding/replay,
+threshold off/under, temporal coercion). Invariant preserved: no raw DML,
+deny-by-default, opt-in.
+
+**Deferred to phase 2b:** the row-level old→new diff preview (approval on the
+diff, not just the count), the MCP `run_structured_writes` execute tool, the
+adversarial write security suite under `make test-security`, the `release-smoke`
+write round-trip, and the write concurrency load gate. **Phase 3:**
+compensation/undo, upserts, multi-row batch, MSSQL execution parity, NOT
+NULL/FK/unique pre-validation (2a lets the DB enforce these — a violation rolls
+back cleanly but surfaces as a masked 500 rather than a typed 4xx).
 
 **Phase 1 shipped (maintainer-approved; Decision Log recorded).** The write
 sibling of the read pipeline, preview-only — **no code path executes or commits
@@ -2043,13 +2075,16 @@ reports the right count AND **changes nothing** — before == after — plus
 deny-by-default). The `IN (subquery)` (item 97) is rejected in a write WHERE for
 phase 1.
 
-**Phases 2–3 (not started):** gated *execution* (single transaction, row caps,
-item-92 approval on the diff, dual-identity audit [90], tamper-evident receipt
-[91]) — **depends on 90 + 91 + 92**; then reversibility/compensation + upserts +
-batch + MSSQL parity. Also deferred from phase 1: the transactional row-level
-old→new diff (the current preview reports the affected *count* + parameterized
-SQL; the killer per-row diff runs the DML in a rolled-back txn — a phase-1.5/2
-enhancement), and scalar-function/CASE SET-values.
+**Phase 2b–3 (not started):** phase 2a above shipped the core gated *execution*
+(single transaction, in-txn row cap, item-92 approval on the row *count*,
+dual-identity audit [90], tamper-evident audit [91]). Still open — **phase 2b:**
+the transactional row-level old→new *diff* preview (the current preview reports
+the affected *count* + parameterized SQL; the killer per-row diff runs the DML in
+a rolled-back txn) and approval on that diff, the MCP `run_structured_writes`
+execute tool, the adversarial write security suite, the `release-smoke` write
+round-trip, and the write concurrency load gate; **phase 3:** reversibility/
+compensation + upserts + batch + MSSQL parity + scalar-function/CASE SET-values +
+NOT NULL/FK/unique pre-validation.
 
 **Effort: XL (cleanly phaseable; Phase 1 is L and carries zero write risk).
 Priority: flagship. Status: decision-gated (crosses read-only). Depends on:

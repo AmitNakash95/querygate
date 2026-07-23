@@ -156,6 +156,13 @@ class WritePolicy(pyd.BaseModel):
     denied_write_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
     # Hard cap on how many rows a single previewed/executed write may affect.
     max_affected_rows: int = pyd.Field(default=100, ge=1)
+    # In-query approval trigger for writes (item 93 phase 2, reuses item 92): a
+    # write whose affected-row count exceeds this pauses for a human sign-off
+    # before it commits (REST 428 -> query:approve token -> resubmit). None =
+    # no approval gate on writes; 0 = require approval for *every* write; N =
+    # require it only for writes touching more than N rows. A softer gate below
+    # the hard `max_affected_rows` reject, exactly like the read gate.
+    require_approval_over_rows: Optional[int] = pyd.Field(default=None, ge=0)
 
     model_config = pyd.ConfigDict(extra="forbid")
 
