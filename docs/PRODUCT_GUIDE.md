@@ -591,27 +591,25 @@ siblings of every read stage: `validate_write_policy` → `validate_write_schema
   or MCP elicitation), and rolls the whole thing back on any error — never a
   partial write. A constraint/type violation surfaces as a clean typed 4xx, not a
   500 or a raw-driver leak.
-- **Reversibility (undo).** With `compensation_enabled`, a write captures a
-  bounded pre-image into a QueryGate-owned store (not an operational-DB shadow
-  table) and returns a `compensation_id`; `POST /{connection}/write/undo`
-  re-applies the inverse **through the governed pipeline** in one atomic
-  transaction, restoring only the columns the write changed. Bounded, single-use,
-  TTL'd. The store is process-local by default but **shared across replicas** with
-  `CONCURRENCY_BACKEND=redis` (a `RedisCompensationStore`), so undo works under
-  the HA deployment; and a **server-generated PK is captured via RETURNING**, so
-  serial/identity-PK inserts are undoable too.
+- **No undo — by design.** QueryGate deliberately does not snapshot rows to offer
+  a rollback: a second copy of the customer's data outside its source of truth is
+  exactly the footprint an operational-database gateway should not add, and it
+  would place unredacted row values in a second store. The safety model is
+  *prevention*, not reversal — the diff preview and the approval gate put a human
+  in front of the exact change before it commits. See the Decision Log entry that
+  records removing the earlier compensation/undo mechanism.
 - **Both transports, no raw field on either.** REST routes above, plus the MCP
   `run_structured_writes` tool (`mode=preview|execute`, batch, `include_diff`,
   in-session elicitation approval). Audit is redaction-safe, dual-identity (item
   90), tamper-evident (item 91): op/table/affected-count only, never a value.
 
 The claim is deliberately **governed** writes — *bounded, previewed, approved,
-attributed, reversible* — never "safe autonomous writes." What's guaranteed by
+attributed* — never "safe autonomous writes." What's guaranteed by
 construction (no raw DML, every target policy-checked, no unqualified
 UPDATE/DELETE, bounded rows) eliminates the catastrophic-shape class; the residual
-("did the agent intend *this* change") is what preview + approval + undo make
-reviewable and reversible. See the Decision Log for the storage choice, the
-approval/undo authorization model, and the honest bounded limits.
+("did the agent intend *this* change") is what preview + approval make
+reviewable and attributable. See the Decision Log for the approval authorization
+model and the honest bounded limits.
 
 ## Security Model
 
@@ -2597,6 +2595,34 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — REMOVED: the governed-write undo/compensation mechanism (item
+  93). Reversibility is no longer a QueryGate capability; governed writes keep the
+  preview → approve → attribute → audit governance tier.** This supersedes the
+  earlier phase-3a/3b reversibility entries below (bounded reversibility, undo
+  semantics, the Redis-backed compensation store, RETURNING capture) — retained
+  as history, but they no longer describe shipping behavior. **Why removed.** Undo
+  was the only part of the write feature that forced QueryGate to keep a second
+  copy of the customer's *actual row values* outside their database (an
+  in-process/Redis compensation store). That (a) placed unredacted sensitive data
+  in a second store and expanded the compliance/attack surface — squarely against
+  the North Star's least-privilege, data-never-leaves posture — and (b) opened a
+  run of correctness landmines a security product cannot ship casually
+  (capture/undo isolation races, blind-clobber of concurrent writes, store
+  durability). Its marginal value is low once preview + approval exist: a human
+  has already seen and approved the exact diff, so a rollback net is a
+  nice-to-have, not the point. Removing it **reclaims the core security
+  proposition — QueryGate never persists your data outside its source of truth**
+  — while keeping the differentiator: a bounded, previewed, human-approved,
+  attributed, audited write with no raw DML. **Removed:**
+  `execution/compensation.py` + `execution/redis_compensation.py`,
+  `WritePolicy.compensation_enabled`/`max_compensation_rows`/`compensation_ttl_seconds`,
+  `POST /{connection}/write/undo`, the MCP `undo_structured_write` tool, and the
+  `compensation_id` field on write results. **Unchanged:** preview + diff, gated
+  execution, the approval gate, dual-identity + tamper-evident audit,
+  deny-by-default, the affected-row cap. If durable reversibility is ever
+  revisited, the correct path is the customer's *own* database history (temporal
+  tables / CDC), never a QueryGate-owned copy — a fresh decision, not a revival of
+  this mechanism.
 - **2026-07-23 — Governed Writes Phase 3b: upserts (INSERT ON CONFLICT DO UPDATE)
   ship for Postgres/SQLite and are *rejected* on MSSQL — reject-not-emulate, no
   synthesized MERGE (item 93).** A new `UpsertStatement` (insert rows, but on a
@@ -2609,9 +2635,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   item-74 posture as `array_agg` and MSSQL `NULLS`. Still no raw DML: the conflict
   target and updated columns are validated identifiers, and the values are bound
   parameters. Proven on real Postgres (insert-then-update-on-conflict) and MSSQL
-  (rejection). **Bounded limit:** an upsert is *not* undoable yet
-  (`compensation_id=null`) — its per-row insert-or-update outcome makes the
-  inverse ambiguous, a later slice; the other three operations remain reversible.
+  (rejection).
 - **2026-07-23 — Governed Writes Phase 3b: reversibility's documented limits are
   closed — serial-PK inserts are undoable (RETURNING), undo works under HA (a
   Redis-backed compensation store), and an UPDATE undo refuses on drift instead

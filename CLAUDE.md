@@ -452,11 +452,11 @@ without an estimator returns None (proceeds under the reactive guardrails).
   future Redis-backed variant, the pattern already used by
   `execution/concurrency.py`/`redis_concurrency.py` and
   `execution/quota.py`/`redis_quota.py`) is a two-part change, not one.** A
-  2026-07-23 review caught `execution/compensation.py`'s `CompensationStore`
-  converted to `async def` while its call sites in `execution/write_execution.py`
-  still called it synchronously — every call silently returned an unawaited
-  coroutine instead of raising, so it passed a casual read and only broke a
-  targeted unit test (`test_write_execution.py::test_compensation_store_ttl_and_single_use`).
+  2026-07-23 review caught a now-removed `CompensationStore` (the compensation
+  store was later deleted along with the write-undo feature) converted to
+  `async def` while its call sites in `execution/write_execution.py` still called
+  it synchronously — every call silently returned an unawaited coroutine instead
+  of raising, so it passed a casual read and only broke a targeted unit test.
   When you make a store's Protocol methods `async`, grep every call site in
   the same commit, run `pytest -m unit` (a `RuntimeWarning: coroutine ... was
   never awaited` means you missed one), and extend the `tests/conftest.py`
