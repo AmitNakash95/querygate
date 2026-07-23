@@ -574,17 +574,19 @@ async def test_undo_does_not_create_a_redo_record(sqlite_app):
 
 
 @pytest.mark.asyncio
-async def test_auto_generated_pk_insert_is_not_undoable(sqlite_app):
-    # Concern 5: an INSERT that omits its (auto) PK returns compensation_id=None,
-    # a caller-visible signal that it can't be undone.
+async def test_auto_generated_pk_insert_is_undoable_via_returning(sqlite_app):
+    # Concern 5 fixed (phase 3b): an INSERT that omits its (auto) PK captures the
+    # generated key via RETURNING, so it IS undoable — undo removes exactly the
+    # inserted row.
     _enable_writes(compensation_enabled=True)
     async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        before = await _orders(client)
         resp = await client.post(
             "/api/v1/demo/write/execute",
             json={
                 "op": "insert",
                 "table": "orders",
-                # No "id" -> SQLite assigns the rowid; the key isn't known here.
+                # No "id" -> SQLite assigns the rowid; captured via RETURNING.
                 "rows": [
                     {
                         "customer_id": 1,
@@ -596,4 +598,11 @@ async def test_auto_generated_pk_insert_is_not_undoable(sqlite_app):
             },
         )
         assert resp.status_code == 200, resp.text
-        assert resp.json()["compensation_id"] is None  # not undoable, and the caller can see it
+        cid = resp.json()["compensation_id"]
+        assert cid is not None  # undoable — the generated key was captured
+        assert await _count_status(client, "auto-pk") == 1
+
+        undo = await client.post("/api/v1/demo/write/undo", json={"compensation_id": cid})
+        assert undo.status_code == 200, undo.text
+        after = await _orders(client)
+    assert after == before  # the auto-PK row is gone

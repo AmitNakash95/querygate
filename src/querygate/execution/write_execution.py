@@ -372,9 +372,14 @@ class WriteExecutionService:
             pending_compensation = await self._capture_pre_image(
                 session, statement, table, affected, write_policy
             )
+            # A server-generated PK isn't known until after the INSERT runs, so
+            # capture it via RETURNING to make serial/identity-PK inserts undoable
+            # too (item 93 phase 3b — otherwise compensation_id would be null).
+            returning_pk = self._insert_returning_pk(statement, table, affected, write_policy)
+            exec_dml = dml.returning(returning_pk) if returning_pk is not None else dml
 
             try:
-                result = await session.execute(dml)
+                result = await session.execute(exec_dml)
             except (IntegrityError, DataError, StatementError) as exc:
                 # A constraint (NOT NULL / FK / unique), a bad value type, or a
                 # bind error is the caller's fault, not a server fault — turn the
@@ -387,6 +392,16 @@ class WriteExecutionService:
                     "(not-null, foreign key, unique, or a mistyped value) and was "
                     "rolled back — nothing was committed"
                 ) from exc
+            if returning_pk is not None:
+                pending_compensation = CompensationRecord(
+                    compensation_id=new_compensation_id(),
+                    connection_id=self._connection_id,
+                    table=table.name,
+                    op="insert",
+                    pk_column=returning_pk.name,
+                    inserted_keys=list(result.scalars().all()),
+                    expires_at=compensation_expiry(write_policy.compensation_ttl_seconds),
+                )
             # Belt-and-suspenders: the statement's own rowcount must also be within
             # cap, so a race between the count and the mutation can't over-write.
             actual = (
@@ -412,6 +427,27 @@ class WriteExecutionService:
             get_compensation_store().put(pending_compensation)
             compensation_id = pending_compensation.compensation_id
         return actual, compensation_id
+
+    @staticmethod
+    def _insert_returning_pk(
+        statement: WriteStatement, table: sa.Table, affected: int, write_policy
+    ) -> Optional[sa.Column]:
+        """The single PK column to capture via RETURNING, for an INSERT with a
+        server-generated key (so it's undoable), or None. Only when compensation
+        is on, within the snapshot cap, the table has one PK column, and at least
+        one row omits it (a supplied key needs no RETURNING — `_capture_pre_image`
+        records it directly)."""
+        if not write_policy.compensation_enabled or affected > write_policy.max_compensation_rows:
+            return None
+        if not isinstance(statement, InsertStatement):
+            return None
+        pk_cols = list(table.primary_key.columns)
+        if len(pk_cols) != 1:
+            return None
+        pk = pk_cols[0]
+        if any(row.get(pk.name) is None for row in statement.rows):
+            return pk
+        return None
 
     async def _capture_pre_image(
         self, session, statement: WriteStatement, table: sa.Table, affected: int, write_policy
