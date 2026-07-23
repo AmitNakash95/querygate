@@ -117,6 +117,7 @@ async def test_insert_update_delete_round_trip_commits(sqlite_app):
         assert await _orders(client) == before  # back to the original rows
 
 
+@pytest.mark.security
 @pytest.mark.asyncio
 async def test_over_cap_write_rolls_back_and_changes_nothing(sqlite_app):
     # A DELETE that would exceed the cap must abort the whole transaction.
@@ -140,6 +141,41 @@ async def test_over_cap_write_rolls_back_and_changes_nothing(sqlite_app):
     assert before == after  # nothing was deleted — the whole write rolled back
 
 
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_multi_row_insert_is_atomic_no_partial_write(sqlite_app):
+    # A multi-row INSERT whose second row violates a constraint must leave the
+    # table unchanged — no partial write escapes the single transaction.
+    _enable_writes()
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        before = await _orders(client)
+        max_id = max(r["id"] for r in before)
+
+        def _row(oid, status):
+            return {
+                "id": oid,
+                "customer_id": 1,
+                "status": status,
+                "total_amount": 10,
+                "created_at": "2026-01-01T00:00:00",
+            }
+
+        resp = await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "insert",
+                "table": "orders",
+                # First row is fine; the second reuses an existing PK -> the whole
+                # INSERT must fail atomically.
+                "rows": [_row(max_id + 1, "ok"), _row(before[0]["id"], "dup")],
+            },
+        )
+        assert resp.status_code >= 400  # constraint violation, no success
+        after = await _orders(client)
+    assert before == after  # neither row landed — the transaction rolled back
+
+
+@pytest.mark.security
 @pytest.mark.asyncio
 async def test_denied_by_default_is_a_clean_rejection(sqlite_app):
     # conftest default policy has writes off.
@@ -154,6 +190,7 @@ async def test_denied_by_default_is_a_clean_rejection(sqlite_app):
     assert before == after
 
 
+@pytest.mark.security
 @pytest.mark.asyncio
 async def test_approval_gate_pauses_then_admits(sqlite_app, monkeypatch):
     monkeypatch.setattr(we.app_config, "approval_token_hmac_key", _KEY)
