@@ -458,6 +458,24 @@ piece is an interactive **MCP elicitation** approval channel (approve inside one
 MCP session instead of the REST round-trip). A deployment that sets no approval
 thresholds or sensitivities is completely unaffected.
 
+### Governed writes — dry-run preview (phase 1)
+
+QueryGate is read-only by default, and the write story starts where it's safest:
+a **dry-run preview that never executes anything**. `POST
+/<connection>/write/preview` takes a typed `InsertStatement`/`UpdateStatement`/
+`DeleteStatement` — **no raw-DML field anywhere**, and an `UPDATE`/`DELETE`
+*cannot be constructed without a `WHERE`* (an unqualified mutation is impossible
+by construction) — validates it against a deny-by-default `WritePolicy`
+(`enabled`, `allowed_tables`, `allowed_operations`, `denied_write_columns`,
+`max_affected_rows`), compiles it to bound-parameter SQLAlchemy Core DML, and
+returns the **affected-row count** (from a policy-checked `COUNT(*)`), whether
+it's within the cap, and the **parameterized** SQL — `executed: false`, always.
+**No code path in phase 1 executes or commits a write.** The claim is bounded and
+honest — *governed writes: bounded, previewed* — with gated execution (single
+transaction, the approval gate, dual-identity audit + tamper-evident receipt) as
+a later, separately-built phase. A read-only deployment leaves `WritePolicy`
+off and the endpoint returns a clean policy rejection.
+
 ### Per-principal rate limits / query quotas
 
 `max_concurrency` bounds how many queries a principal can have *in flight at
