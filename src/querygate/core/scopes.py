@@ -20,6 +20,11 @@ from typing import NamedTuple, Tuple
 ADMIN_RELOAD_CONFIG_SCOPE = "admin:reload-config"
 ADMIN_CONFIG_READ_SCOPE = "admin:config:read"
 ADMIN_CONFIG_WRITE_SCOPE = "admin:config:write"
+# Four-eyes config approval (TODO.md item 42) — reviewing/approving a staged
+# config version is a distinct privilege from authoring one (admin:config:write),
+# so a deployment can require author != approver by giving them to different
+# principals. Enforced server-side, never only in the UI.
+ADMIN_CONFIG_APPROVE_SCOPE = "admin:config:approve"
 
 # Admin connection-operations (TODO.md item 43) — read-only operational health
 # of configured connections. Separate from the config scopes: seeing whether a
@@ -109,6 +114,11 @@ SCOPE_CATALOG: Tuple[ScopeInfo, ...] = (
         "Stage/apply/roll back config-governance versions",
     ),
     ScopeInfo(
+        ADMIN_CONFIG_APPROVE_SCOPE,
+        "Admin · Config",
+        "Approve/reject a staged config version (four-eyes; not the author)",
+    ),
+    ScopeInfo(
         ADMIN_CONNECTIONS_READ_SCOPE,
         "Admin · Connections",
         "Read per-connection operational health/status",
@@ -184,8 +194,15 @@ ROLE_BUNDLES: Tuple[RoleBundle, ...] = (
     ),
     RoleBundle(
         "Config Governor",
-        "Manages governed config changes (stage/apply/rollback) and reloads.",
+        "Authors governed config changes (stage/apply/rollback) and reloads.",
         (ADMIN_CONFIG_READ_SCOPE, ADMIN_CONFIG_WRITE_SCOPE, ADMIN_RELOAD_CONFIG_SCOPE),
+    ),
+    RoleBundle(
+        "Config Approver",
+        "Reviews and approves/rejects staged config changes (four-eyes). Kept "
+        "separate from the authoring role so an author cannot approve their own "
+        "change when require_config_approvals is enabled.",
+        (ADMIN_CONFIG_READ_SCOPE, ADMIN_CONFIG_APPROVE_SCOPE),
     ),
     RoleBundle(
         "Catalog Author",

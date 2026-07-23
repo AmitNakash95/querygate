@@ -2543,6 +2543,25 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — Four-eyes config approval is enforced server-side, author≠approver
+  is structural, and rollback is exempt from the gate (item 42 phase 1).** Adding
+  separation of duties to the config plane, three decisions were made. **(1)
+  Enforcement lives in the store + `apply`, never only the UI.** The store refuses
+  to record a version author's own review and refuses a review of a non-staged
+  version; `apply` refuses a staged version's first activation until it has the
+  configured number of valid approvals. Simulating four-eyes in the browser while
+  the server still permits self-approval (the anti-pattern item 42 explicitly
+  names) is impossible because the browser isn't in the enforcement path. **(2)
+  N approvals means N *distinct* reviewers, bound to content.** A reviewer's
+  latest decision supersedes their own earlier one (no stacking), and each
+  approval carries the version's content fingerprint so it can never count for
+  different content. **(3) Rollback is exempt.** The gate applies only to a staged
+  version's *first* activation — reactivating a previously-active version (DR /
+  rollback) is never blocked on re-approval, because it was approved when first
+  applied and blocking recovery on a quorum would be unsafe. Backward-compatible
+  by default: `require_config_approvals` defaults to 0 (single-administrator mode)
+  and manifests written before the `approvals` field load unchanged. The
+  CLI/admin-UI review flows are phase 2; the authorization core is done.
 - **2026-07-23 — The in-query approval gate uses a stateless, fingerprint-bound
   HMAC token and a scope separate from execution; phase 1 triggers only on the
   cost estimate (item 92).** Building the human-in-the-loop gate, three

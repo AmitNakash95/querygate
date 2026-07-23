@@ -142,7 +142,10 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   stateless HMAC approval-token grant + `query:approve` scope + REST 428/approve
   flow, opt-in; box stays `[ ]` until the MCP-elicitation approval channel + batch.
 - [ ] **42** — Four-eyes config approval and separation of duties. *Governance
-  maturity for the config plane.*
+  maturity for the config plane.* **Phase 1 shipped** (server-side enforcement:
+  durable approval records, author≠approver, `require_config_approvals` apply-gate,
+  `admin:config:approve` scope + REST approve/reject); box stays `[ ]` until
+  phase 2 (CLI + admin-UI review flows).
 - [ ] **39** — Draft-aware policy simulation before staging. *Safer config
   changes; reduces misconfiguration risk in a security product.*
 - [ ] **40** — Semantic access diff for config changes. *Makes a policy change's
