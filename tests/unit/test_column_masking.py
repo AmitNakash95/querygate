@@ -380,7 +380,7 @@ async def test_audit_event_records_masked_columns(tmp_path, _isolated_sink):
         sa.Column("phone", sa.String(20)),
     )
     mock_result = MagicMock()
-    mock_result.mappings.return_value.all.return_value = [{"id": 1, "phone": "6789"}]
+    mock_result.mappings.return_value.all.return_value = [{"id": 1, "phone": "SECRET_PHONE_VALUE"}]
     mock_session = AsyncMock()
     mock_session.execute = AsyncMock(return_value=mock_result)
 
@@ -406,5 +406,8 @@ async def test_audit_event_records_masked_columns(tmp_path, _isolated_sink):
     raw = path.read_text()
     event = json.loads(raw)
     assert event["masked_columns"] == ["phone"]
-    # Redaction-safe: the pre-mask value never appears in the event.
-    assert "555" not in raw
+    # Redaction-safe: the pre-mask row value never appears in the event. The
+    # sentinel is uppercase + underscore so it can never coincide with the
+    # lowercase-hex uuid4 event_id/admission_id (a bare-digit sentinel like "555"
+    # flakily collides with those UUIDs).
+    assert "SECRET_PHONE_VALUE" not in raw
