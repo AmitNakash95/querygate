@@ -226,37 +226,38 @@ human/vendor to complete.
 
 ---
 
-## Frontier status (2026-07-23) — why each remaining item needs a decision, infra, or its own PR
+## Frontier status (updated 2026-07-23, second pass) — every buildable item is shipped; the rest is gated on the maintainer
 
-After the 2026-07-23 batch (56, 96, 95, 54, 60 done; 92 ph1+ph2 triggers; 42
-ph1; 39 reconciled), the roadmap-next automation has reached a frontier: **no
-remaining item is a clean, single-pass, unilaterally-buildable, locally-
-validatable slice.** Each was examined and is blocked as follows — a maintainer
-should pick from these deliberately rather than the automation forcing one:
+Two large batches shipped everything that was buildable without a new maintainer
+decision or external resource. **Done this cycle:** 56, 96, 95, 54, 60, 92, 42
+(full); reconciled 39, 40 (covered by 41), 37; and — after explicit maintainer
+approval — **97 ph1** (`IN (subquery)`), **57** (session dialect adapter, reversing
+the prior inline-branching decision), and **93 ph1** (governed-writes dry-run
+preview, execution disabled). **No remaining ROADMAP item is a clean, unilaterally-
+buildable, locally-validatable slice** — each is blocked as follows, and needs the
+maintainer to unblock it (not the automation to force it):
 
-- **40 ph2** (per-principal semantic diff) — *scope decision needed*: overlaps
-  the shipped **41 ph1** (blast-radius already resolves/ranks per-principal).
-  Decide how a per-principal `/diff` differs from `/blast-radius` before building.
-- **41 ph2** — *async scale infra*: background-job/pagination for >100 configured
-  principals; substantial, low-ROI until a deployment hits that scale.
-- **35 ph2** — *async infra*: `queued`/`running`/`cancelled` states + mid-flight
-  cancellation (a background-execution contract), not a clean slice.
-- **57** — *conflicts with a deliberate CLAUDE.md decision* (`connections/dialects.py`
-  inline branching is an intentional exception) **and** needs MSSQL cost
-  estimation (26 ph2). Needs a maintainer decision before refactoring.
-- **26 ph2 / 36 ph2b / 58 ph2 / 30·89 ph2 / 53** — *infra/vendor/maintainer-gated*
-  (live MSSQL, dual-DB CI, external LLM/Toolbox, deliberate signed-release tag
-  push, external auditor).
-- **18 / 51 / 19 / 37** — *large multi-session features* (stored-proc subsystem +
-  security review; Python+TS SDK; new dialects, needs 57; adaptive-learning e2e
-  proof). Each warrants its own focused PR.
-- **38·44·45·47·50 ph2** — *UI / durable-cross-replica infra phase-2s* (Phase 5,
-  lowest marginal ROI).
-- **93 / F4 / P2 / 97** — *decision-gated*; must not be auto-started (see below).
+- **93 ph2** (gated write *execution*) — depends on 90+91+92 (all shipped) but
+  crosses from preview to *committing writes*: a deliberate build + product
+  decision, its own PR.
+- **26 ph2 / 36 ph2b / 58 ph2 / 53** — *external infra/vendor*: live MSSQL,
+  Postgres+MSSQL dual-DB CI, external LLM/Toolbox harness, an external auditor.
+- **30·89 ph2** — the *maintainer's signed-release tag push* (+ package-index
+  choice); the mechanism is shipped.
+- **41 ph2 / 35 ph2** — *async/scale infra* (background-job pagination for >100
+  principals; queued/running/cancelled + mid-flight cancellation): substantial,
+  low-ROI, each its own build.
+- **18 / 51 ph2 / 19** — *large standalone*: stored-proc subsystem (needs a real
+  security review — procedures have side effects); the TypeScript SDK +
+  standalone distribution (coupled to 30 ph2, not locally validatable); new
+  dialects (need live DBs, now unblocked *architecturally* by 57).
+- **38·44·45·47·50 ph2** — *admin-UI / durable cross-replica infra phase-2s*
+  (Phase 5, lowest marginal ROI).
+- **F4 / P2** — *decision-gated*: NL→StructuredQuery (model-provider/posture
+  decision) and opening the AST as a standard (governance commitment).
 
-The `roadmap-next` automation should surface this list and stop, rather than
-force an entangled or ambiguously-scoped change. Delete/trim this note once the
-maintainer re-prioritizes and the frontier moves.
+`roadmap-next` should surface this and stop rather than force a gated/entangled
+change. Trim this note as the maintainer re-prioritizes and the frontier moves.
 
 ---
 
