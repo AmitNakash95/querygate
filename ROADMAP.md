@@ -274,6 +274,22 @@ surface them for a human, never auto-start them.
       a single-column PK now captures the generated key via `RETURNING`, so
       serial/identity-PK inserts are undoable (was `compensation_id=null`). Proven
       on SQLite + Postgres.
+    - [x] **Fix the in-flight async-conversion regression (found by the
+      2026-07-23 review)** ✅ — `CompensationStore.put/get/consume` were
+      converted to `async def` in a working-tree edit (prep for the durable
+      store below), but `write_execution.py`'s three call sites were not yet
+      updated to `await` them, so undo was non-functional in a single process,
+      not just across replicas. **Fixed:** all three call sites now `await`
+      the store, and the affected test
+      (`test_write_execution.py::test_compensation_store_ttl_and_single_use`)
+      was converted to `async def` with matching `await`s. `pytest -m unit`
+      now passes 230/230 (see `TODO.md` item 93 Phase 3b note and
+      `TECHNICAL_REVIEW.md` for full evidence).
+    - [ ] **Evict consumed/expired compensation records** — `consume()` only flips
+      `consumed=True` and nothing ever deletes an entry from
+      `InMemoryCompensationStore._records`; every governed write with
+      `compensation_enabled` leaks one record for the process's lifetime. Fix
+      alongside the item above, before building the Redis-backed store.
     - [ ] **Durable cross-replica compensation store** — the in-process store means
       undo fails under the multi-replica HA deployment (item 56). Add a Redis-backed
       `CompensationStore` (mirroring the concurrency/quota Redis variants), treating
@@ -347,6 +363,125 @@ Everything else stays gated as before:
 maintainer wants the low-ROI UI slice; get a decision on 92's elicitation SoD
 posture) rather than force a gated/entangled change. Trim this note as the
 maintainer re-prioritizes and the frontier moves.
+
+---
+
+## Technical and Product Improvement Plan (2026-07-23 review)
+
+A full repo-wide due-diligence pass (`TECHNICAL_REVIEW.md`) found this codebase
+to be unusually mature and self-consistent for its stage — the non-negotiables
+hold, the security/auth/catalog boundary checked out clean, and doc claims are
+almost entirely backed by real code and tests. It surfaced one live regression
+in an in-flight change plus a handful of narrow, real gaps, tracked as `TODO.md`
+items 107–113 (the item-93 compensation-store regression is tracked inline in
+item 93's own Phase 3b note, since it's the same feature, not a new item). This
+section sequences that work; it supplements, not replaces, the phase ordering
+above — none of these items change the Phase 0–5 execution order for the
+already-planned initiatives.
+
+### Review Phase 1 — Correctness, security, and production risk
+
+- [x] **Item 93 (Phase 3b) regression, part 1** ✅ — fixed the
+  `CompensationStore` async/await mismatch (`execution/write_execution.py`
+  now awaits the `async` `get`/`put`/`consume`; the affected unit test was
+  converted to `async def` to match). `pytest -m unit` passes 230/230 with no
+  coroutine-never-awaited warnings.
+- [ ] **Item 93 (Phase 3b) regression, part 2** — the consumed-record
+  eviction leak is still open: `consume()` only flags a record, never removes
+  it from the store.
+  - Why: every governed write with `compensation_enabled` leaks a record for
+    the process's lifetime.
+  - Scope: `execution/compensation.py`.
+  - Acceptance criteria: a consumed or expired record is removed from the
+    store, not just flagged; regression test added.
+- [ ] **107** — Batch query execution double-reserves quota on an approval
+  retry.
+  - Why: an MCP batch item that needs interactive approval consumes two
+    quota units for one logical query, silently halving effective throughput
+    for approval-gated callers.
+  - Scope: `execution/service.py` (`_execute_batch_item`, `enforce_query_quota`).
+  - Acceptance criteria:
+    - A test asserts exactly one quota unit is consumed across an
+      approval-required-then-resolved batch item.
+- [ ] **108** — Write-preview diff runs the full DML before the
+  `max_affected_rows` cap is checked.
+  - Why: `include_diff=true` against a broad WHERE forces a real, row-locking
+    UPDATE to run (then rollback) even when the write would be rejected
+    outright as over-cap — a resource-exhaustion / lock-contention risk on a
+    preview-only endpoint.
+  - Scope: `execution/write_preview.py` (`_mutation_diff`).
+  - Acceptance criteria:
+    - An over-cap UPDATE preview with `include_diff=true` short-circuits
+      before running the DML; regression test added.
+- [ ] **109** — MCP `run_structured_writes` has no batch-size cap (the read
+  path's `validate_batch_size` has no write-side equivalent).
+  - Why: a caller can submit an unbounded batch of individually-in-cap writes
+    in one MCP call, well beyond what the read path allows for the same
+    principal.
+  - Scope: `policy/models.py` (`WritePolicy`), `validation/write_policy_validation.py`,
+    `mcp/tools/write.py`.
+  - Acceptance criteria:
+    - `WritePolicy.max_batch_size` exists and is enforced before any
+      statement in an over-size batch is processed; boundary test added.
+
+### Review Phase 2 — Reliability and workflow hardening
+
+- [ ] **112** — Add a scheduled (cron) CI workflow for dependency/security
+  scans and wire `make test-soak` into it.
+  - Why: `.github/workflows/ci.yml` only triggers on `push`/`pull_request` —
+    a CVE disclosed against an already-merged dependency isn't caught until
+    the next incidental change, and the heavier 100-round soak test never
+    runs automatically (only the 5-round `test-load` does).
+  - Scope: `.github/workflows/`, `docs/RELEASING.md`.
+  - Acceptance criteria:
+    - A nightly/weekly workflow runs the CVE/SBOM/lockfile checks and
+      `make test-soak` against `main` independent of code changes.
+- [ ] **113** — Add metrics for the write-undo/compensation-store feature.
+  - Why: once the item-93 regression above is fixed, undo failures would
+    still be invisible in Prometheus — no operator signal exists today.
+  - Scope: `metrics.py`, `execution/compensation.py`, `execution/write_execution.py`.
+  - Acceptance criteria:
+    - Counters for compensation put/get/consume and undo success/failure
+      exist and are asserted by a unit test.
+
+### Review Phase 3 — Architecture and maintainability
+
+- [ ] **110** — Explicitly reject `value_subquery` in a write's WHERE at the
+  write-validation layer instead of relying on the compiler's `ctx=None`
+  default to fail it.
+  - Why: not currently exploitable, but it fails at the wrong layer with a
+    compiler-internal error, and is a latent trap for a future write-compiler
+    change.
+  - Scope: `validation/write_policy_validation.py`.
+  - Acceptance criteria: a `value_subquery` in a write WHERE raises a clean
+    `QueryValidationError` at validation time; regression test added.
+- [ ] **111** — Consolidate the four hand-rolled WHERE-predicate tree walks
+  (`policy_validation.py`, `schema_validation.py`, `write_policy_validation.py`,
+  `write_schema_validation.py`) into one shared helper, mirroring how item 96
+  centralized column-ref walking into `iter_column_refs`.
+  - Why: all four are correct today but could silently drift the next time
+    `WhereNode` grows a new combinator — the exact class of bug item 96 was
+    built to prevent for column refs.
+  - Scope: the four validator modules.
+  - Acceptance criteria: one shared predicate-iterator helper; all four
+    validators' existing test suites pass unchanged (no behavior change).
+
+### Review Phase 4 — Performance, observability, and developer experience
+
+- [x] **Stale security-posture numbers** — `docs/SECURITY_POSTURE.md` claimed
+  "31 threats (QG-01…QG-31)" and "~191" adversarial tests; `docs/THREAT_MODEL.md`
+  actually runs to QG-32 and `pytest -m security --collect-only` collects 259.
+  Corrected directly in `docs/SECURITY_POSTURE.md` and `docs/PRODUCT_GUIDE.md`
+  as part of this review (no TODO item needed — already fixed).
+- Item 113 (metrics) and item 112 (scheduled CI) above are also this phase's
+  content; not repeated here.
+
+**Not turned into tracked items** (reviewed and deliberately left as
+observations in `TECHNICAL_REVIEW.md`, not work items): a potential
+`asyncio.Lock` event-loop-binding risk in `schema/reflection.py`'s
+`_METADATA_LOCKS` cache (no reproduction, no reset path exists but nothing
+currently triggers it — flagged for awareness, matches the documented
+`in_process_limiter().clear()` pattern if it's ever needed).
 
 ---
 

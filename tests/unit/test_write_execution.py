@@ -105,7 +105,7 @@ async def test_denied_by_default_write_is_rejected_and_audited():
     assert "1" not in str(event.query_shape.get("columns", []))
 
 
-def test_compensation_store_ttl_and_single_use():
+async def test_compensation_store_ttl_and_single_use():
     from querygate.execution.compensation import (
         CompensationRecord,
         InMemoryCompensationStore,
@@ -121,11 +121,11 @@ def test_compensation_store_ttl_and_single_use():
         pk_column="id",
         expires_at=compensation_expiry(3600),
     )
-    store.put(rec)
-    assert store.get("c1") is rec
+    await store.put(rec)
+    assert await store.get("c1") is rec
     # Consuming it makes a replay a clean miss.
-    store.consume("c1")
-    assert store.get("c1") is None
+    await store.consume("c1")
+    assert await store.get("c1") is None
 
     # An expired record is a miss too.
     expired = CompensationRecord(
@@ -136,8 +136,8 @@ def test_compensation_store_ttl_and_single_use():
         pk_column="id",
         expires_at=compensation_expiry(-1),
     )
-    store.put(expired)
-    assert store.get("c2") is None
+    await store.put(expired)
+    assert await store.get("c2") is None
 
 
 def test_coerce_temporal_string_to_python_object():

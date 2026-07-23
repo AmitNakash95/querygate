@@ -55,30 +55,35 @@ class CompensationRecord:
 
 
 class CompensationStore(Protocol):
-    def put(self, record: CompensationRecord) -> None: ...
+    """Async so a durable backend (Redis) can await its client — the in-process
+    default is trivially async. Mirrors the concurrency/quota limiter seams."""
 
-    def get(self, compensation_id: str) -> Optional[CompensationRecord]: ...
+    async def put(self, record: CompensationRecord) -> None: ...
 
-    def consume(self, compensation_id: str) -> None: ...
+    async def get(self, compensation_id: str) -> Optional[CompensationRecord]: ...
+
+    async def consume(self, compensation_id: str) -> None: ...
 
 
 class InMemoryCompensationStore:
     """Process-local store. `get` returns None for a missing, expired, or already
-    consumed record, so a stale or replayed undo is a clean no-op-with-error."""
+    consumed record, so a stale or replayed undo is a clean no-op-with-error.
+    Process-local, so undo needs single-replica/affinity — the durable
+    cross-replica sibling is `RedisCompensationStore`."""
 
     def __init__(self) -> None:
         self._records: Dict[str, CompensationRecord] = {}
 
-    def put(self, record: CompensationRecord) -> None:
+    async def put(self, record: CompensationRecord) -> None:
         self._records[record.compensation_id] = record
 
-    def get(self, compensation_id: str) -> Optional[CompensationRecord]:
+    async def get(self, compensation_id: str) -> Optional[CompensationRecord]:
         record = self._records.get(compensation_id)
         if record is None or record.consumed or record.expires_at < time.time():
             return None
         return record
 
-    def consume(self, compensation_id: str) -> None:
+    async def consume(self, compensation_id: str) -> None:
         record = self._records.get(compensation_id)
         if record is not None:
             record.consumed = True
@@ -87,11 +92,24 @@ class InMemoryCompensationStore:
         self._records.clear()
 
 
-_STORE = InMemoryCompensationStore()
+_active_store: CompensationStore = InMemoryCompensationStore()
 
 
-def get_compensation_store() -> InMemoryCompensationStore:
-    return _STORE
+def get_compensation_store() -> CompensationStore:
+    return _active_store
+
+
+def init_compensation_store(store: CompensationStore) -> None:
+    """Install the active compensation store (e.g. Redis when the Redis backend
+    is selected), mirroring `concurrency.init_redis_limiter`."""
+    global _active_store
+    _active_store = store
+
+
+def reset_compensation_store() -> None:
+    """Revert to a fresh in-process store (test teardown / shutdown)."""
+    global _active_store
+    _active_store = InMemoryCompensationStore()
 
 
 def new_compensation_id() -> str:

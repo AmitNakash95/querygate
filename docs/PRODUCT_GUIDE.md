@@ -626,7 +626,7 @@ or worked around.
 > Credentials never sit on any returned model, and that's asserted against the
 > live API schema, not by convention. And none of it is "trust us": every
 > guarantee is backed by a deny-by-default CI gate (static analysis, dependency
-> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 191-case
+> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 259-case
 > adversarial suite), and reviewers get a reproducible packet where each claim
 > names the command that reproduces it. The published container image is signed
 > (cosign keyless) and carries SLSA build provenance, both consumer-verifiable.
@@ -866,7 +866,7 @@ summary.
 
 The gates fall into three groups:
 
-- **The access boundary itself.** The adversarial security suite (191 cases,
+- **The access boundary itself.** The adversarial security suite (259 cases,
   `make test-security`) encodes specific known bypass classes as regressions —
   denied-column inference, undeclared-table smuggling, predicate-as-SQL,
   schema-discovery leaks, policy-cap breaches, audit no-leak. On top of that,
@@ -2579,7 +2579,7 @@ report. Every guarantee is backed by an open-source, deny-by-default check
 that runs in CI on every change: static analysis (Bandit + Semgrep), a
 dependency-CVE audit of the exact shipped set (pip-audit), a CycloneDX SBOM
 per release, container-image scanning (Trivy), full-history secret scanning
-(gitleaks), and OpenAPI fuzzing (Schemathesis) on top of the 191-case
+(gitleaks), and OpenAPI fuzzing (Schemathesis) on top of the 259-case
 adversarial suite. A regression that weakened any of them fails the build.
 For a reviewer under NDA, `docs/SECURITY_POSTURE.md` is a reproducible packet
 — every claim names the command that reproduces it. The published image is
