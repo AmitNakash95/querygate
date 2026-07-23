@@ -185,6 +185,40 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   **Phase 1 shipped** (`IN (subquery)`/`NOT IN`, tree-wide caps, full adversarial
   + e2e coverage, Decision Log recorded); box stays `[ ]` until phase 2
   (`FROM (subquery)` derived table).
+
+#### ★ Flagship pillar — Expressive Query Engine (items 99–106)
+
+*One coordinated initiative deepening the **Structural** pillar: take the READ
+query engine to 10/10 expressiveness for a fluent SQL author with no safety
+regression (the "no raw SQL, ever" bet only wins if the AST rarely walls off a
+real SQL author). **Deep spec + tests + acceptance:
+[docs/ENGINE_EXPRESSIVENESS_PLAN.md](docs/ENGINE_EXPRESSIVENESS_PLAN.md).** Build
+in the listed order; each item's Definition of Done and the canonical regression
+bar are in the plan (§3, §5). Cross-cutting rule: every new node is visited by the
+item-96 canonical walker and capped summed tree-wide (item 97), or it is not done.*
+
+- [ ] **99** — `HAVING` as `WhereNode` + searched `CASE` condition. *Cheap,
+  low-risk warm-up that proves the visitor/cap-expansion pattern. Depends on 96.*
+- [ ] **100** — ★ Bounded scalar `Expression` substrate (arithmetic, conditional
+  aggregation, nested fns, expression-CASE). *The centerpiece — one closed,
+  depth-capped node unlocks the most walls at once. Depends on 96, 99; **requires
+  a Decision Log entry (non-goal #7 boundary + division) before build.***
+- [ ] **101** — ★ General window functions (`WindowSelectItem`: OVER, LAG/LEAD,
+  frames). *Second expressiveness pillar; running totals / moving averages.
+  Depends on 96 (100 for windowed exprs); **Decision Log entry (frames) before
+  build.***
+- [ ] **102** — `EXTRACT`/date_part + relative-date/interval helpers. *High
+  everyday agent value. Depends on 100; **Decision Log entry (interval cap + TZ).***
+- [ ] **103** — Non-equi/range joins + FULL OUTER / CROSS. *Range/temporal joins.
+  Depends on 96, 99; **Decision Log entry (CROSS gating).***
+- [ ] **104** — Set operations (UNION / INTERSECT / EXCEPT). *New scope container;
+  caps summed across arms. Depends on 96, 97; **Decision Log entry before build.***
+- [ ] **105** — CTE / derived table in FROM (non-recursive; recursive OUT of
+  scope). *Multi-stage single-statement analysis. Depends on 96, 97, 104;
+  **Decision Log entry before build.***
+- [ ] **106** — Correlated / EXISTS / scalar subqueries. *Do last — largest safety
+  surface (breaks the uncorrelated assumption). Depends on 96, 97, 105; **Decision
+  Log entry (correlation scope model) before build.***
 - [ ] **19** — Additional dialects (MySQL, Snowflake, BigQuery, …). *Removes the
   "QueryGate is narrow" objection. **Depends on 57.***
 
@@ -231,11 +265,29 @@ surface them for a human, never auto-start them.
     only the `release-smoke` write round-trip.
   - **Phase 3a** ✅ **shipped** — bounded reversibility (**undo**): a
     QueryGate-owned TTL'd pre-image store (no operational-DB shadow table) +
-    `POST /write/undo` that re-applies the inverse through the governed pipeline;
-    proven on SQLite + real Postgres. Remaining phase 3: upserts, batch
-    atomicity, MSSQL parity, MCP undo.
-  - **Phase 3** (compensation/undo + upserts + batch + MSSQL parity) depends on
-    Phase 2.
+    `POST /write/undo` that re-applies the inverse (atomic, changed-columns-only,
+    compensation-id-authorized) through the governed pipeline; proven on SQLite +
+    real Postgres.
+  - **Phase 3b — take reversibility to 10/10** (the self-review findings that hold
+    it back, in priority order):
+    - [x] **RETURNING capture for server-generated PKs** ✅ — an INSERT that omits
+      a single-column PK now captures the generated key via `RETURNING`, so
+      serial/identity-PK inserts are undoable (was `compensation_id=null`). Proven
+      on SQLite + Postgres.
+    - [ ] **Durable cross-replica compensation store** — the in-process store means
+      undo fails under the multi-replica HA deployment (item 56). Add a Redis-backed
+      `CompensationStore` (mirroring the concurrency/quota Redis variants), treating
+      the pre-image values as sensitive at rest; flip the HA/DR matrix row to shared.
+    - [ ] **Optimistic-concurrency undo** — undo silently overwrites a concurrent
+      change to a *changed* column. Detect drift (current value ≠ post-write value)
+      and refuse-or-flag instead of clobbering.
+    - [ ] **MCP undo parity** — undo is REST-only; add an undo path to the MCP
+      surface so an agent that wrote over MCP can also reverse over MCP.
+    - [ ] **`release-smoke` write round-trip** — extend `make release-smoke` with a
+      real capped governed write + undo against the shipped image.
+    - [ ] **MSSQL write execution parity** — proven on Postgres+SQLite; unproven on
+      MSSQL (needs a live MSSQL — infra-gated). Add a real MSSQL write+undo job.
+    - [ ] Upserts, multi-statement batch atomicity, approval-binds-to-diff-hash.
 - **F4 · Safe NL→StructuredQuery.** Needs a decision on model provider/posture;
   must be an isolated opt-in subsystem, never wired into the catalog/32C.
 - **P2 · Open the StructuredQuery AST as a standard.** A standards-governance
