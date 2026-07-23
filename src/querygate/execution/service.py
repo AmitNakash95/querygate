@@ -68,6 +68,7 @@ from querygate.execution.cost_estimation import (
     QueryCostEstimate,
     cost_estimate_violations,
     enforce_cost_estimate,
+    estimate_mssql_query_cost,
     estimate_postgres_query_cost,
 )
 from querygate.execution.quota import enforce_query_quota, record_query_quota_bytes
@@ -341,6 +342,24 @@ class StructuredQueryService:
         )
         return stmt, limit, tables, dialect
 
+    async def _estimate_cost(
+        self, dialect: DatabaseDialect, session, stmt: sa.Select
+    ) -> Optional[QueryCostEstimate]:
+        """Pre-execution cost estimate for the compiled query, per dialect:
+        Postgres plans it inline in the open session (`EXPLAIN`); MSSQL needs a
+        dedicated SHOWPLAN_XML connection. Both fail open (return None). Any other
+        dialect has no estimator yet — the query proceeds under the reactive
+        guardrails."""
+        if dialect == DatabaseDialect.POSTGRESQL:
+            return await estimate_postgres_query_cost(
+                session, stmt, connection_id=self._connection_id
+            )
+        if dialect == DatabaseDialect.MSSQL:
+            return await estimate_mssql_query_cost(
+                get_engine(self._connection_id), stmt, connection_id=self._connection_id
+            )
+        return None
+
     def _observe_cost_estimate(self, estimate: QueryCostEstimate, policy: Policy) -> None:
         """`CostEstimationMode.OBSERVE`: record what *would* have been
         rejected without blocking the query — lets an operator calibrate
@@ -546,10 +565,8 @@ class StructuredQueryService:
 
                     async with session_scope(self._connection_id, policy=policy) as session:
                         estimate: Optional[QueryCostEstimate] = None
-                        if policy.estimate_needed and dialect == DatabaseDialect.POSTGRESQL:
-                            estimate = await estimate_postgres_query_cost(
-                                session, stmt, connection_id=self._connection_id
-                            )
+                        if policy.estimate_needed:
+                            estimate = await self._estimate_cost(dialect, session, stmt)
                             if estimate is not None and policy.cost_estimation_enabled:
                                 if policy.cost_estimation_mode == CostEstimationMode.ENFORCE:
                                     enforce_cost_estimate(estimate, policy)
