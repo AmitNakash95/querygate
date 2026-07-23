@@ -141,8 +141,11 @@ jobs:
       # security-at-volume, and log/audit no-leak checks
       # (tests/integration/test_large_domain_stress.py), which self-seed their
       # own data and so need nothing beyond the bare Postgres service above.
-      - name: pytest -m "postgres_live and not load"
-        run: poetry run pytest -m "postgres_live and not load"
+      # Exclude tests that ALSO need MSSQL (the cross-dialect differential
+      # suite) — they can't pass in a Postgres-only job and run in the dedicated
+      # `cross-dialect-differential` job that provides both databases.
+      - name: pytest -m "postgres_live and not mssql_live and not load"
+        run: poetry run pytest -m "postgres_live and not mssql_live and not load"
 
       # The concurrency-guardrail (pg_sleep probes) + heavy-burst + soak tests.
       # Kept as a separate, named step so a timing-related failure is obvious.
@@ -215,8 +218,92 @@ jobs:
       - name: Set up MSSQL test databases
         run: poetry run python tests/integration/setup_mssql_test_db.py
 
-      - name: pytest -m mssql_live
-        run: poetry run pytest -m mssql_live
+      # Exclude tests that ALSO need Postgres (the cross-dialect differential
+      # suite) — they can't pass in an MSSQL-only job and run in the dedicated
+      # `cross-dialect-differential` job that provides both databases.
+      - name: pytest -m "mssql_live and not postgres_live"
+        run: poetry run pytest -m "mssql_live and not postgres_live"
+
+  cross-dialect-differential:
+    name: Cross-dialect differential tests (Postgres + MSSQL)
+    runs-on: ubuntu-latest
+    # The item-36 differential suite executes the SAME StructuredQuery against a
+    # live Postgres AND a live MSSQL and asserts the returned rows are identical.
+    # It needs BOTH databases in one job (the single-DB jobs above deliberately
+    # exclude it), so this job stands up both service containers, seeds each with
+    # the same demo data, and runs only the dual-marked tests.
+    services:
+      postgres:
+        image: postgres:15.1
+        env:
+          POSTGRES_USER: querygate
+          POSTGRES_PASSWORD: querygate
+          POSTGRES_DB: querygate_demo
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U querygate -d querygate_demo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "QueryGate_Test_Pw1!" # dev-only, matches setup_mssql_test_db.py's default
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P QueryGate_Test_Pw1! -C -Q 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+    env:
+      QUERYGATE_TEST_MSSQL_HOST: localhost
+      QUERYGATE_TEST_MSSQL_PORT: "1433"
+      QUERYGATE_TEST_MSSQL_SA_PASSWORD: "QueryGate_Test_Pw1!"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry==2.4.1
+
+      # ODBC Driver 18 for SQL Server — same client-side requirement as the
+      # mssql-live job (see its notes on deriving the runner's Ubuntu version).
+      - name: Install unixODBC + msodbcsql18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unixodbc unixodbc-dev gnupg curl
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-prod.gpg > /dev/null
+          ubuntu_ver="$(. /etc/os-release && echo "$VERSION_ID")"
+          curl -sSL "https://packages.microsoft.com/config/ubuntu/${ubuntu_ver}/prod.list" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      # Seed Postgres with the canonical demo schema (same source the MSSQL setup
+      # below uses via examples/demo_db/schema.py), so the two databases hold
+      # identical rows and the differential comparison is meaningful.
+      - name: Seed demo schema into Postgres (querygate_demo)
+        env:
+          PGPASSWORD: querygate
+        run: |
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          psql -h localhost -p 5433 -U querygate -d querygate_demo \
+            -v ON_ERROR_STOP=1 -f examples/demo_db/init_postgres.sql
+
+      - name: Set up MSSQL test databases
+        run: poetry run python tests/integration/setup_mssql_test_db.py
+
+      - name: pytest -m "postgres_live and mssql_live"
+        run: poetry run pytest -m "postgres_live and mssql_live"
 
   docker:
     name: Docker + real-Postgres release smoke
