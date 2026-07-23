@@ -70,6 +70,16 @@ def _visible_template(connection_id: str, principal: Principal) -> None:
 
 class BatchQueryRequest(pyd.BaseModel):
     queries: List[StructuredQuery] = pyd.Field(min_length=1)
+    approval_tokens: Dict[str, str] = pyd.Field(
+        default_factory=dict,
+        description=(
+            "In-query approval grants for this batch (item 92): a map of query "
+            "fingerprint -> the signed token from POST /query/approve. A query "
+            "that trips the approval gate without a matching token fails only "
+            "that batch item (fail-closed); each token is verified against its "
+            "own query's fingerprint, so it can't be replayed onto another."
+        ),
+    )
 
 
 class BatchQueryResult(pyd.BaseModel):
@@ -331,7 +341,10 @@ def build_router(
         service = _service(connection, principal)
         validate_batch_size(len(payload.queries), get_policy(connection, principal=principal))
         results = await service.execute_many(
-            payload.queries, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
+            payload.queries,
+            queue_mode=queue_mode,
+            wait_timeout_seconds=wait_timeout_seconds,
+            approval_tokens=payload.approval_tokens,
         )
         return BatchQueryResult(results=results)
 

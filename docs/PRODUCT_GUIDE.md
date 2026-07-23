@@ -2656,10 +2656,15 @@ reasoning behind them, newest first. Added to incrementally as work happens
   one set of reasons so a single approval token covers whatever tripped it, and
   it rejects with `428 Precondition Required` + fingerprint/reasons. The
   sensitivity trigger is dialect-agnostic (works on MSSQL, no estimate needed).
-  The remaining phase-2 piece is the interactive MCP elicitation channel. The
-  whole gate is opt-in per policy and off by default, so it changes nothing for
-  an existing deployment, preserving the read-only, AST-only invariant (it only
-  *adds* a pre-execution pause).
+  The same fingerprint→token flow extends to **batch** (`POST /query/batch`
+  carries a `fingerprint → token` map): a batch can run an approval-gated query
+  while an unapproved one in the same batch stays fail-closed as that item's
+  error, and each token is still bound to its own query's fingerprint so it
+  can't be replayed onto another query in the batch. The remaining phase-2 piece
+  is the interactive MCP elicitation channel. The whole gate is opt-in per policy
+  and off by default, so it changes nothing for an existing deployment,
+  preserving the read-only, AST-only invariant (it only *adds* a pre-execution
+  pause).
 - **2026-07-23 — RFC 9728 `scopes_supported` advertises the full scope
   vocabulary, kept distinct from the `mcp_required_scopes` access gate; role
   bundles are advisory and generated, never enforced or hand-maintained (item
