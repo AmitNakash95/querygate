@@ -2203,7 +2203,39 @@ Delegated-identity attribution (RFC 8693 `act` → `Principal.actor`, the human'
 
 Optional `AUDIT_SINK_BACKEND=jsonl_chained` wraps every redaction-safe event in a hash-chain envelope (SHA-256, or HMAC-SHA256 with `AUDIT_LEDGER_HMAC_KEY`) so edits/deletions/reordering/insertion are detectable; `querygate-audit verify` validates a ledger and `querygate-audit receipt` emits a portable per-query compliance receipt. Chaining is envelope-level (no new event data) and verify-only. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 91).
 
-### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up)
+### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) ✅ DONE (phase 1); phase 2 (sensitivity trigger + MCP elicitation) not started
+
+**Phase 1 shipped (cost/row-estimate trigger + stateless HMAC approval-token
+grant, REST):** `execution/approval.py` is the gate's decision core —
+`approval_required_reasons(estimate, policy)` (reusing the estimate the pipeline
+already computes), `query_fingerprint(query)` (canonical SHA-256 of the AST), and
+`issue_approval_token`/`verify_approval_token` (HMAC-SHA256, fail-closed on any
+missing-key/forged/expired/wrong-fingerprint/malformed input, constant-time
+compare). New `Policy.approval_max_estimated_rows`/`approval_max_estimated_cost`
+(opt-in, default off; a softer gate *below* the hard `max_estimated_*` caps) and
+`Policy.approval_gate_enabled`/`estimate_needed`. The gate runs in
+`execution/service.py`'s `execute()` right after the cost estimate (Postgres
+only, same estimate source), raising `ApprovalRequiredError` (a
+`PolicyViolationError`; `metrics.classify_rejection` → `approval_required`) when
+triggered and no valid token is supplied, admitting when a token bound to that
+exact query is supplied (audited `approval.required`/`approval.granted`). REST:
+`execute` accepts an `X-QueryGate-Approval` header; `ApprovalRequiredError` maps
+to **428 Precondition Required** with `{fingerprint, reasons}`; a new
+scope-gated `POST /{connection}/query/approve` (scope `query:approve`, in the
+scope catalog + a "Query Approver" role bundle) issues the token. Requires
+`AppConfig.approval_token_hmac_key` (fail-closed 503 if unset). Covered by
+`tests/unit/test_approval.py` (22 tests: token forge/replay/expiry/wrong-key/
+malformed, trigger boundary, gate seam, e2e pause→approve→resubmit, endpoint
+scope/503). **Invariant preserved:** read-only, AST-only, opt-in — a
+default-config deployment is byte-for-byte unchanged.
+
+**Phase 2 (not started):** the catalog **sensitivity-label** trigger
+(`sensitivity: pii` on a referenced column → require approval regardless of
+size) and the interactive **MCP elicitation** channel (approve within one MCP
+session instead of the REST token round-trip). The token format and gate already
+accommodate the second trigger (the reasons list is free-form); phase 2 wires
+catalog sensitivity into the pre-execution path and adds the MCP elicitation
+step-up. Batch (`execute_many`) per-query approval tokens are also phase 2.
 
 **Effort: L. Priority: medium (safety moat; sequence after 90/91). Feature ref: F3.**
 

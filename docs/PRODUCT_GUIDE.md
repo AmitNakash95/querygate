@@ -2543,6 +2543,29 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — The in-query approval gate uses a stateless, fingerprint-bound
+  HMAC token and a scope separate from execution; phase 1 triggers only on the
+  cost estimate (item 92).** Building the human-in-the-loop gate, three
+  decisions were made deliberately. **(1) Stateless token, not an approval
+  store.** An approval is an HMAC-SHA256 signature over `{query fingerprint,
+  approver, expiry}` — no server-side pending-approval table. It cannot be
+  forged (keyed HMAC), cannot be replayed against a *different* query (the
+  fingerprint is a SHA-256 of the whole AST, so a one-character change
+  invalidates it), and cannot be replayed forever (short expiry). Verification is
+  fail-closed: a missing key, forged signature, expired, mismatched, or malformed
+  token all deny. This avoids adding statefulness to a security product and keeps
+  the gate horizontally-scalable with no shared approval state. **(2) `query:approve`
+  is a distinct scope from querying.** The agent that runs the query must not be
+  able to approve its own sensitive/expensive read, so approval is a separate
+  scope (a "Query Approver" role) — separation of duties by scope, the same
+  posture as catalog governance. **(3) Phase 1 triggers on cost only.** The gate
+  reuses the estimate the pipeline already computes (Postgres) and rejects with
+  `428 Precondition Required` + the fingerprint/reasons so a client knows exactly
+  what to get approved. The catalog sensitivity-label trigger and the interactive
+  MCP elicitation channel are phase 2 — the token format already accommodates a
+  second trigger (free-form reasons). The whole gate is opt-in per policy and
+  off by default, so it changes nothing for an existing deployment, preserving
+  the read-only, AST-only invariant (it only *adds* a pre-execution pause).
 - **2026-07-23 — RFC 9728 `scopes_supported` advertises the full scope
   vocabulary, kept distinct from the `mcp_required_scopes` access gate; role
   bundles are advisory and generated, never enforced or hand-maintained (item

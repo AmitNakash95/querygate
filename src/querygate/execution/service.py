@@ -43,6 +43,7 @@ from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.auth import Principal
 from querygate.core.config import config as app_config
 from querygate.core.exceptions import (
+    ApprovalRequiredError,
     CapacityTimeoutError,
     ConcurrencyLimitError,
     NotFoundError,
@@ -55,6 +56,11 @@ from querygate.core.exceptions import (
 )
 from querygate.core.logging import get_logger, log_execution
 from querygate.execution.admission import QueueMode, new_admission_id, resolve_wait_seconds
+from querygate.execution.approval import (
+    approval_required_reasons,
+    query_fingerprint,
+    verify_approval_token,
+)
 from querygate.execution.concurrency import concurrency_slot
 from querygate.execution.cost_estimation import (
     QueryCostEstimate,
@@ -331,6 +337,50 @@ class StructuredQueryService:
             estimated_total_cost=estimate.estimated_total_cost,
         )
 
+    def _enforce_approval_gate(
+        self,
+        estimate: QueryCostEstimate,
+        policy: Policy,
+        query: StructuredQuery,
+        approval_token: Optional[str],
+    ) -> None:
+        """In-query human-in-the-loop gate (TODO.md item 92 phase 1). If the
+        estimate trips a policy approval threshold, require a valid approval
+        token bound to this exact query; otherwise raise `ApprovalRequiredError`
+        so the caller can obtain one from a `query:approve` holder and re-submit.
+        No-op when the gate is disabled or the estimate is within threshold.
+        """
+        if not policy.approval_gate_enabled:
+            return
+        reasons = approval_required_reasons(estimate, policy)
+        if not reasons:
+            return
+        fingerprint = query_fingerprint(query)
+        key = app_config.approval_token_hmac_key
+        if verify_approval_token(approval_token or "", fingerprint=fingerprint, key=key):
+            # Approved: the normal success audit records the execution; this
+            # structured line ties the approval grant to the query in the log.
+            get_logger().bind(func="execute").info(
+                "approval.granted",
+                connection=self._connection_id,
+                fingerprint=fingerprint,
+                principal=self._principal_subject,
+                reasons=reasons,
+            )
+            return
+        get_logger().bind(func="execute").warning(
+            "approval.required",
+            connection=self._connection_id,
+            fingerprint=fingerprint,
+            principal=self._principal_subject,
+            reasons=reasons,
+        )
+        raise ApprovalRequiredError(
+            "This query requires human approval before it can run: " + "; ".join(reasons),
+            fingerprint=fingerprint,
+            reasons=reasons,
+        )
+
     def _usage_signal_targets(
         self, query: StructuredQuery
     ) -> List[Tuple[CatalogUsageSignalKind, CatalogDraftTarget]]:
@@ -426,6 +476,7 @@ class StructuredQueryService:
         *,
         queue_mode: Optional[QueueMode] = None,
         wait_timeout_seconds: Optional[float] = None,
+        approval_token: Optional[str] = None,
     ) -> StructuredQueryResult:
         start = time.monotonic()
         admission_id = new_admission_id()
@@ -467,15 +518,21 @@ class StructuredQueryService:
                     sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
 
                     async with session_scope(self._connection_id, policy=policy) as session:
-                        if policy.cost_estimation_enabled and dialect == DatabaseDialect.POSTGRESQL:
+                        if policy.estimate_needed and dialect == DatabaseDialect.POSTGRESQL:
                             estimate = await estimate_postgres_query_cost(
                                 session, stmt, connection_id=self._connection_id
                             )
                             if estimate is not None:
-                                if policy.cost_estimation_mode == CostEstimationMode.ENFORCE:
-                                    enforce_cost_estimate(estimate, policy)
-                                else:
-                                    self._observe_cost_estimate(estimate, policy)
+                                if policy.cost_estimation_enabled:
+                                    if policy.cost_estimation_mode == CostEstimationMode.ENFORCE:
+                                        enforce_cost_estimate(estimate, policy)
+                                    else:
+                                        self._observe_cost_estimate(estimate, policy)
+                                # Human-in-the-loop approval gate (item 92) runs
+                                # after the hard cost gate: a query rejected by
+                                # ENFORCE never reaches here, and one within the
+                                # hard caps may still need a human for its size.
+                                self._enforce_approval_gate(estimate, policy, query, approval_token)
                         result = await session.execute(stmt)
                         raw_rows = [dict(r) for r in result.mappings().all()]
 

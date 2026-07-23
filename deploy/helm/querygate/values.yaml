@@ -192,6 +192,7 @@ secrets:
     # API_KEYS: '["change-me"]'
     # QUERYGATE_DATABASE_URL: "postgresql+asyncpg://user:pass@host:5432/db"
     # VAULT_TOKEN: ""
+    # APPROVAL_TOKEN_HMAC_KEY: ""   # required only if a policy sets approval_max_estimated_* (item 92)
 
 metrics:
   serviceMonitor:

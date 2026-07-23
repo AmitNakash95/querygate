@@ -42,6 +42,7 @@ from starlette import status
 from querygate.core.auth import Principal
 from querygate.core.exceptions import (
     PUBLIC_INTERNAL_ERROR,
+    ApprovalRequiredError,
     AuthorizationError,
     CapacityTimeoutError,
     ConcurrencyLimitError,
@@ -207,6 +208,24 @@ def install_exception_handlers(app: FastAPI) -> None:
             exc,
             status.HTTP_429_TOO_MANY_REQUESTS,
             headers={"Retry-After": str(exc.retry_after_seconds)},
+        )
+
+    # ApprovalRequiredError subclasses PolicyViolationError but is not a plain
+    # allow/deny: it is a *pause* pending a human grant (item 92). It answers 428
+    # Precondition Required and returns the query `fingerprint` (which a
+    # `query:approve` holder signs at POST /{connection}/query/approve) plus the
+    # `reasons`, so the client knows exactly what to get approved and re-submit.
+    # Registered before the generic PolicyViolationError handler so it wins.
+    @app.exception_handler(ApprovalRequiredError)
+    async def _approval_required(_request: Request, exc: ApprovalRequiredError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            content={
+                "detail": public_error_message(exc),
+                "approval_required": True,
+                "fingerprint": exc.fingerprint,
+                "reasons": exc.reasons,
+            },
         )
 
     @app.exception_handler(PolicyViolationError)

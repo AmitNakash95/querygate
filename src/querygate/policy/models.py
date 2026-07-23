@@ -259,6 +259,21 @@ class Policy(pyd.BaseModel):
     max_estimated_cost: Optional[float] = pyd.Field(default=None)
     cost_estimation_mode: CostEstimationMode = pyd.Field(default=CostEstimationMode.ENFORCE)
 
+    # In-query human-in-the-loop approval gate (execution/approval.py, TODO.md
+    # item 92 phase 1). Unset (None, the default for both) means the gate is
+    # off — existing deployments behave identically. When set, a query whose
+    # pre-execution estimate exceeds the threshold is paused with
+    # ApprovalRequiredError unless the caller supplies a valid approval token
+    # (issued by a `query:approve` holder). These are a *softer* gate than
+    # max_estimated_rows/max_estimated_cost above: set them LOWER than the hard
+    # reject caps to mean "ask a human" rather than "refuse". Postgres-only in
+    # phase 1 (same estimate source as cost estimation); the catalog
+    # sensitivity-label trigger and MCP elicitation channel are phase 2.
+    # Enabling the gate requires AppConfig.approval_token_hmac_key to be set,
+    # otherwise no approval could ever be granted (fail-closed).
+    approval_max_estimated_rows: Optional[int] = pyd.Field(default=None)
+    approval_max_estimated_cost: Optional[float] = pyd.Field(default=None)
+
     # Audit/explain SQL rendering. Default is safe-by-default: SQL text uses
     # bind placeholders and parameter values are redacted, so a WHERE-clause
     # literal (an email, an SSN) never ends up verbatim in the audit log or
@@ -278,6 +293,20 @@ class Policy(pyd.BaseModel):
     @property
     def cost_estimation_enabled(self) -> bool:
         return self.max_estimated_rows is not None or self.max_estimated_cost is not None
+
+    @property
+    def approval_gate_enabled(self) -> bool:
+        return (
+            self.approval_max_estimated_rows is not None
+            or self.approval_max_estimated_cost is not None
+        )
+
+    @property
+    def estimate_needed(self) -> bool:
+        """Whether `execute()` must obtain the pre-execution estimate — true when
+        either the hard cost gate or the softer approval gate is configured, so
+        the estimate is computed once and fed to both."""
+        return self.cost_estimation_enabled or self.approval_gate_enabled
 
     @property
     def query_quota_enabled(self) -> bool:
