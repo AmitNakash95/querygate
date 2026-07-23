@@ -91,9 +91,12 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   consumer `cosign verify`/`gh attestation verify` docs). Box stays `[ ]` until
   the two maintainer-gated bits — the *first* executed signed release (a
   deliberate tag push) and a chosen Python package-index — are done.
-- [ ] **56** — HA / multi-region reference deployment + DR runbook (start with a
+- [x] **56** — HA / multi-region reference deployment + DR runbook (start with a
   supported Helm path). *A pilot has to actually deploy; unblocks the
-  "deployed in a day" pilot success criterion.*
+  "deployed in a day" pilot success criterion.* ✅ **Shipped** (zero-downtime
+  rolling config reload, `values-ha.yaml` multi-zone overlay, `deploy/HA_DR.md`
+  shared-state matrix + DR runbook, chart HA invariants CI-asserted; live
+  failover drill is the operator's step).
 - [ ] **36** — Production-grade QA / edge-case test suite. *Hardening before a
   real customer's data and adversaries touch it; raises confidence for the
   pilot without new surface.*
