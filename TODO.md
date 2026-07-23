@@ -2097,11 +2097,12 @@ generated key via `RETURNING` and is undoable (was `compensation_id=null`); (b)
 and `RedisCompensationStore` (installed when `CONCURRENCY_BACKEND=redis`) makes a
 `compensation_id` resolvable on any replica, so undo works under HA (pre-image
 round-trips through JSON with type re-coercion; fakeredis + real-DB tested;
-`_coerce_write_value` now also coerces Decimal). **Honest bounded limits:**
-cannot unwind cascading triggers/FK actions or downstream reads; restores the
-snapshotted value of the changed columns (a concurrent change to a *changed*
-column since is overwritten — no optimistic-concurrency check yet). **Phase 3b
-remaining:** optimistic-concurrency undo, MCP undo parity, `release-smoke` write,
+`_coerce_write_value` now also coerces Decimal); (c) **optimistic-concurrency
+undo** — an UPDATE undo reads each affected row's current changed-column values
+and **refuses** (422) if any drifted from what the write set (or the row is
+gone), so a concurrent change since the write is never silently clobbered.
+**Honest bounded limits:** cannot unwind cascading triggers/FK actions or
+downstream reads. **Phase 3b remaining:** MCP undo parity, `release-smoke` write,
 upserts, multi-statement batch atomicity, MSSQL execution parity,
 approval-binds-to-diff-hash.
 

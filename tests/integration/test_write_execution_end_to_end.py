@@ -662,3 +662,50 @@ async def test_undo_through_redis_store_restores_full_row(sqlite_app):
             assert await _full_row(target) == original  # full row restored via Redis
     finally:
         reset_compensation_store()
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_update_undo_refuses_on_concurrent_change_to_changed_column(sqlite_app):
+    # Optimistic concurrency (phase 3b): if the very column the write changed is
+    # changed again before undo, undo REFUSES rather than clobbering that change.
+    _enable_writes(compensation_enabled=True)
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        target = (await _orders(client))[0]["id"]
+
+        first = await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "update",
+                "table": "orders",
+                "set": {"status": "step-1"},
+                "where": {"col": "orders.id", "op": "eq", "value": target},
+            },
+        )
+        cid = first.json()["compensation_id"]
+
+        # A concurrent change to the SAME column after the write.
+        await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "update",
+                "table": "orders",
+                "set": {"status": "step-2"},
+                "where": {"col": "orders.id", "op": "eq", "value": target},
+            },
+        )
+
+        undo = await client.post("/api/v1/demo/write/undo", json={"compensation_id": cid})
+        assert undo.status_code == 422  # refused — would clobber the concurrent change
+        assert "concurrent change" in undo.json()["detail"].lower()
+
+        # The concurrent change is preserved, not clobbered back.
+        row = await client.post(
+            "/api/v1/demo/query",
+            json={
+                "from": "orders",
+                "select": ["orders.id", "orders.status"],
+                "where": {"col": "orders.id", "op": "eq", "value": target},
+            },
+        )
+    assert row.json()["rows"][0]["status"] == "step-2"

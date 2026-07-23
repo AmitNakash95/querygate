@@ -48,6 +48,10 @@ class CompensationRecord:
     # keys). Undo restores *only* these — never columns the write never touched —
     # so an undo's blast radius never exceeds the change it reverses.
     changed_columns: List[str] = field(default_factory=list)
+    # For UPDATE: the values the write SET (post-image). Undo compares the row's
+    # current value against these and refuses if it drifted, so a concurrent
+    # change since the write is never silently clobbered (optimistic concurrency).
+    post_values: Dict[str, Any] = field(default_factory=dict)
     expires_at: float = 0.0
     consumed: bool = False
 
