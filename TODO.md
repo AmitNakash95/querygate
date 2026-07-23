@@ -2050,10 +2050,14 @@ write boundary security suite** (`tests/security/test_write_boundary.py` +
 dual-marked execution guarantees, under `make test-security`). **Still open in
 2b:** the MCP `run_structured_writes` execute tool, the `release-smoke` write
 round-trip, and the write concurrency load gate. (Approval still binds to the
-write fingerprint, not the diff hash — a phase-3 refinement.) **Phase 3:**
-compensation/undo, upserts, multi-row batch, MSSQL execution parity, NOT
-NULL/FK/unique pre-validation (2a lets the DB enforce these — a violation rolls
-back cleanly but surfaces as a masked 500 rather than a typed 4xx).
+write fingerprint, not the diff hash — a phase-3 refinement.) Also shipped in 2b:
+**constraint handling** — an INSERT missing a NOT NULL column is caught with a
+precise pre-DB validation error, and any DB constraint/type violation
+(NOT NULL/FK/unique/mistyped) maps to a clean typed 422 (rolled back, no raw
+driver text leaked) instead of a masked 500. **Phase 3:** compensation/undo,
+upserts, multi-row batch, MSSQL execution parity, deeper FK/unique
+*pre*-validation (a full pre-check needs a lookup query; today the DB enforces
+them and the violation is a clean 422).
 
 **Phase 1 shipped (maintainer-approved; Decision Log recorded).** The write
 sibling of the read pipeline, preview-only — **no code path executes or commits
