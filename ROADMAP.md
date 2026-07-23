@@ -97,9 +97,12 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   rolling config reload, `values-ha.yaml` multi-zone overlay, `deploy/HA_DR.md`
   shared-state matrix + DR runbook, chart HA invariants CI-asserted; live
   failover drill is the operator's step).
-- [ ] **36** — Production-grade QA / edge-case test suite. *Hardening before a
+- [x] **36** — Production-grade QA / edge-case test suite. *Hardening before a
   real customer's data and adversaries touch it; raises confidence for the
-  pilot without new surface.*
+  pilot without new surface.* ✅ **Shipped** (phase 1 policy-cap boundary +
+  compiler fuzzing, phase 2a malformed-input fuzzing, phase 2b cross-dialect
+  differential *execution* — same AST run against live Postgres + MSSQL, rows
+  asserted equal).
 - [x] **96** — Unify the AST reference-walk into a single canonical visitor.
   *Pure refactor, no behavior change: collapses the four hand-maintained
   reference walks into one authority so a policy/schema hole can't open in a

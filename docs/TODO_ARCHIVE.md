@@ -2042,6 +2042,124 @@ see how one policy/configuration change alters the outcome. Every showcased
 configuration, decision, and error is traceable to a tested QueryGate behavior,
 and the page is explicitly labeled as an illustrative mocked experience.
 
+### 36. Extensive production-grade QA project / edge-case test suite ✅ DONE
+
+**Phase 1 (policy-cap boundary tests + property-based compiler fuzzing) ✅
+DONE.** **Phase 2a (REST/MCP malformed-input fuzzing) ✅ DONE.** **Phase 2b
+(cross-dialect differential EXECUTION tests) ✅ DONE** —
+`tests/integration/test_cross_dialect_differential.py` (`real_db` +
+`postgres_live` + `mssql_live`) executes the same `StructuredQuery`
+(select/filter/join/group-by-aggregate) against a live Postgres AND a live MSSQL
+seeded with identical demo data and asserts the returned rows are equal, so a
+dialect-agnostic query behaves identically end-to-end — going beyond item 78's
+compile-time rendering check. Dialect-specific behavior (date bucketing, stddev
+naming, string_agg, NULLS ordering) is out of scope (the item-74/78 concern).
+
+**Phase 1 shipped:** `tests/unit/test_policy_boundaries.py` proves the
+sharper boundary claim `tests/unit/test_policy_validation.py` didn't: for
+every cap `validate_policy` enforces (`max_joins`, `max_select_columns`,
+`max_group_by`, `max_where_depth`, `top_n.n`/`max_top_n`,
+`top_n.partition_by`/`max_partition_by`, `max_batch_size`), a query at
+exactly the configured limit passes and one unit past it is rejected — not
+just "some over-cap value fails." `max_top_n` and `max_partition_by` had no
+coverage at all before this file.
+
+`tests/unit/test_compiler_properties.py` adds Hypothesis property-based
+fuzzing of `compiler/sqlalchemy_compiler.py`: generated strategies produce
+many random-but-valid `StructuredQuery` combinations across three shapes
+(plain row-select with optional join/where/order_by, aggregate
+GROUP BY/HAVING, and `top_n` per-partition ranking over either shape) and
+assert the compiler never raises, always renders to valid SQL text (both the
+normal bind-parameterized form and the `literal_binds=True` form the
+audit/explain path uses), and always returns `limit >= 1`. A fourth property
+test proves a `MandatoryRowFilter` on the `from_table` survives every random
+shape — the multi-tenant isolation guarantee must never silently drop out
+for an AST combination hand-written tests didn't happen to construct. Added
+`hypothesis` as a dev dependency (`pyproject.toml`/`poetry.lock`).
+
+**Phase 2a shipped:** `tests/security/test_malformed_input_fuzzing.py`
+(security-marked, in the default suite) sweeps the input-parsing/schema
+boundary of both transports with a broad corpus of malformed-but-plausible
+JSON — wrong body/field types, missing/extra fields (including the
+no-raw-SQL `sql`/`raw_sql`/`query`/... smuggle set, QG-01), invalid enum
+values, invalid/empty JSON, non-finite numbers, and `where` trees deep
+enough to trip the JSON parser's recursion guard — and asserts, for REST
+(`/query`, `/query/explain`, `/query/batch`) and MCP (`run_structured_queries`
+via a real `tools/call`): the input is rejected with a clean client error
+(never a 5xx crash), the error body never leaks a server internal (traceback,
+file path, driver/SQLAlchemy text, `NoSuchTableError`, or a connection-string
+credential — QG-07), and the `StructuredQueryService` execute/explain/batch
+methods are patched and asserted *un-called* so malformed input provably
+never reaches the database (QG-01). A mirror case proves an extreme-but-valid
+literal is accepted (not spuriously size-rejected), so the suite tests
+*malformed* shapes, not merely large ones. Policy-cap rejection (over-depth/
+size/batch) is intentionally left to phase 1's `test_policy_boundaries.py`.
+
+Two real robustness gaps the suite surfaced (per this item's "where a real
+gap is found, fix it or record it — don't leave it silent" posture):
+
+- **Fixed — non-finite numbers 500'd at the REST boundary.** `NaN`/`Infinity`
+  (accepted by Python's json parser, not valid JSON) in a numeric field made
+  the *validation-error* response fail to encode (Starlette's `JSONResponse`
+  renders with `allow_nan=False`) and surface as a 500 — leaking a traceback
+  under `debug=True`. `api/_errors.py` now registers a `RequestValidationError`
+  handler that scrubs non-finite floats out of the echoed error, so it is a
+  clean 422. Adversarially confirmed to 500 before the handler existed.
+- **Recorded as residual risk (item 86) — MCP transport 500 on a pathological
+  deep body.** REST rejects a `where` nested past the parser's recursion guard
+  with a clean 400, but the upstream MCP Streamable-HTTP transport's
+  `json.loads` raises `RecursionError`, which it catches and returns as a
+  handled JSON-RPC internal-error (`-32603`, generic non-sensitive message) —
+  an HTTP 500 rather than a 4xx. Handled and leak-free, so the test asserts
+  the security property (handled + no leak + not executed) and item 86 tracks
+  the transport-level body-size/depth guard that would make it a 4xx.
+
+**Explicitly out of scope for this pass, tracked as phase 2b:**
+cross-dialect differential tests (same AST compiled and *executed* against a
+live Postgres and a live MSSQL, asserting equivalent results where the AST
+doesn't invoke dialect-specific behavior) — needs the dual-live-DB harness
+noted above.
+
+**Effort: L (3–5 days) for the full item; phase 1 above was closer to a
+focused 1-day slice.** Not a new subsystem, but a wide sweep across the
+whole request pipeline: it touches `tests/unit/`, `tests/integration/`, and
+`tests/security/` all at once, plus potentially a new `tests/property/` or
+`tests/fuzz/` directory. Sizing is closer to item 15/28 (dedicated test
+tranches) than to a single-module fix — the work is breadth, not depth in
+any one file.
+
+**Why it matters:** Existing suites are strong but each targets one concern
+— `tests/security/test_adversarial_security.py` (item 28) covers
+authz/policy-bypass attack shapes, `tests/integration/test_postgres_load_guardrails.py`
+(item 15) covers concurrency/timeout under load, and the per-module unit
+suites cover correctness of one component at a time. Nothing currently
+sweeps the `StructuredQuery` AST's own input space systematically — deeply
+nested boolean `where` trees at/past `Policy.max_where_depth`, every
+`join`/`group_by`/`top_n` combination at its cap boundary, Unicode/NULL/
+empty-string/extreme-numeric literal values, empty result sets, single-row
+vs. maximum-row responses, and malformed-but-schema-valid AST shapes that
+existing tests haven't happened to construct. A gateway whose entire safety
+argument rests on "callers can only submit a validated AST" needs the
+validator itself proven against the full shape of that AST, not just the
+shapes today's tests happened to write.
+
+**What to do:** Audit `tests/unit/`, `tests/integration/`, and
+`tests/security/` for gaps against the full `StructuredQuery`/`Policy` model
+(`compiler/ast.py`, `policy/models.py`) rather than assuming coverage
+percentage implies scenario coverage — a query that never exercises a cap
+boundary can still hit a line of code. Concretely: boundary values for every
+`Policy` cap (max joins/select/where-depth/group-by/top_n, batch size,
+response bytes) both just-under and just-over; property-based testing
+(e.g. `hypothesis`) generating random valid `StructuredQuery` ASTs to catch
+compiler crashes or SQL-generation bugs that hand-written cases miss;
+cross-dialect differential tests (same AST against Postgres and MSSQL,
+asserting equivalent results where the AST doesn't invoke dialect-specific
+behavior); and malformed-input fuzzing at the REST/MCP JSON boundary (wrong
+types, extra fields, deeply nested `where`, huge string literals) to prove
+schema validation rejects cleanly rather than 500ing. Track coverage
+gaps explicitly rather than chasing a single aggregate `--cov` number, since
+line coverage alone doesn't prove edge cases were exercised.
+
 ### 37. Automated end-to-end proof of adaptive semantic learning ✅ DONE
 
 **Shipped.** `querygate/catalog/adaptive_learning_benchmark.py` plus the
