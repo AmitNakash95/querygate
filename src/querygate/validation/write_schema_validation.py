@@ -26,6 +26,7 @@ from querygate.write_ast.models import (
     DeleteStatement,
     InsertStatement,
     UpdateStatement,
+    UpsertStatement,
     WriteStatement,
 )
 
@@ -48,8 +49,8 @@ async def validate_write_schema(
     exists. Returns the reflected table for the compiler."""
     table = await _load_table(connection_id, statement.table, connection_id)
 
-    # Written columns exist (insert rows / update set).
-    if isinstance(statement, InsertStatement):
+    # Written columns exist (insert/upsert rows / update set).
+    if isinstance(statement, (InsertStatement, UpsertStatement)):
         written = statement.rows[0].keys()
     elif isinstance(statement, UpdateStatement):
         written = statement.set.keys()

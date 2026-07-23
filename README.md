@@ -458,23 +458,69 @@ piece is an interactive **MCP elicitation** approval channel (approve inside one
 MCP session instead of the REST round-trip). A deployment that sets no approval
 thresholds or sensitivities is completely unaffected.
 
-### Governed writes — dry-run preview (phase 1)
+### Governed writes — preview, execute, approve, diff, undo
 
-QueryGate is read-only by default, and the write story starts where it's safest:
-a **dry-run preview that never executes anything**. `POST
-/<connection>/write/preview` takes a typed `InsertStatement`/`UpdateStatement`/
-`DeleteStatement` — **no raw-DML field anywhere**, and an `UPDATE`/`DELETE`
-*cannot be constructed without a `WHERE`* (an unqualified mutation is impossible
-by construction) — validates it against a deny-by-default `WritePolicy`
-(`enabled`, `allowed_tables`, `allowed_operations`, `denied_write_columns`,
-`max_affected_rows`), compiles it to bound-parameter SQLAlchemy Core DML, and
-returns the **affected-row count** (from a policy-checked `COUNT(*)`), whether
-it's within the cap, and the **parameterized** SQL — `executed: false`, always.
-**No code path in phase 1 executes or commits a write.** The claim is bounded and
-honest — *governed writes: bounded, previewed* — with gated execution (single
-transaction, the approval gate, dual-identity audit + tamper-evident receipt) as
-a later, separately-built phase. A read-only deployment leaves `WritePolicy`
-off and the endpoint returns a clean policy rejection.
+QueryGate is read-only until an operator explicitly turns writes on: every
+deployment starts with `WritePolicy.enabled=false`, and there is still no
+`sql`/raw-DML field anywhere in either transport. When writes are enabled, a
+caller can only ever submit a typed `InsertStatement`/`UpdateStatement`/
+`DeleteStatement` — never a SQL string — and an `UPDATE`/`DELETE` *cannot be
+constructed without a `WHERE`* (an unqualified mutation is impossible by
+construction, not just discouraged). Every write is checked against the same
+deny-by-default `WritePolicy` used for reads (`allowed_tables`,
+`allowed_operations`, `denied_write_columns`, `max_affected_rows`) before it
+is compiled to bound-parameter SQLAlchemy Core DML.
+
+```bash
+# 1. Preview: compiles, but never mutates. include_diff=true adds the exact
+#    before/after row values (computed inside a transaction that always rolls
+#    back), bounded by max_diff_rows and masking-aware.
+curl -X POST -H "Authorization: Bearer $CALLER_KEY" \
+  "$HOST/api/v1/<connection>/write/preview?include_diff=true" \
+  -d '{"op":"update","table":"orders","set":{"status":"shipped"},"where":{"col":"orders.id","op":"eq","value":42}}'
+# -> { "executed": false, "affected_rows": 1, "sql": "...", "diff": {"before":[...],"after":[...]} }
+
+# 2. Execute: one transaction — counts matched rows, aborts before mutating if
+#    over max_affected_rows, runs the approval gate if the row count crosses
+#    approval_max_affected_rows, commits, and rolls back whole on any error.
+curl -X POST -H "Authorization: Bearer $CALLER_KEY" \
+  "$HOST/api/v1/<connection>/write/execute" -d '<the same write JSON>'
+# -> { "executed": true, "affected_rows": 1, "compensation_id": "..." }
+
+# 3. Undo (if compensation_enabled): re-applies the inverse of exactly one
+#    prior write, atomically, through the same governed pipeline.
+curl -X POST -H "Authorization: Bearer $CALLER_KEY" \
+  "$HOST/api/v1/<connection>/write/undo" -d '{"compensation_id":"..."}'
+```
+
+**Reversibility.** With `WritePolicy.compensation_enabled`, an execute captures
+a bounded pre-image into a QueryGate-owned store (never a shadow table in the
+operational database) and returns a single-use, TTL'd `compensation_id`.
+`POST /write/undo` restores only the columns that write actually changed, in
+one atomic transaction — a failure reverses nothing rather than partially
+undoing. Serial/identity-PK inserts are undoable too (the generated key is
+captured via `RETURNING`), and with `CONCURRENCY_BACKEND=redis` the
+compensation store is shared across replicas, so undo works under an
+HA deployment, not just a single process. An UPDATE undo **refuses instead of
+clobbering** if a row's changed columns have drifted since the original write
+(optimistic concurrency), rather than silently overwriting a newer change.
+
+**Both transports, same guarantees.** REST is the routes above; MCP has one
+`run_structured_writes` tool (`mode=preview|execute`, batch, `include_diff`,
+plus in-session elicitation approval instead of the REST 428/approve
+round-trip). Every write is audited exactly like a read — redaction-safe,
+dual-identity (on-behalf-of), tamper-evident when chained audit is enabled —
+recording the operation, table, and affected-row count, **never** a value or
+row. A deployment that never sets `WritePolicy.enabled=true` is unaffected:
+every write endpoint returns a clean policy rejection, and the database stays
+read-only in practice as well as by default.
+
+The claim is deliberately **governed**, not "safe autonomous writes": what's
+guaranteed by construction (no raw DML, every target policy-checked, no
+unqualified UPDATE/DELETE, bounded rows) rules out the catastrophic-shape
+class; preview, approval, and undo are what make the remaining question — "did
+the agent intend *this* change" — reviewable and reversible rather than
+unattended.
 
 ### Per-principal rate limits / query quotas
 
@@ -1595,8 +1641,10 @@ Being upfront about what's not done yet:
   with read scope; write-only callers see submitted/inherited so write scope
   cannot become read scope. No admin UI either — the governance mutation API
   is REST-only for now.
-- **No write operations** — by design. QueryGate is read-only; there is no
-  insert/update/delete path anywhere in the AST or compiler.
+- **Writes are opt-in and deny-by-default, not absent** — see "Governed
+  writes" above. `WritePolicy.enabled` is `false` until an operator turns it
+  on per table/operation, so a default deployment is read-only in practice;
+  there is still no raw-DML string field on either transport.
 - **Pre-execution cost estimation is Postgres-only** — `max_estimated_rows`/
   `max_estimated_cost` (above) have no effect on an MSSQL connection yet;
   MSSQL's estimated-plan mechanism needs its own connection lifecycle that

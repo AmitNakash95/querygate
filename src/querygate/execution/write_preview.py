@@ -27,6 +27,7 @@ import sqlalchemy as sa
 from querygate.compiler.sqlalchemy_compiler import _compile_where
 from querygate.compiler.write_compiler import _coerce_row, compile_write
 from querygate.connections.engine import session_scope
+from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.auth import Principal
 from querygate.core.exceptions import QueryValidationError
 from querygate.policy.loader import get_policy
@@ -34,7 +35,12 @@ from querygate.policy.models import Policy
 from querygate.query_ast.models import Predicate, WhereNode
 from querygate.validation.write_policy_validation import validate_write_policy
 from querygate.validation.write_schema_validation import validate_write_schema
-from querygate.write_ast.models import InsertStatement, UpdateStatement, WriteStatement
+from querygate.write_ast.models import (
+    InsertStatement,
+    UpdateStatement,
+    UpsertStatement,
+    WriteStatement,
+)
 
 _MASKED = "***MASKED***"
 
@@ -114,14 +120,17 @@ class WritePreviewService:
         # Compile the DML — proves it is a real, bound-parameter Core statement
         # with no raw SQL. Rendered to text with bind placeholders (never literals)
         # for the redaction-safe preview.
-        dml = compile_write(statement, table)
+        profile, _ = resolve_visible_connection(self._connection_id, principal=self._principal)
+        dml = compile_write(statement, table, profile.dialect)
         sql = str(dml.compile(compile_kwargs={"literal_binds": False}))
 
         max_rows = policy.write.max_affected_rows
         diff: Optional[WriteDiff] = None
-        if isinstance(statement, InsertStatement):
+        if isinstance(statement, (InsertStatement, UpsertStatement)):
             affected = len(statement.rows)
-            if include_diff:
+            # An upsert is insert-or-update per row; its old→new diff is a later
+            # slice, so only a plain INSERT gets a diff preview here.
+            if include_diff and isinstance(statement, InsertStatement):
                 diff = self._insert_diff(statement, table, policy)
         else:
             # Affected-row count from a policy-checked COUNT(*) over the same

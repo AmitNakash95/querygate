@@ -26,7 +26,7 @@ import pydantic as pyd
 
 from querygate.query_ast.models import WhereNode
 
-WriteOp = Literal["insert", "update", "delete"]
+WriteOp = Literal["insert", "update", "delete", "upsert"]
 
 
 class InsertStatement(pyd.BaseModel):
@@ -82,14 +82,58 @@ class DeleteStatement(pyd.BaseModel):
     model_config = pyd.ConfigDict(extra="forbid")
 
 
+class UpsertStatement(pyd.BaseModel):
+    """INSERT rows, but on a unique/primary-key conflict on `conflict_columns`,
+    UPDATE `update_columns` instead of failing (Postgres `ON CONFLICT DO UPDATE`
+    / SQLite's equivalent). MSSQL has no `ON CONFLICT` and is **rejected** (per
+    the reject-not-emulate doctrine — use a separate insert/update there). No raw
+    DML: the conflict target and the updated columns are validated identifiers."""
+
+    op: Literal["upsert"] = "upsert"
+    table: str = pyd.Field(description="Target table name (not Table.Column).")
+    rows: List[Dict[str, Any]] = pyd.Field(
+        min_length=1, description="Rows to insert-or-update; each maps column -> literal value."
+    )
+    conflict_columns: List[str] = pyd.Field(
+        min_length=1,
+        description="The unique/PK column(s) whose collision triggers an update instead of insert.",
+    )
+    update_columns: List[str] = pyd.Field(
+        min_length=1,
+        description="Which columns to overwrite on conflict — a subset of the row's columns, "
+        "excluding the conflict columns.",
+    )
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _validate(self) -> "UpsertStatement":
+        first = set(self.rows[0])
+        if any(len(row) == 0 for row in self.rows) or any(set(row) != first for row in self.rows):
+            raise ValueError("All upsert rows must set the same non-empty set of columns")
+        missing_conflict = [c for c in self.conflict_columns if c not in first]
+        if missing_conflict:
+            raise ValueError(f"conflict_columns not present in the rows: {missing_conflict}")
+        missing_update = [c for c in self.update_columns if c not in first]
+        if missing_update:
+            raise ValueError(f"update_columns not present in the rows: {missing_update}")
+        overlap = set(self.update_columns) & set(self.conflict_columns)
+        if overlap:
+            raise ValueError(
+                f"update_columns must not include a conflict column: {sorted(overlap)}"
+            )
+        return self
+
+
 # Discriminated union dispatched on `op` (mirrors the read AST's registry-based
 # select-item dispatch — no scattered isinstance branching at call sites).
-WriteStatement = Union[InsertStatement, UpdateStatement, DeleteStatement]
+WriteStatement = Union[InsertStatement, UpdateStatement, DeleteStatement, UpsertStatement]
 
 _WRITE_STATEMENT_TYPES: Dict[str, type] = {
     "insert": InsertStatement,
     "update": UpdateStatement,
     "delete": DeleteStatement,
+    "upsert": UpsertStatement,
 }
 
 

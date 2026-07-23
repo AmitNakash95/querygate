@@ -24,7 +24,12 @@ from querygate.execution.approval import issue_approval_token, write_fingerprint
 from querygate.execution.write_execution import WriteExecutionService
 from querygate.policy.models import Policy, WritePolicy
 from querygate.query_ast.models import Predicate
-from querygate.write_ast.models import DeleteStatement, InsertStatement, UpdateStatement
+from querygate.write_ast.models import (
+    DeleteStatement,
+    InsertStatement,
+    UpdateStatement,
+    UpsertStatement,
+)
 
 pytestmark = pytest.mark.security
 
@@ -78,7 +83,7 @@ def test_write_statement_json_schemas_expose_no_raw_dml_field_and_forbid_extras(
     # Schema-level sibling of test_credential_redaction: the live write-statement
     # schemas (what REST OpenAPI is generated from) expose no raw-SQL/DML property
     # and forbid smuggled fields — the no-raw-DML invariant, asserted structurally.
-    for cls in (InsertStatement, UpdateStatement, DeleteStatement):
+    for cls in (InsertStatement, UpdateStatement, DeleteStatement, UpsertStatement):
         schema = cls.model_json_schema()
         props = _all_property_keys(schema)
         assert not (_RAW_DML_FIELDS & props), f"{cls.__name__} exposes a raw-DML field: {props}"
