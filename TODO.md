@@ -2055,7 +2055,10 @@ gated write — the elicitation resolver was factored into shared
 `WriteExecutionService.execute_many` is the batch/resolver seam). **Still open in
 2b:** the `release-smoke` write round-trip and the write concurrency load gate.
 (Approval still binds to the write fingerprint, not the diff hash — a phase-3
-refinement.) Also shipped in 2b:
+refinement.) Write execution is also proved against a **real Postgres**
+(`tests/integration/test_postgres_write_execution.py`, `real_db`/`postgres_live`:
+self-cleaning insert→verify→update→verify→delete→verify round-trip + over-cap
+rollback), not just SQLite. Also shipped in 2b:
 **constraint handling** — an INSERT missing a NOT NULL column is caught with a
 precise pre-DB validation error, and any DB constraint/type violation
 (NOT NULL/FK/unique/mistyped) maps to a clean typed 422 (rolled back, no raw
