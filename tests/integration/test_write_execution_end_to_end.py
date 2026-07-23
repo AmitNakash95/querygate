@@ -22,7 +22,9 @@ _BASE_URL = "http://localhost"
 _KEY = "write-approval-key"
 
 
-def _enable_writes(*, max_affected_rows=100000, require_approval_over_rows=None):
+def _enable_writes(
+    *, max_affected_rows=100000, require_approval_over_rows=None, compensation_enabled=False
+):
     set_policy_store(
         PolicyStore(
             default=Policy(
@@ -32,6 +34,7 @@ def _enable_writes(*, max_affected_rows=100000, require_approval_over_rows=None)
                     allowed_operations=["insert", "update", "delete"],
                     max_affected_rows=max_affected_rows,
                     require_approval_over_rows=require_approval_over_rows,
+                    compensation_enabled=compensation_enabled,
                 )
             ),
             overrides={},
@@ -80,12 +83,10 @@ async def test_insert_update_delete_round_trip_commits(sqlite_app):
             json={"op": "insert", "table": "orders", "rows": [new_row]},
         )
         assert ins.status_code == 200, ins.text
-        assert ins.json() == {
-            "operation": "insert",
-            "table": "orders",
-            "affected_rows": 1,
-            "executed": True,
-        }
+        body = ins.json()
+        assert body["operation"] == "insert" and body["table"] == "orders"
+        assert body["affected_rows"] == 1 and body["executed"] is True
+        assert body["compensation_id"] is None  # compensation not enabled here
         assert await _count_status(client, "new") == 1
 
         # UPDATE it, verify the new value landed.
@@ -260,3 +261,172 @@ async def test_approval_gate_pauses_then_admits(sqlite_app, monkeypatch):
         assert admitted.status_code == 200, admitted.text
         assert admitted.json()["affected_rows"] == 1
         assert await _count_status(client, "gated") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Bounded reversibility (item 93 phase 3a): write -> undo -> original restored #
+# --------------------------------------------------------------------------- #
+
+
+async def _row_ids_with_status(client, status: str) -> set:
+    resp = await client.post(
+        "/api/v1/demo/query",
+        json={
+            "from": "orders",
+            "select": ["orders.id"],
+            "where": {"col": "orders.status", "op": "eq", "value": status},
+            "limit": 100000,
+        },
+    )
+    return {r["id"] for r in resp.json()["rows"]}
+
+
+@pytest.mark.asyncio
+async def test_delete_then_undo_restores_the_rows(sqlite_app):
+    _enable_writes(compensation_enabled=True)
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        before = await _orders(client)
+        pending_ids = await _row_ids_with_status(client, "pending")
+        assert pending_ids
+
+        deleted = await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "delete",
+                "table": "orders",
+                "where": {"col": "orders.status", "op": "eq", "value": "pending"},
+            },
+        )
+        assert deleted.status_code == 200, deleted.text
+        cid = deleted.json()["compensation_id"]
+        assert cid  # a compensation record was captured
+        assert await _row_ids_with_status(client, "pending") == set()  # really deleted
+
+        undo = await client.post("/api/v1/demo/write/undo", json={"compensation_id": cid})
+        assert undo.status_code == 200, undo.text
+        assert undo.json()["affected_rows"] == len(pending_ids)
+        after = await _orders(client)
+    assert after == before  # every deleted row is back, byte-identical
+
+
+@pytest.mark.asyncio
+async def test_insert_then_undo_removes_the_row(sqlite_app):
+    _enable_writes(compensation_enabled=True)
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        before = await _orders(client)
+        new_id = max(r["id"] for r in before) + 1
+        inserted = await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "insert",
+                "table": "orders",
+                "rows": [
+                    {
+                        "id": new_id,
+                        "customer_id": 1,
+                        "status": "undo-me",
+                        "total_amount": 5,
+                        "created_at": "2026-01-01T00:00:00",
+                    }
+                ],
+            },
+        )
+        cid = inserted.json()["compensation_id"]
+        assert await _count_status(client, "undo-me") == 1
+
+        undo = await client.post("/api/v1/demo/write/undo", json={"compensation_id": cid})
+        assert undo.status_code == 200, undo.text
+        after = await _orders(client)
+    assert after == before  # the inserted row is gone
+
+
+@pytest.mark.asyncio
+async def test_update_then_undo_restores_old_values(sqlite_app):
+    _enable_writes(compensation_enabled=True)
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        before = await _orders(client)
+        target = before[0]["id"]
+
+        updated = await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "update",
+                "table": "orders",
+                "set": {"status": "changed"},
+                "where": {"col": "orders.id", "op": "eq", "value": target},
+            },
+        )
+        cid = updated.json()["compensation_id"]
+        assert await _count_status(client, "changed") == 1
+
+        undo = await client.post("/api/v1/demo/write/undo", json={"compensation_id": cid})
+        assert undo.status_code == 200, undo.text
+        after = await _orders(client)
+    assert after == before  # the row's old status is restored
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_undo_cannot_be_replayed(sqlite_app):
+    _enable_writes(compensation_enabled=True)
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        before = await _orders(client)
+        new_id = max(r["id"] for r in before) + 1
+        inserted = await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "insert",
+                "table": "orders",
+                "rows": [
+                    {
+                        "id": new_id,
+                        "customer_id": 1,
+                        "status": "once",
+                        "total_amount": 5,
+                        "created_at": "2026-01-01T00:00:00",
+                    }
+                ],
+            },
+        )
+        cid = inserted.json()["compensation_id"]
+        first = await client.post("/api/v1/demo/write/undo", json={"compensation_id": cid})
+        assert first.status_code == 200
+        # Replaying the consumed id is rejected — it can't re-run or re-delete.
+        second = await client.post("/api/v1/demo/write/undo", json={"compensation_id": cid})
+        assert second.status_code == 422
+        after = await _orders(client)
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_over_cap_snapshot_is_skipped_not_unbounded(sqlite_app):
+    # A write affecting more rows than max_compensation_rows commits, but WITHOUT
+    # a compensation record — the snapshot is bounded, never an unbounded dump.
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                write=WritePolicy(
+                    enabled=True,
+                    allowed_tables=["orders"],
+                    allowed_operations=["update"],
+                    max_affected_rows=100000,
+                    compensation_enabled=True,
+                    max_compensation_rows=1,
+                )
+            ),
+            overrides={},
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "update",
+                "table": "orders",
+                "set": {"status": "bulk"},
+                "where": {"col": "orders.id", "op": "gt", "value": 0},  # every order
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["affected_rows"] > 1
+        assert resp.json()["compensation_id"] is None  # over the snapshot cap -> not captured

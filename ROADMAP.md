@@ -229,6 +229,11 @@ surface them for a human, never auto-start them.
     execution coverage, and ✅ the **write concurrency load gate** (`-m load`:
     cap holds under contention, concurrent inserts commit exactly). Still open:
     only the `release-smoke` write round-trip.
+  - **Phase 3a** ✅ **shipped** — bounded reversibility (**undo**): a
+    QueryGate-owned TTL'd pre-image store (no operational-DB shadow table) +
+    `POST /write/undo` that re-applies the inverse through the governed pipeline;
+    proven on SQLite + real Postgres. Remaining phase 3: upserts, batch
+    atomicity, MSSQL parity, MCP undo.
   - **Phase 3** (compensation/undo + upserts + batch + MSSQL parity) depends on
     Phase 2.
 - **F4 · Safe NL→StructuredQuery.** Needs a decision on model provider/posture;

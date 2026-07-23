@@ -2543,6 +2543,33 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — Governed Writes Phase 3a: bounded reversibility (undo) stores
+  pre-images in a QueryGate-owned compensation store, NOT an in-DB shadow table,
+  and undoes by re-applying through the governed write pipeline (item 93).** The
+  "reversible" pillar. Two storage designs were on the table; the choice is the
+  gate this phase required. **(1) Rejected: an in-DB shadow table.** Snapshotting
+  pre-images into a table in the customer's operational database would keep undo
+  transactionally atomic with the write, but it demands DDL + write privilege on
+  the operational DB *beyond* the governed-write target tables — a large,
+  invasive expansion of QueryGate's footprint that contradicts the North Star
+  (least-privilege, we don't own or mutate your storage's shape). **(2) Chosen: a
+  QueryGate-owned, bounded, TTL'd compensation store.** Before a gated mutation
+  commits, QueryGate captures a bounded pre-image of the affected rows (UPDATE/
+  DELETE) or the inserted keys (INSERT) into its *own* store (a `CompensationStore`
+  protocol, in-memory default, mirroring the audit-sink pattern), and returns a
+  `compensation_id`. Undo (`POST /write/undo`, scope-gated) reads that record and
+  re-applies the inverse **as an ordinary governed write** — a DELETE-undo
+  re-INSERTs the captured rows, an INSERT-undo DELETEs by key, an UPDATE-undo
+  restores the old values by primary key — so the undo is itself validated,
+  capped, and audited; no new privilege or bypass path exists. **Honest limits,
+  documented, not hidden:** bounded reversibility only — it cannot unwind
+  cascading triggers/FK actions or side effects, and a downstream consumer may
+  already have read the changed value; a snapshot is capped by policy
+  (rows/bytes) and expires (TTL). **Redaction posture:** a pre-image necessarily
+  holds real row *values* (you cannot restore what you redact), so the
+  compensation store is a distinct, access-controlled, short-lived store — the
+  redaction-safe **audit** stream still carries only the `compensation_id` +
+  counts, never the values, preserving that invariant.
 - **2026-07-23 — Governed Writes Phase 2b: the dry-run preview gains the bounded
   old→new row *diff* — the one place a preview deliberately shows values, kept
   safe by being bounded, masking-aware, and never audited (item 93).** The
