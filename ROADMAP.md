@@ -135,9 +135,10 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 
 ### Phase 3 — Governance & safety depth (deepen the moat)
 
-- [ ] **26** — Query-cost estimation before execution (complete phase 2 / MSSQL;
-  Postgres exists). *Underpins 92's cost-gating and dollar budgets; broadens
-  an existing guardrail.*
+- [x] **26** — Query-cost estimation before execution. *Underpins 92's
+  cost-gating and dollar budgets; broadens an existing guardrail.* ✅ **Shipped**
+  (phase 1 Postgres `EXPLAIN`; phase 2 MSSQL `SET SHOWPLAN_XML ON` on a dedicated
+  connection — the cost gate now enforces on both dialects, proven on live MSSQL).
 - [x] **92** — In-query human-in-the-loop approval for sensitive/expensive reads
   (F3). *Gates the exfiltration leg of the lethal trifecta on what a read would
   actually touch — nobody else can, because none knows before running it.* ✅
