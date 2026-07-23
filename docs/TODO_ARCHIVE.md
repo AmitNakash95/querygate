@@ -4270,6 +4270,49 @@ auditor exactly what every agent did, on whose behalf, under which policy, and
 that the record is intact" artifact — the literal buying question for the
 fintech/healthcare ICP.
 
+### 95. Discoverable scope catalog + recommended role bundles for IdP integration ✅ DONE
+
+**Effort: S. Priority: enterprise-SSO adoption enabler for the shipped JWT/OAuth
+auth (items 8, 10, 90). Depends on: 10 (JWT), 90 (OAuth resource server). Not a
+security-model change — pure discoverability/DX.**
+
+**Origin.** With JWT/JWKS auth (item 10) and the MCP OAuth resource server (item
+90) shipped, "bring your IdP" is the scalable multi-user story, but an
+authorization server had to be told QueryGate's `scope` vocabulary, which lived
+only as constants in `core/scopes.py` — an operator had to reverse-engineer scope
+strings and hand-group them into roles.
+
+**What shipped.**
+
+- **`core/scopes.py` is now the single source of truth**, not just constants: a
+  structured `SCOPE_CATALOG` (`ScopeInfo(scope, category, gates)` per scope) and
+  advisory `ROLE_BUNDLES` (`RoleBundle(name, purpose, scopes)`), plus
+  `ALL_SCOPES` derived from the catalog. Six recommended bundles — Analyst
+  (no scopes; data-policy-governed), Operator, Config Governor, Catalog Author,
+  Catalog Admin, Catalog Data Steward — collectively cover every scope.
+- **Part 1 — machine-discoverable.** `mcp/oauth_metadata.py`'s RFC 9728
+  `scopes_supported` now advertises `sorted(set(ALL_SCOPES) | mcp_required_scopes)`
+  — the full vocabulary an IdP can import — instead of only echoing the required
+  scopes. The `mcp_required_scopes` **access gate** (`mcp/auth.py`) is untouched;
+  discovery and enforcement are kept as the two distinct concepts they are.
+- **Part 2 — human-readable & generated.** `scope_catalog.py` renders a Markdown
+  reference; `querygate-scope-catalog` (poetry script, `make scope-catalog`)
+  writes `docs/SCOPE_CATALOG.md`. Generated from `core/scopes.py`, never
+  hand-maintained.
+- **Docs:** README's auth section and PRODUCT_GUIDE (auth subsection + a Decision
+  Log entry recording the discovery-≠-gate and roles-are-advisory decisions).
+
+**Tests.** `test_scope_catalog.py` asserts every `*_SCOPE` constant is catalogued
+exactly once, `ALL_SCOPES` matches catalog order, bundles reference only known
+scopes and cover all of them, and the committed doc matches the generator
+(drift guard). `test_mcp_oauth_rs.py` updated to assert the full-vocabulary
+`scopes_supported` (present even with no required scopes configured).
+
+**Hard boundaries honored.** No auth-model change, no QG-owned identity/key
+store, no new scope semantics or enforcement path — the IdP still owns
+identities and QG still resolves data-access policy from `sub`/claims. Per-IdP
+click-through quickstarts were explicitly deferred.
+
 ### 96. Unify the AST reference-walk into a single canonical visitor (enforcement hardening) ✅ DONE
 
 **Effort: M. Priority: high (robustness/proof; pure refactor, no behavior

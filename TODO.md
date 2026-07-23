@@ -232,54 +232,20 @@ QueryGate now has one repeatable source/package gate (`make release-check`) and 
 
 A REST-only admin API (`/api/v1/admin/config/*`, `api/admin_config_routes.py`) layered on top of the existing hot-reload mechanism (item 5) — never a parallel implementation of it. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 25).
 
-### 95. Discoverable scope catalog + recommended role bundles for IdP integration
+### 95. Discoverable scope catalog + recommended role bundles for IdP integration ✅ DONE
 
-**Effort: S. Priority: enterprise-SSO adoption enabler for the shipped JWT/OAuth
-auth (items 8, 10, 90). Depends on: 10 (JWT), 90 (OAuth resource server). Not a
-security-model change — pure discoverability/DX.**
+Shipped both parts: (1) RFC 9728 `scopes_supported` (`mcp/oauth_metadata.py`)
+now advertises the **entire** vocabulary (`core/scopes.py`'s `ALL_SCOPES`,
+unioned with any custom `mcp_required_scopes`), kept distinct from the unchanged
+required-scope access gate; (2) `core/scopes.py` gained a structured
+`SCOPE_CATALOG` + advisory `ROLE_BUNDLES` (Analyst/Operator/Config Governor/
+Catalog Author/Catalog Admin/Catalog Data Steward), from which
+`querygate-scope-catalog` (`make scope-catalog`) generates `docs/SCOPE_CATALOG.md`
+— drift-tested so it can't diverge, and completeness-tested so every scope
+constant is catalogued and covered by a bundle. No auth-model change; data-access
+grants stay in `policy.yaml` keyed by `sub`/claim (an Analyst carries no scope).
 
-**Origin.** With JWT/JWKS auth (item 10) and the MCP OAuth resource server (item
-90) shipped, "bring your IdP" is the scalable multi-user story. But for an
-authorization server (Auth0/Okta/Entra/Keycloak) to mint a usable token it must
-be told QueryGate's `scope` vocabulary — and that vocabulary lives only as
-constants in `core/scopes.py`. An operator today has to reverse-engineer scope
-strings from source and hand-group them into roles. The *identity* + *data-access
-policy* split means the IdP never needs table/column grants (those stay in
-`policy.yaml`, keyed by `sub`/claim), so the only thing that must reach the IdP
-is the fixed, small scope set — this item makes that one-time registration
-turnkey instead of manual archaeology.
-
-**Two complementary parts (do both — one is the mechanism, one is the guidance):**
-
-1. **Publish the full scope catalog in the RFC 9728 protected-resource metadata**
-   so it is machine-discoverable at the existing `.well-known` endpoint
-   (`mcp/oauth_metadata.py`). `scopes_supported` must list the **entire**
-   vocabulary derived from `core/scopes.py` (all scopes the resource understands),
-   NOT be conflated with `mcp_required_scopes` (the access gate for the MCP
-   surface) — these are two different concepts and the current code publishes only
-   the latter ([oauth_metadata.py:57-58](src/querygate/mcp/oauth_metadata.py#L57-L58)).
-   Keep the required-scope gate exactly as-is; only broaden what `scopes_supported`
-   advertises. An IdP that imports scopes from metadata then needs zero manual typing.
-
-2. **A scope-catalog reference doc generated from `core/scopes.py`** (so it can't
-   drift) listing every scope, the action it gates, and **recommended role
-   bundles** — the human judgment metadata's flat list can't supply (e.g. an
-   "Analyst" read-only bundle, a "Catalog Admin" = `catalog:review`/`edit`/
-   `approve`/`reject`/`publish`/`rollback` bundle, an "Operator" =
-   `admin:reload-config`/`admin:connections:*`/`admin:observability:read` bundle).
-   This is the copy-paste source of truth an operator pastes into their IdP's role
-   definitions; end-user provisioning then reduces to role assignment.
-
-**Hard boundaries.** This does NOT change the auth model, add a QG-owned user or
-key store, or make QG an identity provider — the IdP still owns identities and
-QG still resolves data-access policy from `sub`/claims (`policy/loader.py`,
-`MandatoryRowFilter.from_claim`). No new scope *semantics*, no new enforcement
-path — only exposing the existing vocabulary discoverably and documenting the
-recommended groupings. Explicitly out of scope (defer unless a design partner
-asks): per-IdP click-through quickstarts (Auth0/Okta/Entra/Keycloak walkthroughs)
-— nice polish, not needed for the mechanism to work. The catalog reference must
-be generated from `core/scopes.py`, never a hand-maintained second list that can
-silently diverge.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 95).
 
 ## P2 — hardening and scale
 
