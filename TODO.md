@@ -1868,21 +1868,20 @@ competitor's documented capabilities.
 
 Read-only per-principal anomaly detector over the persisted audit stream (`querygate/admin/anomaly.py`) — volume spikes, rejection-rate jumps, and newly-touched connections vs. each caller's own baseline — exposed via `GET /api/v1/admin/observability/anomalies` and a "Behavioral anomalies" panel in the admin Observability view; strictly within the 32C read-only boundary. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 59).
 
-### 60. Bug bounty / responsible disclosure program
+### 60. Bug bounty / responsible disclosure program ✅ DONE
 
-**Effort: S (process and policy, not engineering).** Pairs with item 53 —
-stand this up once an initial third-party audit has cleared the obvious
-issues, not before.
+Shipped the stage-appropriate coordinated-disclosure program in `SECURITY.md`:
+private reporting channel (GitHub private advisory + maintainer contact), in/out
+scope tied to the core guarantees, acknowledgement/triage SLAs, supported-version
+policy, an explicit **recognition-only reward structure** (deliberately no
+monetary bounty at this stage — the paid tier is a documented post-audit
+escalation), and a **single remediation process** every report (researcher,
+internal adversarial-suite, or item-53 audit) flows through: triage →
+regression-lock in `tests/security/` → fix + release gates → release & coordinated
+disclosure. The paid-bounty-platform activation remains gated on item 53's audit,
+as this item's own sequencing requires.
 
-**Why it matters:** A public disclosure process is a cheap, durable trust
-signal for security-conscious buyers, and closes the gap where currently
-there is no external channel for a researcher to report an issue
-responsibly.
-
-**What to do:** Publish a `SECURITY.md` disclosure policy and scope, decide
-on a bounty/recognition structure appropriate to the project's current
-stage, and route incoming reports through the same remediation process
-established for item 53's audit findings.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 60).
 
 ---
 

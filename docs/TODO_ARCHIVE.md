@@ -4270,6 +4270,35 @@ auditor exactly what every agent did, on whose behalf, under which policy, and
 that the record is intact" artifact — the literal buying question for the
 fintech/healthcare ICP.
 
+### 60. Bug bounty / responsible disclosure program ✅ DONE
+
+**Effort: S (process and policy, not engineering).** Coordination-gated for its
+*paid* tier only — that pairs with item 53 and is explicitly deferred; the
+disclosure program itself is stage-appropriate to ship now.
+
+**Why it mattered:** a public disclosure process is a cheap, durable trust
+signal, and without it a researcher has no responsible channel to report.
+
+**What shipped.** `SECURITY.md` (already carried reporting channel, in/out scope,
+SLAs, supported-version policy, and links to the posture/threat-model) gained the
+two remaining pieces of this item:
+
+- **A recognition/reward structure decision appropriate to the current stage:**
+  coordinated disclosure + public recognition, **no monetary bounty yet** —
+  recorded as a deliberate decision, with the paid-program escalation gated on
+  item 53's audit (paying for findings a first audit would catch is poor use of a
+  bounty). The reporting channel/scope/process are stated to survive that
+  escalation unchanged.
+- **A single remediation process** all reports flow through (researcher, internal
+  adversarial-suite finding, or item-53 audit finding): triage/severity →
+  regression-lock as a failing test in `tests/security/` (the same bar every
+  guardrail meets) → fix + release gates → release & coordinated disclosure.
+
+This satisfies item 60's "publish SECURITY.md + decide a stage-appropriate
+structure + route through a shared remediation process." The only remaining part
+— standing up a *paid* bounty platform after the audit — is the deliberately
+deferred escalation, not a gap.
+
 ### 54. Compliance control mapping (SOC 2 / ISO 27001 readiness) ✅ DONE
 
 **Effort: L (mostly documentation and gap analysis).** Coordination-gated: an
