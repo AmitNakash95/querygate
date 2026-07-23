@@ -31,7 +31,7 @@ The safety model (all enforced here, all tested):
 from __future__ import annotations
 
 import time
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import pydantic as pyd
 import sqlalchemy as sa
@@ -44,7 +44,11 @@ from querygate.compiler.write_compiler import compile_write
 from querygate.connections.engine import session_scope
 from querygate.core.auth import Principal
 from querygate.core.config import config as app_config
-from querygate.core.exceptions import ApprovalRequiredError, QueryValidationError
+from querygate.core.exceptions import (
+    ApprovalRequiredError,
+    QueryValidationError,
+    public_error_message,
+)
 from querygate.execution.approval import verify_approval_token, write_fingerprint
 from querygate.execution.concurrency import concurrency_slot
 from querygate.execution.write_preview import _reject_subquery_in_write_where
@@ -53,6 +57,9 @@ from querygate.policy.models import WritePolicy
 from querygate.validation.write_policy_validation import validate_write_policy
 from querygate.validation.write_schema_validation import validate_write_schema
 from querygate.write_ast.models import InsertStatement, WriteStatement
+
+if TYPE_CHECKING:
+    from querygate.execution.service import ApprovalResolver
 
 
 class WriteResult(pyd.BaseModel):
@@ -65,6 +72,17 @@ class WriteResult(pyd.BaseModel):
     executed: bool = True
 
     model_config = pyd.ConfigDict(extra="forbid")
+
+
+class WriteBatchItemResult(pyd.BaseModel):
+    """One write's outcome in a batch — a committed `WriteResult`'s fields, or an
+    `error` (a failing write never drops the rest of the batch)."""
+
+    operation: Optional[str] = None
+    table: Optional[str] = None
+    affected_rows: Optional[int] = None
+    executed: bool = False
+    error: Optional[str] = None
 
 
 def _write_shape(statement: WriteStatement, table_name: str) -> dict:
@@ -142,6 +160,53 @@ class WriteExecutionService:
             duration_ms=int((time.monotonic() - start) * 1000),
         )
         return WriteResult(operation=statement.op, table=table.name, affected_rows=affected)
+
+    async def execute_many(
+        self,
+        statements: List[WriteStatement],
+        *,
+        approval_resolver: Optional["ApprovalResolver"] = None,
+    ) -> List[WriteBatchItemResult]:
+        """Run each write independently — one failure (or a rejected approval)
+        surfaces as that item's `error` without dropping the rest. Each write is
+        its **own** transaction (a batch is not one atomic multi-statement
+        transaction — that stronger semantic is a later phase). `approval_resolver`
+        is the interactive-approval seam (MCP elicitation): when a write trips the
+        gate and no token covers it, the resolver gets one chance to obtain one,
+        then the write is retried once."""
+        return [await self._execute_batch_item(s, approval_resolver) for s in statements]
+
+    async def _execute_batch_item(
+        self, statement: WriteStatement, approval_resolver: Optional["ApprovalResolver"]
+    ) -> WriteBatchItemResult:
+        try:
+            return self._batch_ok(await self.execute(statement))
+        except ApprovalRequiredError as exc:
+            if approval_resolver is not None:
+                token = await approval_resolver(statement, exc)
+                if token is not None:
+                    try:
+                        return self._batch_ok(await self.execute(statement, approval_token=token))
+                    except Exception as retry_exc:  # shaped into the item error below
+                        exc = retry_exc  # type: ignore[assignment]
+            return self._batch_error(statement, exc)
+        except Exception as exc:
+            return self._batch_error(statement, exc)
+
+    @staticmethod
+    def _batch_ok(result: WriteResult) -> WriteBatchItemResult:
+        return WriteBatchItemResult(
+            operation=result.operation,
+            table=result.table,
+            affected_rows=result.affected_rows,
+            executed=True,
+        )
+
+    @staticmethod
+    def _batch_error(statement: WriteStatement, exc: Exception) -> WriteBatchItemResult:
+        return WriteBatchItemResult(
+            operation=statement.op, table=statement.table, error=public_error_message(exc)
+        )
 
     async def _execute_in_transaction(
         self,

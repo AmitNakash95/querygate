@@ -2047,10 +2047,15 @@ deny-by-default, opt-in.
 `WritePolicy.max_diff_rows`, masking-aware, computed by running the DML in a
 rolled-back transaction — `execution/write_preview.py`) and the **adversarial
 write boundary security suite** (`tests/security/test_write_boundary.py` +
-dual-marked execution guarantees, under `make test-security`). **Still open in
-2b:** the MCP `run_structured_writes` execute tool, the `release-smoke` write
-round-trip, and the write concurrency load gate. (Approval still binds to the
-write fingerprint, not the diff hash — a phase-3 refinement.) Also shipped in 2b:
+dual-marked execution guarantees, under `make test-security`), and the **MCP
+`run_structured_writes` tool** (`mcp/tools/write.py`: preview/execute modes,
+batch, `include_diff`, and the in-session elicitation approval channel for a
+gated write — the elicitation resolver was factored into shared
+`mcp/elicitation.py`, now serving both the read and write tools;
+`WriteExecutionService.execute_many` is the batch/resolver seam). **Still open in
+2b:** the `release-smoke` write round-trip and the write concurrency load gate.
+(Approval still binds to the write fingerprint, not the diff hash — a phase-3
+refinement.) Also shipped in 2b:
 **constraint handling** — an INSERT missing a NOT NULL column is caught with a
 precise pre-DB validation error, and any DB constraint/type violation
 (NOT NULL/FK/unique/mistyped) maps to a clean typed 422 (rolled back, no raw
