@@ -1728,24 +1728,20 @@ surface once items 28 and 36 are complete. Remediate findings, then publish
 a redacted summary report as a sales asset per the business brief's "core
 sales assets" list.
 
-### 54. Compliance control mapping (SOC 2 / ISO 27001 readiness)
+### 54. Compliance control mapping (SOC 2 / ISO 27001 readiness) ✅ DONE
 
-**Effort: L (mostly documentation and gap analysis; some control-filling
-code, e.g. formalized retention/access-review evidence).**
+Shipped `docs/COMPLIANCE_MAPPING.md`: a control-by-control map of QueryGate's
+product controls to the SOC 2 Common Criteria (CC1–CC9) + Confidentiality/
+Availability/Processing-Integrity series and ISO 27001:2022 Annex A, each row
+backed by a concrete code/test/doc artifact, with an explicit
+product-provided / shared-responsibility / customer-org responsibility split.
+Includes an honest gap analysis (the audit engagement itself, org-level
+controls like HR/physical/IR-process, access-review formalization, and the
+not-yet-shipped config-SoD items 39–42) — real gaps, no process theater.
+Cross-linked from `docs/SECURITY_POSTURE.md`. The coordination-gated remainder
+(the independent audit) is item 53; org-process standup is the deploying org's.
 
-**Why it matters:** Regulated-industry buyers will ask "where's your SOC 2"
-as a gating question in a security review, before they evaluate
-architecture. QueryGate already has most of the underlying controls
-(redaction-safe audit trail from item 23, governed config change management
-from item 25, adversarial test suite from item 28) — this item is mapping
-what's already built to a recognized framework's control list, not building
-new security features from scratch.
-
-**What to do:** Produce a control-mapping document against SOC 2 (or ISO
-27001) trust-service criteria, identify genuine gaps (e.g. formal
-access-review cadence, incident-response runbook), and close only the gaps
-that are real rather than adding process theater around controls that
-already exist.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 54).
 
 ### 55. Inference/transitive-exposure adversarial test suite ✅ DONE
 

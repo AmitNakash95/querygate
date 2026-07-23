@@ -4270,6 +4270,44 @@ auditor exactly what every agent did, on whose behalf, under which policy, and
 that the record is intact" artifact — the literal buying question for the
 fintech/healthcare ICP.
 
+### 54. Compliance control mapping (SOC 2 / ISO 27001 readiness) ✅ DONE
+
+**Effort: L (mostly documentation and gap analysis).** Coordination-gated: an
+agent can produce the mapping + gap analysis (done here); the independent audit
+engagement (item 53) and org-level process controls are the human/vendor
+remainder, flagged explicitly in the deliverable.
+
+**Why it mattered:** regulated-industry buyers ask "where's your SOC 2" as a
+gating question before evaluating architecture. QueryGate already has most of
+the underlying controls; this item maps what's built to a recognized framework
+rather than building new security features.
+
+**What shipped.** `docs/COMPLIANCE_MAPPING.md` — a control-by-control map to:
+
+- **SOC 2 Common Criteria CC1–CC9** plus the Confidentiality, Availability, and
+  Processing-Integrity series, each row citing a concrete artifact (e.g. CC6.7
+  → `PublicConnectionInfo` + `test_credential_redaction.py`; CC6.8 → cosign/SLSA
+  `release.yml` + `make verify-release`; CC7.3 → `audit/ledger.py` +
+  `querygate-audit verify`; CC7.5/A1 → `deploy/HA_DR.md`; PI1 → the validated-AST
+  pipeline + property-based compiler fuzzing).
+- **ISO/IEC 27001:2022 Annex A** cross-reference for the key domains (access
+  control, logging, cryptography, secure coding, vulnerability management).
+
+Every "Product-provided" row is grounded in a real file/test/CI gate (verified
+to exist before writing). The doc draws an explicit scope boundary —
+product-provided vs. shared-responsibility vs. customer/organization — because
+QueryGate is a self-hosted *component*, not a certified SaaS, so it never claims
+to "be SOC 2 certified"; it maps which controls it *evidences*. Cross-linked
+from `docs/SECURITY_POSTURE.md`'s External attestations section.
+
+**Honest gap analysis (real gaps, not theater):** the audit engagement itself
+(item 53), organizational controls (HR/physical/IR-process/vendor-management/
+access-review cadence), access-review evidence formalization, and the
+not-yet-shipped config separation-of-duties enhancements (items 39–42, correctly
+listed as roadmap not as existing controls). No new product code was added
+because the real gaps are organizational, not code — closing them with product
+features would have been the process theater the item warns against.
+
 ### 95. Discoverable scope catalog + recommended role bundles for IdP integration ✅ DONE
 
 **Effort: S. Priority: enterprise-SSO adoption enabler for the shipped JWT/OAuth
