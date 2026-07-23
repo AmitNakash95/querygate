@@ -221,9 +221,11 @@ surface them for a human, never auto-start them.
     row cap, item-92 approval gate on the row count, dual-identity (90) +
     tamper-evident (91) audit, no raw DML, deny-by-default. `WriteExecutionService`
     + `POST /write/execute` + `POST /write/approve`.
-  - **Phase 2b** (still open) — row-level diff preview + approval on the diff,
-    MCP `run_structured_writes` execute tool, adversarial write security suite,
-    `release-smoke` write round-trip, write concurrency load gate.
+  - **Phase 2b** (partly shipped) — ✅ row-level old→new **diff preview**
+    (`include_diff`, bounded + masking-aware, DML rolled back) and ✅ the
+    adversarial **write security suite** (`make test-security`). Still open: MCP
+    `run_structured_writes` execute tool, `release-smoke` write round-trip, write
+    concurrency load gate.
   - **Phase 3** (compensation/undo + upserts + batch + MSSQL parity) depends on
     Phase 2.
 - **F4 · Safe NL→StructuredQuery.** Needs a decision on model provider/posture;

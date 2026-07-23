@@ -258,17 +258,27 @@ def build_router(
             pyd.Field(discriminator="op"),
         ],
         principal: Principal = Depends(get_principal),
+        include_diff: bool = Query(
+            default=False,
+            description=(
+                "Also return the bounded old→new row diff of exactly what this "
+                "write would change (item 93 phase 2b) — computed by running the "
+                "DML in a rolled-back transaction. Masked columns are redacted; "
+                "the number of rows shown is capped by WritePolicy.max_diff_rows."
+            ),
+        ),
     ):
-        """Governed-writes dry-run preview (TODO.md item 93 phase 1): validate a
-        proposed INSERT/UPDATE/DELETE against WritePolicy + schema, compile it,
-        and report the affected-row count + parameterized SQL. **Nothing is ever
-        executed or committed** — there is no write-execution endpoint in phase 1.
-        Gated by WritePolicy (deny-by-default): a read-only deployment returns a
-        clean policy rejection."""
+        """Governed-writes dry-run preview (TODO.md item 93): validate a proposed
+        INSERT/UPDATE/DELETE against WritePolicy + schema, compile it, and report
+        the affected-row count + parameterized SQL (and, with `include_diff`, the
+        bounded old→new diff of exactly what would change). **Nothing is ever
+        executed or committed** — the diff runs the DML only inside a rolled-back
+        transaction. Gated by WritePolicy (deny-by-default): a read-only
+        deployment returns a clean policy rejection."""
         _require_connection(connection, principal)
         service = WritePreviewService(connection_id=connection, principal=principal)
         with mask_unexpected():
-            return await service.preview(statement)
+            return await service.preview(statement, include_diff=include_diff)
 
     @router.post("/{connection}/write/execute", response_model=WriteResult)
     async def execute_write(
