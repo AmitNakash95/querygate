@@ -2203,7 +2203,22 @@ Delegated-identity attribution (RFC 8693 `act` → `Principal.actor`, the human'
 
 Optional `AUDIT_SINK_BACKEND=jsonl_chained` wraps every redaction-safe event in a hash-chain envelope (SHA-256, or HMAC-SHA256 with `AUDIT_LEDGER_HMAC_KEY`) so edits/deletions/reordering/insertion are detectable; `querygate-audit verify` validates a ledger and `querygate-audit receipt` emits a portable per-query compliance receipt. Chaining is envelope-level (no new event data) and verify-only. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 91).
 
-### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) ✅ DONE (phase 1); phase 2 (sensitivity trigger + MCP elicitation) not started
+### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) ✅ DONE (phases 1 + 2 triggers); MCP-elicitation channel + batch not started
+
+**Phase 2 sensitivity-label trigger shipped:** `Policy.approval_sensitivities`
+(a list of catalog `SensitivityClass` labels, default empty/off) makes a query
+that references a column — or its table — carrying one of those labels require
+approval **regardless of estimated size** and **dialect-agnostically** (no cost
+estimate needed, so it works on MSSQL). `execution/approval.py`'s
+`sensitivity_approval_reasons` enumerates every referenced column via the single
+canonical AST visitor (`iter_column_refs`, item 96 — so a sensitive column in a
+`where`/join/having/etc. triggers it too, not just `select`), resolves each to
+its physical table, and reads only the descriptive catalog's static label (never
+a row value — the catalog stays descriptive). The gate now combines both
+triggers into one decision (`_enforce_approval_gate`), so a single approval token
+covers whatever tripped it; `Policy.approval_cost_gate_enabled` vs.
+`approval_gate_enabled` keep the estimate needed only for the cost trigger.
+Covered by 6 added tests in `tests/unit/test_approval.py`.
 
 **Phase 1 shipped (cost/row-estimate trigger + stateless HMAC approval-token
 grant, REST):** `execution/approval.py` is the gate's decision core —
@@ -2229,13 +2244,11 @@ malformed, trigger boundary, gate seam, e2e pause→approve→resubmit, endpoint
 scope/503). **Invariant preserved:** read-only, AST-only, opt-in — a
 default-config deployment is byte-for-byte unchanged.
 
-**Phase 2 (not started):** the catalog **sensitivity-label** trigger
-(`sensitivity: pii` on a referenced column → require approval regardless of
-size) and the interactive **MCP elicitation** channel (approve within one MCP
-session instead of the REST token round-trip). The token format and gate already
-accommodate the second trigger (the reasons list is free-form); phase 2 wires
-catalog sensitivity into the pre-execution path and adds the MCP elicitation
-step-up. Batch (`execute_many`) per-query approval tokens are also phase 2.
+**Still not started:** the interactive **MCP elicitation** channel (approve
+within one MCP session instead of the REST token round-trip — needs FastMCP
+elicitation wiring) and per-query approval tokens for **batch** (`execute_many`).
+Both triggers (cost + sensitivity) and the REST token flow are done; these two
+are the remaining channel/transport work.
 
 **Effort: L. Priority: medium (safety moat; sequence after 90/91). Feature ref: F3.**
 

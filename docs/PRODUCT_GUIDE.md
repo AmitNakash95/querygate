@@ -2558,14 +2558,19 @@ reasoning behind them, newest first. Added to incrementally as work happens
   is a distinct scope from querying.** The agent that runs the query must not be
   able to approve its own sensitive/expensive read, so approval is a separate
   scope (a "Query Approver" role) — separation of duties by scope, the same
-  posture as catalog governance. **(3) Phase 1 triggers on cost only.** The gate
-  reuses the estimate the pipeline already computes (Postgres) and rejects with
-  `428 Precondition Required` + the fingerprint/reasons so a client knows exactly
-  what to get approved. The catalog sensitivity-label trigger and the interactive
-  MCP elicitation channel are phase 2 — the token format already accommodates a
-  second trigger (free-form reasons). The whole gate is opt-in per policy and
-  off by default, so it changes nothing for an existing deployment, preserving
-  the read-only, AST-only invariant (it only *adds* a pre-execution pause).
+  posture as catalog governance. **(3) Two triggers, one decision.** The gate
+  fires on either the cost/row estimate (Postgres, reusing the estimate the
+  pipeline already computes) **or** a catalog sensitivity label — a query
+  referencing a `pii`/`confidential`/`internal`-labelled column (found via the
+  item-96 canonical visitor, so a sensitive column in *any* clause counts, and
+  resolving only the static descriptive label, never a row value). Both fold into
+  one set of reasons so a single approval token covers whatever tripped it, and
+  it rejects with `428 Precondition Required` + fingerprint/reasons. The
+  sensitivity trigger is dialect-agnostic (works on MSSQL, no estimate needed).
+  The remaining phase-2 piece is the interactive MCP elicitation channel. The
+  whole gate is opt-in per policy and off by default, so it changes nothing for
+  an existing deployment, preserving the read-only, AST-only invariant (it only
+  *adds* a pre-execution pause).
 - **2026-07-23 — RFC 9728 `scopes_supported` advertises the full scope
   vocabulary, kept distinct from the `mcp_required_scopes` access gate; role
   bundles are advisory and generated, never enforced or hand-maintained (item

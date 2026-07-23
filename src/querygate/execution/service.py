@@ -59,6 +59,7 @@ from querygate.execution.admission import QueueMode, new_admission_id, resolve_w
 from querygate.execution.approval import (
     approval_required_reasons,
     query_fingerprint,
+    sensitivity_approval_reasons,
     verify_approval_token,
 )
 from querygate.execution.concurrency import concurrency_slot
@@ -339,20 +340,24 @@ class StructuredQueryService:
 
     def _enforce_approval_gate(
         self,
-        estimate: QueryCostEstimate,
+        estimate: Optional[QueryCostEstimate],
         policy: Policy,
         query: StructuredQuery,
         approval_token: Optional[str],
     ) -> None:
-        """In-query human-in-the-loop gate (TODO.md item 92 phase 1). If the
-        estimate trips a policy approval threshold, require a valid approval
-        token bound to this exact query; otherwise raise `ApprovalRequiredError`
-        so the caller can obtain one from a `query:approve` holder and re-submit.
-        No-op when the gate is disabled or the estimate is within threshold.
+        """In-query human-in-the-loop gate (TODO.md item 92). If the query trips a
+        policy approval trigger — a catalog sensitivity label (phase 2, dialect-
+        agnostic) or the cost/row estimate (phase 1, Postgres; `estimate` may be
+        None otherwise) — require a valid approval token bound to this exact
+        query; otherwise raise `ApprovalRequiredError` so the caller can obtain
+        one from a `query:approve` holder and re-submit. No-op when the gate is
+        disabled or nothing triggers.
         """
         if not policy.approval_gate_enabled:
             return
-        reasons = approval_required_reasons(estimate, policy)
+        reasons = sensitivity_approval_reasons(query, policy, self._connection_id)
+        if estimate is not None:
+            reasons += approval_required_reasons(estimate, policy)
         if not reasons:
             return
         fingerprint = query_fingerprint(query)
@@ -518,21 +523,24 @@ class StructuredQueryService:
                     sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
 
                     async with session_scope(self._connection_id, policy=policy) as session:
+                        estimate: Optional[QueryCostEstimate] = None
                         if policy.estimate_needed and dialect == DatabaseDialect.POSTGRESQL:
                             estimate = await estimate_postgres_query_cost(
                                 session, stmt, connection_id=self._connection_id
                             )
-                            if estimate is not None:
-                                if policy.cost_estimation_enabled:
-                                    if policy.cost_estimation_mode == CostEstimationMode.ENFORCE:
-                                        enforce_cost_estimate(estimate, policy)
-                                    else:
-                                        self._observe_cost_estimate(estimate, policy)
-                                # Human-in-the-loop approval gate (item 92) runs
-                                # after the hard cost gate: a query rejected by
-                                # ENFORCE never reaches here, and one within the
-                                # hard caps may still need a human for its size.
-                                self._enforce_approval_gate(estimate, policy, query, approval_token)
+                            if estimate is not None and policy.cost_estimation_enabled:
+                                if policy.cost_estimation_mode == CostEstimationMode.ENFORCE:
+                                    enforce_cost_estimate(estimate, policy)
+                                else:
+                                    self._observe_cost_estimate(estimate, policy)
+                        # Human-in-the-loop approval gate (item 92) runs after the
+                        # hard cost gate (a query rejected by ENFORCE never reaches
+                        # here). It combines the cost-estimate trigger (Postgres;
+                        # `estimate` may be None otherwise) with the dialect-
+                        # agnostic catalog sensitivity-label trigger, so a single
+                        # approval token covers whatever tripped it.
+                        if policy.approval_gate_enabled:
+                            self._enforce_approval_gate(estimate, policy, query, approval_token)
                         result = await session.execute(stmt)
                         raw_rows = [dict(r) for r in result.mappings().all()]
 
