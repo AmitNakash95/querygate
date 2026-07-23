@@ -31,6 +31,8 @@ docker run -d --name "$APP_CONTAINER" \
     -e CONCURRENCY_BACKEND=redis \
     -e CONCURRENCY_REDIS_URL=redis://querygate-redis:6379/0 \
     -e AUDIT_SINK_BACKEND=none \
+    -e POLICY_FILE=/smoke_write_policy.yaml \
+    -v "$(pwd)/scripts/smoke_write_policy.yaml:/smoke_write_policy.yaml:ro" \
     "$IMAGE_NAME" >/dev/null
 
 for _ in $(seq 1 30); do
@@ -58,3 +60,41 @@ assert len(payload["rows"]) == 2, payload
 assert all(set(row) == {"id", "name"} for row in payload["rows"]), payload
 print("release smoke passed: container queried real Postgres through the structured API")
 PY
+
+# ── Governed WRITE round-trip (item 93): preview -> execute a capped insert ->
+# verify -> undo -> verify — proving the shipped image mutates safely, not just
+# reads. Uses a high id it inserts and then reverses, so the seed is untouched.
+SMOKE_ID=990001
+INSERT_BODY="{\"op\":\"insert\",\"table\":\"orders\",\"rows\":[{\"id\":${SMOKE_ID},\"customer_id\":1,\"status\":\"smoke\",\"total_amount\":1,\"created_at\":\"2026-01-01T00:00:00\"}]}"
+
+# Dry-run preview mutates nothing.
+curl --fail --silent -H 'Content-Type: application/json' -d "$INSERT_BODY" \
+    "$BASE_URL/api/v1/demo/write/preview" >/dev/null
+
+# Execute the write; capture the compensation id.
+exec_response=$(curl --fail --silent -H 'Content-Type: application/json' -d "$INSERT_BODY" \
+    "$BASE_URL/api/v1/demo/write/execute")
+compensation_id=$(EXEC_RESPONSE="$exec_response" python3 -c '
+import json, os
+p = json.loads(os.environ["EXEC_RESPONSE"])
+assert p["affected_rows"] == 1, p
+assert p["compensation_id"], p
+print(p["compensation_id"])
+')
+
+# Verify the row landed.
+verify=$(curl --fail --silent -H 'Content-Type: application/json' \
+    -d "{\"from\":\"orders\",\"select\":[\"orders.id\"],\"where\":{\"col\":\"orders.id\",\"op\":\"eq\",\"value\":${SMOKE_ID}}}" \
+    "$BASE_URL/api/v1/demo/query")
+VERIFY="$verify" python3 -c 'import json,os; assert json.loads(os.environ["VERIFY"])["row_count"] == 1'
+
+# Undo it (bounded reversibility) and verify it is gone.
+curl --fail --silent -H 'Content-Type: application/json' \
+    -d "{\"compensation_id\":\"${compensation_id}\"}" \
+    "$BASE_URL/api/v1/demo/write/undo" >/dev/null
+verify2=$(curl --fail --silent -H 'Content-Type: application/json' \
+    -d "{\"from\":\"orders\",\"select\":[\"orders.id\"],\"where\":{\"col\":\"orders.id\",\"op\":\"eq\",\"value\":${SMOKE_ID}}}" \
+    "$BASE_URL/api/v1/demo/query")
+VERIFY2="$verify2" python3 -c 'import json,os; assert json.loads(os.environ["VERIFY2"])["row_count"] == 0'
+
+echo "release smoke passed: container executed a governed write and reversed it (undo) on real Postgres"
