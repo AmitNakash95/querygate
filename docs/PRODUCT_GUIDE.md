@@ -2543,6 +2543,28 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-23 — Governed Writes Phase 1 (contract + dry-run preview, execution
+  DISABLED) is approved and built; the read-only line is crossed for *preview
+  only* (item 93; maintainer-approved).** The decision to cross read-only was
+  made explicitly for Phase 1's zero-write-risk surface. What ships: a
+  `write_ast/` contract (`InsertStatement`/`UpdateStatement`/`DeleteStatement`,
+  a discriminated union dispatched via a type registry — **no raw-DML field of
+  any kind**; SET-values and predicates reuse the *existing* read AST surface —
+  whitelisted scalar functions + the `Predicate` filter tree), a `WritePolicy`
+  (opt-in `writes_enabled`, per-table allowed operations, allowed write
+  columns, `max_affected_rows`), write policy + schema validation mirroring the
+  read validators, a write compiler, and a **dry-run diff engine** that runs the
+  compiled write inside a transaction, computes a bounded before/after diff, and
+  **ROLLS BACK** — no code path can commit. Two structural guarantees carry the
+  safety story: (1) `UPDATE`/`DELETE` **require** a WHERE clause (an unqualified
+  mutation is impossible by construction, not by lint), and (2) the affected-row
+  count is capped by policy. The claim is deliberately bounded — "governed
+  writes: bounded, previewed, approved, attributed, reversible", never "safe
+  autonomous writes" or a "100%". **What is NOT in Phase 1:** any execution/
+  commit path (Phase 2, gated on items 90/91/92), compensation/undo (Phase 3),
+  upserts/batch/MSSQL-parity (Phase 3). The preview is immediately useful on its
+  own as a "what would this change?" planner and validates the whole
+  AST/policy/compiler design before any real mutation.
 - **2026-07-23 — Reversed: `connections/dialects.py`'s inline dialect branching
   is now a `SessionDialectAdapter`, a SEPARATE async abstract base from the sync
   compiler `DialectAdapter` (item 57; maintainer-approved).** A prior decision

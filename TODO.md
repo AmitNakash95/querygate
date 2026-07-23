@@ -2184,7 +2184,40 @@ is a validated structure, exactly as a read is), the catalog stays descriptive,
 audit stays redaction-safe. The `roadmap-next` automation must **not** auto-start
 it; a human decides first.
 
-### 93. Governed Writes — structured, bounded, previewable, reversible agent mutations
+### 93. Governed Writes — structured, bounded, previewable, reversible agent mutations ✅ DONE (phase 1 — contract + dry-run preview, execution DISABLED); phases 2–3 not started
+
+**Phase 1 shipped (maintainer-approved; Decision Log recorded).** The write
+sibling of the read pipeline, preview-only — **no code path executes or commits
+a write.** `write_ast/models.py`: `InsertStatement`/`UpdateStatement`/
+`DeleteStatement` (discriminated union on `op`, dispatched via
+`_WRITE_STATEMENT_TYPES`), **no raw-DML field anywhere**, WHERE reuses the read
+`Predicate` tree; `UPDATE`/`DELETE` **require** a WHERE (structural — can't be
+constructed without one). `policy/models.py` `WritePolicy` (deny-by-default:
+`enabled=False`, per-table `allowed_tables`/`allowed_operations`,
+`denied_write_columns`, `max_affected_rows`). `validation/write_policy_validation.py`
++ `validation/write_schema_validation.py` mirror the read validators (written
+columns write-allowed + exist; a write's WHERE columns subject to the READ
+allow/deny + masked-column rules; single-target-table only).
+`compiler/write_compiler.py` builds Core `insert()`/`update()`/`delete()` (WHERE
+via the read `_compile_where` — bound params, no raw SQL). `execution/write_preview.py`
+`WritePreviewService.preview()` validates → compiles → reports a redaction-safe
+`WritePreview` (op, table, affected-row count via a policy-checked `COUNT(*)`,
+within-cap, **parameterized** SQL, `executed=False`) — no DML runs. REST
+`POST /{connection}/write/preview` (discriminated-union body). Covered by
+`tests/unit/test_governed_writes.py` (14: no-raw-DML invariant, structural
+mandatory-WHERE, deny-by-default, WHERE read-policy, parameterized DML) +
+`tests/integration/test_write_preview_end_to_end.py` (3: real-SQLite preview
+reports the right count AND **changes nothing** — before == after — plus
+deny-by-default). The `IN (subquery)` (item 97) is rejected in a write WHERE for
+phase 1.
+
+**Phases 2–3 (not started):** gated *execution* (single transaction, row caps,
+item-92 approval on the diff, dual-identity audit [90], tamper-evident receipt
+[91]) — **depends on 90 + 91 + 92**; then reversibility/compensation + upserts +
+batch + MSSQL parity. Also deferred from phase 1: the transactional row-level
+old→new diff (the current preview reports the affected *count* + parameterized
+SQL; the killer per-row diff runs the DML in a rolled-back txn — a phase-1.5/2
+enhancement), and scalar-function/CASE SET-values.
 
 **Effort: XL (cleanly phaseable; Phase 1 is L and carries zero write risk).
 Priority: flagship. Status: decision-gated (crosses read-only). Depends on:
