@@ -2042,6 +2042,95 @@ see how one policy/configuration change alters the outcome. Every showcased
 configuration, decision, and error is traceable to a tested QueryGate behavior,
 and the page is explicitly labeled as an illustrative mocked experience.
 
+### 39. Draft-aware policy simulation before staging ✅ DONE
+
+**Shipped.** `POST /api/v1/admin/config/simulate`
+(`api/admin_config_routes.py`) accepts optional `connections_yaml`/
+`policy_yaml`/`catalog_yaml` overrides (each unset field inherits from the
+active config-governance version, or straight from the deployment files
+before governance has ever been bootstrapped) plus a target `principal`,
+scalar `claims`, `connection`, `table`, `columns`, and an optional structured
+`query`. The target principal is deliberately independent of the calling
+admin's own identity.
+
+- **Endpoint and evaluation scope:** `admin.service.simulate_candidate_policy`
+  writes the resolved candidate documents to a temporary directory and loads
+  them through `cli.load_config_context` — the same loaders and
+  cross-file/schema-shape validation `/admin/config/validate` and the CLI use
+  — into a fresh, request-local `ConnectionRegistry`/`PolicyStore`/
+  `CatalogStore` (`connections/visibility.py`'s new
+  `resolve_visible_connection_from` and `schema_validation.py`'s new
+  `resolve_query_table_connections(..., connection_resolver=...)` seam let the
+  exact production visibility/join-group/policy code run against those
+  isolated stores instead of the process-global ones). Nothing is installed
+  as a singleton and nothing is written to the config-version store, so the
+  live registry/policy/catalog, concurrent production requests, and any other
+  in-flight simulation are provably unaffected — proven under real concurrent
+  load in `test_candidate_simulation_uses_draft_without_persisting_or_changing_live_policy`
+  (12 interleaved simulate + active-policy-test calls via `asyncio.gather`).
+- **Authorization boundary:** `simulate` is the only `/admin/config/*` action
+  gated on *both* `admin:config:read` and `admin:config:write` together —
+  every other action needs only one. It echoes back semantic policy detail
+  like a read endpoint but also resolves caller-supplied config/secret
+  references like a write endpoint, so a read-only principal can't turn it
+  into a secret-existence oracle.
+- **Redactions:** the response model (`CandidatePolicySimulation`) structurally
+  excludes resolved secret values, static mandatory-filter values, supplied
+  claim values, query predicate values, and compiled SQL — it returns only a
+  typed `allow`/`deny` decision, per-column allow/deny, effective guardrails,
+  mandatory-filter claim *readiness* (never the filter's static value), and
+  typed reason codes. A table the candidate policy hides from the target
+  principal never contributes its mandatory-filter identifiers to the
+  response, even when the caller explicitly names that table
+  (`test_candidate_simulation_does_not_reveal_filters_for_denied_table`). An
+  invalid candidate fails closed with a generic message pointing at
+  `/validate` for detail rather than echoing the offending content
+  (`test_candidate_simulation_masks_invalid_candidate_content`), and is still
+  recorded as a redaction-safe `simulate` audit event
+  (`audit/events.py`/`audit/logger.py` gained `"simulate"` alongside
+  validate/preview/stage/apply/rollback).
+- **UI behavior:** the admin UI's "Test as principal" panel
+  (`admin_ui/app.js`/`index.html`) now posts to `/admin/config/simulate` with
+  the current in-browser draft when the session holds both config scopes,
+  falling back to the existing active-policy `/admin/ui/policy/test` endpoint
+  for read-only sessions — labeled accordingly ("Simulate draft policy
+  access" / "Nothing persisted" vs. the active-policy case) so an admin never
+  mistakes a draft-context decision for the currently enforced one.
+- **Threat-model control:** documented as QG-19 in `docs/THREAT_MODEL.md`,
+  covering the oracle risk, the isolation guarantee, the redaction surface,
+  and the fail-closed invalid-candidate behavior.
+
+Covered by `tests/unit/test_admin_service.py` (isolated-context redaction,
+denied-table mandatory-filter suppression, invalid-candidate masking, query
+allow/deny plus missing mandatory-claim denial) and
+`tests/integration/test_admin_config_governance.py` (concurrent draft vs.
+active-policy isolation over real HTTP) and
+`tests/security/test_adversarial_security.py` (scope enforcement).
+
+**Original scope (for reference — see above for what actually shipped):**
+
+**Effort: M–L (2–5 days).** The current active-policy simulator is small, but
+evaluating an uncommitted candidate safely needs an isolated candidate
+registry/policy/catalog context. It must reuse the real loaders and validation
+logic without swapping process-global runtime state or opening a second,
+behaviorally different policy engine.
+
+**Why it matters:** Item 31's “test as principal” deliberately evaluates only
+the active policy. That proves current behavior, but it cannot answer the most
+important pre-change question: “Will this draft allow or deny the intended
+principal after activation?” Requiring an administrator to activate first and
+test afterward weakens the value of dry-run governance.
+
+**What to do:** Extend config preview with a read-only candidate simulation
+endpoint that accepts the draft documents plus a target principal, scalar
+claims, connection, table, columns, and optionally a structured-query shape.
+Load and cross-validate the candidate in an isolated context, then run the same
+policy/visibility checks production execution uses. Return a typed allow/deny
+decision, effective guardrails, mandatory-filter claim readiness, and safe
+reasons—never resolved secret values, static row-filter values, compiled SQL
+literals, or hidden identifiers. Prove simulation persists nothing and cannot
+alter live request behavior even under concurrent use.
+
 ### 43. Admin connection-operations and health workspace ✅ DONE
 
 **Phase 1 shipped (admin connection-status API); phase 2a shipped (rate-limited
