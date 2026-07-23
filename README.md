@@ -415,10 +415,22 @@ rather than after the fact (TODO.md item 92). Opt-in per policy, off by default:
 policy:
   approval_max_estimated_rows: 100000    # softer than max_estimated_rows above
   approval_max_estimated_cost: 50000     # Postgres planner-cost units
+  approval_sensitivities: [pii]          # or internal/confidential — see below
 ```
 
-Set these *below* the hard `max_estimated_*` caps to mean "ask a human" rather
-than "refuse". When a query trips the threshold, execution is paused with
+There are two triggers, and either fires the gate:
+
+- **Cost/size** (`approval_max_estimated_*`): set *below* the hard
+  `max_estimated_*` caps to mean "ask a human" rather than "refuse". Postgres
+  only (reuses the same estimate as cost estimation).
+- **Sensitivity** (`approval_sensitivities`): a query that references a column —
+  or its table — carrying one of these catalog sensitivity labels (`pii`,
+  `confidential`, `internal`) requires approval *regardless of size*, on any
+  dialect. It reads only the descriptive catalog's static label (never a row
+  value) and checks **every** referenced column (a sensitive column used in a
+  `WHERE`/join/grouping trips it too, not just one you `select`).
+
+When a query trips either trigger, execution is paused with
 `428 Precondition Required` carrying a query **fingerprint** and the **reasons**.
 An approver holding the `query:approve` scope (deliberately *not* the querying
 agent — see `docs/SCOPE_CATALOG.md`'s "Query Approver" role) grants a token:
@@ -438,10 +450,10 @@ curl -X POST -H "Authorization: Bearer $CALLER_KEY" \
 The token is a stateless HMAC (set `APPROVAL_TOKEN_HMAC_KEY`) bound to the exact
 query fingerprint and a short expiry — it can't be forged, can't be replayed
 against a *different* query, and can't be replayed indefinitely; any
-missing-key/forged/expired/mismatched token fails closed. Phase 1 triggers on the
-Postgres cost/row estimate; the catalog **sensitivity-label** trigger and an
-interactive **MCP elicitation** approval channel are phase 2. A deployment that
-sets no approval thresholds is completely unaffected.
+missing-key/forged/expired/mismatched token fails closed. The one remaining
+piece is an interactive **MCP elicitation** approval channel (approve inside one
+MCP session instead of the REST round-trip). A deployment that sets no approval
+thresholds or sensitivities is completely unaffected.
 
 ### Per-principal rate limits / query quotas
 

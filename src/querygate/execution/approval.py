@@ -40,9 +40,16 @@ import json
 import time
 from typing import List, Optional
 
+from querygate.catalog.loader import get_catalog_store
+from querygate.catalog.models import SensitivityClass
 from querygate.execution.cost_estimation import QueryCostEstimate
 from querygate.policy.models import Policy
 from querygate.query_ast.models import StructuredQuery
+from querygate.validation.schema_validation import (
+    effective_name_map,
+    iter_column_refs,
+    parse_column_ref,
+)
 
 # Default lifetime of an issued approval token. Short by design: an approval is
 # for "this query, now", not a standing grant.
@@ -80,6 +87,46 @@ def approval_required_reasons(estimate: QueryCostEstimate, policy: Policy) -> Li
             f"threshold ({policy.approval_max_estimated_cost:.0f})"
         )
     return reasons
+
+
+def sensitivity_approval_reasons(
+    query: StructuredQuery, policy: Policy, connection_id: str
+) -> List[str]:
+    """Reasons the query touches a catalog-labelled sensitive column/table whose
+    label is in `policy.approval_sensitivities` (item 92 phase 2). Enumerates
+    every referenced column via the single canonical AST visitor (`iter_column_refs`,
+    item 96), resolves each to its physical table, and consults the descriptive
+    catalog's static sensitivity label — a read of metadata only, never a row
+    value. Empty when the sensitivity trigger is unconfigured or nothing matches.
+
+    A column's own label wins; otherwise its table's table-level label applies,
+    so labelling a whole table sensitive covers columns without their own label.
+    """
+    triggers = set(policy.approval_sensitivities)
+    if not triggers:
+        return []
+    store = get_catalog_store()
+    name_to_physical = effective_name_map(query)
+    hits: List[str] = []
+    seen: set = set()
+    for column_ref in iter_column_refs(query):
+        table, column = parse_column_ref(column_ref.ref)
+        physical = name_to_physical.get(table.lower(), table)
+        entry = store.get_table(connection_id, physical)
+        if entry is None:
+            continue
+        col_entry = entry.column(column)
+        label = (
+            col_entry.sensitivity
+            if col_entry is not None and col_entry.sensitivity != SensitivityClass.NONE
+            else entry.sensitivity
+        )
+        if label in triggers:
+            key = f"{physical}.{column}"
+            if key not in seen:
+                seen.add(key)
+                hits.append(f"references {label}-labelled column {key}")
+    return hits
 
 
 def query_fingerprint(query: StructuredQuery) -> str:

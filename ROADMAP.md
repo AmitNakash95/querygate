@@ -138,9 +138,9 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 - [ ] **92** — In-query human-in-the-loop approval for sensitive/expensive reads
   (F3). *Gates the exfiltration leg of the lethal trifecta on what a read would
   actually touch — nobody else can, because none knows before running it.*
-  **Phase 1 shipped** (cost/row-estimate trigger + stateless HMAC approval-token
-  grant + `query:approve` scope + REST 428/approve flow, opt-in); box stays `[ ]`
-  until phase 2 (catalog sensitivity-label trigger + MCP elicitation).
+  **Shipped: both triggers** (cost/row-estimate + catalog sensitivity-label) +
+  stateless HMAC approval-token grant + `query:approve` scope + REST 428/approve
+  flow, opt-in; box stays `[ ]` until the MCP-elicitation approval channel + batch.
 - [ ] **42** — Four-eyes config approval and separation of duties. *Governance
   maturity for the config plane.*
 - [ ] **39** — Draft-aware policy simulation before staging. *Safer config

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Optional
 
 import pydantic as pyd
 
+from querygate.catalog.models import SensitivityClass
 from querygate.core.exceptions import PolicyViolationError
 
 if TYPE_CHECKING:
@@ -273,6 +274,14 @@ class Policy(pyd.BaseModel):
     # otherwise no approval could ever be granted (fail-closed).
     approval_max_estimated_rows: Optional[int] = pyd.Field(default=None)
     approval_max_estimated_cost: Optional[float] = pyd.Field(default=None)
+    # Sensitivity-label trigger (item 92 phase 2): a query that references a
+    # column (or its table) carrying one of these catalog sensitivity labels
+    # requires approval regardless of its estimated size — the "what it would
+    # touch" half of the gate. Empty (default) means off. Dialect-agnostic and
+    # needs no cost estimate, so it works on MSSQL too. Reads only the static
+    # catalog label (metadata), never a row value — the catalog stays
+    # descriptive, never a query/row-value path.
+    approval_sensitivities: list[SensitivityClass] = pyd.Field(default_factory=list)
 
     # Audit/explain SQL rendering. Default is safe-by-default: SQL text uses
     # bind placeholders and parameter values are redacted, so a WHERE-clause
@@ -295,18 +304,23 @@ class Policy(pyd.BaseModel):
         return self.max_estimated_rows is not None or self.max_estimated_cost is not None
 
     @property
-    def approval_gate_enabled(self) -> bool:
+    def approval_cost_gate_enabled(self) -> bool:
         return (
             self.approval_max_estimated_rows is not None
             or self.approval_max_estimated_cost is not None
         )
 
     @property
+    def approval_gate_enabled(self) -> bool:
+        return self.approval_cost_gate_enabled or bool(self.approval_sensitivities)
+
+    @property
     def estimate_needed(self) -> bool:
         """Whether `execute()` must obtain the pre-execution estimate — true when
-        either the hard cost gate or the softer approval gate is configured, so
-        the estimate is computed once and fed to both."""
-        return self.cost_estimation_enabled or self.approval_gate_enabled
+        the hard cost gate or the cost-based approval gate is configured (the
+        sensitivity-label approval trigger needs no estimate), so the estimate is
+        computed once and fed to both."""
+        return self.cost_estimation_enabled or self.approval_cost_gate_enabled
 
     @property
     def query_quota_enabled(self) -> bool:

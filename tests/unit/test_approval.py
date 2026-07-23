@@ -20,10 +20,13 @@ from querygate.api.app import create_app
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import ApprovalRequiredError
 from querygate.execution import service as svc
+from querygate.catalog.loader import CatalogStore, set_catalog_store
+from querygate.catalog.models import SensitivityClass
 from querygate.execution.approval import (
     approval_required_reasons,
     issue_approval_token,
     query_fingerprint,
+    sensitivity_approval_reasons,
     verify_approval_token,
 )
 from querygate.execution.cost_estimation import QueryCostEstimate
@@ -121,6 +124,99 @@ def test_no_reasons_when_gate_disabled():
     est = QueryCostEstimate(estimated_rows=10_000_000, estimated_total_cost=9e9)
     assert approval_required_reasons(est, policy) == []
     assert policy.approval_gate_enabled is False
+
+
+# --------------------------------------------------------------------------- #
+# Sensitivity-label trigger (phase 2)                                          #
+# --------------------------------------------------------------------------- #
+
+
+def _catalog_with_pii():
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "connections": {
+                    "demo": {
+                        "tables": {
+                            "customers": {
+                                "provenance": {"created_by": "admin"},
+                                "columns": {
+                                    "email": {"sensitivity": "pii"},
+                                    "id": {"sensitivity": "none"},
+                                },
+                            },
+                            "audit_log": {
+                                "sensitivity": "confidential",
+                                "provenance": {"created_by": "admin"},
+                                "columns": {"note": {}},
+                            },
+                        }
+                    }
+                }
+            }
+        )
+    )
+
+
+@pytest.mark.unit
+def test_sensitivity_reasons_trigger_on_a_labelled_column():
+    _catalog_with_pii()
+    policy = Policy(approval_sensitivities=[SensitivityClass.PII])
+    q = StructuredQuery(from_table="customers", select=["customers.email"])
+    reasons = sensitivity_approval_reasons(q, policy, "demo")
+    assert len(reasons) == 1 and "customers.email" in reasons[0]
+
+
+@pytest.mark.unit
+def test_sensitivity_reasons_empty_for_non_sensitive_columns():
+    _catalog_with_pii()
+    policy = Policy(approval_sensitivities=[SensitivityClass.PII])
+    q = StructuredQuery(from_table="customers", select=["customers.id"])
+    assert sensitivity_approval_reasons(q, policy, "demo") == []
+
+
+@pytest.mark.unit
+def test_sensitivity_reasons_empty_when_trigger_unconfigured():
+    _catalog_with_pii()
+    q = StructuredQuery(from_table="customers", select=["customers.email"])
+    assert sensitivity_approval_reasons(q, Policy(), "demo") == []
+
+
+@pytest.mark.unit
+def test_table_level_sensitivity_applies_to_unlabelled_columns():
+    _catalog_with_pii()
+    policy = Policy(approval_sensitivities=[SensitivityClass.CONFIDENTIAL])
+    q = StructuredQuery(from_table="audit_log", select=["audit_log.note"])
+    reasons = sensitivity_approval_reasons(q, policy, "demo")
+    assert len(reasons) == 1 and "audit_log.note" in reasons[0]
+
+
+@pytest.mark.unit
+def test_sensitivity_trigger_fires_in_a_where_clause_too(monkeypatch):
+    # A denied-value inference vector: filtering ON a sensitive column, not
+    # selecting it, must also trip the gate (item 96 visitor covers WHERE).
+    _catalog_with_pii()
+    monkeypatch.setattr(svc.app_config, "approval_token_hmac_key", _KEY)
+    from querygate.query_ast.models import Predicate
+
+    policy = Policy(approval_sensitivities=[SensitivityClass.PII])
+    q = StructuredQuery(
+        from_table="customers",
+        select=["customers.id"],
+        where=Predicate(col="customers.email", op="eq", value="x@y.z"),
+    )
+    with pytest.raises(ApprovalRequiredError):
+        _gate_service()._enforce_approval_gate(None, policy, q, None)
+
+
+@pytest.mark.unit
+def test_sensitivity_gate_admits_with_a_valid_token(monkeypatch):
+    _catalog_with_pii()
+    monkeypatch.setattr(svc.app_config, "approval_token_hmac_key", _KEY)
+    policy = Policy(approval_sensitivities=[SensitivityClass.PII])
+    q = StructuredQuery(from_table="customers", select=["customers.email"])
+    token = issue_approval_token(fingerprint=query_fingerprint(q), approver_subject="a", key=_KEY)
+    _gate_service()._enforce_approval_gate(None, policy, q, token)  # no raise
 
 
 # --------------------------------------------------------------------------- #
