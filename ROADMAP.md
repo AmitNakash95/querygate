@@ -235,16 +235,33 @@ human/vendor to complete.
 
 ---
 
-## Frontier status (updated 2026-07-23, second pass) — every buildable item is shipped; the rest is gated on the maintainer
+## Frontier status (updated 2026-07-23, third pass) — near-frontier; one buildable UI slice + one decision-gated headline remain
 
-Two large batches shipped everything that was buildable without a new maintainer
-decision or external resource. **Done this cycle:** 56, 96, 95, 54, 60, 92, 42
-(full); reconciled 39, 40 (covered by 41), 37; and — after explicit maintainer
-approval — **97 ph1** (`IN (subquery)`), **57** (session dialect adapter, reversing
-the prior inline-branching decision), and **93 ph1** (governed-writes dry-run
-preview, execution disabled). **No remaining ROADMAP item is a clean, unilaterally-
-buildable, locally-validatable slice** — each is blocked as follows, and needs the
-maintainer to unblock it (not the automation to force it):
+Three batches shipped everything buildable without a new maintainer decision or
+external resource. **Done across the cycle:** 56, 96, 95, 54, 60, 92 (triggers +
+REST token flow + **batch tokens**), 42 (full); reconciled 39, 40 (covered by
+41), 37; and — after explicit maintainer approval — **97 ph1** (`IN (subquery)`),
+**57** (session dialect adapter, reversing the prior inline-branching decision),
+**93 ph1** (governed-writes dry-run preview, execution disabled), **41 ph2**
+(stateless paginated blast-radius), and **50 ph2** (`RedisQuotaLimiter` —
+cross-replica shared quota). The remaining frontier is essentially gated, with
+exactly two live threads:
+
+- **Buildable without a decision (low ROI):** **38 ph2** — admin-UI *bulk*
+  approve/reject/delete + export/import + browser-triggered generate/learn +
+  `review_history` view, all over item 32B's existing scoped routes (no new
+  mutation path). Frontend-only; validated by `node --check` + static-markup
+  assertions (no browser automation here), Phase 5 lowest-marginal-ROI.
+- **Decision-gated headline:** **92 MCP-elicitation channel** — the last piece
+  of the in-query approval gate. Prescribed in spirit by the item, but carries a
+  real security-posture call: an elicitation response has no authenticated
+  approver identity, so building it decides whether an MCP client's human may
+  approve a sensitive read *in the querying agent's own session* — bypassing the
+  `query:approve` scope separation REST enforces — and whether operators can
+  force REST-token-only. That shapes the SoD guarantee item 92 sells, so it
+  needs the maintainer, not the automation.
+
+Everything else stays gated as before:
 
 - **93 ph2** (gated write *execution*) — depends on 90+91+92 (all shipped) but
   crosses from preview to *committing writes*: a deliberate build + product
@@ -253,20 +270,21 @@ maintainer to unblock it (not the automation to force it):
   Postgres+MSSQL dual-DB CI, external LLM/Toolbox harness, an external auditor.
 - **30·89 ph2** — the *maintainer's signed-release tag push* (+ package-index
   choice); the mechanism is shipped.
-- **41 ph2 / 35 ph2** — *async/scale infra* (background-job pagination for >100
-  principals; queued/running/cancelled + mid-flight cancellation): substantial,
-  low-ROI, each its own build.
+- **35 ph3** — *design-gated* (agent-visible progress/cancellation posture);
+  phases 1+2 shipped.
 - **18 / 51 ph2 / 19** — *large standalone*: stored-proc subsystem (needs a real
   security review — procedures have side effects); the TypeScript SDK +
   standalone distribution (coupled to 30 ph2, not locally validatable); new
   dialects (need live DBs, now unblocked *architecturally* by 57).
-- **38·44·45·47·50 ph2** — *admin-UI / durable cross-replica infra phase-2s*
-  (Phase 5, lowest marginal ROI).
+- **44·45·47 ph2** — *admin-UI / durable-infra phase-2s* needing external metrics
+  history (44), more UI (45), or an encrypted-at-rest draft store (47).
 - **F4 / P2** — *decision-gated*: NL→StructuredQuery (model-provider/posture
   decision) and opening the AST as a standard (governance commitment).
 
-`roadmap-next` should surface this and stop rather than force a gated/entangled
-change. Trim this note as the maintainer re-prioritizes and the frontier moves.
+`roadmap-next` should surface the two live threads (build 38 ph2 if the
+maintainer wants the low-ROI UI slice; get a decision on 92's elicitation SoD
+posture) rather than force a gated/entangled change. Trim this note as the
+maintainer re-prioritizes and the frontier moves.
 
 ---
 
