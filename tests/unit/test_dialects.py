@@ -20,12 +20,31 @@ import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from querygate.connections.dialects import (
+    MSSQLSessionAdapter,
+    PostgresSessionAdapter,
+    SessionDialectAdapter,
     _raw_pyodbc_connection,
     build_connect_args,
     build_engine_url,
+    get_session_adapter,
     register_query_timeout,
 )
 from querygate.connections.models import ConnectionProfile, DatabaseDialect
+
+
+def test_session_adapter_registry_dispatches_per_dialect():
+    """Item 57: one concrete SessionDialectAdapter per dialect, dispatched via
+    the registry — never inline `if dialect == ...` branching. Every supported
+    dialect resolves to its own adapter, and an unsupported one is rejected."""
+    pg = get_session_adapter(DatabaseDialect.POSTGRESQL)
+    ms = get_session_adapter(DatabaseDialect.MSSQL)
+    assert isinstance(pg, PostgresSessionAdapter)
+    assert isinstance(ms, MSSQLSessionAdapter)
+    # Both implement the full interface (no abstract methods left unimplemented).
+    assert issubclass(PostgresSessionAdapter, SessionDialectAdapter)
+    assert issubclass(MSSQLSessionAdapter, SessionDialectAdapter)
+    with pytest.raises(ValueError, match="Unsupported dialect"):
+        get_session_adapter("oracle")  # type: ignore[arg-type]
 
 
 def test_database_dialect_equals_its_plain_string_value():
