@@ -263,6 +263,15 @@ class AppConfig(BaseSettings):
     # POST /admin/reload-config keeps reloading unchanged, for infra-as-code
     # deployments that edit files directly rather than through this API).
     config_governance_dir: str = pyd.Field(default="var/config_versions")
+
+    # Four-eyes config approval (TODO.md item 42). 0 (default) = single-
+    # administrator mode: a staged version can be applied by any
+    # `admin:config:write` holder, exactly as before. When >= 1, a staged
+    # version cannot be applied until it has at least this many `approve`
+    # decisions from DISTINCT reviewers holding `admin:config:approve`, none of
+    # whom is the version's author (separation of duties enforced server-side,
+    # never only in the UI).
+    require_config_approvals: int = pyd.Field(default=0, ge=0)
     # Upper bound on an imported config change-set bundle (item 47). A bundle
     # carries only submitted document deltas plus a base fingerprint, so this
     # is far above any legitimate change set; it bounds the import endpoint so

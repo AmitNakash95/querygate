@@ -674,6 +674,20 @@ explicitly configured principal, then ranks the access-expanding results so a
 reviewer sees whether a change is fleet-wide or targeted at a specific caller
 before it's staged.
 
+**Four-eyes approval (optional).** By default one `admin:config:write` principal
+can stage and apply a change (single-administrator mode). Set
+`require_config_approvals` to N ≥ 1 and a staged version cannot be applied until
+N **distinct** reviewers holding the separate `admin:config:approve` scope have
+approved it via `POST /admin/config/versions/{id}/approve` (or `/reject`, with an
+optional bounded note) — and **the version's author can never approve their own
+change**. Enforcement is entirely server-side (the store refuses an author's own
+review and `apply` refuses an under-approved version), so it can't be bypassed by
+talking to the API directly rather than the UI. Approvals bind to the version's
+content fingerprint, and rollback to a previously-active version stays exempt so
+disaster recovery is never blocked. Every approve/reject and every
+insufficient-approvals rejection is in the audit trail. See
+`docs/SCOPE_CATALOG.md`'s "Config Approver" role.
+
 ### Validated policy templates and safe-start presets
 
 Common access shapes — deny-by-default, reporting-only, customer-support,
