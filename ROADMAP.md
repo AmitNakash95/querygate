@@ -298,8 +298,9 @@ surface them for a human, never auto-start them.
     - [x] **Optimistic-concurrency undo** ✅ — an UPDATE undo reads each affected
       row's current changed-column values and refuses (422) if any drifted from
       the write's post-image (or the row is gone), instead of silently clobbering.
-    - [ ] **MCP undo parity** — undo is REST-only; add an undo path to the MCP
-      surface so an agent that wrote over MCP can also reverse over MCP.
+    - [x] **MCP undo parity** ✅ — `undo_structured_write(connection,
+      compensation_id)` MCP tool, so an agent that wrote over MCP can also reverse
+      over MCP.
     - [ ] **`release-smoke` write round-trip** — extend `make release-smoke` with a
       real capped governed write + undo against the shipped image.
     - [ ] **MSSQL write execution parity** — proven on Postgres+SQLite; unproven on
