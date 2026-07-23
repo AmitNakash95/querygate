@@ -167,21 +167,6 @@ class WritePolicy(pyd.BaseModel):
     # most this many old→new row changes; a larger affected set is reported
     # truncated. Bounds the value-bearing preview so it can never dump a table.
     max_diff_rows: int = pyd.Field(default=50, ge=1)
-    # Bounded reversibility (item 93 phase 3a). When enabled, a gated write
-    # captures a pre-image into QueryGate's own compensation store and returns a
-    # compensation_id that POST /write/undo re-applies through the governed write
-    # pipeline. Off by default. `max_compensation_rows` caps the snapshot (a write
-    # affecting more is executed WITHOUT a compensation record rather than
-    # snapshotting an unbounded set); the record expires after
-    # `compensation_ttl_seconds`. Two caller-visible limits: (a) an INSERT with a
-    # server-generated PK is now captured via RETURNING so it IS undoable; (b) the
-    # default store is process-local (undo needs single-replica/affinity) — set
-    # CONCURRENCY_BACKEND=redis to share it across replicas (see deploy/HA_DR.md).
-    # Keep `max_compensation_rows` <= `max_affected_rows` so an undo can't exceed
-    # the write cap.
-    compensation_enabled: bool = False
-    max_compensation_rows: int = pyd.Field(default=100, ge=1)
-    compensation_ttl_seconds: int = pyd.Field(default=3600, ge=1)
 
     model_config = pyd.ConfigDict(extra="forbid")
 

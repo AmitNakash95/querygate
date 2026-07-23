@@ -40,7 +40,7 @@ from sqlalchemy.exc import DataError, IntegrityError, StatementError
 from querygate.audit.events import AuditSurface
 from querygate.audit.logger import audit_query
 from querygate.compiler.sqlalchemy_compiler import _compile_where
-from querygate.compiler.write_compiler import _coerce_write_value, compile_write
+from querygate.compiler.write_compiler import compile_write
 from querygate.connections.engine import session_scope
 from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.auth import Principal
@@ -51,23 +51,14 @@ from querygate.core.exceptions import (
     public_error_message,
 )
 from querygate.execution.approval import verify_approval_token, write_fingerprint
-from querygate.execution.compensation import (
-    CompensationRecord,
-    compensation_expiry,
-    get_compensation_store,
-    new_compensation_id,
-)
 from querygate.execution.concurrency import concurrency_slot
 from querygate.execution.write_preview import _reject_subquery_in_write_where
 from querygate.policy.loader import get_policy
 from querygate.policy.models import WritePolicy
-from querygate.query_ast.models import Predicate
 from querygate.validation.write_policy_validation import validate_write_policy
 from querygate.validation.write_schema_validation import validate_write_schema
 from querygate.write_ast.models import (
-    DeleteStatement,
     InsertStatement,
-    UpdateStatement,
     UpsertStatement,
     WriteStatement,
 )
@@ -84,12 +75,6 @@ class WriteResult(pyd.BaseModel):
     table: str
     affected_rows: int
     executed: bool = True
-    # Set when the policy enabled bounded reversibility and this write was
-    # captured (item 93 phase 3a): pass it to POST /write/undo to reverse it.
-    # `null` means this write is NOT undoable — compensation is off, the affected
-    # set exceeded max_compensation_rows, the table has no single-column PK, or an
-    # INSERT used a server-generated PK.
-    compensation_id: Optional[str] = None
 
     model_config = pyd.ConfigDict(extra="forbid")
 
@@ -102,7 +87,6 @@ class WriteBatchItemResult(pyd.BaseModel):
     table: Optional[str] = None
     affected_rows: Optional[int] = None
     executed: bool = False
-    compensation_id: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -173,7 +157,7 @@ class WriteExecutionService:
                 max_queue_depth=policy.max_queue_depth,
                 max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
             ):
-                affected, compensation_id = await self._execute_in_transaction(
+                affected = await self._execute_in_transaction(
                     statement, table, dml, policy, approval_token
                 )
         except Exception as exc:
@@ -192,155 +176,7 @@ class WriteExecutionService:
             operation=statement.op,
             table=table.name,
             affected_rows=affected,
-            compensation_id=compensation_id,
         )
-
-    async def undo(self, compensation_id: str) -> WriteResult:
-        """Reverse a previously-committed write (item 93 phase 3a). The record
-        must exist, be unexpired, unconsumed, and belong to this connection;
-        otherwise a clean rejection. All inverse statements run in **one
-        transaction** — undo is atomic all-or-nothing, upholding the same
-        "no partial write" guarantee as the forward path (it never leaves a
-        half-reversed change). Consumed only on success so a failed undo can be
-        retried and a successful one can't be replayed.
-
-        Authorization: possession of the (single-use, TTL'd, connection-scoped)
-        `compensation_id` — only ever returned to whoever executed the original
-        governed write. Undo therefore does NOT re-trigger the approval gate (the
-        forward write was already approved and undo restores the *prior* state,
-        which is lower-risk) and does NOT re-check the inverse op against
-        `allowed_operations` (undoing a DELETE is an INSERT — requiring INSERT to
-        be separately enabled would make reversibility unusable). It still
-        enforces deny-by-default (writes must be enabled + the table writable),
-        the affected-row cap, schema truth, and full audit — see the Decision Log.
-        """
-        record = await get_compensation_store().get(compensation_id)
-        if record is None or record.connection_id != self._connection_id:
-            raise QueryValidationError(
-                "unknown, expired, already-used, or wrong-connection compensation id"
-            )
-        try:
-            total = await self._apply_undo_atomically(record)
-        except Exception as exc:
-            self._audit_undo(record, affected_rows=None, rejected=True, error=exc)
-            raise
-        await get_compensation_store().consume(compensation_id)
-        self._audit_undo(record, affected_rows=total, rejected=False)
-        return WriteResult(operation=f"undo_{record.op}", table=record.table, affected_rows=total)
-
-    def _build_undo(self, record: CompensationRecord) -> List[WriteStatement]:
-        """The inverse governed write(s): re-INSERT deleted rows, DELETE inserted
-        keys, or restore each updated row's changed columns by primary key."""
-        pk_ref = f"{record.table}.{record.pk_column}"
-        if record.op == "delete":
-            return [InsertStatement(table=record.table, rows=record.pre_image)]
-        if record.op == "insert":
-            return [
-                DeleteStatement(
-                    table=record.table,
-                    where=Predicate(col=pk_ref, op="in", value=record.inserted_keys),
-                )
-            ]
-        # UPDATE undo: one restore per row (each row's old values differ), keyed
-        # on its PK, restoring ONLY the columns the original write changed — so a
-        # concurrent change to a column this write never touched is preserved.
-        statements: List[WriteStatement] = []
-        for row in record.pre_image:
-            restore = {c: row[c] for c in record.changed_columns if c in row}
-            if not restore:
-                continue
-            statements.append(
-                UpdateStatement(
-                    table=record.table,
-                    set=restore,
-                    where=Predicate(col=pk_ref, op="eq", value=row[record.pk_column]),
-                )
-            )
-        return statements
-
-    async def _apply_undo_atomically(self, record: CompensationRecord) -> int:
-        """Apply every inverse statement in ONE transaction, committing once — any
-        failure rolls the whole undo back (atomic). Deny-by-default and the
-        affected-row cap still hold; the approval and op-allowed gates are
-        deliberately bypassed (see `undo`). Does not capture new compensation, so
-        an undo never spawns orphaned redo records. For an UPDATE, refuses if a
-        changed row drifted from the write's post-image (optimistic concurrency)."""
-        statements = self._build_undo(record)
-        policy = get_policy(self._connection_id, principal=self._principal)
-        if not policy.write.table_writable(record.table):
-            raise QueryValidationError(
-                f"writes are not enabled for table {record.table!r}; cannot undo"
-            )
-        cap = policy.write.max_affected_rows
-        total = 0
-        async with concurrency_slot(
-            self._connection_id,
-            policy.max_concurrency,
-            policy.concurrency_wait_seconds,
-            principal_subject=self._principal_subject,
-            max_queue_depth=policy.max_queue_depth,
-            max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
-        ):
-            async with session_scope(self._connection_id, policy=policy) as session:
-                if record.op == "update" and record.post_values:
-                    await self._assert_no_update_drift(session, record)
-                for stmt in statements:
-                    table = await validate_write_schema(stmt, self._connection_id, self._principal)
-                    dml = compile_write(stmt, table)
-                    affected = await self._count_affected(session, stmt, table)
-                    if affected > cap:
-                        raise QueryValidationError(
-                            f"undo would affect {affected} rows, over the "
-                            f"max_affected_rows cap of {cap}"
-                        )
-                    try:
-                        await session.execute(dml)
-                    except (IntegrityError, DataError, StatementError) as exc:
-                        raise QueryValidationError(
-                            "undo violates a database constraint or value type and was "
-                            "rolled back — nothing was committed"
-                        ) from exc
-                    total += len(stmt.rows) if isinstance(stmt, InsertStatement) else affected
-                await session.commit()
-        return total
-
-    async def _assert_no_update_drift(self, session, record: CompensationRecord) -> None:
-        """Optimistic concurrency for UPDATE undo: read each affected row's current
-        changed-column values and refuse the undo if any differs from what the
-        write set (or the row is gone) — so a concurrent change since the write is
-        never silently overwritten."""
-        table = await validate_write_schema(
-            UpdateStatement(
-                table=record.table,
-                set={c: record.post_values[c] for c in record.changed_columns},
-                where=Predicate(
-                    col=f"{record.table}.{record.pk_column}",
-                    op="eq",
-                    value=record.pre_image[0][record.pk_column],
-                ),
-            ),
-            self._connection_id,
-            self._principal,
-        )
-        pk = record.pk_column
-        keys = [row[pk] for row in record.pre_image]
-        cols = [table.c[pk]] + [table.c[c] for c in record.changed_columns if c in table.c]
-        rows = (await session.execute(sa.select(*cols).where(table.c[pk].in_(keys)))).mappings()
-        current = {row[pk]: dict(row) for row in rows}
-        for snapshot in record.pre_image:
-            cur = current.get(snapshot[pk])
-            if cur is None:
-                raise QueryValidationError(
-                    "a row changed since the write (it no longer exists); undo refused "
-                    "to avoid clobbering a concurrent change"
-                )
-            for col in record.changed_columns:
-                expected = _coerce_write_value(table.c[col], record.post_values[col])
-                if cur[col] != expected:
-                    raise QueryValidationError(
-                        "a row changed since the write; undo refused to avoid clobbering "
-                        "a concurrent change (optimistic concurrency)"
-                    )
 
     async def execute_many(
         self,
@@ -357,8 +193,7 @@ class WriteExecutionService:
         rolls the whole batch back (every item then reports the same error). An
         atomic batch is deny-by-default + capped like any write and fails closed on
         an approval-gated write (there is no per-item token channel in atomic
-        mode); it does not capture per-write compensation (undo an atomic batch by
-        composing its inverse, a later slice)."""
+        mode)."""
         if atomic:
             return await self._execute_many_atomically(statements)
         return [await self._execute_batch_item(s, approval_resolver) for s in statements]
@@ -451,7 +286,6 @@ class WriteExecutionService:
             table=result.table,
             affected_rows=result.affected_rows,
             executed=True,
-            compensation_id=result.compensation_id,
         )
 
     @staticmethod
@@ -467,11 +301,11 @@ class WriteExecutionService:
         dml,
         policy,
         approval_token: Optional[str],
-    ) -> tuple[int, Optional[str]]:
-        """One transaction: count -> cap -> approval -> capture pre-image ->
-        mutate -> re-check cap -> commit. Any raise propagates to `session_scope`,
-        which rolls back — so there is never a partial or over-cap committed
-        write. Returns (affected_rows, compensation_id-or-None)."""
+    ) -> int:
+        """One transaction: count -> cap -> approval -> mutate -> re-check cap ->
+        commit. Any raise propagates to `session_scope`, which rolls back — so
+        there is never a partial or over-cap committed write. Returns the affected
+        row count."""
         cap = policy.write.max_affected_rows
         write_policy = policy.write
         async with session_scope(self._connection_id, policy=policy) as session:
@@ -486,20 +320,8 @@ class WriteExecutionService:
             # Human-in-the-loop approval on the write, before it mutates anything.
             self._enforce_write_approval_gate(statement, affected, write_policy, approval_token)
 
-            # Bounded reversibility (item 93 phase 3a): capture the pre-image in
-            # the same transaction, before mutating — held in memory and only
-            # committed to the compensation store after the write commits.
-            pending_compensation = await self._capture_pre_image(
-                session, statement, table, affected, write_policy
-            )
-            # A server-generated PK isn't known until after the INSERT runs, so
-            # capture it via RETURNING to make serial/identity-PK inserts undoable
-            # too (item 93 phase 3b — otherwise compensation_id would be null).
-            returning_pk = self._insert_returning_pk(statement, table, affected, write_policy)
-            exec_dml = dml.returning(returning_pk) if returning_pk is not None else dml
-
             try:
-                result = await session.execute(exec_dml)
+                result = await session.execute(dml)
             except (IntegrityError, DataError, StatementError) as exc:
                 # A constraint (NOT NULL / FK / unique), a bad value type, or a
                 # bind error is the caller's fault, not a server fault — turn the
@@ -512,16 +334,6 @@ class WriteExecutionService:
                     "(not-null, foreign key, unique, or a mistyped value) and was "
                     "rolled back — nothing was committed"
                 ) from exc
-            if returning_pk is not None:
-                pending_compensation = CompensationRecord(
-                    compensation_id=new_compensation_id(),
-                    connection_id=self._connection_id,
-                    table=table.name,
-                    op="insert",
-                    pk_column=returning_pk.name,
-                    inserted_keys=list(result.scalars().all()),
-                    expires_at=compensation_expiry(write_policy.compensation_ttl_seconds),
-                )
             # Belt-and-suspenders: the statement's own rowcount must also be within
             # cap, so a race between the count and the mutation can't over-write.
             actual = (
@@ -538,92 +350,7 @@ class WriteExecutionService:
                     f"write affected {actual} rows, over the max_affected_rows cap of {cap}"
                 )
             await session.commit()
-
-        # The write is durably committed — only now record the compensation, so a
-        # rolled-back write never leaves an undo pointing at a change that didn't
-        # happen.
-        compensation_id = None
-        if pending_compensation is not None:
-            await get_compensation_store().put(pending_compensation)
-            compensation_id = pending_compensation.compensation_id
-        return actual, compensation_id
-
-    @staticmethod
-    def _insert_returning_pk(
-        statement: WriteStatement, table: sa.Table, affected: int, write_policy
-    ) -> Optional[sa.Column]:
-        """The single PK column to capture via RETURNING, for an INSERT with a
-        server-generated key (so it's undoable), or None. Only when compensation
-        is on, within the snapshot cap, the table has one PK column, and at least
-        one row omits it (a supplied key needs no RETURNING — `_capture_pre_image`
-        records it directly)."""
-        if not write_policy.compensation_enabled or affected > write_policy.max_compensation_rows:
-            return None
-        if not isinstance(statement, InsertStatement):
-            return None
-        pk_cols = list(table.primary_key.columns)
-        if len(pk_cols) != 1:
-            return None
-        pk = pk_cols[0]
-        if any(row.get(pk.name) is None for row in statement.rows):
-            return pk
-        return None
-
-    async def _capture_pre_image(
-        self, session, statement: WriteStatement, table: sa.Table, affected: int, write_policy
-    ) -> Optional[CompensationRecord]:
-        """Build (but do not yet store) the compensation record for this write, or
-        None if compensation is off, the affected set is over the snapshot cap, or
-        the table lacks the single-column primary key an undo needs to key on."""
-        if not write_policy.compensation_enabled or affected > write_policy.max_compensation_rows:
-            return None
-        if isinstance(statement, UpsertStatement):
-            return None  # upsert reversibility (per-row insert-or-update) is a later slice
-        pk_cols = list(table.primary_key.columns)
-        if len(pk_cols) != 1:
-            return None  # undo keys on a single-column PK (documented limit)
-        pk = pk_cols[0].name
-
-        record = CompensationRecord(
-            compensation_id=new_compensation_id(),
-            connection_id=self._connection_id,
-            table=table.name,
-            op=statement.op,
-            pk_column=pk,
-            expires_at=compensation_expiry(write_policy.compensation_ttl_seconds),
-        )
-        where = {statement.table: table}
-        if isinstance(statement, InsertStatement):
-            keys = [row.get(pk) for row in statement.rows]
-            if any(k is None for k in keys):
-                # A server-generated PK (serial/identity) isn't known here without
-                # RETURNING, so this INSERT is NOT undoable: the caller sees this
-                # as compensation_id=None (documented on WritePolicy / the
-                # endpoint). Supply the PK to make an INSERT undoable; RETURNING
-                # capture is a phase-3b follow-up.
-                return None
-            record.inserted_keys = keys
-        elif isinstance(statement, UpdateStatement):
-            # Snapshot ONLY the primary key + the columns this UPDATE changes, so
-            # undo restores exactly what was changed and nothing else.
-            record.changed_columns = [c for c in statement.set.keys() if c != pk]
-            # The values the write sets — undo refuses if the row drifted from these.
-            record.post_values = {c: statement.set[c] for c in record.changed_columns}
-            cols = [table.c[pk]] + [table.c[c] for c in record.changed_columns if c in table.c]
-            pre_stmt = (
-                sa.select(*cols)
-                .where(_compile_where(statement.where, where, alias_map={}))
-                .limit(write_policy.max_compensation_rows)
-            )
-            record.pre_image = [dict(r) for r in (await session.execute(pre_stmt)).mappings().all()]
-        else:  # DELETE: snapshot the full rows so the undo can re-insert them.
-            pre_stmt = (
-                sa.select(table)
-                .where(_compile_where(statement.where, where, alias_map={}))
-                .limit(write_policy.max_compensation_rows)
-            )
-            record.pre_image = [dict(r) for r in (await session.execute(pre_stmt)).mappings().all()]
-        return record
+        return actual
 
     async def _count_affected(self, session, statement: WriteStatement, table: sa.Table) -> int:
         if isinstance(statement, (InsertStatement, UpsertStatement)):
@@ -688,34 +415,6 @@ class WriteExecutionService:
             surface=self._surface,
             operation="execute_structured_write",
             query_shape=_write_shape(statement, table_name),
-            policy_decision="denied" if rejected else "allowed",
-            rejected=rejected,
-            rejection_reason=(f"{type(error).__name__}: {error}" if error else None),
-            error_category=(type(error).__name__ if error else None),
-        )
-
-    def _audit_undo(
-        self,
-        record: CompensationRecord,
-        *,
-        affected_rows: Optional[int],
-        rejected: bool,
-        error: Optional[Exception] = None,
-    ) -> None:
-        """Audit an undo as a single redaction-safe `undo_structured_write` event
-        — op/table/affected-count only, never a restored value."""
-        audit_query(
-            connection_id=self._connection_id,
-            sql="",
-            row_count=affected_rows,
-            principal=self._principal_subject,
-            principal_scopes=self._principal_scopes,
-            actor=self._principal_actor,
-            delegation_chain=self._delegation_chain,
-            auth_method=self._auth_method,
-            surface=self._surface,
-            operation="undo_structured_write",
-            query_shape={"op": f"undo_{record.op}", "table": record.table},
             policy_decision="denied" if rejected else "allowed",
             rejected=rejected,
             rejection_reason=(f"{type(error).__name__}: {error}" if error else None),

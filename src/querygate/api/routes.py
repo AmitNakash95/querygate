@@ -69,13 +69,6 @@ class ApprovalGrant(pyd.BaseModel):
     approval_token: str
 
 
-class WriteUndoRequest(pyd.BaseModel):
-    """Reverse a committed governed write (item 93 phase 3a) by its
-    compensation_id — the opaque id returned in the write's response."""
-
-    compensation_id: str
-
-
 def _visible_template(connection_id: str, principal: Principal) -> None:
     """A template is visible/invocable only if its target connection is —
     reuse the exact non-enumerating connection-visibility rule (item 22), and
@@ -351,25 +344,6 @@ def build_router(
             key=app_config.approval_token_hmac_key,
         )
         return ApprovalGrant(fingerprint=fingerprint, approval_token=token)
-
-    @router.post("/{connection}/write/undo", response_model=WriteResult)
-    async def undo_write(
-        connection: str,
-        payload: WriteUndoRequest,
-        principal: Principal = Depends(get_principal),
-    ):
-        """Reverse a previously-committed governed write (TODO.md item 93 phase
-        3a) using the `compensation_id` its response returned. Bounded
-        reversibility: the inverse is re-applied **through the governed write
-        pipeline** (validated, capped, audited), so undo needs the WritePolicy to
-        allow the inverse operation and no new privilege. A stale/expired/reused
-        id returns a clean rejection."""
-        _require_connection(connection, principal)
-        service = WriteExecutionService(
-            connection_id=connection, principal=principal, surface="rest"
-        )
-        with mask_unexpected():
-            return await service.undo(payload.compensation_id)
 
     @router.get("/query-templates", response_model=List[PublicQueryTemplate])
     async def list_query_templates(principal: Principal = Depends(get_principal)):

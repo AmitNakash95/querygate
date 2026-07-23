@@ -458,7 +458,7 @@ piece is an interactive **MCP elicitation** approval channel (approve inside one
 MCP session instead of the REST round-trip). A deployment that sets no approval
 thresholds or sensitivities is completely unaffected.
 
-### Governed writes — preview, execute, approve, diff, undo
+### Governed writes — preview, execute, approve, diff
 
 QueryGate is read-only until an operator explicitly turns writes on: every
 deployment starts with `WritePolicy.enabled=false`, and there is still no
@@ -485,25 +485,16 @@ curl -X POST -H "Authorization: Bearer $CALLER_KEY" \
 #    approval_max_affected_rows, commits, and rolls back whole on any error.
 curl -X POST -H "Authorization: Bearer $CALLER_KEY" \
   "$HOST/api/v1/<connection>/write/execute" -d '<the same write JSON>'
-# -> { "executed": true, "affected_rows": 1, "compensation_id": "..." }
-
-# 3. Undo (if compensation_enabled): re-applies the inverse of exactly one
-#    prior write, atomically, through the same governed pipeline.
-curl -X POST -H "Authorization: Bearer $CALLER_KEY" \
-  "$HOST/api/v1/<connection>/write/undo" -d '{"compensation_id":"..."}'
+# -> { "executed": true, "affected_rows": 1 }
 ```
 
-**Reversibility.** With `WritePolicy.compensation_enabled`, an execute captures
-a bounded pre-image into a QueryGate-owned store (never a shadow table in the
-operational database) and returns a single-use, TTL'd `compensation_id`.
-`POST /write/undo` restores only the columns that write actually changed, in
-one atomic transaction — a failure reverses nothing rather than partially
-undoing. Serial/identity-PK inserts are undoable too (the generated key is
-captured via `RETURNING`), and with `CONCURRENCY_BACKEND=redis` the
-compensation store is shared across replicas, so undo works under an
-HA deployment, not just a single process. An UPDATE undo **refuses instead of
-clobbering** if a row's changed columns have drifted since the original write
-(optimistic concurrency), rather than silently overwriting a newer change.
+**No undo — by design.** QueryGate deliberately does not snapshot rows to offer
+a rollback. Keeping a second copy of your data outside its source of truth is
+exactly the footprint an operational-database gateway should not add. The safety
+story is *prevention*, not reversal: the diff preview and the approval gate put a
+human in front of the exact change before it commits, deny-by-default and the
+affected-row cap make a catastrophic-shape write impossible, and every write is
+attributed and audited.
 
 **Both transports, same guarantees.** REST is the routes above; MCP has one
 `run_structured_writes` tool (`mode=preview|execute`, batch, `include_diff`,
@@ -518,8 +509,8 @@ read-only in practice as well as by default.
 The claim is deliberately **governed**, not "safe autonomous writes": what's
 guaranteed by construction (no raw DML, every target policy-checked, no
 unqualified UPDATE/DELETE, bounded rows) rules out the catastrophic-shape
-class; preview, approval, and undo are what make the remaining question — "did
-the agent intend *this* change" — reviewable and reversible rather than
+class; preview and approval are what make the remaining question — "did the
+agent intend *this* change" — reviewable and attributable rather than
 unattended.
 
 ### Per-principal rate limits / query quotas
