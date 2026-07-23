@@ -2411,6 +2411,62 @@ without a live model call; state plainly what wasn't exercised). Resist
 adding a maintained framework-specific SDK layer beyond the example
 itself — that risk was already called out in item 20.
 
+### 56. HA / multi-region reference deployment + DR runbook ✅ DONE
+
+**Effort: L (3–5 days).** Built on item 29's reference stack and item 9's
+cross-instance concurrency state; the new work was failover behavior and a
+documented recovery procedure, not a new deployment topology from scratch.
+
+**Why it mattered:** `docs/business/GO_TO_MARKET.md` explicitly said not to
+claim "a production Helm/Kubernetes reference deployment" yet. Item 29's
+reference stack is not the same claim as proven multi-instance failover —
+enterprise buyers evaluating this for production traffic ask for an HA/DR story
+specifically, not just a docker-compose file or a single Helm chart.
+
+**What shipped.**
+
+- **Zero-downtime rollouts + all-replica config reload.** The Helm
+  `deployment.yaml` now sets a configurable `updateStrategy`
+  (`RollingUpdate`, default `maxUnavailable: 0` / `maxSurge: 1`) and stamps a
+  `checksum/config` annotation derived from the rendered ConfigMap onto the pod
+  template. A `helm upgrade` that changes connections/policy/catalog therefore
+  rolls **every** replica one at a time behind the readiness gate — the
+  multi-replica-correct, zero-downtime config-reload path (item 5 + item 56).
+  This closes the real HA gap that `admin/service.py`'s `apply()` reloads only
+  the single replica that served the request (no cross-replica broadcast).
+- **Multi-zone overlay** `deploy/helm/querygate/values-ha.yaml`: autoscaling
+  floor 3, a PodDisruptionBudget, `topologySpreadConstraints` across
+  `topology.kubernetes.io/zone` and `kubernetes.io/hostname`, Redis-backed
+  concurrency kept on, and the chained audit sink selected.
+- **Optional shared config-governance PVC** (`configGovernance.enabled`,
+  `templates/configgovernance-pvc.yaml`) — ReadWriteMany, so the governance API
+  (Path B) has one shared version history across replicas when needed; off by
+  default because GitOps/ConfigMap (Path A) is the recommended multi-replica
+  path and needs no shared volume.
+- **`deploy/HA_DR.md`** — the shared-state correctness matrix (concurrency is a
+  true shared cap under `CONCURRENCY_BACKEND=redis`; **per-principal quota is
+  still per-replica** until item 50 phase 2 — effective budget multiplies by
+  replica count; config-governance and persisted audit are per-replica unless
+  deliberately shared), the zero-downtime config-reload contract, multi-zone and
+  active/active-or-passive multi-region topology, a backup/restore procedure
+  (Git-as-config-backup, governance PVC snapshot, audit-via-log-aggregator), and
+  reference RTO (≈ minutes) / RPO (≈ zero for config) targets, plus a failover
+  drill checklist for the one step only the operator can run.
+- Cross-links from `deploy/README.md` and `deploy/runbook.md`; GO_TO_MARKET
+  claims reconciled (HA/DR deployment now "safe to claim now" with the quota and
+  live-drill caveats; only an enterprise *SLA* remains "do not claim").
+
+**Tests.** `tests/unit/test_helm_ha_deployment.py` renders the actual chart with
+`helm template` and asserts the invariants are real properties of the manifests,
+not prose: zero-downtime strategy, a change-sensitive config checksum (proving a
+config edit actually rolls the pods), the HA overlay's PDB + zone spread + Redis
+concurrency, and the governance PVC being RWX and opt-in. Skips cleanly where
+`helm` is absent; CI images that ship helm exercise it for real.
+
+**Honest remainder (operator-run, by design).** A live multi-zone/multi-region
+failover *drill* against a real cluster is the operator's step — HA_DR.md §5 is
+its checklist. Everything code/chart/doc-preparable is done and tested here.
+
 ### 59. Read-only behavioral anomaly surfacing on the audit stream ✅ DONE
 
 **Phase 1 (detection engine + admin REST API) ✅ DONE. Phase 2 (surface the
