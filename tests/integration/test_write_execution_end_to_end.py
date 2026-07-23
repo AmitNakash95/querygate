@@ -430,3 +430,170 @@ async def test_over_cap_snapshot_is_skipped_not_unbounded(sqlite_app):
         assert resp.status_code == 200, resp.text
         assert resp.json()["affected_rows"] > 1
         assert resp.json()["compensation_id"] is None  # over the snapshot cap -> not captured
+
+
+# --------------------------------------------------------------------------- #
+# Reversibility hardening regressions (item 93 phase 3a self-review fixes)     #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_approved_write_undo_needs_no_token(sqlite_app, monkeypatch):
+    monkeypatch.setattr(we.app_config, "approval_token_hmac_key", _KEY)
+    _enable_writes(require_approval_over_rows=0, compensation_enabled=True)
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        before = await _orders(client)
+        target = before[0]["id"]
+        # The forward UPDATE trips the gate; approve it with a token.
+        from querygate.write_ast.models import UpdateStatement
+
+        stmt = {
+            "op": "update",
+            "table": "orders",
+            "set": {"status": "approved-change"},
+            "where": {"col": "orders.id", "op": "eq", "value": target},
+        }
+        fp = write_fingerprint(UpdateStatement(**stmt))
+        token = issue_approval_token(fingerprint=fp, approver_subject="human", key=_KEY)
+        upd = await client.post(
+            "/api/v1/demo/write/execute", json=stmt, headers={"X-QueryGate-Approval": token}
+        )
+        assert upd.status_code == 200, upd.text
+        cid = upd.json()["compensation_id"]
+        assert cid
+
+        # Undo needs NO approval token even though the forward write did.
+        undo = await client.post("/api/v1/demo/write/undo", json={"compensation_id": cid})
+        assert undo.status_code == 200, undo.text
+        after = await _orders(client)
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_update_undo_restores_only_changed_columns(sqlite_app):
+    # Concern 3: undo of an UPDATE that changed `status` must NOT clobber a
+    # concurrent change to `customer_id` (a column the original write never set).
+    _enable_writes(compensation_enabled=True)
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        target = (await _orders(client))[0]["id"]
+
+        changed = await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "update",
+                "table": "orders",
+                "set": {"status": "s-changed"},
+                "where": {"col": "orders.id", "op": "eq", "value": target},
+            },
+        )
+        cid = changed.json()["compensation_id"]
+
+        # A separate change to a DIFFERENT column on the same row.
+        await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "update",
+                "table": "orders",
+                "set": {"customer_id": 3},
+                "where": {"col": "orders.id", "op": "eq", "value": target},
+            },
+        )
+
+        undo = await client.post("/api/v1/demo/write/undo", json={"compensation_id": cid})
+        assert undo.status_code == 200, undo.text
+
+        row = await client.post(
+            "/api/v1/demo/query",
+            json={
+                "from": "orders",
+                "select": ["orders.id", "orders.status", "orders.customer_id"],
+                "where": {"col": "orders.id", "op": "eq", "value": target},
+            },
+        )
+    body = row.json()["rows"][0]
+    assert body["status"] != "s-changed"  # status restored
+    assert body["customer_id"] == 3  # the untouched-by-the-write column is preserved
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_undo_is_atomic_and_not_consumed_on_failure(sqlite_app):
+    # Concern 1: if the undo can't fully apply (here, the re-insert exceeds a
+    # now-lower cap), it reverses NOTHING and the record stays usable.
+    _enable_writes(max_affected_rows=100000, compensation_enabled=True)
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        pending = await _row_ids_with_status(client, "pending")
+        assert len(pending) >= 2
+        deleted = await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "delete",
+                "table": "orders",
+                "where": {"col": "orders.status", "op": "eq", "value": "pending"},
+            },
+        )
+        cid = deleted.json()["compensation_id"]
+        assert await _row_ids_with_status(client, "pending") == set()
+
+        # Tighten the cap below the number of rows the undo must re-insert.
+        _enable_writes(max_affected_rows=1, compensation_enabled=True)
+        failed = await client.post("/api/v1/demo/write/undo", json={"compensation_id": cid})
+        assert failed.status_code == 422  # over cap -> rejected
+        assert await _row_ids_with_status(client, "pending") == set()  # nothing re-inserted
+
+        # The record was NOT consumed by the failed undo — restoring the cap works.
+        _enable_writes(max_affected_rows=100000, compensation_enabled=True)
+        ok = await client.post("/api/v1/demo/write/undo", json={"compensation_id": cid})
+        assert ok.status_code == 200, ok.text
+        assert await _row_ids_with_status(client, "pending") == pending
+
+
+@pytest.mark.asyncio
+async def test_undo_does_not_create_a_redo_record(sqlite_app):
+    # Concern 6c: an undo's own inverse writes must not spawn orphaned
+    # compensation records.
+    from querygate.execution.compensation import get_compensation_store
+
+    _enable_writes(compensation_enabled=True)
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        target = (await _orders(client))[0]["id"]
+        upd = await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "update",
+                "table": "orders",
+                "set": {"status": "x"},
+                "where": {"col": "orders.id", "op": "eq", "value": target},
+            },
+        )
+        cid = upd.json()["compensation_id"]
+        record_count_before = len(get_compensation_store()._records)
+        await client.post("/api/v1/demo/write/undo", json={"compensation_id": cid})
+    # No new record was minted by the undo (still just the original).
+    assert len(get_compensation_store()._records) == record_count_before
+
+
+@pytest.mark.asyncio
+async def test_auto_generated_pk_insert_is_not_undoable(sqlite_app):
+    # Concern 5: an INSERT that omits its (auto) PK returns compensation_id=None,
+    # a caller-visible signal that it can't be undone.
+    _enable_writes(compensation_enabled=True)
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/demo/write/execute",
+            json={
+                "op": "insert",
+                "table": "orders",
+                # No "id" -> SQLite assigns the rowid; the key isn't known here.
+                "rows": [
+                    {
+                        "customer_id": 1,
+                        "status": "auto-pk",
+                        "total_amount": 5,
+                        "created_at": "2026-01-01T00:00:00",
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["compensation_id"] is None  # not undoable, and the caller can see it

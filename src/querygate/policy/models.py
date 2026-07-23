@@ -173,7 +173,12 @@ class WritePolicy(pyd.BaseModel):
     # pipeline. Off by default. `max_compensation_rows` caps the snapshot (a write
     # affecting more is executed WITHOUT a compensation record rather than
     # snapshotting an unbounded set); the record expires after
-    # `compensation_ttl_seconds`.
+    # `compensation_ttl_seconds`. Two caller-visible limits: (a) an INSERT with a
+    # server-generated PK returns compensation_id=null (not undoable — supply the
+    # PK to make it reversible); (b) the store is process-local, so undo needs
+    # single-replica or session affinity (see deploy/HA_DR.md). Keep
+    # `max_compensation_rows` <= `max_affected_rows` so an undo can't exceed the
+    # write cap.
     compensation_enabled: bool = False
     max_compensation_rows: int = pyd.Field(default=100, ge=1)
     compensation_ttl_seconds: int = pyd.Field(default=3600, ge=1)

@@ -11,8 +11,18 @@ redact), so it is a distinct, short-lived, access-controlled store — the
 redaction-safe audit stream carries only the `compensation_id` + counts. Records
 are bounded (a write over `max_compensation_rows` is executed *without* a
 compensation record rather than snapshotting an unbounded set) and expire after
-a TTL. The default store is in-process; the `CompensationStore` protocol leaves
-room for a durable backend later, mirroring the audit-sink pattern.
+a TTL.
+
+**Single-process limitation (loud, by design in phase 3a).** The default store is
+**process-local**: a `compensation_id` minted in one worker/replica is invisible
+to another, so `POST /write/undo` only succeeds on the same process that made the
+write. Under more than one replica, undo therefore needs session affinity to that
+replica, exactly like the per-replica audit ledger (see `deploy/HA_DR.md`). The
+`CompensationStore` protocol is the seam for a durable cross-replica backend
+(phase 3b), mirroring how `ConcurrencyLimiter`/quota gained a Redis variant — but
+that also has to treat the pre-image values as sensitive at rest, so it is its own
+piece of work, not a silent default. Until then: keep reversibility to
+single-replica or affinity-routed deployments, or treat undo as best-effort.
 """
 
 from __future__ import annotations
@@ -36,6 +46,10 @@ class CompensationRecord:
     pk_column: str
     pre_image: List[Dict[str, Any]] = field(default_factory=list)
     inserted_keys: List[Any] = field(default_factory=list)
+    # For UPDATE: exactly the columns the original write changed (its `set`
+    # keys). Undo restores *only* these — never columns the write never touched —
+    # so an undo's blast radius never exceeds the change it reverses.
+    changed_columns: List[str] = field(default_factory=list)
     expires_at: float = 0.0
     consumed: bool = False
 
