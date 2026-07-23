@@ -4269,3 +4269,54 @@ receipt *at the query layer*. Combined with item 90 this is the "prove to your
 auditor exactly what every agent did, on whose behalf, under which policy, and
 that the record is intact" artifact — the literal buying question for the
 fintech/healthcare ICP.
+
+### 96. Unify the AST reference-walk into a single canonical visitor (enforcement hardening) ✅ DONE
+
+**Effort: M. Priority: high (robustness/proof; pure refactor, no behavior
+change). Depends on: nothing. Blocks: item 97.**
+
+**Why it mattered.** The knowledge "every place in a `StructuredQuery` where a
+table/column reference can appear" was duplicated across four independently
+hand-maintained walks: `validation/policy_validation.py`'s `_iter_column_refs`,
+`_non_projection_column_refs` (whose own docstring admitted it was
+"`_iter_column_refs` minus the bare-`str` select branch" — a near-verbatim copy
+kept in lockstep by hand), and `_collect_referenced_tables`, plus
+`validation/schema_validation.py`'s own separate `for join…`/`for item…`
+enumerations and `_collect_tables_from_where`. Every time the AST grew a field,
+each walk had to be taught the new position or a policy/schema hole opened
+silently in whichever one was forgotten.
+
+**What shipped.**
+
+- `validation/schema_validation.py` now defines the single canonical reference
+  visitor: `iter_column_refs(query) -> Iterator[ColumnRef]`, where
+  `ColumnRef = (position: RefPosition, ref: str)`. `RefPosition` is a 10-value
+  enum (`SELECT_PROJECTION_BARE`, `SELECT_NESTED`, `JOIN_ON`, `JOIN_EXTRA_ON`,
+  `WHERE`, `GROUP_BY`, `HAVING`, `ORDER_BY`, `TOP_N_PARTITION`, `TOP_N_ORDER`) —
+  rich enough to preserve the one distinction enforcement branches on: a *bare*
+  top-level select projection is the sole position a masked column (item 49) may
+  appear. The single WHERE-tree recursion (`_where_column_refs`) is the visitor's
+  only caller.
+- **policy_validation.py** deleted `_iter_column_refs`,
+  `_non_projection_column_refs`, `_collect_referenced_tables`, and its own
+  `_where_column_refs`. `referenced_tables` now folds from/join structural tables
+  with `iter_column_refs`; `validate_policy` walks the visitor once and feeds
+  both the table/column allow-deny checks and the masked-column rule (the latter
+  by filtering `position is RefPosition.SELECT_PROJECTION_BARE`). The
+  predicate-axis walk `_iter_where_predicates` (for count/in-list caps, not
+  references) deliberately stayed — a different axis.
+- **schema_validation.py**'s `validate_schema` replaced its six inline
+  per-position table-collection loops (and `_collect_tables_from_where`) with a
+  single `for column_ref in iter_column_refs(query)`.
+
+**Zero behavior change**, as required: the full suite (1402 passed), the
+adversarial `make test-security` suite, and `test_credential_redaction.py` all
+pass unchanged; no new caller surface, no AST change, no policy-semantics change.
+`tests/unit/test_reference_visitor.py` (new) pins the position taxonomy and the
+exact reference set per position, plus the alias→physical mapping and the
+item-49 exemption, so a future AST reference position must be taught in the one
+visitor (and this test) rather than in N forgotten copies — which is precisely
+what makes item 97's bounded nested subqueries safe to add by construction.
+
+**Hard boundaries honored.** Not a rewrite of policy semantics, not a change to
+any cap or allow/deny rule, not a new AST field.
