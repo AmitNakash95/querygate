@@ -35,6 +35,7 @@ from typing import List, Optional
 
 import pydantic as pyd
 import sqlalchemy as sa
+from sqlalchemy.exc import DataError, IntegrityError, StatementError
 
 from querygate.audit.events import AuditSurface
 from querygate.audit.logger import audit_query
@@ -167,7 +168,20 @@ class WriteExecutionService:
             # Human-in-the-loop approval on the write, before it mutates anything.
             self._enforce_write_approval_gate(statement, affected, write_policy, approval_token)
 
-            result = await session.execute(dml)
+            try:
+                result = await session.execute(dml)
+            except (IntegrityError, DataError, StatementError) as exc:
+                # A constraint (NOT NULL / FK / unique), a bad value type, or a
+                # bind error is the caller's fault, not a server fault — turn the
+                # opaque driver error into a clean, typed 4xx and roll back (the
+                # raise propagates to session_scope). The safe message names the
+                # *class* of problem without echoing raw driver/schema text, so
+                # neither the response nor the audit leaks internals.
+                raise QueryValidationError(
+                    "the write violates a database constraint or value type "
+                    "(not-null, foreign key, unique, or a mistyped value) and was "
+                    "rolled back — nothing was committed"
+                ) from exc
             # Belt-and-suspenders: the statement's own rowcount must also be within
             # cap, so a race between the count and the mutation can't over-write.
             actual = (

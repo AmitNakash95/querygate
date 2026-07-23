@@ -58,6 +58,28 @@ async def validate_write_schema(
     for column in written:
         resolve_column(table, column)  # raises QueryValidationError if missing
 
+    # For an INSERT, a NOT NULL column with no default that the row omits would
+    # fail at the database as an opaque IntegrityError — catch it here as a clean,
+    # precise validation error instead. Auto-generated primary keys are exempt
+    # (the DB fills them), so this flags the real "you forgot a required field"
+    # case (a NOT NULL FK/business column) without false-positiving on a surrogate
+    # id column.
+    if isinstance(statement, InsertStatement):
+        provided = set(statement.rows[0].keys())
+        missing = sorted(
+            col.name
+            for col in table.columns
+            if not col.nullable
+            and col.default is None
+            and col.server_default is None
+            and not col.primary_key
+            and col.name not in provided
+        )
+        if missing:
+            raise QueryValidationError(
+                f"INSERT into {table.name!r} is missing required column(s): {', '.join(missing)}"
+            )
+
     # WHERE refs must exist AND must reference the single target table (a write
     # is single-table in Phase 1 — no correlated/other-table refs).
     where = getattr(statement, "where", None)
