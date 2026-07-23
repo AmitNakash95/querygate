@@ -559,6 +559,57 @@ designer, which already composed a validated `Policy` layer into the draft the
 same way; item 87 brought that "form instead of YAML" ergonomics to templates,
 the one config document that still lacked it.
 
+### Governed Writes (the write pipeline)
+
+Governed writes (TODO.md item 93) extend the same spine to **mutations** —
+INSERT / UPDATE / DELETE — without ever crossing the core invariant: a write is a
+**typed AST**, never a raw-DML string. `write_ast/` mirrors `query_ast/`
+(`InsertStatement`/`UpdateStatement`/`DeleteStatement`, discriminated on `op`),
+an UPDATE/DELETE **structurally requires** a WHERE (an unqualified one cannot be
+expressed), and set-values and predicates reuse the read AST — so an injected
+value can only ever land in a bound parameter. A write flows through the write
+siblings of every read stage: `validate_write_policy` → `validate_write_schema` →
+`compile_write` (SQLAlchemy Core `insert()/update()/delete()`) → execute → audit.
+
+- **WritePolicy is deny-by-default.** Writes are off unless enabled, and then only
+  for allowed tables/operations, with a `max_affected_rows` cap and per-column
+  write allow/deny (separate from read allow/deny). A default deployment cannot
+  write at all.
+- **Preview, and the old→new diff.** `POST /{connection}/write/preview` validates,
+  compiles, and reports the affected-row count + parameterized SQL, all without
+  mutating. `?include_diff=true` adds the killer feature: the bounded, old→new row
+  diff of exactly what would change — computed by running the DML in a
+  **rolled-back** transaction. The diff is the one write surface that returns row
+  values, so it is bounded (`max_diff_rows`), masking-aware (a read-masked column
+  is redacted), and never audited.
+- **Gated execution.** `POST /{connection}/write/execute` commits in a single
+  transaction: it counts matched rows *in that transaction*, aborts before
+  mutating if over the cap (and re-checks the statement's own rowcount so a race
+  can't over-write), runs the item-92 approval gate on the row count (REST token
+  or MCP elicitation), and rolls the whole thing back on any error — never a
+  partial write. A constraint/type violation surfaces as a clean typed 4xx, not a
+  500 or a raw-driver leak.
+- **Reversibility (undo).** With `compensation_enabled`, a write captures a
+  bounded pre-image into a QueryGate-owned store (not an operational-DB shadow
+  table) and returns a `compensation_id`; `POST /{connection}/write/undo`
+  re-applies the inverse **through the governed pipeline** in one atomic
+  transaction, restoring only the columns the write changed. Bounded, single-use,
+  TTL'd. Known limits (documented, caller-visible): the store is process-local
+  (undo needs single-replica/affinity — see the HA/DR matrix), and an INSERT with
+  a server-generated PK returns `compensation_id=null` (not undoable).
+- **Both transports, no raw field on either.** REST routes above, plus the MCP
+  `run_structured_writes` tool (`mode=preview|execute`, batch, `include_diff`,
+  in-session elicitation approval). Audit is redaction-safe, dual-identity (item
+  90), tamper-evident (item 91): op/table/affected-count only, never a value.
+
+The claim is deliberately **governed** writes — *bounded, previewed, approved,
+attributed, reversible* — never "safe autonomous writes." What's guaranteed by
+construction (no raw DML, every target policy-checked, no unqualified
+UPDATE/DELETE, bounded rows) eliminates the catastrophic-shape class; the residual
+("did the agent intend *this* change") is what preview + approval + undo make
+reviewable and reversible. See the Decision Log for the storage choice, the
+approval/undo authorization model, and the honest bounded limits.
+
 ## Security Model
 
 The [Core Request Pipeline](#the-core-request-pipeline) section explains what
