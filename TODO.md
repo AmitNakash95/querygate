@@ -2016,7 +2016,20 @@ is a validated structure, exactly as a read is), the catalog stays descriptive,
 audit stays redaction-safe. The `roadmap-next` automation must **not** auto-start
 it; a human decides first.
 
-### 93. Governed Writes — structured, bounded, previewable, reversible agent mutations ✅ DONE (phase 1 — contract + dry-run preview; phase 2a — gated execution; phase 2b — diff preview + security suite + clean errors + MCP tool + real-Postgres + load gate; phase 3a — bounded reversibility/undo); phase 2b tail (release-smoke write) + phase 3b not started
+### 93. Governed Writes — structured, bounded, previewable, reversible agent mutations ✅ DONE (phases 1–3b) — only two reasoned deferrals remain
+
+**Comprehensively shipped:** the write sibling of the read pipeline for all four
+operations (INSERT/UPDATE/DELETE/UPSERT), *bounded* (deny-by-default, mandatory
+WHERE, in-txn cap, atomic — single or all-or-nothing batch), *previewed* (dry-run
++ bounded masking-aware old→new diff), *approved* (REST token + MCP elicitation),
+*attributed* (dual-identity, tamper-evident, redaction-safe audit), and
+*reversible* (bounded undo — atomic, changed-columns-only, optimistic-concurrency,
+serial-PK via RETURNING, durable cross-replica Redis store). REST + MCP surfaces,
+clean typed errors, an adversarial security suite, and proven on **SQLite +
+real Postgres + real MSSQL + the shipped image + a concurrency load gate**. Only
+two **reasoned deferrals** remain (not "not started" — deliberate, recorded):
+upsert-undo (per-row insert-or-update is ambiguous to reverse) and
+approval-binds-to-diff-hash (over-engineering vs the current fingerprint binding).
 
 **Phase 2a shipped (gated write EXECUTION, REST; maintainer-approved, Decision
 Log recorded).** `execution/write_execution.py`'s `WriteExecutionService.execute()`
