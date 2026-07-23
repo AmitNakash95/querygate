@@ -2101,6 +2101,27 @@ cross-replica compensation store, RETURNING capture for serial-PK inserts,
 optimistic-concurrency undo, upserts, multi-statement batch atomicity, MSSQL
 execution parity, MCP undo parity, approval-binds-to-diff-hash.
 
+**2026-07-23 review finding — in-flight regression on `compensation.py`, FIXED.**
+A working-tree edit converted `CompensationStore.put/get/consume` to
+`async def` (prep for the Redis-backed durable store above), but
+`execution/write_execution.py`'s three call sites
+(`get_compensation_store().get(...)` line ~207, `.consume(...)` line ~217,
+`.put(...)` line ~427) were not yet updated to `await` them when the review
+found this — `get()` returned an un-awaited coroutine so `record.connection_id`
+raised `AttributeError`, and `put()`'s coroutine was silently discarded (never
+stored); undo did not work at all in a single process, not just across
+replicas. **Fixed:** all three call sites now `await` the store, and
+`tests/unit/test_write_execution.py::test_compensation_store_ttl_and_single_use`
+(which itself called the now-async store synchronously) was converted to
+`async def` with matching `await`s. Re-verified: `pytest -m unit` → 230
+passed, 0 failed. **Still open, separate from the above:**
+`InMemoryCompensationStore.consume()` only sets `record.consumed = True` and
+never removes the entry from `self._records` — every governed write with
+`compensation_enabled` leaks one record for the life of the process even after
+TTL expiry, since `get()` filters expired/consumed records out of *reads* but
+nothing ever evicts them from the dict. Fix this eviction gap before building
+the Redis-backed store.
+
 **Phase 1 shipped (maintainer-approved; Decision Log recorded).** The write
 sibling of the read pipeline, preview-only — **no code path executes or commits
 a write.** `write_ast/models.py`: `InsertStatement`/`UpdateStatement`/
@@ -2468,3 +2489,300 @@ never a raw-SQL string.
 correlated/cross-connection/over-depth all rejected with clear errors; caps
 proven to apply tree-wide by adversarial tests; Decision Log entry recorded.
 No raw-SQL surface, no non-goal crossed.
+
+---
+
+## Flagship pillar — Expressive Query Engine (items 99–106)
+
+Items 99–106 are one coordinated initiative: take the READ structured query
+engine to 10/10 expressiveness for a fluent SQL author **without weakening any
+safety invariant** — the deepening of the North Star **Structural** pillar (the
+"no raw SQL, ever" bet only wins if the AST rarely walls off a real SQL author).
+The deep, authoritative design/test/validation spec lives in
+**[docs/ENGINE_EXPRESSIVENESS_PLAN.md](docs/ENGINE_EXPRESSIVENESS_PLAN.md)** — each
+item below is scoped there (§4) with its AST shape, compiler seam, validation
+wiring, caps, dialect handling, adversarial cases, and per-item Definition of
+Done. Build them in the order 99 → 106; the plan's §3 checklist and §5 canonical
+regression bar are mandatory acceptance gates for every item.
+
+The unifying safety rule (plan §1, §3): **every new node must be wired into the
+canonical reference visitor (item 96) or its column refs bypass policy allow/deny
++ masking**, and **every new cost-bearing count must be capped summed tree-wide
+(item 97)**. Reject-don't-emulate (item 74) governs all per-dialect gaps.
+
+### 99. Query engine: `HAVING` as `WhereNode` + searched `CASE` condition
+
+OR-logic over aggregate conditions (`HAVING SUM(x) > 10 OR COUNT(*) < 3`) and
+multi-condition CASE branches (`CASE WHEN a > 0 AND b < 5 THEN …`). Change
+`StructuredQuery.having: List[Predicate]` → `Optional[WhereNode]` and
+`CaseWhen.when: Predicate` → `WhereNode`, reusing the existing (already-safe)
+`_compile_where` / `where_depth` / visitor machinery; bounded by existing
+`max_where_depth` / `max_where_predicates` / `max_case_branches`. The low-risk
+warm-up that proves the visitor/cap-expansion pattern before the substrate lands.
+
+**Effort: S. Priority: high (flagship pillar; cheap first step). Depends on:
+item 96.** Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 0.**
+
+### 100. Query engine: bounded scalar `Expression` substrate ★
+
+The centerpiece. Introduce one **closed, depth-capped** recursive `Expression`
+union (column | literal | binary-op `+ - * /` | function-call with nesting | CASE)
+used everywhere a scalar value is expected, and give aggregates an `Expression`
+argument. Unlocks — in one item — arithmetic (`quantity * unit_price`), conditional
+aggregation (`SUM(CASE WHEN status='paid' THEN amount END)`), nested functions
+(`lower(trim(x))`), expression-valued CASE, computed group/order keys, and a batch
+of scalar fns (`cast`/`round`/`floor`/`ceil`/`abs`/`substring`/`nullif`/`replace`).
+Arithmetic + conditional aggregation are deliberately ONE item (shared substrate) —
+do not split. New caps `max_expression_depth` / `max_expression_nodes` summed
+tree-wide; guarded division; visitor recursion into every `Expression` is the
+make-or-break safety step.
+
+**Effort: XL. Priority: high (flagship pillar; highest expressiveness unlock).
+Depends on: items 96, 99. Requires a recorded Decision Log entry in
+`docs/PRODUCT_GUIDE.md` before build** — the bounded-vs-open-ended-grammar boundary
+(non-goal #7) and division semantics (plan §8, entries 1–2). Full spec +
+acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 1.**
+
+### 101. Query engine: general window functions (`WindowSelectItem`) ★
+
+Generalize windowing beyond `top_n`'s rank-and-filter: a first-class
+`WindowSelectItem` for `SUM/AVG/… OVER`, `LAG/LEAD/NTILE/FIRST_VALUE/LAST_VALUE`,
+with `PARTITION BY`, `ORDER BY`, and `ROWS/RANGE` frames — unlocking running
+totals, moving averages, percent-of-total (with item 100), gap/island analysis.
+Reuses `_apply_top_n`'s subquery-materialization insight (OVER can't reference a
+peer SELECT alias). New cap `max_window_specs` + a frame bound; window `arg` reuses
+item 100's `Expression`. Assert each fn/frame **runs** on real Postgres AND MSSQL
+(the "renders fine, breaks live" trap — items 75/82), reject-don't-emulate where a
+dialect genuinely lacks a form.
+
+**Effort: L. Priority: high (flagship pillar; second expressiveness pillar).
+Depends on: items 96; 100 for windowed expressions. Requires a Decision Log entry
+(default frame + unbounded-frame cap; plan §8 entry 3) before build.** Full spec +
+acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 2.**
+
+### 102. Query engine: `EXTRACT`/date_part + relative-date/interval helpers
+
+`EXTRACT(dow/hour/year …)` and native relative-date filtering
+(`created_at > now() - interval '7 days'`) so an agent needn't hand-compute a
+timestamp literal. Extends item 100's `FunctionExpr`; interval magnitude is a
+**capped** literal (`max_interval_days`), not free. Per-dialect `DialectAdapter`
+methods (`EXTRACT` vs `DATEPART`, `now()` vs `SYSUTCDATETIME`, `- interval` vs
+`DATEADD`). Note in docs that relative-date filtering is already composable today
+via a computed literal — this is native convenience, prioritized accordingly.
+
+**Effort: M. Priority: medium (flagship pillar; high everyday value). Depends on:
+item 100. Requires a Decision Log entry (interval cap + timezone semantics; plan §8
+entry 4).** Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 3a.**
+
+### 103. Query engine: non-equi/range joins + FULL OUTER / CROSS
+
+Generalize `JoinSpec` from equality-pairs to an optional `condition: WhereNode`
+(range/temporal joins, e.g. `ON price BETWEEN band.lo AND band.hi`), keeping the
+equality `on` form as sugar; add `"full"` and `"cross"` `JoinType`s. `CROSS`
+(cartesian) is a cost lever — gate behind a policy flag (`allow_cross_join`,
+default off) + row cap. Non-equi conditions count as join predicates in the caps.
+
+**Effort: M. Priority: medium (flagship pillar). Depends on: items 96, 99 (WhereNode
+join condition). Requires a Decision Log entry (CROSS gating; plan §8 entry 5).**
+Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 3b.**
+
+### 104. Query engine: set operations (UNION / INTERSECT / EXCEPT)
+
+A new top-level shape wrapping N `StructuredQuery` arms + op + `all: bool`, with
+matching select arity. A new **scope container**: extend `iter_query_scopes` so each
+arm is validated as its own scope (mirror item 97 exactly), all caps summed across
+arms, and mandatory row filters + k-anon min-group applied to every arm (a set op
+must not be a channel to dodge a per-table filter). New cap `max_set_op_arms`.
+
+**Effort: L. Priority: medium (flagship pillar). Depends on: items 96, 97. Requires
+a recorded Decision Log entry before build.** Full spec + acceptance:
+**ENGINE_EXPRESSIVENESS_PLAN.md Phase 4a.**
+
+### 105. Query engine: CTE / derived table in FROM (non-recursive)
+
+Allow `from`/`JoinSpec.table` to be a named subquery (a `StructuredQuery` + alias)
+in addition to a physical table — enabling aggregate-then-join / dedup-then-rank in
+one statement. Generalizes item 97's `subquery_tables` plumbing and
+`effective_name_map`; new cap `max_cte_count` + reuse `max_subquery_depth`. A CTE
+must not become a channel to reach a denied table, dodge a mandatory row filter, or
+surface a masked column as a non-projection input. **Recursive CTE is explicitly
+OUT of scope** (unbounded recursion = DoS) pending a separately-recorded hard
+iteration cap.
+
+**Effort: XL. Priority: medium (flagship pillar). Depends on: items 96, 97, 104.
+Requires a recorded Decision Log entry before build.** Full spec + acceptance:
+**ENGINE_EXPRESSIVENESS_PLAN.md Phase 4b.**
+
+### 106. Query engine: correlated / EXISTS / scalar subqueries
+
+`EXISTS`/`NOT EXISTS`, correlated subqueries, and scalar subqueries
+(`= (SELECT …)`, subquery in SELECT/HAVING). Highest-risk item: it breaks the
+**uncorrelated** assumption the entire current subquery layer rests on (item 97's
+`_compile_in_subquery` resolves against the subquery's own tables only).
+Correlation must be limited to a **declared, capped** set of outer refs so the
+visitor can enforce policy/masking on them against the outer scope; scalar-subquery
+arity enforced; depth/count caps stay summed tree-wide. Note: scalar-aggregate
+comparison is often achievable today via two round-trips — document that recipe.
+
+**Effort: XL. Priority: medium-low (flagship pillar; do last — largest safety
+surface). Depends on: items 96, 97, 105. Requires a recorded Decision Log entry in
+`docs/PRODUCT_GUIDE.md` before build** (correlation scope model; plan §8 entry 7).
+Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 5.**
+
+---
+
+## Findings from the 2026-07-23 technical/product review
+
+Items 107–113 came out of a full-repo due-diligence pass (see
+`TECHNICAL_REVIEW.md` for the full write-up and evidence). Item 93's own
+compensation-store regression is tracked inline in item 93's Phase 3b note
+above, not here, since it's the same feature. These are otherwise-solid,
+narrowly-scoped fixes/hardenings the review surfaced — not a restatement of
+already-tracked open work.
+
+### 107. Batch query execution double-reserves quota on an approval retry
+
+`StructuredQueryService._execute_batch_item`
+(`execution/service.py:718-753`) calls `self.execute()` a first time, and
+`execute()` reserves the per-principal query quota
+(`enforce_query_quota`, `execution/service.py:522`) *before* the item-92
+approval gate runs later in the same call. When the first attempt raises
+`ApprovalRequiredError` and an `approval_resolver` (MCP elicitation) obtains a
+token, `_execute_batch_item` retries by calling `self.execute()` a *second*
+time — reserving and recording quota again for what is logically one
+approved query. A principal running interactive-approval batches over MCP
+sees roughly double the quota consumption of an equivalent non-approval
+workload, silently halving effective throughput. Not covered by
+`test_admission.py`, `test_query_quota.py`, `test_approval.py`, or
+`test_mcp_elicitation_approval.py` — none exercise a quota assertion across
+the approval-retry path specifically.
+
+**Fix:** thread the already-obtained `quota_reservation` (or a "quota already
+reserved for this fingerprint" flag) through the retry call so the second
+`execute()` doesn't re-reserve, and add a test asserting exactly one quota
+unit is consumed across an approval-required-then-retried batch item.
+
+**Effort: S. Priority: medium (real throughput bug, narrow blast radius).
+Depends on: none.**
+
+### 108. Write-preview diff runs the full DML before the affected-row cap is checked
+
+`WritePreviewService.preview()` (`execution/write_preview.py:106-152`) computes
+`affected` via a policy-checked `COUNT(*)`, but when `include_diff=True` it
+unconditionally calls `_mutation_diff`, which — for `UpdateStatement` — executes
+the *real* UPDATE (`await session.execute(dml)`, `write_preview.py:203`) inside
+the (later-rolled-back) transaction to compute an old→new diff, regardless of
+whether `affected` already exceeds `WritePolicy.max_affected_rows`. Only the
+*rows shown in the diff response* are capped by `max_diff_rows`
+(`write_preview.py:166,185`) — the actual row-locking UPDATE against every
+matching row still runs first. A caller can request `include_diff=true` against
+a broad WHERE clause to force a full-table UPDATE (row locks, WAL/redo
+activity, lock contention with concurrent writers) purely to preview a write
+that would be rejected outright as over-cap. No test exercises
+`include_diff=true` together with an over-`max_affected_rows` predicate.
+
+**Fix:** short-circuit `_mutation_diff` (return `within_affected_cap=False`,
+`diff=None` or a truncated/est.-only diff) when `affected > max_affected_rows`,
+before running the DML; add a regression test for an over-cap UPDATE preview
+with `include_diff=true`.
+
+**Effort: S. Priority: medium (resource-exhaustion / lock-contention risk on a
+preview-only endpoint). Depends on: none.**
+
+### 109. MCP `run_structured_writes` has no batch-size cap
+
+`mcp/tools/write.py` accepts an unbounded `writes: List[...]` with no
+equivalent of the read path's `validate_batch_size(len(queries), policy)`
+(`mcp/tools/query.py:128`, backed by `validation/policy_validation.py`).
+`WritePolicy` has no `max_batch_size`-style field at all. A caller can submit
+an arbitrarily large batch of individually-in-cap writes in a single MCP call,
+each running through the full validate→compile→execute pipeline sequentially —
+an easy way to multiply cost/lock-time per call well beyond what the read
+path allows for the same principal.
+
+**Fix:** add `WritePolicy.max_batch_size` (mirroring the read policy's cap) and
+enforce it in `write_policy_validation.py` before any statement in the batch is
+processed; test both the read-parity cap and the boundary case.
+
+**Effort: S. Priority: medium-high (write path currently has weaker sizing
+guardrails than the read path it was modeled on). Depends on: none.**
+
+### 110. `value_subquery` in a write's WHERE is validated at the wrong layer
+
+`UpdateStatement`/`DeleteStatement` reuse the read `WhereNode`, so a
+`Predicate.value_subquery` (item 97) is structurally legal there, but neither
+`write_policy_validation.py` nor `write_schema_validation.py` inspects it —
+it only fails later, inside `compiler/write_compiler.py`'s `_compile_where`,
+because the compiler always passes `ctx=None` for writes. This isn't
+currently exploitable (the compiler-level failure is safe), but it fails at
+the wrong layer with a compiler-internal error instead of a clean policy/
+schema-validation rejection, and it's a latent trap: a future write-compiler
+change that ever passes a non-`None` `ctx` (e.g. to support a write-side
+subquery feature) would silently reopen a bypass this layer was never built
+to check.
+
+**Fix:** explicitly reject `value_subquery` predicates in a write's WHERE at
+`write_policy_validation.py` (mirroring how the read side scopes subqueries),
+with a clear `QueryValidationError`, and add a regression test.
+
+**Effort: XS. Priority: low-medium (defense-in-depth / clear error, not a live
+bypass). Depends on: none.**
+
+### 111. Duplicated WHERE-predicate tree walk across four validators
+
+`validation/policy_validation.py`, `schema_validation.py`,
+`write_policy_validation.py`, and `write_schema_validation.py` each hand-roll
+their own recursive WHERE-boolean-tree enumerator, rather than sharing one
+implementation the way item 96 centralized column-ref walking into
+`iter_column_refs`. All four are correct today, but the read/write validator
+pairs could silently drift the next time `WhereNode` grows a new combinator
+(a new node type would need updating in four places, easy to miss one) — the
+exact class of bug item 96 was built to prevent for column refs.
+
+**Fix:** extract one shared WHERE-tree-walk helper (predicate iterator) used
+by all four validators, analogous to `iter_column_refs`; no behavior change,
+covered by the existing validator test suites passing unchanged.
+
+**Effort: S. Priority: low (maintainability/drift-prevention, not a live bug).
+Depends on: none.**
+
+### 112. No scheduled (cron) CI run — dependency/security scans only fire on push/PR
+
+`.github/workflows/ci.yml`'s only triggers are `push: branches: [main]` and
+`pull_request` — there is no `schedule:` trigger anywhere in
+`.github/workflows/`. SBOM/CVE audit, image scanning, secret scanning, and the
+adversarial/DAST suites therefore only run when someone happens to open a PR
+or push to `main`. A CVE disclosed against an already-merged, unchanged
+dependency isn't caught until the next incidental change touches the repo.
+Separately, `make test-soak` (`Makefile:112-115`, `SOAK_ROUNDS=100`) is never
+invoked by CI at all — only `make test-load`'s lighter `QUERYGATE_LOAD_ROUNDS=5`
+runs in the `postgres-live` job (`ci.yml:150-155`); a slow-degradation or
+pool-leak regression that only surfaces after dozens of rounds passes every PR
+and is caught only if a maintainer remembers to run `test-soak` manually
+before a release.
+
+**Fix:** add a nightly/weekly `schedule:` workflow that runs `dep-audit`-class
+checks (CVE/SBOM/lockfile drift) and `make test-soak` against `main`
+independent of code changes; document the cadence in `docs/RELEASING.md`.
+
+**Effort: S. Priority: medium (closes a real blind window between code
+changes, cheap to add). Depends on: none.**
+
+### 113. No metrics for the write-undo / compensation-store feature
+
+`metrics.py` instruments concurrency, quota, cost-estimation, and
+catalog-usage-signal buffering, but has no counter/gauge for compensation
+store put/get/consume or undo success/failure (`execution/compensation.py`,
+`execution/write_execution.py`). Once item 93's compensation-store regression
+(tracked inline under item 93 Phase 3b) is fixed, undo failures would still be
+invisible in Prometheus/Grafana — an operator has no signal that undo is
+failing silently for a class of writes until a customer reports it.
+
+**Fix:** add `querygate_compensation_records_total`,
+`querygate_undo_attempts_total{outcome=...}` (or equivalent) counters, wired
+the same way `execution/concurrency.py`'s metrics are; a lightweight unit test
+asserting the counter increments on undo success/failure.
+
+**Effort: XS. Priority: low (observability gap, not a correctness bug).
+Depends on: 93 phase 3b's compensation-store fix (to have something correct
+to measure).**

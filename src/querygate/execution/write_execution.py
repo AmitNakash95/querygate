@@ -204,7 +204,7 @@ class WriteExecutionService:
         enforces deny-by-default (writes must be enabled + the table writable),
         the affected-row cap, schema truth, and full audit — see the Decision Log.
         """
-        record = get_compensation_store().get(compensation_id)
+        record = await get_compensation_store().get(compensation_id)
         if record is None or record.connection_id != self._connection_id:
             raise QueryValidationError(
                 "unknown, expired, already-used, or wrong-connection compensation id"
@@ -214,7 +214,7 @@ class WriteExecutionService:
         except Exception as exc:
             self._audit_undo(record, affected_rows=None, rejected=True, error=exc)
             raise
-        get_compensation_store().consume(compensation_id)
+        await get_compensation_store().consume(compensation_id)
         self._audit_undo(record, affected_rows=total, rejected=False)
         return WriteResult(operation=f"undo_{record.op}", table=record.table, affected_rows=total)
 
@@ -424,7 +424,7 @@ class WriteExecutionService:
         # happen.
         compensation_id = None
         if pending_compensation is not None:
-            get_compensation_store().put(pending_compensation)
+            await get_compensation_store().put(pending_compensation)
             compensation_id = pending_compensation.compensation_id
         return actual, compensation_id
 
