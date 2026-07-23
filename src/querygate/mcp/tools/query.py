@@ -6,16 +6,84 @@ mcp/tools/connections.py for why.
 
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
+from mcp.server.fastmcp import Context
 from pydantic import BaseModel, Field
 
+from querygate.core.auth import Principal
+from querygate.core.config import AppConfig
+from querygate.core.exceptions import ApprovalRequiredError
+from querygate.core.logging import get_logger
 from querygate.execution.admission import QueueMode
-from querygate.execution.service import StructuredQueryService
-from querygate.mcp.auth import get_mcp_caller
+from querygate.execution.approval import issue_approval_token
+from querygate.execution.service import ApprovalResolver, StructuredQueryService
+from querygate.mcp.auth import get_mcp_caller, get_mcp_config
 from querygate.mcp.exceptions import MCPErrorResult, safe_mcp_tool
 from querygate.mcp.server import mcp_server
 from querygate.policy.loader import get_policy
 from querygate.query_ast.models import StructuredQuery
 from querygate.validation.policy_validation import validate_batch_size
+
+
+class _ApprovalElicitation(BaseModel):
+    """The one-field form an MCP client renders for an in-query approval step-up
+    (item 92). Primitive-only per the elicitation spec."""
+
+    approve: bool = Field(
+        default=False,
+        description=(
+            "Set true to approve this sensitive/expensive query for a single "
+            "execution. Leaving it false (or declining/cancelling) rejects it."
+        ),
+    )
+
+
+def _elicitation_resolver(
+    ctx: Context, caller: Principal, config: AppConfig
+) -> Optional[ApprovalResolver]:
+    """Build an `ApprovalResolver` that asks the MCP client's human to approve a
+    gated query via `Context.elicit`, minting a one-time token on approval.
+
+    Returns `None` (no interactive channel — stay fail-closed on the REST token
+    flow) unless the operator opted in *and* an approval-signing key is set. The
+    querying agent can never satisfy its own gate here: only a human answering
+    the elicitation can, and the minted token is bound to that exact query's
+    fingerprint, so it can't be reused for anything else.
+    """
+    if not config.mcp_elicitation_approval_enabled or not config.approval_token_hmac_key:
+        return None
+
+    async def _resolve(query: StructuredQuery, exc: ApprovalRequiredError) -> Optional[str]:
+        reasons = "; ".join(exc.reasons) if exc.reasons else "policy requires approval"
+        message = (
+            "This read needs human approval before it runs "
+            f"({reasons}). Approve this one-time execution?"
+        )
+        log = get_logger()
+        try:
+            result = await ctx.elicit(message=message, schema=_ApprovalElicitation)
+        except Exception:
+            # Client can't elicit (no interactive channel) — degrade to the
+            # fail-closed rejection rather than failing the whole batch item on
+            # a transport error.
+            log.info("approval.elicitation.unavailable", fingerprint=exc.fingerprint)
+            return None
+        approved = result.action == "accept" and getattr(result.data, "approve", False)
+        log.info(
+            "approval.elicitation.decision",
+            fingerprint=exc.fingerprint,
+            action=result.action,
+            approved=approved,
+        )
+        if not approved:
+            return None
+        return issue_approval_token(
+            fingerprint=exc.fingerprint,
+            approver_subject=f"mcp-elicitation:{caller.subject}",
+            key=config.approval_token_hmac_key,
+        )
+
+    return _resolve
+
 
 _CONNECTION_FIELD = Field(description="Connection id from list_connections.")
 _QUEUE_MODE_FIELD = Field(
@@ -120,6 +188,7 @@ async def run_structured_queries(
     ] = "execute",
     queue_mode: Annotated[Optional[QueueMode], _QUEUE_MODE_FIELD] = None,
     wait_timeout_seconds: Annotated[Optional[float], _WAIT_TIMEOUT_FIELD] = None,
+    ctx: Context = None,
 ) -> Union[BatchQueryToolResult, BatchExplainToolResult, MCPErrorResult]:
     caller = get_mcp_caller()
     validate_batch_size(len(queries), get_policy(connection, principal=caller))
@@ -129,8 +198,17 @@ async def run_structured_queries(
         return BatchExplainToolResult(
             results=[BatchExplainItemToolResult(**r.model_dump()) for r in explain_results]
         )
+    # In-query human-in-the-loop approval (item 92): if a query trips the gate,
+    # ask the client's human to approve it in-session via elicitation instead of
+    # the out-of-band REST token flow. Opt-in and off by default (see
+    # AppConfig.mcp_elicitation_approval_enabled); when off, resolver is None and
+    # a gated query stays fail-closed as that item's error.
+    resolver = _elicitation_resolver(ctx, caller, get_mcp_config()) if ctx is not None else None
     results = await service.execute_many(
-        queries, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
+        queries,
+        queue_mode=queue_mode,
+        wait_timeout_seconds=wait_timeout_seconds,
+        approval_resolver=resolver,
     )
     return BatchQueryToolResult(
         results=[BatchQueryItemToolResult(**r.model_dump()) for r in results]
