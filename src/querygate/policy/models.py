@@ -164,6 +164,13 @@ class Policy(pyd.BaseModel):
     max_select_columns: int = pyd.Field(default=30)
     max_where_depth: int = pyd.Field(default=5)
     max_group_by: int = pyd.Field(default=10)
+    # Bounds caller-authored subquery nesting (Predicate.value_subquery, an
+    # `IN (subquery)`; TODO.md item 97). Default 1 = at most one level of nesting.
+    # 0 disables nested subqueries entirely. All the count caps above
+    # (max_joins/max_select_columns/max_group_by/max_where_predicates/top_n) are
+    # additionally enforced SUMMED across the whole query tree, so nesting can
+    # never multiply the effective cap.
+    max_subquery_depth: int = pyd.Field(default=1, ge=0)
     max_limit: int = pyd.Field(default=100)
     max_limit_aggregate: int = pyd.Field(default=1000)
     default_limit: int = pyd.Field(default=50)

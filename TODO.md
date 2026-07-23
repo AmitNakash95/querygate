@@ -2440,7 +2440,35 @@ AST reference position is taught in one place. Makes item 97 safe by constructio
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 96).
 
-### 97. Bounded nested subqueries (uncorrelated, single-connection, depth-capped)
+### 97. Bounded nested subqueries (uncorrelated, single-connection, depth-capped) ✅ DONE (phase 1 — IN (subquery)); phase 2 (FROM (subquery) derived table) not started
+
+**Phase 1 shipped — `IN (subquery)` / `NOT IN (subquery)`:** `Predicate.value_subquery`
+is a nested `StructuredQuery` (recursive AST via `model_rebuild`), valid only for
+`in`/`not_in`, mutually exclusive with value/value_col, must select exactly one
+column. `Policy.max_subquery_depth` (default 1) bounds nesting. The single
+canonical scope-walker `schema_validation.iter_query_scopes` enumerates the outer
+query + every subquery as **independent scopes**; policy validation enforces the
+count caps (select/joins/group_by/where-predicates/top_n) **summed tree-wide**
+(so nesting can't multiply a cap — the core threat), plus per-scope column
+allow/deny + masking (a denied/masked column can't hide one level down), and
+rejects: over-depth, a masked column as the subquery's IN-output, and
+`value_subquery` outside a WHERE clause (HAVING/CASE rejected). Schema validation
+validates each subquery scope independently (a correlated reference to an outer
+table fails as undeclared-in-scope) and rejects cross-connection subqueries. The
+compiler renders `col.in_(subselect)` via the same compile path (so the subquery
+gets mandatory row filters + min-group guardrail), stripping the subquery LIMIT
+so IN membership is complete. Covered by `tests/security/test_subquery_boundary.py`
+(13 adversarial: cap-evasion-via-nesting per cap, denied/masked-in-subquery,
+correlated, cross-connection, over-depth, HAVING/CASE) + `tests/integration/
+test_subquery_end_to_end.py` (real-SQLite IN/NOT-IN match an equivalent join).
+Renders as standard SQL IN(subquery) on Postgres+MSSQL (no dialect-specific
+code); MSSQL execution parity is CI-validated. Decision Log entry recorded.
+
+**Phase 2 (not started):** `FROM (subquery)` — a derived table the outer query
+selects *from*. Additionally needs the outer query to resolve against the inner
+query's OUTPUT aliases (a virtual relation) without reaching past them into inner
+base tables; deferred as a distinct, harder slice. HAVING/CASE `IN (subquery)`
+also deferred.
 
 **Effort: L. Priority: medium (capability extension). Depends on: item 96.
 Requires a recorded Decision Log entry in `docs/PRODUCT_GUIDE.md` before build.**
