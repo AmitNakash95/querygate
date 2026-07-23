@@ -606,3 +606,59 @@ async def test_auto_generated_pk_insert_is_undoable_via_returning(sqlite_app):
         assert undo.status_code == 200, undo.text
         after = await _orders(client)
     assert after == before  # the auto-PK row is gone
+
+
+@pytest.mark.asyncio
+async def test_undo_through_redis_store_restores_full_row(sqlite_app):
+    # The durable cross-replica path (phase 3b): a compensation record round-trips
+    # through Redis (JSON) and the undo restores the full row — including the
+    # Decimal total_amount and datetime created_at, whose types the compiler
+    # re-coerces from their JSON strings.
+    import fakeredis.aioredis
+
+    from querygate.execution.compensation import init_compensation_store, reset_compensation_store
+    from querygate.execution.redis_compensation import RedisCompensationStore
+
+    init_compensation_store(RedisCompensationStore(fakeredis.aioredis.FakeRedis()))
+    _enable_writes(compensation_enabled=True)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL
+        ) as client:
+
+            async def _full_row(order_id):
+                r = await client.post(
+                    "/api/v1/demo/query",
+                    json={
+                        "from": "orders",
+                        "select": [
+                            "orders.id",
+                            "orders.status",
+                            "orders.total_amount",
+                            "orders.created_at",
+                        ],
+                        "where": {"col": "orders.id", "op": "eq", "value": order_id},
+                    },
+                )
+                rows = r.json()["rows"]
+                return rows[0] if rows else None
+
+            target = (await _orders(client))[0]["id"]
+            original = await _full_row(target)
+
+            deleted = await client.post(
+                "/api/v1/demo/write/execute",
+                json={
+                    "op": "delete",
+                    "table": "orders",
+                    "where": {"col": "orders.id", "op": "eq", "value": target},
+                },
+            )
+            cid = deleted.json()["compensation_id"]
+            assert cid and await _full_row(target) is None  # gone, record in Redis
+
+            undo = await client.post("/api/v1/demo/write/undo", json={"compensation_id": cid})
+            assert undo.status_code == 200, undo.text
+            assert await _full_row(target) == original  # full row restored via Redis
+    finally:
+        reset_compensation_store()

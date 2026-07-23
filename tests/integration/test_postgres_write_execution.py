@@ -145,10 +145,10 @@ async def test_over_cap_write_rolls_back_against_postgres():
 async def test_delete_then_undo_restores_rows_against_postgres():
     # Bounded reversibility (phase 3a) end-to-end on real Postgres: delete the
     # test row, then undo and confirm it is restored byte-identically.
-    from querygate.execution.compensation import get_compensation_store
+    from querygate.execution.compensation import reset_compensation_store
 
     _use_writable_policy(compensation_enabled=True)
-    get_compensation_store().clear()
+    reset_compensation_store()
     writer = WriteExecutionService("demo")
     reader = StructuredQueryService(connection_id="demo")
 

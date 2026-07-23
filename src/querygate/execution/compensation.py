@@ -14,15 +14,13 @@ compensation record rather than snapshotting an unbounded set) and expire after
 a TTL.
 
 **Single-process limitation (loud, by design in phase 3a).** The default store is
-**process-local**: a `compensation_id` minted in one worker/replica is invisible
-to another, so `POST /write/undo` only succeeds on the same process that made the
-write. Under more than one replica, undo therefore needs session affinity to that
-replica, exactly like the per-replica audit ledger (see `deploy/HA_DR.md`). The
-`CompensationStore` protocol is the seam for a durable cross-replica backend
-(phase 3b), mirroring how `ConcurrencyLimiter`/quota gained a Redis variant — but
-that also has to treat the pre-image values as sensitive at rest, so it is its own
-piece of work, not a silent default. Until then: keep reversibility to
-single-replica or affinity-routed deployments, or treat undo as best-effort.
+**process-local**, so a `compensation_id` minted in one worker/replica is
+invisible to another and `POST /write/undo` only succeeds on the same process.
+The cross-replica sibling `RedisCompensationStore` (phase 3b) fixes this: install
+it (automatic when `CONCURRENCY_BACKEND=redis`) and any replica resolves the id.
+The in-process default is for single-replica or affinity-routed deployments. The
+Redis backend treats the pre-image values as sensitive (secure the Redis; TTL
+bounds exposure; field-level encryption-at-rest is a further hardening).
 """
 
 from __future__ import annotations
