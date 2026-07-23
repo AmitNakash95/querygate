@@ -100,11 +100,13 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 - [ ] **36** — Production-grade QA / edge-case test suite. *Hardening before a
   real customer's data and adversaries touch it; raises confidence for the
   pilot without new surface.*
-- [ ] **96** — Unify the AST reference-walk into a single canonical visitor.
+- [x] **96** — Unify the AST reference-walk into a single canonical visitor.
   *Pure refactor, no behavior change: collapses the four hand-maintained
   reference walks into one authority so a policy/schema hole can't open in a
   forgotten copy. Robustness the pilot benefits from now, and the enabler that
-  makes future AST breadth safe-by-construction. **Blocks 97.***
+  makes future AST breadth safe-by-construction. **Blocks 97.*** ✅ **Shipped**
+  (`iter_column_refs` canonical visitor + `RefPosition` taxonomy; four parallel
+  walks removed; zero behavior change, 1402 tests pass).
 - [ ] **95** — Discoverable scope catalog + recommended role bundles for IdP
   integration. *Turns the shipped "bring your IdP" auth (items 10/90) into a
   turnkey wire-up: a design partner with Okta/Entra/Auth0 can register QG's

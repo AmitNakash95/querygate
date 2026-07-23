@@ -2522,49 +2522,20 @@ analytics "pre-compute the heavy work" win lives in the customer's DB
 (materialized views/indexes), which QueryGate already reads as ordinary tables —
 that is documentation (the analytics-performance note), not this item.
 
-### 96. Unify the AST reference-walk into a single canonical visitor (enforcement hardening)
+### 96. Unify the AST reference-walk into a single canonical visitor (enforcement hardening) ✅ DONE
 
-**Effort: M. Priority: high (robustness/proof; pure refactor, no behavior
-change). Depends on: nothing. Blocks: item 97.**
+Shipped: `validation/schema_validation.py` now defines the single canonical
+`iter_column_refs(query) -> Iterator[ColumnRef]` visitor (with a `RefPosition`
+taxonomy), and policy validation, `referenced_tables`, and schema validation's
+table-collection all consume it. The four hand-maintained parallel walks
+(`_iter_column_refs`, `_non_projection_column_refs`, `_collect_referenced_tables`,
+and schema's `_collect_tables_from_where` + inline per-position loops) are gone.
+Pure refactor, zero behavior change — proven by the adversarial, credential-
+redaction, and full suites passing unchanged (1402 passed), plus a new
+`tests/unit/test_reference_visitor.py` pinning the position taxonomy so a future
+AST reference position is taught in one place. Makes item 97 safe by construction.
 
-**Why it matters.** The knowledge "every place in a `StructuredQuery` where a
-table/column reference can appear" is currently duplicated across at least four
-independently hand-maintained walks:
-`validation/policy_validation.py`'s `_iter_column_refs`,
-`_non_projection_column_refs` (whose own docstring admits it is
-"`_iter_column_refs` minus the bare-`str` select branch" — a near-verbatim copy
-kept in lockstep by hand), and `_collect_referenced_tables`, plus
-`validation/schema_validation.py`'s own separate `for join…`/`for item…`
-enumerations. Every time the AST grows a field (a new select-item type, a new
-clause, a nested node), each of these walks must be taught the new position or a
-policy/schema hole opens silently in whichever one was forgotten. That is the
-real robustness debt — not the pipeline being "flat" (it correctly recurses
-already where the AST has depth, i.e. `WhereGroup` nesting via
-`_where_column_refs`/`_iter_where_predicates`/`where_depth`), but that the
-same enumeration lives in N places.
-
-**What to do.** Define one canonical reference visitor over the AST — a single
-authority that yields (position-kind, reference) for every table/column
-reference a query contains — and have policy validation, schema validation, and
-`referenced_tables` all consume it instead of their own bespoke walks. Position
-kind must be rich enough to preserve today's distinctions (bare top-level select
-projection vs. everywhere-else, for the item-49 masked-column rule) so behavior
-is byte-for-byte preserved. Follow the composable-interface doctrine
-(`CLAUDE.md`): one visitor, consumed everywhere; do not scatter new `if`
-branches at call sites.
-
-**Acceptance.** Pure refactor — **zero behavior change**, proven by the existing
-adversarial (`make test-security`), credential-redaction, and full suites
-passing unchanged; no new caller surface, no AST change, no policy semantics
-change. The win is that "where can a reference appear" becomes single-authority,
-so future AST additions (including item 97) are enforced by construction rather
-than by remembering to update four walks. This item is sellable and worth
-shipping on its own even if item 97 never happens.
-
-**Hard boundaries.** Not a rewrite of policy semantics, not a change to any cap
-or allow/deny rule, not a new AST field. If the refactor would change any
-observable validation outcome, it is out of scope for this item — that is a
-separate, deliberately-decided change.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 96).
 
 ### 97. Bounded nested subqueries (uncorrelated, single-connection, depth-capped)
 
