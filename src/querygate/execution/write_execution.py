@@ -347,15 +347,85 @@ class WriteExecutionService:
         statements: List[WriteStatement],
         *,
         approval_resolver: Optional["ApprovalResolver"] = None,
+        atomic: bool = False,
     ) -> List[WriteBatchItemResult]:
-        """Run each write independently — one failure (or a rejected approval)
-        surfaces as that item's `error` without dropping the rest. Each write is
-        its **own** transaction (a batch is not one atomic multi-statement
-        transaction — that stronger semantic is a later phase). `approval_resolver`
-        is the interactive-approval seam (MCP elicitation): when a write trips the
-        gate and no token covers it, the resolver gets one chance to obtain one,
-        then the write is retried once."""
+        """Run a batch of writes. Default (`atomic=False`): each write is its own
+        transaction — one failure (or a rejected approval) surfaces as that item's
+        `error` without dropping the rest; `approval_resolver` (MCP elicitation)
+        can obtain a token for a gated write and retry it once. `atomic=True`:
+        **all-or-nothing** — every write runs in ONE transaction and any failure
+        rolls the whole batch back (every item then reports the same error). An
+        atomic batch is deny-by-default + capped like any write and fails closed on
+        an approval-gated write (there is no per-item token channel in atomic
+        mode); it does not capture per-write compensation (undo an atomic batch by
+        composing its inverse, a later slice)."""
+        if atomic:
+            return await self._execute_many_atomically(statements)
         return [await self._execute_batch_item(s, approval_resolver) for s in statements]
+
+    async def _execute_many_atomically(
+        self, statements: List[WriteStatement]
+    ) -> List[WriteBatchItemResult]:
+        policy = get_policy(self._connection_id, principal=self._principal)
+        dialect = self._connection_dialect()
+        cap = policy.write.max_affected_rows
+        oks: List[WriteBatchItemResult] = []
+        try:
+            async with concurrency_slot(
+                self._connection_id,
+                policy.max_concurrency,
+                policy.concurrency_wait_seconds,
+                principal_subject=self._principal_subject,
+                max_queue_depth=policy.max_queue_depth,
+                max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
+            ):
+                async with session_scope(self._connection_id, policy=policy) as session:
+                    for stmt in statements:
+                        validate_write_policy(stmt, policy, self._connection_id)
+                        _reject_subquery_in_write_where(getattr(stmt, "where", None))
+                        table = await validate_write_schema(
+                            stmt, self._connection_id, self._principal
+                        )
+                        affected = await self._count_affected(session, stmt, table)
+                        if affected > cap:
+                            raise QueryValidationError(
+                                f"a write in the atomic batch would affect {affected} rows, "
+                                f"over the max_affected_rows cap of {cap}"
+                            )
+                        # Fail closed on an approval-gated write (no per-item token
+                        # channel in atomic mode).
+                        self._enforce_write_approval_gate(stmt, affected, policy.write, None)
+                        try:
+                            await session.execute(compile_write(stmt, table, dialect))
+                        except (IntegrityError, DataError, StatementError) as exc:
+                            raise QueryValidationError(
+                                "a write in the atomic batch violated a database constraint or "
+                                "value type; the whole batch was rolled back"
+                            ) from exc
+                        oks.append(
+                            WriteBatchItemResult(
+                                operation=stmt.op,
+                                table=stmt.table,
+                                affected_rows=(
+                                    len(stmt.rows)
+                                    if isinstance(stmt, (InsertStatement, UpsertStatement))
+                                    else affected
+                                ),
+                                executed=True,
+                            )
+                        )
+                    await session.commit()
+        except Exception as exc:
+            # All-or-nothing: nothing committed — report the same error for every
+            # item so the caller sees the batch was rejected as a unit.
+            message = public_error_message(exc)
+            return [
+                WriteBatchItemResult(operation=s.op, table=s.table, error=message)
+                for s in statements
+            ]
+        for stmt, ok in zip(statements, oks):
+            self._audit("", stmt, None, affected_rows=ok.affected_rows, rejected=False)
+        return oks
 
     async def _execute_batch_item(
         self, statement: WriteStatement, approval_resolver: Optional["ApprovalResolver"]

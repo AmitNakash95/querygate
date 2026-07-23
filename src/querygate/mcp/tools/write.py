@@ -106,6 +106,17 @@ async def run_structured_writes(
         bool,
         Field(description="In preview mode, also return the bounded old→new row diff."),
     ] = False,
+    atomic: Annotated[
+        bool,
+        Field(
+            description=(
+                "execute mode only. false (default): each write is its own transaction, one "
+                "failure doesn't drop the rest. true: all-or-nothing — every write runs in one "
+                "transaction and any failure rolls the whole batch back (no per-write "
+                "compensation/undo in atomic mode)."
+            )
+        ),
+    ] = False,
     ctx: Context = None,
 ) -> Union[WritePreviewBatchResult, WriteExecuteBatchResult, MCPErrorResult]:
     caller = get_mcp_caller()
@@ -117,9 +128,13 @@ async def run_structured_writes(
     service = WriteExecutionService(connection_id=connection, principal=caller, surface="mcp")
     # In-session human approval for a gated write (item 92 machinery, item 93):
     # opt-in and off by default. When unavailable, a gated write stays fail-closed
-    # as that item's error.
+    # as that item's error. (Atomic mode fails closed on a gated write instead.)
     resolver = (
-        build_elicitation_resolver(ctx, caller, get_mcp_config()) if ctx is not None else None
+        None
+        if atomic
+        else (
+            build_elicitation_resolver(ctx, caller, get_mcp_config()) if ctx is not None else None
+        )
     )
-    results = await service.execute_many(writes, approval_resolver=resolver)
+    results = await service.execute_many(writes, approval_resolver=resolver, atomic=atomic)
     return WriteExecuteBatchResult(results=results)

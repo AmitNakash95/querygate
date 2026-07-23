@@ -312,7 +312,16 @@ surface them for a human, never auto-start them.
     - [x] **Upserts** ✅ — `UpsertStatement` (INSERT ON CONFLICT DO UPDATE) via a
       per-dialect compiler registry; Postgres/SQLite native, MSSQL rejected
       (reject-not-emulate). Proven on real Postgres + MSSQL. (Upsert-undo deferred.)
-    - [ ] Multi-statement batch atomicity, approval-binds-to-diff-hash.
+    - [x] **Multi-statement batch atomicity** ✅ — `execute_many(atomic=True)` /
+      the MCP tool's `atomic` flag: all writes in one transaction, all-or-nothing
+      (fail-closed on a gated write; no per-write compensation in atomic mode).
+    - [~] **approval-binds-to-diff-hash** — *deliberately deferred (not building
+      speculatively).* The approval token already binds to the write's full
+      fingerprint (a one-char change invalidates it) and the row-count/sensitivity
+      trigger is re-evaluated at execute; binding to a computed diff-hash would
+      force the execute path to compute the (expensive) diff every time for a
+      TOCTOU window a pilot hasn't asked to close. Revisit if a design partner
+      needs approve-the-exact-data semantics.
     - **Production-grade reversibility hardening (2026-07-23 design review — the
       10/10 bar).** Why/acceptance for each is in TODO.md item 93 Phase 3b; do in
       this order:
