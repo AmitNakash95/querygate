@@ -59,7 +59,13 @@ from querygate.mcp.server import create_mcp_server
 # meanwhile-grown tool surface combines both, measured 75,682 chars. Not
 # drift — the additive sum of two independently-approved surfaces. New budget
 # restores ~5% headroom.
-_MAX_TOTAL_CHARS = 79_500
+#
+# Bumped 2026-07-23 (item 93 phase 2b: governed-writes MCP tool) — the new
+# run_structured_writes tool inlines the whole write AST (Insert/Update/Delete
+# plus the reused WHERE tree) and the WritePreview/WriteDiff response schema, a
+# deliberate ~23K new agent-facing surface for the flagship write feature
+# (measured 102,968 chars). New budget keeps ~5% headroom.
+_MAX_TOTAL_CHARS = 108_000
 
 
 def _tool_schema_chars(tool: object) -> int:

@@ -21,6 +21,7 @@ from querygate.core.config import AppConfig
 from querygate.core.exceptions import ApprovalRequiredError
 from querygate.execution import service as svc
 from querygate.execution.approval import query_fingerprint, verify_approval_token
+from querygate.mcp.elicitation import build_elicitation_resolver
 from querygate.execution.cost_estimation import QueryCostEstimate
 from querygate.execution.service import StructuredQueryService
 from querygate.mcp.tools import query as qtool
@@ -68,19 +69,17 @@ def _exc() -> ApprovalRequiredError:
 
 
 def test_resolver_none_when_channel_disabled():
-    assert (
-        qtool._elicitation_resolver(_ctx("accept", True), _CALLER, _config(enabled=False)) is None
-    )
+    assert build_elicitation_resolver(_ctx("accept", True), _CALLER, _config(enabled=False)) is None
 
 
 def test_resolver_none_when_no_signing_key():
-    assert qtool._elicitation_resolver(_ctx("accept", True), _CALLER, _config(key="")) is None
+    assert build_elicitation_resolver(_ctx("accept", True), _CALLER, _config(key="")) is None
 
 
 @pytest.mark.asyncio
 async def test_resolver_mints_bound_token_on_approval():
     ctx = _ctx("accept", approve=True)
-    resolve = qtool._elicitation_resolver(ctx, _CALLER, _config())
+    resolve = build_elicitation_resolver(ctx, _CALLER, _config())
     assert resolve is not None
     token = await resolve(_QUERY, _exc())
     assert token is not None
@@ -94,14 +93,14 @@ async def test_resolver_mints_bound_token_on_approval():
 
 @pytest.mark.asyncio
 async def test_resolver_returns_none_on_decline():
-    resolve = qtool._elicitation_resolver(_ctx("decline"), _CALLER, _config())
+    resolve = build_elicitation_resolver(_ctx("decline"), _CALLER, _config())
     assert await resolve(_QUERY, _exc()) is None
 
 
 @pytest.mark.asyncio
 async def test_resolver_returns_none_when_accepted_but_not_approved():
     # Client accepted the form but left approve=false — deny-by-default.
-    resolve = qtool._elicitation_resolver(_ctx("accept", approve=False), _CALLER, _config())
+    resolve = build_elicitation_resolver(_ctx("accept", approve=False), _CALLER, _config())
     assert await resolve(_QUERY, _exc()) is None
 
 
@@ -109,7 +108,7 @@ async def test_resolver_returns_none_when_accepted_but_not_approved():
 async def test_resolver_fails_closed_when_elicitation_raises():
     ctx = MagicMock()
     ctx.elicit = AsyncMock(side_effect=RuntimeError("client has no elicitation channel"))
-    resolve = qtool._elicitation_resolver(ctx, _CALLER, _config())
+    resolve = build_elicitation_resolver(ctx, _CALLER, _config())
     assert await resolve(_QUERY, _exc()) is None
 
 
