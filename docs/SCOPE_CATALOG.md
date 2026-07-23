@@ -33,6 +33,7 @@ scope, only a valid identity.
 | `admin:reload-config` | Hot-reload connections/policy/catalog from disk |
 | `admin:config:read` | Read config-governance versions and history |
 | `admin:config:write` | Stage/apply/roll back config-governance versions |
+| `admin:config:approve` | Approve/reject a staged config version (four-eyes; not the author) |
 
 ### Admin · Connections
 
@@ -89,11 +90,18 @@ Day-2 operations: reload config, check connection health, read trends.
 
 ### Config Governor
 
-Manages governed config changes (stage/apply/rollback) and reloads.
+Authors governed config changes (stage/apply/rollback) and reloads.
 
 - `admin:config:read`
 - `admin:config:write`
 - `admin:reload-config`
+
+### Config Approver
+
+Reviews and approves/rejects staged config changes (four-eyes). Kept separate from the authoring role so an author cannot approve their own change when require_config_approvals is enabled.
+
+- `admin:config:read`
+- `admin:config:approve`
 
 ### Catalog Author
 
