@@ -2066,10 +2066,28 @@ rollback), not just SQLite. Also shipped in 2b:
 **constraint handling** — an INSERT missing a NOT NULL column is caught with a
 precise pre-DB validation error, and any DB constraint/type violation
 (NOT NULL/FK/unique/mistyped) maps to a clean typed 422 (rolled back, no raw
-driver text leaked) instead of a masked 500. **Phase 3:** compensation/undo,
-upserts, multi-row batch, MSSQL execution parity, deeper FK/unique
-*pre*-validation (a full pre-check needs a lookup query; today the DB enforces
-them and the violation is a clean 422).
+driver text leaked) instead of a masked 500.
+
+**Phase 3a shipped — bounded reversibility (undo).** `execution/compensation.py`:
+a `CompensationStore` (in-memory default, TTL'd, mirroring the audit-sink
+pattern) holds a bounded pre-image — NOT a shadow table in the operational DB
+(Decision Log records why: minimal footprint, no extra DB privilege). When
+`WritePolicy.compensation_enabled`, a gated write captures the pre-image within
+its transaction (UPDATE/DELETE rows, or INSERT keys), commits, then records it and
+returns a `compensation_id`. `WriteExecutionService.undo()` (REST
+`POST /write/undo`, scope-gated) re-applies the inverse **through the governed
+write pipeline** — re-INSERT deleted rows / DELETE inserted keys / restore old
+values by PK — so undo is itself validated, capped, and audited. Bounded (a write
+over `max_compensation_rows` commits *without* a record), single-use (consumed on
+undo, replay rejected), single-column-PK-keyed, TTL'd. Proven end-to-end on
+SQLite (`test_write_execution_end_to_end.py`: delete/insert/update → undo →
+byte-identical restore, replay rejected, over-cap-snapshot skipped) and real
+Postgres. **Honest limits:** cannot unwind cascading triggers/FK actions or
+downstream reads; restores the snapshotted state (a concurrent change since is
+clobbered). **Phase 3 remaining:** upserts, multi-statement batch atomicity,
+MSSQL execution parity, MCP undo parity, approval-binds-to-diff-hash, deeper
+FK/unique *pre*-validation (today the DB enforces them and the violation is a
+clean 422).
 
 **Phase 1 shipped (maintainer-approved; Decision Log recorded).** The write
 sibling of the read pipeline, preview-only — **no code path executes or commits

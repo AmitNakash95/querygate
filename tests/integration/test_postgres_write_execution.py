@@ -139,3 +139,45 @@ async def test_over_cap_write_rolls_back_against_postgres():
         StructuredQuery(from_table="orders", select=["orders.id"], limit=100000)
     )
     assert before.row_count == after.row_count  # nothing deleted
+
+
+@pytest.mark.asyncio
+async def test_delete_then_undo_restores_rows_against_postgres():
+    # Bounded reversibility (phase 3a) end-to-end on real Postgres: delete the
+    # test row, then undo and confirm it is restored byte-identically.
+    from querygate.execution.compensation import get_compensation_store
+
+    _use_writable_policy(compensation_enabled=True)
+    get_compensation_store().clear()
+    writer = WriteExecutionService("demo")
+    reader = StructuredQueryService(connection_id="demo")
+
+    await _delete_test_row(writer)
+    try:
+        await writer.execute(
+            InsertStatement(
+                table="orders",
+                rows=[
+                    {
+                        "id": _TEST_ID,
+                        "customer_id": 1,
+                        "status": "pg-undo",
+                        "total_amount": 7.25,
+                        "created_at": "2026-01-01T00:00:00",
+                    }
+                ],
+            )
+        )
+        deleted = await writer.execute(
+            DeleteStatement(
+                table="orders", where=Predicate(col="orders.id", op="eq", value=_TEST_ID)
+            )
+        )
+        assert deleted.compensation_id
+        assert await _status_of(reader, _TEST_ID) is None  # gone
+
+        undone = await writer.undo(deleted.compensation_id)
+        assert undone.affected_rows == 1
+        assert await _status_of(reader, _TEST_ID) == "pg-undo"  # restored
+    finally:
+        await _delete_test_row(writer)
