@@ -6,7 +6,7 @@ StructuredQuery AST, validated against schema + policy before compilation.
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional
+from typing import Annotated, Callable, List, Optional, Union
 
 import pydantic as pyd
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
@@ -20,7 +20,19 @@ from querygate.core.auth import Principal
 from querygate.core.config import AppConfig, config as app_config
 from querygate.core.exceptions import NotFoundError
 from querygate.execution.admission import QueueMode
-from querygate.execution.approval import issue_approval_token, query_fingerprint
+from querygate.execution.approval import (
+    issue_approval_token,
+    query_fingerprint,
+    write_fingerprint,
+)
+from querygate.execution.write_execution import WriteExecutionService, WriteResult
+from querygate.execution.write_preview import WritePreview, WritePreviewService
+from querygate.write_ast.models import (
+    DeleteStatement,
+    InsertStatement,
+    UpdateStatement,
+    UpsertStatement,
+)
 from querygate.execution.service import (
     BatchQueryItemResult,
     ExplainResult,
@@ -68,6 +80,16 @@ def _visible_template(connection_id: str, principal: Principal) -> None:
 
 class BatchQueryRequest(pyd.BaseModel):
     queries: List[StructuredQuery] = pyd.Field(min_length=1)
+    approval_tokens: Dict[str, str] = pyd.Field(
+        default_factory=dict,
+        description=(
+            "In-query approval grants for this batch (item 92): a map of query "
+            "fingerprint -> the signed token from POST /query/approve. A query "
+            "that trips the approval gate without a matching token fails only "
+            "that batch item (fail-closed); each token is verified against its "
+            "own query's fingerprint, so it can't be replayed onto another."
+        ),
+    )
 
 
 class BatchQueryResult(pyd.BaseModel):
@@ -233,6 +255,96 @@ def build_router(
         )
         return ApprovalGrant(fingerprint=fingerprint, approval_token=token)
 
+    @router.post("/{connection}/write/preview", response_model=WritePreview)
+    async def preview_write(
+        connection: str,
+        statement: Annotated[
+            Union[InsertStatement, UpdateStatement, DeleteStatement, UpsertStatement],
+            pyd.Field(discriminator="op"),
+        ],
+        principal: Principal = Depends(get_principal),
+        include_diff: bool = Query(
+            default=False,
+            description=(
+                "Also return the bounded old→new row diff of exactly what this "
+                "write would change (item 93 phase 2b) — computed by running the "
+                "DML in a rolled-back transaction. Masked columns are redacted; "
+                "the number of rows shown is capped by WritePolicy.max_diff_rows."
+            ),
+        ),
+    ):
+        """Governed-writes dry-run preview (TODO.md item 93): validate a proposed
+        INSERT/UPDATE/DELETE against WritePolicy + schema, compile it, and report
+        the affected-row count + parameterized SQL (and, with `include_diff`, the
+        bounded old→new diff of exactly what would change). **Nothing is ever
+        executed or committed** — the diff runs the DML only inside a rolled-back
+        transaction. Gated by WritePolicy (deny-by-default): a read-only
+        deployment returns a clean policy rejection."""
+        _require_connection(connection, principal)
+        service = WritePreviewService(connection_id=connection, principal=principal)
+        with mask_unexpected():
+            return await service.preview(statement, include_diff=include_diff)
+
+    @router.post("/{connection}/write/execute", response_model=WriteResult)
+    async def execute_write(
+        connection: str,
+        statement: Annotated[
+            Union[InsertStatement, UpdateStatement, DeleteStatement, UpsertStatement],
+            pyd.Field(discriminator="op"),
+        ],
+        principal: Principal = Depends(get_principal),
+        approval_token: Optional[str] = Header(default=None, alias="X-QueryGate-Approval"),
+    ):
+        """Governed-writes gated execution (TODO.md item 93 phase 2): validate an
+        INSERT/UPDATE/DELETE against WritePolicy + schema, compile it, and — only
+        if in policy and within the affected-row cap — commit it in a single
+        transaction. Deny-by-default (a read-only deployment returns a clean
+        policy rejection); no raw DML path exists. A write over the policy's
+        `require_approval_over_rows` returns **428** with the write `fingerprint`
+        (sign it at `POST /{connection}/write/approve`, resubmit with the
+        `X-QueryGate-Approval` header). The affected-row cap is re-checked inside
+        the transaction, so a race can't over-write; any error rolls the whole
+        write back — never a partial mutation."""
+        _require_connection(connection, principal)
+        service = WriteExecutionService(
+            connection_id=connection, principal=principal, surface="rest"
+        )
+        with mask_unexpected():
+            # An ApprovalRequiredError propagates to the 428 handler in _errors.py
+            # carrying the write fingerprint + reasons.
+            return await service.execute(statement, approval_token=approval_token)
+
+    @router.post("/{connection}/write/approve", response_model=ApprovalGrant)
+    async def approve_write(
+        connection: str,
+        statement: Annotated[
+            Union[InsertStatement, UpdateStatement, DeleteStatement, UpsertStatement],
+            pyd.Field(discriminator="op"),
+        ],
+        principal: Principal = Depends(get_principal),
+    ):
+        """Grant an approval token for a write that tripped the governed-writes
+        approval gate (TODO.md item 93 phase 2). Requires the `query:approve`
+        scope — the same separation of duties as read approval, so an agent
+        cannot approve its own sensitive/large write. Returns a short-lived,
+        HMAC-signed token bound to this exact write's fingerprint; resubmit the
+        identical write with it in the `X-QueryGate-Approval` header. Stateless:
+        no approval is stored server-side."""
+        require_scope(principal, QUERY_APPROVE_SCOPE)
+        _require_connection(connection, principal)
+        if not app_config.approval_token_hmac_key:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Approval grants are not configured (APPROVAL_TOKEN_HMAC_KEY is unset).",
+            )
+        fingerprint = write_fingerprint(statement)
+        token = issue_approval_token(
+            fingerprint=fingerprint,
+            approver_subject=principal.subject,
+            key=app_config.approval_token_hmac_key,
+        )
+        return ApprovalGrant(fingerprint=fingerprint, approval_token=token)
+
     @router.get("/query-templates", response_model=List[PublicQueryTemplate])
     async def list_query_templates(principal: Principal = Depends(get_principal)):
         """Curated query templates whose target connection is visible to the
@@ -309,7 +421,10 @@ def build_router(
         service = _service(connection, principal)
         validate_batch_size(len(payload.queries), get_policy(connection, principal=principal))
         results = await service.execute_many(
-            payload.queries, queue_mode=queue_mode, wait_timeout_seconds=wait_timeout_seconds
+            payload.queries,
+            queue_mode=queue_mode,
+            wait_timeout_seconds=wait_timeout_seconds,
+            approval_tokens=payload.approval_tokens,
         )
         return BatchQueryResult(results=results)
 

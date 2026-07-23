@@ -2042,6 +2042,381 @@ see how one policy/configuration change alters the outcome. Every showcased
 configuration, decision, and error is traceable to a tested QueryGate behavior,
 and the page is explicitly labeled as an illustrative mocked experience.
 
+### 26. Query-cost estimation before execution ✅ DONE
+
+**Phase 1 (Postgres `EXPLAIN`-based estimation) ✅ DONE.** **Phase 2 (MSSQL
+estimated-plan equivalent) ✅ DONE** — `estimate_mssql_query_cost` uses a
+dedicated `SET SHOWPLAN_XML ON` connection (SHOWPLAN mode must own its batch, so
+it can't share the query's session) and parses the estimated rows / subtree cost
+from the SHOWPLAN XML; `StructuredQueryService._estimate_cost` dispatches by
+dialect (Postgres inline-EXPLAIN vs MSSQL SHOWPLAN), same fail-open + observable
+contract. Proven against a live MSSQL (`tests/integration/test_mssql_cost_estimation.py`:
+the estimator returns rows/cost, a full scan over threshold is rejected before
+execution, a selective query admits). The Postgres-only limitation the
+CLAUDE.md/service noted is now closed — the cost gate enforces on both dialects.
+
+**Phase 1 shipped:** `execution/cost_estimation.py`'s
+`estimate_postgres_query_cost()` plans (never runs) the already-validated,
+already-compiled `Select` with `EXPLAIN (FORMAT JSON)` — the statement is
+rendered once with `literal_binds=True` (the same fallback-on-failure
+pattern `execution/service.py`'s `_compile_to_text` already uses) so the
+whole EXPLAIN is one self-contained string; no data is exposed by doing this
+since EXPLAIN never executes the statement. It reads the root plan node's
+`Plan Rows`/`Total Cost` and hands them to `enforce_cost_estimate()`, which
+raises a new `CostEstimateExceededError` (subclasses `PolicyViolationError`,
+mirroring `ConcurrencyLimitError`'s rationale — same client-error handling,
+but its own metrics reason: `querygate_queries_rejected_total{reason="cost_estimate"}`,
+broken out from the coarser `policy` bucket) with a message that tells the
+agent what to do next ("narrow the query with additional filters, a smaller
+limit/top_n, or a more selective time range"), not just that it was denied.
+
+New `Policy.max_estimated_rows`/`max_estimated_cost` (both `Optional`,
+default `None` — unset means fully disabled, zero behavior change for
+existing deployments) gate this in `StructuredQueryService.execute()`,
+inside the same session/transaction already opened for the real query — one
+extra round-trip, not a second connection. Deliberately **not** wired into
+`explain_structured_query`: that call has an existing, tested invariant
+(`test_explain_does_not_open_a_db_session`) that it never touches the
+database at all, staying a pure, always-cheap compile preview; adding a live
+EXPLAIN round-trip there would break that contract for a feature explicitly
+scoped to gating `execute()`.
+
+**Fail-open by design, not fail-closed:** if EXPLAIN can't be obtained or
+parsed for a given query (an unusual construct that can't render with
+literal binds, an unexpected plan shape), `estimate_postgres_query_cost()`
+logs a warning and returns `None` rather than raising — the query proceeds
+and is still bounded by every existing reactive guardrail (row caps,
+timeout, concurrency, response-byte cap). This is a deliberate trade-off:
+the feature adds proactive rejection of *likely* full scans/join
+explosions without becoming a new way to accidentally block legitimate
+traffic on an EXPLAIN edge case.
+
+**Follow-up shipped in this same pass — fail-open observability and a
+calibration mode, so the two honest caveats above ("fails open" and
+"thresholds aren't portable, so they need per-deployment tuning") aren't
+silent gaps:**
+
+- `querygate_cost_estimation_attempts_total{connection}` and
+  `querygate_cost_estimation_unavailable_total{connection,reason}` (reason:
+  `compile_failed`/`explain_failed`/`plan_parse_failed`) make the fail-open
+  path observable instead of only a stdout warning — an operator can alert
+  on the unavailable counter climbing, which means the gate has silently
+  stopped evaluating queries on that connection, rather than discovering it
+  after the fact.
+- New `Policy.cost_estimation_mode` (`CostEstimationMode`, default
+  `ENFORCE`) adds `OBSERVE`: the estimate is still computed and compared
+  against the threshold, but a would-be rejection is only recorded (a
+  `cost_estimation.observed_would_reject` log line plus
+  `querygate_cost_estimation_would_reject_total{connection}`), never
+  raised. `execution/cost_estimation.py`'s `cost_estimate_violations()` is
+  the single source of truth both `enforce_cost_estimate()` (ENFORCE) and
+  `StructuredQueryService._observe_cost_estimate()` (OBSERVE) build on, so
+  the two modes can never disagree about what counts as a violation. Lets
+  an operator calibrate `max_estimated_rows`/`max_estimated_cost` against
+  real production traffic before switching a connection to `ENFORCE`,
+  instead of guessing a threshold from documentation on day one.
+
+Covered by `tests/unit/test_cost_estimation.py` (attempts/unavailable
+metrics per failure path, `cost_estimate_violations`/
+`format_cost_estimate_violation_message`), `tests/unit/test_service.py`
+(OBSERVE mode runs the query instead of rejecting; does not flag a query
+within threshold), and a real-Postgres
+`test_observe_mode_runs_the_query_and_records_would_reject` in
+`tests/integration/test_postgres_cost_estimation.py`.
+
+MSSQL is explicitly a no-op, not an error: a policy with these fields set on
+an MSSQL connection is valid and simply has no effect there (see the phase 2
+write-up below for why). Covered by `tests/unit/test_cost_estimation.py`
+(estimator parsing success/failure/fail-open paths, `enforce_cost_estimate`
+threshold combinations), the wiring tests in `tests/unit/test_service.py`
+(estimation disabled by default, MSSQL no-op, execute rejects over threshold
+while explain never opens a session), and
+`tests/integration/test_postgres_cost_estimation.py` against a real
+Postgres — a genuinely large sequential-scan-shaped query is rejected under
+a small `max_estimated_rows`, a selective indexed query passes under the
+same policy, and disabling the gate (the default) never issues an EXPLAIN at
+all. `docs/THREAT_MODEL.md`'s QG-08 row and residual-risk section were
+updated; `help/service.py`'s redacted policy summary now reports these new
+guardrail values (including `cost_estimation_mode`) like every other cap.
+
+**Phase 2 — MSSQL estimated-plan equivalent, not started:** SQL Server's
+`SET SHOWPLAN_XML ON` can't be prefixed onto an already-compiled statement
+the way Postgres's inline `EXPLAIN (FORMAT JSON) <query>` can — once
+SHOWPLAN mode is set, it must be the *only* statement in its batch (the
+query being planned can't run in the same batch as the `SET`), so getting an
+estimated MSSQL plan needs a dedicated connection/session lifecycle (open a
+connection, `SET SHOWPLAN_XML ON`, run the query text to get its plan
+without execution, then discard that connection rather than reusing it for
+the real query) rather than one extra statement inside the existing session.
+That's a genuinely different code shape, not a bigger version of phase 1's
+approach — tracked here as its own follow-up.
+
+**Effort: L (3–5 days for one dialect, longer cross-dialect).** The hard
+part is not calling `EXPLAIN`; it is turning dialect-specific plan output
+into a conservative, understandable policy decision without blocking safe
+queries unnecessarily.
+
+**Why it matters:** Row limits, timeouts, and concurrency caps are reactive
+guardrails. A 10/10 gateway should also be proactive: reject or warn on
+queries that are likely to full-scan huge tables, explode joins, or stress a
+production database before they run. This is a differentiator against
+generic MCP database connectors.
+
+**What to do (phase 2):** Add an MSSQL estimated-plan path with its own
+connection lifecycle (`SET SHOWPLAN_XML ON` in a dedicated session), extract
+comparable row/cost signals from the returned plan XML, and reuse the same
+`Policy.max_estimated_rows`/`max_estimated_cost` gate and
+`CostEstimateExceededError` phase 1 already established rather than
+inventing a parallel mechanism.
+
+### 36. Extensive production-grade QA project / edge-case test suite ✅ DONE
+
+**Phase 1 (policy-cap boundary tests + property-based compiler fuzzing) ✅
+DONE.** **Phase 2a (REST/MCP malformed-input fuzzing) ✅ DONE.** **Phase 2b
+(cross-dialect differential EXECUTION tests) ✅ DONE** —
+`tests/integration/test_cross_dialect_differential.py` (`real_db` +
+`postgres_live` + `mssql_live`) executes the same `StructuredQuery`
+(select/filter/join/group-by-aggregate) against a live Postgres AND a live MSSQL
+seeded with identical demo data and asserts the returned rows are equal, so a
+dialect-agnostic query behaves identically end-to-end — going beyond item 78's
+compile-time rendering check. Dialect-specific behavior (date bucketing, stddev
+naming, string_agg, NULLS ordering) is out of scope (the item-74/78 concern).
+
+**Phase 1 shipped:** `tests/unit/test_policy_boundaries.py` proves the
+sharper boundary claim `tests/unit/test_policy_validation.py` didn't: for
+every cap `validate_policy` enforces (`max_joins`, `max_select_columns`,
+`max_group_by`, `max_where_depth`, `top_n.n`/`max_top_n`,
+`top_n.partition_by`/`max_partition_by`, `max_batch_size`), a query at
+exactly the configured limit passes and one unit past it is rejected — not
+just "some over-cap value fails." `max_top_n` and `max_partition_by` had no
+coverage at all before this file.
+
+`tests/unit/test_compiler_properties.py` adds Hypothesis property-based
+fuzzing of `compiler/sqlalchemy_compiler.py`: generated strategies produce
+many random-but-valid `StructuredQuery` combinations across three shapes
+(plain row-select with optional join/where/order_by, aggregate
+GROUP BY/HAVING, and `top_n` per-partition ranking over either shape) and
+assert the compiler never raises, always renders to valid SQL text (both the
+normal bind-parameterized form and the `literal_binds=True` form the
+audit/explain path uses), and always returns `limit >= 1`. A fourth property
+test proves a `MandatoryRowFilter` on the `from_table` survives every random
+shape — the multi-tenant isolation guarantee must never silently drop out
+for an AST combination hand-written tests didn't happen to construct. Added
+`hypothesis` as a dev dependency (`pyproject.toml`/`poetry.lock`).
+
+**Phase 2a shipped:** `tests/security/test_malformed_input_fuzzing.py`
+(security-marked, in the default suite) sweeps the input-parsing/schema
+boundary of both transports with a broad corpus of malformed-but-plausible
+JSON — wrong body/field types, missing/extra fields (including the
+no-raw-SQL `sql`/`raw_sql`/`query`/... smuggle set, QG-01), invalid enum
+values, invalid/empty JSON, non-finite numbers, and `where` trees deep
+enough to trip the JSON parser's recursion guard — and asserts, for REST
+(`/query`, `/query/explain`, `/query/batch`) and MCP (`run_structured_queries`
+via a real `tools/call`): the input is rejected with a clean client error
+(never a 5xx crash), the error body never leaks a server internal (traceback,
+file path, driver/SQLAlchemy text, `NoSuchTableError`, or a connection-string
+credential — QG-07), and the `StructuredQueryService` execute/explain/batch
+methods are patched and asserted *un-called* so malformed input provably
+never reaches the database (QG-01). A mirror case proves an extreme-but-valid
+literal is accepted (not spuriously size-rejected), so the suite tests
+*malformed* shapes, not merely large ones. Policy-cap rejection (over-depth/
+size/batch) is intentionally left to phase 1's `test_policy_boundaries.py`.
+
+Two real robustness gaps the suite surfaced (per this item's "where a real
+gap is found, fix it or record it — don't leave it silent" posture):
+
+- **Fixed — non-finite numbers 500'd at the REST boundary.** `NaN`/`Infinity`
+  (accepted by Python's json parser, not valid JSON) in a numeric field made
+  the *validation-error* response fail to encode (Starlette's `JSONResponse`
+  renders with `allow_nan=False`) and surface as a 500 — leaking a traceback
+  under `debug=True`. `api/_errors.py` now registers a `RequestValidationError`
+  handler that scrubs non-finite floats out of the echoed error, so it is a
+  clean 422. Adversarially confirmed to 500 before the handler existed.
+- **Recorded as residual risk (item 86) — MCP transport 500 on a pathological
+  deep body.** REST rejects a `where` nested past the parser's recursion guard
+  with a clean 400, but the upstream MCP Streamable-HTTP transport's
+  `json.loads` raises `RecursionError`, which it catches and returns as a
+  handled JSON-RPC internal-error (`-32603`, generic non-sensitive message) —
+  an HTTP 500 rather than a 4xx. Handled and leak-free, so the test asserts
+  the security property (handled + no leak + not executed) and item 86 tracks
+  the transport-level body-size/depth guard that would make it a 4xx.
+
+**Explicitly out of scope for this pass, tracked as phase 2b:**
+cross-dialect differential tests (same AST compiled and *executed* against a
+live Postgres and a live MSSQL, asserting equivalent results where the AST
+doesn't invoke dialect-specific behavior) — needs the dual-live-DB harness
+noted above.
+
+**Effort: L (3–5 days) for the full item; phase 1 above was closer to a
+focused 1-day slice.** Not a new subsystem, but a wide sweep across the
+whole request pipeline: it touches `tests/unit/`, `tests/integration/`, and
+`tests/security/` all at once, plus potentially a new `tests/property/` or
+`tests/fuzz/` directory. Sizing is closer to item 15/28 (dedicated test
+tranches) than to a single-module fix — the work is breadth, not depth in
+any one file.
+
+**Why it matters:** Existing suites are strong but each targets one concern
+— `tests/security/test_adversarial_security.py` (item 28) covers
+authz/policy-bypass attack shapes, `tests/integration/test_postgres_load_guardrails.py`
+(item 15) covers concurrency/timeout under load, and the per-module unit
+suites cover correctness of one component at a time. Nothing currently
+sweeps the `StructuredQuery` AST's own input space systematically — deeply
+nested boolean `where` trees at/past `Policy.max_where_depth`, every
+`join`/`group_by`/`top_n` combination at its cap boundary, Unicode/NULL/
+empty-string/extreme-numeric literal values, empty result sets, single-row
+vs. maximum-row responses, and malformed-but-schema-valid AST shapes that
+existing tests haven't happened to construct. A gateway whose entire safety
+argument rests on "callers can only submit a validated AST" needs the
+validator itself proven against the full shape of that AST, not just the
+shapes today's tests happened to write.
+
+**What to do:** Audit `tests/unit/`, `tests/integration/`, and
+`tests/security/` for gaps against the full `StructuredQuery`/`Policy` model
+(`compiler/ast.py`, `policy/models.py`) rather than assuming coverage
+percentage implies scenario coverage — a query that never exercises a cap
+boundary can still hit a line of code. Concretely: boundary values for every
+`Policy` cap (max joins/select/where-depth/group-by/top_n, batch size,
+response bytes) both just-under and just-over; property-based testing
+(e.g. `hypothesis`) generating random valid `StructuredQuery` ASTs to catch
+compiler crashes or SQL-generation bugs that hand-written cases miss;
+cross-dialect differential tests (same AST against Postgres and MSSQL,
+asserting equivalent results where the AST doesn't invoke dialect-specific
+behavior); and malformed-input fuzzing at the REST/MCP JSON boundary (wrong
+types, extra fields, deeply nested `where`, huge string literals) to prove
+schema validation rejects cleanly rather than 500ing. Track coverage
+gaps explicitly rather than chasing a single aggregate `--cov` number, since
+line coverage alone doesn't prove edge cases were exercised.
+
+### 37. Automated end-to-end proof of adaptive semantic learning ✅ DONE
+
+**Shipped.** `querygate/catalog/adaptive_learning_benchmark.py` plus the
+packaged fixture `querygate/catalog/benchmark_data/adaptive_learning_v1.yaml`
+drive the real persisted components — `CatalogStore`/`CatalogFileRepository`,
+`catalog.usage.record_usage_signals`/`should_emit_signal`,
+`catalog.learning.generate_learned_relationship_proposals`,
+`catalog.governance`'s unmodified review/publish/rollback state machine,
+`catalog.retrieval.search_catalog`, `catalog.refresh.refresh_catalog_schema`,
+`validation.policy_validation.validate_policy`, and a real (mocked-session)
+`StructuredQueryService` — through the complete lifecycle, exactly matching
+the six-step "what to build" list below:
+
+1. The fixture's initial catalog has no relationship hint for
+   `orders.customer_id -> customers.id` at all; the task query
+   deterministically fails before learning (`baseline_correct=False`),
+   proving the fixture was not pre-seeded with the answer.
+2. Usage evidence uses fixed evidence-reference ids and a single fake-clock
+   timestamp (`_FAKE_CLOCK`, never `datetime.now()`), and covers every
+   required control: below-threshold support, a conflicting pair (two
+   competing targets for the same source column, tied under the conflict
+   margin), repeated-single-principal (20 signals, one principal, must not
+   inflate support), cross-connection (the same relationship recorded under
+   a second connection id), a denied-object query (proven to raise
+   `PolicyViolationError` before any execution — so no signal for it can
+   ever exist), and an unreviewed-guidance target (proven via the real
+   `should_emit_signal` gate returning `False`).
+3. The real learner produces exactly one `learned` proposal for the
+   expected relationship and none for any control; a direct replay against
+   byte-identical evidence resolves to `"idempotent"` through the
+   deterministic generation-id path specifically (not merely avoiding a
+   visible duplicate via the separate open-proposal dedup guard); two
+   independent `CatalogFileRepository` handles racing the same file
+   ("two-worker" execution) still serialize to exactly one proposal.
+4. The pending proposal is proven not agent-visible
+   (`search_catalog` still fails the task). A disposable copy of the store
+   is rejected by a named reviewer actor and proven to leave behavior
+   unchanged; the main store is then approved and published by a
+   *different* actor than the learner, and the published entry's
+   provenance/version record is checked for actor attribution rather than
+   self-publication.
+5. After publication, a fresh reload (`CatalogStore.from_file`, not the
+   in-memory object) finds the relationship with `freshness=current`, and
+   discovery-call reduction (`1 - 1/baseline_discovery_calls`) is checked
+   against a compiled, non-fixture-tunable threshold. Principal-safe
+   filtering is proven on the same published content: visible under the
+   default policy, hidden under a policy denying the relationship's target
+   table.
+6. A real schema change (dropping the referenced column) is run through
+   `refresh_catalog_schema` and proven to stale only the affected
+   relationship while a separate manually-verified, unrelated entry stays
+   `verified`. A real rollback reverts the publish and the task
+   demonstrably regresses to the baseline again. A genuine learner failure
+   (a store missing its schema snapshot) is proven not to block a real
+   `StructuredQueryService.execute()` call. Every post-rollback assertion is
+   repeated against one final fresh reload, not just in-memory state.
+
+Every check was adversarially verified during development by deliberately
+breaking one real invariant at a time (the anti-feedback-loop gate, the
+conflict margin, the support threshold, rollback, policy enforcement,
+cross-connection isolation, and query execution itself) and confirming the
+report's `security_violations`/`rollback_correct`/
+`ordinary_query_unaffected_by_learner_failure` fields actually flip — this
+is not a checker that always reports success. Covered by
+`tests/integration/test_adaptive_learning_benchmark.py`, including seven
+tests that each break one real invariant and assert the checker notices.
+
+**Acceptance gate — met:** `make adaptive-learning-test` (wrapping
+`poetry run python -m querygate.catalog_cli adaptive-learning-test`) is a
+single deterministic command, wired into `make release-check` right after
+the 32A `evaluate` benchmark. It runs with no live model, external network,
+wall-clock sleep (every timestamp is the fixed `_FAKE_CLOCK` constant), or
+production row access, and exits non-zero on failure. Thresholds
+(`MIN_DISCOVERY_CALL_REDUCTION`, `MAX_DUPLICATE_PROPOSALS`,
+`MAX_SECURITY_VIOLATIONS`) are compiled constants in
+`adaptive_learning_benchmark.py`, not fixture fields.
+
+**Original scope (for reference — see above for what actually shipped):**
+
+**Why it matters:** The shipped `semantic_memory_v1.yaml` benchmark is a
+deterministic test of retrieval from a static catalog. It does not feed usage
+signals, produce a learned proposal, exercise human approval/publication, or
+prove that a later request benefits from earlier safe usage. It therefore must
+not be cited as an automated test of "self learning." A real test needs to
+prove the state transition and the behavioral improvement while also proving
+that the learning path cannot become an authorization or data-exfiltration
+path.
+
+**What to build:** Add a versioned, network-free scenario fixture (for example
+`benchmarks/adaptive_learning_v1.yaml`) and an integration test/runner that
+drives the real persisted components through the complete lifecycle:
+
+1. Start from a catalog that demonstrably lacks the expected business term or
+   preferred relationship, then run the unfamiliar task with learning disabled
+   and record the deterministic baseline result and discovery-call count.
+2. Submit only typed, redaction-safe normalized usage events with fixed ids and
+   a fake clock. Include enough independent successful evidence to cross the
+   predeclared support/confidence threshold, plus below-threshold, conflicting,
+   repeated-generated-guidance, denied-object, cross-principal, and
+   cross-connection controls that must not contribute.
+3. Run the real learner and assert that it creates exactly one `learned` draft
+   with bounded evidence summaries, support/confidence, provenance, and no row
+   values, credentials, query literals, natural-language history, raw errors,
+   or policy-hidden identifiers. Replay and two-worker execution must be
+   idempotent and must not double-count evidence or duplicate the proposal.
+4. Prove the proposal is not agent-visible and cannot alter access, mandatory
+   filters, sensitivity, or query execution before review. Exercise item 32B's
+   authorized review/publish path as a separate test actor; rejection must
+   leave behavior unchanged, while approval must retain provenance and an
+   auditable transition rather than allowing the learner to publish itself.
+5. Repeat the original task after approved publication and require the correct
+   table/relationship outcome with a predeclared material reduction in
+   discovery calls versus the baseline. Citations must identify the governed
+   catalog version and freshness. A control run with learning disabled or
+   insufficient support must show no improvement, proving the fixture was not
+   simply pre-seeded with the answer.
+6. Change the relevant schema and policy and assert selective staleness,
+   principal-safe filtering, rollback behavior, and unchanged ordinary query
+   availability when the learner fails. Restart/reload the persisted state and
+   repeat the assertions so the test is not only an in-memory happy path.
+
+**Acceptance gate:** expose one deterministic command such as
+`make adaptive-learning-test`, run it from `make release-check` once 32C is
+shipped, and keep its thresholds in source rather than fixture-tunable. It must
+run without a live model, external network, wall-clock sleeps, or production
+row access; fail on any learned-content auto-publication or policy disclosure;
+and report baseline-versus-learned correctness, discovery-call reduction,
+stale detection, duplicate proposals, and security violations. Do not make a
+"self-learning" product claim until this test and the adversarial suite pass.
+
 ### 39. Draft-aware policy simulation before staging ✅ DONE
 
 **Shipped.** `POST /api/v1/admin/config/simulate`
@@ -2611,6 +2986,52 @@ concurrency, and the governance PVC being RWX and opt-in. Skips cleanly where
 **Honest remainder (operator-run, by design).** A live multi-zone/multi-region
 failover *drill* against a real cluster is the operator's step — HA_DR.md §5 is
 its checklist. Everything code/chart/doc-preparable is done and tested here.
+
+### 57. Pluggable dialect-adapter architecture ✅ DONE
+
+**Shipped.** Dialect-specific behavior is now behind two formal, registry-
+dispatched abstract bases — one concrete class per dialect, no inline
+`if dialect == ...` branching:
+
+- **Compiler (sync)** — `compiler/dialect_adapters.py`'s `DialectAdapter`
+  (date-bucketing, order-by nulls, stat/string_agg/array_agg/percentile_cont
+  naming, column masking) with Postgres/MSSQL/SQLite classes — shipped as the
+  compiler-scoped slice, item 73.
+- **Engine/session (async)** — `connections/dialects.py`'s new
+  `SessionDialectAdapter` (engine-URL, connect-args, query-timeout registration,
+  per-session guardrails) with `PostgresSessionAdapter`/`MSSQLSessionAdapter`,
+  dispatched via `_SESSION_ADAPTERS`/`get_session_adapter`. Reverses the prior
+  deliberate 'inline branching is fine here' decision (recorded in the
+  PRODUCT_GUIDE Decision Log; CLAUDE.md updated). Kept a SEPARATE ABC from the
+  sync compiler adapter on purpose — async session execution vs. sync SQL
+  building are different execution models. Behavior-preserving (module funcs
+  are thin dispatchers; `test_dialects.py` unchanged + a new registry test).
+
+Adding a dialect (item 19) is now: implement both adapters + register. The one
+remaining gap is the cost-estimation hook's MSSQL side, which is blocked on
+MSSQL estimated-plan support (item 26 ph2), not on the adapter interface.
+
+<details><summary>Original scope</summary>
+
+**Effort: L (interface design); each subsequent dialect then becomes
+independent M-effort work rather than a bespoke project.**
+
+**Why it matters:** Item 19 treats every new dialect as M–XL bespoke work
+gated on core-team bandwidth — the actual long-term bottleneck behind
+QueryGate's biggest competitive gap (database breadth against Google's
+Toolbox and Hasura). `connections/dialects.py` and the compiler's dialect
+dispatch (the 3-way branch in `_date_bucket_expr`) already isolate
+dialect-specific behavior; formalizing that isolation into a stable adapter
+interface is what would let dialect support scale without linearly scaling
+core-team effort.
+
+**What to do:** Extract a formal `DialectAdapter` interface (session
+guardrails, date-bucketing, cost-estimation hook from item 26) from the
+existing 2-dialect implementation, verify it holds by porting Postgres and
+MSSQL onto it with no behavior change, and only then treat additional
+dialects (item 19) as adapter implementations rather than core-pipeline
+changes.
+</details>
 
 ### 59. Read-only behavioral anomaly surfacing on the audit stream ✅ DONE
 
@@ -4414,6 +4835,96 @@ receipt *at the query layer*. Combined with item 90 this is the "prove to your
 auditor exactly what every agent did, on whose behalf, under which policy, and
 that the record is intact" artifact — the literal buying question for the
 fintech/healthcare ICP.
+
+### 92. In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) ✅ DONE
+
+**Phase 2 sensitivity-label trigger shipped:** `Policy.approval_sensitivities`
+(a list of catalog `SensitivityClass` labels, default empty/off) makes a query
+that references a column — or its table — carrying one of those labels require
+approval **regardless of estimated size** and **dialect-agnostically** (no cost
+estimate needed, so it works on MSSQL). `execution/approval.py`'s
+`sensitivity_approval_reasons` enumerates every referenced column via the single
+canonical AST visitor (`iter_column_refs`, item 96 — so a sensitive column in a
+`where`/join/having/etc. triggers it too, not just `select`), resolves each to
+its physical table, and reads only the descriptive catalog's static label (never
+a row value — the catalog stays descriptive). The gate now combines both
+triggers into one decision (`_enforce_approval_gate`), so a single approval token
+covers whatever tripped it; `Policy.approval_cost_gate_enabled` vs.
+`approval_gate_enabled` keep the estimate needed only for the cost trigger.
+Covered by 6 added tests in `tests/unit/test_approval.py`.
+
+**Phase 1 shipped (cost/row-estimate trigger + stateless HMAC approval-token
+grant, REST):** `execution/approval.py` is the gate's decision core —
+`approval_required_reasons(estimate, policy)` (reusing the estimate the pipeline
+already computes), `query_fingerprint(query)` (canonical SHA-256 of the AST), and
+`issue_approval_token`/`verify_approval_token` (HMAC-SHA256, fail-closed on any
+missing-key/forged/expired/wrong-fingerprint/malformed input, constant-time
+compare). New `Policy.approval_max_estimated_rows`/`approval_max_estimated_cost`
+(opt-in, default off; a softer gate *below* the hard `max_estimated_*` caps) and
+`Policy.approval_gate_enabled`/`estimate_needed`. The gate runs in
+`execution/service.py`'s `execute()` right after the cost estimate (Postgres
+only, same estimate source), raising `ApprovalRequiredError` (a
+`PolicyViolationError`; `metrics.classify_rejection` → `approval_required`) when
+triggered and no valid token is supplied, admitting when a token bound to that
+exact query is supplied (audited `approval.required`/`approval.granted`). REST:
+`execute` accepts an `X-QueryGate-Approval` header; `ApprovalRequiredError` maps
+to **428 Precondition Required** with `{fingerprint, reasons}`; a new
+scope-gated `POST /{connection}/query/approve` (scope `query:approve`, in the
+scope catalog + a "Query Approver" role bundle) issues the token. Requires
+`AppConfig.approval_token_hmac_key` (fail-closed 503 if unset). Covered by
+`tests/unit/test_approval.py` (22 tests: token forge/replay/expiry/wrong-key/
+malformed, trigger boundary, gate seam, e2e pause→approve→resubmit, endpoint
+scope/503). **Invariant preserved:** read-only, AST-only, opt-in — a
+default-config deployment is byte-for-byte unchanged.
+
+**Batch approval tokens shipped (REST):** `execute_many` takes an
+`approval_tokens` map (query fingerprint -> the signed token from
+`POST /query/approve`) and threads each query's token into its `execute()`
+call, so an approval-gated query can run inside a batch. `BatchQueryRequest`
+carries the map (`POST /query/batch`). A query with no matching token stays
+fail-closed — its `ApprovalRequiredError` surfaces as that batch item's `error`
+without dropping the rest — and each token is still verified against its own
+query's fingerprint in `execute()`, so it can't be replayed onto another query
+in the same batch. Covered by 3 tests (2 service-level in `test_approval.py`, 1
+route-level in `test_rest_api.py`).
+
+**MCP elicitation channel shipped (the interactive step-up):** over MCP, a query
+that trips the gate is approved **in-session** via `Context.elicit` instead of
+the out-of-band REST token round-trip. `mcp/tools/query.py`'s
+`_elicitation_resolver` builds an `ApprovalResolver` (a narrow async callback the
+transport-agnostic `execute_many` calls when a query raises
+`ApprovalRequiredError` and no pre-supplied token covers it): it elicits a
+one-field `approve` form from the client's human and, only on an explicit
+accept+approve, mints the same fingerprint-bound short-lived HMAC token the REST
+flow issues and retries the query once with it. Opt-in and **off by default**
+(`AppConfig.mcp_elicitation_approval_enabled`): an elicitation response carries
+no authenticated approver identity, so enabling it is a deliberate decision that
+the client's human is a trusted approver — separation of duties is preserved by
+the medium (the querying agent physically can't answer its own elicitation), and
+the minted token records `approver_subject=mcp-elicitation:<caller>` for the
+audit trail. Fails closed on a client without an elicitation channel (degrades
+to the REST-token rejection) and when the signing key is unset. The resolver
+seam keeps all batch/error shaping in `execute_many` while the MCP-specific
+interaction stays in `mcp/`; the service never imports MCP. Covered by 8 tests
+in `tests/unit/test_mcp_elicitation_approval.py` (opt-in gating, accept/decline/
+accept-without-approve/elicitation-error handling, token binding, the
+`execute_many` retry seam, and the tool wiring). Decision recorded in
+`docs/PRODUCT_GUIDE.md`'s Decision Log (2026-07-23).
+
+**Effort: L. Priority: medium (safety moat; sequence after 90/91). Feature ref: F3.**
+
+**Why it mattered (competitive pressure):** MCP elicitation is the standardized
+HITL primitive (and the `2026-07-28` spec revision keeps a first-class
+client-interaction path), and Auth0 async-authz (CIBA), PromptQL, and others
+gate *writes*. But **reads are the exfiltration leg of the lethal trifecta**
+every 2025 incident exploited (Supabase, Neon), and no competitor gates *reads*
+on *what the query would actually touch* — because none knows before running
+it. QueryGate uniquely already holds the three signals to decide automatically
+whether a read needs a human: catalog sensitivity labels (32A), the
+pre-execution cost/row estimate (item 26), and the parsed AST. Distinct from
+item 42 (four-eyes for *config* changes) and item 35 (capacity waiting) —
+neither gates *query execution* on sensitivity/cost. **Invariant:** read-only
+posture and AST-only input unchanged; this only adds a pre-execution gate.
 
 ### 60. Bug bounty / responsible disclosure program ✅ DONE
 

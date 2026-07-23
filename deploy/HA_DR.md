@@ -33,12 +33,13 @@ footgun, so this is spelled out per-kind:
 | State | Cross-replica behavior | How to make it correct |
 |---|---|---|
 | **In-flight concurrency cap** (`Policy.max_concurrency`, item 9) | **Correct & shared** when `CONCURRENCY_BACKEND=redis` — all replicas count against one Redis-backed limiter. With the in-process backend each replica enforces the cap independently, so the real ceiling silently multiplies by replica count. | Set `CONCURRENCY_BACKEND=redis` and a real `CONCURRENCY_REDIS_URL` whenever `replicaCount > 1`. The HA overlay does this. |
-| **Per-principal rate / byte quota** (item 50) | **Per-replica only.** The window is in-process; the Redis-backed shared-budget variant is item 50 **phase 2 (not started)**. Under N replicas a principal's effective quota is up to **N×** the configured cap (a caller pinned to one replica by session affinity sees exactly 1×; round-robined callers see up to N×). | No shared enforcement exists yet. Either divide the intended quota by replica count when sizing `Policy` quotas, or keep quota-critical connections behind session affinity. Do **not** advertise quotas as a hard cross-fleet budget until phase 2. |
+| **Per-principal rate / byte quota** (item 50) | **Shared & correct** when `CONCURRENCY_BACKEND=redis` — the `RedisQuotaLimiter` (item 50 phase 2) enforces a principal's request/byte rolling-window budget against the true cross-replica window via one Redis, so the budget is a single fleet-wide cap. With the **in-process** backend the window is per-replica, so the effective quota multiplies by replica count (up to N×). | Set `CONCURRENCY_BACKEND=redis` (the same setting that makes the concurrency cap shared) whenever `replicaCount > 1`; the HA overlay does this. Only the in-process fallback (single-replica) is per-replica. |
 | **Config-governance version store** (Path B API, item 17/42) | **Per-pod** by default (each replica's own `CONFIG_GOVERNANCE_DIR`). A governance `apply` reloads **only the replica that served the request**; there is no cross-replica reload broadcast. | Prefer the GitOps/ConfigMap path (§2) for multi-replica config changes. If you need the governance *API* in an HA deployment, set `configGovernance.enabled=true` (an RWX PVC shared by all replicas) **and** roll the fleet after an `apply` so every replica reloads — or fan the `apply`/`reload-config` call out to each pod. |
 | **Persisted audit ledger** (JSONL / `jsonl_chained`, item 91) | **Per-replica file.** Each pod writes its own file; the hash-chain integrity is *per file*, not fleet-global. Every event is also on the pod's stdout regardless. | Treat **stdout + your log aggregator** as the unified, durable audit stream. Persist per-pod JSONL (a PVC) only if you also want the local chained copy; verify each file's chain independently with `querygate-audit verify`. |
 
-The one-line takeaway: **concurrency is a true shared cap; quota is not yet;
-config and audit are per-replica unless you deliberately share them.**
+The one-line takeaway: **concurrency and per-principal quota are both true
+shared caps under `CONCURRENCY_BACKEND=redis`; config and audit are per-replica
+unless you deliberately share them.**
 
 ---
 
@@ -192,7 +193,8 @@ before a pilot depends on it:
    still totals correctly (Redis-shared) rather than multiplying.
 3. **Redis loss.** Kill Redis. Confirm behavior matches your chosen posture
    (fail-closed vs. degraded) and that recovery is automatic when Redis returns.
-   Remember quota is per-replica regardless (matrix §1).
+   The quota limiter fails open on a Redis error (a request is admitted rather
+   than blocked), so confirm that matches your posture too.
 4. **Full-region loss (multi-region only).** Repoint the global LB to the second
    region; confirm RTO against your target and that audit from both regions
    lands in the central store.
