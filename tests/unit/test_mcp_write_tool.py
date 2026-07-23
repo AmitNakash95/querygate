@@ -122,3 +122,18 @@ async def test_tool_execute_mode_passes_resolver_only_when_enabled(monkeypatch):
         monkeypatch.setattr(wtool, "get_mcp_config", lambda: _config(True))
         await wtool.run_structured_writes("demo", [_delete(1)], mode="execute", ctx=None)
         assert captured["resolver"] is None
+
+
+@pytest.mark.asyncio
+async def test_undo_tool_calls_service_undo(monkeypatch):
+    from querygate.execution.write_execution import WriteResult
+
+    monkeypatch.setattr(wtool, "get_mcp_caller", lambda: _CALLER)
+    exec_service = MagicMock()
+    exec_service.undo = AsyncMock(
+        return_value=WriteResult(operation="undo_delete", table="orders", affected_rows=2)
+    )
+    with patch.object(wtool, "WriteExecutionService", return_value=exec_service):
+        result = await wtool.undo_structured_write("demo", "cid-123")
+    exec_service.undo.assert_awaited_once_with("cid-123")
+    assert result.operation == "undo_delete" and result.affected_rows == 2

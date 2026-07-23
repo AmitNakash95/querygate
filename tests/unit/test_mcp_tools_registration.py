@@ -11,6 +11,7 @@ _EXPECTED_TOOLS = {
     "search_catalog",
     "run_structured_queries",
     "run_structured_writes",
+    "undo_structured_write",
     "list_query_templates",
     "run_query_template",
     "search_querygate_guide",
