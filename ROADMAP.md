@@ -117,8 +117,11 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
 
 ### Phase 2 — Enterprise procurement unlocks (pull-driven — do when a partner's security team engages)
 
-- [ ] **54** — Compliance control mapping (SOC 2 / ISO 27001 readiness).
-  *Procurement checkbox; pairs with the audit trail from 91.*
+- [x] **54** — Compliance control mapping (SOC 2 / ISO 27001 readiness).
+  *Procurement checkbox; pairs with the audit trail from 91.* ✅ **Shipped**
+  (`docs/COMPLIANCE_MAPPING.md`: SOC 2 CC1–CC9 + C/A/PI + ISO 27001 Annex A
+  mapped to real artifacts, honest product/shared/org split; audit engagement =
+  item 53).
 - [ ] **53** — Independent third-party security audit + published report.
   *External validation enterprise buyers ask for. Needs vendor coordination —
   see "Coordination-gated" note below.*
