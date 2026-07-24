@@ -201,8 +201,12 @@ in the listed order; each item's Definition of Done and the canonical regression
 bar are in the plan (§3, §5). Cross-cutting rule: every new node is visited by the
 item-96 canonical walker and capped summed tree-wide (item 97), or it is not done.*
 
-- [ ] **99** — `HAVING` as `WhereNode` + searched `CASE` condition. *Cheap,
+- [x] **99** — `HAVING` as `WhereNode` + searched `CASE` condition. *Cheap,
   low-risk warm-up that proves the visitor/cap-expansion pattern. Depends on 96.*
+  ✅ **Shipped** (both positions reuse `_compile_where` + the item-96 visitor;
+  `max_where_depth`/`max_where_predicates` extended to HAVING and CASE-condition
+  trees + a new tree-wide case-condition predicate budget; no new policy field, no
+  dialect code. Breaking wire change: `"having": [{…}]` → `"having": {…}`).
 - [ ] **100** — ★ Bounded scalar `Expression` substrate (arithmetic, conditional
   aggregation, nested fns, expression-CASE). *The centerpiece — one closed,
   depth-capped node unlocks the most walls at once. Depends on 96, 99; **requires
@@ -316,6 +320,13 @@ frontier is gated, with **one** live buildable thread:
   `review_history` view, all over item 32B's existing scoped routes (no new
   mutation path). Frontend-only; validated by `node --check` + static-markup
   assertions (no browser automation here), Phase 5 lowest-marginal-ROI.
+- **Buildable without a decision (high ROI):** the **Technical-Review Phase 1
+  fixes — 107, 108, 109** (quota double-reserve on an approval retry; the
+  preview diff running DML before the over-cap check; the missing MCP write
+  batch-size cap). Narrow, local, correctness/DoS-relevant, no external
+  dependency. **Item 99 shipped 2026-07-24** — it was the one flagship-engine
+  item needing no Decision Log entry; **100–106 each require one before build**,
+  so the engine pillar is decision-gated again from here.
 
 Everything else stays gated as before:
 

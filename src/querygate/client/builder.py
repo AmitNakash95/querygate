@@ -378,8 +378,10 @@ def percentile_cont(
     return PercentileContSelectItem(col=_colname(column), fraction=fraction, alias=as_)
 
 
-def when(condition: Predicate, then: Any) -> CaseWhen:
-    """One CASE branch: a predicate condition and its ``col(...)``/``lit(...)`` result."""
+def when(condition: WhereNode, then: Any) -> CaseWhen:
+    """One CASE branch: a condition and its ``col(...)``/``lit(...)`` result. The
+    condition is a full ``WhereNode`` — a single predicate OR an
+    ``and_(...)``/``or_(...)``/``not_(...)`` group for a searched CASE (item 99)."""
     return CaseWhen(when=condition, then=_to_arg(then))
 
 
@@ -446,7 +448,7 @@ class Query:
         self._joins: List[JoinSpec] = []
         self._where: List[WhereNode] = []
         self._group_by: List[str] = []
-        self._having: List[Predicate] = []
+        self._having: List[WhereNode] = []
         self._order_by: List[OrderBySpec] = []
         self._limit: Optional[int] = None
         self._offset = 0
@@ -506,9 +508,12 @@ class Query:
         self._group_by.extend(_colname(c) for c in columns)
         return self
 
-    def having(self, *predicates: Predicate) -> "Query":
-        """Post-aggregation predicates (AND-combined, matching the AST)."""
-        self._having.extend(predicates)
+    def having(self, *nodes: WhereNode) -> "Query":
+        """Add post-aggregation predicate(s)/group(s). Multiple nodes — across
+        one call or several ``.having()`` calls — are AND-combined, exactly like
+        ``.where()``. Pass ``or_(...)``/``and_(...)``/``not_(...)`` for boolean
+        logic over aggregate conditions (item 99)."""
+        self._having.extend(nodes)
         return self
 
     def order_by(
@@ -552,12 +557,16 @@ class Query:
         return self
 
     # Terminals ----------------------------------------------------------- #
-    def _where_node(self) -> Optional[WhereNode]:
-        if not self._where:
+    @staticmethod
+    def _and_combine(nodes: List[WhereNode]) -> Optional[WhereNode]:
+        if not nodes:
             return None
-        if len(self._where) == 1:
-            return self._where[0]
-        return WhereGroup(and_terms=list(self._where))
+        if len(nodes) == 1:
+            return nodes[0]
+        return WhereGroup(and_terms=list(nodes))
+
+    def _where_node(self) -> Optional[WhereNode]:
+        return self._and_combine(self._where)
 
     def build(self) -> StructuredQuery:
         """Construct and validate the ``StructuredQuery``. Raises the same
@@ -570,7 +579,7 @@ class Query:
             joins=self._joins,
             where=self._where_node(),
             group_by=self._group_by,
-            having=self._having,
+            having=self._and_combine(self._having),
             order_by=self._order_by,
             limit=self._limit,
             offset=self._offset,

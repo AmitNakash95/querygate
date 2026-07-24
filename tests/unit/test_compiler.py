@@ -104,7 +104,7 @@ class TestCompiler:
                 AggregateSelectItem(fn="count", col="*", alias="order_count"),
             ],
             group_by=["orders.customer_id"],
-            having=[Predicate(col="order_count", op="gte", value=2)],
+            having=Predicate(col="order_count", op="gte", value=2),
             order_by=[OrderBySpec(col="order_count", dir="desc")],
             limit=50,
         )
@@ -399,16 +399,14 @@ class TestCompiler:
                 AggregateSelectItem(fn="count", col="*", alias="n"),
             ],
             group_by=["orders.status"],
-            having=[
-                Predicate(
-                    col_fn={
-                        "fn": "coalesce",
-                        "args": [{"col": "orders.total_amount"}, {"literal": 0}],
-                    },
-                    op="gt",
-                    value=0,
-                )
-            ],
+            having=Predicate(
+                col_fn={
+                    "fn": "coalesce",
+                    "args": [{"col": "orders.total_amount"}, {"literal": 0}],
+                },
+                op="gt",
+                value=0,
+            ),
             limit=5,
         )
         stmt, _ = compile_structured_query(query, tables, Policy())
@@ -441,6 +439,64 @@ class TestCompiler:
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "lower(orders.status)" in compiled
         assert "CASE WHEN" in compiled.upper()
+
+    def test_searched_having_or_group_renders(self):
+        """item 99: HAVING is a WhereNode, so OR-logic over aggregate conditions
+        renders as a single boolean HAVING clause."""
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.status",
+                AggregateSelectItem(fn="sum", col="orders.total_amount", alias="s"),
+                AggregateSelectItem(fn="count", col="*", alias="n"),
+            ],
+            group_by=["orders.status"],
+            having=WhereGroup(
+                or_terms=[
+                    Predicate(col="s", op="gt", value=10),
+                    Predicate(col="n", op="lt", value=3),
+                ]
+            ),
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).upper()
+        assert "HAVING" in compiled
+        # The two aggregate conditions are OR-combined inside one HAVING clause.
+        having_clause = compiled.split("HAVING", 1)[1]
+        assert " OR " in having_clause
+
+    def test_searched_case_and_condition_renders(self):
+        """item 99: a searched-CASE condition is a full WhereNode — multiple
+        conditions combine with AND/OR inside one WHEN."""
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=[
+                {
+                    "when": [
+                        {
+                            "when": {
+                                "and": [
+                                    {"col": "orders.status", "op": "eq", "value": "completed"},
+                                    {"col": "orders.total_amount", "op": "gt", "value": 100},
+                                ]
+                            },
+                            "then": {"literal": "big-done"},
+                        }
+                    ],
+                    "else": {"literal": "other"},
+                    "as": "label",
+                }
+            ],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).upper()
+        assert "CASE WHEN" in compiled
+        case_clause = compiled.split("CASE WHEN", 1)[1].split("END", 1)[0]
+        assert " AND " in case_clause
 
     def test_composite_join_key_ands_both_conditions(self):
         metadata = sa.MetaData()
@@ -559,7 +615,7 @@ class TestCompiler:
                 StringAggSelectItem(col="orders.status", delimiter=", ", alias="statuses"),
             ],
             group_by=["orders.customer_id"],
-            having=[Predicate(col="statuses", op="neq", value="")],
+            having=Predicate(col="statuses", op="neq", value=""),
             limit=5,
         )
         stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
@@ -620,7 +676,7 @@ class TestCompiler:
                 ArrayAggSelectItem(col="orders.status", alias="statuses"),
             ],
             group_by=["orders.customer_id"],
-            having=[Predicate(col="statuses", op="neq", value="")],
+            having=Predicate(col="statuses", op="neq", value=""),
             limit=5,
         )
         stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
@@ -683,7 +739,7 @@ class TestCompiler:
                 PercentileContSelectItem(col="orders.total_amount", fraction=0.5, alias="median"),
             ],
             group_by=["orders.customer_id"],
-            having=[Predicate(col="median", op="gt", value=0)],
+            having=Predicate(col="median", op="gt", value=0),
             limit=5,
         )
         stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
@@ -1081,16 +1137,14 @@ class TestCrossDialectRendering:
             from_table="orders",
             select=["orders.status", AggregateSelectItem(fn="count", col="*", alias="n")],
             group_by=["orders.status"],
-            having=[
-                Predicate(
-                    col_fn={
-                        "fn": "coalesce",
-                        "args": [{"col": "orders.total_amount"}, {"literal": 0}],
-                    },
-                    op="gt",
-                    value=0,
-                )
-            ],
+            having=Predicate(
+                col_fn={
+                    "fn": "coalesce",
+                    "args": [{"col": "orders.total_amount"}, {"literal": 0}],
+                },
+                op="gt",
+                value=0,
+            ),
             limit=5,
         )
         stmt, _ = compile_structured_query(query, tables, Policy(), dialect="mssql")
@@ -1151,7 +1205,7 @@ class TestMinGroupSize:
                 AggregateSelectItem(fn="count", col="*", alias="n"),
             ],
             group_by=["orders.customer_id"],
-            having=[Predicate(col="n", op="gte", value=2)],
+            having=Predicate(col="n", op="gte", value=2),
         )
         stmt, _ = compile_structured_query(query, tables, Policy(min_group_size=5))
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))

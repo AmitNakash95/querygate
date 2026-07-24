@@ -171,7 +171,7 @@ def test_subquery_in_having_is_rejected():
         from_table="orders",
         select=["orders.customer_id"],
         group_by=["orders.customer_id"],
-        having=[Predicate(col="orders.customer_id", op="in", value_subquery=sub)],
+        having=Predicate(col="orders.customer_id", op="in", value_subquery=sub),
     )
     with pytest.raises(PolicyViolationError, match="only supported in a WHERE"):
         validate_policy(q, Policy(), _CONN)
