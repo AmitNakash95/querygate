@@ -174,6 +174,11 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   lifecycle (`202` + status/cancel), cancellation semantics (queue-only vs.
   dialect DB-cancel), and a `429`/`Retry-After` breaking-change evaluation each
   need a protocol/product decision before build.
+- [ ] **94** — Verify (and, if warranted, enable) prepared-statement plan reuse
+  for template execution. *Cheap, bounded perf/observability check on the
+  already-shipped template path (item 48); placed here 2026-07-24 because it is
+  adoption polish, not a moat or safety item. May close as "verified, no change
+  warranted".* **Depends on 48.**
 - [ ] **18** — Stored-procedure catalog. *Extends read coverage where customers
   already encapsulate logic in procs.*
 - [x] **57** — Pluggable dialect-adapter architecture. *The enabler that turns
@@ -333,8 +338,11 @@ Everything else stays gated as before:
 - **93 ph2** (gated write *execution*) — depends on 90+91+92 (all shipped) but
   crosses from preview to *committing writes*: a deliberate build + product
   decision, its own PR.
-- **26 ph2 / 36 ph2b / 58 ph2 / 53** — *external infra/vendor*: live MSSQL,
-  Postgres+MSSQL dual-DB CI, external LLM/Toolbox harness, an external auditor.
+- **58 ph2 / 53** — *external infra/vendor*: an external LLM/Toolbox benchmark
+  harness, an external auditor. (**26 ph2** — MSSQL `SHOWPLAN_XML` cost
+  estimation — and **36 ph2b** — the Postgres+MSSQL cross-dialect differential
+  suite — have since shipped against live CI databases; both items are now
+  fully `✅ DONE` in TODO.md.)
 - **30·89 ph2** — the *maintainer's signed-release tag push* (+ package-index
   choice); the mechanism is shipped.
 - **35 ph3** — *design-gated* (agent-visible progress/cancellation posture);
@@ -394,16 +402,12 @@ already-planned initiatives.
   never affected. Proven by hooking `before_cursor_execute` and asserting on the
   statements issued, with a within-cap positive control so the guard can't
   degrade into disabling the feature).
-- [ ] **109** — MCP `run_structured_writes` has no batch-size cap (the read
-  path's `validate_batch_size` has no write-side equivalent).
-  - Why: a caller can submit an unbounded batch of individually-in-cap writes
-    in one MCP call, well beyond what the read path allows for the same
-    principal.
-  - Scope: `policy/models.py` (`WritePolicy`), `validation/write_policy_validation.py`,
-    `mcp/tools/write.py`.
-  - Acceptance criteria:
-    - `WritePolicy.max_batch_size` exists and is enforced before any
-      statement in an over-size batch is processed; boundary test added.
+- [x] **109** — MCP `run_structured_writes` has no batch-size cap (the read
+  path's `validate_batch_size` has no write-side equivalent). ✅ **Shipped**
+  (`WritePolicy.max_batch_size`, default 10 to match the read cap and drift-tested
+  against it, + `validate_write_batch_size` enforced at the MCP tool before the
+  preview/execute branch *and* inside `execute_many`, so no statement is touched
+  in an over-size batch and the service layer is bounded regardless of transport).
 
 ### Review Phase 2 — Reliability and workflow hardening
 

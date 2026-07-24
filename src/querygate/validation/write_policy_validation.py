@@ -25,6 +25,20 @@ from querygate.write_ast.models import (
 )
 
 
+def validate_write_batch_size(count: int, policy: Policy) -> None:
+    """Bound how many writes one batch call may carry (TODO.md item 109) — the
+    write sibling of `policy_validation.validate_batch_size`.
+
+    Called *before* any statement in the batch is validated, compiled, or run, so
+    an over-size batch costs nothing. `WritePolicy.max_affected_rows` bounds a
+    single statement's blast radius; this bounds how many statements ride along
+    with it, which is otherwise unbounded on the batched (MCP) write path."""
+    if count > policy.write.max_batch_size:
+        raise PolicyViolationError(
+            f"write batch size {count} exceeds max of {policy.write.max_batch_size}"
+        )
+
+
 def _where_predicates(node: WhereNode) -> Iterator[Predicate]:
     if isinstance(node, Predicate):
         yield node

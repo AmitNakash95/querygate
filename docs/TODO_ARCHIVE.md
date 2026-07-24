@@ -5586,3 +5586,59 @@ positive control still passes.
 **Hard boundaries honored.** No new policy field (reuses `max_affected_rows`),
 no change to what a preview may show, masking still applied to every diff row,
 and the preview remains non-mutating (the rollback is untouched).
+
+### 109. MCP `run_structured_writes` has no batch-size cap ✅ DONE
+
+**Effort: S. Priority: medium-high (the write path had weaker sizing guardrails
+than the read path it was modeled on). Depends on: none.** Surfaced by the
+2026-07-23 technical review (`TECHNICAL_REVIEW.md`).
+
+**Why it mattered.** The read path caps how many queries one call may carry —
+`validate_batch_size(len(queries), policy)` against `Policy.max_batch_size`,
+enforced at **both** transports (`api/routes.py`, `mcp/tools/query.py`). The
+write path had no equivalent at any layer: `WritePolicy` carried no batch field
+at all, and `mcp/tools/write.py` accepted an unbounded `writes: List[...]`. A
+caller could submit an arbitrarily long batch of *individually legal,
+individually in-cap* writes in a single MCP call, each running the full
+validate→compile→execute pipeline and taking locks in sequence — multiplying
+cost and lock time per call far past what the same principal was allowed on the
+read side. `max_affected_rows` is no defense here: it bounds one statement's
+blast radius, and every statement in the batch satisfies it.
+
+**What shipped.**
+
+- `WritePolicy.max_batch_size` (`policy/models.py`), `default=10, ge=1` —
+  deliberately the *same* default as `Policy.max_batch_size` rather than a new
+  invented number, since the write path was modeled on the read path. A drift
+  test (`test_write_batch_size_cap_defaults_to_the_read_path_value`) pins the
+  two together so they can't silently diverge.
+- `validate_write_batch_size(count, policy)`
+  (`validation/write_policy_validation.py`) — the write sibling of
+  `validate_batch_size`, same shape and error style.
+- Enforced at **two** layers, deliberately:
+  - `mcp/tools/write.py`, before the `mode` branch — so *both* preview and
+    execute batches are rejected before any statement is validated, compiled,
+    previewed, or run. (MCP is currently the only batched write transport; the
+    REST write endpoints are single-statement.)
+  - `WriteExecutionService.execute_many` — so the service layer is bounded by
+    construction for any future caller, rather than depending on each transport
+    remembering to check. This mirrors the read path, which likewise checks at
+    each transport rather than in one place only.
+
+**Coverage.** `tests/unit/test_governed_writes.py`: the read-parity default,
+over-cap rejection, the **boundary** case (exactly at cap passes, one over
+fails), `ge=1` validation, and an `execute_many` test proving the service layer
+rejects before running anything. `tests/security/test_write_boundary.py` adds
+the adversarial framing — `test_unbounded_write_batch_is_capped_not_a_dos_vector`
+(5000 individually-legal writes in one call) and
+`test_write_batch_cap_is_enforced_before_any_statement_runs` (up-front, not
+partway through — otherwise an over-size batch would still pay for, and commit,
+every statement before the one that trips the cap).
+
+Verified both new tests genuinely bite: with the `execute_many` enforcement
+removed they fail; with it restored they pass.
+
+**Not expanded.** `WritePolicy` guardrails are still outside the item-40/41
+semantic-diff scope (`admin/access_diff.py` enumerates read-`Policy` fields
+only). That is a pre-existing boundary, not a regression from this item; adding
+write-policy diffing is its own separately-scoped piece of work.

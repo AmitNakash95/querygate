@@ -25,6 +25,8 @@ from querygate.mcp.auth import get_mcp_caller, get_mcp_config
 from querygate.mcp.elicitation import build_elicitation_resolver
 from querygate.mcp.exceptions import MCPErrorResult, safe_mcp_tool
 from querygate.mcp.server import mcp_server
+from querygate.policy.loader import get_policy
+from querygate.validation.write_policy_validation import validate_write_batch_size
 from querygate.write_ast.models import (
     DeleteStatement,
     InsertStatement,
@@ -95,6 +97,10 @@ async def run_structured_writes(
     ctx: Context = None,
 ) -> Union[WritePreviewBatchResult, WriteExecuteBatchResult, MCPErrorResult]:
     caller = get_mcp_caller()
+    # Cap the batch before ANY statement is validated, compiled, previewed, or
+    # run (item 109) — the read path's `validate_batch_size` equivalent, which
+    # the write path was missing entirely.
+    validate_write_batch_size(len(writes), get_policy(connection, principal=caller))
     if mode == "preview":
         preview_service = WritePreviewService(connection_id=connection, principal=caller)
         previews = [await preview_service.preview(w, include_diff=include_diff) for w in writes]
