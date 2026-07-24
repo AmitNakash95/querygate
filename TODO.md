@@ -57,7 +57,7 @@ order-of-magnitude, not commitments.
 | 23 | ✅ Persisted audit/event sink | M | 1, 12 |
 | 24 | ✅ Release hygiene and reproducible v0.1.0 cut | S–M | 4, 14, 17 |
 | 25 | ✅ Admin/config governance plane | L | 5, 6, 10, 13 |
-| 26 | ✅ Query-cost estimation before execution (phase 1: Postgres EXPLAIN; phase 2: MSSQL not started) | L | 2, 3, 15 |
+| 26 | ✅ Query-cost estimation before execution (phase 1: Postgres `EXPLAIN`; phase 2: MSSQL `SHOWPLAN_XML`) | L | 2, 3, 15 |
 | 27 | ✅ Semantic schema catalog and sensitivity metadata | L | 6, 16 |
 | 28 | ✅ Threat model + adversarial security test suite | M | 1, 6, 8, 10, 11 |
 | 29 | ✅ Production deployment reference stack | M | 4, 9, 12, 13, 14 |
@@ -66,14 +66,14 @@ order-of-magnitude, not commitments.
 | 32 | ✅ Governed adaptive semantic memory for agents (32A ✅; 32B ✅; 32C ✅) | XL | 23, 25, 27, 28 |
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
-| 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phase 1: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit; phase 2: queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
-| 36 | ✅ Extensive production-grade QA project / edge-case test suite (phase 1: policy-cap boundary tests + Hypothesis property-based compiler fuzzing; phase 2a: REST/MCP malformed-input fuzzing; phase 2b: cross-dialect differential tests not started) | L | 15, 28 |
+| 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phases 1–2: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit, queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
+| 36 | ✅ Extensive production-grade QA project / edge-case test suite (all phases: policy-cap boundary tests + Hypothesis property-based compiler fuzzing, REST/MCP malformed-input fuzzing, cross-dialect differential execution tests) | L | 15, 28 |
 | 37 | ✅ Automated end-to-end proof of adaptive semantic learning | M–L | 23, 25, 27, 28, 32B, 32C |
 | 38 | ✅ Admin UI catalog-governance workspace (phase 1: core review/approve/reject/publish/rollback loop; phase 2: bulk ops, export/import UI, generation triggers not started) | L | 27, 31, 32B |
 | 39 | ✅ Draft-aware policy simulation before staging | M–L | 6, 17, 25, 31 |
-| 40 | ✅ Semantic access diff for config changes (phase 1: connection-baseline diff + REST; phase 2: per-principal resolution not started) | L | 6, 25, 31, 39 |
-| 41 | ✅ Policy-change blast-radius analysis (phase 1: bounded synchronous aggregation + ranking; phase 2: async/paginated evaluation for very large principal counts not started) | M–L | 22, 25, 31, 40 |
-| 42 | Four-eyes config approval and separation of duties | XL | 10, 23, 25, 31 |
+| 40 | ✅ Semantic access diff for config changes (phase 1: connection-baseline diff + REST; phase 2 per-principal resolution covered by item 41) | L | 6, 25, 31, 39 |
+| 41 | ✅ Policy-change blast-radius analysis (phase 1: bounded synchronous aggregation + ranking; phase 2: stateless paginated evaluation) | M–L | 22, 25, 31, 40 |
+| 42 | ✅ Four-eyes config approval and separation of duties | XL | 10, 23, 25, 31 |
 | 43 | ✅ Admin connection-operations and health workspace (phase 1: admin connection-status API; phase 2a: "test now" probe; phase 2b: browser workspace) | L | 7, 12, 31 |
 | 44 | ✅ Admin observability and rejection-trend dashboard (phase 1: admin-scoped aggregated overview API + read-only browser cards panel; phase 2: time-window charts, config/catalog-change trend, external metrics backend not started) | L | 12, 23, 31, 35 |
 | 45 | ✅ Dedicated non-admin "My access" portal (phase 1: identity, guardrails, mandatory-filter readiness, schema browser; phase 2: personal denial history not started) | M | 22, 31, 33 |
@@ -81,17 +81,17 @@ order-of-magnitude, not commitments.
 | 47 | ✅ Safe draft recovery plus config export/import UX (phase 1: change-set export/import + policy-only local recovery; phase 2: server-side encrypted draft store not started) | M | 13, 25, 31 |
 | 48 | ✅ Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) (phase 1: file-configured invocable templates + REST/MCP; phase 2: governed authoring via the config-versioning plane) | L | 6, 22, 25, 32B |
 | 49 | ✅ Column-value masking/tokenization (not just allow/deny) | L | 6, 27 |
-| 50 | ✅ Per-principal rate limits / query quotas over time (phase 1: in-process rolling-window request/byte quota; phase 2: Redis-backed cross-replica quota not started) | M | 9, 25 |
+| 50 | ✅ Per-principal rate limits / query quotas over time (phase 1: in-process rolling-window request/byte quota; phase 2: Redis-backed cross-replica quota) | M | 9, 25 |
 | 51 | ✅ Typed client-side query-builder SDK (phase 1: Python builder; phase 2: TypeScript + standalone dependency-light distribution not started) | M (per language) | 20 |
 | 52 | ✅ Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI) | S (per framework) | 20 |
 | 53 | Independent third-party security audit + published report | S* | 28 |
-| 54 | Compliance control mapping (SOC 2 / ISO 27001 readiness) | L | 23, 25, 28 |
+| 54 | ✅ Compliance control mapping (SOC 2 / ISO 27001 readiness) | L | 23, 25, 28 |
 | 55 | ✅ Inference/transitive-exposure adversarial test suite | M | 28 |
-| 56 | HA / multi-region reference deployment + DR runbook | L | 29 |
-| 57 | Pluggable dialect-adapter architecture | L | 2, 19 |
-| 58 | Published adversarial benchmark vs. raw-SQL agent and Google Toolbox | M | 28, 36 |
+| 56 | ✅ HA / multi-region reference deployment + DR runbook | L | 29 |
+| 57 | ✅ Pluggable dialect-adapter architecture | L | 2, 19 |
+| 58 | ✅ Published adversarial benchmark vs. raw-SQL agent and Google Toolbox (phase 1: offline deterministic corpus + CLI + published report; phase 2: external LLM/Toolbox harness not started) | M | 28, 36 |
 | 59 | ✅ Read-only behavioral anomaly surfacing on the audit stream | M | 32C, 44 |
-| 60 | Bug bounty / responsible disclosure program | S | 53 |
+| 60 | ✅ Bug bounty / responsible disclosure program | S | 53 |
 | 61 | ✅ Deduplicate the StructuredQuery JSON Schema across execute/explain/batch tools | S–M | — |
 | 62 | ✅ Consolidate redundant instructional prose into one source of truth | M | 61 (pairs well) |
 | 63 | ✅ Scope-gate admin-only tool schemas out of non-admin sessions | M | 8, 22 |
@@ -123,12 +123,35 @@ order-of-magnitude, not commitments.
 | 89 | ✅ Open-source security validation gates + trust posture (phase 1 ✅; phase 2 signed delivery not started) | L | 28, 30 |
 | 90 | ✅ Delegated agent identity (on-behalf-of) into policy + dual-identity audit | M | 8, 10, 23 |
 | 91 | ✅ Tamper-evident hash-chained audit ledger + per-query compliance receipts | M | 23 |
-| 92 | In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) | L | 26, 90, 91 |
-| 93 | Governed Writes — structured, bounded, previewable, governed agent mutations (decision-gated) | XL | 25, 48, 90, 91 |
+| 92 | ✅ In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) | L | 26, 90, 91 |
+| 93 | ✅ Governed Writes — structured, bounded, previewable, governed agent mutations (governance tier shipped: preview/diff, gated execution, approval, batch, upserts; reversibility/undo REMOVED 2026-07-23; `release-smoke` write round-trip open) | XL | 25, 48, 90, 91 |
 | 94 | Verify/enable prepared-statement plan reuse for template execution | S | 48 |
+| 95 | ✅ Discoverable scope catalog + recommended role bundles for IdP integration | S | 10, 90 |
+| 96 | ✅ Unify the AST reference-walk into a single canonical visitor | M | — |
+| 97 | ✅ Bounded nested subqueries (phase 1: `IN (subquery)`/`NOT IN`, tree-wide caps; phase 2: `FROM (subquery)` derived table not started) | L | 96 |
+| 99 | ✅ ★ `HAVING` as `WhereNode` + searched `CASE` condition | S | 96 |
+| 100 | ★ Bounded scalar `Expression` substrate (arithmetic, conditional aggregation, nested fns, expression-CASE) | XL | 96, 99 |
+| 101 | ★ General window functions (`WindowSelectItem`: OVER, LAG/LEAD, frames) | L | 96, 100 (windowed exprs) |
+| 102 | ★ `EXTRACT`/date_part + relative-date/interval helpers | M | 100 |
+| 103 | ★ Non-equi/range joins + FULL OUTER / CROSS | M | 96, 99 |
+| 104 | ★ Set operations (UNION / INTERSECT / EXCEPT) | L | 96, 97 |
+| 105 | ★ CTE / derived table in FROM (non-recursive) | XL | 96, 97, 104 |
+| 106 | ★ Correlated / EXISTS / scalar subqueries | XL | 96, 97, 105 |
+| 107 | Batch query execution double-reserves quota on an approval retry | S | — |
+| 108 | ✅ Write-preview diff runs the full DML before the affected-row cap is checked | S | — |
+| 109 | MCP `run_structured_writes` has no batch-size cap | S | — |
+| 110 | `value_subquery` in a write's WHERE is validated at the wrong layer | XS | — |
+| 111 | Duplicated WHERE-predicate tree walk across four validators | S | — |
+| 112 | No scheduled (cron) CI run — dependency/security scans only fire on push/PR | S | — |
+| 113 | ✅ OBSOLETE — metrics for the removed write-undo / compensation store | — | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
-anything, was intentionally left out of scope).
+anything, was intentionally left out of scope); a parenthesized phase note
+means the item is only partially shipped and still carries open work.
+★ = the flagship Expressive Query Engine pillar (items 99–106; spec in
+[docs/ENGINE_EXPRESSIVENESS_PLAN.md](docs/ENGINE_EXPRESSIVENESS_PLAN.md)).
+There is no item 98 — the number was skipped when that pillar was allocated
+and stays unused, since item numbers are permanent and never reused.
 
 Items 21–47 are the next quality tranche from the current repo scan: mostly
 security consistency, enterprise operability, and product polish — the
@@ -152,6 +175,14 @@ explicitly accepted; see its own entry. Combined effect measured in
 `tests/unit/test_mcp_token_budget.py`: 53,841 chars (~13,460 tokens) per
 MCP session, down from the original pre-tranche 67,338. They live in their
 own "P5" section below.
+
+Items 99–106 are the flagship Expressive Query Engine pillar (★) — one
+coordinated initiative taking the READ engine to 10/10 expressiveness with no
+safety regression; build in the listed order, per
+[docs/ENGINE_EXPRESSIVENESS_PLAN.md](docs/ENGINE_EXPRESSIVENESS_PLAN.md).
+Items 107–113 came out of the 2026-07-23 repo-wide technical/product review
+(`TECHNICAL_REVIEW.md`) — narrow correctness, guardrail, and maintainability
+gaps, sequenced in ROADMAP.md's "Technical and Product Improvement Plan".
 
 \*\* item 53's effort is engineering coordination and remediation only; the
 audit itself is an external vendor engagement and calendar-time cost, not
@@ -289,7 +320,7 @@ Added `docs/THREAT_MODEL.md`, covering assets, trust boundaries, attacker capabi
 
 A `deploy/` directory with two verified reference stacks — a production-ish Docker Compose file and a Helm chart — sharing the same shape: app + Redis (distributed concurrency,… **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 29).
 
-### 30. Distribution, SBOM, and signed release artifacts
+### 30. Distribution, SBOM, and signed release artifacts ✅ DONE (phase 1); phase 2 signing/provenance mechanism shipped, first signed release + package-index remain maintainer-gated
 
 **Phase 1 (SBOM + dependency audit + checksums) ✅ DONE.** **Phase 2 —
 signing + provenance mechanism now shipped; two operational bits remain
@@ -398,7 +429,7 @@ a new `querygate/help/` product-knowledge boundary with ten canonical Markdown t
 
 `landing/sandbox.html` — a single self-contained, static HTML page (fonts via Google Fonts CDN, everything else inline, no build step, no network calls after load) linked from… **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 34).
 
-### 35. Agent-visible capacity waiting, progress, and cancellation
+### 35. Agent-visible capacity waiting, progress, and cancellation ✅ DONE (phases 1–2); phase 3 (progress notifications, REST 202 + cancel, mid-queue cancellation) deferred
 
 **Phase 1 shipped:** `concurrency_slot()` already waited for up to the
 policy's `concurrency_wait_seconds` and raised `ConcurrencyLimitError`
@@ -932,7 +963,7 @@ a `column_mask` policy primitive (`policy/models.py`: `ColumnMask`/`ColumnMaskKi
 
 Three `Policy` fields (`max_requests_per_window`, `max_response_bytes_per_window`, `quota_window_seconds`, resolved per principal through the existing `PolicyStore` merge) enforced by `execution/quota.py`'s narrow `QuotaLimiter` Protocol *before* the service queues or opens a DB session; a refused caller gets REST **429 + `Retry-After`** / MCP **`RATE_LIMITED`**. Phase 2 added `execution/redis_quota.py`'s `RedisQuotaLimiter` (one atomic Lua script, sorted set + bytes hash) so the window is a single shared budget across replicas. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 50).
 
-### 51. Typed client-side query-builder SDK (Python + TypeScript)
+### 51. Typed client-side query-builder SDK (Python + TypeScript) ✅ DONE (phase 1 — Python builder); phase 2 (TypeScript + standalone distribution) not started
 
 **Phase 1 (Python builder) ✅ DONE.** **Phase 2 (TypeScript sibling +
 standalone dependency-light distribution) not started — split out below
@@ -2161,23 +2192,15 @@ no DML reaches the database.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 108).
 
-### 109. MCP `run_structured_writes` has no batch-size cap
+### 109. MCP `run_structured_writes` has no batch-size cap ✅ DONE
 
-`mcp/tools/write.py` accepts an unbounded `writes: List[...]` with no
-equivalent of the read path's `validate_batch_size(len(queries), policy)`
-(`mcp/tools/query.py:128`, backed by `validation/policy_validation.py`).
-`WritePolicy` has no `max_batch_size`-style field at all. A caller can submit
-an arbitrarily large batch of individually-in-cap writes in a single MCP call,
-each running through the full validate→compile→execute pipeline sequentially —
-an easy way to multiply cost/lock-time per call well beyond what the read
-path allows for the same principal.
+Added `WritePolicy.max_batch_size` (default 10, mirroring `Policy.max_batch_size`)
+and `validate_write_batch_size`, enforced both at the MCP tool (before the
+preview/execute branch, so no statement is touched) and inside
+`WriteExecutionService.execute_many` (so the service layer is bounded regardless
+of transport).
 
-**Fix:** add `WritePolicy.max_batch_size` (mirroring the read policy's cap) and
-enforce it in `write_policy_validation.py` before any statement in the batch is
-processed; test both the read-parity cap and the boundary case.
-
-**Effort: S. Priority: medium-high (write path currently has weaker sizing
-guardrails than the read path it was modeled on). Depends on: none.**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 109).
 
 ### 110. `value_subquery` in a write's WHERE is validated at the wrong layer
 

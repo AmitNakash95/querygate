@@ -167,6 +167,14 @@ class WritePolicy(pyd.BaseModel):
     # most this many old→new row changes; a larger affected set is reported
     # truncated. Bounds the value-bearing preview so it can never dump a table.
     max_diff_rows: int = pyd.Field(default=50, ge=1)
+    # How many writes one batch call may carry (TODO.md item 109) — the write
+    # sibling of `Policy.max_batch_size`, and deliberately the same default. The
+    # write path is batched only over MCP (`run_structured_writes`); without this
+    # a caller could submit an unbounded batch of individually-in-cap writes in
+    # one call, multiplying lock time and cost per call well past what the read
+    # path allows the same principal. `max_affected_rows` bounds ONE statement;
+    # this bounds how many statements ride along with it.
+    max_batch_size: int = pyd.Field(default=10, ge=1)
 
     model_config = pyd.ConfigDict(extra="forbid")
 

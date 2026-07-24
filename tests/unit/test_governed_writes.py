@@ -13,7 +13,10 @@ import pytest
 from querygate.compiler.write_compiler import compile_write
 from querygate.core.exceptions import PolicyViolationError
 from querygate.policy.models import ColumnMask, ColumnMaskKind, Policy, WritePolicy
-from querygate.validation.write_policy_validation import validate_write_policy
+from querygate.validation.write_policy_validation import (
+    validate_write_batch_size,
+    validate_write_policy,
+)
 from querygate.write_ast.models import (
     DeleteStatement,
     InsertStatement,
@@ -168,3 +171,58 @@ def test_insert_compiles():
     sql = str(dml.compile(compile_kwargs={"literal_binds": False})).upper()
     assert sql.startswith("INSERT INTO ORDERS")
     assert "NEW" not in sql  # bound, not literal
+
+
+# --------------------------------------------------------------------------- #
+# Batch sizing (TODO.md item 109) — the write sibling of the read path's        #
+# `validate_batch_size`. `max_affected_rows` bounds ONE statement's blast       #
+# radius; this bounds how many statements ride along with it.                   #
+# --------------------------------------------------------------------------- #
+
+
+def _batch(n: int) -> list:
+    return [UpdateStatement(**_update().model_dump()) for _ in range(n)]
+
+
+def test_write_batch_size_cap_defaults_to_the_read_path_value():
+    """The write cap deliberately mirrors `Policy.max_batch_size` rather than
+    inventing a different number — the write path was modeled on the read path."""
+    assert WritePolicy().max_batch_size == Policy().max_batch_size
+
+
+def test_write_batch_over_cap_is_rejected():
+    policy = _writable()
+    policy.write.max_batch_size = 3
+    with pytest.raises(PolicyViolationError, match="write batch size 4 exceeds max of 3"):
+        validate_write_batch_size(4, policy)
+
+
+def test_write_batch_at_cap_passes():
+    """Boundary: exactly at the cap is allowed, one over is not (item 109)."""
+    policy = _writable()
+    policy.write.max_batch_size = 3
+    validate_write_batch_size(3, policy)  # must not raise
+    with pytest.raises(PolicyViolationError):
+        validate_write_batch_size(4, policy)
+
+
+def test_write_batch_size_cap_must_be_at_least_one():
+    with pytest.raises(Exception):
+        WritePolicy(max_batch_size=0)
+
+
+@pytest.mark.asyncio
+async def test_execute_many_rejects_an_over_size_batch_before_running_anything():
+    """The cap is enforced at the service layer, not only at the MCP transport,
+    and *before* any statement is validated/compiled/executed — so an over-size
+    batch costs nothing rather than failing partway through."""
+    from querygate.execution.write_execution import WriteExecutionService
+    from querygate.policy.loader import PolicyStore, set_policy_store
+
+    policy = _writable()
+    policy.write.max_batch_size = 2
+    set_policy_store(PolicyStore(default=policy, overrides={}))
+
+    service = WriteExecutionService(connection_id=_CONN, surface="rest")
+    with pytest.raises(PolicyViolationError, match="write batch size 3 exceeds max of 2"):
+        await service.execute_many(_batch(3))

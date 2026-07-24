@@ -55,7 +55,10 @@ from querygate.execution.concurrency import concurrency_slot
 from querygate.execution.write_preview import _reject_subquery_in_write_where
 from querygate.policy.loader import get_policy
 from querygate.policy.models import WritePolicy
-from querygate.validation.write_policy_validation import validate_write_policy
+from querygate.validation.write_policy_validation import (
+    validate_write_batch_size,
+    validate_write_policy,
+)
 from querygate.validation.write_schema_validation import validate_write_schema
 from querygate.write_ast.models import (
     InsertStatement,
@@ -194,6 +197,12 @@ class WriteExecutionService:
         atomic batch is deny-by-default + capped like any write and fails closed on
         an approval-gated write (there is no per-item token channel in atomic
         mode)."""
+        # Bound the batch at the service layer too, not only at the MCP
+        # transport (item 109) — so any future batch caller is capped by
+        # construction rather than by remembering to check.
+        validate_write_batch_size(
+            len(statements), get_policy(self._connection_id, principal=self._principal)
+        )
         if atomic:
             return await self._execute_many_atomically(statements)
         return [await self._execute_batch_item(s, approval_resolver) for s in statements]
