@@ -104,7 +104,7 @@ def _customers_table() -> sa.Table:
         StructuredQuery(
             from_table="customers",
             select=[AggregateSelectItem(fn="count", col="*", alias="n")],
-            having=[Predicate(col="customers.email", op="eq", value="target@example.com")],
+            having=Predicate(col="customers.email", op="eq", value="target@example.com"),
         ),
         StructuredQuery(
             from_table="customers",

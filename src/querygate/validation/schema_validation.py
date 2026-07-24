@@ -85,7 +85,10 @@ def select_item_column_refs(item: SelectItem) -> Iterator[str]:
         return
     if isinstance(item, CaseSelectItem):
         for branch in item.when:
-            yield from predicate_column_refs(branch.when)
+            # branch.when is a full WhereNode (item 99) — walk the whole boolean
+            # tree so every nested condition column is visited, not just a
+            # single predicate's.
+            yield from _where_column_refs(branch.when)
             if isinstance(branch.then, ColArg):
                 yield branch.then.col
         if isinstance(item.else_, ColArg):
@@ -165,7 +168,8 @@ def iter_where_and_having_predicates(query: StructuredQuery) -> Iterator[Predica
     separate scope). The one place a `value_subquery` (item 97) can be attached."""
     if query.where is not None:
         yield from _where_predicates(query.where)
-    yield from query.having
+    if query.having is not None:
+        yield from _where_predicates(query.having)
 
 
 def _where_predicates(node: WhereNode) -> Iterator[Predicate]:
@@ -231,8 +235,8 @@ def iter_column_refs(query: StructuredQuery) -> Iterator[ColumnRef]:
     for col_ref in query.group_by:
         if "." in col_ref:
             yield ColumnRef(RefPosition.GROUP_BY, col_ref)
-    for pred in query.having:
-        for ref in predicate_column_refs(pred):
+    if query.having is not None:
+        for ref in _where_column_refs(query.having):
             yield ColumnRef(RefPosition.HAVING, ref)
     for order in query.order_by:
         if "." in order.col:
@@ -504,8 +508,10 @@ async def _reflect_and_validate_scope(
     _validate_group_by(query, tables)
     if query.where is not None:
         _validate_where_columns(query.where, tables, allow_alias=False)
-    for pred in query.having:
-        _validate_predicate_columns(pred, tables, allow_alias=True)
+    if query.having is not None:
+        # allow_alias=True — a HAVING predicate may reference a select alias
+        # (an aggregate's `as`), unlike WHERE. Walks the whole boolean tree.
+        _validate_where_columns(query.having, tables, allow_alias=True)
     for order in query.order_by:
         if "." in order.col:
             t, c = parse_column_ref(order.col)
@@ -521,11 +527,12 @@ def _validate_select_columns(query: StructuredQuery, tables: Dict[str, sa.Table]
         if isinstance(item, AggregateSelectItem) and item.col == "*" and item.fn != "count":
             raise QueryValidationError("Only count(*) is allowed as a star aggregate")
         if isinstance(item, CaseSelectItem):
-            # Same strictness as a top-level WHERE predicate (no bare-alias
-            # `when` — CASE branch conditions must reference a real column,
-            # same reasoning `_validate_where_columns` applies to `where`).
+            # Same strictness as a top-level WHERE tree (no bare-alias `when` —
+            # a searched-CASE condition must reference a real column, same
+            # reasoning `_validate_where_columns` applies to `where`). The
+            # condition is a full WhereNode (item 99), so validate the whole tree.
             for branch in item.when:
-                _validate_predicate_columns(branch.when, tables, allow_alias=False)
+                _validate_where_columns(branch.when, tables, allow_alias=False)
         for ref in select_item_column_refs(item):
             t, c = parse_column_ref(ref)
             resolve_column(tables[t], c)

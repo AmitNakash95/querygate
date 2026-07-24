@@ -180,7 +180,7 @@ cases:
     query:
       from_table: customers
       select: [{fn: count, col: "*", alias: n}]
-      having: [{col: customers.email, op: eq, value: target@example.com}]
+      having: {col: customers.email, op: eq, value: target@example.com}
     querygate:
       blocks: true
       guardrail: policy column allow/deny over HAVING predicates
