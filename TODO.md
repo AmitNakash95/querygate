@@ -137,9 +137,9 @@ order-of-magnitude, not commitments.
 | 104 | ★ Set operations (UNION / INTERSECT / EXCEPT) | L | 96, 97 |
 | 105 | ★ CTE / derived table in FROM (non-recursive) | XL | 96, 97, 104 |
 | 106 | ★ Correlated / EXISTS / scalar subqueries | XL | 96, 97, 105 |
-| 107 | Batch query execution double-reserves quota on an approval retry | S | — |
+| 107 | ✅ Batch query execution double-reserves quota on an approval retry | S | — |
 | 108 | ✅ Write-preview diff runs the full DML before the affected-row cap is checked | S | — |
-| 109 | MCP `run_structured_writes` has no batch-size cap | S | — |
+| 109 | ✅ MCP `run_structured_writes` has no batch-size cap | S | — |
 | 110 | `value_subquery` in a write's WHERE is validated at the wrong layer | XS | — |
 | 111 | Duplicated WHERE-predicate tree walk across four validators | S | — |
 | 112 | No scheduled (cron) CI run — dependency/security scans only fire on push/PR | S | — |
@@ -2158,30 +2158,15 @@ above, not here, since it's the same feature. These are otherwise-solid,
 narrowly-scoped fixes/hardenings the review surfaced — not a restatement of
 already-tracked open work.
 
-### 107. Batch query execution double-reserves quota on an approval retry
+### 107. Batch query execution double-reserves quota on an approval retry ✅ DONE
 
-`StructuredQueryService._execute_batch_item`
-(`execution/service.py:718-753`) calls `self.execute()` a first time, and
-`execute()` reserves the per-principal query quota
-(`enforce_query_quota`, `execution/service.py:522`) *before* the item-92
-approval gate runs later in the same call. When the first attempt raises
-`ApprovalRequiredError` and an `approval_resolver` (MCP elicitation) obtains a
-token, `_execute_batch_item` retries by calling `self.execute()` a *second*
-time — reserving and recording quota again for what is logically one
-approved query. A principal running interactive-approval batches over MCP
-sees roughly double the quota consumption of an equivalent non-approval
-workload, silently halving effective throughput. Not covered by
-`test_admission.py`, `test_query_quota.py`, `test_approval.py`, or
-`test_mcp_elicitation_approval.py` — none exercise a quota assertion across
-the approval-retry path specifically.
+An in-session batch approval retry now reuses the quota reservation the paused
+first attempt already made instead of reserving a second unit. The live
+reservation is stashed on the `ApprovalRequiredError` as it leaves `execute()`
+and threaded back into the retry via a private `_reserved_quota` parameter, so
+one approved query consumes exactly one quota unit.
 
-**Fix:** thread the already-obtained `quota_reservation` (or a "quota already
-reserved for this fingerprint" flag) through the retry call so the second
-`execute()` doesn't re-reserve, and add a test asserting exactly one quota
-unit is consumed across an approval-required-then-retried batch item.
-
-**Effort: S. Priority: medium (real throughput bug, narrow blast radius).
-Depends on: none.**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 107).
 
 ### 108. Write-preview diff runs the full DML before the affected-row cap is checked ✅ DONE
 
