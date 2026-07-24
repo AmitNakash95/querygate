@@ -265,7 +265,7 @@ class TestValidateSchema:
         query = StructuredQuery(
             from_table="orders",
             select=["orders.id"],
-            having=[Predicate(col="orders.status", op="eq", value="completed")],
+            having=Predicate(col="orders.status", op="eq", value="completed"),
             limit=5,
         )
         with pytest.raises(ValueError, match="having requires"):
@@ -283,7 +283,7 @@ class TestValidateSchema:
             select=[
                 {"col": "orders.status", "delimiter": ", ", "as": "statuses"},
             ],
-            having=[Predicate(col="statuses", op="neq", value="")],
+            having=Predicate(col="statuses", op="neq", value=""),
             limit=5,
         )
         result = await sv.validate_schema(query, connection_id="demo")
@@ -302,7 +302,7 @@ class TestValidateSchema:
             select=[
                 {"col": "orders.status", "as": "statuses"},
             ],
-            having=[Predicate(col="statuses", op="neq", value="")],
+            having=Predicate(col="statuses", op="neq", value=""),
             limit=5,
         )
         result = await sv.validate_schema(query, connection_id="demo")
@@ -322,7 +322,7 @@ class TestValidateSchema:
             select=[
                 {"col": "orders.status", "fraction": 0.5, "as": "median"},
             ],
-            having=[Predicate(col="median", op="gt", value=0)],
+            having=Predicate(col="median", op="gt", value=0),
             limit=5,
         )
         result = await sv.validate_schema(query, connection_id="demo")

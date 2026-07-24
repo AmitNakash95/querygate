@@ -5086,3 +5086,93 @@ what makes item 97's bounded nested subqueries safe to add by construction.
 
 **Hard boundaries honored.** Not a rewrite of policy semantics, not a change to
 any cap or allow/deny rule, not a new AST field.
+
+### 99. Query engine: `HAVING` as `WhereNode` + searched `CASE` condition ✅ DONE
+
+**Effort: S. Priority: high (flagship pillar; cheap first step). Depends on:
+item 96.** Phase 0 of
+[docs/ENGINE_EXPRESSIVENESS_PLAN.md](ENGINE_EXPRESSIVENESS_PLAN.md) — the
+low-risk warm-up that proves the visitor/cap-expansion pattern on machinery that
+already existed, before items 100+ build the `Expression` substrate on it.
+
+**Why it mattered.** Two positions in the AST were arbitrarily weaker than
+`where`, for no safety reason: `StructuredQuery.having` was a `List[Predicate]`
+(implicitly AND-combined, no nesting) and `CaseWhen.when` was a single
+`Predicate`. So `HAVING SUM(x) > 10 OR COUNT(*) < 3` and a searched
+`CASE WHEN a > 0 AND b < 5 THEN …` were inexpressible — the caller had to
+pre-filter in `where` before grouping (which changes the semantics) or give up.
+Since the Structural pillar's whole bet is that the AST rarely walls off a
+fluent SQL author, an artificial wall over machinery that already existed was
+pure downside.
+
+**What shipped.**
+
+- **AST** (`query_ast/models.py`): `having: List[Predicate]` →
+  `Optional[WhereNode]`; `CaseWhen.when: Predicate` → `WhereNode`. `CaseWhen`
+  joins the recursive `model_rebuild()` cycle now that it references `WhereNode`.
+  Both positions are now the *same* union `where` already used — this removed a
+  special case rather than adding a grammar.
+- **Compiler** (`compiler/sqlalchemy_compiler.py`): both positions compile
+  through the one existing `_compile_where`. HAVING threads `alias_map` (so a
+  HAVING predicate can still reference a select alias); a CASE condition passes
+  `alias_map={}` (it can't reference a peer select alias). Both pass `ctx=None`,
+  keeping `value_subquery` WHERE-only. The two hand-rolled
+  `_resolve_predicate_target` + `_apply_predicate` call sites are gone.
+- **Validation** — the safety-critical half. The canonical visitor (item 96) now
+  walks both trees: `iter_column_refs` yields every HAVING ref via
+  `_where_column_refs` (not a flat list of single predicates), and
+  `select_item_column_refs` walks the whole CASE-condition tree. So column
+  allow/deny **and** the item-49 masked-column rule follow automatically at any
+  nesting depth — an unvisited ref buried in an OR-group would have been a silent
+  policy/mask bypass, which is exactly the failure class item 96 was built to
+  prevent. `iter_where_and_having_predicates` walks the HAVING tree so
+  `iter_query_scopes` still finds a nested `value_subquery`, and schema
+  validation validates both trees (`_validate_where_columns`, `allow_alias=True`
+  for HAVING, `False` for CASE conditions).
+- **Caps — no new policy field, per the plan.** `max_where_depth` now also fires
+  on a deep HAVING tree and on a deep CASE condition (one shared
+  `_check_where_depth` helper, labeled per position). `max_where_predicates` now
+  counts HAVING predicates *across the tree* rather than a flat `len()`, and
+  gained a third tree-wide budget — `case condition predicate count` — so a wide
+  boolean CASE condition can't dodge the cap by breadth (depth and branch-count
+  caps alone wouldn't catch `and` of N predicates in one branch). All summed
+  tree-wide across subquery scopes, per item 97.
+- **Item 97 boundary preserved and tightened:** `value_subquery` stays WHERE-only
+  and is now rejected even when buried inside a HAVING or CASE boolean group
+  (the old check only inspected a single predicate).
+- **Latent gap closed on the way:** `max_in_list_size` now applies to an
+  `in`/`not_in` inside a CASE condition too. The old single-predicate walk never
+  size-checked CASE conditions, so an over-size `in` list there was unbounded.
+- **Audit** (`audit/events.py`): `having` is shaped with `_where_shape` and
+  emitted only when set, matching `where`. Fixed a real pre-existing bug in
+  `_where_shape` while there — a `not` group fell through to
+  `{"or": []}`, silently misreporting the predicate shape; it now emits
+  `{"not": …}`. Still redaction-safe: shapes carry operator/column/function only,
+  never literals.
+- **Client SDK** (`client/builder.py`): `.having(*nodes)` takes full `WhereNode`s
+  and AND-combines multiple nodes/calls via a shared `_and_combine` helper (so
+  `.where()` and `.having()` now use identical logic); `when()` accepts a
+  `WhereNode`. Builder ergonomics are unchanged for existing callers.
+
+**Coverage.** 2 compiler tests (OR-combined HAVING clause; AND-combined CASE
+condition), 9 policy tests (denied column buried in a HAVING OR-group and in a
+CASE AND-condition; masked column in both; HAVING depth cap; CASE-condition depth
+cap; CASE-condition predicate-count cap; in-list size inside a CASE condition),
+3 client-builder tests, and a new end-to-end integration file
+(`tests/integration/test_searched_having_case_end_to_end.py`) that *executes*
+both against real SQLite and compares against a ground truth computed from the
+same pipeline — asserting each boolean arm actually contributes, so the test
+can't pass on AND/OR confusion. The item-97 subquery-in-HAVING/CASE rejections
+and the property-based compiler fuzzer were updated to the new shapes. Full
+suite: 1589 passed; `-m security` 258 passed.
+
+**Accepted cost (recorded in the Decision Log):** a breaking wire-format change
+— `"having": [{…}]` becomes `"having": {…}` (or `{"and": […]}`), and the audit
+event's `having` is a nested shape present only when set. No JSON example in
+`examples/` or the docs used `having`, so the blast radius was the test suite,
+the benchmark corpus case `denied-column-in-having`, and the client builder.
+
+**Hard boundaries honored.** No raw SQL, no new dialect code (boolean logic is
+universal on both Postgres and MSSQL, so nothing belonged on `DialectAdapter`),
+no new policy cap field, no new scope container, and no change to what a masked
+or denied column is allowed to do.

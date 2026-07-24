@@ -2331,18 +2331,17 @@ canonical reference visitor (item 96) or its column refs bypass policy allow/den
 + masking**, and **every new cost-bearing count must be capped summed tree-wide
 (item 97)**. Reject-don't-emulate (item 74) governs all per-dialect gaps.
 
-### 99. Query engine: `HAVING` as `WhereNode` + searched `CASE` condition
+### 99. Query engine: `HAVING` as `WhereNode` + searched `CASE` condition ✅ DONE
 
-OR-logic over aggregate conditions (`HAVING SUM(x) > 10 OR COUNT(*) < 3`) and
-multi-condition CASE branches (`CASE WHEN a > 0 AND b < 5 THEN …`). Change
-`StructuredQuery.having: List[Predicate]` → `Optional[WhereNode]` and
-`CaseWhen.when: Predicate` → `WhereNode`, reusing the existing (already-safe)
-`_compile_where` / `where_depth` / visitor machinery; bounded by existing
-`max_where_depth` / `max_where_predicates` / `max_case_branches`. The low-risk
-warm-up that proves the visitor/cap-expansion pattern before the substrate lands.
+`having` and `CaseWhen.when` are now the same `WhereNode` union as `where`, so
+OR-logic over aggregate conditions and searched multi-condition CASE branches
+compile through the one existing `_compile_where`, are walked by the item-96
+canonical visitor, and are bounded by the existing `max_where_depth` /
+`max_where_predicates` (plus a new tree-wide case-condition predicate budget) —
+no new policy field and no dialect code. Breaking wire change: `"having": [{…}]`
+→ `"having": {…}`.
 
-**Effort: S. Priority: high (flagship pillar; cheap first step). Depends on:
-item 96.** Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 0.**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 99).
 
 ### 100. Query engine: bounded scalar `Expression` substrate ★
 
