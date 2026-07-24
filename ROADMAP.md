@@ -318,20 +318,24 @@ in-session approval, maintainer-approved)**, 42 (full); reconciled 39, 40
 inline-branching decision), **93 ph1** (governed-writes dry-run preview,
 execution disabled), **41 ph2** (stateless paginated blast-radius), and
 **50 ph2** (`RedisQuotaLimiter` — cross-replica shared quota). The remaining
-frontier is gated, with **one** live buildable thread:
+frontier's buildable threads:
 
-- **Buildable without a decision (low ROI):** **38 ph2** — admin-UI *bulk*
-  approve/reject/delete + export/import + browser-triggered generate/learn +
-  `review_history` view, all over item 32B's existing scoped routes (no new
-  mutation path). Frontend-only; validated by `node --check` + static-markup
-  assertions (no browser automation here), Phase 5 lowest-marginal-ROI.
-- **Buildable without a decision (high ROI):** the **Technical-Review Phase 1
-  fixes — 107, 108, 109** (quota double-reserve on an approval retry; the
-  preview diff running DML before the over-cap check; the missing MCP write
-  batch-size cap). Narrow, local, correctness/DoS-relevant, no external
-  dependency. **Item 99 shipped 2026-07-24** — it was the one flagship-engine
-  item needing no Decision Log entry; **100–106 each require one before build**,
-  so the engine pillar is decision-gated again from here.
+- **Technical-Review Phase 1 (107, 108, 109) — ✅ all shipped 2026-07-24.**
+  Quota double-reserve on an approval retry (107), the write preview running the
+  real DML before the over-cap check (108), and the missing MCP write batch-size
+  cap (109) are done. The **remaining review items** are all still buildable with
+  no external dependency: **110** (reject `value_subquery` in a write WHERE at the
+  validation layer, XS) and **111** (consolidate the four hand-rolled
+  WHERE-predicate walks into one shared helper, à la item 96) in Review Phase 3,
+  and **112** (a scheduled/cron CI job for CVE/SBOM scans + `make test-soak`) in
+  Review Phase 2. These are the next buildable thread.
+- **Flagship engine:** **item 99 shipped 2026-07-24** — it was the one
+  flagship-engine item needing no Decision Log entry; **100–106 each require one
+  before build**, so the engine pillar is decision-gated again from here.
+- **Admin UI (low ROI):** **38 ph2** — bulk approve/reject/delete + export/import
+  + browser-triggered generate/learn + `review_history`, all over item 32B's
+  existing scoped routes (no new mutation path). Frontend-only; Phase 5
+  lowest-marginal-ROI.
 
 Everything else stays gated as before:
 
@@ -386,15 +390,13 @@ already-planned initiatives.
 - [x] **Item 93 (Phase 3b) regression, part 2 — OBSOLETE (2026-07-23).** The
   consumed-record eviction leak is moot: the compensation store was removed
   entirely along with the undo mechanism (see item 93). No code remains to leak.
-- [ ] **107** — Batch query execution double-reserves quota on an approval
-  retry.
-  - Why: an MCP batch item that needs interactive approval consumes two
-    quota units for one logical query, silently halving effective throughput
-    for approval-gated callers.
-  - Scope: `execution/service.py` (`_execute_batch_item`, `enforce_query_quota`).
-  - Acceptance criteria:
-    - A test asserts exactly one quota unit is consumed across an
-      approval-required-then-resolved batch item.
+- [x] **107** — Batch query execution double-reserves quota on an approval
+  retry. ✅ **Shipped** (the paused first attempt stashes its live quota
+  reservation on the `ApprovalRequiredError`; the in-session retry reuses it via a
+  private `_reserved_quota` param instead of reserving again, so one approved
+  query consumes exactly one unit. Test asserts a one-entry quota window across
+  the approval-required-then-resolved retry; verified it fails `2==1` when reverted.
+  The REST 428->resubmit flow is untouched — that's a genuinely new request).
 - [x] **108** — Write-preview diff runs the full DML before the
   `max_affected_rows` cap is checked. ✅ **Shipped** (`_mutation_diff` takes a
   `within_cap` flag and falls back to the existing Python-applied-SET path, so an
