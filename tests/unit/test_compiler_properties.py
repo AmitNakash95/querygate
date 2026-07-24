@@ -266,7 +266,7 @@ def _aggregate_queries(draw):
         )
         agg_item = AggregateSelectItem(fn=agg_fn, col=agg_col, alias="agg_value", distinct=distinct)
     select = ["orders.status", agg_item]
-    having = draw(
+    having_preds = draw(
         st.lists(
             st.builds(
                 Predicate,
@@ -277,6 +277,14 @@ def _aggregate_queries(draw):
             max_size=2,
         )
     )
+    # having is now an Optional[WhereNode] (item 99): 0 preds → None, 1 → the
+    # predicate, 2 → an AND group — the same shapes the builder produces.
+    if not having_preds:
+        having = None
+    elif len(having_preds) == 1:
+        having = having_preds[0]
+    else:
+        having = WhereGroup(and_terms=having_preds)
     order_by = draw(
         st.lists(
             st.builds(

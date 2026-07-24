@@ -1276,7 +1276,9 @@ their own — see the [Decision Log](#decision-log).
 A `Policy` bundles everything that bounds a query against one connection:
 table/column allow and deny lists, per-query complexity caps (`max_joins`,
 `max_select_columns`, `max_where_depth`, `max_where_predicates` and
-`max_in_list_size` for WHERE/HAVING shape, `max_group_by`, `max_top_n` and
+`max_in_list_size` for WHERE/HAVING/CASE-condition predicate shape — all three
+of those positions are the same `WhereNode` tree and are bounded identically
+(item 99) — `max_group_by`, `max_top_n` and
 `max_partition_by` for windowed queries, `max_limit`/`max_limit_aggregate`
 for row counts, `max_response_bytes` for response size), execution
 guardrails (`timeout_seconds`, `max_concurrency`, queue-depth caps),
@@ -2595,6 +2597,34 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-24 — `having` and a CASE branch's `when` become full `WhereNode`s
+  (TODO.md item 99), a deliberate breaking wire-format change.** `having` was
+  `List[Predicate]` (implicitly AND-combined, no nesting) and `CaseWhen.when` was a
+  single `Predicate`; both are now the same `WhereNode` union `where` already used
+  (a `Predicate` **or** an `and`/`or`/`not` group). So `HAVING SUM(x) > 10 OR
+  COUNT(*) < 3` and a searched `CASE WHEN a > 0 AND b < 5 THEN …` are expressible
+  instead of forcing the caller to pre-filter in `where` or give up.
+  **Why this is safe rather than new surface:** it *removes* a special case rather
+  than adding a grammar. Both positions now compile through the one existing
+  `_compile_where`, are walked by the one canonical reference visitor (item 96) via
+  `_where_column_refs`, and are bounded by the caps that already existed —
+  `max_where_depth` now also fires on a deep HAVING or CASE-condition tree, and
+  `max_where_predicates` now counts HAVING predicates across the tree (not a flat
+  list length) plus a new tree-wide `case condition predicate count` budget so a
+  wide boolean CASE condition can't dodge the cap. No new policy field, no new
+  dialect code (boolean logic is universal), and `value_subquery` stays WHERE-only
+  (item 97) — now rejected even when buried inside a HAVING/CASE boolean group.
+  Closed a latent gap on the way: `max_in_list_size` now also applies to an
+  `in`/`not_in` inside a CASE condition, which the old single-predicate walk missed.
+  **Accepted cost:** the wire shape changed — `"having": [{…}]` becomes
+  `"having": {…}` (or `{"and": [ … ]}` for several conditions), and the audit
+  event's `having` is now a nested shape emitted only when set, matching `where`.
+  The Python client builder's `.having(...)` ergonomics are unchanged (multiple
+  predicates/calls still AND-combine, exactly like `.where()`). This is the Phase 0
+  warm-up of the Expressive Query Engine pillar
+  ([docs/ENGINE_EXPRESSIVENESS_PLAN.md](ENGINE_EXPRESSIVENESS_PLAN.md)), proving the
+  visitor/cap-expansion pattern on machinery that already existed before the larger
+  items (100+) build on it.
 - **2026-07-23 — REMOVED: the governed-write undo/compensation mechanism (item
   93). Reversibility is no longer a QueryGate capability; governed writes keep the
   preview → approve → attribute → audit governance tier.** This supersedes the

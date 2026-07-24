@@ -290,7 +290,9 @@ def _where_shape(node: WhereNode) -> Dict[str, Any]:
     if isinstance(node, WhereGroup):
         if node.and_terms:
             return {"and": [_where_shape(term) for term in node.and_terms]}
-        return {"or": [_where_shape(term) for term in node.or_terms or []]}
+        if node.or_terms:
+            return {"or": [_where_shape(term) for term in node.or_terms]}
+        return {"not": _where_shape(node.not_terms)}
     raise TypeError(f"Unsupported where node: {type(node).__name__}")
 
 
@@ -309,12 +311,13 @@ def normalize_query_shape(query: StructuredQuery) -> Dict[str, Any]:
             for join in query.joins
         ],
         "group_by": list(query.group_by),
-        "having": [_predicate_shape(predicate) for predicate in query.having],
         "order_by": [order.model_dump() for order in query.order_by],
         "offset": query.offset,
     }
     if query.where is not None:
         shape["where"] = _where_shape(query.where)
+    if query.having is not None:
+        shape["having"] = _where_shape(query.having)
     if query.limit is not None:
         shape["requested_limit"] = query.limit
     if query.top_n is not None:
