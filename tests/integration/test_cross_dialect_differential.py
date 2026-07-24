@@ -90,11 +90,15 @@ def _rows(result):
     return [{k: _norm(v) for k, v in row.items()} for row in result.rows]
 
 
-async def _assert_same(query: StructuredQuery) -> None:
+async def _assert_same(query: StructuredQuery) -> list:
+    """Assert both dialects return identical rows, and return them so a caller
+    can additionally assert the query was *discriminating* — two empty result
+    sets are trivially equal and would prove nothing."""
     pg = await StructuredQueryService(connection_id="pg").execute(query)
     ms = await StructuredQueryService(connection_id="ms").execute(query)
     assert _rows(pg) == _rows(ms), f"cross-dialect mismatch\n  PG={_rows(pg)}\n  MS={_rows(ms)}"
     assert pg.row_count == ms.row_count
+    return _rows(pg)
 
 
 @pytest.mark.asyncio
@@ -157,3 +161,101 @@ async def test_group_by_aggregate_matches():
             order_by=[OrderBySpec(col="customers.country", dir="asc")],
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_searched_having_or_group_matches():
+    """item 99: HAVING is a WhereNode. Boolean logic over aggregate conditions
+    is plain ANSI SQL on both dialects — assert it RUNS and returns identical
+    rows, not just that it renders (the items 75/82 'renders fine, breaks live'
+    trap)."""
+    _setup()
+    select = [
+        "orders.status",
+        AggregateSelectItem(fn="count", col="orders.id", alias="n"),
+        AggregateSelectItem(fn="sum", col="orders.total_amount", alias="total"),
+    ]
+    kept = await _assert_same(
+        StructuredQuery(
+            from_table="orders",
+            select=select,
+            group_by=["orders.status"],
+            having=WhereGroup(
+                or_terms=[
+                    Predicate(col="total", op="gt", value=300),
+                    Predicate(col="n", op="lt", value=2),
+                ]
+            ),
+            order_by=[OrderBySpec(col="orders.status", dir="asc")],
+        )
+    )
+    every_group = await _assert_same(
+        StructuredQuery(
+            from_table="orders",
+            select=select,
+            group_by=["orders.status"],
+            order_by=[OrderBySpec(col="orders.status", dir="asc")],
+        )
+    )
+    # Non-vacuous: the HAVING must have kept something AND excluded something.
+    assert 0 < len(kept) < len(every_group)
+    # Each OR arm must independently carry a group, or this isn't testing OR.
+    assert any(r["total"] > 300 and r["n"] >= 2 for r in kept)
+    assert any(r["n"] < 2 and r["total"] <= 300 for r in kept)
+
+
+@pytest.mark.asyncio
+async def test_searched_having_not_group_matches():
+    """A negated HAVING group — the shape the audit `_where_shape` bug hid."""
+    _setup()
+    kept = await _assert_same(
+        StructuredQuery(
+            from_table="orders",
+            select=["orders.status", AggregateSelectItem(fn="count", col="orders.id", alias="n")],
+            group_by=["orders.status"],
+            having=WhereGroup(not_terms=Predicate(col="n", op="lt", value=2)),
+            order_by=[OrderBySpec(col="orders.status", dir="asc")],
+        )
+    )
+    # NOT(n < 2) must keep only groups with n >= 2, and keep at least one.
+    assert kept and all(r["n"] >= 2 for r in kept)
+
+
+@pytest.mark.asyncio
+async def test_searched_case_condition_matches():
+    """item 99: a multi-condition CASE `when` must classify rows identically on
+    both dialects."""
+    _setup()
+    labelled = await _assert_same(
+        StructuredQuery(
+            from_table="orders",
+            select=[
+                "orders.id",
+                {
+                    "when": [
+                        {
+                            "when": {
+                                "and": [
+                                    {"col": "orders.status", "op": "eq", "value": "completed"},
+                                    {"col": "orders.total_amount", "op": "gt", "value": 100},
+                                ]
+                            },
+                            "then": {"literal": "big-done"},
+                        },
+                        {
+                            "when": {
+                                "not": {"col": "orders.status", "op": "eq", "value": "completed"}
+                            },
+                            "then": {"literal": "not-done"},
+                        },
+                    ],
+                    "else": {"literal": "small-done"},
+                    "as": "label",
+                },
+            ],
+            order_by=[OrderBySpec(col="orders.id", dir="asc")],
+        )
+    )
+    # All three branches must actually be exercised, or the AND/NOT conditions
+    # aren't being tested — a CASE where every row lands in ELSE proves nothing.
+    assert {"big-done", "not-done", "small-done"} == {r["label"] for r in labelled}
