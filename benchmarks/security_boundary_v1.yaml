@@ -188,6 +188,58 @@ cases:
       blocks: false
       rationale: HAVING is another inference oracle a passthrough leaves open.
 
+  - id: denied-column-buried-in-having-or-group
+    category: policy_denied_column
+    title: A denied column nested inside a HAVING OR-group is rejected
+    check: policy_block
+    policy: {denied_columns: {customers: [email]}}
+    query:
+      from_table: customers
+      select: [{fn: count, col: "*", alias: n}]
+      group_by: [customers.id]
+      having:
+        or:
+          - {col: customers.id, op: gt, value: 0}
+          - {col: customers.email, op: eq, value: target@example.com}
+    querygate:
+      blocks: true
+      guardrail: >-
+        canonical reference visitor (item 96) recurses the whole HAVING
+        WhereNode tree (item 99), so a denied column one level down inside a
+        boolean group is still checked
+    raw_sql_baseline:
+      blocks: false
+      rationale: >-
+        Nesting the reference inside a boolean group defeats any check that
+        only inspects top-level predicates.
+
+  - id: denied-column-buried-in-searched-case-condition
+    category: policy_denied_column
+    title: A denied column nested inside a searched CASE condition is rejected
+    check: policy_block
+    policy: {denied_columns: {customers: [email]}}
+    query:
+      from_table: customers
+      select:
+        - when:
+            - when:
+                and:
+                  - {col: customers.id, op: gt, value: 0}
+                  - {col: customers.email, op: eq, value: target@example.com}
+              then: {literal: hit}
+          else: {literal: miss}
+          alias: probe
+    querygate:
+      blocks: true
+      guardrail: >-
+        select_item_column_refs walks the full CASE-condition WhereNode tree
+        (item 99), so the masked/denied-column rules apply at any nesting depth
+    raw_sql_baseline:
+      blocks: false
+      rationale: >-
+        A CASE branch turns a denied column into a visible boolean, leaking it
+        one bit at a time.
+
   - id: denied-column-in-order-by
     category: policy_denied_column
     title: A denied column in ORDER BY is rejected
