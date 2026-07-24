@@ -2620,7 +2620,22 @@ reasoning behind them, newest first. Added to incrementally as work happens
   `"having": {…}` (or `{"and": [ … ]}` for several conditions), and the audit
   event's `having` is now a nested shape emitted only when set, matching `where`.
   The Python client builder's `.having(...)` ergonomics are unchanged (multiple
-  predicates/calls still AND-combine, exactly like `.where()`). This is the Phase 0
+  predicates/calls still AND-combine, exactly like `.where()`).
+  **A backward-compatibility shim was considered and deliberately declined
+  (maintainer-ratified 2026-07-24).** A `mode="before"` validator could have
+  accepted the legacy list and folded it (`[X]` → `X`, `[X, Y]` →
+  `{"and": [X, Y]}`), and that is the pattern item 100 plans for its legacy
+  `col: str` aggregate form. It was rejected here because **no caller outside
+  this repository sends `having`**: no `examples/`, doc, or landing-page JSON
+  used it; the Python builder is unaffected; and MCP clients re-read the tool
+  schema each session, so a fresh agent emits the new shape automatically. With
+  no real migration burden to absorb, a permanent second accepted shape would
+  buy nothing and cost the property that makes `extra="forbid"` meaningful —
+  exactly one way to express exactly one thing. The break also fails **loudly**
+  (a typed 422 at Pydantic validation), never silently, so a stale caller gets a
+  clear error rather than wrong data. Precedent for future engine items
+  (100–106): prefer the clean break while the AST has no external consumers;
+  add a deprecating shim only once a real caller would be broken by it. This is the Phase 0
   warm-up of the Expressive Query Engine pillar
   ([docs/ENGINE_EXPRESSIVENESS_PLAN.md](ENGINE_EXPRESSIVENESS_PLAN.md)), proving the
   visitor/cap-expansion pattern on machinery that already existed before the larger
