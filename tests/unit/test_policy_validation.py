@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from querygate.core.exceptions import PolicyViolationError
-from querygate.policy.models import Policy
+from querygate.policy.models import ColumnMask, Policy
 from querygate.query_ast.models import JoinSpec, Predicate, StructuredQuery, WhereGroup
 from querygate.validation.policy_validation import validate_batch_size, validate_policy
 
@@ -371,13 +371,11 @@ def test_denied_column_rejected_when_only_used_inside_having_col_fn():
         from_table="customers",
         select=["customers.id"],
         group_by=["customers.id"],
-        having=[
-            Predicate(
-                col_fn={"fn": "coalesce", "args": [{"col": "customers.email"}, {"literal": ""}]},
-                op="neq",
-                value="",
-            )
-        ],
+        having=Predicate(
+            col_fn={"fn": "coalesce", "args": [{"col": "customers.email"}, {"literal": ""}]},
+            op="neq",
+            value="",
+        ),
     )
     policy = Policy(denied_columns={"customers": ["email"]})
     with pytest.raises(PolicyViolationError, match="not accessible"):
@@ -419,13 +417,173 @@ def test_having_predicate_count_exceeded():
         from_table="orders",
         select=["orders.id"],
         group_by=["orders.id"],
-        having=[
-            Predicate(col="orders.id", op="gt", value=1),
-            Predicate(col="orders.id", op="lt", value=100),
-        ],
+        having=WhereGroup(
+            and_terms=[
+                Predicate(col="orders.id", op="gt", value=1),
+                Predicate(col="orders.id", op="lt", value=100),
+            ]
+        ),
     )
     with pytest.raises(PolicyViolationError, match="having predicate count"):
         validate_policy(query, Policy(max_where_predicates=1), connection_id="demo")
+
+
+# --------------------------------------------------------------------------- #
+# item 99: searched HAVING (WhereNode) + searched CASE condition (WhereNode).
+# The new boolean positions must get the exact same allow/deny, masking, depth,
+# count, and in-list treatment as WHERE — a new position is a new bypass surface.
+# --------------------------------------------------------------------------- #
+def test_denied_column_buried_in_having_or_group_is_rejected():
+    query = StructuredQuery(
+        from_table="customers",
+        select=["customers.id"],
+        group_by=["customers.id"],
+        having=WhereGroup(
+            or_terms=[
+                Predicate(col="customers.id", op="gt", value=1),
+                Predicate(col="customers.email", op="eq", value="target@example.com"),
+            ]
+        ),
+    )
+    policy = Policy(denied_columns={"customers": ["email"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_masked_column_in_having_is_rejected():
+    query = StructuredQuery(
+        from_table="customers",
+        select=["customers.id"],
+        group_by=["customers.id"],
+        having=Predicate(col="customers.email", op="eq", value="x"),
+    )
+    policy = Policy(column_masks={"customers": [ColumnMask(column="email", kind="hash")]})
+    with pytest.raises(PolicyViolationError, match="masked by policy"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_denied_column_buried_in_searched_case_and_condition_is_rejected():
+    query = StructuredQuery(
+        from_table="customers",
+        select=[
+            {
+                "when": [
+                    {
+                        "when": {
+                            "and": [
+                                {"col": "customers.id", "op": "gt", "value": 0},
+                                {"col": "customers.email", "op": "eq", "value": "x"},
+                            ]
+                        },
+                        "then": {"literal": "y"},
+                    }
+                ],
+                "as": "label",
+            }
+        ],
+    )
+    policy = Policy(denied_columns={"customers": ["email"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_masked_column_in_searched_case_condition_is_rejected():
+    query = StructuredQuery(
+        from_table="customers",
+        select=[
+            {
+                "when": [
+                    {
+                        "when": {
+                            "or": [
+                                {"col": "customers.id", "op": "gt", "value": 0},
+                                {"col": "customers.email", "op": "eq", "value": "x"},
+                            ]
+                        },
+                        "then": {"literal": "y"},
+                    }
+                ],
+                "as": "label",
+            }
+        ],
+    )
+    policy = Policy(column_masks={"customers": [ColumnMask(column="email", kind="hash")]})
+    with pytest.raises(PolicyViolationError, match="masked by policy"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_having_nesting_depth_exceeded():
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        group_by=["orders.id"],
+        having=WhereGroup(not_terms=Predicate(col="orders.id", op="gt", value=1)),
+    )
+    with pytest.raises(PolicyViolationError, match="having nesting depth"):
+        validate_policy(query, Policy(max_where_depth=1), connection_id="demo")
+
+
+def test_case_condition_nesting_depth_exceeded():
+    query = StructuredQuery(
+        from_table="orders",
+        select=[
+            {
+                "when": [
+                    {
+                        "when": {"not": {"col": "orders.status", "op": "eq", "value": "a"}},
+                        "then": {"literal": 1},
+                    }
+                ],
+                "as": "label",
+            }
+        ],
+    )
+    with pytest.raises(PolicyViolationError, match="case condition nesting depth"):
+        validate_policy(query, Policy(max_where_depth=1), connection_id="demo")
+
+
+def test_case_condition_predicate_count_exceeded():
+    query = StructuredQuery(
+        from_table="orders",
+        select=[
+            {
+                "when": [
+                    {
+                        "when": {
+                            "and": [
+                                {"col": "orders.status", "op": "eq", "value": "a"},
+                                {"col": "orders.status", "op": "eq", "value": "b"},
+                                {"col": "orders.status", "op": "eq", "value": "c"},
+                            ]
+                        },
+                        "then": {"literal": 1},
+                    }
+                ],
+                "as": "label",
+            }
+        ],
+    )
+    with pytest.raises(PolicyViolationError, match="case condition predicate count"):
+        validate_policy(query, Policy(max_where_predicates=2), connection_id="demo")
+
+
+def test_in_list_size_checked_inside_case_condition():
+    query = StructuredQuery(
+        from_table="orders",
+        select=[
+            {
+                "when": [
+                    {
+                        "when": {"col": "orders.status", "op": "in", "value": ["a", "b", "c"]},
+                        "then": {"literal": 1},
+                    }
+                ],
+                "as": "label",
+            }
+        ],
+    )
+    with pytest.raises(PolicyViolationError, match="max_in_list_size"):
+        validate_policy(query, Policy(max_in_list_size=2), connection_id="demo")
 
 
 def test_in_list_size_exceeded():

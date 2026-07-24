@@ -6,7 +6,7 @@ disabled connection or an over-cap query never even touches the database.
 
 from __future__ import annotations
 
-from typing import Iterator, List, Set
+from typing import Iterator, List, Optional, Set
 
 from querygate.core.exceptions import PolicyViolationError
 from querygate.policy.models import Policy
@@ -60,6 +60,24 @@ def _scope_where_predicate_count(query: StructuredQuery) -> int:
     return sum(1 for _ in _iter_where_predicates(query.where)) if query.where is not None else 0
 
 
+def _scope_having_predicate_count(query: StructuredQuery) -> int:
+    """HAVING is a WhereNode (item 99); count every predicate in its boolean
+    tree, not a flat list length."""
+    return sum(1 for _ in _iter_where_predicates(query.having)) if query.having is not None else 0
+
+
+def _scope_case_condition_predicate_count(query: StructuredQuery) -> int:
+    """Every predicate across every searched-CASE condition (item 99) in this
+    scope's select list — a `when` is now a WhereNode, so its boolean breadth
+    is counted and bounded like WHERE/HAVING, not left unbounded."""
+    total = 0
+    for item in query.select:
+        if isinstance(item, CaseSelectItem):
+            for branch in item.when:
+                total += sum(1 for _ in _iter_where_predicates(branch.when))
+    return total
+
+
 def _enforce_tree_wide_caps(scopes: List[StructuredQuery], policy: Policy) -> None:
     """The count-based caps are enforced on the SUM across every scope in the
     query tree (TODO.md item 97), never per-level — otherwise a caller could put
@@ -94,10 +112,15 @@ def _enforce_tree_wide_caps(scopes: List[StructuredQuery], policy: Policy) -> No
         raise PolicyViolationError(
             f"where predicate count {total} exceeds max of {policy.max_where_predicates}"
         )
-    total = sum(len(q.having) for q in scopes)
+    total = sum(_scope_having_predicate_count(q) for q in scopes)
     if total > policy.max_where_predicates:
         raise PolicyViolationError(
             f"having predicate count {total} exceeds max of {policy.max_where_predicates}"
+        )
+    total = sum(_scope_case_condition_predicate_count(q) for q in scopes)
+    if total > policy.max_where_predicates:
+        raise PolicyViolationError(
+            f"case condition predicate count {total} exceeds max of {policy.max_where_predicates}"
         )
     total = sum(len(q.top_n.partition_by) for q in scopes if q.top_n is not None)
     if total > policy.max_partition_by:
@@ -112,27 +135,44 @@ def _enforce_tree_wide_caps(scopes: List[StructuredQuery], policy: Policy) -> No
         )
 
 
+def _check_where_depth(node: Optional[WhereNode], policy: Policy, label: str) -> None:
+    """Enforce `max_where_depth` on any predicate tree (WHERE, HAVING, or a
+    searched-CASE condition — item 99). A `None` node (unset clause) is a no-op."""
+    if node is None:
+        return
+    depth = where_depth(node)
+    if depth > policy.max_where_depth:
+        raise PolicyViolationError(
+            f"{label} nesting depth {depth} exceeds max {policy.max_where_depth}"
+        )
+
+
 def _validate_scope(query: StructuredQuery, policy: Policy) -> None:
     """Per-scope checks (applied to the outer query AND each subquery
     independently): the non-summable caps and the column allow/deny + masked-
     column rule against THIS scope's own tables (item 97 — a subquery's base
     columns get the full treatment, resolved against the subquery's own name map,
     never the outer's)."""
+    # In-list-size is checked on every predicate the scope can carry: WHERE tree,
+    # HAVING tree, and every searched-CASE condition tree (item 99).
+    all_predicates: List[Predicate] = []
     for item in query.select:
-        if isinstance(item, CaseSelectItem) and len(item.when) > policy.max_case_branches:
-            raise PolicyViolationError(
-                f"case when branches exceeds max of {policy.max_case_branches}"
-            )
-    if query.where is not None:
-        depth = where_depth(query.where)
-        if depth > policy.max_where_depth:
-            raise PolicyViolationError(
-                f"where nesting depth {depth} exceeds max {policy.max_where_depth}"
-            )
-
-    all_predicates: List[Predicate] = list(query.having)
-    if query.where is not None:
-        all_predicates.extend(_iter_where_predicates(query.where))
+        if isinstance(item, CaseSelectItem):
+            if len(item.when) > policy.max_case_branches:
+                raise PolicyViolationError(
+                    f"case when branches exceeds max of {policy.max_case_branches}"
+                )
+            for branch in item.when:
+                # A searched-CASE condition (item 99) is a WhereNode — depth-bound
+                # it exactly like WHERE/HAVING so a deeply-nested condition can't
+                # be a compile-time DoS.
+                _check_where_depth(branch.when, policy, "case condition")
+                all_predicates.extend(_iter_where_predicates(branch.when))
+    _check_where_depth(query.where, policy, "where")
+    _check_where_depth(query.having, policy, "having")
+    for node in (query.where, query.having):
+        if node is not None:
+            all_predicates.extend(_iter_where_predicates(node))
     for pred in all_predicates:
         # A value_subquery predicate has no literal list to size; it's validated
         # as its own scope. Only literal in/not_in lists have a max_in_list_size.
@@ -190,19 +230,21 @@ def _validate_subquery_constraints(scoped: List, policy: Policy) -> None:
     the item-49 masked-column rule applies to it, even though it is a bare
     projection *within* the subquery scope)."""
     for depth, scope in scoped:
-        for pred in scope.having:
-            if pred.value_subquery is not None:
-                raise PolicyViolationError(
-                    "IN (subquery) is only supported in a WHERE clause, not HAVING (item 97)"
-                )
+        if scope.having is not None:
+            for pred in _iter_where_predicates(scope.having):
+                if pred.value_subquery is not None:
+                    raise PolicyViolationError(
+                        "IN (subquery) is only supported in a WHERE clause, not HAVING (item 97)"
+                    )
         for item in scope.select:
             if isinstance(item, CaseSelectItem):
                 for branch in item.when:
-                    if branch.when.value_subquery is not None:
-                        raise PolicyViolationError(
-                            "IN (subquery) is only supported in a WHERE clause, not a CASE "
-                            "condition (item 97)"
-                        )
+                    for pred in _iter_where_predicates(branch.when):
+                        if pred.value_subquery is not None:
+                            raise PolicyViolationError(
+                                "IN (subquery) is only supported in a WHERE clause, not a CASE "
+                                "condition (item 97)"
+                            )
         if depth > 0:
             # This scope is a subquery: its single select item is the value set
             # feeding IN. A masked column may not be used there.
