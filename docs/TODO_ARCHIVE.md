@@ -992,6 +992,133 @@ externalized through item 13.
 
 ---
 
+### 26. Query-cost estimation before execution ✅ DONE
+
+**Phase 1 (Postgres `EXPLAIN`-based estimation) ✅ DONE.** **Phase 2 (MSSQL
+estimated-plan equivalent) ✅ DONE** — `estimate_mssql_query_cost` uses a
+dedicated `SET SHOWPLAN_XML ON` connection (SHOWPLAN mode must own its batch, so
+it can't share the query's session) and parses the estimated rows / subtree cost
+from the SHOWPLAN XML; `StructuredQueryService._estimate_cost` dispatches by
+dialect (Postgres inline-EXPLAIN vs MSSQL SHOWPLAN), same fail-open + observable
+contract. Proven against a live MSSQL (`tests/integration/test_mssql_cost_estimation.py`:
+the estimator returns rows/cost, a full scan over threshold is rejected before
+execution, a selective query admits). The Postgres-only limitation the
+CLAUDE.md/service noted is now closed — the cost gate enforces on both dialects.
+
+**Phase 1 shipped:** `execution/cost_estimation.py`'s
+`estimate_postgres_query_cost()` plans (never runs) the already-validated,
+already-compiled `Select` with `EXPLAIN (FORMAT JSON)` — the statement is
+rendered once with `literal_binds=True` (the same fallback-on-failure
+pattern `execution/service.py`'s `_compile_to_text` already uses) so the
+whole EXPLAIN is one self-contained string; no data is exposed by doing this
+since EXPLAIN never executes the statement. It reads the root plan node's
+`Plan Rows`/`Total Cost` and hands them to `enforce_cost_estimate()`, which
+raises a new `CostEstimateExceededError` (subclasses `PolicyViolationError`,
+mirroring `ConcurrencyLimitError`'s rationale — same client-error handling,
+but its own metrics reason: `querygate_queries_rejected_total{reason="cost_estimate"}`,
+broken out from the coarser `policy` bucket) with a message that tells the
+agent what to do next ("narrow the query with additional filters, a smaller
+limit/top_n, or a more selective time range"), not just that it was denied.
+
+New `Policy.max_estimated_rows`/`max_estimated_cost` (both `Optional`,
+default `None` — unset means fully disabled, zero behavior change for
+existing deployments) gate this in `StructuredQueryService.execute()`,
+inside the same session/transaction already opened for the real query — one
+extra round-trip, not a second connection. Deliberately **not** wired into
+`explain_structured_query`: that call has an existing, tested invariant
+(`test_explain_does_not_open_a_db_session`) that it never touches the
+database at all, staying a pure, always-cheap compile preview; adding a live
+EXPLAIN round-trip there would break that contract for a feature explicitly
+scoped to gating `execute()`.
+
+**Fail-open by design, not fail-closed:** if EXPLAIN can't be obtained or
+parsed for a given query (an unusual construct that can't render with
+literal binds, an unexpected plan shape), `estimate_postgres_query_cost()`
+logs a warning and returns `None` rather than raising — the query proceeds
+and is still bounded by every existing reactive guardrail (row caps,
+timeout, concurrency, response-byte cap). This is a deliberate trade-off:
+the feature adds proactive rejection of *likely* full scans/join
+explosions without becoming a new way to accidentally block legitimate
+traffic on an EXPLAIN edge case.
+
+**Follow-up shipped in this same pass — fail-open observability and a
+calibration mode, so the two honest caveats above ("fails open" and
+"thresholds aren't portable, so they need per-deployment tuning") aren't
+silent gaps:**
+
+- `querygate_cost_estimation_attempts_total{connection}` and
+  `querygate_cost_estimation_unavailable_total{connection,reason}` (reason:
+  `compile_failed`/`explain_failed`/`plan_parse_failed`) make the fail-open
+  path observable instead of only a stdout warning — an operator can alert
+  on the unavailable counter climbing, which means the gate has silently
+  stopped evaluating queries on that connection, rather than discovering it
+  after the fact.
+- New `Policy.cost_estimation_mode` (`CostEstimationMode`, default
+  `ENFORCE`) adds `OBSERVE`: the estimate is still computed and compared
+  against the threshold, but a would-be rejection is only recorded (a
+  `cost_estimation.observed_would_reject` log line plus
+  `querygate_cost_estimation_would_reject_total{connection}`), never
+  raised. `execution/cost_estimation.py`'s `cost_estimate_violations()` is
+  the single source of truth both `enforce_cost_estimate()` (ENFORCE) and
+  `StructuredQueryService._observe_cost_estimate()` (OBSERVE) build on, so
+  the two modes can never disagree about what counts as a violation. Lets
+  an operator calibrate `max_estimated_rows`/`max_estimated_cost` against
+  real production traffic before switching a connection to `ENFORCE`,
+  instead of guessing a threshold from documentation on day one.
+
+Covered by `tests/unit/test_cost_estimation.py` (attempts/unavailable
+metrics per failure path, `cost_estimate_violations`/
+`format_cost_estimate_violation_message`), `tests/unit/test_service.py`
+(OBSERVE mode runs the query instead of rejecting; does not flag a query
+within threshold), and a real-Postgres
+`test_observe_mode_runs_the_query_and_records_would_reject` in
+`tests/integration/test_postgres_cost_estimation.py`.
+
+MSSQL is explicitly a no-op, not an error: a policy with these fields set on
+an MSSQL connection is valid and simply has no effect there (see the phase 2
+write-up below for why). Covered by `tests/unit/test_cost_estimation.py`
+(estimator parsing success/failure/fail-open paths, `enforce_cost_estimate`
+threshold combinations), the wiring tests in `tests/unit/test_service.py`
+(estimation disabled by default, MSSQL no-op, execute rejects over threshold
+while explain never opens a session), and
+`tests/integration/test_postgres_cost_estimation.py` against a real
+Postgres — a genuinely large sequential-scan-shaped query is rejected under
+a small `max_estimated_rows`, a selective indexed query passes under the
+same policy, and disabling the gate (the default) never issues an EXPLAIN at
+all. `docs/THREAT_MODEL.md`'s QG-08 row and residual-risk section were
+updated; `help/service.py`'s redacted policy summary now reports these new
+guardrail values (including `cost_estimation_mode`) like every other cap.
+
+**Phase 2 — MSSQL estimated-plan equivalent, not started:** SQL Server's
+`SET SHOWPLAN_XML ON` can't be prefixed onto an already-compiled statement
+the way Postgres's inline `EXPLAIN (FORMAT JSON) <query>` can — once
+SHOWPLAN mode is set, it must be the *only* statement in its batch (the
+query being planned can't run in the same batch as the `SET`), so getting an
+estimated MSSQL plan needs a dedicated connection/session lifecycle (open a
+connection, `SET SHOWPLAN_XML ON`, run the query text to get its plan
+without execution, then discard that connection rather than reusing it for
+the real query) rather than one extra statement inside the existing session.
+That's a genuinely different code shape, not a bigger version of phase 1's
+approach — tracked here as its own follow-up.
+
+**Effort: L (3–5 days for one dialect, longer cross-dialect).** The hard
+part is not calling `EXPLAIN`; it is turning dialect-specific plan output
+into a conservative, understandable policy decision without blocking safe
+queries unnecessarily.
+
+**Why it matters:** Row limits, timeouts, and concurrency caps are reactive
+guardrails. A 10/10 gateway should also be proactive: reject or warn on
+queries that are likely to full-scan huge tables, explode joins, or stress a
+production database before they run. This is a differentiator against
+generic MCP database connectors.
+
+**What to do (phase 2):** Add an MSSQL estimated-plan path with its own
+connection lifecycle (`SET SHOWPLAN_XML ON` in a dedicated session), extract
+comparable row/cost signals from the returned plan XML, and reuse the same
+`Policy.max_estimated_rows`/`max_estimated_cost` gate and
+`CostEstimateExceededError` phase 1 already established rather than
+inventing a parallel mechanism.
+
 ### 27. Semantic schema catalog and sensitivity metadata ✅ DONE
 
 **Shipped:** A new `querygate/catalog/` module (`models.py` + `loader.py`)
@@ -2042,133 +2169,6 @@ see how one policy/configuration change alters the outcome. Every showcased
 configuration, decision, and error is traceable to a tested QueryGate behavior,
 and the page is explicitly labeled as an illustrative mocked experience.
 
-### 26. Query-cost estimation before execution ✅ DONE
-
-**Phase 1 (Postgres `EXPLAIN`-based estimation) ✅ DONE.** **Phase 2 (MSSQL
-estimated-plan equivalent) ✅ DONE** — `estimate_mssql_query_cost` uses a
-dedicated `SET SHOWPLAN_XML ON` connection (SHOWPLAN mode must own its batch, so
-it can't share the query's session) and parses the estimated rows / subtree cost
-from the SHOWPLAN XML; `StructuredQueryService._estimate_cost` dispatches by
-dialect (Postgres inline-EXPLAIN vs MSSQL SHOWPLAN), same fail-open + observable
-contract. Proven against a live MSSQL (`tests/integration/test_mssql_cost_estimation.py`:
-the estimator returns rows/cost, a full scan over threshold is rejected before
-execution, a selective query admits). The Postgres-only limitation the
-CLAUDE.md/service noted is now closed — the cost gate enforces on both dialects.
-
-**Phase 1 shipped:** `execution/cost_estimation.py`'s
-`estimate_postgres_query_cost()` plans (never runs) the already-validated,
-already-compiled `Select` with `EXPLAIN (FORMAT JSON)` — the statement is
-rendered once with `literal_binds=True` (the same fallback-on-failure
-pattern `execution/service.py`'s `_compile_to_text` already uses) so the
-whole EXPLAIN is one self-contained string; no data is exposed by doing this
-since EXPLAIN never executes the statement. It reads the root plan node's
-`Plan Rows`/`Total Cost` and hands them to `enforce_cost_estimate()`, which
-raises a new `CostEstimateExceededError` (subclasses `PolicyViolationError`,
-mirroring `ConcurrencyLimitError`'s rationale — same client-error handling,
-but its own metrics reason: `querygate_queries_rejected_total{reason="cost_estimate"}`,
-broken out from the coarser `policy` bucket) with a message that tells the
-agent what to do next ("narrow the query with additional filters, a smaller
-limit/top_n, or a more selective time range"), not just that it was denied.
-
-New `Policy.max_estimated_rows`/`max_estimated_cost` (both `Optional`,
-default `None` — unset means fully disabled, zero behavior change for
-existing deployments) gate this in `StructuredQueryService.execute()`,
-inside the same session/transaction already opened for the real query — one
-extra round-trip, not a second connection. Deliberately **not** wired into
-`explain_structured_query`: that call has an existing, tested invariant
-(`test_explain_does_not_open_a_db_session`) that it never touches the
-database at all, staying a pure, always-cheap compile preview; adding a live
-EXPLAIN round-trip there would break that contract for a feature explicitly
-scoped to gating `execute()`.
-
-**Fail-open by design, not fail-closed:** if EXPLAIN can't be obtained or
-parsed for a given query (an unusual construct that can't render with
-literal binds, an unexpected plan shape), `estimate_postgres_query_cost()`
-logs a warning and returns `None` rather than raising — the query proceeds
-and is still bounded by every existing reactive guardrail (row caps,
-timeout, concurrency, response-byte cap). This is a deliberate trade-off:
-the feature adds proactive rejection of *likely* full scans/join
-explosions without becoming a new way to accidentally block legitimate
-traffic on an EXPLAIN edge case.
-
-**Follow-up shipped in this same pass — fail-open observability and a
-calibration mode, so the two honest caveats above ("fails open" and
-"thresholds aren't portable, so they need per-deployment tuning") aren't
-silent gaps:**
-
-- `querygate_cost_estimation_attempts_total{connection}` and
-  `querygate_cost_estimation_unavailable_total{connection,reason}` (reason:
-  `compile_failed`/`explain_failed`/`plan_parse_failed`) make the fail-open
-  path observable instead of only a stdout warning — an operator can alert
-  on the unavailable counter climbing, which means the gate has silently
-  stopped evaluating queries on that connection, rather than discovering it
-  after the fact.
-- New `Policy.cost_estimation_mode` (`CostEstimationMode`, default
-  `ENFORCE`) adds `OBSERVE`: the estimate is still computed and compared
-  against the threshold, but a would-be rejection is only recorded (a
-  `cost_estimation.observed_would_reject` log line plus
-  `querygate_cost_estimation_would_reject_total{connection}`), never
-  raised. `execution/cost_estimation.py`'s `cost_estimate_violations()` is
-  the single source of truth both `enforce_cost_estimate()` (ENFORCE) and
-  `StructuredQueryService._observe_cost_estimate()` (OBSERVE) build on, so
-  the two modes can never disagree about what counts as a violation. Lets
-  an operator calibrate `max_estimated_rows`/`max_estimated_cost` against
-  real production traffic before switching a connection to `ENFORCE`,
-  instead of guessing a threshold from documentation on day one.
-
-Covered by `tests/unit/test_cost_estimation.py` (attempts/unavailable
-metrics per failure path, `cost_estimate_violations`/
-`format_cost_estimate_violation_message`), `tests/unit/test_service.py`
-(OBSERVE mode runs the query instead of rejecting; does not flag a query
-within threshold), and a real-Postgres
-`test_observe_mode_runs_the_query_and_records_would_reject` in
-`tests/integration/test_postgres_cost_estimation.py`.
-
-MSSQL is explicitly a no-op, not an error: a policy with these fields set on
-an MSSQL connection is valid and simply has no effect there (see the phase 2
-write-up below for why). Covered by `tests/unit/test_cost_estimation.py`
-(estimator parsing success/failure/fail-open paths, `enforce_cost_estimate`
-threshold combinations), the wiring tests in `tests/unit/test_service.py`
-(estimation disabled by default, MSSQL no-op, execute rejects over threshold
-while explain never opens a session), and
-`tests/integration/test_postgres_cost_estimation.py` against a real
-Postgres — a genuinely large sequential-scan-shaped query is rejected under
-a small `max_estimated_rows`, a selective indexed query passes under the
-same policy, and disabling the gate (the default) never issues an EXPLAIN at
-all. `docs/THREAT_MODEL.md`'s QG-08 row and residual-risk section were
-updated; `help/service.py`'s redacted policy summary now reports these new
-guardrail values (including `cost_estimation_mode`) like every other cap.
-
-**Phase 2 — MSSQL estimated-plan equivalent, not started:** SQL Server's
-`SET SHOWPLAN_XML ON` can't be prefixed onto an already-compiled statement
-the way Postgres's inline `EXPLAIN (FORMAT JSON) <query>` can — once
-SHOWPLAN mode is set, it must be the *only* statement in its batch (the
-query being planned can't run in the same batch as the `SET`), so getting an
-estimated MSSQL plan needs a dedicated connection/session lifecycle (open a
-connection, `SET SHOWPLAN_XML ON`, run the query text to get its plan
-without execution, then discard that connection rather than reusing it for
-the real query) rather than one extra statement inside the existing session.
-That's a genuinely different code shape, not a bigger version of phase 1's
-approach — tracked here as its own follow-up.
-
-**Effort: L (3–5 days for one dialect, longer cross-dialect).** The hard
-part is not calling `EXPLAIN`; it is turning dialect-specific plan output
-into a conservative, understandable policy decision without blocking safe
-queries unnecessarily.
-
-**Why it matters:** Row limits, timeouts, and concurrency caps are reactive
-guardrails. A 10/10 gateway should also be proactive: reject or warn on
-queries that are likely to full-scan huge tables, explode joins, or stress a
-production database before they run. This is a differentiator against
-generic MCP database connectors.
-
-**What to do (phase 2):** Add an MSSQL estimated-plan path with its own
-connection lifecycle (`SET SHOWPLAN_XML ON` in a dedicated session), extract
-comparable row/cost signals from the returned plan XML, and reuse the same
-`Policy.max_estimated_rows`/`max_estimated_cost` gate and
-`CostEstimateExceededError` phase 1 already established rather than
-inventing a parallel mechanism.
-
 ### 36. Extensive production-grade QA project / edge-case test suite ✅ DONE
 
 **Phase 1 (policy-cap boundary tests + property-based compiler fuzzing) ✅
@@ -2505,6 +2505,194 @@ decision, effective guardrails, mandatory-filter claim readiness, and safe
 reasons—never resolved secret values, static row-filter values, compiled SQL
 literals, or hidden identifiers. Prove simulation persists nothing and cannot
 alter live request behavior even under concurrent use.
+
+### 40. Semantic access diff for config changes ✅ DONE
+
+Phase 1 (connection-baseline semantic diff, `POST /admin/config/diff`) shipped.
+**Phase 2 (per-principal resolution) is COVERED by item 41 ph1 (blast-radius)**,
+which reuses the exact same `compute_access_diff(principal=...)` engine and
+returns each configured principal's full itemized change list in
+`principal_impacts[].changes` — the "reporting-agent gains X" statements phase 2
+described — plus ranking. A distinct per-principal `/diff` would only duplicate
+that. Maintainer decision (2026-07-23): mark phase 2 covered, no new code. See
+item 41.
+
+<details><summary>Original phase-1 write-up</summary>
+
+**Phase 1 shipped (connection-baseline layer); phase 2 (per-principal
+resolution) not started.**
+
+`POST /api/v1/admin/config/diff` (`api/admin_config_routes.py` →
+`admin.service.diff_candidate_access` → `admin/access_diff.py`) returns a
+server-derived, authorization-aware diff of *resolved* access — not a line
+diff of YAML — between the active config-governance version (or the deployment
+files before governance has been bootstrapped) and a caller-supplied candidate
+(unset documents inherit from active, exactly like `/validate` and `/versions`).
+
+- **Evaluation scope (phase 1):** `evaluation_scope="connection_baseline"`.
+  Both snapshots are loaded through the same isolated candidate-context path
+  item 39's `/simulate` uses (`_load_isolated_candidate_context`), so the live
+  registry/policy/catalog singletons and any concurrent request are provably
+  untouched. For every connection present in either snapshot, the default and
+  per-connection policy layers are resolved with **no principal applied** and
+  compared. Reported `SemanticAccessChange` items cover connection visibility,
+  every guardrail cap, table access, column access, mandatory-filter
+  requirements, and join groups, each classified `tightening`/`loosening`/
+  `neutral` (guardrail direction is derived from a single permissiveness
+  comparator, with an unset optional cap treated as "unlimited"). A
+  `SemanticDiffSummary` counts each direction; changes are ordered loosening-
+  first so a truncated list keeps the highest-risk entries.
+- **Authorization:** like `/simulate`, `/diff` requires **both**
+  `admin:config:read` and `admin:config:write` — it echoes resolved policy
+  detail (read-like) while resolving caller-supplied config/secret references
+  (write-like), so neither scope alone can turn it into a secret-existence
+  oracle.
+- **Redaction:** `before`/`after` only ever carry non-sensitive resolved
+  values (a guardrail number, `visible`/`hidden`/`absent`, a join-group name,
+  or a mandatory-filter *source kind* and claim *name*). Static
+  mandatory-filter values, resolved secrets, connection strings, query
+  predicate values, and raw YAML are structurally never placed in the output.
+- **Honest incompleteness:** `analysis_incomplete` is set with a
+  human-readable reason rather than silently under-reporting when the
+  per-principal override layer itself changed (phase 2), when an allow-list
+  toggled between restricted and unrestricted (objects the policy never names
+  may also be affected and can't be enumerated without live schema
+  reflection), or when the change list was truncated at its cap.
+- **Threat-model control:** documented as QG-20 in `docs/THREAT_MODEL.md`.
+
+Covered by `tests/unit/test_config_semantic_diff.py` (the pure classification
+engine), `tests/unit/test_admin_service.py` (isolation, audit, safe
+invalid-candidate masking), `tests/integration/test_admin_config_governance.py`
+(the REST surface, redaction, and non-persistence), and
+`tests/security/test_adversarial_security.py` (both-scope enforcement).
+
+**Phase 2 (not started) — per-principal resolution.** Phase 1 resolves the
+default and per-connection layers only; a change that lives purely in a
+`principals:` override is detected and flagged as incomplete but not itemized.
+Phase 2 resolves each explicitly *configured* principal (bounded by the policy
+file, not by runtime traffic) so the diff can state "reporting-agent gains
+`orders.total`", applying the same per-principal denied-table redaction
+`/simulate` already uses. That per-principal fan-out is also the input item 41
+(policy-change blast-radius) aggregates, ranks, and paginates — so phase 2 is
+split out both because it is a distinct, independently useful slice and because
+it is the natural foundation item 41 builds on.
+
+**Original scope (for reference — see above for what shipped in phase 1):**
+
+**Effort: L (3–5 days).** A trustworthy diff must compare resolved behavior,
+not YAML syntax. It needs a typed diff model, policy resolution across default,
+connection, and principal layers, bounded output/redaction rules, REST wiring,
+and cross-checks proving its decisions match the enforcement path.
+
+**Why it matters:** A line diff can show that `allowed_tables` changed, but not
+whether the change grants access after inherited defaults, connection
+overrides, principal overrides, and deny-wins rules are resolved. Reviewers
+need statements such as “reporting-agent gains `orders.total`” or “the default
+row limit rises from 100 to 500,” not an expectation that they mentally execute
+the merge algorithm from YAML.
+
+**What to do:** Build a server-derived, authorization-aware semantic diff
+between the active and candidate snapshots. Report typed additions/removals for
+connection visibility, tables, columns, mandatory-filter requirements, join
+groups, and every guardrail; classify each as tightening, loosening, or neutral.
+Keep raw values out of filter diffs, distinguish explicit rules from inherited
+effects, cap result size, and provide stable machine-readable output for both
+the UI and CI/CD review tooling.
+
+</details>
+
+### 41. Policy-change blast-radius analysis ✅ DONE
+
+**Phase 1 (bounded, synchronous aggregation) ✅ DONE.** **Phase 2
+(paginated evaluation) ✅ DONE.** Phase 2 took the *paginated-response* option
+(the simpler, stateless of the two shapes the spec offered): `compute_blast_radius_report`
++ `POST /admin/config/blast-radius` accept a `principal_offset` cursor and
+evaluate one deterministically-sorted **page** of configured principals per
+request (page size = the existing `max_principals`), returning `principal_offset`
++ `next_principal_offset` (None on the last page). A deployment with more
+principals than one page now covers *every* principal across successive requests
+instead of the overflow being dropped as `analysis_incomplete`. `highest_risk`
+ranks over the constant baseline + the current page. Covered by
+`tests/unit/test_blast_radius.py` (page bounds + next-offset cursor; paging
+covers every configured principal). A background-job/polling variant was
+deliberately not built — pagination is stateless, needs no job store, and covers
+the same "too many principals for one synchronous pass" case.
+
+**Phase 1 shipped:** `POST /api/v1/admin/config/blast-radius`
+(`api/admin_config_routes.py`) reuses item 40's semantic diff
+(`admin/access_diff.compute_access_diff`) rather than a parallel resolution
+path — that function gained an optional `principal` argument so the exact
+same per-connection classification logic (guardrails, table/column access,
+mandatory filters, join group, connection visibility) can be evaluated once
+at the connection baseline (unchanged behavior, `principal=None`) and again
+for one specific caller. `admin/blast_radius.py`'s
+`compute_blast_radius_report()` calls it once for the baseline, then once
+more for every principal with an explicit `principals:` entry in either the
+active or candidate policy — a principal *without* an override is identical
+to the baseline by construction, so it is never separately evaluated or
+listed, closing the loop item 40's own diff left open
+(`analysis_incomplete` when "per-principal impact is resolved in a later
+phase").
+
+Findings are ranked, not just listed: `highest_risk` includes only
+access-*expanding* (loosening) changes — a removed mandatory row filter
+ranked above a newly visible connection/table/column, ranked above a
+loosened guardrail cap — with each entry tagged `scope: "baseline"` (affects
+every principal without an override; fleet-wide) or `scope: "principal"`
+(affects only that named caller; targeted), so a reviewer can immediately
+tell a small YAML edit with a fleet-wide blast radius from a large edit that
+only touches one agent's override — exactly the scenario this item's own
+"why it matters" describes. Tightening/neutral changes are never hidden;
+they remain in full in `baseline.changes` and each principal's own
+`principal_impacts[].changes`, just excluded from the risk-priority view.
+
+Work is bounded on every axis, each with its own cap and an honest
+`analysis_incomplete` state (with a specific human-readable reason) rather
+than silent under-reporting when a cap is hit: at most 100 configured
+principals are individually evaluated (`principals_evaluated` vs.
+`principals_configured` in the response); each principal's own change list
+is capped like item 40's diff already was; and `highest_risk` itself is
+capped at 25 entries. `compute_blast_radius` (`admin/service.py`) shares
+`diff_candidate_access`'s isolated-context loading, redaction posture, scope
+requirement (`admin:config:read` **and** `admin:config:write` together, for
+the same read-detail-plus-write-resolution reasoning as `diff`/`simulate`),
+and audit trail (`config.governance` event, new `"blast_radius"` action) —
+never a second candidate-loading or audit path.
+
+Covered by `tests/unit/test_blast_radius.py` (pure aggregation/ranking logic:
+fleet-wide vs. targeted scoping, a principal shielded from a base-policy
+change by its own override, mandatory-filter-removal ranked above
+table/column access ranked above guardrails, tightening changes excluded
+from `highest_risk`, both bounds triggering `analysis_incomplete`),
+`tests/unit/test_admin_service.py` (isolation from live singletons and the
+governance store, audit events, invalid-candidate masking), a REST
+integration test proving a targeted per-principal expansion surfaces as the
+top `highest_risk` finding even while the connection baseline itself
+tightens, and adversarial security tests (both config scopes independently
+required, matching `/diff`; a static mandatory-filter value never appears
+anywhere in the aggregated response, including inside a per-principal
+impact entry). See `docs/THREAT_MODEL.md`'s new QG-22 entry.
+
+**Explicitly out of scope for this pass** (matches this item's own "high end
+applies when... asynchronous or paginated analysis" framing): no
+async/background evaluation and no paginated response — a deployment with
+more than 100 configured principals gets `analysis_incomplete` with a count
+of how many were skipped, not a way to page through the rest. No admin UI
+panel either, matching item 40 phase 1's own scope (the admin UI's existing
+"Change preview" panel is a client-side line diff, not wired to either
+semantic endpoint).
+
+**Why it matters:** A syntactically tiny default-policy change can affect every
+principal and connection, while a large YAML edit may affect only one agent.
+Without an impact summary, reviewers cannot distinguish a targeted change from
+a fleet-wide access expansion or guardrail relaxation before activation.
+
+**What to do (phase 2):** Add an asynchronous or paginated evaluation path
+for deployments with more configured principals than phase 1's bounded,
+synchronous pass can cover in one request — a background job with a
+pollable status/result, or a paginated `principal_impacts` response —
+without changing phase 1's response shape for the common case that already
+fits under the bound.
 
 ### 42. Four-eyes config approval and separation of duties ✅ DONE
 
@@ -2892,6 +3080,95 @@ redacting the response after the fact. Audit which columns were masked
 (never the pre-mask value) so operators can distinguish "denied" from
 "masked" access in the same audit stream item 23 already provides.
 
+### 50. Per-principal rate limits / query quotas over time ✅ DONE
+
+**Phase 2 shipped (Redis cross-replica quota):** `execution/redis_quota.py`'s
+`RedisQuotaLimiter` makes a principal's request/byte rolling-window budget a
+single **shared** budget across replicas, closing the per-replica-multiplication
+gap phase 1 flagged (and that `deploy/HA_DR.md`'s shared-state matrix called
+out). Mirrors `redis_concurrency.py`: a per-(connection, principal) sorted set
+scored by wall-clock time + a parallel bytes hash, one atomic Lua script that
+prunes aged entries, checks the request-count and byte-total caps against the
+true cross-replica window, and records the attempt; `record_bytes` fills in the
+response size afterward (guarded so a late write can't resurrect a pruned entry);
+both keys carry a window-length TTL. The `QuotaLimiter` protocol (and
+`enforce_query_quota`/`record_query_quota_bytes`) went **async** so the Redis
+backend can await its client; the in-process limiter is the unchanged default.
+`create_app` installs it when `concurrency_backend=redis` (same client as the
+concurrency limiter). Tested with fakeredis (`tests/unit/test_redis_quota.py`:
+caps, rolling expiry, per-key isolation, record_bytes, and — standing in for
+cross-replica — two limiter instances sharing one Redis enforcing one budget).
+
+**Shipped (phase 1 — in-process rolling-window quota):** three `Policy`
+fields (`max_requests_per_window`, `max_response_bytes_per_window`,
+`quota_window_seconds`; both caps unset = disabled, identical to prior
+behavior), resolved per principal through the existing `PolicyStore` merge —
+so a per-principal `principals:` override can throttle one noisy caller
+without a code change. Enforcement is a new `execution/quota.py` with a
+narrow `QuotaLimiter` Protocol (CLAUDE.md "Composable single-purpose
+interfaces") and one `InProcessQuotaLimiter` today: a sliding-window log
+keyed by `(connection_id, principal_subject)`. `StructuredQueryService.execute`
+calls `enforce_query_quota` **before** it queues or opens a DB session
+(`reserve()` atomically prunes the window, checks both caps, and records the
+attempt so concurrent in-flight callers can't race past the cap), and
+`record_query_quota_bytes` attributes the response size afterward (the query
+that crosses the byte ceiling completes; the next one is refused). A rejected
+caller raises `QuotaExceededError` (a `PolicyViolationError`, so every
+existing deny-path handler and `public_error_message` treat it as
+client-actionable) and never touches the database.
+
+Distinct, contextful rejection (not a bare 429): REST maps it to **429 with a
+`Retry-After` header** (`api/_errors.py`), MCP to a **`RATE_LIMITED`** error
+code (`mcp/exceptions.py`) — both carrying a message that names the cap and a
+retry hint. Audited exactly like other policy denials (`policy_decision:
+denied`, `error_category: quota`), with a dedicated `quota` reason in
+`metrics.classify_rejection`/`querygate_queries_rejected_total` plus a
+`querygate_query_quota_rejections_total{connection,quota_kind}` counter
+breaking out requests-vs-bytes. `explain()` is deliberately not quota-gated
+(it compiles a preview and never executes — same reason it skips
+cost-estimation).
+
+**Coverage:** `tests/unit/test_query_quota.py` (window semantics, per-
+principal/per-connection isolation, byte accounting, policy validation,
+classification, REST-429/MCP mapping), `tests/integration/test_query_quota_e2e.py`
+(real execute pipeline against SQLite: request cap, per-principal isolation,
+byte cap, unauthenticated skip, metric increment), and a
+`tests/security/test_adversarial_security.py` case proving a quota-rejected
+attempt is refused strictly before schema validation / the engine.
+
+**Phase 2 — Redis-backed cross-replica quota (NOT STARTED):** the in-process
+window is per-replica, so under a load balancer the effective quota is
+multiplied by instance count — exactly the caveat the default in-process
+concurrency limiter carries (see `execution/redis_concurrency.py`). Closing
+it means a `RedisQuotaLimiter` implementing the same `QuotaLimiter` Protocol
+(a per-key sorted set of attempt timestamps + byte weights, pruned by a
+single atomic Lua `ZREMRANGEBYSCORE`/`ZADD` script — the exact shape item 9's
+`RedisConcurrencyLimiter` already uses), selected by the same
+`concurrency_backend`/startup swap `init_redis_limiter` uses, plus a
+live-Redis integration gate. Split out because the in-process quota is a
+complete, shippable guardrail for single-instance deployments on its own, and
+the cross-replica variant needs the real-Redis test infrastructure item 9
+established — the same phasing precedent as item 35 phase 2.
+
+**Effort: M (2–3 days).** Reuses the Redis-backed cross-instance state item
+9 already introduced for the concurrency limiter; this is a second counter
+(a rolling window or token bucket keyed by principal) alongside it, not a
+new distributed-state mechanism.
+
+**Why it matters:** The concurrency semaphore (item 9) bounds how many
+queries a principal can have *in flight at once*, not how many it can run
+*over time*. A well-behaved agent that never exceeds its concurrency limit
+can still issue tens of thousands of sequential queries an hour, exhausting
+DB capacity or a customer's cost budget — the multi-tenant cost-governance
+story enterprise buyers in `docs/business/GO_TO_MARKET.md`'s target segment
+will ask for directly.
+
+**What to do:** Add a per-principal (and optionally per-connection)
+request-count and byte-count quota over a configurable rolling window,
+enforced before execution alongside the existing concurrency guard. Return
+a distinct, policy-shaped rejection (not a raw 429 with no context) and
+audit quota rejections the same way other policy denials are audited today.
+
 ### 52. Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI function-calling) ✅ DONE
 
 **Shipped:** three runnable integration examples mirroring item 20's Claude
@@ -2930,6 +3207,84 @@ documents integration with most major agent frameworks out of the box.
 without a live model call; state plainly what wasn't exercised). Resist
 adding a maintained framework-specific SDK layer beyond the example
 itself — that risk was already called out in item 20.
+
+### 54. Compliance control mapping (SOC 2 / ISO 27001 readiness) ✅ DONE
+
+**Effort: L (mostly documentation and gap analysis).** Coordination-gated: an
+agent can produce the mapping + gap analysis (done here); the independent audit
+engagement (item 53) and org-level process controls are the human/vendor
+remainder, flagged explicitly in the deliverable.
+
+**Why it mattered:** regulated-industry buyers ask "where's your SOC 2" as a
+gating question before evaluating architecture. QueryGate already has most of
+the underlying controls; this item maps what's built to a recognized framework
+rather than building new security features.
+
+**What shipped.** `docs/COMPLIANCE_MAPPING.md` — a control-by-control map to:
+
+- **SOC 2 Common Criteria CC1–CC9** plus the Confidentiality, Availability, and
+  Processing-Integrity series, each row citing a concrete artifact (e.g. CC6.7
+  → `PublicConnectionInfo` + `test_credential_redaction.py`; CC6.8 → cosign/SLSA
+  `release.yml` + `make verify-release`; CC7.3 → `audit/ledger.py` +
+  `querygate-audit verify`; CC7.5/A1 → `deploy/HA_DR.md`; PI1 → the validated-AST
+  pipeline + property-based compiler fuzzing).
+- **ISO/IEC 27001:2022 Annex A** cross-reference for the key domains (access
+  control, logging, cryptography, secure coding, vulnerability management).
+
+Every "Product-provided" row is grounded in a real file/test/CI gate (verified
+to exist before writing). The doc draws an explicit scope boundary —
+product-provided vs. shared-responsibility vs. customer/organization — because
+QueryGate is a self-hosted *component*, not a certified SaaS, so it never claims
+to "be SOC 2 certified"; it maps which controls it *evidences*. Cross-linked
+from `docs/SECURITY_POSTURE.md`'s External attestations section.
+
+**Honest gap analysis (real gaps, not theater):** the audit engagement itself
+(item 53), organizational controls (HR/physical/IR-process/vendor-management/
+access-review cadence), access-review evidence formalization, and the
+not-yet-shipped config separation-of-duties enhancements (items 39–42, correctly
+listed as roadmap not as existing controls). No new product code was added
+because the real gaps are organizational, not code — closing them with product
+features would have been the process theater the item warns against.
+
+### 55. Inference/transitive-exposure adversarial test suite ✅ DONE
+
+**Shipped:** A new design note (`docs/INFERENCE_RISKS.md`) enumerating
+inference-attack shapes against the `StructuredQuery` AST, plus adversarial
+regression cases added to item 28's suite
+(`tests/security/test_adversarial_security.py`).
+
+The investigation found **no enforcement gap**: the policy column walk
+(`validation/policy_validation.py`'s `_iter_column_refs` + the shared
+`select_item_column_refs`/`predicate_column_refs` harvesters) already checks
+every column reference in every clause, and the AST forbids nested scalar
+functions, so there is no expression tree a column can hide inside. The value
+of this item is therefore (a) proving that exhaustively and (b) documenting the
+residual risks that identifier allow/deny structurally *cannot* close.
+
+- **Class A — direct reference in any clause (closed, regression-locked):**
+  `test_denied_column_cannot_be_used_for_inference` is now parametrized across
+  every column-carrying AST position — where/group_by/having/order_by/top_n
+  (partition_by + order_by)/join `on`, plus scalar-function args, `CASE`
+  when/then/else, aggregate/`percentile_cont`/`string_agg` columns, predicate
+  `col_fn` and `value_col`, and composite join `extra_on` keys — each asserting
+  a denied column is rejected. Adding a new column-carrying AST node without
+  extending the harvest fails this test.
+- **Class B — residual risks (documented, not closable by allow/deny):** R1
+  derived/correlated permitted columns (closed by *policy* — deny the derived
+  column too), R2 underlying-data correlation (out of scope for an access
+  gateway), R3 aggregate differencing / no minimum group size (accepted v1
+  residual; a scoped candidate `min_group_size` guardrail is noted, not
+  half-built), R4 existence/row-count probing (accepted, mitigated in depth by
+  mandatory row filters, masking, quotas, and audit). R1 and R3 each carry a
+  demonstrating test asserting the current allowed-by-design behavior, so the
+  boundary is explicit and flips the day a closing feature lands.
+
+**Why it matters:** Column allow/deny stops a query from directly selecting
+a denied column, but "provably does not leak it *indirectly*" was previously
+asserted only for a handful of clauses. This item makes that guarantee
+exhaustive and regression-locked, and draws the honest line between what the
+engine closes and what remains a policy-configuration or accepted residual
+risk — rather than leaving the inference category silently unaddressed.
 
 ### 56. HA / multi-region reference deployment + DR runbook ✅ DONE
 
@@ -3117,6 +3472,35 @@ truncated summary is shown as the same honest snapshot banner the overview
 uses. Asserted by `tests/integration/test_admin_ui.py` (the SPA serves the
 `anomaly-table-wrap` panel, the "Behavioral anomalies" heading, and the
 `/admin/observability/anomalies` fetch).
+
+### 60. Bug bounty / responsible disclosure program ✅ DONE
+
+**Effort: S (process and policy, not engineering).** Coordination-gated for its
+*paid* tier only — that pairs with item 53 and is explicitly deferred; the
+disclosure program itself is stage-appropriate to ship now.
+
+**Why it mattered:** a public disclosure process is a cheap, durable trust
+signal, and without it a researcher has no responsible channel to report.
+
+**What shipped.** `SECURITY.md` (already carried reporting channel, in/out scope,
+SLAs, supported-version policy, and links to the posture/threat-model) gained the
+two remaining pieces of this item:
+
+- **A recognition/reward structure decision appropriate to the current stage:**
+  coordinated disclosure + public recognition, **no monetary bounty yet** —
+  recorded as a deliberate decision, with the paid-program escalation gated on
+  item 53's audit (paying for findings a first audit would catch is poor use of a
+  bounty). The reporting channel/scope/process are stated to survive that
+  escalation unchanged.
+- **A single remediation process** all reports flow through (researcher, internal
+  adversarial-suite finding, or item-53 audit finding): triage/severity →
+  regression-lock as a failing test in `tests/security/` (the same bar every
+  guardrail meets) → fix + release gates → release & coordinated disclosure.
+
+This satisfies item 60's "publish SECURITY.md + decide a stage-appropriate
+structure + route through a shared remediation process." The only remaining part
+— standing up a *paid* bounty platform after the audit — is the deliberately
+deferred escalation, not a gap.
 
 ### 61. Deduplicate the StructuredQuery JSON Schema across execute/explain/batch tools ✅ DONE
 
@@ -4688,6 +5072,42 @@ parse → merge → render with typed coercion, and the draft going dirty).
 guided form; a Decision Log entry records the shared-release routing, the
 JSON-skeleton scope call, and that Policy was already covered.
 
+### 88. Minimum aggregation group size (k-anonymity guardrail) ✅ DONE
+
+**Shipped:** A new `Policy.min_group_size` cap (`policy/models.py`) that closes
+the direct, single-query form of the aggregate-differencing residual that item
+55's design note flagged as R3 (`docs/INFERENCE_RISKS.md`). When set (floor 2;
+`None` disables), the compiler (`compiler/sqlalchemy_compiler.py`) injects
+`HAVING count(*) >= k` into every **aggregate** query — grouped or
+single-implicit-group — so any result group backed by fewer than *k* underlying
+rows is suppressed. A caller can no longer aggregate over a razor-thin filter to
+single out an individual (`count(*) WHERE id = X` returns nothing when fewer
+than *k* rows match). It is the aggregate analog of a mandatory row filter:
+policy-driven, injected, non-removable, and it only touches aggregate queries —
+plain row reads remain governed by mandatory row filters, not group size.
+
+**Scope (deliberate):** this closes single-query singling-out, **not**
+multi-query differencing (isolating an individual by subtracting two
+independently-compliant aggregates), which needs query-set auditing or
+differential privacy — out of scope and documented as still-residual in
+`docs/INFERENCE_RISKS.md`. No new AST surface; `min_group_size` is a policy cap,
+loaded generically from `policy.yaml` like every other cap.
+
+**Coverage:** compiler unit tests (`test_compiler.py::TestMinGroupSize` — HAVING
+injection on grouped/single-group aggregates, no-op on plain selects, combines
+with caller HAVING, `None` no-op), real end-to-end suppression against SQLite
+(`test_sqlite_end_to_end.py` — a single-customer country group and a
+single-row filtered count are suppressed; the whole-table count is returned),
+a security test tying the closure back to item 55's R3
+(`test_adversarial_security.py`), and policy-model validation
+(`test_policy_models.py` — default `None`, floor of 2).
+
+**Why it matters:** item 55 proved the direct column-reference defenses are
+complete and documented the residuals it couldn't close. R3 (no minimum group
+size) was the one residual with a bounded, well-precedented fix — this item
+builds it, turning a documented gap into an opt-in enforced guardrail without
+overclaiming (multi-query differencing stays honestly out of scope).
+
 ### 90. Delegated agent identity (on-behalf-of) carried into policy + dual-identity audit ✅ DONE
 
 **Effort: L. Priority: high (time-sensitive — see below). Feature ref: F1.**
@@ -4926,73 +5346,6 @@ item 42 (four-eyes for *config* changes) and item 35 (capacity waiting) —
 neither gates *query execution* on sensitivity/cost. **Invariant:** read-only
 posture and AST-only input unchanged; this only adds a pre-execution gate.
 
-### 60. Bug bounty / responsible disclosure program ✅ DONE
-
-**Effort: S (process and policy, not engineering).** Coordination-gated for its
-*paid* tier only — that pairs with item 53 and is explicitly deferred; the
-disclosure program itself is stage-appropriate to ship now.
-
-**Why it mattered:** a public disclosure process is a cheap, durable trust
-signal, and without it a researcher has no responsible channel to report.
-
-**What shipped.** `SECURITY.md` (already carried reporting channel, in/out scope,
-SLAs, supported-version policy, and links to the posture/threat-model) gained the
-two remaining pieces of this item:
-
-- **A recognition/reward structure decision appropriate to the current stage:**
-  coordinated disclosure + public recognition, **no monetary bounty yet** —
-  recorded as a deliberate decision, with the paid-program escalation gated on
-  item 53's audit (paying for findings a first audit would catch is poor use of a
-  bounty). The reporting channel/scope/process are stated to survive that
-  escalation unchanged.
-- **A single remediation process** all reports flow through (researcher, internal
-  adversarial-suite finding, or item-53 audit finding): triage/severity →
-  regression-lock as a failing test in `tests/security/` (the same bar every
-  guardrail meets) → fix + release gates → release & coordinated disclosure.
-
-This satisfies item 60's "publish SECURITY.md + decide a stage-appropriate
-structure + route through a shared remediation process." The only remaining part
-— standing up a *paid* bounty platform after the audit — is the deliberately
-deferred escalation, not a gap.
-
-### 54. Compliance control mapping (SOC 2 / ISO 27001 readiness) ✅ DONE
-
-**Effort: L (mostly documentation and gap analysis).** Coordination-gated: an
-agent can produce the mapping + gap analysis (done here); the independent audit
-engagement (item 53) and org-level process controls are the human/vendor
-remainder, flagged explicitly in the deliverable.
-
-**Why it mattered:** regulated-industry buyers ask "where's your SOC 2" as a
-gating question before evaluating architecture. QueryGate already has most of
-the underlying controls; this item maps what's built to a recognized framework
-rather than building new security features.
-
-**What shipped.** `docs/COMPLIANCE_MAPPING.md` — a control-by-control map to:
-
-- **SOC 2 Common Criteria CC1–CC9** plus the Confidentiality, Availability, and
-  Processing-Integrity series, each row citing a concrete artifact (e.g. CC6.7
-  → `PublicConnectionInfo` + `test_credential_redaction.py`; CC6.8 → cosign/SLSA
-  `release.yml` + `make verify-release`; CC7.3 → `audit/ledger.py` +
-  `querygate-audit verify`; CC7.5/A1 → `deploy/HA_DR.md`; PI1 → the validated-AST
-  pipeline + property-based compiler fuzzing).
-- **ISO/IEC 27001:2022 Annex A** cross-reference for the key domains (access
-  control, logging, cryptography, secure coding, vulnerability management).
-
-Every "Product-provided" row is grounded in a real file/test/CI gate (verified
-to exist before writing). The doc draws an explicit scope boundary —
-product-provided vs. shared-responsibility vs. customer/organization — because
-QueryGate is a self-hosted *component*, not a certified SaaS, so it never claims
-to "be SOC 2 certified"; it maps which controls it *evidences*. Cross-linked
-from `docs/SECURITY_POSTURE.md`'s External attestations section.
-
-**Honest gap analysis (real gaps, not theater):** the audit engagement itself
-(item 53), organizational controls (HR/physical/IR-process/vendor-management/
-access-review cadence), access-review evidence formalization, and the
-not-yet-shipped config separation-of-duties enhancements (items 39–42, correctly
-listed as roadmap not as existing controls). No new product code was added
-because the real gaps are organizational, not code — closing them with product
-features would have been the process theater the item warns against.
-
 ### 95. Discoverable scope catalog + recommended role bundles for IdP integration ✅ DONE
 
 **Effort: S. Priority: enterprise-SSO adoption enabler for the shipped JWT/OAuth
@@ -5176,3 +5529,60 @@ the benchmark corpus case `denied-column-in-having`, and the client builder.
 universal on both Postgres and MSSQL, so nothing belonged on `DialectAdapter`),
 no new policy cap field, no new scope container, and no change to what a masked
 or denied column is allowed to do.
+
+### 108. Write-preview diff runs the full DML before the affected-row cap is checked ✅ DONE
+
+**Effort: S. Priority: medium (resource-exhaustion / lock-contention risk on a
+preview-only endpoint). Depends on: none.** Surfaced by the 2026-07-23
+technical review (`TECHNICAL_REVIEW.md`).
+
+**Why it mattered.** `WritePreviewService.preview()` computed the affected-row
+count with a policy-checked `COUNT(*)`, but when `include_diff=true` it called
+`_mutation_diff` unconditionally — and for an `UpdateStatement` that executes
+the *real* UPDATE inside the (later-rolled-back) transaction to read back the
+committed-shape old→new values. Only the rows *shown in the response* were
+capped (`max_diff_rows`); the row-locking UPDATE against **every** matching row
+ran first. So a caller could point `include_diff=true` at a deliberately broad
+WHERE and force a full-table UPDATE — taking row locks, generating WAL/redo, and
+contending with live writers — purely to preview a write that would then be
+**rejected outright** as over `max_affected_rows`. All the cost of the write,
+none of the authorization, on a preview-only endpoint.
+
+**What shipped.** `_mutation_diff` gained a keyword-only `within_cap: bool`,
+passed from `preview()` as `affected <= max_affected_rows`. The DML-executing
+branch is now gated on it. Crucially the fix does **not** drop the feature: the
+method already had a non-DML path (applying the statement's SET to the
+before-rows in Python — the documented fallback for a composite/absent primary
+key), so an over-cap preview reuses that and still returns a useful bounded
+diff. Only the DML is skipped. The Python fallback is an approximation — it
+can't reflect DB-side defaults, triggers, or type coercion — which is the right
+trade for a write that will not be permitted to run anyway.
+
+A DELETE preview was never affected: it only SELECTs the doomed rows
+(`LIMIT max_diff_rows + 1`) and runs no DML, so its diff is unchanged and still
+available over-cap.
+
+**Coverage** (`tests/integration/test_write_preview_end_to_end.py`). Proving
+this needs observing the SQL actually issued — the preview rolls back either
+way, so the *data* is identical whether or not the DML ran; the defect is work
+performed, not end state. `_record_sql` hooks SQLAlchemy's
+`before_cursor_execute` on the engine the `sqlite_app` fixture exposes through
+its monkeypatched `get_engine`, and the tests assert on the statements seen:
+
+- `test_over_cap_update_diff_never_runs_the_dml` — over-cap UPDATE preview with
+  `include_diff=true` issues **zero** UPDATE statements, still returns a
+  populated diff with the proposed new value, reports
+  `within_affected_cap: false`, and changes nothing.
+- `test_within_cap_update_diff_still_runs_the_dml` — the **positive control**:
+  within cap, exactly one UPDATE is issued. Without this, the fix could have
+  been "disable the DML-backed diff entirely" and still looked green.
+- `test_over_cap_delete_diff_lists_rows_without_running_dml` — an over-cap
+  DELETE keeps its bounded diff and issues no DELETE.
+
+Verified the regression test genuinely bites: with the `within_cap` guard
+reverted, `test_over_cap_update_diff_never_runs_the_dml` fails while the
+positive control still passes.
+
+**Hard boundaries honored.** No new policy field (reuses `max_affected_rows`),
+no change to what a preview may show, masking still applied to every diff row,
+and the preview remains non-mutating (the rollback is untouched).

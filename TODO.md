@@ -654,191 +654,11 @@ catalog access.
 
 ### 40. Semantic access diff for config changes ✅ DONE
 
-Phase 1 (connection-baseline semantic diff, `POST /admin/config/diff`) shipped.
-**Phase 2 (per-principal resolution) is COVERED by item 41 ph1 (blast-radius)**,
-which reuses the exact same `compute_access_diff(principal=...)` engine and
-returns each configured principal's full itemized change list in
-`principal_impacts[].changes` — the "reporting-agent gains X" statements phase 2
-described — plus ranking. A distinct per-principal `/diff` would only duplicate
-that. Maintainer decision (2026-07-23): mark phase 2 covered, no new code. See
-item 41.
-
-<details><summary>Original phase-1 write-up</summary>
-
-**Phase 1 shipped (connection-baseline layer); phase 2 (per-principal
-resolution) not started.**
-
-`POST /api/v1/admin/config/diff` (`api/admin_config_routes.py` →
-`admin.service.diff_candidate_access` → `admin/access_diff.py`) returns a
-server-derived, authorization-aware diff of *resolved* access — not a line
-diff of YAML — between the active config-governance version (or the deployment
-files before governance has been bootstrapped) and a caller-supplied candidate
-(unset documents inherit from active, exactly like `/validate` and `/versions`).
-
-- **Evaluation scope (phase 1):** `evaluation_scope="connection_baseline"`.
-  Both snapshots are loaded through the same isolated candidate-context path
-  item 39's `/simulate` uses (`_load_isolated_candidate_context`), so the live
-  registry/policy/catalog singletons and any concurrent request are provably
-  untouched. For every connection present in either snapshot, the default and
-  per-connection policy layers are resolved with **no principal applied** and
-  compared. Reported `SemanticAccessChange` items cover connection visibility,
-  every guardrail cap, table access, column access, mandatory-filter
-  requirements, and join groups, each classified `tightening`/`loosening`/
-  `neutral` (guardrail direction is derived from a single permissiveness
-  comparator, with an unset optional cap treated as "unlimited"). A
-  `SemanticDiffSummary` counts each direction; changes are ordered loosening-
-  first so a truncated list keeps the highest-risk entries.
-- **Authorization:** like `/simulate`, `/diff` requires **both**
-  `admin:config:read` and `admin:config:write` — it echoes resolved policy
-  detail (read-like) while resolving caller-supplied config/secret references
-  (write-like), so neither scope alone can turn it into a secret-existence
-  oracle.
-- **Redaction:** `before`/`after` only ever carry non-sensitive resolved
-  values (a guardrail number, `visible`/`hidden`/`absent`, a join-group name,
-  or a mandatory-filter *source kind* and claim *name*). Static
-  mandatory-filter values, resolved secrets, connection strings, query
-  predicate values, and raw YAML are structurally never placed in the output.
-- **Honest incompleteness:** `analysis_incomplete` is set with a
-  human-readable reason rather than silently under-reporting when the
-  per-principal override layer itself changed (phase 2), when an allow-list
-  toggled between restricted and unrestricted (objects the policy never names
-  may also be affected and can't be enumerated without live schema
-  reflection), or when the change list was truncated at its cap.
-- **Threat-model control:** documented as QG-20 in `docs/THREAT_MODEL.md`.
-
-Covered by `tests/unit/test_config_semantic_diff.py` (the pure classification
-engine), `tests/unit/test_admin_service.py` (isolation, audit, safe
-invalid-candidate masking), `tests/integration/test_admin_config_governance.py`
-(the REST surface, redaction, and non-persistence), and
-`tests/security/test_adversarial_security.py` (both-scope enforcement).
-
-**Phase 2 (not started) — per-principal resolution.** Phase 1 resolves the
-default and per-connection layers only; a change that lives purely in a
-`principals:` override is detected and flagged as incomplete but not itemized.
-Phase 2 resolves each explicitly *configured* principal (bounded by the policy
-file, not by runtime traffic) so the diff can state "reporting-agent gains
-`orders.total`", applying the same per-principal denied-table redaction
-`/simulate` already uses. That per-principal fan-out is also the input item 41
-(policy-change blast-radius) aggregates, ranks, and paginates — so phase 2 is
-split out both because it is a distinct, independently useful slice and because
-it is the natural foundation item 41 builds on.
-
-**Original scope (for reference — see above for what shipped in phase 1):**
-
-**Effort: L (3–5 days).** A trustworthy diff must compare resolved behavior,
-not YAML syntax. It needs a typed diff model, policy resolution across default,
-connection, and principal layers, bounded output/redaction rules, REST wiring,
-and cross-checks proving its decisions match the enforcement path.
-
-**Why it matters:** A line diff can show that `allowed_tables` changed, but not
-whether the change grants access after inherited defaults, connection
-overrides, principal overrides, and deny-wins rules are resolved. Reviewers
-need statements such as “reporting-agent gains `orders.total`” or “the default
-row limit rises from 100 to 500,” not an expectation that they mentally execute
-the merge algorithm from YAML.
-
-**What to do:** Build a server-derived, authorization-aware semantic diff
-between the active and candidate snapshots. Report typed additions/removals for
-connection visibility, tables, columns, mandatory-filter requirements, join
-groups, and every guardrail; classify each as tightening, loosening, or neutral.
-Keep raw values out of filter diffs, distinguish explicit rules from inherited
-effects, cap result size, and provide stable machine-readable output for both
-the UI and CI/CD review tooling.
-
-</details>
+`POST /api/v1/admin/config/diff` (`admin/access_diff.py`) returns a server-derived, authorization-aware diff of *resolved* access — connection visibility, every guardrail cap, table/column access, mandatory-filter requirements, join groups — between the active config version and a caller-supplied candidate, each change classified tightening/loosening/neutral and redaction-safe; both config scopes required. Phase 2 (per-principal resolution) is COVERED by item 41's blast-radius, which reuses the same `compute_access_diff(principal=…)` engine (maintainer decision, 2026-07-23). Threat-model QG-20. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 40).
 
 ### 41. Policy-change blast-radius analysis ✅ DONE
 
-**Phase 1 (bounded, synchronous aggregation) ✅ DONE.** **Phase 2
-(paginated evaluation) ✅ DONE.** Phase 2 took the *paginated-response* option
-(the simpler, stateless of the two shapes the spec offered): `compute_blast_radius_report`
-+ `POST /admin/config/blast-radius` accept a `principal_offset` cursor and
-evaluate one deterministically-sorted **page** of configured principals per
-request (page size = the existing `max_principals`), returning `principal_offset`
-+ `next_principal_offset` (None on the last page). A deployment with more
-principals than one page now covers *every* principal across successive requests
-instead of the overflow being dropped as `analysis_incomplete`. `highest_risk`
-ranks over the constant baseline + the current page. Covered by
-`tests/unit/test_blast_radius.py` (page bounds + next-offset cursor; paging
-covers every configured principal). A background-job/polling variant was
-deliberately not built — pagination is stateless, needs no job store, and covers
-the same "too many principals for one synchronous pass" case.
-
-**Phase 1 shipped:** `POST /api/v1/admin/config/blast-radius`
-(`api/admin_config_routes.py`) reuses item 40's semantic diff
-(`admin/access_diff.compute_access_diff`) rather than a parallel resolution
-path — that function gained an optional `principal` argument so the exact
-same per-connection classification logic (guardrails, table/column access,
-mandatory filters, join group, connection visibility) can be evaluated once
-at the connection baseline (unchanged behavior, `principal=None`) and again
-for one specific caller. `admin/blast_radius.py`'s
-`compute_blast_radius_report()` calls it once for the baseline, then once
-more for every principal with an explicit `principals:` entry in either the
-active or candidate policy — a principal *without* an override is identical
-to the baseline by construction, so it is never separately evaluated or
-listed, closing the loop item 40's own diff left open
-(`analysis_incomplete` when "per-principal impact is resolved in a later
-phase").
-
-Findings are ranked, not just listed: `highest_risk` includes only
-access-*expanding* (loosening) changes — a removed mandatory row filter
-ranked above a newly visible connection/table/column, ranked above a
-loosened guardrail cap — with each entry tagged `scope: "baseline"` (affects
-every principal without an override; fleet-wide) or `scope: "principal"`
-(affects only that named caller; targeted), so a reviewer can immediately
-tell a small YAML edit with a fleet-wide blast radius from a large edit that
-only touches one agent's override — exactly the scenario this item's own
-"why it matters" describes. Tightening/neutral changes are never hidden;
-they remain in full in `baseline.changes` and each principal's own
-`principal_impacts[].changes`, just excluded from the risk-priority view.
-
-Work is bounded on every axis, each with its own cap and an honest
-`analysis_incomplete` state (with a specific human-readable reason) rather
-than silent under-reporting when a cap is hit: at most 100 configured
-principals are individually evaluated (`principals_evaluated` vs.
-`principals_configured` in the response); each principal's own change list
-is capped like item 40's diff already was; and `highest_risk` itself is
-capped at 25 entries. `compute_blast_radius` (`admin/service.py`) shares
-`diff_candidate_access`'s isolated-context loading, redaction posture, scope
-requirement (`admin:config:read` **and** `admin:config:write` together, for
-the same read-detail-plus-write-resolution reasoning as `diff`/`simulate`),
-and audit trail (`config.governance` event, new `"blast_radius"` action) —
-never a second candidate-loading or audit path.
-
-Covered by `tests/unit/test_blast_radius.py` (pure aggregation/ranking logic:
-fleet-wide vs. targeted scoping, a principal shielded from a base-policy
-change by its own override, mandatory-filter-removal ranked above
-table/column access ranked above guardrails, tightening changes excluded
-from `highest_risk`, both bounds triggering `analysis_incomplete`),
-`tests/unit/test_admin_service.py` (isolation from live singletons and the
-governance store, audit events, invalid-candidate masking), a REST
-integration test proving a targeted per-principal expansion surfaces as the
-top `highest_risk` finding even while the connection baseline itself
-tightens, and adversarial security tests (both config scopes independently
-required, matching `/diff`; a static mandatory-filter value never appears
-anywhere in the aggregated response, including inside a per-principal
-impact entry). See `docs/THREAT_MODEL.md`'s new QG-22 entry.
-
-**Explicitly out of scope for this pass** (matches this item's own "high end
-applies when... asynchronous or paginated analysis" framing): no
-async/background evaluation and no paginated response — a deployment with
-more than 100 configured principals gets `analysis_incomplete` with a count
-of how many were skipped, not a way to page through the rest. No admin UI
-panel either, matching item 40 phase 1's own scope (the admin UI's existing
-"Change preview" panel is a client-side line diff, not wired to either
-semantic endpoint).
-
-**Why it matters:** A syntactically tiny default-policy change can affect every
-principal and connection, while a large YAML edit may affect only one agent.
-Without an impact summary, reviewers cannot distinguish a targeted change from
-a fleet-wide access expansion or guardrail relaxation before activation.
-
-**What to do (phase 2):** Add an asynchronous or paginated evaluation path
-for deployments with more configured principals than phase 1's bounded,
-synchronous pass can cover in one request — a background job with a
-pollable status/result, or a paginated `principal_impacts` response —
-without changing phase 1's response shape for the common case that already
-fits under the bound.
+`POST /api/v1/admin/config/blast-radius` (`admin/blast_radius.py`) reuses item 40's `compute_access_diff` — not a parallel resolution path — to evaluate every principal with an explicit `principals:` override, ranking only access-*expanding* changes in `highest_risk` and tagging each `baseline` (fleet-wide) or `principal` (targeted). Phase 2 added a stateless `principal_offset` cursor so successive pages cover every configured principal instead of the overflow being dropped as `analysis_incomplete`. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 41).
 
 ### 42. Four-eyes config approval and separation of duties ✅ DONE
 
@@ -1110,92 +930,7 @@ a `column_mask` policy primitive (`policy/models.py`: `ColumnMask`/`ColumnMaskKi
 
 ### 50. Per-principal rate limits / query quotas over time ✅ DONE
 
-**Phase 2 shipped (Redis cross-replica quota):** `execution/redis_quota.py`'s
-`RedisQuotaLimiter` makes a principal's request/byte rolling-window budget a
-single **shared** budget across replicas, closing the per-replica-multiplication
-gap phase 1 flagged (and that `deploy/HA_DR.md`'s shared-state matrix called
-out). Mirrors `redis_concurrency.py`: a per-(connection, principal) sorted set
-scored by wall-clock time + a parallel bytes hash, one atomic Lua script that
-prunes aged entries, checks the request-count and byte-total caps against the
-true cross-replica window, and records the attempt; `record_bytes` fills in the
-response size afterward (guarded so a late write can't resurrect a pruned entry);
-both keys carry a window-length TTL. The `QuotaLimiter` protocol (and
-`enforce_query_quota`/`record_query_quota_bytes`) went **async** so the Redis
-backend can await its client; the in-process limiter is the unchanged default.
-`create_app` installs it when `concurrency_backend=redis` (same client as the
-concurrency limiter). Tested with fakeredis (`tests/unit/test_redis_quota.py`:
-caps, rolling expiry, per-key isolation, record_bytes, and — standing in for
-cross-replica — two limiter instances sharing one Redis enforcing one budget).
-
-**Shipped (phase 1 — in-process rolling-window quota):** three `Policy`
-fields (`max_requests_per_window`, `max_response_bytes_per_window`,
-`quota_window_seconds`; both caps unset = disabled, identical to prior
-behavior), resolved per principal through the existing `PolicyStore` merge —
-so a per-principal `principals:` override can throttle one noisy caller
-without a code change. Enforcement is a new `execution/quota.py` with a
-narrow `QuotaLimiter` Protocol (CLAUDE.md "Composable single-purpose
-interfaces") and one `InProcessQuotaLimiter` today: a sliding-window log
-keyed by `(connection_id, principal_subject)`. `StructuredQueryService.execute`
-calls `enforce_query_quota` **before** it queues or opens a DB session
-(`reserve()` atomically prunes the window, checks both caps, and records the
-attempt so concurrent in-flight callers can't race past the cap), and
-`record_query_quota_bytes` attributes the response size afterward (the query
-that crosses the byte ceiling completes; the next one is refused). A rejected
-caller raises `QuotaExceededError` (a `PolicyViolationError`, so every
-existing deny-path handler and `public_error_message` treat it as
-client-actionable) and never touches the database.
-
-Distinct, contextful rejection (not a bare 429): REST maps it to **429 with a
-`Retry-After` header** (`api/_errors.py`), MCP to a **`RATE_LIMITED`** error
-code (`mcp/exceptions.py`) — both carrying a message that names the cap and a
-retry hint. Audited exactly like other policy denials (`policy_decision:
-denied`, `error_category: quota`), with a dedicated `quota` reason in
-`metrics.classify_rejection`/`querygate_queries_rejected_total` plus a
-`querygate_query_quota_rejections_total{connection,quota_kind}` counter
-breaking out requests-vs-bytes. `explain()` is deliberately not quota-gated
-(it compiles a preview and never executes — same reason it skips
-cost-estimation).
-
-**Coverage:** `tests/unit/test_query_quota.py` (window semantics, per-
-principal/per-connection isolation, byte accounting, policy validation,
-classification, REST-429/MCP mapping), `tests/integration/test_query_quota_e2e.py`
-(real execute pipeline against SQLite: request cap, per-principal isolation,
-byte cap, unauthenticated skip, metric increment), and a
-`tests/security/test_adversarial_security.py` case proving a quota-rejected
-attempt is refused strictly before schema validation / the engine.
-
-**Phase 2 — Redis-backed cross-replica quota (NOT STARTED):** the in-process
-window is per-replica, so under a load balancer the effective quota is
-multiplied by instance count — exactly the caveat the default in-process
-concurrency limiter carries (see `execution/redis_concurrency.py`). Closing
-it means a `RedisQuotaLimiter` implementing the same `QuotaLimiter` Protocol
-(a per-key sorted set of attempt timestamps + byte weights, pruned by a
-single atomic Lua `ZREMRANGEBYSCORE`/`ZADD` script — the exact shape item 9's
-`RedisConcurrencyLimiter` already uses), selected by the same
-`concurrency_backend`/startup swap `init_redis_limiter` uses, plus a
-live-Redis integration gate. Split out because the in-process quota is a
-complete, shippable guardrail for single-instance deployments on its own, and
-the cross-replica variant needs the real-Redis test infrastructure item 9
-established — the same phasing precedent as item 35 phase 2.
-
-**Effort: M (2–3 days).** Reuses the Redis-backed cross-instance state item
-9 already introduced for the concurrency limiter; this is a second counter
-(a rolling window or token bucket keyed by principal) alongside it, not a
-new distributed-state mechanism.
-
-**Why it matters:** The concurrency semaphore (item 9) bounds how many
-queries a principal can have *in flight at once*, not how many it can run
-*over time*. A well-behaved agent that never exceeds its concurrency limit
-can still issue tens of thousands of sequential queries an hour, exhausting
-DB capacity or a customer's cost budget — the multi-tenant cost-governance
-story enterprise buyers in `docs/business/GO_TO_MARKET.md`'s target segment
-will ask for directly.
-
-**What to do:** Add a per-principal (and optionally per-connection)
-request-count and byte-count quota over a configurable rolling window,
-enforced before execution alongside the existing concurrency guard. Return
-a distinct, policy-shaped rejection (not a raw 429 with no context) and
-audit quota rejections the same way other policy denials are audited today.
+Three `Policy` fields (`max_requests_per_window`, `max_response_bytes_per_window`, `quota_window_seconds`, resolved per principal through the existing `PolicyStore` merge) enforced by `execution/quota.py`'s narrow `QuotaLimiter` Protocol *before* the service queues or opens a DB session; a refused caller gets REST **429 + `Retry-After`** / MCP **`RATE_LIMITED`**. Phase 2 added `execution/redis_quota.py`'s `RedisQuotaLimiter` (one atomic Lua script, sorted set + bytes hash) so the window is a single shared budget across replicas. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 50).
 
 ### 51. Typed client-side query-builder SDK (Python + TypeScript)
 
@@ -1324,43 +1059,7 @@ Cross-linked from `docs/SECURITY_POSTURE.md`. The coordination-gated remainder
 
 ### 55. Inference/transitive-exposure adversarial test suite ✅ DONE
 
-**Shipped:** A new design note (`docs/INFERENCE_RISKS.md`) enumerating
-inference-attack shapes against the `StructuredQuery` AST, plus adversarial
-regression cases added to item 28's suite
-(`tests/security/test_adversarial_security.py`).
-
-The investigation found **no enforcement gap**: the policy column walk
-(`validation/policy_validation.py`'s `_iter_column_refs` + the shared
-`select_item_column_refs`/`predicate_column_refs` harvesters) already checks
-every column reference in every clause, and the AST forbids nested scalar
-functions, so there is no expression tree a column can hide inside. The value
-of this item is therefore (a) proving that exhaustively and (b) documenting the
-residual risks that identifier allow/deny structurally *cannot* close.
-
-- **Class A — direct reference in any clause (closed, regression-locked):**
-  `test_denied_column_cannot_be_used_for_inference` is now parametrized across
-  every column-carrying AST position — where/group_by/having/order_by/top_n
-  (partition_by + order_by)/join `on`, plus scalar-function args, `CASE`
-  when/then/else, aggregate/`percentile_cont`/`string_agg` columns, predicate
-  `col_fn` and `value_col`, and composite join `extra_on` keys — each asserting
-  a denied column is rejected. Adding a new column-carrying AST node without
-  extending the harvest fails this test.
-- **Class B — residual risks (documented, not closable by allow/deny):** R1
-  derived/correlated permitted columns (closed by *policy* — deny the derived
-  column too), R2 underlying-data correlation (out of scope for an access
-  gateway), R3 aggregate differencing / no minimum group size (accepted v1
-  residual; a scoped candidate `min_group_size` guardrail is noted, not
-  half-built), R4 existence/row-count probing (accepted, mitigated in depth by
-  mandatory row filters, masking, quotas, and audit). R1 and R3 each carry a
-  demonstrating test asserting the current allowed-by-design behavior, so the
-  boundary is explicit and flips the day a closing feature lands.
-
-**Why it matters:** Column allow/deny stops a query from directly selecting
-a denied column, but "provably does not leak it *indirectly*" was previously
-asserted only for a handful of clauses. This item makes that guarantee
-exhaustive and regression-locked, and draws the honest line between what the
-engine closes and what remains a policy-configuration or accepted residual
-risk — rather than leaving the inference category silently unaddressed.
+`docs/INFERENCE_RISKS.md` plus adversarial regressions in item 28's suite. The investigation found **no enforcement gap**: `test_denied_column_cannot_be_used_for_inference` is now parametrized across every column-carrying AST position, so adding a new column-carrying node without extending the shared harvesters fails the test. The residual risks identifier allow/deny structurally cannot close (R1–R4) are documented, two with demonstrating tests; R3 (no minimum group size) was later closed by item 88. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 55).
 
 ### 56. HA / multi-region reference deployment + DR runbook ✅ DONE
 
@@ -1625,39 +1324,7 @@ The Templates domain gained a guided authoring form (id/connection/description +
 
 ### 88. Minimum aggregation group size (k-anonymity guardrail) ✅ DONE
 
-**Shipped:** A new `Policy.min_group_size` cap (`policy/models.py`) that closes
-the direct, single-query form of the aggregate-differencing residual that item
-55's design note flagged as R3 (`docs/INFERENCE_RISKS.md`). When set (floor 2;
-`None` disables), the compiler (`compiler/sqlalchemy_compiler.py`) injects
-`HAVING count(*) >= k` into every **aggregate** query — grouped or
-single-implicit-group — so any result group backed by fewer than *k* underlying
-rows is suppressed. A caller can no longer aggregate over a razor-thin filter to
-single out an individual (`count(*) WHERE id = X` returns nothing when fewer
-than *k* rows match). It is the aggregate analog of a mandatory row filter:
-policy-driven, injected, non-removable, and it only touches aggregate queries —
-plain row reads remain governed by mandatory row filters, not group size.
-
-**Scope (deliberate):** this closes single-query singling-out, **not**
-multi-query differencing (isolating an individual by subtracting two
-independently-compliant aggregates), which needs query-set auditing or
-differential privacy — out of scope and documented as still-residual in
-`docs/INFERENCE_RISKS.md`. No new AST surface; `min_group_size` is a policy cap,
-loaded generically from `policy.yaml` like every other cap.
-
-**Coverage:** compiler unit tests (`test_compiler.py::TestMinGroupSize` — HAVING
-injection on grouped/single-group aggregates, no-op on plain selects, combines
-with caller HAVING, `None` no-op), real end-to-end suppression against SQLite
-(`test_sqlite_end_to_end.py` — a single-customer country group and a
-single-row filtered count are suppressed; the whole-table count is returned),
-a security test tying the closure back to item 55's R3
-(`test_adversarial_security.py`), and policy-model validation
-(`test_policy_models.py` — default `None`, floor of 2).
-
-**Why it matters:** item 55 proved the direct column-reference defenses are
-complete and documented the residuals it couldn't close. R3 (no minimum group
-size) was the one residual with a bounded, well-precedented fix — this item
-builds it, turning a documented gap into an opt-in enforced guardrail without
-overclaiming (multi-query differencing stays honestly out of scope).
+`Policy.min_group_size` (floor 2; `None` disables) makes the compiler inject `HAVING count(*) >= k` into every **aggregate** query — grouped or single-implicit-group — so any group backed by fewer than *k* rows is suppressed: the aggregate analog of a mandatory row filter, closing the single-query singling-out form of item 55's R3 residual. Multi-query differencing stays honestly out of scope. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 88).
 
 ### 89. Open-source security validation gates + customer-facing trust posture ✅ DONE (phase 1); phase 2 (signed delivery) mechanism shipped, first release + package-index remain maintainer-gated
 
@@ -2485,29 +2152,14 @@ unit is consumed across an approval-required-then-retried batch item.
 **Effort: S. Priority: medium (real throughput bug, narrow blast radius).
 Depends on: none.**
 
-### 108. Write-preview diff runs the full DML before the affected-row cap is checked
+### 108. Write-preview diff runs the full DML before the affected-row cap is checked ✅ DONE
 
-`WritePreviewService.preview()` (`execution/write_preview.py:106-152`) computes
-`affected` via a policy-checked `COUNT(*)`, but when `include_diff=True` it
-unconditionally calls `_mutation_diff`, which — for `UpdateStatement` — executes
-the *real* UPDATE (`await session.execute(dml)`, `write_preview.py:203`) inside
-the (later-rolled-back) transaction to compute an old→new diff, regardless of
-whether `affected` already exceeds `WritePolicy.max_affected_rows`. Only the
-*rows shown in the diff response* are capped by `max_diff_rows`
-(`write_preview.py:166,185`) — the actual row-locking UPDATE against every
-matching row still runs first. A caller can request `include_diff=true` against
-a broad WHERE clause to force a full-table UPDATE (row locks, WAL/redo
-activity, lock contention with concurrent writers) purely to preview a write
-that would be rejected outright as over-cap. No test exercises
-`include_diff=true` together with an over-`max_affected_rows` predicate.
+An over-cap `include_diff=true` UPDATE preview no longer executes the real
+row-locking DML: `_mutation_diff` takes a `within_cap` flag and falls back to the
+existing Python-applied-SET path, so the caller still gets a bounded diff while
+no DML reaches the database.
 
-**Fix:** short-circuit `_mutation_diff` (return `within_affected_cap=False`,
-`diff=None` or a truncated/est.-only diff) when `affected > max_affected_rows`,
-before running the DML; add a regression test for an over-cap UPDATE preview
-with `include_diff=true`.
-
-**Effort: S. Priority: medium (resource-exhaustion / lock-contention risk on a
-preview-only endpoint). Depends on: none.**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 108).
 
 ### 109. MCP `run_structured_writes` has no batch-size cap
 

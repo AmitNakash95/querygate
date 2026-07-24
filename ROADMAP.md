@@ -387,16 +387,13 @@ already-planned initiatives.
   - Acceptance criteria:
     - A test asserts exactly one quota unit is consumed across an
       approval-required-then-resolved batch item.
-- [ ] **108** — Write-preview diff runs the full DML before the
-  `max_affected_rows` cap is checked.
-  - Why: `include_diff=true` against a broad WHERE forces a real, row-locking
-    UPDATE to run (then rollback) even when the write would be rejected
-    outright as over-cap — a resource-exhaustion / lock-contention risk on a
-    preview-only endpoint.
-  - Scope: `execution/write_preview.py` (`_mutation_diff`).
-  - Acceptance criteria:
-    - An over-cap UPDATE preview with `include_diff=true` short-circuits
-      before running the DML; regression test added.
+- [x] **108** — Write-preview diff runs the full DML before the
+  `max_affected_rows` cap is checked. ✅ **Shipped** (`_mutation_diff` takes a
+  `within_cap` flag and falls back to the existing Python-applied-SET path, so an
+  over-cap preview issues no DML but still returns a bounded diff; DELETE was
+  never affected. Proven by hooking `before_cursor_execute` and asserting on the
+  statements issued, with a within-cap positive control so the guard can't
+  degrade into disabling the feature).
 - [ ] **109** — MCP `run_structured_writes` has no batch-size cap (the read
   path's `validate_batch_size` has no write-side equivalent).
   - Why: a caller can submit an unbounded batch of individually-in-cap writes
