@@ -55,7 +55,7 @@ def _kitchen_sink() -> StructuredQuery:
             ]
         ),
         group_by=["orders.id"],  # GROUP_BY (dotted)
-        having=[Predicate(col="orders.total", op="gt", value=1)],  # HAVING
+        having=Predicate(col="orders.total", op="gt", value=1),  # HAVING
         order_by=[OrderBySpec(col="orders.id", dir="asc")],  # ORDER_BY (dotted)
     )
 

@@ -182,6 +182,59 @@ def test_case_with_else_and_literal_and_column_branches():
     }
 
 
+def test_searched_having_with_or_group_builds():
+    """item 99: `.having()` takes full WhereNodes, so OR-logic over aggregate
+    conditions is expressible client-side, matching the AST."""
+    q = (
+        Query.from_("orders")
+        .select("orders.status", agg.sum("orders.total_amount", as_="s"), agg.count("*", as_="n"))
+        .group_by("orders.status")
+        .having(or_(col("s") > 500, col("n") < 2))
+    )
+    dumped = q.to_dict()
+    assert dumped["having"] == {
+        "or": [
+            {"col": "s", "op": "gt", "value": 500},
+            {"col": "n", "op": "lt", "value": 2},
+        ]
+    }
+
+
+def test_multiple_having_calls_are_and_combined():
+    """Several `.having()` predicates AND-combine into one WhereGroup, exactly
+    like `.where()` — the pre-item-99 AND semantics are preserved."""
+    q = (
+        Query.from_("orders")
+        .select(agg.count("*", as_="n"), agg.sum("orders.total_amount", as_="s"))
+        .group_by("orders.status")
+        .having(col("n") > 1)
+        .having(col("s") > 10)
+    )
+    assert q.to_dict()["having"] == {
+        "and": [
+            {"col": "n", "op": "gt", "value": 1},
+            {"col": "s", "op": "gt", "value": 10},
+        ]
+    }
+
+
+def test_searched_case_condition_is_a_boolean_group():
+    """A CASE `when` accepts a full WhereNode — a searched CASE (item 99)."""
+    item = case(
+        when(
+            and_(col("orders.status") == "completed", col("orders.total_amount") > 100), lit("hot")
+        ),
+        else_=lit("cold"),
+        as_="bucket",
+    )
+    assert item.model_dump(by_alias=True, exclude_none=True)["when"][0]["when"] == {
+        "and": [
+            {"col": "orders.status", "op": "eq", "value": "completed"},
+            {"col": "orders.total_amount", "op": "gt", "value": 100},
+        ]
+    }
+
+
 def test_top_n_with_partition_and_ordering_helpers():
     q = (
         Query.from_("order_items")

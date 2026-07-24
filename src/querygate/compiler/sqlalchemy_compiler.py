@@ -314,8 +314,12 @@ def _build_select_columns(
         if isinstance(item, CaseSelectItem):
             whens = []
             for branch in item.when:
-                target = _resolve_predicate_target(branch.when, tables, alias_map={})
-                condition = _apply_predicate(target, branch.when, tables)
+                # A searched-CASE condition is a full WhereNode (item 99),
+                # compiled through the exact same machinery as `where`/`having`.
+                # alias_map={} — a CASE condition can't reference a peer select
+                # alias, and ctx=None keeps `value_subquery` out (rejected in
+                # validation; would fail here too).
+                condition = _compile_where(branch.when, tables, alias_map={})
                 whens.append((condition, _resolve_scalar_arg(branch.then, tables)))
             else_value = _resolve_scalar_arg(item.else_, tables) if item.else_ is not None else None
             expr = sa.case(*whens, else_=else_value)
@@ -530,9 +534,12 @@ def compile_structured_query(
             ]
         )
 
-    for pred in query.having:
-        target = _resolve_predicate_target(pred, tables, alias_map)
-        stmt = stmt.having(_apply_predicate(target, pred, tables))
+    if query.having is not None:
+        # HAVING is a full WhereNode (item 99), compiled through the same
+        # `_compile_where` machinery as WHERE. alias_map is threaded so a HAVING
+        # predicate can reference a select alias (e.g. an aggregate's `as`);
+        # ctx=None keeps `value_subquery` out (WHERE-only, item 97).
+        stmt = stmt.having(_compile_where(query.having, tables, alias_map))
 
     is_aggregate = bool(query.group_by) or any(
         isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in query.select

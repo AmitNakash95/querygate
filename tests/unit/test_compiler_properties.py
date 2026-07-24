@@ -157,6 +157,61 @@ def _where_clauses(draw):
 
 
 @st.composite
+def _having_predicate(draw):
+    """One HAVING predicate. Draws BOTH resolution paths the compiler has to
+    handle there: a select *alias* (resolved via `alias_map`) and a real
+    Table.Column group key (resolved via `tables`)."""
+    if draw(st.sampled_from(["alias", "alias", "group_key"])) == "group_key":
+        return Predicate(
+            col="orders.status",
+            op=draw(st.sampled_from(["eq", "neq"])),
+            value=draw(st.sampled_from(["completed", "pending", "cancelled"])),
+        )
+    return Predicate(
+        col="agg_value",
+        op=draw(st.sampled_from(["gt", "gte", "lt", "eq"])),
+        value=draw(st.integers(min_value=0, max_value=1000)),
+    )
+
+
+@st.composite
+def _having_clauses(draw):
+    """Random HAVING trees. item 99 made `having` a full `WhereNode`, so this
+    draws the same and/or/not shapes `_where_clauses` does — drawing only a flat
+    AND list would leave the entire new boolean surface unfuzzed."""
+    preds = [draw(_having_predicate()) for _ in range(draw(st.integers(min_value=1, max_value=3)))]
+    if len(preds) == 1:
+        node = draw(st.one_of(st.just(preds[0]), st.just(WhereGroup(and_terms=preds))))
+    else:
+        node = WhereGroup(and_terms=preds) if draw(st.booleans()) else WhereGroup(or_terms=preds)
+    if draw(st.booleans()):
+        node = WhereGroup(not_terms=node)  # item 99: negated HAVING group
+    return node
+
+
+@st.composite
+def _case_conditions(draw):
+    """A searched-CASE `when` (item 99) — a full WhereNode, not a lone
+    predicate, so the CASE branch's boolean tree gets fuzzed too."""
+    preds = [
+        Predicate(col="orders.status", op="eq", value=draw(st.sampled_from(["completed", "new"]))),
+        Predicate(
+            col="orders.total_amount",
+            op=draw(st.sampled_from(["gt", "lte"])),
+            value=draw(st.integers(min_value=0, max_value=500)),
+        ),
+    ]
+    kind = draw(st.sampled_from(["single", "and", "or", "not"]))
+    if kind == "single":
+        return preds[0]
+    if kind == "and":
+        return WhereGroup(and_terms=preds)
+    if kind == "or":
+        return WhereGroup(or_terms=preds)
+    return WhereGroup(not_terms=WhereGroup(and_terms=preds))
+
+
+@st.composite
 def _row_select_queries(draw):
     """Random plain (non-aggregate) row-select shapes: optional join, select
     width, an optional where tree, order_by, and limit.
@@ -175,12 +230,12 @@ def _row_select_queries(draw):
         select_cols = select_cols + [
             ScalarFunctionSelectItem(fn="lower", args=[ColArg(col="orders.status")], alias="lc")
         ]
-    if draw(st.booleans()):  # item 72: a CASE projection
+    if draw(st.booleans()):  # item 72: a CASE projection (item 99: searched condition)
         select_cols = select_cols + [
             CaseSelectItem(
                 when=[
                     CaseWhen(
-                        when=Predicate(col="orders.status", op="eq", value="completed"),
+                        when=draw(_case_conditions()),
                         then=LiteralArg(literal="Done"),
                     )
                 ],
@@ -266,17 +321,8 @@ def _aggregate_queries(draw):
         )
         agg_item = AggregateSelectItem(fn=agg_fn, col=agg_col, alias="agg_value", distinct=distinct)
     select = ["orders.status", agg_item]
-    having = draw(
-        st.lists(
-            st.builds(
-                Predicate,
-                col=st.just("agg_value"),
-                op=st.sampled_from(["gt", "gte", "lt", "eq"]),
-                value=st.integers(min_value=0, max_value=1000),
-            ),
-            max_size=2,
-        )
-    )
+    # having is an Optional[WhereNode] (item 99) — draw real boolean trees.
+    having = draw(st.one_of(st.none(), _having_clauses()))
     order_by = draw(
         st.lists(
             st.builds(

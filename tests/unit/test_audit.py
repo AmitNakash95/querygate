@@ -167,19 +167,75 @@ def test_normalized_query_shape_handles_predicate_col_fn_in_having():
         from_table="orders",
         select=["orders.status", {"fn": "count", "col": "*", "as": "n"}],
         group_by=["orders.status"],
-        having=[
-            Predicate(
-                col_fn={"fn": "coalesce", "args": [{"col": "orders.total_amount"}, {"literal": 0}]},
-                op="gt",
-                value=0,
-            )
-        ],
+        having=Predicate(
+            col_fn={"fn": "coalesce", "args": [{"col": "orders.total_amount"}, {"literal": 0}]},
+            op="gt",
+            value=0,
+        ),
         limit=10,
     )
     shape = normalize_query_shape(query)
     serialized = json.dumps(shape)
     assert "orders.total_amount" in serialized
     assert '"function": "coalesce"' in serialized
+
+
+def test_searched_having_and_case_shapes_carry_structure_but_no_literals():
+    """item 99: HAVING and a CASE `when` are now WhereNode trees. The audit shape
+    must record their boolean structure and columns while leaking no predicate
+    literal — the redaction rule the new positions inherit from `where`."""
+    query = StructuredQuery(
+        from_table="orders",
+        select=[
+            "orders.status",
+            {"fn": "count", "col": "*", "as": "n"},
+            {
+                "when": [
+                    {
+                        "when": {
+                            "not": {
+                                "col": "orders.status",
+                                "op": "eq",
+                                "value": "case-secret-literal",
+                            }
+                        },
+                        "then": {"literal": "case-then-literal"},
+                    }
+                ],
+                "as": "label",
+            },
+        ],
+        group_by=["orders.status"],
+        having={
+            "or": [
+                {"col": "n", "op": "gt", "value": 4242},
+                {"col": "orders.status", "op": "eq", "value": "having-secret-literal"},
+            ]
+        },
+        limit=10,
+    )
+    serialized = json.dumps(normalize_query_shape(query))
+
+    # Structure is preserved: the OR group and its operators are recorded.
+    assert '"or"' in serialized
+    assert '"operator": "gt"' in serialized
+    # No predicate literal from any of the new positions reaches the event.
+    assert "having-secret-literal" not in serialized
+    assert "case-secret-literal" not in serialized
+    assert "4242" not in serialized
+
+
+def test_where_shape_records_a_not_group_rather_than_an_empty_or():
+    """Regression: `_where_shape` used to fall through a `not` group to
+    `{"or": []}`, silently misreporting the predicate shape."""
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        where={"not": {"col": "orders.status", "op": "eq", "value": "x"}},
+    )
+    assert normalize_query_shape(query)["where"] == {
+        "not": {"operator": "eq", "column": "orders.status"}
+    }
 
 
 def test_jsonl_sink_appends_versioned_events_with_private_file_mode(tmp_path):

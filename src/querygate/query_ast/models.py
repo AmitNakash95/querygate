@@ -228,13 +228,15 @@ class ScalarFunctionSelectItem(ScalarFunctionCall):
 
 
 class CaseWhen(pyd.BaseModel):
-    """One CASE WHEN branch: a single Predicate condition (not a full
-    WhereNode — a deliberate v1 simplification covering the common
-    `CASE WHEN col = x THEN ...` shape without full boolean nesting inside a
-    select item) and the value to project when it's true.
+    """One CASE WHEN branch: a `when` condition and the value to project when
+    it's true. `when` is a full `WhereNode` (a single Predicate OR a boolean
+    `and`/`or`/`not` group — a *searched* CASE, `CASE WHEN a > 0 AND b < 5
+    THEN ...`), reusing the exact same predicate machinery, visitor, and caps
+    as `where`/`having` (TODO.md item 99). Bounded by `max_where_depth` /
+    `max_where_predicates` / `max_case_branches` like any other predicate tree.
     """
 
-    when: Predicate
+    when: WhereNode
     then: ScalarFunctionArg
 
     model_config = pyd.ConfigDict(extra="forbid")
@@ -561,12 +563,15 @@ class StructuredQuery(pyd.BaseModel):
         default_factory=list,
         description="Table.Column refs, or a date_bucket select item's alias.",
     )
-    having: List[Predicate] = pyd.Field(
-        default_factory=list,
+    having: Optional[WhereNode] = pyd.Field(
+        default=None,
         description=(
-            "Predicates evaluated after group_by/aggregation, same shape as a where "
-            "Predicate. The list is AND-combined (no nested and/or here) — for OR logic "
-            "on grouped values, filter in `where` before grouping instead."
+            "Filter on grouped/aggregated results — the same shape as `where`: a single "
+            "Predicate ({col, op, value}) or a WhereGroup for boolean nesting "
+            "(and/or/not), so OR-logic over aggregate conditions "
+            "(HAVING SUM(x) > 10 OR COUNT(*) < 3) is expressible. A `having` "
+            "Predicate may reference a select item's alias (e.g. an aggregate's `as`) "
+            "in its `col`, unlike `where`. Requires group_by or aggregate select items."
         ),
     )
     order_by: List[OrderBySpec] = pyd.Field(
@@ -626,9 +631,11 @@ class StructuredQuery(pyd.BaseModel):
 
 
 # StructuredQuery references Predicate (via WhereNode) and Predicate now references
-# StructuredQuery (value_subquery) — a recursive cycle (TODO.md item 97). Rebuild
-# all three now that every model in the cycle is defined so the forward refs
-# resolve. Order matters least once all names exist, but do the leaf types first.
+# StructuredQuery (value_subquery) — a recursive cycle (TODO.md item 97). CaseWhen
+# also joins the cycle now that its `when` is a WhereNode (item 99). Rebuild every
+# model in the cycle once all names are defined so the forward refs resolve. Order
+# matters least once all names exist, but do the leaf types first.
 Predicate.model_rebuild()
 WhereGroup.model_rebuild()
+CaseWhen.model_rebuild()
 StructuredQuery.model_rebuild()
