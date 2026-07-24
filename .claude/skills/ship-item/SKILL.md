@@ -36,9 +36,9 @@ quick-scan index), so follow it mechanically.
    - The same `### N. <heading> ✅ DONE` heading.
    - One line summarizing what shipped.
    - Then, on its own: `**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item N).`
-4. **Update the Quick-scan summary table** in `TODO.md`: flip the item's row to
-   `✅`. (The table indexes items 1–66; if the item is >66 and table-less, that's
-   fine — the stub/heading is the authoritative anchor.)
+4. **Reconcile the derived mirrors**: run `make worklist-sync` to regenerate the
+   Quick-scan `✅` column and the ROADMAP checkboxes from the headings (never
+   hand-edit those two — they are derived). Every item has a table row; keep it.
 5. **Verify cross-refs still resolve**: `grep -rn "item N" .` should still make
    sense — the number must NOT change.
 
@@ -51,7 +51,15 @@ quick-scan index), so follow it mechanically.
 
 ## Verify
 
+The authoritative gate is the worklist consistency checker — it enforces every
+rule above (done item archived + stubbed + pointer present, table/ROADMAP
+mirrors reconciled, archive in numeric order, no dangling pointer). It also runs
+in the unit suite (`test_worklist_consistency.py`) and blocks `git commit` via
+the project pre-commit hook, so a mistake here can't reach a commit:
+
 ```bash
-grep -n "### N\." TODO.md docs/TODO_ARCHIVE.md   # stub in TODO, full body in archive
-grep -n "Full write-up.*(item N)" TODO.md         # stub pointer present
+make worklist-check         # python3 scripts/check_worklist.py — exit 0 == clean
 ```
+
+If it reports table/ROADMAP mirror drift, `make worklist-sync` fixes that
+automatically; archival/stub/numbering issues it flags need a manual fix.
