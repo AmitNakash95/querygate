@@ -55,6 +55,14 @@ validate-config: ## Validate connections.yaml/policy.yaml (CONNECTIONS_FILE / PO
 scope-catalog: ## Regenerate docs/SCOPE_CATALOG.md from core/scopes.py (drift-tested)
 	poetry run querygate-scope-catalog --output docs/SCOPE_CATALOG.md
 
+.PHONY: worklist-check
+worklist-check: ## Verify TODO.md / ROADMAP.md / TODO_ARCHIVE.md reconcile (drift-tested by test_worklist_consistency.py)
+	python3 scripts/check_worklist.py
+
+.PHONY: worklist-sync
+worklist-sync: ## Regenerate the derived Quick-scan ✅ column + bare ROADMAP checkboxes from the TODO.md headings
+	python3 scripts/check_worklist.py --fix
+
 .PHONY: semantic-memory-evaluate
 semantic-memory-evaluate: ## Run the fixed offline semantic-memory 32A benchmark
 	poetry run python -m querygate.catalog_cli evaluate
