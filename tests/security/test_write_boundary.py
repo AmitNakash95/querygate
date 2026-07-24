@@ -255,3 +255,45 @@ def test_approval_token_bound_to_one_write_is_rejected_for_another(monkeypatch):
     svc._enforce_write_approval_gate(approved, 5, wp, token)  # admits its own write
     with pytest.raises(ApprovalRequiredError):
         svc._enforce_write_approval_gate(other, 5, wp, token)  # not another
+
+
+# --------------------------------------------------------------------------- #
+# Batch sizing as a DoS axis (TODO.md item 109)                                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_unbounded_write_batch_is_capped_not_a_dos_vector():
+    """The write path is batched only over MCP. Before item 109 `WritePolicy`
+    had no batch cap at all, so a caller could submit an arbitrarily long list
+    of individually-in-cap writes in ONE call — each running the full
+    validate→compile→execute pipeline and taking locks — multiplying cost and
+    lock time per call far past what the read path allows the same principal.
+    `max_affected_rows` does not help: every statement is individually legal."""
+    from querygate.validation.write_policy_validation import validate_write_batch_size
+
+    policy = _writable(max_batch_size=5)
+    validate_write_batch_size(5, policy)  # at the cap: allowed
+    with pytest.raises(PolicyViolationError, match="write batch size"):
+        validate_write_batch_size(5000, policy)
+
+
+def test_write_batch_cap_is_enforced_before_any_statement_runs():
+    """The rejection must happen up front, not partway through — otherwise an
+    over-size batch still pays for (and commits!) the statements before the
+    one that trips the cap."""
+    import asyncio
+
+    from querygate.execution.write_execution import WriteExecutionService
+    from querygate.policy.loader import PolicyStore, set_policy_store
+
+    set_policy_store(PolicyStore(default=_writable(max_batch_size=1), overrides={}))
+    svc = WriteExecutionService("demo")
+    # Two writes against a table that does not exist in this unit context: if the
+    # cap were checked per-item instead of up front, the first would fail on
+    # schema/connection resolution rather than the batch-size rule.
+    statements = [
+        DeleteStatement(table="orders", where=_eq()),
+        DeleteStatement(table="orders", where=_eq()),
+    ]
+    with pytest.raises(PolicyViolationError, match="write batch size 2 exceeds max of 1"):
+        asyncio.run(svc.execute_many(statements))
