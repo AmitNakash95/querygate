@@ -143,7 +143,18 @@ class WritePreviewService:
             async with session_scope(self._connection_id, policy=policy) as session:
                 affected = int((await session.execute(count_stmt)).scalar_one())
                 if include_diff:
-                    diff = await self._mutation_diff(session, statement, table, dml, policy)
+                    # `within_cap` gates the DML-executing diff path (item 108):
+                    # an over-cap write is rejected outright, so previewing it
+                    # must never run a real row-locking UPDATE over every
+                    # matching row just to build a diff the caller can't use.
+                    diff = await self._mutation_diff(
+                        session,
+                        statement,
+                        table,
+                        dml,
+                        policy,
+                        within_cap=affected <= max_rows,
+                    )
                 # Defense-in-depth: never leave a transaction open that could
                 # commit — the diff runs the DML, so this rollback is what makes
                 # the whole preview non-mutating.
@@ -184,13 +195,31 @@ class WritePreviewService:
         )
 
     async def _mutation_diff(
-        self, session, statement: WriteStatement, table: sa.Table, dml, policy: Policy
+        self,
+        session,
+        statement: WriteStatement,
+        table: sa.Table,
+        dml,
+        policy: Policy,
+        *,
+        within_cap: bool = True,
     ) -> WriteDiff:
         """Bounded old→new diff for an UPDATE/DELETE, computed inside the
         (about-to-be-rolled-back) transaction. DELETE shows the rows that would
-        disappear; UPDATE runs the DML and re-reads the affected rows by
-        single-column primary key to show the real committed-shape old→new,
-        falling back to applying the SET in Python for a composite/absent PK."""
+        disappear (a bounded SELECT — it never runs the DML); UPDATE runs the DML
+        and re-reads the affected rows by single-column primary key to show the
+        real committed-shape old→new, falling back to applying the SET in Python
+        for a composite/absent PK.
+
+        `within_cap=False` (the affected count already exceeds
+        `WritePolicy.max_affected_rows`) forces that same Python fallback for
+        UPDATE — TODO.md item 108. Otherwise `include_diff=true` against a broad
+        WHERE would run a real row-locking UPDATE over *every* matching row —
+        taking locks, generating WAL/redo and contending with live writers — to
+        preview a write that is rejected outright as over-cap. The caller still
+        gets a useful bounded diff; only the DML is skipped. The Python fallback
+        is an approximation (it can't reflect DB-side defaults/triggers/coercion),
+        which is the right trade for a write that will not be allowed to run."""
         limit = policy.write.max_diff_rows
         where = _compile_where(statement.where, {statement.table: table}, alias_map={})
         before_stmt = sa.select(table).where(where).limit(limit + 1)
@@ -206,7 +235,7 @@ class WritePreviewService:
             )
 
         pk_cols = list(table.primary_key.columns)
-        if len(pk_cols) == 1 and before_rows:
+        if within_cap and len(pk_cols) == 1 and before_rows:
             pk = pk_cols[0]
             keys = [r[pk.name] for r in before_rows]
             await session.execute(dml)  # applied in-txn, rolled back by the caller

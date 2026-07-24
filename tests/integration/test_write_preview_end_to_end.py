@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy, WritePolicy
@@ -232,6 +233,141 @@ async def test_diff_masks_masked_columns(sqlite_app):
         row = resp.json()["diff"]["rows"][0]
     assert row["before"]["status"] == "***MASKED***"
     assert row["after"]["status"] == "***MASKED***"
+
+
+def _enable_writes_with_cap(max_affected_rows: int):
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                write=WritePolicy(
+                    enabled=True,
+                    allowed_tables=["orders"],
+                    allowed_operations=["insert", "update", "delete"],
+                    max_affected_rows=max_affected_rows,
+                )
+            ),
+            overrides={},
+        )
+    )
+
+
+def _record_sql(request) -> list:
+    """Capture every statement the preview actually sends to the database.
+
+    The `sqlite_app` fixture monkeypatches `get_engine` to return its real
+    engine, so we can hook SQLAlchemy's cursor-execute event on it. Observing
+    the SQL is the only way to prove item 108: the preview rolls back either
+    way, so the *data* is unchanged whether or not the DML ran — the defect is
+    the work performed, not the end state."""
+    import querygate.execution.service as svc_module
+
+    engine = svc_module.get_engine("demo")
+    executed: list = []
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _on_execute(conn, cursor, statement, parameters, context, executemany):
+        executed.append(statement)
+
+    request.addfinalizer(
+        lambda: event.remove(engine.sync_engine, "before_cursor_execute", _on_execute)
+    )
+    return executed
+
+
+def _updates(executed: list) -> list:
+    return [s for s in executed if s.lstrip().upper().startswith("UPDATE")]
+
+
+@pytest.mark.asyncio
+async def test_over_cap_update_diff_never_runs_the_dml(sqlite_app, request):
+    """TODO.md item 108: `include_diff=true` against a broad WHERE must not run a
+    real row-locking UPDATE over every matching row just to preview a write that
+    is rejected outright as over-cap."""
+    _enable_writes_with_cap(2)
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        before = await _all_orders(client)
+        assert len(before) > 2  # the predicate below really is over-cap
+
+        executed = _record_sql(request)
+        resp = await client.post(
+            "/api/v1/demo/write/preview?include_diff=true",
+            json={
+                "op": "update",
+                "table": "orders",
+                "set": {"status": "over-cap-preview"},
+                "where": {"col": "orders.id", "op": "gt", "value": 0},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        after = await _all_orders(client)
+
+    assert body["affected_rows"] == len(before)
+    assert body["within_affected_cap"] is False
+    # The headline assertion: no UPDATE reached the database.
+    assert _updates(executed) == [], f"over-cap preview ran DML: {_updates(executed)}"
+    # The caller still gets a useful bounded diff — the fix skips the DML, not
+    # the feature (computed by applying the SET in Python).
+    assert body["diff"] is not None and body["diff"]["rows"]
+    row = body["diff"]["rows"][0]
+    assert row["after"]["status"] == "over-cap-preview"
+    assert row["before"]["status"] != "over-cap-preview"
+    assert before == after  # and nothing changed
+
+
+@pytest.mark.asyncio
+async def test_within_cap_update_diff_still_runs_the_dml(sqlite_app, request):
+    """Positive control for item 108 — the guard must be the affected-row cap,
+    not a blanket disabling of the DML-backed diff. Within cap the preview still
+    executes the real UPDATE in the rolled-back transaction, which is what makes
+    the diff reflect true committed shape."""
+    _enable_writes_with_cap(100000)
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        before = await _all_orders(client)
+        target = before[0]["id"]
+
+        executed = _record_sql(request)
+        resp = await client.post(
+            "/api/v1/demo/write/preview?include_diff=true",
+            json={
+                "op": "update",
+                "table": "orders",
+                "set": {"status": "in-cap-preview"},
+                "where": {"col": "orders.id", "op": "eq", "value": target},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["within_affected_cap"] is True
+        after = await _all_orders(client)
+
+    assert len(_updates(executed)) == 1
+    assert before == after  # still rolled back
+
+
+@pytest.mark.asyncio
+async def test_over_cap_delete_diff_lists_rows_without_running_dml(sqlite_app, request):
+    """A DELETE preview never ran the DML (it only SELECTs the doomed rows), so
+    an over-cap DELETE keeps its useful bounded diff."""
+    _enable_writes_with_cap(2)
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        before = await _all_orders(client)
+        executed = _record_sql(request)
+        resp = await client.post(
+            "/api/v1/demo/write/preview?include_diff=true",
+            json={
+                "op": "delete",
+                "table": "orders",
+                "where": {"col": "orders.id", "op": "gt", "value": 0},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        after = await _all_orders(client)
+
+    assert body["within_affected_cap"] is False
+    assert body["diff"]["rows"] and all(r["after"] is None for r in body["diff"]["rows"])
+    assert [s for s in executed if s.lstrip().upper().startswith("DELETE")] == []
+    assert before == after
 
 
 @pytest.mark.asyncio
