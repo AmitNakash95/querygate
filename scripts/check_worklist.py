@@ -55,7 +55,9 @@ ARCHIVE = ROOT / "docs" / "TODO_ARCHIVE.md"
 _HEAD_RE = re.compile(r"^### (\d+)\. (.*)$")
 _TABLE_RE = re.compile(r"^\| (\d+) \| (.*?) \| ")
 _ROAD_BOX_RE = re.compile(r"^(- \[)([ x])(\] \*\*)(\d+)(\*\*)")
-_POINTER_RE = re.compile(r"\(item (\d+)\)")
+# Only the archive *write-up pointer* ("… TODO_ARCHIVE.md) (item N)"), never a
+# bare prose cross-reference like "(item 19)" — those legitimately name any item.
+_POINTER_RE = re.compile(r"TODO_ARCHIVE\.md\)\s*\(item (\d+)\)")
 
 # A *done* item's body should be a one-line-summary stub. Real stubs top out
 # around 15 lines; a full un-migrated write-up runs 40–400. Well clear of both.
@@ -99,10 +101,17 @@ def _archive_numbers(text: str):
     return [int(m.group(1)) for m in re.finditer(r"^### (\d+)\.", text, re.M)]
 
 
-def find_violations() -> list[str]:
-    todo = TODO.read_text(encoding="utf-8")
-    road = ROADMAP.read_text(encoding="utf-8")
-    arch = ARCHIVE.read_text(encoding="utf-8")
+def find_violations(
+    todo: str | None = None, road: str | None = None, arch: str | None = None
+) -> list[str]:
+    """Return a list of human-readable violation strings ([] means clean).
+
+    The three docs default to the live repo files; pass text explicitly to
+    exercise the detector on synthetic inputs (see the unit tests).
+    """
+    todo = TODO.read_text(encoding="utf-8") if todo is None else todo
+    road = ROADMAP.read_text(encoding="utf-8") if road is None else road
+    arch = ARCHIVE.read_text(encoding="utf-8") if arch is None else arch
 
     headings, bodies, table = _parse_todo(todo)
     title = {n: t for n, t in headings}
@@ -131,8 +140,10 @@ def find_violations() -> list[str]:
         if n not in arch_set:
             v.append(f"C: item {n} is `✅ DONE` but has no `### {n}.` in TODO_ARCHIVE.md")
         body = "\n".join(bodies[n])
-        if not re.search(rf"\(item {n}\)", body):
-            v.append(f"C: item {n} is `✅ DONE` but its TODO body has no `(item {n})` write-up pointer")
+        if not re.search(rf"TODO_ARCHIVE\.md\)\s*\(item {n}\)", body):
+            v.append(
+                f"C: item {n} is `✅ DONE` but its TODO body has no TODO_ARCHIVE `(item {n})` write-up pointer"
+            )
         if len(bodies[n]) > _STUB_MAX_LINES:
             v.append(
                 f"C: item {n} is `✅ DONE` but its TODO body is {len(bodies[n])} lines "
@@ -180,7 +191,9 @@ def find_violations() -> list[str]:
         for m in _POINTER_RE.finditer("\n".join(lines)):
             target = int(m.group(1))
             if target not in arch_set:
-                v.append(f"G: item {n}'s body points at `(item {target})` but that item is not archived")
+                v.append(
+                    f"G: item {n}'s body points at `(item {target})` but that item is not archived"
+                )
 
     return v
 
@@ -236,7 +249,9 @@ def apply_fix() -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument(
         "--fix",
         action="store_true",
@@ -265,9 +280,12 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "\nStructural violations (A/B/C/D/G) need a manual fix — archive the item, "
             "leave a stub, or renumber.\n"
-            + ("Table/ROADMAP mirror drift (E/F) is auto-fixable: run "
-               "`make worklist-sync` (or `python3 scripts/check_worklist.py --fix`).\n"
-               if fixable else ""),
+            + (
+                "Table/ROADMAP mirror drift (E/F) is auto-fixable: run "
+                "`make worklist-sync` (or `python3 scripts/check_worklist.py --fix`).\n"
+                if fixable
+                else ""
+            ),
             file=sys.stderr,
         )
         return 1

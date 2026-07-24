@@ -5530,6 +5530,61 @@ universal on both Postgres and MSSQL, so nothing belonged on `DialectAdapter`),
 no new policy cap field, no new scope container, and no change to what a masked
 or denied column is allowed to do.
 
+### 107. Batch query execution double-reserves quota on an approval retry ✅ DONE
+
+**Effort: S. Priority: medium (real throughput bug, narrow blast radius).
+Depends on: none.** Surfaced by the 2026-07-23 technical review
+(`TECHNICAL_REVIEW.md`).
+
+**Why it mattered.** `execute()` reserves the per-principal query quota (item 50)
+at the very top — deliberately before queuing or touching the DB, so a
+rate-limited caller doesn't even consume a concurrency slot. The item-92 approval
+gate runs *later* in the same call, after cost estimation. So when a query trips
+the gate, one quota unit is already spent. Over MCP, `_execute_batch_item`
+handles the resulting `ApprovalRequiredError` by asking the elicitation resolver
+for a token and, if granted, calling `execute()` **again** — which reserved a
+*second* unit for what is logically one approved query. A principal running
+interactive-approval batches therefore burned roughly two quota units per
+approved query, silently ~halving effective throughput. No test asserted quota
+consumption across the approval-retry path, so it passed a casual read.
+
+**Why the retry, specifically — and not the REST 428 flow.** The REST path
+answers an over-threshold query with `428`, the caller signs a token and
+*resubmits a brand-new request*; that legitimately counts as a new request
+(fresh admission, fresh HTTP call). The double-count is unique to the **in-session
+batch retry**, where the same logical `execute_many` item is re-driven internally
+after the first attempt paused. So the fix is scoped exactly there.
+
+**What shipped.**
+
+- `ApprovalRequiredError` gained a `quota_reservation` attribute (default `None`,
+  typed loosely to avoid a `core` -> `execution` import). `execute()` stashes its
+  in-flight reservation there as the exception leaves the method.
+- `execute()` gained a private `_reserved_quota: Optional[QuotaReservation]`
+  parameter. When set, it reuses that reservation instead of calling
+  `enforce_query_quota` again — so no second unit is counted, and the response
+  bytes still attribute to the original window entry.
+- `_execute_batch_item` threads `exc.quota_reservation` into the retry
+  `execute(...)`.
+
+Idempotent by construction for the disabled/unattributable cases: when quota is
+off or there's no principal, the reservation is `None` on both attempts, so
+reserving twice records nothing twice — the fix only changes the enabled path,
+which is the only one that double-counted.
+
+**Coverage** (`tests/unit/test_mcp_elicitation_approval.py`):
+`test_approval_retry_consumes_exactly_one_quota_unit` enables a request quota,
+drives an approval-required-then-approved batch item through the real
+`execute_many` retry seam (same harness as the existing retry test), and asserts
+the in-process quota window for `(connection, principal)` holds exactly **one**
+entry. Verified it bites: with the reuse reverted, the window holds two and the
+test fails `2 == 1`.
+
+**Hard boundaries honored.** No change to what the quota caps are or when the
+approval gate trips (the estimate/sensitivity trigger still re-evaluates on the
+retry); audit and metrics still record the true sequence (a paused attempt then a
+successful one). Purely a fix to *how many times* one logical query reserves quota.
+
 ### 108. Write-preview diff runs the full DML before the affected-row cap is checked ✅ DONE
 
 **Effort: S. Priority: medium (resource-exhaustion / lock-contention risk on a
@@ -5642,58 +5697,3 @@ removed they fail; with it restored they pass.
 semantic-diff scope (`admin/access_diff.py` enumerates read-`Policy` fields
 only). That is a pre-existing boundary, not a regression from this item; adding
 write-policy diffing is its own separately-scoped piece of work.
-
-### 107. Batch query execution double-reserves quota on an approval retry ✅ DONE
-
-**Effort: S. Priority: medium (real throughput bug, narrow blast radius).
-Depends on: none.** Surfaced by the 2026-07-23 technical review
-(`TECHNICAL_REVIEW.md`).
-
-**Why it mattered.** `execute()` reserves the per-principal query quota (item 50)
-at the very top — deliberately before queuing or touching the DB, so a
-rate-limited caller doesn't even consume a concurrency slot. The item-92 approval
-gate runs *later* in the same call, after cost estimation. So when a query trips
-the gate, one quota unit is already spent. Over MCP, `_execute_batch_item`
-handles the resulting `ApprovalRequiredError` by asking the elicitation resolver
-for a token and, if granted, calling `execute()` **again** — which reserved a
-*second* unit for what is logically one approved query. A principal running
-interactive-approval batches therefore burned roughly two quota units per
-approved query, silently ~halving effective throughput. No test asserted quota
-consumption across the approval-retry path, so it passed a casual read.
-
-**Why the retry, specifically — and not the REST 428 flow.** The REST path
-answers an over-threshold query with `428`, the caller signs a token and
-*resubmits a brand-new request*; that legitimately counts as a new request
-(fresh admission, fresh HTTP call). The double-count is unique to the **in-session
-batch retry**, where the same logical `execute_many` item is re-driven internally
-after the first attempt paused. So the fix is scoped exactly there.
-
-**What shipped.**
-
-- `ApprovalRequiredError` gained a `quota_reservation` attribute (default `None`,
-  typed loosely to avoid a `core` -> `execution` import). `execute()` stashes its
-  in-flight reservation there as the exception leaves the method.
-- `execute()` gained a private `_reserved_quota: Optional[QuotaReservation]`
-  parameter. When set, it reuses that reservation instead of calling
-  `enforce_query_quota` again — so no second unit is counted, and the response
-  bytes still attribute to the original window entry.
-- `_execute_batch_item` threads `exc.quota_reservation` into the retry
-  `execute(...)`.
-
-Idempotent by construction for the disabled/unattributable cases: when quota is
-off or there's no principal, the reservation is `None` on both attempts, so
-reserving twice records nothing twice — the fix only changes the enabled path,
-which is the only one that double-counted.
-
-**Coverage** (`tests/unit/test_mcp_elicitation_approval.py`):
-`test_approval_retry_consumes_exactly_one_quota_unit` enables a request quota,
-drives an approval-required-then-approved batch item through the real
-`execute_many` retry seam (same harness as the existing retry test), and asserts
-the in-process quota window for `(connection, principal)` holds exactly **one**
-entry. Verified it bites: with the reuse reverted, the window holds two and the
-test fails `2 == 1`.
-
-**Hard boundaries honored.** No change to what the quota caps are or when the
-approval gate trips (the estimate/sensitivity trigger still re-evaluates on the
-retry); audit and metrics still record the true sequence (a paused attempt then a
-successful one). Purely a fix to *how many times* one logical query reserves quota.
