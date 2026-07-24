@@ -87,6 +87,14 @@ automate these):
   is allowed but must be a deliberate, one-line-reasoned edit, not drift.
 - The archive is reference-only: never put an open action item there, and don't
   add a second TODO file or a competing index.
+- **These rules are machine-enforced.** `scripts/check_worklist.py` (run it with
+  `make worklist-check`) verifies every one of them — done items archived +
+  stubbed + pointer present, Quick-scan `✅` column and ROADMAP checkboxes
+  reconciled to the headings, archive in numeric order, no dangling pointer,
+  unique numbers. It runs in the unit suite (`test_worklist_consistency.py`) and
+  blocks `git commit` via the project pre-commit hook. The two *derived* mirrors
+  (the table `✅` column and the bare ROADMAP checkboxes) are regenerated from
+  the headings with `make worklist-sync` — never hand-edit them.
 
 ## Repo map
 
