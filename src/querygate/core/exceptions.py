@@ -135,6 +135,13 @@ class ApprovalRequiredError(PolicyViolationError):
         super().__init__(message)
         self.fingerprint = fingerprint
         self.reasons = reasons
+        # The approval gate runs *after* the per-principal quota is reserved, so
+        # by the time this is raised one quota unit is already spent for this
+        # logical query. When an in-session batch retry obtains a token and calls
+        # `execute()` again, it reuses this reservation instead of reserving a
+        # second unit (TODO.md item 107). Typed loosely to avoid a core->execution
+        # import; only `execution/service.py` sets or reads it.
+        self.quota_reservation: object | None = None
 
 
 class QueryValidationError(ValueError):

@@ -162,6 +162,58 @@ async def test_execute_many_retries_after_resolver_grants_approval(monkeypatch):
     assert declined_calls  # the resolver was actually consulted
 
 
+@pytest.mark.asyncio
+async def test_approval_retry_consumes_exactly_one_quota_unit(monkeypatch):
+    """TODO.md item 107: a batch item that pauses for approval and is then
+    approved in-session must consume exactly ONE per-principal quota unit, not
+    two. The first attempt reserves before the approval gate runs; the retry
+    must reuse that reservation, not reserve again."""
+    from querygate.execution.quota import in_process_quota_limiter
+
+    monkeypatch.setattr(svc.app_config, "approval_token_hmac_key", _KEY)
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                approval_max_estimated_rows=100,  # gate trips at estimate 500
+                max_requests_per_window=5,  # request quota enabled
+                quota_window_seconds=60,
+            ),
+            overrides={},
+        )
+    )
+    table = sa.Table("orders", sa.MetaData(), sa.Column("id", sa.Integer, primary_key=True))
+    query = StructuredQuery(from_table="orders", select=["orders.id"], limit=10)
+
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    estimate = QueryCostEstimate(estimated_rows=500, estimated_total_cost=None)
+
+    async def _resolver(q, exc):
+        from querygate.execution.approval import issue_approval_token
+
+        return issue_approval_token(fingerprint=exc.fingerprint, approver_subject="human", key=_KEY)
+
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"orders": table})),
+        patch.object(svc, "session_scope", _scope),
+        patch.object(svc, "estimate_postgres_query_cost", AsyncMock(return_value=estimate)),
+    ):
+        # Quota is per (connection, principal_subject) — needs an attributable caller.
+        service = StructuredQueryService(connection_id="demo", principal=_CALLER)
+        granted = await service.execute_many([query], approval_resolver=_resolver)
+
+    assert granted[0].row_count == 1 and granted[0].error is None
+    window = in_process_quota_limiter()._windows.get(("demo", _CALLER.subject), [])
+    assert len(window) == 1, f"approval retry double-reserved quota: {len(window)} units"
+
+
 # --------------------------------------------------------------------------- #
 # Tool wiring: a resolver is built only when the operator opted in              #
 # --------------------------------------------------------------------------- #

@@ -71,7 +71,11 @@ from querygate.execution.cost_estimation import (
     estimate_mssql_query_cost,
     estimate_postgres_query_cost,
 )
-from querygate.execution.quota import enforce_query_quota, record_query_quota_bytes
+from querygate.execution.quota import (
+    QuotaReservation,
+    enforce_query_quota,
+    record_query_quota_bytes,
+)
 from querygate.metrics import (
     COST_ESTIMATION_WOULD_REJECT_TOTAL,
     QUERIES_REJECTED_TOTAL,
@@ -523,6 +527,7 @@ class StructuredQueryService:
         queue_mode: Optional[QueueMode] = None,
         wait_timeout_seconds: Optional[float] = None,
         approval_token: Optional[str] = None,
+        _reserved_quota: Optional[QuotaReservation] = None,
     ) -> StructuredQueryResult:
         start = time.monotonic()
         admission_id = new_admission_id()
@@ -538,11 +543,19 @@ class StructuredQueryService:
             # queuing or touching the database, so a rate-limited caller doesn't
             # even consume a concurrency slot. Raises QuotaExceededError (a
             # PolicyViolationError), handled by the outer `except` below.
-            quota_reservation = await enforce_query_quota(
-                policy,
-                connection_id=self._connection_id,
-                principal_subject=self._principal_subject,
-            )
+            #
+            # `_reserved_quota` is set only on an in-session approval retry
+            # (item 107): the first attempt already reserved a unit before it
+            # paused for approval, so the retry reuses that reservation instead of
+            # reserving (and counting) a second unit for one logical query.
+            if _reserved_quota is not None:
+                quota_reservation = _reserved_quota
+            else:
+                quota_reservation = await enforce_query_quota(
+                    policy,
+                    connection_id=self._connection_id,
+                    principal_subject=self._principal_subject,
+                )
             wait_seconds = resolve_wait_seconds(
                 queue_mode=queue_mode,
                 requested_wait_seconds=wait_timeout_seconds,
@@ -691,6 +704,11 @@ class StructuredQueryService:
                 QUERY_QUOTA_REJECTIONS_TOTAL.labels(
                     connection=self._connection_id, quota_kind=exc.quota_kind
                 ).inc()
+            if isinstance(exc, ApprovalRequiredError):
+                # Hand the already-spent quota reservation to an in-session retry
+                # so it doesn't reserve a second unit (item 107). The estimate/
+                # sensitivity trigger re-evaluates on the retry regardless.
+                exc.quota_reservation = quota_reservation
             raise
 
     async def execute_many(
@@ -763,6 +781,9 @@ class StructuredQueryService:
                             queue_mode=queue_mode,
                             wait_timeout_seconds=wait_timeout_seconds,
                             approval_token=resolved,
+                            # Reuse the reservation the first (paused) attempt
+                            # already made — don't double-count quota (item 107).
+                            _reserved_quota=exc.quota_reservation,  # type: ignore[arg-type]
                         )
                         return BatchQueryItemResult(**result.model_dump())
                     except Exception as retry_exc:  # shaped into the item error below
