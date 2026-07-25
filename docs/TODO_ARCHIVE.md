@@ -5755,7 +5755,9 @@ release.
 `schedule` (daily at 07:00 UTC, off-peak) and `workflow_dispatch` (with an
 optional `soak_rounds` input for on-demand runs), independent of any code change.
 A non-cancelling `concurrency` group keeps two scheduled runs from overlapping;
-`permissions: contents: read` is least-privilege (no write scopes). Three jobs:
+`permissions: contents: read` is least-privilege (no write scopes); each job
+carries a `timeout-minutes` bound (20/30/45) so a hung run can't burn the 360-min
+GitHub default. Three jobs:
 
 - **`dependency-audit`** — `poetry check --lock` (lockfile drift) then
   `scripts/generate_sbom.py`, the identical CycloneDX SBOM + `pip-audit`
@@ -5778,15 +5780,26 @@ section documenting the cadence, the three jobs, and how to triage a red nightly
 run (same as a failed release gate — a CVE, lockfile drift, or guardrail
 regression landed on `main` without a code change to trigger the per-PR gates).
 
-**Verification.** The workflow's structure is machine-validated (YAML parses;
-jobs `dependency-audit`/`image-scan`/`soak` and triggers `schedule`/
-`workflow_dispatch` resolve), and every command it invokes is an existing,
-exercised target (`poetry check --lock`, `poetry build`,
-`scripts/generate_sbom.py`, the `aquasecurity/trivy-action` already used by
-ci.yml's docker job, and the `make test-soak` Makefile target). The cron firing
-itself is inherently only observable once merged and scheduled — a config
-declaration, not runtime logic — so there is no in-repo test to add; the
+**Verification.** The workflow was linted clean with `actionlint` (which bundles
+shellcheck, so the `run:` step shell was validated too) — no schema, expression,
+`uses:`, or shell errors. Every job's command path was then executed locally and
+proven green, not just asserted to be reused:
+
+- **`dependency-audit`** — `poetry check --lock` → "All set!"; `poetry build` +
+  `scripts/generate_sbom.py` → SBOM (47 components) written and `pip-audit`
+  reported "no unreviewed known vulnerabilities (0 allowlisted)". The nightly
+  will be green on day one, not red on a pre-existing finding.
+- **`image-scan`** — `make scan-image` (the same Dockerfile build + Trivy
+  HIGH/CRITICAL `--ignore-unfixed` deny-by-default scan the job runs via
+  `aquasecurity/trivy-action`) exited 0 with no findings.
+- **`soak`** — against a real Compose Postgres with `querygate_stress` created
+  the same way the job seeds it, `SOAK_ROUNDS=2 make test-soak` ran the full
+  `-m load` set (concurrency guardrails + large-domain stress soak + write-load),
+  9/9 passed. The bounded round count proves the exact command path; the nightly
+  runs the full `SOAK_ROUNDS=100`.
+
+The cron *firing* is inherently only observable once merged and scheduled — a
+config declaration, not runtime logic — so there is no in-repo test to add; the
 acceptance criterion (a nightly/weekly workflow runs the CVE/SBOM/lockfile checks
 and `make test-soak` against `main` independent of code changes) is satisfied by
-the declared `schedule:` trigger plus the reused, already-green invoked
-commands.
+the declared `schedule:` trigger plus every invoked command proven green above.
