@@ -5530,6 +5530,105 @@ universal on both Postgres and MSSQL, so nothing belonged on `DialectAdapter`),
 no new policy cap field, no new scope container, and no change to what a masked
 or denied column is allowed to do.
 
+### 100. Query engine: bounded scalar `Expression` substrate ★ ✅ DONE
+
+**Effort: XL. Priority: high (flagship pillar — the Structural pillar itself).
+Depended on: items 96, 99.** Full spec: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 1.**
+
+**Shipped.** One closed, depth-capped recursive `Expression` union now backs every
+position where a scalar value is expected, replacing the flat leaf set that made
+arithmetic, conditional aggregation, nested functions, expression-valued `CASE`,
+and computed group keys *the same* missing feature:
+
+```
+Expression = ColumnExpr | LiteralExpr | BinaryOpExpr | FunctionExpr
+           | CastExpr | CaseExpr
+```
+
+**Positions it reaches:** a new `ExpressionSelectItem` projection
+(`{"expr": …, "as": …}`), `AggregateSelectItem.arg`, `CaseWhen.then` /
+`CaseSelectItem.else_` (widened from column-or-literal — a wire-compatible
+superset), and **both** sides of a `Predicate` (`expr` / `value_expr`). A computed
+GROUP BY key needs no new field: project the expression with an alias and group by
+it, the route `date_bucket` has always used.
+
+**Functions:** `coalesce/lower/upper/trim/concat/abs/floor/nullif/replace` are
+dialect-universal and stay off the adapter; `ceil`/`length`/`round`/`substring`
+genuinely differ and are one new `DialectAdapter.scalar_function` method per
+dialect (`CEILING`/`LEN` on T-SQL; `round`'s NUMERIC cast on Postgres, which has
+no `round(double precision, integer)`; `substr` on the internal SQLite path).
+`substring` requires exactly 3 arguments at the AST layer because T-SQL has no
+2-argument form — a 2-arg call would render fine on Postgres and break live.
+
+**Caps (new):** `Policy.max_expression_depth` (default 5, per expression tree) and
+`Policy.max_expression_nodes` (default 200, summed **tree-wide** across the query
+and every subquery per item 97). `max_case_branches`, `max_where_depth`, the
+case-condition predicate budget, and `max_in_list_size` now follow a CASE wherever
+item 100 lets it move (into an aggregate argument, into arithmetic, into a WHERE
+predicate) instead of only seeing a top-level `CaseSelectItem`.
+
+**Safety — the make-or-break step.** `expression_column_refs` recurses the union
+and *crosses into the boolean-condition layer and back* (a `CaseExpr` branch's
+`when` is a `WhereNode`, so its refs are ordinary `Predicate` refs, not
+`ColumnExpr` nodes). Every ref is yielded through the item-96 canonical visitor at
+`SELECT_NESTED`/`WHERE`/`HAVING`, so a denied or masked column buried anywhere in
+an expression is rejected exactly as at the top level. No new `RefPosition` member
+was needed — an expression column is never a bare projection, which is precisely
+what the masked-column rule keys on.
+
+**Decisions recorded** (`docs/PRODUCT_GUIDE.md` Decision Log, all 2026-07-25):
+the five-part non-goal-#7 boundary; **guarded division** (`left / NULLIF(right,
+0)`); `AggregateSelectItem.col` kept permanently as sugar normalized to `arg`;
+**`ColArg`/`LiteralArg` collapsed into `ColumnExpr`/`LiteralExpr`** so exactly one
+column-leaf type exists; and **writes excluded** — `expr`/`value_expr` in a write
+WHERE is rejected at `validate_write_policy`, the item-110 posture.
+
+**Two live-breakage traps caught and fixed during the build**, both of the
+items 75/82 "renders fine, breaks live" class:
+- `CAST(x AS text)` mapped to SQLAlchemy's `Text`, which renders T-SQL's
+  **deprecated `TEXT`** (not even comparable with `=`). Now `Unicode` →
+  `NVARCHAR(max)` on MSSQL, `VARCHAR` elsewhere — the type
+  `MSSQLDialectAdapter.column_mask` already used.
+- Postgres has **no `round(double precision, integer)`**; the adapter casts to
+  NUMERIC. Verified against the live server, which rejects the uncast form.
+
+**Also fixed (would have been a 500 on every expression query):**
+`audit/events.py`'s `normalize_query_shape` knew none of the new nodes. It now
+emits a redaction-safe expression *shape* — node kinds, operators, and column
+refs, but **no literal values** — for both select items and predicates.
+`execution/service.py` additionally maps a `DataError`/`ProgrammingError` from the
+database into a clean typed `QueryValidationError` (arithmetic on a text column is
+now an ordinary caller mistake), mirroring the write path's constraint mapping and
+never echoing driver text, which carries column names and values.
+
+**Coverage.** Unit: visitor contract per union member and per position
+(`test_reference_visitor.py`), rendering + per-dialect divergence + guarded
+division (`test_compiler.py`), depth/node/CASE caps including the tree-wide sum
+across a subquery (`test_policy_validation.py`), the `col`↔`arg` sugar identity
+and an Expression-union drift guard for the client builder
+(`test_client_builder.py`), the DB-type-error mapping (`test_service.py`).
+Security: denied **and** masked column buried at maximum depth in **every** one of
+six expression positions, the undeclared-table check, and no-literal-in-audit
+(`test_adversarial_security.py`) — verified to fail when the visitor's
+CASE-condition crossing is reverted. Integration: SQLite end-to-end value checks
+against ground truth computed through the same pipeline
+(`test_expression_end_to_end.py`) and real Postgres
+(`test_postgres_expression_substrate.py`) — the guarded-division test fails with a
+real `DivisionByZeroError` if the `NULLIF` is removed. Full suite 1669 passed,
+`-m security` 274 passed, `-m postgres_live` green.
+
+**Canonical regression bar (plan §5):** rows 1, 2 and 7 went ✅; row 15's
+arithmetic half is done and waits only on `OVER` (item 101). 5/16 → **8/16**.
+
+**Accepted cost.** The agent-facing MCP schema grew ~14K chars (117,100 total;
+`_MAX_TOTAL_CHARS` bumped deliberately to 123,000 after moving maintainer
+rationale out of model docstrings — a Pydantic docstring becomes the agent-facing
+schema description and costs tokens every session, a `#` comment costs nothing).
+Every later engine item (101–106) now inherits `Expression` as a dependency, so a
+bug in the substrate is a bug everywhere — the deliberate trade for reviewing one
+node hard, once, instead of five special cases each with its own visitor wiring to
+forget.
+
 ### 107. Batch query execution double-reserves quota on an approval retry ✅ DONE
 
 **Effort: S. Priority: medium (real throughput bug, narrow blast radius).
