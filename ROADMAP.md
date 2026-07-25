@@ -46,9 +46,15 @@ It is:
 3. **Unlock enterprise procurement** only when a partner's security team pulls
    for it (compliance mapping, third-party audit, disclosure program).
 4. **Deepen governance/safety** (approval gates, config-change safety).
-5. **Grow adoption and breadth** once product-market fit is proven (SDKs, DX,
-   dialect breadth via the adapter architecture).
-6. **Catalog/observability depth** last — lowest marginal ROI per unit effort.
+5. **Deepen the core engine** — take the structured query surface to 10/10
+   expressiveness (the ★ flagship pillar, items 99–106). *Re-sequenced
+   2026-07-25 (maintainer decision): the engine is the **Structural** pillar
+   itself, not adoption polish — the "no raw SQL, ever" bet only holds if the
+   AST rarely walls off a fluent SQL author, so engine depth outranks SDK/DX
+   breadth. Previously buried inside Phase 4 behind items 51/35/94/18.*
+6. **Grow adoption and breadth** once the engine is deep enough to adopt (SDKs,
+   DX, dialect breadth via the adapter architecture).
+7. **Catalog/observability depth** last — lowest marginal ROI per unit effort.
 
 Decision-gated items (governed writes, NL→StructuredQuery, the open AST
 standard) are **excluded from the automated order** — they need an explicit
@@ -162,40 +168,7 @@ eligible only when its TODO.md "Depends on" (if any) is satisfied.
   safety trio (39/40/41).* ✅ **Shipped** (ph1 ranked aggregation + ph2 paginated
   per-principal evaluation via a `principal_offset`/`next_principal_offset` cursor).
 
-### Phase 4 — Adoption & breadth (grow once PMF is proven)
-
-- [ ] **51** — Typed client-side query-builder SDK (Python + TypeScript).
-  *Lowers integration friction for the next wave of adopters.*
-- [ ] **35** — Agent-visible capacity waiting, progress, and cancellation.
-  *Developer-experience polish for real agent workloads.* **Phase 1 + Phase 2
-  shipped** (admission info + queue modes; Redis cross-replica admission state +
-  queue-depth caps). Box stays `[ ]` for **Phase 3, which is design-gated** by
-  the item's own text — MCP progress-notification wire format, a REST async
-  lifecycle (`202` + status/cancel), cancellation semantics (queue-only vs.
-  dialect DB-cancel), and a `429`/`Retry-After` breaking-change evaluation each
-  need a protocol/product decision before build.
-- [ ] **94** — Verify (and, if warranted, enable) prepared-statement plan reuse
-  for template execution. *Cheap, bounded perf/observability check on the
-  already-shipped template path (item 48); placed here 2026-07-24 because it is
-  adoption polish, not a moat or safety item. May close as "verified, no change
-  warranted".* **Depends on 48.**
-- [ ] **18** — Stored-procedure catalog. *Extends read coverage where customers
-  already encapsulate logic in procs.*
-- [x] **57** — Pluggable dialect-adapter architecture. *The enabler that turns
-  each new store into an adapter (not a project) — do before 19.* ✅ **Shipped**
-  (sync compiler `DialectAdapter` [item 73] + new async `SessionDialectAdapter`;
-  reverses the prior inline-branching exception. Adding a dialect = implement
-  both + register).
-- [ ] **97** — Bounded nested subqueries (uncorrelated, single-connection,
-  depth-capped). *AST expressiveness: serves the "scope a set then filter from
-  it" shape as a validated node, not a raw-SQL string. Minimal-safe subset only
-  (reject correlated / cross-connection / over-depth); caps summed tree-wide.
-  **Depends on 96; requires a PRODUCT_GUIDE Decision Log entry before build.***
-  **Phase 1 shipped** (`IN (subquery)`/`NOT IN`, tree-wide caps, full adversarial
-  + e2e coverage, Decision Log recorded); box stays `[ ]` until phase 2
-  (`FROM (subquery)` derived table).
-
-#### ★ Flagship pillar — Expressive Query Engine (items 99–106)
+### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
 *One coordinated initiative deepening the **Structural** pillar: take the READ
 query engine to 10/10 expressiveness for a fluent SQL author with no safety
@@ -205,6 +178,13 @@ real SQL author). **Deep spec + tests + acceptance:
 in the listed order; each item's Definition of Done and the canonical regression
 bar are in the plan (§3, §5). Cross-cutting rule: every new node is visited by the
 item-96 canonical walker and capped summed tree-wide (item 97), or it is not done.*
+
+**Promoted ahead of adoption/breadth on 2026-07-25 (maintainer decision):** the
+engine *is* the Structural pillar, so its depth outranks SDK/DX/dialect breadth —
+an agent that hits a wall routes around the gate, and the safety guarantee stops
+mattering. Items **100–106 are each gated only on a recorded PRODUCT_GUIDE
+Decision Log entry**, which is a maintainer paragraph, not external infra — that
+gate is the *first step of the item*, not a reason to defer it.
 
 - [x] **99** — `HAVING` as `WhereNode` + searched `CASE` condition. *Cheap,
   low-risk warm-up that proves the visitor/cap-expansion pattern. Depends on 96.*
@@ -226,16 +206,56 @@ item-96 canonical walker and capped summed tree-wide (item 97), or it is not don
   Depends on 96, 99; **Decision Log entry (CROSS gating).***
 - [ ] **104** — Set operations (UNION / INTERSECT / EXCEPT). *New scope container;
   caps summed across arms. Depends on 96, 97; **Decision Log entry before build.***
+- [ ] **97 (phase 2)** — `FROM (subquery)` derived table. *Moved here 2026-07-25
+  from its old standalone slot: **its remaining phase 2 is the same capability as
+  item 105** (105's own text says it "generalizes item 97's `subquery_tables`
+  plumbing and `effective_name_map`"). Build them together or fold 97 ph2 into
+  105 — do not implement the derived table twice.* **Phase 1 shipped**
+  (`IN (subquery)`/`NOT IN`, tree-wide caps, full adversarial + e2e coverage,
+  Decision Log recorded); box stays `[ ]` for phase 2. **Depends on 96.**
 - [ ] **105** — CTE / derived table in FROM (non-recursive; recursive OUT of
   scope). *Multi-stage single-statement analysis. Depends on 96, 97, 104;
   **Decision Log entry before build.***
 - [ ] **106** — Correlated / EXISTS / scalar subqueries. *Do last — largest safety
   surface (breaks the uncorrelated assumption). Depends on 96, 97, 105; **Decision
   Log entry (correlation scope model) before build.***
-- [ ] **19** — Additional dialects (MySQL, Snowflake, BigQuery, …). *Removes the
-  "QueryGate is narrow" objection. **Depends on 57.***
 
-### Phase 5 — Catalog & observability depth (lowest marginal ROI — opportunistic)
+### Phase 5 — Adoption & breadth (grow once the engine is deep enough to adopt)
+
+*Demoted below the engine on 2026-07-25 — see the Phase 4 note. Nothing here is
+wrong; it is all downstream of having a surface worth integrating against.*
+
+- [ ] **51** — Typed client-side query-builder SDK (Python + TypeScript).
+  *Lowers integration friction for the next wave of adopters.* **Phase 1 shipped**
+  (in-tree Python builder); box stays `[ ]` for phase 2 — the TypeScript sibling
+  (needs a Node toolchain this repo doesn't have) and the standalone
+  dependency-light distribution (**coupled to 30 phase 2's registry choice**).
+  *Note: every engine item above widens the AST this SDK must mirror — building
+  the TS builder before the engine settles buys rework.*
+- [ ] **35** — Agent-visible capacity waiting, progress, and cancellation.
+  *Developer-experience polish for real agent workloads.* **Phase 1 + Phase 2
+  shipped** (admission info + queue modes; Redis cross-replica admission state +
+  queue-depth caps). Box stays `[ ]` for **Phase 3, which is design-gated** by
+  the item's own text — MCP progress-notification wire format, a REST async
+  lifecycle (`202` + status/cancel), cancellation semantics (queue-only vs.
+  dialect DB-cancel), and a `429`/`Retry-After` breaking-change evaluation each
+  need a protocol/product decision before build.
+- [ ] **94** — Verify (and, if warranted, enable) prepared-statement plan reuse
+  for template execution. *Cheap, bounded perf/observability check on the
+  already-shipped template path (item 48); adoption polish, not a moat or safety
+  item. May close as "verified, no change warranted".* **Depends on 48.**
+- [ ] **18** — Stored-procedure catalog. *Extends read coverage where customers
+  already encapsulate logic in procs.*
+- [x] **57** — Pluggable dialect-adapter architecture. *The enabler that turns
+  each new store into an adapter (not a project) — do before 19.* ✅ **Shipped**
+  (sync compiler `DialectAdapter` [item 73] + new async `SessionDialectAdapter`;
+  reverses the prior inline-branching exception. Adding a dialect = implement
+  both + register).
+- [ ] **19** — Additional dialects (MySQL, Snowflake, BigQuery, …). *Removes the
+  "QueryGate is narrow" objection. **Depends on 57**; also downstream of the
+  engine — each new adapter must render every Phase 4 primitive.*
+
+### Phase 6 — Catalog & observability depth (lowest marginal ROI — opportunistic)
 
 - [x] **37** — Automated end-to-end proof of adaptive semantic learning. ✅
   **Shipped** (`catalog/adaptive_learning_benchmark.py` drives the real 32C
@@ -302,12 +322,36 @@ surface them for a human, never auto-start them.
 - **60** (bug bounty) is process/policy.
 - **54** (compliance mapping) is largely documentation mapped to real controls.
 
+**Also externally blocked — skip these in the walk (added 2026-07-25).** Both sit
+in Phase 0/1, *ahead* of the engine, and both had their blocker described only in
+inline prose, so a fresh walk could stall on them. They are listed here so the
+selector skips them deterministically, exactly like the two lists above:
+
+- **58 phase 2** — the live LLM / Google Toolbox benchmark run needs external
+  model + Toolbox infrastructure that does not exist locally. Phase 1 (offline
+  corpus + CLI + published report) has shipped.
+- **30 · 89 phase 2** — the signing/provenance *mechanism* has shipped; what
+  remains is the **maintainer's own deliberate signed-release tag push** plus a
+  Python package-index choice. An agent must never push a tag (see the tag-safety
+  rule in the `roadmap-next`/`release-gate` skills).
+
 An agent may do the code/doc-preparable parts and clearly flag what needs a
 human/vendor to complete.
 
 ---
 
-## Frontier status (updated 2026-07-23, fourth pass) — one buildable UI slice left; everything else gated
+## Frontier status (updated 2026-07-25, fifth pass) — the frontier is the engine
+
+**2026-07-25 maintainer decision:** the core engine and systems are where effort
+goes. The fourth-pass note below (kept for history) read the frontier as "one
+buildable UI slice left; everything else gated" — that was a *procedural* reading.
+Items 100–106 are gated only on a Decision Log paragraph the maintainer writes,
+which is the item's own first step, not an external blocker. Treat the engine as
+the live frontier: `roadmap-next` should walk Phase 4 in order (100 → 106),
+drafting each item's Decision Log entry for approval as step 1 of that item.
+Adoption/breadth (Phase 5) and catalog/UI (Phase 6) wait behind it.
+
+### Fourth pass (2026-07-23), retained for history
 
 Successive batches shipped everything buildable without a new maintainer
 decision or external resource. **Done across the cycle:** 56, 96, 95, 54, 60,
@@ -331,10 +375,12 @@ frontier's buildable threads:
   review items remain.
 - **Flagship engine:** **item 99 shipped 2026-07-24** — it was the one
   flagship-engine item needing no Decision Log entry; **100–106 each require one
-  before build**, so the engine pillar is decision-gated again from here.
+  before build**. *(Superseded 2026-07-25: that Decision Log requirement is the
+  first step of each item, not a gate that defers it — see the fifth-pass note
+  above. The engine is now Phase 4 and is the active frontier.)*
 - **Admin UI (low ROI):** **38 ph2** — bulk approve/reject/delete + export/import
   + browser-triggered generate/learn + `review_history`, all over item 32B's
-  existing scoped routes (no new mutation path). Frontend-only; Phase 5
+  existing scoped routes (no new mutation path). Frontend-only; Phase 6
   lowest-marginal-ROI.
 
 Everything else stays gated as before:
@@ -360,10 +406,10 @@ Everything else stays gated as before:
 - **F4 / P2** — *decision-gated*: NL→StructuredQuery (model-provider/posture
   decision) and opening the AST as a standard (governance commitment).
 
-`roadmap-next` should surface the two live threads (build 38 ph2 if the
-maintainer wants the low-ROI UI slice; get a decision on 92's elicitation SoD
-posture) rather than force a gated/entangled change. Trim this note as the
-maintainer re-prioritizes and the frontier moves.
+*(The fourth pass closed by telling `roadmap-next` to surface two live threads —
+38 ph2's UI slice and a decision on 92's elicitation SoD posture. Both are
+superseded: 92 shipped fully, and the 2026-07-25 re-prioritization puts the
+engine ahead of the UI slice. Trim this note as the frontier moves.)*
 
 ---
 
@@ -377,7 +423,7 @@ in an in-flight change plus a handful of narrow, real gaps, tracked as `TODO.md`
 items 107–113 (the item-93 compensation-store regression is tracked inline in
 item 93's own Phase 3b note, since it's the same feature, not a new item). This
 section sequences that work; it supplements, not replaces, the phase ordering
-above — none of these items change the Phase 0–5 execution order for the
+above — none of these items change the Phase 0–6 execution order for the
 already-planned initiatives.
 
 ### Review Phase 1 — Correctness, security, and production risk
@@ -477,8 +523,15 @@ currently triggers it — flagged for awareness, matches the documented
    qualifier), it is complete — reconcile this file's checkbox to `[x]` and
    continue.
 3. The **next item** is the first one that is *not* fully `✅ DONE`, is *not* in
-   the Decision-gated list, and whose TODO.md dependencies are satisfied. Skip
-   (and report) any decision-gated item reached before it.
+   the Decision-gated list, is *not* in the Coordination-gated / externally-blocked
+   list, and whose TODO.md dependencies are satisfied. Skip (and report) any gated
+   item reached before it. **As of 2026-07-25 this resolves to item 100** — the
+   walk skips 58 ph2 and 30·89 ph2 (externally blocked), 53 (external vendor),
+   and lands on Phase 4's engine pillar.
+   **A required Decision Log entry is not a skip condition.** Items 100–106 each
+   need one recorded in `docs/PRODUCT_GUIDE.md` before code — that is the item's
+   own first step (draft it, get maintainer ratification, then build), not a
+   reason to defer the item and move on.
 4. Announce: the last completed item (where the previous agent left off), the
    next item, why it's next, and any items skipped and why.
 5. Implement it with the full `next-item` discipline (scope → production-grade

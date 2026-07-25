@@ -1961,6 +1961,14 @@ query's OUTPUT aliases (a virtual relation) without reaching past them into inne
 base tables; deferred as a distinct, harder slice. HAVING/CASE `IN (subquery)`
 also deferred.
 
+> **Overlap with item 105 (noted 2026-07-25).** Item 105 (CTE / derived table in
+> FROM) is the same capability generalized — its own text says it "generalizes
+> item 97's `subquery_tables` plumbing and `effective_name_map`". ROADMAP.md
+> Phase 4 now sequences 97 phase 2 immediately before 105 for that reason. Build
+> them as one slice, or fold 97 phase 2 into 105 and stub it — do **not**
+> implement the derived table twice. Which way to resolve it is a call to make
+> when 105 is scoped, not now.
+
 **Effort: L. Priority: medium (capability extension). Depends on: item 96.
 Requires a recorded Decision Log entry in `docs/PRODUCT_GUIDE.md` before build.**
 
