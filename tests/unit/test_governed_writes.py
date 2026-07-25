@@ -11,8 +11,9 @@ import sqlalchemy as sa
 import pytest
 
 from querygate.compiler.write_compiler import compile_write
-from querygate.core.exceptions import PolicyViolationError
+from querygate.core.exceptions import PolicyViolationError, QueryValidationError
 from querygate.policy.models import ColumnMask, ColumnMaskKind, Policy, WritePolicy
+from querygate.query_ast.models import Predicate, StructuredQuery, WhereGroup
 from querygate.validation.write_policy_validation import (
     validate_write_batch_size,
     validate_write_policy,
@@ -130,6 +131,43 @@ def test_masked_column_cannot_filter_a_write():
     )
     with pytest.raises(PolicyViolationError, match="masked"):
         validate_write_policy(stmt, policy, _CONN)
+
+
+# --------------------------------------------------------------------------- #
+# Subquery predicates are a READ-only capability — rejected in a write WHERE    #
+# at the validation layer, not left to fail deep in the compiler (item 110)     #
+# --------------------------------------------------------------------------- #
+
+
+def test_value_subquery_in_write_where_is_rejected_at_validation():
+    # UpdateStatement/DeleteStatement reuse the read WhereNode, so item-97's
+    # value_subquery is structurally constructible here — but the write compiler
+    # passes ctx=None and can't render it. It must fail cleanly at validation.
+    sub = StructuredQuery(from_table="customers", select=["customers.id"])
+    stmt = UpdateStatement(
+        table="orders",
+        set={"status": "shipped"},
+        where=Predicate(col="orders.customer_id", op="in", value_subquery=sub),
+    )
+    with pytest.raises(QueryValidationError, match="subquery predicate"):
+        validate_write_policy(stmt, _writable(), _CONN)
+
+
+def test_value_subquery_nested_in_a_boolean_group_is_still_rejected():
+    # The rejection must walk the whole WHERE tree, not just inspect the top
+    # node — a subquery hidden one AND-level down must be caught too.
+    sub = StructuredQuery(from_table="customers", select=["customers.id"])
+    stmt = DeleteStatement(
+        table="orders",
+        where=WhereGroup(
+            and_terms=[
+                Predicate(col="orders.id", op="gt", value=0),
+                Predicate(col="orders.customer_id", op="in", value_subquery=sub),
+            ]
+        ),
+    )
+    with pytest.raises(QueryValidationError, match="subquery predicate"):
+        validate_write_policy(stmt, _writable(), _CONN)
 
 
 def test_valid_write_passes_policy():

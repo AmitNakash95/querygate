@@ -5698,6 +5698,41 @@ semantic-diff scope (`admin/access_diff.py` enumerates read-`Policy` fields
 only). That is a pre-existing boundary, not a regression from this item; adding
 write-policy diffing is its own separately-scoped piece of work.
 
+### 110. `value_subquery` in a write's WHERE is validated at the wrong layer ✅ DONE
+
+**Effort: XS. Priority: low-medium (defense-in-depth / clear error, not a live
+bypass). Depends on: none.** Surfaced by the 2026-07-23 technical review
+(`TECHNICAL_REVIEW.md`), Review Phase 3.
+
+**Why it mattered.** `UpdateStatement`/`DeleteStatement` reuse the read
+`WhereNode`, so a `Predicate.value_subquery` (item 97's `IN (subquery)`) is
+structurally constructible in a write's WHERE — but neither
+`write_policy_validation.py` nor `write_schema_validation.py` inspected it. It
+only failed later, deep inside `compiler/write_compiler.py`'s `_compile_where`,
+because the write compiler always passes `ctx=None`. Not currently exploitable
+(the compiler-level failure is safe), but it failed at the *wrong layer* with a
+compiler-internal error instead of a clean validation rejection, and it was a
+latent trap: a future write-compiler change that ever passed a non-`None` `ctx`
+(e.g. to support a write-side subquery feature) would silently reopen a bypass
+this layer was never built to check.
+
+**What shipped.** `validate_write_policy` now rejects any predicate whose
+`value_subquery` is set, walking the *whole* WHERE tree via the existing
+`_where_predicates` iterator (so a subquery hidden one boolean-group level down
+is caught too), and raising a clean `QueryValidationError` *before* the per-column
+allow/deny checks and long before the compiler. The message points the caller at
+the primitives — "scope the target rows with literal or column predicates
+instead" — the same reject-not-emulate posture as MSSQL `array_agg`/`NULLS`
+(a genuine capability gap on the write path, not a policy denial). No compiler
+change; no new policy field.
+
+**Coverage.** `tests/unit/test_governed_writes.py` — a top-level
+`value_subquery` in an UPDATE WHERE and one nested inside a DELETE's `and`-group
+both raise `QueryValidationError` at `validate_write_policy` time. Both were
+verified to bite: with the new check reverted they fail (validation does *not*
+raise — proving the pre-fix "wrong layer" behavior), and pass with it restored.
+The write + subquery security boundary suites still pass unchanged.
+
 ### 112. No scheduled (cron) CI run — dependency/security scans only fire on push/PR ✅ DONE
 
 **Effort: S. Priority: medium (closes a real blind window between code changes,
