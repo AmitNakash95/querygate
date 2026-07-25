@@ -1394,8 +1394,11 @@ class TestExpressionSubstrate:
                 "select": [{"expr": {"cast": {"col": "orders.id"}, "to": "text"}, "as": "id_text"}],
             }
         )
-        # `to: text` deliberately renders NVARCHAR(max) on MSSQL rather than
-        # T-SQL's deprecated TEXT, which cannot even be compared with `=`.
+        # `to: text` renders NVARCHAR(max) on MSSQL. NOTE: this asserts the
+        # rendering only. The *reason* for choosing Unicode over Text is that a
+        # connected server renders Text as VARCHAR(max), which silently mangles
+        # non-ASCII — invisible in SQL text, so it is proven by the round-trip
+        # assertion in tests/integration/test_mssql_expression_substrate.py.
         assert "CAST(orders.id AS VARCHAR)" in self._sql(query, dialect="postgresql")
         assert "CAST(orders.id AS NVARCHAR(max))" in self._sql(query, dialect="mssql")
 

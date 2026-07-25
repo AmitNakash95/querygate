@@ -5567,10 +5567,18 @@ case-condition predicate budget, and `max_in_list_size` now follow a CASE wherev
 item 100 lets it move (into an aggregate argument, into arithmetic, into a WHERE
 predicate) instead of only seeing a top-level `CaseSelectItem`.
 
-**Safety — the make-or-break step.** `expression_column_refs` recurses the union
-and *crosses into the boolean-condition layer and back* (a `CaseExpr` branch's
-`when` is a `WhereNode`, so its refs are ordinary `Predicate` refs, not
-`ColumnExpr` nodes). Every ref is yielded through the item-96 canonical visitor at
+**Safety — the make-or-break step.** There is exactly ONE recursion over the
+closed union, `iter_expression_parts`; the column-ref walk, the node-count and
+depth caps, and the nested-CASE rules are all *filters* over it, so a new member
+cannot be taught to three of four walks and forgotten in the fourth (the item
+96/111 drift class). It **fails closed** — an unrecognized node raises rather
+than being yielded childless (which would contribute neither refs nor size) —
+and it *crosses into the boolean-condition layer and back* (a `CaseExpr`
+branch's `when` is a `WhereNode`, so its refs are ordinary `Predicate` refs, not
+`ColumnExpr` nodes). Exhaustiveness is pinned by construction: tests are
+parameterized over `typing.get_args(Expression)`, and a guard test fails if a
+member joins the union without a payload under test — verified by adding a
+seventh member and watching it fail. Every ref is yielded through the item-96 canonical visitor at
 `SELECT_NESTED`/`WHERE`/`HAVING`, so a denied or masked column buried anywhere in
 an expression is rejected exactly as at the top level. No new `RefPosition` member
 was needed — an expression column is never a bare projection, which is precisely
@@ -5585,10 +5593,16 @@ WHERE is rejected at `validate_write_policy`, the item-110 posture.
 
 **Two live-breakage traps caught and fixed during the build**, both of the
 items 75/82 "renders fine, breaks live" class:
-- `CAST(x AS text)` mapped to SQLAlchemy's `Text`, which renders T-SQL's
-  **deprecated `TEXT`** (not even comparable with `=`). Now `Unicode` →
-  `NVARCHAR(max)` on MSSQL, `VARCHAR` elsewhere — the type
-  `MSSQLDialectAdapter.column_mask` already used.
+- `CAST(x AS text)` mapped to SQLAlchemy's `Text`, which a **connected**
+  SQL Server 2012+ renders as `VARCHAR(max)` — codepage-limited, so under the
+  default collation `'δ-λ'` silently comes back `'d-?'`. Now `Unicode` →
+  `NVARCHAR(max)`, the type `MSSQLDialectAdapter.column_mask` already used.
+  *(The first draft of this justified the change as "TEXT is deprecated and not
+  comparable"; that is what an UNCONNECTED `mssql.dialect()` renders and was
+  simply wrong for a real server. The real-MSSQL mutation test caught the bad
+  reasoning — the rendering-only assertion had not — and the fix was to assert
+  the non-ASCII round-trip instead. Recorded because the wrong reason nearly
+  shipped attached to the right change.)*
 - Postgres has **no `round(double precision, integer)`**; the adapter casts to
   NUMERIC. Verified against the live server, which rejects the uncast form.
 
@@ -5612,10 +5626,16 @@ six expression positions, the undeclared-table check, and no-literal-in-audit
 (`test_adversarial_security.py`) — verified to fail when the visitor's
 CASE-condition crossing is reverted. Integration: SQLite end-to-end value checks
 against ground truth computed through the same pipeline
-(`test_expression_end_to_end.py`) and real Postgres
-(`test_postgres_expression_substrate.py`) — the guarded-division test fails with a
-real `DivisionByZeroError` if the `NULLIF` is removed. Full suite 1669 passed,
-`-m security` 274 passed, `-m postgres_live` green.
+(`test_expression_end_to_end.py`), real Postgres
+(`test_postgres_expression_substrate.py`), and **real MSSQL**
+(`test_mssql_expression_substrate.py`).
+
+**Every per-dialect claim is mutation-verified against a live server**, not
+asserted from SQL text — the discipline items 75/82 exist to enforce. Reverting
+each rendering produces the real failure: `ceil` → *"'ceil' is not a recognized
+built-in function name"*; a one-argument `ROUND` → *"The round function requires
+2 to 3 arguments"*; unguarded `/` → *"Divide by zero error encountered"* on
+MSSQL and `DivisionByZeroError` on Postgres.
 
 **Canonical regression bar (plan §5):** rows 1, 2 and 7 went ✅; row 15's
 arithmetic half is done and waits only on `OVER` (item 101). 5/16 → **8/16**.

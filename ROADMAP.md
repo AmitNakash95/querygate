@@ -486,6 +486,15 @@ already-planned initiatives.
 
 ### Review Phase 3 — Architecture and maintainability
 
+- [ ] **114** — The write tool's MCP schema advertises read-only predicate
+  fields it rejects (`expr`/`value_expr`/`value_subquery`, plus the whole read
+  `StructuredQuery` definition), making `run_structured_writes` the largest tool
+  schema. *Surfaced 2026-07-25 while measuring item 100's MCP budget increase:
+  4,871 of those chars are item 100's Expression union inlined into a tool that
+  refuses it. Deliberately NOT folded into item 100 — it is a write-contract
+  change and gets its own PR. Sequenced here rather than in a Phase, since it is
+  maintainability work on an already-shipped surface.*
+
 - [x] **110** — Explicitly reject `value_subquery` in a write's WHERE at the
   write-validation layer instead of relying on the compiler's `ctx=None`
   default to fail it.

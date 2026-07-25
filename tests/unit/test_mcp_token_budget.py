@@ -77,6 +77,16 @@ from querygate.mcp.server import create_mcp_server
 # comment costs nothing) — that trim alone recovered ~5K. New budget keeps ~5%
 # headroom. Do the same trim before the next bump: prose that only a maintainer
 # needs does not belong in a model docstring.
+#
+# KNOWN WASTE inside this number, measured while bumping it (TODO.md item 114):
+# `run_structured_writes` is the single largest tool (34,594 chars) because a
+# write's `where` reuses the READ Predicate, so **4,871 chars of Expression
+# definitions — plus the whole read StructuredQuery definition — are inlined
+# into the write tool for fields the write path REJECTS at validation
+# (expr/value_expr per item 100, value_subquery per item 110). Fixing that is a
+# write-contract change and belongs in its own PR; when item 114 lands this
+# budget should DROP, not grow. Do not raise this ceiling again without first
+# checking whether item 114 would have made the raise unnecessary.
 _MAX_TOTAL_CHARS = 123_000
 
 

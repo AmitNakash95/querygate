@@ -321,3 +321,116 @@ def test_referenced_tables_sees_tables_reachable_only_through_an_expression():
         }
     )
     assert referenced_tables(query) == {"orders", "items"}
+
+
+# --------------------------------------------------------------------------- #
+# Item 100 — exhaustiveness of the closed Expression union.
+#
+# `iter_expression_parts` is the ONE recursion over the union; the ref walk, the
+# node/depth caps, and the CASE-condition rules are all filters over it. A new
+# member that is added to the union but not to the walk is a silent policy and
+# cap bypass, so these tests are parameterized over `typing.get_args(Expression)`
+# — adding a member without teaching the walk fails here by construction rather
+# than by someone remembering to write a test.
+# --------------------------------------------------------------------------- #
+_MARKER = "t.marker_col"
+
+# One instance of each union member, each wrapping the marker column so the walk
+# has to descend into that member's children to find it.
+_MEMBER_PAYLOADS = {
+    "ColumnExpr": {"col": _MARKER},
+    "LiteralExpr": None,  # a literal carries no ref by construction — see below
+    "BinaryOpExpr": {"op": "+", "left": {"col": _MARKER}, "right": {"literal": 1}},
+    "FunctionExpr": {"fn": "lower", "args": [{"col": _MARKER}]},
+    "CastExpr": {"cast": {"col": _MARKER}, "to": "text"},
+    "CaseExpr": {
+        "when": [{"when": {"col": _MARKER, "op": "eq", "value": 1}, "then": {"literal": 1}}]
+    },
+}
+
+
+def test_every_expression_union_member_has_a_payload_under_test():
+    """Guard on the guard: if a member joins the union without a payload here,
+    the parameterized tests below would silently stop covering it."""
+    import typing
+
+    from querygate.query_ast.models import Expression
+
+    assert {member.__name__ for member in typing.get_args(Expression)} == set(_MEMBER_PAYLOADS)
+
+
+# ColumnExpr IS the marker (a leaf), so it has no children to descend into;
+# LiteralExpr carries no ref at all. Both properties are pinned separately.
+_LEAF_MEMBERS = {"ColumnExpr", "LiteralExpr"}
+_REF_BEARING_MEMBERS = [name for name, p in _MEMBER_PAYLOADS.items() if p is not None]
+_COMPOSITE_MEMBERS = [name for name in _REF_BEARING_MEMBERS if name not in _LEAF_MEMBERS]
+
+
+@pytest.mark.parametrize("member", _REF_BEARING_MEMBERS)
+def test_walk_finds_the_column_inside_every_union_member(member):
+    """Every member's columns are reached by the one canonical walk, so they are
+    policy-checked and mask-checked wherever the member is nested."""
+    from querygate.validation.schema_validation import expression_column_refs
+
+    expr = _to_expression_model(_MEMBER_PAYLOADS[member])
+    assert _MARKER in set(expression_column_refs(expr)), f"{member} hides its column refs"
+
+
+@pytest.mark.parametrize("member", _COMPOSITE_MEMBERS)
+def test_walk_descends_into_every_composite_union_member(member):
+    """A composite member must yield more than itself, or its size is not
+    counted toward `max_expression_nodes` and its depth is under-reported."""
+    from querygate.validation.schema_validation import iter_expression_parts
+
+    expr = _to_expression_model(_MEMBER_PAYLOADS[member])
+    assert len(list(iter_expression_parts(expr))) > 1, f"{member} is not descended into"
+
+
+def test_literal_is_the_only_member_that_contributes_no_refs():
+    """Pinned explicitly so `LiteralExpr` being excluded above reads as a
+    deliberate property, not an oversight in the parameterization."""
+    from querygate.validation.schema_validation import expression_column_refs
+
+    assert list(expression_column_refs(_to_expression_model({"literal": "x"}))) == []
+
+
+def test_walk_fails_closed_on_an_unknown_expression_node():
+    """A future union member that reaches the walk without a branch must RAISE,
+    not be yielded childless — silently contributing neither refs (a policy and
+    masking bypass) nor size (a cap bypass) is the failure mode that matters."""
+    from querygate.core.exceptions import QueryValidationError
+    from querygate.validation.schema_validation import iter_expression_parts
+
+    class NotAnExpression:
+        pass
+
+    with pytest.raises(QueryValidationError, match="Unsupported expression node"):
+        list(iter_expression_parts(NotAnExpression()))
+
+
+@pytest.mark.parametrize("member", _REF_BEARING_MEMBERS)
+def test_compiler_handles_every_union_member(member):
+    """The compiler is the one recursion over the union that cannot be folded
+    into the walk (it produces SQL, not a traversal). Pin that it too covers
+    every member — and it likewise raises rather than silently mis-rendering."""
+    import sqlalchemy as sa
+
+    from querygate.compiler.sqlalchemy_compiler import _compile_expression
+
+    metadata = sa.MetaData()
+    table = sa.Table("t", metadata, sa.Column("marker_col", sa.Integer))
+    compiled = _compile_expression(
+        _to_expression_model(_MEMBER_PAYLOADS[member]), {"t": table}, "postgresql"
+    )
+    assert compiled is not None
+
+
+def test_compiler_fails_closed_on_an_unknown_expression_node():
+    from querygate.compiler.sqlalchemy_compiler import _compile_expression
+    from querygate.core.exceptions import QueryValidationError
+
+    class NotAnExpression:
+        pass
+
+    with pytest.raises(QueryValidationError, match="Unsupported expression node"):
+        _compile_expression(NotAnExpression(), {}, "postgresql")
