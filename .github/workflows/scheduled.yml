@@ -1,0 +1,151 @@
+name: Scheduled security & soak
+
+# TODO.md item 112. The main CI workflow (ci.yml) only triggers on
+# push/pull_request, so its SBOM/CVE audit, image scan, and guardrail load
+# tests run only when someone happens to touch the repo. This workflow closes
+# two blind windows that don't depend on a code change:
+#   * a CVE disclosed against an already-merged, unchanged dependency (or the
+#     shipped image's OS/library layers) — caught here nightly, not "whenever
+#     the next PR lands"; and
+#   * the heavy `make test-soak` (SOAK_ROUNDS=100), which ci.yml never runs —
+#     only the lighter 5-round `test-load` runs per-PR — so a slow-degradation
+#     or pool-leak regression that only surfaces after dozens of rounds is
+#     otherwise caught only if a maintainer remembers to run it before a release.
+on:
+  schedule:
+    # 07:00 UTC daily — independent of any push or pull request. Off-peak so a
+    # long soak/image build doesn't contend with weekday CI.
+    - cron: "0 7 * * *"
+  # Let a maintainer trigger the same checks on demand (e.g. right after a CVE
+  # advisory lands) without waiting for the nightly slot.
+  workflow_dispatch:
+    inputs:
+      soak_rounds:
+        description: "Rounds for make test-soak (guardrail load scenarios)"
+        required: false
+        default: "100"
+
+# A scheduled run is not urgent; never let two overlap or pile up.
+concurrency:
+  group: scheduled-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    name: Dependency CVE + SBOM + lockfile drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry==2.4.1
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      # Lockfile drift: fail if poetry.lock no longer matches pyproject.toml,
+      # the same check `make release-check` runs first.
+      - name: poetry check --lock
+        run: poetry check --lock
+
+      # The SBOM/audit is built from the wheel + the locked `main` set, so build
+      # first (same order ci.yml's `test` job uses).
+      - name: Build package
+        run: poetry build
+
+      # CycloneDX SBOM + pip-audit CVE gate over the exact locked ship set;
+      # deny-by-default via security/dependency-audit-allowlist.json. This is
+      # the step that catches a newly-disclosed CVE against an unchanged
+      # dependency between code changes.
+      - name: Generate SBOM and audit locked dependencies
+        run: poetry run python scripts/generate_sbom.py
+
+  image-scan:
+    name: Trivy image CVE/secret/misconfig scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Scan the exact production image we ship. Unlike ci.yml's image scan
+      # (which piggybacks on the release-smoke build), this runs on the nightly
+      # schedule so a CVE newly disclosed against an OS/library layer of an
+      # already-built image is caught without a code change.
+      - name: Build the production image
+        run: docker build -t querygate:scheduled-scan .
+
+      # Fail on any HIGH/CRITICAL that isn't a reviewed exception in
+      # .trivyignore (deny-by-default). `--ignore-unfixed` keeps the gate
+      # actionable — it fails only on CVEs that actually have a fix available.
+      - name: Trivy scan of the shipped image
+        uses: aquasecurity/trivy-action@v0.24.0
+        with:
+          image-ref: querygate:scheduled-scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+          scanners: vuln,secret,misconfig
+
+  soak:
+    name: Guardrail soak (make test-soak)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:15.1
+        env:
+          POSTGRES_USER: querygate
+          POSTGRES_PASSWORD: querygate
+          POSTGRES_DB: querygate_demo
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U querygate -d querygate_demo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry==2.4.1
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      # Same seeding the postgres-live job in ci.yml uses: the bare `services`
+      # Postgres can't run the initdb hook, so seed the canonical demo schema
+      # into querygate_demo and create the separate querygate_stress database
+      # the large-domain soak scenarios populate themselves. Both are needed
+      # because `make test-soak` runs every `-m load` test, which spans the
+      # concurrency-guardrail suite + the large-domain stress soak.
+      - name: Seed demo schema (querygate_demo) + create stress DB (querygate_stress)
+        env:
+          PGPASSWORD: querygate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          psql -h localhost -p 5433 -U querygate -d querygate_demo \
+            -v ON_ERROR_STOP=1 -f examples/demo_db/init_postgres.sql
+          psql -h localhost -p 5433 -U querygate -d querygate_demo \
+            -v ON_ERROR_STOP=1 -c 'CREATE DATABASE querygate_stress OWNER querygate;'
+
+      # The full soak: repeat the real-Postgres guardrail load scenarios many
+      # rounds to surface a slow pool leak or a cap breach that a single pass
+      # (ci.yml's 5-round test-load) would miss. Defaults to 100 rounds; a
+      # manual run can override via the workflow_dispatch input.
+      - name: make test-soak
+        run: make test-soak SOAK_ROUNDS="${{ github.event.inputs.soak_rounds || '100' }}"
