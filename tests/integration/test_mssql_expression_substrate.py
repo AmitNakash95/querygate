@@ -42,6 +42,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from querygate.api.app import create_app
+from querygate.compiler.sqlalchemy_compiler import CAST_TARGETS, DIALECT_ROUTED_EXPR_FNS
 from querygate.connections.engine import reset_engines
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
@@ -53,7 +54,14 @@ pytestmark = [pytest.mark.integration, pytest.mark.real_db, pytest.mark.mssql_li
 
 _BASE_URL = "http://localhost"
 
-_HOST = os.environ.get("QUERYGATE_TEST_MSSQL_HOST", "localhost")
+# Default 127.0.0.1, NOT "localhost": on macOS `localhost` resolves to ::1
+# first, and docker-compose publishes this port on IPv4 only (127.0.0.1, matching
+# the other services' loopback-only binding), so an ODBC connect to "localhost"
+# hangs on IPv6 and dies with a Login timeout that looks like a server problem.
+# CI sets QUERYGATE_TEST_MSSQL_HOST explicitly, so this default only affects
+# local runs — where it is the difference between `make test-mssql-live` working
+# and appearing to be broken.
+_HOST = os.environ.get("QUERYGATE_TEST_MSSQL_HOST", "127.0.0.1")
 _PORT = os.environ.get("QUERYGATE_TEST_MSSQL_PORT", "14330")
 _SA_PASSWORD = os.environ.get("QUERYGATE_TEST_MSSQL_SA_PASSWORD", "QueryGate_Test_Pw1!")
 _ODBC_DRIVER = os.environ.get("QUERYGATE_TEST_MSSQL_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
@@ -77,7 +85,7 @@ async def mssql_app():
                     id="mssql_demo",
                     dialect="mssql",
                     connection_string=_DEMO_URL,
-                    known_tables=["customers", "orders", "order_items"],
+                    known_tables=["customers", "orders", "order_items", "products"],
                 )
             }
         )
@@ -315,3 +323,83 @@ async def test_nested_functions_and_expression_predicate_run_on_mssql(mssql_app)
     assert rows
     for row in rows:
         assert row["shout"] == row["product_name"].strip().upper()
+
+
+# --------------------------------------------------------------------------- #
+# Coverage forcing-function — the MSSQL half. See the identical block in
+# test_postgres_expression_substrate.py: every dialect-routed function and every
+# cast target must be EXECUTED against a real server on BOTH supported dialects,
+# because a rendering assertion cannot distinguish correct SQL from SQL that
+# merely looks correct (this file's `to: "text"` case is the proof).
+# --------------------------------------------------------------------------- #
+_LIVE_FN_CASES = {
+    "ceil": ({"fn": "ceil", "args": [{"col": "order_items.unit_price"}]}, lambda v: v is not None),
+    "length": (
+        {"fn": "length", "args": [{"col": "order_items.product_name"}]},
+        lambda v: int(v) > 0,
+    ),
+    "round": (
+        {"fn": "round", "args": [{"col": "order_items.unit_price"}, {"literal": 1}]},
+        lambda v: v is not None,
+    ),
+    "substring": (
+        {
+            "fn": "substring",
+            "args": [{"col": "order_items.product_name"}, {"literal": 1}, {"literal": 3}],
+        },
+        lambda v: isinstance(v, str) and len(v) == 3,
+    ),
+}
+
+_LIVE_CAST_CASES = {
+    "text": ({"col": "order_items.product_name"}, lambda v: isinstance(v, str)),
+    "integer": ({"col": "order_items.quantity"}, lambda v: int(v) >= 0),
+    "numeric": ({"col": "order_items.unit_price"}, lambda v: v is not None),
+    "date": ({"col": "orders.created_at"}, lambda v: v is not None),
+    "timestamp": ({"col": "orders.created_at"}, lambda v: v is not None),
+    # T-SQL has no BOOLEAN type; `Boolean` renders BIT and an int casts to it
+    # cleanly, so unlike Postgres this needs no special-cased column.
+    "boolean": ({"col": "order_items.quantity"}, lambda v: isinstance(v, bool)),
+}
+
+
+def test_every_dialect_routed_function_has_a_live_mssql_case():
+    assert set(_LIVE_FN_CASES) == set(DIALECT_ROUTED_EXPR_FNS)
+
+
+def test_every_cast_target_has_a_live_mssql_case():
+    assert set(_LIVE_CAST_CASES) == set(CAST_TARGETS)
+
+
+@pytest.mark.parametrize("fn_name", sorted(_LIVE_FN_CASES))
+@pytest.mark.asyncio
+async def test_dialect_routed_function_executes_on_real_mssql(fn_name, mssql_app):
+    expr, check = _LIVE_FN_CASES[fn_name]
+    rows = await _rows(
+        mssql_app,
+        {"from": "order_items", "select": [{"expr": expr, "as": "v"}], "limit": 3},
+    )
+    assert rows, fn_name
+    for row in rows:
+        assert check(row["v"]), (fn_name, row["v"])
+
+
+@pytest.mark.parametrize("target", sorted(_LIVE_CAST_CASES))
+@pytest.mark.asyncio
+async def test_cast_target_executes_on_real_mssql(target, mssql_app):
+    operand, check = _LIVE_CAST_CASES[target]
+    table = "orders" if operand["col"].startswith("orders.") else "order_items"
+    async with AsyncClient(transport=ASGITransport(app=mssql_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            f"/api/v1/mssql_demo/query",
+            json={
+                "from": table,
+                "select": [{"expr": {"cast": operand, "to": target}, "as": "v"}],
+                "limit": 3,
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["rows"]
+    assert rows, target
+    for row in rows:
+        assert check(row["v"]), (target, row["v"])

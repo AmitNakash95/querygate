@@ -2230,6 +2230,23 @@ database, no Docker, and no network access.
   These are excluded from the default suite specifically so `poetry run
   pytest` never requires Docker or a live database.
 
+  `make test-postgres-live` and `make test-mssql-live` are one-command paths:
+  each starts the databases it needs (the MSSQL one is behind a compose
+  `mssql` profile so a normal `docker compose up` doesn't pull a ~2GB image
+  nobody asked for, and it also brings up Postgres because the cross-dialect
+  differential suite is marked *both*), seeds them, and runs the suite.
+
+  **Why the real-database tier is not optional for dialect work.** A test that
+  asserts *generated SQL text* cannot tell a correct rendering from one that
+  merely looks correct — SQLAlchemy renders whatever it is asked to. Item 82
+  found it compiling T-SQL-invalid `within_group()` SQL without complaint, and
+  item 100 found something subtler: a cast spelling that produced no error at
+  all on a real server and instead silently corrupted non-ASCII data. So every
+  per-dialect primitive is *executed* against both backends with its value
+  asserted, and the two expression suites are parameterized over the compiler's
+  own exported set of dialect-routed functions and cast targets — adding one
+  without live coverage on both dialects fails a guard test by construction.
+
 ### `make test-security` — adversarial boundary suite
 
 **File:** `tests/security/` (`pytest -m security`)

@@ -8,7 +8,7 @@ known to exist and be policy-permitted.
 from __future__ import annotations
 
 import operator
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, get_args
 
 import sqlalchemy as sa
 
@@ -28,6 +28,7 @@ from querygate.query_ast.models import (
     DateBucketSelectItem,
     Expression,
     ExpressionSelectItem,
+    ExprFn,
     FunctionExpr,
     LiteralExpr,
     PercentileContSelectItem,
@@ -137,6 +138,26 @@ _CAST_TYPES = {
     "date": sa.Date,
     "timestamp": sa.DateTime,
 }
+
+# The expression functions whose SQL genuinely differs per dialect — derived,
+# not hand-listed, so it cannot fall out of step with `_UNIVERSAL_EXPR_FNS`.
+#
+# This is exported because the real-database suites are PARAMETERIZED over it:
+# `tests/integration/test_postgres_expression_substrate.py` and
+# `test_mssql_expression_substrate.py` each assert their live-execution cases
+# cover exactly this set. Adding a function here without a real-DB case fails
+# those tests, which is deliberate — item 100 shipped a `CAST(x AS text)`
+# rationale that was simply WRONG ("T-SQL's deprecated TEXT is not comparable")
+# because it was backed only by an assertion on generated SQL text. A connected
+# SQL Server renders that spelling as VARCHAR(max), which does not error at
+# all; it silently mangles non-ASCII. Rendering assertions cannot tell a correct
+# rendering from one that merely looks correct (the items 75/82 trap), so
+# per-dialect behavior must be proven by EXECUTING and asserting a value.
+DIALECT_ROUTED_EXPR_FNS = frozenset(get_args(ExprFn)) - frozenset(_UNIVERSAL_EXPR_FNS)
+
+# Cast targets are the same class of claim, for the same reason — see the
+# `_CAST_TYPES["text"]` comment above, which is the case that proved it.
+CAST_TARGETS = frozenset(_CAST_TYPES)
 
 _BINARY_OPS = {
     "+": operator.add,
