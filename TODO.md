@@ -2135,6 +2135,13 @@ surface a masked column as a non-projection input. **Recursive CTE is explicitly
 OUT of scope** (unbounded recursion = DoS) pending a separately-recorded hard
 iteration cap.
 
+> **Overlap with item 97 phase 2 (noted 2026-07-25).** Item 97's remaining phase 2
+> (`FROM (subquery)` derived table) is **the same capability** this item
+> generalizes. ROADMAP.md Phase 4 sequences 97 ph2 immediately before this item for
+> that reason. When scoping 105, decide explicitly: build both as one slice, or
+> fold 97 ph2 into 105 and stub item 97 as fully `✅ DONE`. Do **not** implement the
+> derived table twice.
+
 **Effort: XL. Priority: medium (flagship pillar). Depends on: items 96, 97, 104.
 Requires a recorded Decision Log entry before build.** Full spec + acceptance:
 **ENGINE_EXPRESSIVENESS_PLAN.md Phase 4b.**
