@@ -33,6 +33,7 @@ from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.execution.service import StructuredQueryService
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
+from querygate.compiler.sqlalchemy_compiler import CAST_TARGETS, DIALECT_ROUTED_EXPR_FNS
 from querygate.query_ast.models import StructuredQuery
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_db, pytest.mark.postgres_live]
@@ -40,7 +41,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.real_db, pytest.mark.postgres
 _CONNECTION_STRING = "postgresql+asyncpg://querygate:querygate@localhost:5433/querygate_demo"
 
 
-def _use_policy(**policy_overrides) -> None:
+def _use_policy(known_tables=None, **policy_overrides) -> None:
     set_registry(
         ConnectionRegistry(
             {
@@ -48,7 +49,7 @@ def _use_policy(**policy_overrides) -> None:
                     id="demo",
                     dialect="postgresql",
                     connection_string=_CONNECTION_STRING,
-                    known_tables=["customers", "orders", "order_items"],
+                    known_tables=known_tables or ["customers", "orders", "order_items"],
                 )
             }
         )
@@ -255,3 +256,108 @@ async def test_nested_functions_and_cast_run_on_real_postgres():
         assert row["prefix"] == name[:3]
         assert row["n"] == len(name)
         assert row["id_text"] == str(row["id_text"])
+
+
+# --------------------------------------------------------------------------- #
+# Coverage forcing-function: every per-dialect primitive must be EXECUTED here.
+#
+# Item 100 shipped a `CAST(x AS text)` rationale that was wrong because it was
+# backed only by an assertion on generated SQL text. These tests are
+# parameterized over the compiler's own exported sets, so a new dialect-routed
+# function or cast target cannot be added without a live case — the same
+# two-stage guard used for the Expression union in test_reference_visitor.py.
+# --------------------------------------------------------------------------- #
+_LIVE_FN_CASES = {
+    "ceil": ({"fn": "ceil", "args": [{"col": "order_items.unit_price"}]}, lambda v: v is not None),
+    "length": (
+        {"fn": "length", "args": [{"col": "order_items.product_name"}]},
+        lambda v: int(v) > 0,
+    ),
+    "round": (
+        {"fn": "round", "args": [{"col": "order_items.unit_price"}, {"literal": 1}]},
+        lambda v: v is not None,
+    ),
+    "substring": (
+        {
+            "fn": "substring",
+            "args": [{"col": "order_items.product_name"}, {"literal": 1}, {"literal": 3}],
+        },
+        lambda v: isinstance(v, str) and len(v) == 3,
+    ),
+}
+
+# `boolean` is excluded: Postgres has no implicit int->boolean cast, so a
+# meaningful case needs a real boolean column, which order_items has not. It is
+# covered on its own below against `products.in_stock`.
+_LIVE_CAST_CASES = {
+    "text": ({"col": "order_items.product_name"}, lambda v: isinstance(v, str)),
+    "integer": ({"col": "order_items.quantity"}, lambda v: int(v) >= 0),
+    "numeric": ({"col": "order_items.unit_price"}, lambda v: v is not None),
+    "date": ({"col": "orders.created_at"}, lambda v: v is not None),
+    "timestamp": ({"col": "orders.created_at"}, lambda v: v is not None),
+    "boolean": None,
+}
+
+
+def test_every_dialect_routed_function_has_a_live_postgres_case():
+    """Guard on the guard: a new function routed to `DialectAdapter` must gain a
+    real-execution case here, not just a rendering assertion."""
+    assert set(_LIVE_FN_CASES) == set(DIALECT_ROUTED_EXPR_FNS)
+
+
+def test_every_cast_target_has_a_live_postgres_case():
+    assert set(_LIVE_CAST_CASES) == set(CAST_TARGETS)
+
+
+@pytest.mark.parametrize("fn_name", sorted(_LIVE_FN_CASES))
+@pytest.mark.asyncio
+async def test_dialect_routed_function_executes_on_real_postgres(fn_name):
+    expr, check = _LIVE_FN_CASES[fn_name]
+    _use_policy()
+    query = StructuredQuery.model_validate(
+        {"from": "order_items", "select": [{"expr": expr, "as": "v"}], "limit": 3}
+    )
+    result = await StructuredQueryService(connection_id="demo").execute(query)
+    assert result.rows, fn_name
+    for row in result.rows:
+        assert check(row["v"]), (fn_name, row["v"])
+
+
+@pytest.mark.parametrize(
+    "target", sorted(t for t, case in _LIVE_CAST_CASES.items() if case is not None)
+)
+@pytest.mark.asyncio
+async def test_cast_target_executes_on_real_postgres(target):
+    operand, check = _LIVE_CAST_CASES[target]
+    _use_policy()
+    table = "orders" if operand["col"].startswith("orders.") else "order_items"
+    query = StructuredQuery.model_validate(
+        {
+            "from": table,
+            "select": [{"expr": {"cast": operand, "to": target}, "as": "v"}],
+            "limit": 3,
+        }
+    )
+    result = await StructuredQueryService(connection_id="demo").execute(query)
+    assert result.rows, target
+    for row in result.rows:
+        assert check(row["v"]), (target, row["v"])
+
+
+@pytest.mark.asyncio
+async def test_boolean_cast_executes_on_real_postgres():
+    """Its own case: Postgres has no implicit int->boolean cast, so this needs a
+    genuinely boolean column rather than order_items' numerics."""
+    _use_policy(known_tables=["customers", "orders", "order_items", "products"])
+    query = StructuredQuery.model_validate(
+        {
+            "from": "products",
+            "select": [
+                {"expr": {"cast": {"col": "products.in_stock"}, "to": "boolean"}, "as": "v"}
+            ],
+            "limit": 3,
+        }
+    )
+    result = await StructuredQueryService(connection_id="demo").execute(query)
+    assert result.rows
+    assert all(isinstance(row["v"], bool) for row in result.rows)

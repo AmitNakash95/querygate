@@ -123,7 +123,12 @@ test-soak: ## Repeat the real-Postgres guardrail load scenarios (override SOAK_R
 	QUERYGATE_LOAD_ROUNDS=$(SOAK_ROUNDS) poetry run pytest -m load
 
 .PHONY: test-mssql-live
-test-mssql-live: ## Run tests needing a real MSSQL server — see tests/integration/test_mssql_live.py's module docstring for setup
+# Depends on compose-up too, not just compose-up-mssql: the cross-dialect
+# differential suite (item 36 phase 2b) is marked BOTH postgres_live and
+# mssql_live, so `-m mssql_live` selects it and it needs the demo Postgres up as
+# well. Without this it fails with a bare NoSuchTableError that looks like an
+# MSSQL problem.
+test-mssql-live: compose-up compose-up-mssql ## Run tests needing a real MSSQL server (starts + seeds both databases for you)
 	poetry run python tests/integration/setup_mssql_test_db.py
 	poetry run pytest -m mssql_live
 
@@ -235,9 +240,13 @@ release-smoke: ## Build the image and execute a real structured query against Po
 compose-up: ## Start the local demo Postgres and Redis services (detached and healthy)
 	docker compose up -d --wait
 
+.PHONY: compose-up-mssql
+compose-up-mssql: ## Start the real SQL Server used by the mssql_live suite (profile-gated; amd64 emulation on Apple Silicon, allow ~1 min to boot)
+	docker compose --profile mssql up -d --wait querygate-mssql
+
 .PHONY: compose-down
-compose-down: ## Stop and remove the local demo infrastructure containers
-	docker compose down
+compose-down: ## Stop and remove the local demo infrastructure containers (including the mssql profile)
+	docker compose --profile mssql down
 
 .PHONY: compose-logs
 compose-logs: ## Tail logs from the local demo infrastructure

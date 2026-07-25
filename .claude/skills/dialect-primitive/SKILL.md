@@ -62,6 +62,47 @@ reasoned Decision Log entry in `docs/PRODUCT_GUIDE.md` (see the
 
 ## Tests
 
-- Assert the mechanical translation renders each dialect's expected SQL.
+**A rendering assertion is not evidence.** This is the single most important
+rule here, and it is written from a real failure (item 100, 2026-07-25): a
+`CAST(x AS text)` mapping shipped with a *wrong justification* — "T-SQL's TEXT
+is deprecated and not comparable with `=`" — because it was backed only by an
+assertion on generated SQL text. A **connected** SQL Server renders that
+spelling as `VARCHAR(max)`, which does not error at all; it silently mangles
+non-ASCII (`'δ-λ'` → `'d-?'`). The rendering test passed happily against the
+broken spelling. Compare with items 75/82, where SQLAlchemy compiled
+T-SQL-invalid `within_group()` SQL with no complaint: **the compiler will render
+whatever you ask for, so SQL text cannot distinguish correct from
+merely-correct-looking.**
+
+Two traps specifically:
+
+- `sa.dialects.mssql.dialect()` constructed standalone is **not** the dialect a
+  live connection uses. A connected dialect sets `deprecate_large_types` (and
+  other server-version flags) after interrogating the server, so type names and
+  some constructs render differently in a test than in production. If you
+  compile with an unconnected dialect, you are testing a fiction.
+- Silent wrongness beats loud wrongness for danger. A syntax error surfaces
+  immediately; a codepage/collation/rounding difference returns *data*.
+
+So, required:
+
+- **Execute against every real dialect that implements it, and assert a VALUE.**
+  `tests/integration/test_postgres_expression_substrate.py` and
+  `test_mssql_expression_substrate.py` are the pattern: they are parameterized
+  over the compiler's exported `DIALECT_ROUTED_EXPR_FNS` / `CAST_TARGETS`, and a
+  guard test asserts the live cases cover exactly those sets — so a new
+  per-dialect primitive **cannot** be added without real-database coverage on
+  both backends. Extend those sets and the suites will demand the cases.
+- **Mutation-check it.** Revert your rendering to the other dialect's spelling
+  and confirm the live test fails with the real server error. If it still
+  passes, the test proves nothing — that is exactly how the `CAST` mistake was
+  caught. Record the observed error in the test docstring.
+- Rendering assertions are still fine as a *fast* unit-level check of the
+  translation, but label them as such; they are never the evidence for a claim
+  about a dialect's behavior.
 - Assert the unsupported-on-dialect path raises `QueryValidationError` with a
   message that mentions the primitive alternative (not a silent fallback).
+
+Run them with `make test-postgres-live` and `make test-mssql-live` — the latter
+starts and seeds both databases for you (the cross-dialect differential suite
+needs Postgres up as well).
