@@ -149,17 +149,13 @@ class ColumnRef(NamedTuple):
 
 def _where_column_refs(node: WhereNode) -> Iterator[str]:
     """Every Table.Column ref inside a (possibly nested) WHERE tree, in
-    document order. The one recursion over the boolean tree — the visitor
-    below is the only caller.
+    document order — layered on the single canonical `iter_where_predicates`
+    walk (item 111) rather than re-recursing the boolean tree itself, so a new
+    `WhereGroup` combinator is handled in exactly one place. The visitor below
+    is the only caller.
     """
-    if isinstance(node, Predicate):
-        yield from predicate_column_refs(node)
-        return
-    if node.not_terms is not None:
-        yield from _where_column_refs(node.not_terms)
-        return
-    for child in node.and_terms or node.or_terms or []:
-        yield from _where_column_refs(child)
+    for pred in iter_where_predicates(node):
+        yield from predicate_column_refs(pred)
 
 
 def iter_where_and_having_predicates(query: StructuredQuery) -> Iterator[Predicate]:
@@ -167,20 +163,27 @@ def iter_where_and_having_predicates(query: StructuredQuery) -> Iterator[Predica
     only — does NOT descend into a predicate's `value_subquery`, which is a
     separate scope). The one place a `value_subquery` (item 97) can be attached."""
     if query.where is not None:
-        yield from _where_predicates(query.where)
+        yield from iter_where_predicates(query.where)
     if query.having is not None:
-        yield from _where_predicates(query.having)
+        yield from iter_where_predicates(query.having)
 
 
-def _where_predicates(node: WhereNode) -> Iterator[Predicate]:
+def iter_where_predicates(node: WhereNode) -> Iterator[Predicate]:
+    """Every `Predicate` leaf in a (possibly nested) WHERE/HAVING/CASE boolean
+    tree, in document order. This is the single canonical WHERE-predicate walk —
+    the read policy/schema and write policy/schema validators all call it, so a
+    new `WhereGroup` combinator (item 96's failure class) is handled in exactly
+    one place instead of four hand-rolled copies. It does NOT descend into a
+    predicate's `value_subquery` — that is a separate scope (see
+    `iter_query_scopes`)."""
     if isinstance(node, Predicate):
         yield node
         return
     if node.not_terms is not None:
-        yield from _where_predicates(node.not_terms)
+        yield from iter_where_predicates(node.not_terms)
         return
     for child in node.and_terms or node.or_terms or []:
-        yield from _where_predicates(child)
+        yield from iter_where_predicates(child)
 
 
 def iter_query_scopes(
@@ -606,14 +609,10 @@ def _validate_top_n(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None
 def _validate_where_columns(
     node: WhereNode, tables: Dict[str, sa.Table], allow_alias: bool
 ) -> None:
-    if isinstance(node, Predicate):
-        _validate_predicate_columns(node, tables, allow_alias=allow_alias)
-        return
-    if node.not_terms is not None:
-        _validate_where_columns(node.not_terms, tables, allow_alias=allow_alias)
-        return
-    for child in node.and_terms or node.or_terms or []:
-        _validate_where_columns(child, tables, allow_alias=allow_alias)
+    # Per-leaf, no dependence on the tree's shape — layered on the single
+    # canonical walk (item 111) instead of re-recursing the boolean tree.
+    for pred in iter_where_predicates(node):
+        _validate_predicate_columns(pred, tables, allow_alias=allow_alias)
 
 
 def _validate_predicate_columns(
