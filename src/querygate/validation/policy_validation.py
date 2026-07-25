@@ -6,7 +6,7 @@ disabled connection or an over-cap query never even touches the database.
 
 from __future__ import annotations
 
-from typing import Iterator, List, Optional, Set
+from typing import List, Optional, Set
 
 from querygate.core.exceptions import PolicyViolationError
 from querygate.policy.models import Policy
@@ -16,25 +16,11 @@ from querygate.validation.schema_validation import (
     effective_name_map,
     iter_column_refs,
     iter_query_scopes,
+    iter_where_predicates,
     parse_column_ref,
     select_item_column_refs,
     where_depth,
 )
-
-
-def _iter_where_predicates(node: WhereNode) -> Iterator[Predicate]:
-    """Enumerate the Predicate leaves of a WHERE tree — a different axis from
-    the reference visitor (predicates, for count/in-list caps, not column
-    references), so it stays here rather than folding into `iter_column_refs`.
-    """
-    if isinstance(node, Predicate):
-        yield node
-        return
-    if node.not_terms is not None:
-        yield from _iter_where_predicates(node.not_terms)
-        return
-    for child in node.and_terms or node.or_terms or []:
-        yield from _iter_where_predicates(child)
 
 
 def referenced_tables(query: StructuredQuery) -> Set[str]:
@@ -57,13 +43,13 @@ def referenced_tables(query: StructuredQuery) -> Set[str]:
 
 
 def _scope_where_predicate_count(query: StructuredQuery) -> int:
-    return sum(1 for _ in _iter_where_predicates(query.where)) if query.where is not None else 0
+    return sum(1 for _ in iter_where_predicates(query.where)) if query.where is not None else 0
 
 
 def _scope_having_predicate_count(query: StructuredQuery) -> int:
     """HAVING is a WhereNode (item 99); count every predicate in its boolean
     tree, not a flat list length."""
-    return sum(1 for _ in _iter_where_predicates(query.having)) if query.having is not None else 0
+    return sum(1 for _ in iter_where_predicates(query.having)) if query.having is not None else 0
 
 
 def _scope_case_condition_predicate_count(query: StructuredQuery) -> int:
@@ -74,7 +60,7 @@ def _scope_case_condition_predicate_count(query: StructuredQuery) -> int:
     for item in query.select:
         if isinstance(item, CaseSelectItem):
             for branch in item.when:
-                total += sum(1 for _ in _iter_where_predicates(branch.when))
+                total += sum(1 for _ in iter_where_predicates(branch.when))
     return total
 
 
@@ -167,12 +153,12 @@ def _validate_scope(query: StructuredQuery, policy: Policy) -> None:
                 # it exactly like WHERE/HAVING so a deeply-nested condition can't
                 # be a compile-time DoS.
                 _check_where_depth(branch.when, policy, "case condition")
-                all_predicates.extend(_iter_where_predicates(branch.when))
+                all_predicates.extend(iter_where_predicates(branch.when))
     _check_where_depth(query.where, policy, "where")
     _check_where_depth(query.having, policy, "having")
     for node in (query.where, query.having):
         if node is not None:
-            all_predicates.extend(_iter_where_predicates(node))
+            all_predicates.extend(iter_where_predicates(node))
     for pred in all_predicates:
         # A value_subquery predicate has no literal list to size; it's validated
         # as its own scope. Only literal in/not_in lists have a max_in_list_size.
@@ -231,7 +217,7 @@ def _validate_subquery_constraints(scoped: List, policy: Policy) -> None:
     projection *within* the subquery scope)."""
     for depth, scope in scoped:
         if scope.having is not None:
-            for pred in _iter_where_predicates(scope.having):
+            for pred in iter_where_predicates(scope.having):
                 if pred.value_subquery is not None:
                     raise PolicyViolationError(
                         "IN (subquery) is only supported in a WHERE clause, not HAVING (item 97)"
@@ -239,7 +225,7 @@ def _validate_subquery_constraints(scoped: List, policy: Policy) -> None:
         for item in scope.select:
             if isinstance(item, CaseSelectItem):
                 for branch in item.when:
-                    for pred in _iter_where_predicates(branch.when):
+                    for pred in iter_where_predicates(branch.when):
                         if pred.value_subquery is not None:
                             raise PolicyViolationError(
                                 "IN (subquery) is only supported in a WHERE clause, not a CASE "
