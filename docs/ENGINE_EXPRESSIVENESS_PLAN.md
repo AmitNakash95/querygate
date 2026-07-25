@@ -1,12 +1,20 @@
 # Expressive Query Engine — Path to 10/10 (Flagship Pillar Plan)
 
-**Status:** design/plan (no code yet). **Owner:** engine. **Audience:** the
+**Status (2026-07-25):** in progress — **Phase 0 (item 99) has shipped**; Phase 1
+(item 100) is next and its Decision Log entries (§8 entries 1–2) are **recorded**.
+Phases 2–5 (items 101–106) are unstarted. **Owner:** engine. **Audience:** the
 implementing agent (Claude) + reviewers.
 **Authority:** this is the *deep spec* the read-engine expressiveness items point
 to. Item **content** and `✅ DONE` status live in `TODO.md`; execution **order**
-lives in `ROADMAP.md`. This document is the reference those items cite — it does
-not replace them. When you start an item, add its stub to `TODO.md` (next free
-number is **99**) and reconcile `ROADMAP.md`, per CLAUDE.md's worklist rules.
+lives in `ROADMAP.md` (this pillar is **Phase 4** as of the 2026-07-25
+re-sequence). This document is the reference those items cite — it does not
+replace them.
+
+> **Item numbering.** Items 99–106 are already allocated to this plan's phases and
+> exist in `TODO.md`. The highest allocated item file-wide is **113**, so a genuinely
+> new item takes **114** — never reuse a number in this range. (This line previously
+> read "next free number is **99**", which was true only before item 99 was created;
+> it is a trap now, since item numbers are permanent and file-global per CLAUDE.md.)
 
 ---
 
@@ -539,13 +547,20 @@ regression, not progress — hold all four.
 These are the deliberate-tradeoff calls that CLAUDE.md requires be recorded in the
 open **before** implementation, not discovered after:
 
-1. **Bounded `Expression` substrate vs. non-goal #7.** Record *why* a closed,
-   depth-capped expression tree (fixed operators, fixed function set, `max_expression_
-   depth`/`max_expression_nodes`) is **not** the "open-ended expression grammar"
-   non-goal #7 forbids — and what the hard boundary is (no arbitrary UDFs, no free
-   function strings, no uncapped nesting).
-2. **Division semantics.** Guarded divide (`NULLIF(denominator,0)` → NULL) vs.
-   dialect-native error. Pick one, state why.
+1. ✅ **RECORDED 2026-07-25** — **Bounded `Expression` substrate vs. non-goal #7.**
+   Record *why* a closed, depth-capped expression tree (fixed operators, fixed
+   function set, `max_expression_depth`/`max_expression_nodes`) is **not** the
+   "open-ended expression grammar" non-goal #7 forbids — and what the hard boundary
+   is (no arbitrary UDFs, no free function strings, no uncapped nesting).
+   *Outcome: five stated boundaries; see the `docs/PRODUCT_GUIDE.md` Decision Log
+   entry dated 2026-07-25.*
+2. ✅ **RECORDED 2026-07-25** — **Division semantics.** Guarded divide
+   (`NULLIF(denominator,0)` → NULL) vs. dialect-native error. Pick one, state why.
+   *Outcome: **guarded** — `left / NULLIF(right, 0)`. Postgres raises
+   unconditionally; MSSQL's behavior depends on `ARITHABORT`/`ANSI_WARNINGS`, which
+   our `MSSQLSessionDialectAdapter` does not set — and that adapter DOES set
+   `XACT_ABORT ON`, under which an unguarded divide-by-zero aborts the whole
+   transaction, not just the row. Guarding makes it deterministic on both.*
 3. **Window frame bounds.** The default frame and the cap on unbounded frames.
 4. **Interval/relative-date cap and timezone semantics** (UTC vs server-local).
 5. **CROSS JOIN gating** (policy flag default-off + row-cap rationale).

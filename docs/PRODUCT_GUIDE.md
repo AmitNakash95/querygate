@@ -2597,6 +2597,127 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-25 — the roadmap is re-sequenced so the Expressive Query Engine
+  (items 99–106) becomes ROADMAP.md Phase 4, ahead of adoption/breadth.** The
+  engine pillar was previously a subsection at the *bottom* of "Phase 4 — Adoption
+  & breadth", sequenced behind the client SDK (51), DX polish (35), a perf check
+  (94), and the stored-procedure catalog (18). **Why that was wrong:** the engine
+  *is* the North Star's **Structural** pillar, not polish downstream of it. The
+  "no caller-controlled raw SQL, ever" bet (non-goal #1) only holds if the
+  structured surface is expressive enough that a fluent SQL author rarely hits a
+  wall — an agent that hits one routes around the gate (dumps tables, asks for raw
+  access, gives up), at which point the safety guarantee protects nothing because
+  nobody adopts it. Expressiveness is what makes the safety constraint acceptable.
+  Adoption/breadth is also *literally downstream*: every engine item widens the AST
+  the SDK must mirror and each new dialect adapter must render, so building those
+  first buys rework. Adoption & breadth became Phase 5, catalog/observability Phase
+  6. **Two selector fixes shipped with it** so the automated `roadmap-next` walk is
+  deterministic rather than re-derived from prose each session: items 58 phase 2
+  and 30·89 phase 2 sit in Phase 0/1 *ahead* of the engine but appeared in neither
+  gating list (their blockers — external LLM/Toolbox infrastructure, and the
+  maintainer's own signed-release tag push — were described only inline), so both
+  are now listed as externally blocked; and the pick algorithm now states
+  explicitly that **a required Decision Log entry is not a skip condition** — it is
+  the item's own first step. Without that, a cautious agent could skip all seven
+  engine items (each of which says "requires a Decision Log entry before build")
+  and fall through to Phase 5, the exact failure the re-sequence corrects.
+  **Accepted cost:** the client SDK's TypeScript half and new dialects wait; a
+  design partner integrating today uses the shipped in-tree Python builder and the
+  two supported dialects.
+- **2026-07-25 — a closed, depth-capped scalar `Expression` union will enter the
+  read AST (TODO.md item 100), and it is deliberately *not* the "open-ended
+  expression grammar" non-goal #7 forbids.** *(Decision recorded ahead of
+  implementation, as ENGINE_EXPRESSIVENESS_PLAN.md §8 requires; item 100 is not yet
+  built — this entry records the boundary the build must hold to, not shipped
+  behavior.)* Today "what can be projected or compared" is a flat set of leaf
+  shapes: a bare `Table.Column` string, a one-level `ScalarFunctionCall` with no
+  nesting, an aggregate over a bare column string, and a `CASE` whose `then`/`else`
+  is a column-or-literal. That single boundary is why arithmetic, conditional
+  aggregation, nested functions, expression-valued `CASE`, and computed
+  GROUP/ORDER keys are all *the same* missing feature — `SUM(quantity *
+  unit_price)` fails both because no `*` operator exists anywhere and because an
+  aggregate argument can only be a column name. Item 100 replaces that flat set
+  with one recursive `Expression` union (`ColumnExpr` | `LiteralExpr` |
+  `BinaryOpExpr` | `FunctionExpr` | `CaseExpr`) used everywhere a scalar value is
+  expected, and gives aggregates an `Expression` argument.
+  **The hard boundary that keeps this bounded rather than open-ended**, stated so a
+  future change can be measured against it:
+  1. **The operator set is fixed and finite** — `+ - * /` only. Not a parser, not
+     an operator table a caller can extend.
+  2. **`FunctionExpr.fn` is an enum, never a free string.** A caller cannot name a
+     UDF, a stored procedure, or any function the enum does not list. Adding a
+     function is a code change with a dialect decision, not caller input.
+  3. **Nesting is capped, not unbounded** — new `Policy.max_expression_depth`
+     (default 5) and `Policy.max_expression_nodes`, the latter summed **tree-wide**
+     via `_enforce_tree_wide_caps` exactly as item 97 requires, so nesting an
+     expression inside a subquery cannot multiply the budget.
+  4. **Every leaf is still a typed identifier or literal.** `ColumnExpr.col` is
+     resolved and policy-checked like any other column reference; `LiteralExpr`
+     binds as a parameter. No string is ever interpolated into SQL, so non-goal #1
+     is untouched.
+  5. **The canonical visitor recurses through every `Expression` node.** An
+     unvisited `ColumnExpr` buried in a `BinaryOpExpr` would be a silent policy and
+     masking bypass, so `select_item_column_refs` / `predicate_column_refs` recurse
+     and yield each `ColumnExpr.col` at its correct `RefPosition`. This is the
+     make-or-break safety step, and the headline adversarial test is a
+     denied/masked column nested arbitrarily deep in
+     `BinaryOpExpr`/`FunctionExpr`/`CaseExpr` being rejected.
+  What non-goal #7 forbids is a grammar whose *shape* the caller authors freely — an
+  expression string, an arbitrary function name, unbounded nesting. What this adds
+  is a closed algebra over identifiers a caller is *already* allowed to reference:
+  finite operators, an enumerated function set, a capped tree. The difference is
+  that the set of legal programs here is enumerable and every one is
+  policy-checked; an open grammar's is not. **Accepted cost:** the AST surface an
+  agent must learn grows meaningfully, and every later engine item (101–106)
+  inherits `Expression` as a dependency — a bug in the substrate is a bug
+  everywhere. That is the deliberate trade: one node reviewed hard, once, instead
+  of five separate special cases each with its own visitor wiring to forget.
+- **2026-07-25 — division renders guarded: `left / NULLIF(right, 0)`, so
+  divide-by-zero yields NULL rather than an error** (item 100; ratified by the
+  maintainer). The alternative — dialect-native behavior — is **not reliably
+  specified for us**: Postgres raises `division_by_zero` unconditionally, while
+  MSSQL's behavior is contingent on `ARITHABORT`/`ANSI_WARNINGS`, which
+  `connections/dialects.py`'s `MSSQLSessionDialectAdapter` does **not** set (it
+  sets only `LOCK_TIMEOUT`, `XACT_ABORT ON`, and `DEADLOCK_PRIORITY LOW`) — so the
+  outcome would be inherited from whatever the driver/connection negotiates rather
+  than from anything QueryGate specifies. Worse, that same adapter sets
+  **`XACT_ABORT ON`**, under which a run-time error aborts the entire transaction:
+  an unguarded divide-by-zero would take down the whole request rather than yield a
+  row. So "do nothing" means one AST whose behavior varies by backend *and* by
+  driver configuration — exactly what the cross-dialect differential execution
+  suite (item 36 phase 2b) exists to prevent. Guarding makes it deterministic
+  everywhere. It also turns an ordinary analytic query — a ratio over a group that
+  happens to have a zero denominator — into a failed request rather than a NULL
+  cell, which is what a SQL author writing this by hand would reach for anyway.
+  **Accepted cost:** a caller cannot distinguish "denominator was zero" from
+  "operand was NULL" without an explicit `CASE`, and we diverge from Postgres's
+  native behavior — a deliberate consistency-over-fidelity call, documented in the
+  capability section rather than left for a user to discover. This is **not** the
+  engine synthesizing structure the AST didn't ask for (the item-74 line): it is
+  one fixed, documented rendering of the `/` operator the caller *did* ask for,
+  identical on every dialect — the same category as `date_bucket` compiling to
+  `date_trunc` on Postgres and `DATEADD`/`DATEDIFF` on MSSQL.
+- **2026-07-25 — `AggregateSelectItem.col: str` is kept permanently as sugar for
+  `ColumnExpr`, a ratified exception to the item-99 "prefer the clean break"
+  precedent** (item 100). The 2026-07-24 item-99 entry set the precedent for items
+  100–106: prefer a clean breaking change while the AST has no external consumers,
+  and add a shim only once a real caller would break. That precedent and
+  ENGINE_EXPRESSIVENESS_PLAN.md §4 Phase 1's migration note (keep `col` working as
+  sugar) genuinely conflict, so the conflict was surfaced and decided in the open
+  rather than resolved silently by whichever document was read last. **Decision:
+  keep `col`.** Unlike `having` — which no caller outside this repository emitted —
+  `col` *does* have consumers: `examples/`, the docs, and the Python client
+  builder's `agg.*` helpers all produce it. And `SUM(col="Orders.Amount")` is the
+  overwhelmingly common case; forcing `arg={"col": "Orders.Amount"}` on every
+  aggregate is ceremony for no safety gain. **Why this is a narrower exception than
+  the `having` shim would have been:** `col` is normalized to `ColumnExpr` by a
+  `mode="before"` validator, so exactly one shape reaches the compiler, the caps,
+  and the canonical visitor. It is a *spelling*, not a second structural shape and
+  not a second code path — the property that made rejecting the `having` shim
+  worthwhile (one way to express one thing, at the enforcement layer) is preserved.
+  **Accepted cost:** two spellings exist at the wire/schema level, so the MCP tool
+  schema and docs must show which is canonical, and a future reader must know the
+  normalization exists to reason about `col`.
 - **2026-07-24 — `having` and a CASE branch's `when` become full `WhereNode`s
   (TODO.md item 99), a deliberate breaking wire-format change.** `having` was
   `List[Predicate]` (implicitly AND-combined, no nesting) and `CaseWhen.when` was a
