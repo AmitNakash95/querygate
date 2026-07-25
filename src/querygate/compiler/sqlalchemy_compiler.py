@@ -117,12 +117,19 @@ _UNIVERSAL_EXPR_FNS = {
 }
 
 _CAST_TYPES = {
-    # `Unicode`, not `Text`: SQLAlchemy renders Text as `TEXT` on MSSQL, and
-    # T-SQL's TEXT is deprecated — it cannot be compared with `=` or used with
-    # most operators, so `CAST(x AS TEXT)` would compile cleanly and fail
-    # against a real SQL Server (the items 75/82 trap). Unicode renders
-    # NVARCHAR(max) there and VARCHAR on Postgres/SQLite. This is the same type
-    # `MSSQLDialectAdapter.column_mask` already casts through.
+    # `Unicode`, not `Text` — and the reason is DATA CORRUPTION, not syntax.
+    # Verified against a real SQL Server 2022: `Text` renders `VARCHAR(max)`
+    # there (a *connected* MSSQL dialect sets `deprecate_large_types` after
+    # checking the server version, so it does NOT emit the deprecated `TEXT`
+    # that an unconnected `mssql.dialect()` shows — a rendering-only assertion
+    # is actively misleading here). `VARCHAR` is codepage-limited: under the
+    # default SQL_Latin1_General_CP1_CI_AS collation, casting 'δ-λ' through it
+    # silently yields 'd-?'. `Unicode` renders `NVARCHAR(max)` and round-trips
+    # intact, and is the same type `MSSQLDialectAdapter.column_mask` already
+    # casts through. On Postgres/SQLite both spellings render VARCHAR, so this
+    # choice costs nothing there. Pinned by
+    # tests/integration/test_mssql_expression_substrate.py, which asserts the
+    # non-ASCII round-trip rather than the SQL text.
     "text": sa.Unicode,
     "integer": sa.Integer,
     "numeric": sa.Numeric,
