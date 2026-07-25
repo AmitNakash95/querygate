@@ -142,7 +142,7 @@ order-of-magnitude, not commitments.
 | 109 | ✅ MCP `run_structured_writes` has no batch-size cap | S | — |
 | 110 | `value_subquery` in a write's WHERE is validated at the wrong layer | XS | — |
 | 111 | Duplicated WHERE-predicate tree walk across four validators | S | — |
-| 112 | No scheduled (cron) CI run — dependency/security scans only fire on push/PR | S | — |
+| 112 | ✅ No scheduled (cron) CI run — dependency/security scans only fire on push/PR | S | — |
 | 113 | ✅ OBSOLETE — metrics for the removed write-undo / compensation store | — | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
@@ -2226,27 +2226,10 @@ covered by the existing validator test suites passing unchanged.
 **Effort: S. Priority: low (maintainability/drift-prevention, not a live bug).
 Depends on: none.**
 
-### 112. No scheduled (cron) CI run — dependency/security scans only fire on push/PR
+### 112. No scheduled (cron) CI run — dependency/security scans only fire on push/PR ✅ DONE
 
-`.github/workflows/ci.yml`'s only triggers are `push: branches: [main]` and
-`pull_request` — there is no `schedule:` trigger anywhere in
-`.github/workflows/`. SBOM/CVE audit, image scanning, secret scanning, and the
-adversarial/DAST suites therefore only run when someone happens to open a PR
-or push to `main`. A CVE disclosed against an already-merged, unchanged
-dependency isn't caught until the next incidental change touches the repo.
-Separately, `make test-soak` (`Makefile:112-115`, `SOAK_ROUNDS=100`) is never
-invoked by CI at all — only `make test-load`'s lighter `QUERYGATE_LOAD_ROUNDS=5`
-runs in the `postgres-live` job (`ci.yml:150-155`); a slow-degradation or
-pool-leak regression that only surfaces after dozens of rounds passes every PR
-and is caught only if a maintainer remembers to run `test-soak` manually
-before a release.
-
-**Fix:** add a nightly/weekly `schedule:` workflow that runs `dep-audit`-class
-checks (CVE/SBOM/lockfile drift) and `make test-soak` against `main`
-independent of code changes; document the cadence in `docs/RELEASING.md`.
-
-**Effort: S. Priority: medium (closes a real blind window between code
-changes, cheap to add). Depends on: none.**
+Added `.github/workflows/scheduled.yml` — a nightly (07:00 UTC) + `workflow_dispatch` workflow running the CVE/SBOM/lockfile audit, a Trivy image scan, and `make test-soak` against `main` independent of code changes; cadence documented in `docs/RELEASING.md`.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 112).
 
 ### 113. No metrics for the write-undo / compensation-store feature ✅ OBSOLETE (2026-07-23)
 
