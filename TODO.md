@@ -144,6 +144,7 @@ order-of-magnitude, not commitments.
 | 111 | ✅ Duplicated WHERE-predicate tree walk across four validators | S | — |
 | 112 | ✅ No scheduled (cron) CI run — dependency/security scans only fire on push/PR | S | — |
 | 113 | ✅ OBSOLETE — metrics for the removed write-undo / compensation store | — | — |
+| 114 |  Write tool MCP schema advertises read-only predicate fields it rejects | M | 93 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2216,3 +2217,42 @@ Added `.github/workflows/scheduled.yml` — a nightly (07:00 UTC) + `workflow_di
 compensation store or undo path left to instrument, so this observability gap no
 longer exists. If write-*execution* metrics are wanted later, that is a fresh,
 separately-scoped item (not undo-specific).
+
+
+### 114. The write tool's MCP schema advertises read-only predicate fields it rejects
+
+**Effort: M. Priority: medium (agent-facing correctness + MCP token budget).
+Depends on: item 93 (governed writes) — this is a write-contract change and
+should be its own PR, not a rider on a read-engine item.**
+
+`run_structured_writes` is now the LARGEST MCP tool schema (34,594 chars,
+larger than the read tool) because a write statement's `where` reuses the READ
+`Predicate`/`WhereNode` models verbatim. That drags in three field groups the
+write path explicitly **rejects** at validation:
+
+- `expr` / `value_expr` — item 100's scalar Expression (rejected in
+  `validate_write_policy`; **4,871 chars** of `Expression` union definitions are
+  inlined into the write tool because of it),
+- `value_subquery` — rejected since item 110, which also pulls the entire read
+  `StructuredQuery` definition into the write tool's schema.
+
+**Why it matters beyond bytes:** the schema is the agent's contract. Advertising
+a field the server refuses at runtime invites the agent to build a write it will
+be denied, which is exactly the "hit a wall, route around the gate" failure the
+engine plan exists to prevent — and it spends agent context on every session to
+do it.
+
+**Scope:** give the write AST its own predicate/where types carrying only the
+fields writes actually accept (`col`, `op`, `value`, `value_col`, boolean
+groups), instead of reusing the read `Predicate`. The runtime rejections stay as
+defence in depth.
+
+**Acceptance criteria:**
+- The write tool's JSON schema contains no `expr`/`value_expr`/`value_subquery`
+  and no inlined read `StructuredQuery`/`Expression` definitions.
+- Every currently-valid write payload still validates unchanged (this is a pure
+  narrowing to fields already rejected at runtime — assert with a round-trip
+  test over the existing write corpus).
+- The existing runtime rejections keep their tests (defence in depth, not
+  replaced by the schema narrowing).
+- `_MAX_TOTAL_CHARS` in `tests/unit/test_mcp_token_budget.py` drops accordingly.

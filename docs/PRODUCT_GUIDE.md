@@ -348,7 +348,11 @@ rejected exactly as it would be at the top level. That last one is the load-
 bearing property — `tests/security/test_adversarial_security.py` asserts it for
 a denied *and* a masked column in every position an expression can occupy,
 including the subtle one (a column inside a `CASE`'s *condition*, which is a
-predicate tree rather than an expression node).
+predicate tree rather than an expression node). There is exactly **one**
+recursion over the union (`iter_expression_parts`); the ref walk, the caps, and
+the CASE rules are filters over it, and it raises on an unrecognized node rather
+than silently skipping it — so a future member cannot open a hole by being
+taught to some walks and not others.
 
 **Division renders guarded** — `left / NULLIF(right, 0)`, so a zero denominator
 yields NULL identically on every dialect instead of Postgres's hard error and
@@ -363,7 +367,12 @@ Postgres has no `round(double precision, integer)` so the adapter casts to
 `NUMERIC`), and `substring` — are one `DialectAdapter.scalar_function` method.
 `substring` requires exactly three arguments at the AST layer *because* T-SQL
 has no two-argument form: allowing it would render fine on Postgres and break
-against a live SQL Server.
+against a live SQL Server. Every one of these is verified by *executing* against
+both real backends and asserting values — deliberately not by asserting SQL
+text, which cannot distinguish a correct rendering from one that merely looks
+correct. (`to: "text"` is the case that proves the point: it maps to
+`NVARCHAR(max)` on MSSQL, and the wrong spelling does not error at all — it
+silently mangles non-ASCII, which only a round-trip assertion catches.)
 
 **Writes are unchanged.** A computed predicate in a write's `WHERE` is rejected
 at write validation, the same posture item 110 established for subqueries —

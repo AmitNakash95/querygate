@@ -30,6 +30,7 @@ from querygate.query_ast.models import (
     Expression,
     ExpressionSelectItem,
     FunctionExpr,
+    LiteralExpr,
     PercentileContSelectItem,
     Predicate,
     ScalarFunctionSelectItem,
@@ -75,30 +76,85 @@ def effective_name_map(query: StructuredQuery) -> Dict[str, str]:
     return mapping
 
 
-def iter_expression_nodes(expr: Expression) -> Iterator[Expression]:
-    """Every node of a bounded scalar `Expression` tree (item 100), in document
-    order, INCLUDING expressions reachable only through a nested `CaseExpr`
-    branch's condition predicates (`CASE WHEN a > b * 2 THEN ...`). One walk,
-    used for column-ref collection, the depth/node caps, and the nested-CASE
-    rules — so a new union member is taught here once, not in five places.
+class ExpressionPart(NamedTuple):
+    """One element yielded by `iter_expression_parts`, the single canonical walk
+    over an `Expression` tree.
+
+    `node` is an `Expression` node, unless `is_condition` — in which case it is a
+    `CaseExpr` branch's `when`, a `WhereNode` rather than an expression. That
+    distinction is the reason this walk yields a tagged part instead of a plain
+    node: collecting column refs has to cross out of the expression union into
+    the boolean-condition layer, while the node/depth caps must not count the
+    condition tree as expression structure.
     """
-    yield expr
+
+    depth: int
+    node: object
+    is_condition: bool
+
+
+def iter_expression_parts(expr: Expression, _depth: int = 1) -> Iterator[ExpressionPart]:
+    """THE single recursion over the closed `Expression` union (item 100).
+
+    Everything else that needs to traverse an expression — column-ref collection
+    (`expression_column_refs`), the node-count and depth caps
+    (`iter_expression_nodes` / `expression_depth`), and the nested-CASE rules
+    (`iter_expression_case_conditions`) — is a *filter* over this one walk rather
+    than its own recursion. That matters because those four questions are all
+    load-bearing for safety, and four hand-maintained walks over one union is
+    exactly the drift failure class items 96 and 111 exist to prevent: a new
+    union member added to three of four walks opens a silent hole in the fourth.
+
+    It descends into expressions reachable ONLY through a `CaseExpr` branch's
+    condition predicates (`CASE WHEN a > b * 2 THEN …`) — the deepest position
+    the grammar allows.
+
+    **Fails closed on an unknown node.** A future union member that reaches here
+    without a branch raises rather than being silently yielded childless, which
+    would contribute neither its refs (a policy/mask bypass) nor its size (a cap
+    bypass). The closed union plus Pydantic validation means a caller cannot
+    trigger this; only a code change can, and the tests below catch it.
+    """
+    yield ExpressionPart(_depth, expr, False)
+    if isinstance(expr, (ColumnExpr, LiteralExpr)):
+        return  # leaves
     if isinstance(expr, BinaryOpExpr):
-        yield from iter_expression_nodes(expr.left)
-        yield from iter_expression_nodes(expr.right)
-    elif isinstance(expr, FunctionExpr):
+        yield from iter_expression_parts(expr.left, _depth + 1)
+        yield from iter_expression_parts(expr.right, _depth + 1)
+        return
+    if isinstance(expr, FunctionExpr):
         for arg in expr.args:
-            yield from iter_expression_nodes(arg)
-    elif isinstance(expr, CastExpr):
-        yield from iter_expression_nodes(expr.cast)
-    elif isinstance(expr, CaseExpr):
+            yield from iter_expression_parts(arg, _depth + 1)
+        return
+    if isinstance(expr, CastExpr):
+        yield from iter_expression_parts(expr.cast, _depth + 1)
+        return
+    if isinstance(expr, CaseExpr):
         for branch in expr.when:
+            yield ExpressionPart(_depth, branch.when, True)
             for pred in iter_where_predicates(branch.when):
                 for nested in predicate_expressions(pred):
-                    yield from iter_expression_nodes(nested)
-            yield from iter_expression_nodes(branch.then)
+                    yield from iter_expression_parts(nested, _depth + 1)
+            yield from iter_expression_parts(branch.then, _depth + 1)
         if expr.else_ is not None:
-            yield from iter_expression_nodes(expr.else_)
+            yield from iter_expression_parts(expr.else_, _depth + 1)
+        return
+    raise QueryValidationError(
+        f"Unsupported expression node {type(expr).__name__} — it was added to the "
+        "Expression union without being taught to iter_expression_parts"
+    )
+
+
+def iter_expression_nodes(expr: Expression) -> Iterator[Expression]:
+    """Every `Expression` node in a tree (a `CaseExpr` condition is a `WhereNode`,
+    not an expression node, so it is excluded). Feeds `max_expression_nodes` and
+    the per-`CaseExpr` branch cap."""
+    return (part.node for part in iter_expression_parts(expr) if not part.is_condition)
+
+
+def iter_expression_case_conditions(expr: Expression) -> Iterator[WhereNode]:
+    """Every `CaseExpr` branch condition inside an expression tree, at any depth."""
+    return (part.node for part in iter_expression_parts(expr) if part.is_condition)
 
 
 def expression_column_refs(expr: Expression) -> Iterator[str]:
@@ -109,57 +165,23 @@ def expression_column_refs(expr: Expression) -> Iterator[str]:
     bypass, the single most important rule in
     docs/ENGINE_EXPRESSIVENESS_PLAN.md §1.
 
-    This recurses the union directly rather than filtering
-    `iter_expression_nodes`, because collecting refs has to cross out of the
-    expression union into the boolean-condition layer and back (via
-    `predicate_column_refs`, the canonical per-predicate collector, which
-    recurses into a predicate's own expressions). The two walks are the closed
-    union's only recursions and MUST stay in lockstep: a new `Expression`
-    member is handled in both, or it silently contributes neither refs nor
-    node-count. `test_reference_visitor.py` pins that with a single mixed
-    expression asserting the exact ref set.
+    A condition contributes only its predicates' *direct* refs: any expression
+    those predicates carry is descended into by the walk itself, so taking the
+    full `predicate_column_refs` here would double-report them.
     """
-    if isinstance(expr, ColumnExpr):
-        yield expr.col
-    elif isinstance(expr, BinaryOpExpr):
-        yield from expression_column_refs(expr.left)
-        yield from expression_column_refs(expr.right)
-    elif isinstance(expr, FunctionExpr):
-        for arg in expr.args:
-            yield from expression_column_refs(arg)
-    elif isinstance(expr, CastExpr):
-        yield from expression_column_refs(expr.cast)
-    elif isinstance(expr, CaseExpr):
-        for branch in expr.when:
-            yield from _where_column_refs(branch.when)
-            yield from expression_column_refs(branch.then)
-        if expr.else_ is not None:
-            yield from expression_column_refs(expr.else_)
-    # LiteralExpr carries no reference.
+    for part in iter_expression_parts(expr):
+        if part.is_condition:
+            for pred in iter_where_predicates(part.node):
+                yield from predicate_direct_column_refs(pred)
+        elif isinstance(part.node, ColumnExpr):
+            yield part.node.col
 
 
-def expression_depth(expr: Expression, depth: int = 1) -> int:
+def expression_depth(expr: Expression) -> int:
     """Nesting depth of an `Expression` tree, counting a `CaseExpr` branch's
     condition-predicate expressions as children too — so `max_expression_depth`
     bounds every path a caller can build, not just the arithmetic one."""
-    if isinstance(expr, BinaryOpExpr):
-        return max(expression_depth(expr.left, depth + 1), expression_depth(expr.right, depth + 1))
-    if isinstance(expr, FunctionExpr):
-        return max(expression_depth(arg, depth + 1) for arg in expr.args)
-    if isinstance(expr, CastExpr):
-        return expression_depth(expr.cast, depth + 1)
-    if isinstance(expr, CaseExpr):
-        children = [expression_depth(branch.then, depth + 1) for branch in expr.when]
-        children.extend(
-            expression_depth(nested, depth + 1)
-            for branch in expr.when
-            for pred in iter_where_predicates(branch.when)
-            for nested in predicate_expressions(pred)
-        )
-        if expr.else_ is not None:
-            children.append(expression_depth(expr.else_, depth + 1))
-        return max(children)
-    return depth
+    return max(part.depth for part in iter_expression_parts(expr) if not part.is_condition)
 
 
 def predicate_expressions(pred: Predicate) -> Iterator[Expression]:
@@ -205,10 +227,7 @@ def iter_scope_case_conditions(query: StructuredQuery) -> Iterator[WhereNode]:
     condition cannot escape them by being nested one level deeper.
     """
     for expr in iter_scope_expressions(query):
-        for node in iter_expression_nodes(expr):
-            if isinstance(node, CaseExpr):
-                for branch in node.when:
-                    yield branch.when
+        yield from iter_expression_case_conditions(expr)
 
 
 def select_item_column_refs(item: SelectItem) -> Iterator[str]:
@@ -241,14 +260,13 @@ def select_item_column_refs(item: SelectItem) -> Iterator[str]:
         yield item.col
 
 
-def predicate_column_refs(pred: Predicate) -> Iterator[str]:
-    """Every Table.Column ref a Predicate touches: `col` if it's a dotted
-    Table.Column (a bare alias — valid only in HAVING — is skipped here;
-    enforcing that strictly is `_validate_predicate_columns`'s job, not this
-    collector's), else each `ColArg` in `col_fn.args` or every ref inside a
-    computed `expr` — plus `value_col`/`value_expr` if set. Single source of
-    truth shared by policy validation's ref walk and this module's own
-    table-collection/reflection logic.
+def predicate_direct_column_refs(pred: Predicate) -> Iterator[str]:
+    """The refs a Predicate carries WITHOUT descending into its expressions:
+    `col` if dotted, each `ColArg` in `col_fn.args`, and `value_col`.
+
+    Split out from `predicate_column_refs` for one caller —
+    `expression_column_refs`, whose walk already descends into `expr`/
+    `value_expr` itself and would otherwise report those refs twice.
     """
     if pred.col is not None:
         if "." in pred.col:
@@ -257,12 +275,21 @@ def predicate_column_refs(pred: Predicate) -> Iterator[str]:
         for arg in pred.col_fn.args:
             if isinstance(arg, ColArg):
                 yield arg.col
-    elif pred.expr is not None:
-        yield from expression_column_refs(pred.expr)
     if pred.value_col is not None:
         yield pred.value_col
-    if pred.value_expr is not None:
-        yield from expression_column_refs(pred.value_expr)
+
+
+def predicate_column_refs(pred: Predicate) -> Iterator[str]:
+    """Every Table.Column ref a Predicate touches: its direct refs (see above —
+    a bare alias in `col`, valid only in HAVING, is skipped; enforcing that
+    strictly is `_validate_predicate_columns`'s job, not this collector's) plus
+    every ref inside a computed `expr`/`value_expr`. Single source of truth
+    shared by policy validation's ref walk and this module's own
+    table-collection/reflection logic.
+    """
+    yield from predicate_direct_column_refs(pred)
+    for expression in predicate_expressions(pred):
+        yield from expression_column_refs(expression)
 
 
 class RefPosition(enum.Enum):
