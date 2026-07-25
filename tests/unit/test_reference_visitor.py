@@ -26,7 +26,11 @@ from querygate.query_ast.models import (
     WhereGroup,
 )
 from querygate.validation.policy_validation import referenced_tables
-from querygate.validation.schema_validation import RefPosition, iter_column_refs
+from querygate.validation.schema_validation import (
+    RefPosition,
+    iter_column_refs,
+    iter_where_predicates,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -132,3 +136,40 @@ def test_referenced_tables_maps_alias_to_physical():
         ],
     )
     assert referenced_tables(query) == {"employees"}
+
+
+# --------------------------------------------------------------------------- #
+# iter_where_predicates — the single canonical WHERE-predicate walk (item 111). #
+# The read policy/schema + write policy/schema validators all consume it, so    #
+# its tree traversal is pinned here in one place (the item-96 discipline, for    #
+# the predicate axis rather than the column-ref axis).                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_iter_where_predicates_yields_every_leaf_through_and_or_not():
+    """A nested boolean tree mixing and/or/not: every Predicate leaf is yielded
+    in document order, and no WhereGroup node is yielded."""
+    tree = WhereGroup(
+        and_terms=[
+            Predicate(col="orders.id", op="gt", value=0),
+            WhereGroup(
+                or_terms=[
+                    Predicate(col="orders.status", op="eq", value="new"),
+                    WhereGroup(not_terms=Predicate(col="orders.total", op="lt", value=10)),
+                ]
+            ),
+        ]
+    )
+    preds = list(iter_where_predicates(tree))
+    assert all(isinstance(p, Predicate) for p in preds)
+    assert [(p.col, p.value) for p in preds] == [
+        ("orders.id", 0),
+        ("orders.status", "new"),
+        ("orders.total", 10),
+    ]
+
+
+def test_iter_where_predicates_on_a_bare_predicate():
+    """A WHERE that is a single Predicate (not a group) yields just that node."""
+    leaf = Predicate(col="orders.id", op="eq", value=1)
+    assert list(iter_where_predicates(leaf)) == [leaf]

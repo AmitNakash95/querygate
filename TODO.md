@@ -141,7 +141,7 @@ order-of-magnitude, not commitments.
 | 108 | ✅ Write-preview diff runs the full DML before the affected-row cap is checked | S | — |
 | 109 | ✅ MCP `run_structured_writes` has no batch-size cap | S | — |
 | 110 | ✅ `value_subquery` in a write's WHERE is validated at the wrong layer | XS | — |
-| 111 | Duplicated WHERE-predicate tree walk across four validators | S | — |
+| 111 | ✅ Duplicated WHERE-predicate tree walk across four validators | S | — |
 | 112 | ✅ No scheduled (cron) CI run — dependency/security scans only fire on push/PR | S | — |
 | 113 | ✅ OBSOLETE — metrics for the removed write-undo / compensation store | — | — |
 
@@ -2192,23 +2192,10 @@ of transport).
 `validate_write_policy` now rejects a `value_subquery` predicate anywhere in a write's WHERE with a clean `QueryValidationError` at validation time (walking the whole boolean tree), instead of failing deep in the write compiler's `ctx=None` path.
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 110).
 
-### 111. Duplicated WHERE-predicate tree walk across four validators
+### 111. Duplicated WHERE-predicate tree walk across four validators ✅ DONE
 
-`validation/policy_validation.py`, `schema_validation.py`,
-`write_policy_validation.py`, and `write_schema_validation.py` each hand-roll
-their own recursive WHERE-boolean-tree enumerator, rather than sharing one
-implementation the way item 96 centralized column-ref walking into
-`iter_column_refs`. All four are correct today, but the read/write validator
-pairs could silently drift the next time `WhereNode` grows a new combinator
-(a new node type would need updating in four places, easy to miss one) — the
-exact class of bug item 96 was built to prevent for column refs.
-
-**Fix:** extract one shared WHERE-tree-walk helper (predicate iterator) used
-by all four validators, analogous to `iter_column_refs`; no behavior change,
-covered by the existing validator test suites passing unchanged.
-
-**Effort: S. Priority: low (maintainability/drift-prevention, not a live bug).
-Depends on: none.**
+Extracted one shared `iter_where_predicates` (in `schema_validation.py`, beside item 96's `iter_column_refs`) consumed by all four read/write policy/schema validators; the four hand-rolled copies + their now-unused imports were deleted. No behavior change (full + security suites pass unchanged; two direct contract tests added).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 111).
 
 ### 112. No scheduled (cron) CI run — dependency/security scans only fire on push/PR ✅ DONE
 
