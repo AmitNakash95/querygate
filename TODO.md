@@ -140,7 +140,7 @@ order-of-magnitude, not commitments.
 | 107 | ✅ Batch query execution double-reserves quota on an approval retry | S | — |
 | 108 | ✅ Write-preview diff runs the full DML before the affected-row cap is checked | S | — |
 | 109 | ✅ MCP `run_structured_writes` has no batch-size cap | S | — |
-| 110 | `value_subquery` in a write's WHERE is validated at the wrong layer | XS | — |
+| 110 | ✅ `value_subquery` in a write's WHERE is validated at the wrong layer | XS | — |
 | 111 | Duplicated WHERE-predicate tree walk across four validators | S | — |
 | 112 | ✅ No scheduled (cron) CI run — dependency/security scans only fire on push/PR | S | — |
 | 113 | ✅ OBSOLETE — metrics for the removed write-undo / compensation store | — | — |
@@ -2187,26 +2187,10 @@ of transport).
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 109).
 
-### 110. `value_subquery` in a write's WHERE is validated at the wrong layer
+### 110. `value_subquery` in a write's WHERE is validated at the wrong layer ✅ DONE
 
-`UpdateStatement`/`DeleteStatement` reuse the read `WhereNode`, so a
-`Predicate.value_subquery` (item 97) is structurally legal there, but neither
-`write_policy_validation.py` nor `write_schema_validation.py` inspects it —
-it only fails later, inside `compiler/write_compiler.py`'s `_compile_where`,
-because the compiler always passes `ctx=None` for writes. This isn't
-currently exploitable (the compiler-level failure is safe), but it fails at
-the wrong layer with a compiler-internal error instead of a clean policy/
-schema-validation rejection, and it's a latent trap: a future write-compiler
-change that ever passes a non-`None` `ctx` (e.g. to support a write-side
-subquery feature) would silently reopen a bypass this layer was never built
-to check.
-
-**Fix:** explicitly reject `value_subquery` predicates in a write's WHERE at
-`write_policy_validation.py` (mirroring how the read side scopes subqueries),
-with a clear `QueryValidationError`, and add a regression test.
-
-**Effort: XS. Priority: low-medium (defense-in-depth / clear error, not a live
-bypass). Depends on: none.**
+`validate_write_policy` now rejects a `value_subquery` predicate anywhere in a write's WHERE with a clean `QueryValidationError` at validation time (walking the whole boolean tree), instead of failing deep in the write compiler's `ctx=None` path.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 110).
 
 ### 111. Duplicated WHERE-predicate tree walk across four validators
 

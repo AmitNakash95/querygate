@@ -321,14 +321,14 @@ execution disabled), **41 ph2** (stateless paginated blast-radius), and
 frontier's buildable threads:
 
 - **Technical-Review Phase 1 (107, 108, 109) — ✅ all shipped 2026-07-24; Review
-  Phase 2 (112) — ✅ shipped 2026-07-25.** Quota double-reserve on an approval
-  retry (107), the write preview running the real DML before the over-cap check
-  (108), the missing MCP write batch-size cap (109), and the scheduled/cron CI job
-  for CVE/SBOM scans + `make test-soak` (112) are done. The **remaining review
-  items** are both still buildable with no external dependency, in Review Phase 3:
-  **110** (reject `value_subquery` in a write WHERE at the validation layer, XS)
-  and **111** (consolidate the four hand-rolled WHERE-predicate walks into one
-  shared helper, à la item 96). These are the next buildable thread.
+  Phase 2 (112) + Phase 3 (110) — ✅ shipped 2026-07-25.** Quota double-reserve on
+  an approval retry (107), the write preview running the real DML before the
+  over-cap check (108), the missing MCP write batch-size cap (109), the
+  scheduled/cron CI job for CVE/SBOM scans + `make test-soak` (112), and rejecting
+  `value_subquery` in a write WHERE at the validation layer (110) are done. The
+  **one remaining review item** is still buildable with no external dependency:
+  **111** (consolidate the four hand-rolled WHERE-predicate walks into one shared
+  helper, à la item 96), Review Phase 3. That is the next buildable thread.
 - **Flagship engine:** **item 99 shipped 2026-07-24** — it was the one
   flagship-engine item needing no Decision Log entry; **100–106 each require one
   before build**, so the engine pillar is decision-gated again from here.
@@ -430,7 +430,7 @@ already-planned initiatives.
 
 ### Review Phase 3 — Architecture and maintainability
 
-- [ ] **110** — Explicitly reject `value_subquery` in a write's WHERE at the
+- [x] **110** — Explicitly reject `value_subquery` in a write's WHERE at the
   write-validation layer instead of relying on the compiler's `ctx=None`
   default to fail it.
   - Why: not currently exploitable, but it fails at the wrong layer with a
