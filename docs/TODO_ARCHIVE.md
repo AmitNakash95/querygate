@@ -5733,6 +5733,50 @@ verified to bite: with the new check reverted they fail (validation does *not*
 raise — proving the pre-fix "wrong layer" behavior), and pass with it restored.
 The write + subquery security boundary suites still pass unchanged.
 
+### 111. Duplicated WHERE-predicate tree walk across four validators ✅ DONE
+
+**Effort: S. Priority: low (maintainability/drift-prevention, not a live bug).
+Depends on: none.** Surfaced by the 2026-07-23 technical review
+(`TECHNICAL_REVIEW.md`), Review Phase 3.
+
+**Why it mattered.** `policy_validation.py`, `schema_validation.py`,
+`write_policy_validation.py`, and `write_schema_validation.py` each hand-rolled
+their own recursive WHERE-boolean-tree predicate enumerator — four byte-identical
+copies of `if Predicate: yield; elif not_terms: recurse; else: recurse children`.
+All four were correct, but the next time `WhereNode` grows a new combinator, a new
+node type would need updating in four places — easy to miss one and silently open
+a policy/schema hole in a forgotten copy. This is the exact class of bug item 96
+was built to prevent for column refs (`iter_column_refs`), applied to the
+predicate axis.
+
+**What shipped.** One shared `iter_where_predicates(node)` in
+`schema_validation.py` (beside item 96's `iter_column_refs`, the AST-walk home),
+now public and documented as the single canonical WHERE-predicate walk. The other
+three validators import it; their local copies (`_iter_where_predicates` /
+`_where_predicates`) and the now-unused `Iterator`/`Predicate`/`WhereNode` imports
+they required were deleted. `iter_where_and_having_predicates` (already in
+`schema_validation.py`) now delegates to it too.
+
+The consolidation went one level further than the four named enumerators: the two
+*other* per-leaf boolean-tree recursions in `schema_validation.py` — the column-ref
+walk `_where_column_refs` (feeds item 96's `iter_column_refs`) and the
+column-validation walk `_validate_where_columns` — were also re-expressed as
+`for pred in iter_where_predicates(node): …`, since both are purely per-Predicate
+with no dependence on tree shape (provably identical output and document order).
+The **only** remaining hand-rolled recursion over the boolean tree is
+`_where_depth`, which genuinely needs the tree structure (nesting depth) and so
+cannot be leaf-flattened — a legitimately distinct operation, not a missed
+duplicate. So a new `WhereGroup` combinator is now handled in exactly one place
+for every leaf-oriented traversal.
+
+**No behavior change**, by construction (the four walks were identical) and by
+proof: the full default suite (1613) and the security suite (260) pass unchanged.
+Added two direct contract tests in `tests/unit/test_reference_visitor.py` (the
+item-96 visitor's test home) pinning the traversal — every Predicate leaf yielded
+in document order through nested and/or/not groups, no `WhereGroup` node yielded,
+and the bare-Predicate case — so a future edit to the now-single helper is caught
+directly, not only transitively.
+
 ### 112. No scheduled (cron) CI run — dependency/security scans only fire on push/PR ✅ DONE
 
 **Effort: S. Priority: medium (closes a real blind window between code changes,
