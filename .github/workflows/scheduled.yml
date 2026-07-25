@@ -37,6 +37,7 @@ jobs:
   dependency-audit:
     name: Dependency CVE + SBOM + lockfile drift
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -70,6 +71,7 @@ jobs:
   image-scan:
     name: Trivy image CVE/secret/misconfig scan
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -96,6 +98,7 @@ jobs:
   soak:
     name: Guardrail soak (make test-soak)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:15.1
