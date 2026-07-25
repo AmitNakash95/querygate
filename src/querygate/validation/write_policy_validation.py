@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Iterator
 
-from querygate.core.exceptions import PolicyViolationError
+from querygate.core.exceptions import PolicyViolationError, QueryValidationError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import Predicate, WhereNode
 from querygate.validation.schema_validation import parse_column_ref, predicate_column_refs
@@ -87,6 +87,20 @@ def validate_write_policy(statement: WriteStatement, policy: Policy, connection_
     where = getattr(statement, "where", None)
     if where is not None:
         for pred in _where_predicates(where):
+            # A subquery predicate (item 97's `value_subquery` / IN (subquery)) is
+            # a READ-only capability — writes never pass a compiler `ctx`, so the
+            # write compiler can't render one and would fail deep inside
+            # `_compile_where` with an internal error. Reject it here, at the
+            # validation layer, with a clear message instead: the write path
+            # genuinely lacks this capability, so this is a reject-not-emulate
+            # rejection (like MSSQL `array_agg`), not a policy denial. Scope the
+            # target rows with literal or column predicates instead.
+            if pred.value_subquery is not None:
+                raise QueryValidationError(
+                    "A subquery predicate (value_subquery / IN (subquery)) is not "
+                    "supported in a write's WHERE clause; scope the target rows "
+                    "with literal or column predicates instead."
+                )
             for ref in predicate_column_refs(pred):
                 table, column = parse_column_ref(ref)
                 if not policy.column_allowed(table, column):
