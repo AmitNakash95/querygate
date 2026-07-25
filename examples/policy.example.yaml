@@ -35,8 +35,18 @@ default:
   max_where_predicates: 100
   max_in_list_size: 1000
 
-  # Caps the number of WHEN branches in a single CASE select item.
+  # Caps the number of WHEN branches in a single CASE — anywhere it appears,
+  # including a CASE nested inside an aggregate argument or arithmetic.
   max_case_branches: 10
+
+  # Bounds on the scalar expression substrate (arithmetic, nested functions,
+  # conditional aggregation — TODO.md item 100). These are what make the
+  # expression grammar *bounded* rather than open-ended: max_expression_depth
+  # limits how deeply one expression may nest, and max_expression_nodes limits
+  # total expression size summed across the query AND every subquery, so
+  # nesting can't multiply the budget.
+  max_expression_depth: 5
+  max_expression_nodes: 200
 
   timeout_seconds: 30
   max_concurrency: 8

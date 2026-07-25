@@ -53,9 +53,10 @@ from querygate.execution import concurrency as cc
 from querygate.execution import service as svc
 from querygate.execution.admission import QueueMode
 from querygate.execution.service import StructuredQueryService, _cap_response_bytes
+from querygate.audit.events import normalize_query_shape
 from querygate.mcp.exceptions import _error_code_from_exception
 from querygate.policy.loader import PolicyStore, set_policy_store
-from querygate.policy.models import MandatoryRowFilter, Policy
+from querygate.policy.models import ColumnMask, ColumnMaskKind, MandatoryRowFilter, Policy
 from querygate.secrets.resolvers import VaultSecretResolver
 from querygate.query_ast.models import (
     AggregateSelectItem,
@@ -1830,3 +1831,179 @@ async def test_per_principal_quota_refuses_execution_before_touching_the_databas
     )
     with pytest.raises(AssertionError, match="must not reach"):
         await other.execute(query)
+
+
+# --------------------------------------------------------------------------- #
+# Item 100 — the bounded scalar Expression substrate.
+#
+# ENGINE_EXPRESSIVENESS_PLAN.md §1 rule 2: "Any new node whose column references
+# are not yielded by the visitor is a silent policy-and-mask bypass." An
+# expression is a RECURSIVE node, so the attack is to bury the forbidden column
+# as deep as the grammar allows and in the least obvious position — inside a
+# CASE branch's *condition*, which is not an Expression node at all but an
+# ordinary predicate tree the ref walk has to cross into and back out of.
+# --------------------------------------------------------------------------- #
+def _buried(leaf: dict) -> dict:
+    """`leaf` placed at the deepest position the expression grammar allows."""
+    return {
+        "op": "+",
+        "left": {
+            "fn": "coalesce",
+            "args": [{"cast": leaf, "to": "numeric"}, {"literal": 0}],
+        },
+        "right": {"literal": 1},
+    }
+
+
+def _expression_positions(leaf: dict):
+    """Every distinct AST position an Expression can occupy, each hiding `leaf`.
+
+    Parameterizing over positions (rather than testing one) is the point: the
+    substrate is reachable from a projection, an aggregate argument, and BOTH
+    sides of a predicate, and a walker fixed for one position but not another is
+    exactly the drift these tests exist to catch.
+    """
+    return {
+        "expression_projection": {
+            "from": "customers",
+            "select": [{"expr": _buried(leaf), "as": "computed"}],
+        },
+        "aggregate_argument": {
+            "from": "customers",
+            "select": [{"fn": "sum", "arg": _buried(leaf), "as": "total"}],
+        },
+        "case_then_inside_an_aggregate": {
+            "from": "customers",
+            "select": [
+                {
+                    "fn": "sum",
+                    "arg": {
+                        "when": [
+                            {
+                                "when": {"col": "customers.id", "op": "gt", "value": 0},
+                                "then": _buried(leaf),
+                            }
+                        ]
+                    },
+                    "as": "total",
+                }
+            ],
+        },
+        "case_condition_inside_an_expression": {
+            # The subtle one: the leaf is in a *predicate* nested in a CASE
+            # condition nested in an expression — outside the Expression union
+            # entirely, reachable only if the ref walk crosses layers.
+            "from": "customers",
+            "select": [
+                {
+                    "expr": {
+                        "when": [
+                            {
+                                "when": {"col": leaf["col"], "op": "eq", "value": 1},
+                                "then": {"literal": 1},
+                            }
+                        ]
+                    },
+                    "as": "computed",
+                }
+            ],
+        },
+        "predicate_left_side": {
+            "from": "customers",
+            "select": ["customers.id"],
+            "where": {"expr": _buried(leaf), "op": "gt", "value": 1},
+        },
+        "predicate_right_side": {
+            "from": "customers",
+            "select": ["customers.id"],
+            "where": {"col": "customers.id", "op": "gt", "value_expr": _buried(leaf)},
+        },
+    }
+
+
+@pytest.mark.parametrize("position", list(_expression_positions({"col": "customers.id"})))
+def test_denied_column_buried_in_an_expression_is_rejected(position):
+    """The headline test: a column the policy denies must be rejected no matter
+    how deeply an expression buries it."""
+    query = StructuredQuery.model_validate(
+        _expression_positions({"col": "customers.secret_code"})[position]
+    )
+    policy = Policy(denied_columns={"customers": ["secret_code"]}, max_expression_depth=10)
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+@pytest.mark.parametrize("position", list(_expression_positions({"col": "customers.id"})))
+def test_masked_column_buried_in_an_expression_is_rejected(position):
+    """A masked column may ONLY surface as a bare top-level projection (item
+    49). Inside an expression it is a non-projection input, so the raw value
+    would leak by inference — reject, never silently mask in place."""
+    query = StructuredQuery.model_validate(
+        _expression_positions({"col": "customers.phone"})[position]
+    )
+    policy = Policy(
+        column_masks={"customers": [ColumnMask(column="phone", kind=ColumnMaskKind.NULL)]},
+        max_expression_depth=10,
+    )
+    with pytest.raises(PolicyViolationError, match="masked"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_expression_cannot_pull_in_an_undeclared_table():
+    """An expression ref to a table that is neither the from-table nor a
+    declared join must be rejected at schema validation, exactly like any other
+    ref — an expression is not a back door into the table graph."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [
+                {
+                    "expr": {
+                        "op": "*",
+                        "left": {"col": "customers.id"},
+                        "right": {"col": "secrets.value"},
+                    },
+                    "as": "computed",
+                }
+            ],
+        }
+    )
+    with pytest.raises(QueryValidationError, match="undeclared"):
+        asyncio.run(sv.validate_schema(query, "demo"))
+
+
+def test_expression_literals_never_reach_a_persisted_audit_event():
+    """Expressiveness must not become an exfiltration channel through the audit
+    trail: arithmetic constants and CASE literals are values like any other, and
+    a persisted event carries no values (non-negotiable 3)."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [
+                {
+                    "fn": "sum",
+                    "arg": {
+                        "when": [
+                            {
+                                "when": {
+                                    "col": "customers.country",
+                                    "op": "eq",
+                                    "value": "SECRET-COUNTRY",
+                                },
+                                "then": {
+                                    "op": "*",
+                                    "left": {"col": "customers.id"},
+                                    "right": {"literal": 987654321},
+                                },
+                            }
+                        ],
+                        "else": {"literal": "SECRET-ELSE"},
+                    },
+                    "as": "total",
+                }
+            ],
+        }
+    )
+    shape = json.dumps(normalize_query_shape(query))
+    for needle in ("SECRET-COUNTRY", "SECRET-ELSE", "987654321"):
+        assert needle not in shape, f"{needle} leaked into the audited query shape"

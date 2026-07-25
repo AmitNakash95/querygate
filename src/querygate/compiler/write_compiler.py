@@ -82,11 +82,11 @@ def compile_write(
     if isinstance(statement, UpdateStatement):
         # A validated set: bare column name -> literal value. `.where` is
         # required by the AST, so this is never an unqualified UPDATE.
-        where_clause = _compile_where(statement.where, {statement.table: table}, alias_map={})
+        where_clause = _compile_where(statement.where, {statement.table: table}, {}, dialect)
         return sa.update(table).where(where_clause).values(**_coerce_row(statement.set, table))
 
     if isinstance(statement, DeleteStatement):
-        where_clause = _compile_where(statement.where, {statement.table: table}, alias_map={})
+        where_clause = _compile_where(statement.where, {statement.table: table}, {}, dialect)
         return sa.delete(table).where(where_clause)
 
     if isinstance(statement, UpsertStatement):

@@ -91,6 +91,20 @@ def validate_write_policy(statement: WriteStatement, policy: Policy, connection_
                     "supported in a write's WHERE clause; scope the target rows "
                     "with literal or column predicates instead."
                 )
+            # Item 100's scalar Expression substrate is a READ-engine capability
+            # (ENGINE_EXPRESSIVENESS_PLAN.md is scoped to the read query engine).
+            # A computed predicate would compile fine here, but it has never been
+            # reviewed against the write path's own guarantees — the affected-row
+            # COUNT(*), the item-108 diff, and the row cap all re-derive the same
+            # WHERE, so widening writes is a deliberate future item, not a
+            # side-effect of widening reads. Same reject-at-validation posture as
+            # value_subquery above (item 110), not a policy denial.
+            if pred.expr is not None or pred.value_expr is not None:
+                raise QueryValidationError(
+                    "A computed expression predicate (expr / value_expr) is not "
+                    "supported in a write's WHERE clause; scope the target rows "
+                    "with literal or column predicates instead."
+                )
             for ref in predicate_column_refs(pred):
                 table, column = parse_column_ref(ref)
                 if not policy.column_allowed(table, column):

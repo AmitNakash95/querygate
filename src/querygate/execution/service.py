@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pydantic as pyd
 import sqlalchemy as sa
+from sqlalchemy.exc import DataError, ProgrammingError
 
 from querygate.audit.events import AuditSurface, normalize_query_shape
 from querygate.audit.logger import audit_query
@@ -593,7 +594,28 @@ class StructuredQueryService:
                         # approval token covers whatever tripped it.
                         if policy.approval_gate_enabled:
                             self._enforce_approval_gate(estimate, policy, query, approval_token)
-                        result = await session.execute(stmt)
+                        try:
+                            result = await session.execute(stmt)
+                        except (DataError, ProgrammingError) as exc:
+                            # The database refused the statement itself. Since
+                            # every identifier was already reflected and policy-
+                            # checked, what reaches here is a value/type/operator
+                            # problem the caller expressed — e.g. multiplying a
+                            # text column (item 100 made arithmetic reachable, so
+                            # this became an ordinary caller mistake rather than
+                            # an exotic one). That is a 4xx, not a server fault,
+                            # and it is mapped exactly like the write path maps
+                            # constraint violations (`write_execution.py`). The
+                            # message names the CLASS of problem and never echoes
+                            # the driver text, which can carry table/column names
+                            # and the failing values — so neither the response nor
+                            # the audit's rejection_reason leaks schema or data.
+                            raise QueryValidationError(
+                                "the database could not execute this query as expressed — an "
+                                "operator, function, or value type is not valid for the "
+                                "referenced columns (for example arithmetic on a text column). "
+                                "The underlying database error is not returned."
+                            ) from exc
                         raw_rows = [dict(r) for r in result.mappings().all()]
 
                     rows = [_clean_row_values(r) for r in raw_rows]
