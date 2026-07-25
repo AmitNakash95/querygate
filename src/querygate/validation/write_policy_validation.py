@@ -10,12 +10,13 @@ so a denied or masked column can't be used to target rows.
 
 from __future__ import annotations
 
-from typing import Iterator
-
 from querygate.core.exceptions import PolicyViolationError, QueryValidationError
 from querygate.policy.models import Policy
-from querygate.query_ast.models import Predicate, WhereNode
-from querygate.validation.schema_validation import parse_column_ref, predicate_column_refs
+from querygate.validation.schema_validation import (
+    iter_where_predicates,
+    parse_column_ref,
+    predicate_column_refs,
+)
 from querygate.write_ast.models import (
     DeleteStatement,
     InsertStatement,
@@ -37,17 +38,6 @@ def validate_write_batch_size(count: int, policy: Policy) -> None:
         raise PolicyViolationError(
             f"write batch size {count} exceeds max of {policy.write.max_batch_size}"
         )
-
-
-def _where_predicates(node: WhereNode) -> Iterator[Predicate]:
-    if isinstance(node, Predicate):
-        yield node
-        return
-    if node.not_terms is not None:
-        yield from _where_predicates(node.not_terms)
-        return
-    for child in node.and_terms or node.or_terms or []:
-        yield from _where_predicates(child)
 
 
 def _written_columns(statement: WriteStatement) -> list[str]:
@@ -86,7 +76,7 @@ def validate_write_policy(statement: WriteStatement, policy: Policy, connection_
     # to target a mutation.
     where = getattr(statement, "where", None)
     if where is not None:
-        for pred in _where_predicates(where):
+        for pred in iter_where_predicates(where):
             # A subquery predicate (item 97's `value_subquery` / IN (subquery)) is
             # a READ-only capability — writes never pass a compiler `ctx`, so the
             # write compiler can't render one and would fail deep inside

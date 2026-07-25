@@ -9,15 +9,15 @@ unit-test without a real database, exactly as for reads.
 
 from __future__ import annotations
 
-from typing import Iterator, Optional
+from typing import Optional
 
 import sqlalchemy as sa
 
 from querygate.core.auth import Principal
 from querygate.core.exceptions import QueryValidationError
-from querygate.query_ast.models import Predicate, WhereNode
 from querygate.validation.schema_validation import (
     _load_table,
+    iter_where_predicates,
     parse_column_ref,
     predicate_column_refs,
     resolve_column,
@@ -29,17 +29,6 @@ from querygate.write_ast.models import (
     UpsertStatement,
     WriteStatement,
 )
-
-
-def _where_predicates(node: WhereNode) -> Iterator[Predicate]:
-    if isinstance(node, Predicate):
-        yield node
-        return
-    if node.not_terms is not None:
-        yield from _where_predicates(node.not_terms)
-        return
-    for child in node.and_terms or node.or_terms or []:
-        yield from _where_predicates(child)
 
 
 async def validate_write_schema(
@@ -85,7 +74,7 @@ async def validate_write_schema(
     # is single-table in Phase 1 — no correlated/other-table refs).
     where = getattr(statement, "where", None)
     if where is not None:
-        for pred in _where_predicates(where):
+        for pred in iter_where_predicates(where):
             for ref in predicate_column_refs(pred):
                 ref_table, ref_col = parse_column_ref(ref)
                 if ref_table.lower() != statement.table.lower():
