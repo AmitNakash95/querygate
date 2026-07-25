@@ -30,7 +30,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from examples.demo_db.schema import create_and_seed_async  # noqa: E402
 
-_HOST = os.environ.get("QUERYGATE_TEST_MSSQL_HOST", "localhost")
+# Default 127.0.0.1, NOT "localhost": on macOS `localhost` resolves to ::1
+# first, and docker-compose publishes this port on IPv4 only (127.0.0.1, matching
+# the other services' loopback-only binding), so an ODBC connect to "localhost"
+# hangs on IPv6 and dies with a Login timeout that looks like a server problem.
+# CI sets QUERYGATE_TEST_MSSQL_HOST explicitly, so this default only affects
+# local runs — where it is the difference between `make test-mssql-live` working
+# and appearing to be broken.
+_HOST = os.environ.get("QUERYGATE_TEST_MSSQL_HOST", "127.0.0.1")
 _PORT = os.environ.get("QUERYGATE_TEST_MSSQL_PORT", "14330")
 _SA_PASSWORD = os.environ.get("QUERYGATE_TEST_MSSQL_SA_PASSWORD", "QueryGate_Test_Pw1!")
 _ODBC_DRIVER = os.environ.get("QUERYGATE_TEST_MSSQL_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
