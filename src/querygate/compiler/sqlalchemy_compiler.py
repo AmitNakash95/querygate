@@ -7,6 +7,7 @@ known to exist and be policy-permitted.
 
 from __future__ import annotations
 
+import operator
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import sqlalchemy as sa
@@ -18,9 +19,17 @@ from querygate.core.exceptions import QueryValidationError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     ArrayAggSelectItem,
+    BinaryOpExpr,
+    CaseExpr,
     CaseSelectItem,
+    CastExpr,
     ColArg,
+    ColumnExpr,
     DateBucketSelectItem,
+    Expression,
+    ExpressionSelectItem,
+    FunctionExpr,
+    LiteralExpr,
     PercentileContSelectItem,
     Predicate,
     ScalarFunctionArg,
@@ -91,6 +100,104 @@ def _resolve_scalar_arg(arg: ScalarFunctionArg, tables: Dict[str, sa.Table]) -> 
     return arg.literal
 
 
+# Dialect-universal expression functions stay OFF the DialectAdapter, exactly as
+# its docstring requires. The four that genuinely diverge live on the adapter's
+# `scalar_function` (CEILING vs ceil, LEN vs LENGTH, ROUND's argument rules,
+# substr vs SUBSTRING).
+_UNIVERSAL_EXPR_FNS = {
+    "coalesce": sa.func.coalesce,
+    "lower": sa.func.lower,
+    "upper": sa.func.upper,
+    "trim": sa.func.trim,
+    "concat": sa.func.concat,
+    "abs": sa.func.abs,
+    "floor": sa.func.floor,
+    "nullif": sa.func.nullif,
+    "replace": sa.func.replace,
+}
+
+_CAST_TYPES = {
+    # `Unicode`, not `Text`: SQLAlchemy renders Text as `TEXT` on MSSQL, and
+    # T-SQL's TEXT is deprecated — it cannot be compared with `=` or used with
+    # most operators, so `CAST(x AS TEXT)` would compile cleanly and fail
+    # against a real SQL Server (the items 75/82 trap). Unicode renders
+    # NVARCHAR(max) there and VARCHAR on Postgres/SQLite. This is the same type
+    # `MSSQLDialectAdapter.column_mask` already casts through.
+    "text": sa.Unicode,
+    "integer": sa.Integer,
+    "numeric": sa.Numeric,
+    "boolean": sa.Boolean,
+    "date": sa.Date,
+    "timestamp": sa.DateTime,
+}
+
+_BINARY_OPS = {
+    "+": operator.add,
+    "-": operator.sub,
+    "*": operator.mul,
+}
+
+
+def _compile_expression(expr: Expression, tables: Dict[str, sa.Table], dialect: str) -> Any:
+    """Compile one bounded scalar `Expression` (item 100) into a SQLAlchemy Core
+    construct. Mirrors `_compile_where`'s shape: one recursive function that is
+    the ONLY place an expression becomes SQL, so every position that accepts an
+    expression (a projection, an aggregate argument, a predicate's two sides)
+    renders identically and inherits every guarantee at once.
+
+    Nothing here interpolates a string: a `ColumnExpr` resolves to a reflected
+    `sa.Column`, a `LiteralExpr` binds as a parameter, and a `FunctionExpr`'s
+    name comes from a closed enum — non-goal #1 is untouched by the added
+    expressiveness. Depth is already bounded by `max_expression_depth` at
+    validation time, so this recursion cannot be driven arbitrarily deep.
+    """
+    if isinstance(expr, ColumnExpr):
+        return _column(tables, expr.col)
+    if isinstance(expr, LiteralExpr):
+        # sa.literal(), not the raw Python value: two literal operands must be
+        # combined by the DATABASE, not by Python's own operators — otherwise
+        # {"op": "*", "left": {"literal": "a"}, "right": {"literal": 2}} would
+        # quietly evaluate to "aa" in the compiler instead of being the type
+        # error the database should reject it as.
+        return sa.null() if expr.literal is None else sa.literal(expr.literal)
+    if isinstance(expr, BinaryOpExpr):
+        left = _compile_expression(expr.left, tables, dialect)
+        right = _compile_expression(expr.right, tables, dialect)
+        if expr.op == "/":
+            # GUARDED division (2026-07-25 Decision Log): a zero denominator
+            # yields NULL on every dialect rather than inheriting Postgres's
+            # hard error and MSSQL's ARITHABORT/XACT_ABORT-dependent behavior,
+            # under which one bad row would abort the whole transaction.
+            return left / sa.func.nullif(right, 0)
+        return _BINARY_OPS[expr.op](left, right)
+    if isinstance(expr, FunctionExpr):
+        args = [_compile_expression(arg, tables, dialect) for arg in expr.args]
+        universal = _UNIVERSAL_EXPR_FNS.get(expr.fn)
+        if universal is not None:
+            return universal(*args)
+        return get_dialect_adapter(dialect).scalar_function(expr.fn, args)
+    if isinstance(expr, CastExpr):
+        # SQLAlchemy renders the per-dialect type name itself (Text -> VARCHAR(max)
+        # on MSSQL, Boolean -> BIT), so a cast needs no adapter method.
+        return sa.cast(_compile_expression(expr.cast, tables, dialect), _CAST_TYPES[expr.to]())
+    if isinstance(expr, CaseExpr):
+        whens = [
+            # alias_map={} — a CASE condition can't reference a peer select
+            # alias; ctx=None keeps `value_subquery` out (rejected in policy
+            # validation for every CASE condition, wherever nested).
+            (
+                _compile_where(branch.when, tables, {}, dialect),
+                _compile_expression(branch.then, tables, dialect),
+            )
+            for branch in expr.when
+        ]
+        else_value = (
+            _compile_expression(expr.else_, tables, dialect) if expr.else_ is not None else None
+        )
+        return sa.case(*whens, else_=else_value)
+    raise QueryValidationError(f"Unsupported expression node {type(expr).__name__}")
+
+
 class _WhereCtx(NamedTuple):
     """Everything `_compile_where` needs to render a nested `IN (subquery)`
     (item 97): the policy/dialect/principal to compile the subquery through the
@@ -128,16 +235,25 @@ def _compile_in_subquery(pred: Predicate, ctx: Optional["_WhereCtx"]) -> sa.Sele
 
 
 def _apply_predicate(
-    col: Any, pred: Predicate, tables: Dict[str, sa.Table], ctx: Optional["_WhereCtx"] = None
+    col: Any,
+    pred: Predicate,
+    tables: Dict[str, sa.Table],
+    dialect: str,
+    ctx: Optional["_WhereCtx"] = None,
 ) -> Any:
     op = pred.op
     if pred.value_subquery is not None:
         # IN (subquery) / NOT IN (subquery) — item 97.
         subselect = _compile_in_subquery(pred, ctx)
         return col.in_(subselect) if op == "in" else ~col.in_(subselect)
-    # value_col is only valid for eq/neq/lt/lte/gt/gte (enforced at the AST
-    # layer), so every other op below always sees pred.value here.
-    val = _column(tables, pred.value_col) if pred.value_col is not None else pred.value
+    # value_col/value_expr are only valid for eq/neq/lt/lte/gt/gte (enforced at
+    # the AST layer), so every other op below always sees pred.value here.
+    if pred.value_col is not None:
+        val = _column(tables, pred.value_col)
+    elif pred.value_expr is not None:
+        val = _compile_expression(pred.value_expr, tables, dialect)
+    else:
+        val = pred.value
     if op == "eq":
         return col == val
     if op == "neq":
@@ -166,8 +282,10 @@ def _apply_predicate(
 
 
 def _resolve_predicate_target(
-    pred: Predicate, tables: Dict[str, sa.Table], alias_map: Dict[str, Any]
+    pred: Predicate, tables: Dict[str, sa.Table], alias_map: Dict[str, Any], dialect: str
 ) -> Any:
+    if pred.expr is not None:
+        return _compile_expression(pred.expr, tables, dialect)
     if pred.col_fn is not None:
         scalar_fn = _SCALAR_FNS[pred.col_fn.fn]
         args = [_resolve_scalar_arg(arg, tables) for arg in pred.col_fn.args]
@@ -204,17 +322,18 @@ def _compile_where(
     node: WhereNode,
     tables: Dict[str, sa.Table],
     alias_map: Dict[str, Any],
+    dialect: str,
     ctx: Optional["_WhereCtx"] = None,
 ) -> Any:
     if isinstance(node, Predicate):
-        target = _resolve_predicate_target(node, tables, alias_map)
-        return _apply_predicate(target, node, tables, ctx)
+        target = _resolve_predicate_target(node, tables, alias_map, dialect)
+        return _apply_predicate(target, node, tables, dialect, ctx)
 
     if node.not_terms is not None:
-        return sa.not_(_compile_where(node.not_terms, tables, alias_map, ctx))
+        return sa.not_(_compile_where(node.not_terms, tables, alias_map, dialect, ctx))
 
     children = node.and_terms or node.or_terms or []
-    compiled = [_compile_where(child, tables, alias_map, ctx) for child in children]
+    compiled = [_compile_where(child, tables, alias_map, dialect, ctx) for child in children]
     if node.and_terms is not None:
         return sa.and_(*compiled)
     return sa.or_(*compiled)
@@ -311,38 +430,34 @@ def _build_select_columns(
             alias_map[alias] = labeled
             continue
 
-        if isinstance(item, CaseSelectItem):
-            whens = []
-            for branch in item.when:
-                # A searched-CASE condition is a full WhereNode (item 99),
-                # compiled through the exact same machinery as `where`/`having`.
-                # alias_map={} — a CASE condition can't reference a peer select
-                # alias, and ctx=None keeps `value_subquery` out (rejected in
-                # validation; would fail here too).
-                condition = _compile_where(branch.when, tables, alias_map={})
-                whens.append((condition, _resolve_scalar_arg(branch.then, tables)))
-            else_value = _resolve_scalar_arg(item.else_, tables) if item.else_ is not None else None
-            expr = sa.case(*whens, else_=else_value)
-            labeled = expr.label(item.alias)
+        if isinstance(item, (CaseSelectItem, ExpressionSelectItem)):
+            # A CaseSelectItem is exactly a CaseExpr plus a required alias, so
+            # both projections go through the one `_compile_expression` path —
+            # searched-CASE branch conditions included (item 99/100).
+            source = item.expr if isinstance(item, ExpressionSelectItem) else item.as_expression()
+            labeled = _compile_expression(source, tables, dialect).label(item.alias)
             columns.append(labeled)
             alias_map[item.alias] = labeled
             continue
 
         fn = _aggregate_fn(item.fn, dialect)
-        if item.col == "*":
+        if item.arg is None:
             if item.fn != "count":
                 raise QueryValidationError("Only count(*) is allowed as a star aggregate")
             expr = fn()
         else:
-            arg = _column(tables, item.col)
+            arg = _compile_expression(item.arg, tables, dialect)
             expr = fn(arg.distinct()) if item.distinct else fn(arg)
 
         alias = item.alias
         if not alias:
-            if item.col == "*":
+            if item.arg is None:
                 alias = f"{item.fn}_all"
             else:
-                _, col_name = parse_column_ref(item.col)
+                # An aggregate with no alias always has a bare-column `arg` (the
+                # `col` sugar) — the AST layer requires an explicit alias for any
+                # computed argument, since there is no sensible default name.
+                _, col_name = parse_column_ref(item.arg.col)
                 alias = f"{item.fn}_{col_name}"
         labeled = expr.label(alias)
         columns.append(labeled)
@@ -524,7 +639,7 @@ def compile_structured_query(
     stmt = _apply_mandatory_row_filters(stmt, policy, tables, name_to_physical, principal)
 
     if query.where is not None:
-        stmt = stmt.where(_compile_where(query.where, tables, alias_map={}, ctx=where_ctx))
+        stmt = stmt.where(_compile_where(query.where, tables, {}, dialect, ctx=where_ctx))
 
     if query.group_by:
         stmt = stmt.group_by(
@@ -539,7 +654,7 @@ def compile_structured_query(
         # `_compile_where` machinery as WHERE. alias_map is threaded so a HAVING
         # predicate can reference a select alias (e.g. an aggregate's `as`);
         # ctx=None keeps `value_subquery` out (WHERE-only, item 97).
-        stmt = stmt.having(_compile_where(query.having, tables, alias_map))
+        stmt = stmt.having(_compile_where(query.having, tables, alias_map, dialect))
 
     is_aggregate = bool(query.group_by) or any(
         isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in query.select

@@ -298,6 +298,79 @@ Adding a real third dialect (item 19) means implementing one new
 Postgres/MSSQL-flavored assumptions — that containment is the whole point
 of the abstraction, not just where today's two dialects happen to differ.
 
+### Computed expressions: arithmetic, conditional aggregation, nested functions
+
+**Files:** `src/querygate/query_ast/models.py` (the `Expression` union),
+`src/querygate/compiler/sqlalchemy_compiler.py` (`_compile_expression`).
+**Item:** TODO.md 100 — the first big build of the
+[Expressive Query Engine plan](ENGINE_EXPRESSIVENESS_PLAN.md).
+
+Until item 100, "what can be projected or compared" was a **flat** set of
+shapes: a bare `Table.Column`, a one-level function call with no nesting, an
+aggregate over a bare column *name*, and a `CASE` whose result was a
+column-or-literal. One boundary — no recursive scalar type — is why
+`SUM(quantity * unit_price)` was impossible (no `*` operator existed anywhere,
+*and* an aggregate argument could only be a column name), and why conditional
+aggregation, nested functions, expression-valued `CASE`, and computed group
+keys were all missing at once. They were the same gap wearing five hats.
+
+There is now one recursive **`Expression`** used everywhere a scalar value is
+expected:
+
+| Node | Shape | Example |
+| --- | --- | --- |
+| `ColumnExpr` | `{"col": "Order.Total"}` | a column |
+| `LiteralExpr` | `{"literal": 5}` | a bound literal |
+| `BinaryOpExpr` | `{"op": "*", "left": …, "right": …}` | `quantity * unit_price` |
+| `FunctionExpr` | `{"fn": "lower", "args": [ … ]}` | `lower(trim(name))` |
+| `CastExpr` | `{"cast": …, "to": "numeric"}` | `CAST(x AS NUMERIC)` |
+| `CaseExpr` | `{"when": [ … ], "else": …}` | conditional aggregation |
+
+It appears in four positions: a new `ExpressionSelectItem` projection
+(`{"expr": …, "as": "line_total"}`), an aggregate's `arg`, and **both** sides
+of a `Predicate` (`expr` / `value_expr`). So
+`SUM(CASE WHEN status='paid' THEN amount ELSE 0 END)`,
+`WHERE quantity * unit_price > 100`, and `lower(trim(name))` are all
+expressible now. A **computed GROUP BY key** needs no new field: project the
+expression with an alias and group by that alias — the same route
+`date_bucket` has always used, rather than a second inline grammar for group
+keys.
+
+**This is deliberately not an open-ended expression grammar** (non-goal #7).
+The boundary is recorded in the [Decision Log](#decision-log) and is five
+things: the operator set is fixed (`+ - * /`); `FunctionExpr.fn` is an **enum**,
+so no caller can name a UDF or stored procedure; nesting is capped
+(`max_expression_depth`, plus `max_expression_nodes` summed **tree-wide** across
+subqueries); every leaf is still a typed identifier or bound literal, so no
+string is ever interpolated into SQL; and the item-96 canonical visitor recurses
+through every node, so a denied or masked column buried in a `BinaryOpExpr` is
+rejected exactly as it would be at the top level. That last one is the load-
+bearing property — `tests/security/test_adversarial_security.py` asserts it for
+a denied *and* a masked column in every position an expression can occupy,
+including the subtle one (a column inside a `CASE`'s *condition*, which is a
+predicate tree rather than an expression node).
+
+**Division renders guarded** — `left / NULLIF(right, 0)`, so a zero denominator
+yields NULL identically on every dialect instead of Postgres's hard error and
+MSSQL's `XACT_ABORT`-driven whole-transaction abort. See the Decision Log for
+why consistency won over dialect fidelity here.
+
+**Dialect handling** follows the existing rule: `coalesce`/`lower`/`upper`/
+`trim`/`concat`/`abs`/`floor`/`nullif`/`replace` are identical everywhere and
+stay off the adapter; the four that genuinely differ — `ceil` (T-SQL spells it
+`CEILING`), `length` (`LEN`), `round` (T-SQL requires the length argument;
+Postgres has no `round(double precision, integer)` so the adapter casts to
+`NUMERIC`), and `substring` — are one `DialectAdapter.scalar_function` method.
+`substring` requires exactly three arguments at the AST layer *because* T-SQL
+has no two-argument form: allowing it would render fine on Postgres and break
+against a live SQL Server.
+
+**Writes are unchanged.** A computed predicate in a write's `WHERE` is rejected
+at write validation, the same posture item 110 established for subqueries —
+the write path re-derives that WHERE for its affected-row count, its diff, and
+its row cap, so widening it is a separately-scoped decision, not a side effect
+of widening reads.
+
 ### 4. Concurrency control — don't overwhelm the database
 
 **File:** `src/querygate/execution/concurrency.py`
@@ -1278,7 +1351,10 @@ table/column allow and deny lists, per-query complexity caps (`max_joins`,
 `max_select_columns`, `max_where_depth`, `max_where_predicates` and
 `max_in_list_size` for WHERE/HAVING/CASE-condition predicate shape — all three
 of those positions are the same `WhereNode` tree and are bounded identically
-(item 99) — `max_group_by`, `max_top_n` and
+(item 99) — `max_expression_depth` and `max_expression_nodes` for the scalar
+expression substrate (item 100; see
+[Computed expressions](#computed-expressions-arithmetic-conditional-aggregation-nested-functions)),
+`max_group_by`, `max_top_n` and
 `max_partition_by` for windowed queries, `max_limit`/`max_limit_aggregate`
 for row counts, `max_response_bytes` for response size), execution
 guardrails (`timeout_seconds`, `max_concurrency`, queue-depth caps),
@@ -2624,12 +2700,15 @@ reasoning behind them, newest first. Added to incrementally as work happens
   **Accepted cost:** the client SDK's TypeScript half and new dialects wait; a
   design partner integrating today uses the shipped in-tree Python builder and the
   two supported dialects.
-- **2026-07-25 — a closed, depth-capped scalar `Expression` union will enter the
+- **2026-07-25 — a closed, depth-capped scalar `Expression` union entered the
   read AST (TODO.md item 100), and it is deliberately *not* the "open-ended
   expression grammar" non-goal #7 forbids.** *(Decision recorded ahead of
-  implementation, as ENGINE_EXPRESSIVENESS_PLAN.md §8 requires; item 100 is not yet
-  built — this entry records the boundary the build must hold to, not shipped
-  behavior.)* Today "what can be projected or compared" is a flat set of leaf
+  implementation, as ENGINE_EXPRESSIVENESS_PLAN.md §8 requires; **item 100 has
+  since SHIPPED and holds to all five boundaries below** — see
+  [Computed expressions](#computed-expressions-arithmetic-conditional-aggregation-nested-functions)
+  for the shipped capability, and the two follow-on entries below for the
+  decisions the build itself forced.)* Before it, "what can be projected or
+  compared" was a flat set of leaf
   shapes: a bare `Table.Column` string, a one-level `ScalarFunctionCall` with no
   nesting, an aggregate over a bare column string, and a `CASE` whose `then`/`else`
   is a column-or-literal. That single boundary is why arithmetic, conditional
@@ -2718,6 +2797,39 @@ reasoning behind them, newest first. Added to incrementally as work happens
   **Accepted cost:** two spellings exist at the wire/schema level, so the MCP tool
   schema and docs must show which is canonical, and a future reader must know the
   normalization exists to reason about `col`.
+- **2026-07-25 — `ColArg`/`LiteralArg` were collapsed into item 100's
+  `ColumnExpr`/`LiteralExpr` rather than kept as sibling types.** The two pairs had
+  byte-identical wire shapes (`{"col": …}` / `{"literal": …}`), so building the
+  `Expression` union alongside them would have left **two** column-leaf types that
+  every walker, cap, and policy check must treat identically forever — precisely
+  the duplicated-walk failure class items 96 and 111 were built to remove,
+  reintroduced at the leaf. `ColArg`/`LiteralArg` are now aliases of the same
+  classes, so `ScalarFunctionArg` is a subset of `Expression` and existing payloads
+  and Python call sites keep working verbatim. **Two deliberate tightenings ride
+  along:** a column leaf must now be a dotted `Table.Column` at the AST layer
+  (previously a bare name was accepted and rejected later by `parse_column_ref`),
+  and a literal is typed `str|int|float|bool|None` instead of `Any` (a dict or list
+  literal is now rejected up front rather than failing opaquely at bind time).
+  **Accepted cost:** both tightenings are technically breaking for inputs that
+  could only ever have failed further down; the earlier, typed rejection is the
+  point. The `ColArg`/`LiteralArg` names are kept because they read better at a
+  scalar-function call site.
+- **2026-07-25 — item 100's `Expression` is a READ-engine capability; a computed
+  predicate in a write's `WHERE` is rejected at write validation.** `expr` and
+  `value_expr` would compile fine on the write path (it reuses the read
+  `Predicate` and `_compile_where`), which is exactly why leaving them unhandled
+  was the risk: the write path independently re-derives that same WHERE three
+  times — for the affected-row `COUNT(*)`, for the item-108 diff, and for the
+  post-mutation row-cap re-check — and none of those has been reviewed against an
+  expression's semantics. `validate_write_policy` therefore rejects it with a clean
+  typed error, the same reject-at-the-validation-layer posture item 110
+  established for `value_subquery`, rather than relying on it happening to work.
+  **Accepted cost:** `UPDATE … WHERE price * qty > 100` is not expressible; scope
+  the target rows with literal or column predicates, or compute the set with a read
+  first. Widening writes is a separately-scoped future item — the engine plan is
+  explicitly scoped to the read query engine, and quietly extending the write
+  contract as a side effect of a read change is exactly the kind of drift the
+  governed-writes decision record exists to prevent.
 - **2026-07-24 — `having` and a CASE branch's `when` become full `WhereNode`s
   (TODO.md item 99), a deliberate breaking wire-format change.** `having` was
   `List[Predicate]` (implicitly AND-combined, no nesting) and `CaseWhen.when` was a

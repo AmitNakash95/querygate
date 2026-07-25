@@ -173,3 +173,151 @@ def test_iter_where_predicates_on_a_bare_predicate():
     """A WHERE that is a single Predicate (not a group) yields just that node."""
     leaf = Predicate(col="orders.id", op="eq", value=1)
     assert list(iter_where_predicates(leaf)) == [leaf]
+
+
+# --------------------------------------------------------------------------- #
+# Item 100 — the bounded scalar Expression substrate
+#
+# The visitor is the enforcement chokepoint: an Expression column ref that is
+# not yielded here bypasses column allow/deny AND the item-49 masked-column rule
+# entirely. These pin that every union member contributes its refs, at any depth
+# and in every position an expression can occupy.
+# --------------------------------------------------------------------------- #
+def _every_expression_member() -> dict:
+    """One expression using EVERY member of the closed union, with a distinct
+    column at each position, so a missed member shows up as a missing ref."""
+    return {
+        "op": "+",  # BinaryOpExpr
+        "left": {
+            "fn": "coalesce",  # FunctionExpr (nested args)
+            "args": [
+                {"cast": {"col": "t.cast_col"}, "to": "numeric"},  # CastExpr
+                {"literal": 0},  # LiteralExpr — contributes no ref
+            ],
+        },
+        "right": {
+            "when": [  # CaseExpr
+                {
+                    # A CASE condition is a WhereNode, NOT an Expression: its
+                    # refs are ordinary Predicate refs, so the ref walk has to
+                    # cross out of the union and back.
+                    "when": {
+                        "col": "t.cond_col",
+                        "op": "gt",
+                        "value_col": "t.cond_value_col",
+                    },
+                    "then": {"col": "t.then_col"},  # ColumnExpr
+                }
+            ],
+            "else": {
+                # A predicate nested inside a CASE condition may itself carry a
+                # whole expression — the deepest reachable position.
+                "op": "*",
+                "left": {"col": "t.else_col"},
+                "right": {"literal": 2},
+            },
+        },
+    }
+
+
+_EXPRESSION_MEMBER_REFS = {
+    "t.cast_col",
+    "t.cond_col",
+    "t.cond_value_col",
+    "t.then_col",
+    "t.else_col",
+}
+
+
+def test_expression_refs_are_yielded_from_every_union_member():
+    from querygate.validation.schema_validation import expression_column_refs
+
+    refs = set(expression_column_refs(_to_expression_model(_every_expression_member())))
+    assert refs == _EXPRESSION_MEMBER_REFS
+
+
+def _to_expression_model(payload: dict):
+    """Parse a raw expression payload through the real union."""
+    from querygate.query_ast.models import ExpressionSelectItem
+
+    return ExpressionSelectItem.model_validate({"expr": payload, "as": "x"}).expr
+
+
+def test_expression_refs_in_a_projection_are_select_nested_not_bare():
+    """SELECT_PROJECTION_BARE is the ONLY position a masked column may appear.
+    A column inside a computed projection must NOT claim that position, or
+    masking silently stops applying to arithmetic."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "t",
+            "select": [{"expr": _every_expression_member(), "as": "computed"}],
+        }
+    )
+    refs = list(iter_column_refs(query))
+    assert {r.ref for r in refs} == _EXPRESSION_MEMBER_REFS
+    assert {r.position for r in refs} == {RefPosition.SELECT_NESTED}
+
+
+def test_aggregate_expression_argument_refs_are_visited():
+    query = StructuredQuery.model_validate(
+        {
+            "from": "t",
+            "select": [{"fn": "sum", "arg": _every_expression_member(), "as": "total"}],
+        }
+    )
+    assert {r.ref for r in iter_column_refs(query)} == _EXPRESSION_MEMBER_REFS
+
+
+def test_predicate_expression_refs_are_visited_on_both_sides():
+    query = StructuredQuery.model_validate(
+        {
+            "from": "t",
+            "select": ["t.id"],
+            "where": {
+                "expr": {"op": "*", "left": {"col": "t.qty"}, "right": {"col": "t.price"}},
+                "op": "gt",
+                "value_expr": {"op": "+", "left": {"col": "t.floor"}, "right": {"literal": 1}},
+            },
+        }
+    )
+    where_refs = {r.ref for r in iter_column_refs(query) if r.position is RefPosition.WHERE}
+    assert where_refs == {"t.qty", "t.price", "t.floor"}
+
+
+def test_case_select_item_and_equivalent_expression_yield_the_same_refs():
+    """CaseSelectItem is the projection SPELLING of CaseExpr — if the two walks
+    ever diverge, one of them is a bypass."""
+    branch = {
+        "when": [{"when": {"col": "t.a", "op": "eq", "value": 1}, "then": {"col": "t.b"}}],
+        "else": {"col": "t.c"},
+    }
+    as_case_item = StructuredQuery.model_validate({"from": "t", "select": [{**branch, "as": "k"}]})
+    as_expression = StructuredQuery.model_validate(
+        {"from": "t", "select": [{"expr": branch, "as": "k"}]}
+    )
+    assert {r.ref for r in iter_column_refs(as_case_item)} == {
+        r.ref for r in iter_column_refs(as_expression)
+    }
+
+
+def test_referenced_tables_sees_tables_reachable_only_through_an_expression():
+    """Table-level allow/deny reads from `referenced_tables`; a table named ONLY
+    deep inside an expression must still be checked."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "joins": [{"table": "items", "on": ["orders.id", "items.order_id"]}],
+            "select": [
+                {
+                    "fn": "sum",
+                    "arg": {
+                        "op": "*",
+                        "left": {"col": "items.qty"},
+                        "right": {"col": "items.price"},
+                    },
+                    "as": "revenue",
+                }
+            ],
+        }
+    )
+    assert referenced_tables(query) == {"orders", "items"}

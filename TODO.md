@@ -130,7 +130,7 @@ order-of-magnitude, not commitments.
 | 96 | ✅ Unify the AST reference-walk into a single canonical visitor | M | — |
 | 97 | ✅ Bounded nested subqueries (phase 1: `IN (subquery)`/`NOT IN`, tree-wide caps; phase 2: `FROM (subquery)` derived table not started) | L | 96 |
 | 99 | ✅ ★ `HAVING` as `WhereNode` + searched `CASE` condition | S | 96 |
-| 100 | ★ Bounded scalar `Expression` substrate (arithmetic, conditional aggregation, nested fns, expression-CASE) | XL | 96, 99 |
+| 100 | ✅ ★ Bounded scalar `Expression` substrate (arithmetic, conditional aggregation, nested fns, expression-CASE) | XL | 96, 99 |
 | 101 | ★ General window functions (`WindowSelectItem`: OVER, LAG/LEAD, frames) | L | 96, 100 (windowed exprs) |
 | 102 | ★ `EXTRACT`/date_part + relative-date/interval helpers | M | 100 |
 | 103 | ★ Non-equi/range joins + FULL OUTER / CROSS | M | 96, 99 |
@@ -2049,25 +2049,17 @@ no new policy field and no dialect code. Breaking wire change: `"having": [{…}
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 99).
 
-### 100. Query engine: bounded scalar `Expression` substrate ★
+### 100. Query engine: bounded scalar `Expression` substrate ★ ✅ DONE
 
-The centerpiece. Introduce one **closed, depth-capped** recursive `Expression`
-union (column | literal | binary-op `+ - * /` | function-call with nesting | CASE)
-used everywhere a scalar value is expected, and give aggregates an `Expression`
-argument. Unlocks — in one item — arithmetic (`quantity * unit_price`), conditional
-aggregation (`SUM(CASE WHEN status='paid' THEN amount END)`), nested functions
-(`lower(trim(x))`), expression-valued CASE, computed group/order keys, and a batch
-of scalar fns (`cast`/`round`/`floor`/`ceil`/`abs`/`substring`/`nullif`/`replace`).
-Arithmetic + conditional aggregation are deliberately ONE item (shared substrate) —
-do not split. New caps `max_expression_depth` / `max_expression_nodes` summed
-tree-wide; guarded division; visitor recursion into every `Expression` is the
-make-or-break safety step.
+One closed, depth-capped recursive `Expression` union (column | literal |
+arithmetic | nested function | cast | CASE) now backs projections, aggregate
+arguments, CASE results, and both sides of a predicate — unlocking
+`SUM(quantity * unit_price)`, conditional aggregation, `lower(trim(x))`, and
+computed group keys in one item. Capped by `max_expression_depth` /
+`max_expression_nodes` (summed tree-wide), visited by the item-96 canonical
+visitor at every depth, guarded division, and reject-not-emulate per dialect.
 
-**Effort: XL. Priority: high (flagship pillar; highest expressiveness unlock).
-Depends on: items 96, 99. Requires a recorded Decision Log entry in
-`docs/PRODUCT_GUIDE.md` before build** — the bounded-vs-open-ended-grammar boundary
-(non-goal #7) and division semantics (plan §8, entries 1–2). Full spec +
-acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 1.**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 100).
 
 ### 101. Query engine: general window functions (`WindowSelectItem`) ★
 

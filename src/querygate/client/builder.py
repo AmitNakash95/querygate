@@ -41,15 +41,26 @@ from querygate.query_ast.models import (
     AggregateFn,
     AggregateSelectItem,
     ArrayAggSelectItem,
+    BinaryOp,
+    BinaryOpExpr,
+    CaseExpr,
     CaseSelectItem,
     CaseWhen,
+    CastExpr,
+    CastType,
     ColArg,
+    ColumnExpr,
     CompareOp,
     DateBucketSelectItem,
     DateGranularity,
+    Expression,
+    ExpressionSelectItem,
+    ExprFn,
+    FunctionExpr,
     JoinSpec,
     JoinType,
     LiteralArg,
+    LiteralExpr,
     OrderBySpec,
     PercentileContSelectItem,
     Predicate,
@@ -65,6 +76,10 @@ from querygate.query_ast.models import (
     WhereGroup,
     WhereNode,
 )
+
+# The concrete Expression classes, for isinstance checks against an already-built
+# AST node handed straight to a builder helper.
+ExpressionModels = (ColumnExpr, LiteralExpr, BinaryOpExpr, FunctionExpr, CastExpr, CaseExpr)
 
 __all__ = [
     "Query",
@@ -85,9 +100,15 @@ __all__ = [
     "not_",
     "asc",
     "desc",
+    "expr",
+    "expr_fn",
+    "expr_select",
+    "case_expr",
+    "cast",
     "Column",
     "FnColumn",
     "Literal",
+    "Expr",
 ]
 
 
@@ -132,7 +153,12 @@ class _Comparable:
         raise NotImplementedError
 
     def _predicate(
-        self, op: CompareOp, *, value: Any = _UNSET, value_col: Optional[str] = None
+        self,
+        op: CompareOp,
+        *,
+        value: Any = _UNSET,
+        value_col: Optional[str] = None,
+        value_expr: Optional[Expression] = None,
     ) -> Predicate:
         kwargs = dict(self._target())
         kwargs["op"] = op
@@ -140,11 +166,17 @@ class _Comparable:
             kwargs["value"] = value
         if value_col is not None:
             kwargs["value_col"] = value_col
+        if value_expr is not None:
+            kwargs["value_expr"] = value_expr
         return Predicate(**kwargs)
 
     def _cmp(self, op: CompareOp, other: Any) -> Predicate:
         if isinstance(other, Column):
             return self._predicate(op, value_col=other.name)
+        if isinstance(other, (Expr, *ExpressionModels)):
+            # Comparing against a computed right-hand side (item 100), e.g.
+            # col("oi.price") > col("oi.cost") * 1.2.
+            return self._predicate(op, value_expr=_to_expression(other))
         return self._predicate(op, value=_unwrap(other))
 
     # Operator overloads -------------------------------------------------- #
@@ -206,7 +238,11 @@ class _Comparable:
 
 
 class Column(_Comparable):
-    """A ``Table.Column`` (or ``Alias.Column``) reference. Build with ``col``."""
+    """A ``Table.Column`` (or ``Alias.Column``) reference. Build with ``col``.
+
+    The arithmetic operators lift it into an ``Expr`` (item 100), so
+    ``col("oi.qty") * col("oi.price")`` reads the way it would in SQL.
+    """
 
     __slots__ = ("name",)
 
@@ -215,6 +251,30 @@ class Column(_Comparable):
 
     def _target(self) -> dict:
         return {"col": self.name}
+
+    def __add__(self, other: Any) -> "Expr":
+        return _binary("+", self, other)
+
+    def __radd__(self, other: Any) -> "Expr":
+        return _binary("+", other, self)
+
+    def __sub__(self, other: Any) -> "Expr":
+        return _binary("-", self, other)
+
+    def __rsub__(self, other: Any) -> "Expr":
+        return _binary("-", other, self)
+
+    def __mul__(self, other: Any) -> "Expr":
+        return _binary("*", self, other)
+
+    def __rmul__(self, other: Any) -> "Expr":
+        return _binary("*", other, self)
+
+    def __truediv__(self, other: Any) -> "Expr":
+        return _binary("/", self, other)
+
+    def __rtruediv__(self, other: Any) -> "Expr":
+        return _binary("/", other, self)
 
 
 class FnColumn(_Comparable):
@@ -271,6 +331,130 @@ def _to_arg(value: Any) -> ScalarFunctionArg:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Bounded scalar expressions (TODO.md item 100)
+# --------------------------------------------------------------------------- #
+class Expr(_Comparable):
+    """A built scalar ``Expression``. Arithmetic operators compose it further
+    (``col("a.qty") * col("a.price") + 1``) and the comparison operators turn it
+    into a ``Predicate`` targeting the computed value, exactly like ``Column``.
+    """
+
+    __slots__ = ("node",)
+
+    def __init__(self, node: Expression) -> None:
+        self.node = node
+
+    def _target(self) -> dict:
+        return {"expr": self.node}
+
+    def __add__(self, other: Any) -> "Expr":
+        return _binary("+", self, other)
+
+    def __radd__(self, other: Any) -> "Expr":
+        return _binary("+", other, self)
+
+    def __sub__(self, other: Any) -> "Expr":
+        return _binary("-", self, other)
+
+    def __rsub__(self, other: Any) -> "Expr":
+        return _binary("-", other, self)
+
+    def __mul__(self, other: Any) -> "Expr":
+        return _binary("*", self, other)
+
+    def __rmul__(self, other: Any) -> "Expr":
+        return _binary("*", other, self)
+
+    def __truediv__(self, other: Any) -> "Expr":
+        return _binary("/", self, other)
+
+    def __rtruediv__(self, other: Any) -> "Expr":
+        return _binary("/", other, self)
+
+
+def _to_expression(value: Any) -> Expression:
+    """Normalize anything usable as a scalar expression into an ``Expression``.
+
+    A BARE Python scalar is accepted here (unlike ``_to_arg``) because an
+    arithmetic operand is unambiguous — a column must be written ``col(...)``,
+    so ``col("a.qty") * 2`` and ``+ "x"`` can only mean literals. Function
+    arguments and CASE results keep requiring the explicit wrapper, since there
+    a bare string genuinely could be either.
+    """
+    if isinstance(value, Expr):
+        return value.node
+    if isinstance(value, Column):
+        return ColumnExpr(col=value.name)
+    if isinstance(value, Literal):
+        return LiteralExpr(literal=value.value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return LiteralExpr(literal=value)
+    if isinstance(value, ExpressionModels):
+        return value
+    raise TypeError(
+        f"cannot use {type(value).__name__} as a scalar expression — use col(...), "
+        "lit(...), a bare scalar, or another expression"
+    )
+
+
+def _binary(op: BinaryOp, left: Any, right: Any) -> Expr:
+    return Expr(BinaryOpExpr(op=op, left=_to_expression(left), right=_to_expression(right)))
+
+
+def expr(value: Any) -> Expr:
+    """Lift a ``col(...)``/``lit(...)``/bare scalar into an ``Expr`` so the
+    arithmetic operators are available, e.g. ``expr(col("a.qty")) * 2``. A
+    column already supports the operators directly; this is for the cases where
+    the left operand is a plain value."""
+    return Expr(_to_expression(value))
+
+
+def expr_fn(name: ExprFn, *args: Any) -> Expr:
+    """A whitelisted scalar function over expressions, WITH nesting —
+    ``expr_fn("lower", expr_fn("trim", col("c.name")))``. Arguments follow the
+    explicit-wrapper rule (``col(...)``/``lit(...)``/another expression)."""
+    return Expr(FunctionExpr(fn=name, args=[_to_expression(_require_wrapped(a)) for a in args]))
+
+
+def cast(value: Any, to: CastType) -> Expr:
+    """``CAST(value AS type)`` over the closed target-type set."""
+    return Expr(CastExpr(cast=_to_expression(_require_wrapped(value)), to=to))
+
+
+def case_expr(*whens: CaseWhen, else_: Any = None) -> Expr:
+    """An expression-valued ``CASE`` — the form usable INSIDE an aggregate or
+    arithmetic, which is what makes conditional aggregation expressible:
+    ``agg.sum(case_expr(when(col("o.status") == "paid", col("o.amount")),
+    else_=lit(0)), as_="paid_total")``. Use :func:`case` for a top-level
+    projection (it is the same node plus a required alias)."""
+    return Expr(
+        CaseExpr(
+            when=list(whens),
+            else_=(_to_expression(else_) if else_ is not None else None),
+        )
+    )
+
+
+def expr_select(value: Any, *, as_: str) -> ExpressionSelectItem:
+    """Project a computed expression, e.g.
+    ``expr_select(col("oi.qty") * col("oi.price"), as_="line_total")``. An
+    ``as_`` alias is required — a computed value has no default output name."""
+    return ExpressionSelectItem(expr=_to_expression(value), alias=as_)
+
+
+def _require_wrapped(value: Any) -> Any:
+    """Function arguments and CASE results keep ``_to_arg``'s explicitness rule:
+    a bare string there could plausibly be a column name OR a literal."""
+    if isinstance(value, (Column, Literal, Expr, ExpressionModels)):
+        return value
+    raise TypeError(
+        "expression-function arguments and CASE results must be wrapped explicitly "
+        "as col(...) for a column or lit(...) for a literal, to avoid ambiguity; "
+        f"got a bare {type(value).__name__}"
+    )
+
+
 def _scalar_call(name: ScalarFn, args: Sequence[Any]) -> ScalarFunctionCall:
     return ScalarFunctionCall(fn=name, args=[_to_arg(a) for a in args])
 
@@ -306,44 +490,70 @@ class _Agg:
     @staticmethod
     def _make(
         function: AggregateFn,
-        column: Union[str, Column],
+        column: Union[str, Column, "Expr"],
         distinct: bool,
         as_: Optional[str],
     ) -> AggregateSelectItem:
+        # A computed argument (item 100) goes to `arg`; a plain column keeps the
+        # `col` sugar spelling, which the server normalizes to the same node.
+        if isinstance(column, (Expr, *ExpressionModels)):
+            return AggregateSelectItem(
+                fn=function, arg=_to_expression(column), distinct=distinct, alias=as_
+            )
         return AggregateSelectItem(fn=function, col=_colname(column), distinct=distinct, alias=as_)
 
     def count(
-        self, column: Union[str, Column] = "*", *, distinct: bool = False, as_: Optional[str] = None
+        self,
+        column: Union[str, Column, "Expr"] = "*",
+        *,
+        distinct: bool = False,
+        as_: Optional[str] = None,
     ) -> AggregateSelectItem:
         return self._make("count", column, distinct, as_)
 
     def sum(
-        self, column: Union[str, Column], *, distinct: bool = False, as_: Optional[str] = None
+        self,
+        column: Union[str, Column, "Expr"],
+        *,
+        distinct: bool = False,
+        as_: Optional[str] = None,
     ) -> AggregateSelectItem:
         return self._make("sum", column, distinct, as_)
 
     def avg(
-        self, column: Union[str, Column], *, distinct: bool = False, as_: Optional[str] = None
+        self,
+        column: Union[str, Column, "Expr"],
+        *,
+        distinct: bool = False,
+        as_: Optional[str] = None,
     ) -> AggregateSelectItem:
         return self._make("avg", column, distinct, as_)
 
     def min(
-        self, column: Union[str, Column], *, distinct: bool = False, as_: Optional[str] = None
+        self,
+        column: Union[str, Column, "Expr"],
+        *,
+        distinct: bool = False,
+        as_: Optional[str] = None,
     ) -> AggregateSelectItem:
         return self._make("min", column, distinct, as_)
 
     def max(
-        self, column: Union[str, Column], *, distinct: bool = False, as_: Optional[str] = None
+        self,
+        column: Union[str, Column, "Expr"],
+        *,
+        distinct: bool = False,
+        as_: Optional[str] = None,
     ) -> AggregateSelectItem:
         return self._make("max", column, distinct, as_)
 
     def stddev(
-        self, column: Union[str, Column], *, as_: Optional[str] = None
+        self, column: Union[str, Column, "Expr"], *, as_: Optional[str] = None
     ) -> AggregateSelectItem:
         return self._make("stddev", column, False, as_)
 
     def variance(
-        self, column: Union[str, Column], *, as_: Optional[str] = None
+        self, column: Union[str, Column, "Expr"], *, as_: Optional[str] = None
     ) -> AggregateSelectItem:
         return self._make("variance", column, False, as_)
 
@@ -379,17 +589,19 @@ def percentile_cont(
 
 
 def when(condition: WhereNode, then: Any) -> CaseWhen:
-    """One CASE branch: a condition and its ``col(...)``/``lit(...)`` result. The
-    condition is a full ``WhereNode`` — a single predicate OR an
-    ``and_(...)``/``or_(...)``/``not_(...)`` group for a searched CASE (item 99)."""
-    return CaseWhen(when=condition, then=_to_arg(then))
+    """One CASE branch: a condition and its result. The condition is a full
+    ``WhereNode`` — a single predicate OR an ``and_(...)``/``or_(...)``/
+    ``not_(...)`` group for a searched CASE (item 99). The result is any
+    expression (item 100): ``col(...)``, ``lit(...)``, or something computed
+    like ``col("oi.qty") * col("oi.price")``."""
+    return CaseWhen(when=condition, then=_to_expression(_require_wrapped(then)))
 
 
 def case(*whens: CaseWhen, else_: Any = None, as_: str) -> CaseSelectItem:
     """``CASE WHEN ... THEN ... [ELSE ...] END`` — an ``as_`` alias is required."""
     return CaseSelectItem(
         when=list(whens),
-        else_=(_to_arg(else_) if else_ is not None else None),
+        else_=(_to_expression(_require_wrapped(else_)) if else_ is not None else None),
         alias=as_,
     )
 

@@ -612,3 +612,163 @@ def test_batch_size_exceeded():
 
 def test_batch_size_within_limit():
     validate_batch_size(3, Policy(max_batch_size=3))  # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# Item 100 — caps on the bounded scalar Expression substrate.
+#
+# "Bounded" is the whole justification for the substrate not being the
+# open-ended expression grammar non-goal #7 forbids (2026-07-25 Decision Log,
+# boundary 3). These pin that the bound is real.
+# --------------------------------------------------------------------------- #
+def _nested_arithmetic(depth: int) -> dict:
+    """A left-leaning chain of `depth` BinaryOpExpr nodes over one column."""
+    node = {"col": "customers.id"}
+    for _ in range(depth):
+        node = {"op": "+", "left": node, "right": {"literal": 1}}
+    return node
+
+
+def _query_with_expression(expression: dict, **extra) -> StructuredQuery:
+    return StructuredQuery.model_validate(
+        {"from": "customers", "select": [{"expr": expression, "as": "computed"}], **extra}
+    )
+
+
+def test_max_expression_depth_fires():
+    query = _query_with_expression(_nested_arithmetic(6))
+    with pytest.raises(PolicyViolationError, match="expression nesting depth"):
+        validate_policy(query, Policy(max_expression_depth=3), connection_id="demo")
+
+
+def test_max_expression_depth_at_cap_passes():
+    # depth 3 = two BinaryOpExpr levels over the ColumnExpr leaf.
+    query = _query_with_expression(_nested_arithmetic(2))
+    validate_policy(query, Policy(max_expression_depth=3), connection_id="demo")
+
+
+def test_max_expression_nodes_fires():
+    query = _query_with_expression(_nested_arithmetic(10))
+    with pytest.raises(PolicyViolationError, match="expression node count"):
+        validate_policy(query, Policy(max_expression_nodes=5, max_expression_depth=50), "demo")
+
+
+def test_expression_node_cap_is_summed_tree_wide_across_a_subquery():
+    """Item 97's rule: a count-based cap is enforced on the SUM across every
+    scope. Splitting an expression budget between the outer query and a
+    subquery must not buy twice the budget."""
+    # 3 BinaryOpExpr + 3 LiteralExpr + 1 ColumnExpr leaf = 7 nodes per scope.
+    outer_expr = _nested_arithmetic(3)
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [{"expr": outer_expr, "as": "computed"}],
+            "where": {
+                "col": "customers.id",
+                "op": "in",
+                "value_subquery": {
+                    "from": "orders",
+                    "select": [{"expr": _nested_arithmetic(3), "as": "inner"}],
+                },
+            },
+        }
+    )
+    policy = Policy(max_expression_nodes=7, max_expression_depth=50, max_subquery_depth=1)
+    with pytest.raises(PolicyViolationError, match="expression node count 14"):
+        validate_policy(query, policy, connection_id="demo")
+    # Each scope alone is within the same cap — proving the cap is the SUM.
+    validate_policy(
+        _query_with_expression(outer_expr),
+        policy,
+        connection_id="demo",
+    )
+
+
+def test_case_branch_cap_applies_to_a_case_nested_inside_an_expression():
+    """max_case_branches used to see only a top-level CaseSelectItem. Burying
+    the CASE inside an aggregate argument must not dodge it."""
+    branches = [
+        {"when": {"col": "customers.id", "op": "eq", "value": n}, "then": {"literal": n}}
+        for n in range(5)
+    ]
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [{"fn": "sum", "arg": {"when": branches}, "as": "total"}],
+        }
+    )
+    with pytest.raises(PolicyViolationError, match="case when branches"):
+        validate_policy(query, Policy(max_case_branches=2), connection_id="demo")
+
+
+def test_case_condition_predicate_budget_counts_conditions_nested_in_expressions():
+    """The item-99 case-condition predicate budget must follow the CASE
+    wherever item 100 lets it move."""
+    condition = {"or": [{"col": "customers.id", "op": "eq", "value": n} for n in range(6)]}
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [
+                {
+                    "fn": "sum",
+                    "arg": {"when": [{"when": condition, "then": {"literal": 1}}]},
+                    "as": "total",
+                }
+            ],
+        }
+    )
+    with pytest.raises(PolicyViolationError, match="case condition predicate count"):
+        validate_policy(query, Policy(max_where_predicates=3), connection_id="demo")
+
+
+def test_where_depth_cap_applies_to_a_case_condition_inside_an_expression():
+    condition = {"and": [{"or": [{"not": {"col": "customers.id", "op": "eq", "value": 1}}]}]}
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [
+                {
+                    "fn": "sum",
+                    "arg": {"when": [{"when": condition, "then": {"literal": 1}}]},
+                    "as": "total",
+                }
+            ],
+        }
+    )
+    with pytest.raises(PolicyViolationError, match="case condition nesting depth"):
+        validate_policy(query, Policy(max_where_depth=2), connection_id="demo")
+
+
+def test_subquery_inside_an_expression_case_condition_is_rejected():
+    """A value_subquery reachable only through a CaseExpr condition is NOT
+    enumerated by iter_query_scopes (which walks WHERE/HAVING predicates), so it
+    would never be schema-validated. It must be rejected with a clean typed
+    error rather than reaching the compiler."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [
+                {
+                    "fn": "sum",
+                    "arg": {
+                        "when": [
+                            {
+                                "when": {
+                                    "col": "customers.id",
+                                    "op": "in",
+                                    "value_subquery": {
+                                        "from": "orders",
+                                        "select": ["orders.customer_id"],
+                                    },
+                                },
+                                "then": {"literal": 1},
+                            }
+                        ]
+                    },
+                    "as": "total",
+                }
+            ],
+        }
+    )
+    with pytest.raises(PolicyViolationError, match="only supported in a WHERE clause"):
+        validate_policy(query, Policy(), connection_id="demo")

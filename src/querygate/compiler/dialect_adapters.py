@@ -70,6 +70,19 @@ class DialectAdapter(ABC):
         Order.TotalAmount) for the median."""
 
     @abstractmethod
+    def scalar_function(self, name: str, args: List[Any]) -> Any:
+        """Render one item-100 `FunctionExpr` whose SQL genuinely differs per
+        dialect. Only the divergent few route here — `coalesce`, `lower`,
+        `upper`, `trim`, `concat`, `abs`, `floor`, `nullif` and `replace` are
+        identical everywhere and stay in the compiler's universal table, per
+        this interface's own "nothing dialect-universal belongs here" rule.
+
+        Arity is already checked at the AST layer, so an implementation may
+        index `args` positionally. A dialect with no genuine equivalent for a
+        function raises `QueryValidationError` rather than emulating one.
+        """
+
+    @abstractmethod
     def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
         """Transform col_expr so the database itself returns a masked value
         (TODO.md item 49). NULL/BUCKET render identically everywhere; HASH and
@@ -115,6 +128,25 @@ class PostgresDialectAdapter(DialectAdapter):
 
     def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
         return sa.within_group(sa.func.percentile_cont(fraction), col_expr)
+
+    def scalar_function(self, name: str, args: List[Any]) -> Any:
+        if name == "ceil":
+            return sa.func.ceil(args[0])
+        if name == "length":
+            return sa.func.length(args[0])
+        if name == "substring":
+            return sa.func.substring(*args)
+        if name == "round":
+            # Postgres has no round(double precision, integer) — only
+            # round(numeric, integer) — so a two-argument round over a float
+            # column errors at runtime unless the value is numeric. Casting is
+            # the mechanical per-dialect rendering of the SAME operation the
+            # caller expressed (the date_bucket category), not structure the
+            # AST didn't ask for. One-argument round is fine on any type.
+            if len(args) == 2:
+                return sa.func.round(sa.cast(args[0], sa.Numeric), args[1])
+            return sa.func.round(args[0])
+        raise QueryValidationError(f"Unsupported scalar function {name!r} on Postgres")
 
     def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
         if mask.kind is ColumnMaskKind.NULL:
@@ -202,6 +234,31 @@ class MSSQLDialectAdapter(DialectAdapter):
             "requiring an OVER(...) clause"
         )
 
+    def scalar_function(self, name: str, args: List[Any]) -> Any:
+        if name == "ceil":
+            # T-SQL spells it CEILING; there is no CEIL. Same operation, its
+            # own idiom — the mechanical-translation case, not a real gap.
+            return sa.func.CEILING(args[0])
+        if name == "length":
+            # LEN, not LENGTH. Note T-SQL's LEN ignores trailing spaces where
+            # Postgres's length() does not; a caller who needs the exact byte/
+            # char semantics can TRIM explicitly rather than have us synthesize
+            # a DATALENGTH-based emulation the AST never asked for.
+            return sa.func.LEN(args[0])
+        if name == "substring":
+            # SQLAlchemy's mssql compiler renders the comma form
+            # SUBSTRING(x, start, len); Postgres gets the SQL-standard
+            # SUBSTRING(x FROM start FOR len). Both are correct for their
+            # dialect — this is why the AST requires exactly 3 arguments (T-SQL
+            # has no 2-argument form, so allowing one would render fine on
+            # Postgres and break live on MSSQL).
+            return sa.func.substring(*args)
+        if name == "round":
+            # T-SQL's ROUND requires the length argument; one-argument round is
+            # rendered as ROUND(x, 0), the identical operation.
+            return sa.func.ROUND(args[0], args[1] if len(args) == 2 else 0)
+        raise QueryValidationError(f"Unsupported scalar function {name!r} on MSSQL")
+
     def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
         if mask.kind is ColumnMaskKind.NULL:
             return sa.null()
@@ -288,6 +345,21 @@ class SQLiteDialectAdapter(DialectAdapter):
         raise QueryValidationError(
             "percentile_cont is not supported on the internal SQLite test/example "
             "dialect: SQLite has no ordered-set aggregate (WITHIN GROUP) support"
+        )
+
+    def scalar_function(self, name: str, args: List[Any]) -> Any:
+        if name == "ceil":
+            return sa.func.ceil(args[0])
+        if name == "length":
+            return sa.func.length(args[0])
+        if name == "substring":
+            # SQLite's substr(); `substring` is only an alias from 3.34, so the
+            # portable spelling is used for the internal test/example path.
+            return sa.func.substr(*args)
+        if name == "round":
+            return sa.func.round(*args)
+        raise QueryValidationError(
+            f"Unsupported scalar function {name!r} on the internal SQLite test/example dialect"
         )
 
     def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
