@@ -5697,3 +5697,74 @@ removed they fail; with it restored they pass.
 semantic-diff scope (`admin/access_diff.py` enumerates read-`Policy` fields
 only). That is a pre-existing boundary, not a regression from this item; adding
 write-policy diffing is its own separately-scoped piece of work.
+
+### 112. No scheduled (cron) CI run — dependency/security scans only fire on push/PR ✅ DONE
+
+**Effort: S. Priority: medium (closes a real blind window between code changes,
+cheap to add). Depends on: none.** Surfaced by the 2026-07-23 technical review
+(`TECHNICAL_REVIEW.md`), Review Phase 2.
+
+**Why it mattered.** `.github/workflows/ci.yml`'s only triggers were
+`push: branches: [main]` and `pull_request`, so the SBOM/CVE audit, Trivy image
+scan, secret scan, and adversarial/DAST suites ran only when someone happened to
+open a PR or push to `main`. A CVE disclosed against an already-merged, unchanged
+dependency (or the shipped image's OS/library layers) was not caught until the
+next incidental change touched the repo. Separately, `make test-soak`
+(`SOAK_ROUNDS=100`) was never invoked by CI at all — only the lighter 5-round
+`test-load` ran in the `postgres-live` job — so a slow-degradation or pool-leak
+regression that only surfaces after dozens of rounds passed every PR and was
+caught only if a maintainer remembered to run `test-soak` manually before a
+release.
+
+**What shipped.** `.github/workflows/scheduled.yml` — a new workflow triggered on
+`schedule` (daily at 07:00 UTC, off-peak) and `workflow_dispatch` (with an
+optional `soak_rounds` input for on-demand runs), independent of any code change.
+A non-cancelling `concurrency` group keeps two scheduled runs from overlapping;
+`permissions: contents: read` is least-privilege (no write scopes); each job
+carries a `timeout-minutes` bound (20/30/45) so a hung run can't burn the 360-min
+GitHub default. Three jobs:
+
+- **`dependency-audit`** — `poetry check --lock` (lockfile drift) then
+  `scripts/generate_sbom.py`, the identical CycloneDX SBOM + `pip-audit`
+  deny-by-default CVE gate `make release-check` runs, over the exact locked
+  `main` ship set. This is the step that catches a newly-disclosed CVE against an
+  unchanged dependency between code changes.
+- **`image-scan`** — builds the production image and Trivy-scans it for
+  HIGH/CRITICAL vulnerabilities, secrets, and misconfig (`--ignore-unfixed`,
+  reviewed exceptions in `.trivyignore`), mirroring ci.yml's image-scan posture
+  but on the nightly schedule.
+- **`soak`** — stands up the same bare Postgres service the `postgres-live` job
+  uses, seeds `querygate_demo` and creates the separate `querygate_stress`
+  database the large-domain scenarios populate (both needed because
+  `make test-soak` runs every `-m load` test — the concurrency-guardrail suite,
+  the write-load suite, and the large-domain stress soak), then runs
+  `make test-soak SOAK_ROUNDS=100` (overridable via the dispatch input).
+
+**Docs.** `docs/RELEASING.md` gained a "Scheduled security scans and soak"
+section documenting the cadence, the three jobs, and how to triage a red nightly
+run (same as a failed release gate — a CVE, lockfile drift, or guardrail
+regression landed on `main` without a code change to trigger the per-PR gates).
+
+**Verification.** The workflow was linted clean with `actionlint` (which bundles
+shellcheck, so the `run:` step shell was validated too) — no schema, expression,
+`uses:`, or shell errors. Every job's command path was then executed locally and
+proven green, not just asserted to be reused:
+
+- **`dependency-audit`** — `poetry check --lock` → "All set!"; `poetry build` +
+  `scripts/generate_sbom.py` → SBOM (47 components) written and `pip-audit`
+  reported "no unreviewed known vulnerabilities (0 allowlisted)". The nightly
+  will be green on day one, not red on a pre-existing finding.
+- **`image-scan`** — `make scan-image` (the same Dockerfile build + Trivy
+  HIGH/CRITICAL `--ignore-unfixed` deny-by-default scan the job runs via
+  `aquasecurity/trivy-action`) exited 0 with no findings.
+- **`soak`** — against a real Compose Postgres with `querygate_stress` created
+  the same way the job seeds it, `SOAK_ROUNDS=2 make test-soak` ran the full
+  `-m load` set (concurrency guardrails + large-domain stress soak + write-load),
+  9/9 passed. The bounded round count proves the exact command path; the nightly
+  runs the full `SOAK_ROUNDS=100`.
+
+The cron *firing* is inherently only observable once merged and scheduled — a
+config declaration, not runtime logic — so there is no in-repo test to add; the
+acceptance criterion (a nightly/weekly workflow runs the CVE/SBOM/lockfile checks
+and `make test-soak` against `main` independent of code changes) is satisfied by
+the declared `schedule:` trigger plus every invoked command proven green above.
