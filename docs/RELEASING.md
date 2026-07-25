@@ -98,6 +98,33 @@ integrity check a consumer runs after downloading a release bundle. It checks *i
 (the bytes are the ones this repo produced), not *authenticity*; authenticity of the
 published container image comes from the signature and provenance described next.
 
+## Scheduled security scans and soak
+
+`.github/workflows/ci.yml` only triggers on `push`/`pull_request`, so its SBOM/CVE
+audit, image scan, and guardrail load tests run only when the repo is touched. A CVE
+disclosed against an already-merged, unchanged dependency (or the shipped image's
+OS/library layers) would otherwise go unnoticed until the next incidental change, and
+the heavy `make test-soak` (`SOAK_ROUNDS=100`) never runs per-PR — only the lighter
+5-round `test-load` does.
+
+`.github/workflows/scheduled.yml` closes both windows. It runs nightly at 07:00 UTC
+(and on-demand via `workflow_dispatch`, with an optional `soak_rounds` input),
+independent of any code change, and covers three jobs:
+
+- **`dependency-audit`** — `poetry check --lock` (lockfile drift) followed by
+  `scripts/generate_sbom.py`, the same CycloneDX SBOM + `pip-audit` deny-by-default
+  CVE gate `make release-check` runs, over the exact locked ship set.
+- **`image-scan`** — builds the production image and Trivy-scans it for HIGH/CRITICAL
+  vulnerabilities, secrets, and misconfig (`--ignore-unfixed`, exceptions in
+  `.trivyignore`).
+- **`soak`** — seeds the demo + stress databases and runs `make test-soak`
+  (`SOAK_ROUNDS=100`), repeating the real-Postgres guardrail load scenarios far
+  enough to surface a slow pool leak or a cap breach a single pass would miss.
+
+A red nightly run means a new CVE, lockfile drift, or a guardrail regression has landed
+on `main` without a code change to trigger the per-PR gates — triage it the same as a
+failed release gate.
+
 ## Signed, provenance-attested container image
 
 The published container image is cryptographically signed and carries SLSA build

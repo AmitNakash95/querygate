@@ -320,15 +320,15 @@ execution disabled), **41 ph2** (stateless paginated blast-radius), and
 **50 ph2** (`RedisQuotaLimiter` — cross-replica shared quota). The remaining
 frontier's buildable threads:
 
-- **Technical-Review Phase 1 (107, 108, 109) — ✅ all shipped 2026-07-24.**
-  Quota double-reserve on an approval retry (107), the write preview running the
-  real DML before the over-cap check (108), and the missing MCP write batch-size
-  cap (109) are done. The **remaining review items** are all still buildable with
-  no external dependency: **110** (reject `value_subquery` in a write WHERE at the
-  validation layer, XS) and **111** (consolidate the four hand-rolled
-  WHERE-predicate walks into one shared helper, à la item 96) in Review Phase 3,
-  and **112** (a scheduled/cron CI job for CVE/SBOM scans + `make test-soak`) in
-  Review Phase 2. These are the next buildable thread.
+- **Technical-Review Phase 1 (107, 108, 109) — ✅ all shipped 2026-07-24; Review
+  Phase 2 (112) — ✅ shipped 2026-07-25.** Quota double-reserve on an approval
+  retry (107), the write preview running the real DML before the over-cap check
+  (108), the missing MCP write batch-size cap (109), and the scheduled/cron CI job
+  for CVE/SBOM scans + `make test-soak` (112) are done. The **remaining review
+  items** are both still buildable with no external dependency, in Review Phase 3:
+  **110** (reject `value_subquery` in a write WHERE at the validation layer, XS)
+  and **111** (consolidate the four hand-rolled WHERE-predicate walks into one
+  shared helper, à la item 96). These are the next buildable thread.
 - **Flagship engine:** **item 99 shipped 2026-07-24** — it was the one
   flagship-engine item needing no Decision Log entry; **100–106 each require one
   before build**, so the engine pillar is decision-gated again from here.
@@ -413,7 +413,7 @@ already-planned initiatives.
 
 ### Review Phase 2 — Reliability and workflow hardening
 
-- [ ] **112** — Add a scheduled (cron) CI workflow for dependency/security
+- [x] **112** — Add a scheduled (cron) CI workflow for dependency/security
   scans and wire `make test-soak` into it.
   - Why: `.github/workflows/ci.yml` only triggers on `push`/`pull_request` —
     a CVE disclosed against an already-merged dependency isn't caught until
