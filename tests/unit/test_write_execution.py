@@ -21,8 +21,7 @@ from querygate.execution.approval import issue_approval_token, write_fingerprint
 from querygate.execution.write_execution import WriteExecutionService
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy, WritePolicy
-from querygate.query_ast.models import Predicate
-from querygate.write_ast.models import DeleteStatement
+from querygate.write_ast.models import DeleteStatement, WritePredicate
 
 pytestmark = pytest.mark.unit
 
@@ -41,7 +40,11 @@ class _CapturingSink:
 
 
 def _delete(value: int) -> DeleteStatement:
-    return DeleteStatement(table="orders", where=Predicate(col="orders.id", op="eq", value=value))
+    # WritePredicate, not the read Predicate: since item 114 a write's filter has
+    # its own narrowed type. The wire payload ({col, op, value}) is identical.
+    return DeleteStatement(
+        table="orders", where=WritePredicate(col="orders.id", op="eq", value=value)
+    )
 
 
 def _wp(require_approval_over_rows=0) -> WritePolicy:

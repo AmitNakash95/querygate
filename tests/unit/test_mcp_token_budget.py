@@ -78,30 +78,33 @@ from querygate.mcp.server import create_mcp_server
 # headroom. Do the same trim before the next bump: prose that only a maintainer
 # needs does not belong in a model docstring.
 #
-# KNOWN WASTE inside this number, measured while bumping it (TODO.md item 114):
-# `run_structured_writes` is the single largest tool (34,594 chars) because a
-# write's `where` reuses the READ Predicate, so **4,871 chars of Expression
-# definitions — plus the whole read StructuredQuery definition — are inlined
-# into the write tool for fields the write path REJECTS at validation
-# (expr/value_expr per item 100, value_subquery per item 110). Fixing that is a
-# write-contract change and belongs in its own PR; when item 114 lands this
-# budget should DROP, not grow. Do not raise this ceiling again without first
-# checking whether item 114 would have made the raise unnecessary.
+# Bumped 2026-07-25 (item 101: general window functions) — 123,000 -> 132,000,
+# measured 126,700. Kept as one line so this log stays append-only; the full
+# rationale (and the prediction the next entry redeems) is in
+# docs/TODO_ARCHIVE.md's item-101 entry.
 #
-# Bumped 2026-07-26 (item 101: general window functions) — measured 126,700
-# chars, +9,600 over item 100 (of which ~860 is a rewritten MCP_INSTRUCTIONS
-# section that documents windows and *corrects* a now-false claim, "no function
-# nesting anywhere", which item 100 had left stale). Only about half of the rest
-# is the new capability:
-# `WindowSelectItem`/`WindowSpec`/`WindowFrame`/`WindowBound` add ~4,370 chars to
-# `run_structured_queries`, and the SAME ~4,370 is inlined a second time into
-# `run_structured_writes` (34,594 -> 38,964) because a write's `where` reuses the
-# read `Predicate`, which reaches `StructuredQuery` -> `SelectItem` -> the window
-# nodes the write path cannot use at all. That is exactly the KNOWN WASTE above:
-# **item 114 would have absorbed this entire raise.** Model docstrings were kept
-# agent-facing and the maintainer rationale for the window bounds lives in `#`
-# comments, per the trim rule above. New budget keeps ~5% headroom.
-_MAX_TOTAL_CHARS = 132_000
+# DROPPED 2026-07-26 (item 114: the write tool stops advertising read-only
+# predicate fields) — measured 104,042 chars, **down 24,509 (-19%)** from the
+# 128,551 measured at item 115 (which had itself added 1,851 over item 101's
+# 126,700 — a wider EffectiveGuardrails in describe_my_querygate_access's output
+# schema — without
+# needing a bump, so item 101's figure understates this drop).
+# `run_structured_writes` fell from 38,964 to 14,455 (-63%): a
+# write's `where` used to reuse the READ `Predicate`, which dragged the entire
+# `Expression` union, every `SelectItem` (windows included) and the whole read
+# `StructuredQuery` definition into a tool that REJECTS all of them. The write
+# AST now has its own narrowed predicate types, so the schema advertises exactly
+# what a write accepts. This is the drop item 101's archive entry predicted, and
+# it is why that raise was accepted. Note precisely what improved: this ceiling
+# (110,000) is back below item 100's 123,000 but is still ~2,000 ABOVE the 108,000
+# in force before item 100 — it is the measured *total* that is now lower.
+#
+# The budget keeps ~5% headroom. Before raising it again: check whether the
+# growth is real new capability or another duplicated definition, and move
+# maintainer rationale out of model docstrings into `#` comments first (a
+# Pydantic docstring becomes the agent-facing schema description and costs
+# tokens on every session; a `#` comment costs nothing).
+_MAX_TOTAL_CHARS = 110_000
 
 
 def _tool_schema_chars(tool: object) -> int:

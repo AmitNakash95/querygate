@@ -28,6 +28,7 @@ from querygate.write_ast.models import (
     UpdateStatement,
     UpsertStatement,
     WriteStatement,
+    to_read_where,
 )
 
 
@@ -74,7 +75,8 @@ async def validate_write_schema(
     # is single-table in Phase 1 — no correlated/other-table refs).
     where = getattr(statement, "where", None)
     if where is not None:
-        for pred in iter_where_predicates(where):
+        # Narrowed write filter -> read WhereNode (item 114); see write_ast.models.
+        for pred in iter_where_predicates(to_read_where(where)):
             for ref in predicate_column_refs(pred):
                 ref_table, ref_col = parse_column_ref(ref)
                 if ref_table.lower() != statement.table.lower():

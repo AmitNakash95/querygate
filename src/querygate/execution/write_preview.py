@@ -29,10 +29,8 @@ from querygate.compiler.write_compiler import _coerce_row, compile_write
 from querygate.connections.engine import session_scope
 from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.auth import Principal
-from querygate.core.exceptions import QueryValidationError
 from querygate.policy.loader import get_policy
 from querygate.policy.models import Policy
-from querygate.query_ast.models import Predicate, WhereNode
 from querygate.validation.write_policy_validation import validate_write_policy
 from querygate.validation.write_schema_validation import validate_write_schema
 from querygate.write_ast.models import (
@@ -40,6 +38,7 @@ from querygate.write_ast.models import (
     UpdateStatement,
     UpsertStatement,
     WriteStatement,
+    to_read_where,
 )
 
 _MASKED = "***MASKED***"
@@ -81,25 +80,6 @@ class WritePreview(pyd.BaseModel):
     model_config = pyd.ConfigDict(extra="forbid")
 
 
-def _reject_subquery_in_write_where(where: Optional[WhereNode]) -> None:
-    """A value_subquery (item 97) inside a write WHERE is out of scope for write
-    Phase 1 — reject it rather than silently mis-handle it."""
-    if where is None:
-        return
-    stack: List[WhereNode] = [where]
-    while stack:
-        node = stack.pop()
-        if isinstance(node, Predicate):
-            if node.value_subquery is not None:
-                raise QueryValidationError(
-                    "IN (subquery) is not supported in a write's WHERE (item 93 phase 1)"
-                )
-            continue
-        if node.not_terms is not None:
-            stack.append(node.not_terms)
-        stack.extend(node.and_terms or node.or_terms or [])
-
-
 class WritePreviewService:
     """Thin service that validates + previews a write on one connection. Mirrors
     `StructuredQueryService` for the read path; there is no execute() sibling in
@@ -114,7 +94,6 @@ class WritePreviewService:
     ) -> WritePreview:
         policy = get_policy(self._connection_id, principal=self._principal)
         validate_write_policy(statement, policy, self._connection_id)
-        _reject_subquery_in_write_where(getattr(statement, "where", None))
         table = await validate_write_schema(statement, self._connection_id, self._principal)
 
         # Compile the DML — proves it is a real, bound-parameter Core statement
@@ -139,7 +118,12 @@ class WritePreviewService:
                 sa.select(sa.func.count())
                 .select_from(table)
                 .where(
-                    _compile_where(statement.where, {statement.table: table}, {}, profile.dialect)
+                    _compile_where(
+                        to_read_where(statement.where),
+                        {statement.table: table},
+                        {},
+                        profile.dialect,
+                    )
                 )
             )
             async with session_scope(self._connection_id, policy=policy) as session:
@@ -225,7 +209,9 @@ class WritePreviewService:
         is an approximation (it can't reflect DB-side defaults/triggers/coercion),
         which is the right trade for a write that will not be allowed to run."""
         limit = policy.write.max_diff_rows
-        where = _compile_where(statement.where, {statement.table: table}, {}, dialect)
+        where = _compile_where(
+            to_read_where(statement.where), {statement.table: table}, {}, dialect
+        )
         before_stmt = sa.select(table).where(where).limit(limit + 1)
         before_rows = [dict(r) for r in (await session.execute(before_stmt)).mappings().all()]
         truncated = len(before_rows) > limit

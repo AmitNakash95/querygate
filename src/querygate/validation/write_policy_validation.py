@@ -23,6 +23,7 @@ from querygate.write_ast.models import (
     UpdateStatement,
     UpsertStatement,
     WriteStatement,
+    to_read_where,
 )
 
 
@@ -76,7 +77,10 @@ def validate_write_policy(statement: WriteStatement, policy: Policy, connection_
     # to target a mutation.
     where = getattr(statement, "where", None)
     if where is not None:
-        for pred in iter_where_predicates(where):
+        # Narrowed write filter -> the read WhereNode the ONE canonical predicate
+        # walk understands (item 114). A read node passes through unchanged, which
+        # is what keeps the rejections below reachable as defence in depth.
+        for pred in iter_where_predicates(to_read_where(where)):
             # A subquery predicate (item 97's `value_subquery` / IN (subquery)) is
             # a READ-only capability — writes never pass a compiler `ctx`, so the
             # write compiler can't render one and would fail deep inside
