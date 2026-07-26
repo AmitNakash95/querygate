@@ -194,6 +194,34 @@ def _missing_part(part: str, dialect: str) -> QueryValidationError:
     return QueryValidationError(f"extract part {part!r} is not supported on {dialect}")
 
 
+def _missing_unit(unit: str, dialect: str) -> QueryValidationError:
+    """The `date_add` sibling of `_missing_part`. Both exist for the same reason
+    and both must, or the exhaustiveness doctrine holds for half the surface —
+    which is what the first version of this refactor actually shipped."""
+    return QueryValidationError(f"interval unit {unit!r} is not supported on {dialect}")
+
+
+# The `date_add` unit vocabulary per dialect, exhaustive for the same reason the
+# part maps are. SQLite is the sharpest case: an unmapped unit reaching its
+# `datetime(x, '+N units')` modifier yields **NULL**, not an error — the exact
+# silent-empty-column failure `weeks` caused before it was mapped to days.
+_MSSQL_DATEADD_UNITS: Dict[str, str] = {
+    "year": "year",
+    "month": "month",
+    "week": "week",
+    "day": "day",
+    "hour": "hour",
+    "minute": "minute",
+    "second": "second",
+}
+
+# `week` is present but is rewritten to days by the adapter (SQLite has no
+# `weeks` modifier); membership here is what makes the unit *known*.
+_SQLITE_DATEADD_UNITS: frozenset = frozenset(
+    {"year", "month", "week", "day", "hour", "minute", "second"}
+)
+
+
 # Which positional argument of Postgres's `make_interval(years, months, weeks,
 # days, hours, mins, secs)` each unit fills.
 #
@@ -295,7 +323,9 @@ class PostgresDialectAdapter(DialectAdapter):
         # cast makes the declared "integer" contract true rather than
         # dialect-dependent (a `Decimal` here and an `int` on MSSQL for the same
         # AST is precisely the differential-suite mismatch items 75/82 warn of).
-        field = _PG_EXTRACT_FIELDS[part]
+        field = _PG_EXTRACT_FIELDS.get(part)
+        if field is None:
+            raise _missing_part(part, "Postgres")
         # FLOOR before the cast, and it is load-bearing for exactly one part.
         # Postgres's EXTRACT returns `numeric` INCLUDING the fractional second,
         # and `numeric -> integer` ROUNDS HALF AWAY FROM ZERO — so a plain cast
@@ -320,7 +350,10 @@ class PostgresDialectAdapter(DialectAdapter):
         # `unit` only chooses which position. No caller-derived content reaches
         # the statement text (the plan's §9 hard rule).
         args: List[Any] = [0] * 7
-        args[_PG_MAKE_INTERVAL_POSITIONS[unit]] = sa.literal(amount)
+        position = _PG_MAKE_INTERVAL_POSITIONS.get(unit)
+        if position is None:
+            raise QueryValidationError(f"interval unit {unit!r} is not supported on Postgres")
+        args[position] = sa.literal(amount)
         return expr + sa.func.make_interval(*args)
 
     def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
@@ -466,9 +499,9 @@ class MSSQLDialectAdapter(DialectAdapter):
             # AST didn't ask for.
             weekday = sa.func.DATEPART(sa.literal_column("weekday"), expr)
             return (weekday + sa.literal_column("@@DATEFIRST") - 1) % 7
-        # `iso_week`, not `week`: T-SQL's plain `week` is a DATEFIRST-dependent
-        # count that disagrees with Postgres's ISO week for the same date.
-        field = {"week": "iso_week", "dayofyear": "dayofyear"}.get(part, part)
+        field = _MSSQL_DATEPART_FIELDS.get(part)
+        if field is None:
+            raise _missing_part(part, "MSSQL")
         return sa.func.DATEPART(sa.literal_column(field), expr)
 
     def current_timestamp(self, kind: Literal["timestamp", "date"]) -> Any:
@@ -488,9 +521,12 @@ class MSSQLDialectAdapter(DialectAdapter):
 
     def date_add(self, expr: Any, unit: str, amount: int) -> Any:
         # T-SQL has no interval type — DATEADD is the whole idiom, and it takes
-        # the unit as a keyword. The keyword comes from the `IntervalUnit` enum,
-        # never caller text; only `amount` is caller-supplied, and it binds.
-        return sa.func.DATEADD(sa.literal_column(unit), sa.literal(amount), expr)
+        # the unit as a keyword. The keyword comes from an exhaustive map, never
+        # caller text; only `amount` is caller-supplied, and it binds.
+        keyword = _MSSQL_DATEADD_UNITS.get(unit)
+        if keyword is None:
+            raise _missing_unit(unit, "MSSQL")
+        return sa.func.DATEADD(sa.literal_column(keyword), sa.literal(amount), expr)
 
     def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
         if mask.kind is ColumnMaskKind.NULL:
@@ -622,7 +658,10 @@ class SQLiteDialectAdapter(DialectAdapter):
             # back into quarter 1. Months are 1-12, so truncation is floor here.
             month = sa.cast(sa.func.strftime("%m", expr), sa.Integer)
             return sa.cast((month + 2) / 3, sa.Integer)
-        return sa.cast(sa.func.strftime(_SQLITE_STRFTIME_PARTS[part], expr), sa.Integer)
+        code = _SQLITE_STRFTIME_PARTS.get(part)
+        if code is None:
+            raise _missing_part(part, "the internal SQLite test/example dialect")
+        return sa.cast(sa.func.strftime(code, expr), sa.Integer)
 
     def current_timestamp(self, kind: Literal["timestamp", "date"]) -> Any:
         # SQLite's 'now' is already UTC, so no conversion is needed to match the
@@ -634,6 +673,13 @@ class SQLiteDialectAdapter(DialectAdapter):
         # returns NULL rather than erroring, so this would have been a silently
         # empty column, not a failure. Expressed in days instead, which is the
         # identical shift (a week is exactly 7 days, unlike months/years).
+        #
+        # Exhaustive, for the same reason: a future `IntervalUnit` reaching the
+        # f-string below would render `'+3 nanocenturys'`, which SQLite answers
+        # with NULL rather than an error — the identical silent-empty-column
+        # failure `weeks` already caused once.
+        if unit not in _SQLITE_DATEADD_UNITS:
+            raise _missing_unit(unit, "the internal SQLite test/example dialect")
         if unit == "week":
             unit, amount = "day", amount * 7
         # The modifier is a STRING ('-7 days'), which is why `amount` is

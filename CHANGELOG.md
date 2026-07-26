@@ -25,6 +25,17 @@ All notable changes to QueryGate are documented here.
   container) sees no change. Rationale in `docs/PRODUCT_GUIDE.md`'s Decision Log
   (2026-07-26).
 
+- **A date primitive now requires a date column.** `extract`/`date_add` over a
+  column that is not a date/time type is rejected at validation with a typed
+  4xx. This is a **breaking change for SQL Server callers**: T-SQL implicitly
+  converts an int or a string to a datetime counted from 1900-01-01, so
+  `DATEPART(hour, <int or varchar column>)` used to return a value (`0`, and
+  `1900-01-03` for a shift) where Postgres errored — the same query, a hard
+  failure on one backend and a plausible wrong answer on the other. A string
+  column that genuinely holds a timestamp should be cast explicitly
+  (`{"cast": {"col": "..."}, "to": "timestamp"}`); the rejection message says
+  so. Postgres `interval` columns are unaffected — they remain valid operands.
+
 ### Added
 
 - Date and relative-time query primitives (TODO.md item 102). Three new members
