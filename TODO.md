@@ -146,7 +146,7 @@ order-of-magnitude, not commitments.
 | 113 | ✅ OBSOLETE — metrics for the removed write-undo / compensation store | — | — |
 | 114 | ✅  Write tool MCP schema advertises read-only predicate fields it rejects | M | 93 |
 | 115 | ✅  Guardrail-field lists in admin/help have drifted from `Policy`'s caps | S | — |
-| 116 |  A write's WHERE is exempt from every shape cap the read path enforces | S | — |
+| 116 | ✅  A write's WHERE is exempt from every shape cap the read path enforces | S | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2244,44 +2244,15 @@ way) or a test fails.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 115).
 
-### 116. A write's WHERE is exempt from every shape cap the read path enforces
+### 116. A write's WHERE was exempt from every shape cap the read path enforces ✅ DONE
 
-**Effort: S. Priority: medium (resource-exhaustion guardrail parity). Depends on:
-nothing.** Surfaced 2026-07-26 by the item-114 audit — three reviewers flagged it
-independently. Pre-existing since item 93; item 114 is what made it salient, since
-the write filter now has its own type and therefore an obvious home for the caps.
+`validate_write_policy` enforced none of `max_where_depth`,
+`max_where_predicates` or `max_in_list_size`, so `delete … where id in [<huge
+list>]` was rendered in full client-side (measured: 100,000 values -> a 689 KB
+statement) before `max_affected_rows` was consulted — and past the driver's
+parameter limit it failed in the driver rather than being refused cleanly. Each of the three rules is now a single
+function both paths reach (verified by spying on each one), and the write path
+applies them — to every statement of a batch up front — before any DML compiles,
+proven by observing that no statement reaches the database.
 
-`validate_write_policy` enforces none of `Policy.max_where_depth`,
-`max_where_predicates`, or `max_in_list_size`. All three live only in
-`policy_validation.py`, which the write path never calls. So:
-
-- **`max_in_list_size` (default 1000) is the concrete one.** A
-  `{"op":"delete","table":"orders","where":{"col":"orders.id","op":"in","value":[…1e6 ids…]}}`
-  compiles ~1M bind parameters and runs a `COUNT(*)` over them **before**
-  `max_affected_rows` is consulted — the read path refuses the same list.
-- **Depth** is at least fail-safe: ~800 nested `not` levels return a clean
-  Pydantic `ValidationError` (422), not a `RecursionError` — but a write filter may
-  nest ~250 levels where a read caps at 5, and the tree is now walked four times
-  (`to_read_where`, two validator walks, `_compile_where`).
-- **Predicate count** is likewise unbounded.
-
-**Why it was not fixed inside item 114:** adding the caps changes which writes are
-*accepted*, which is a policy-behaviour decision for the maintainer, not a
-side-effect of a schema narrowing. It is also the write sibling of a read
-guardrail, so the natural implementation reuses `_check_where_depth` and the
-in-list check rather than inventing write-specific ones.
-
-**Scope:** `validation/write_policy_validation.py`; possibly a shared helper with
-`policy_validation.py` so the two cannot drift.
-
-**Acceptance criteria:**
-- A write WHERE is bounded by `max_where_depth`, `max_where_predicates` and
-  `max_in_list_size`, enforced before any DML is compiled or any `COUNT(*)` runs.
-- The over-cap rejection is a clean typed `PolicyViolationError`, audited like any
-  other rejected write attempt.
-- Tests: each cap fires on a write; an over-size `in` list is refused before the
-  affected-row count executes (assert no statement reaches the database, the
-  technique item 108 used); and the read-path caps keep their existing tests.
-- Decide explicitly whether the write caps are the same fields or write-specific
-  ones (`WritePolicy.max_*`), and record it — the read caps are tuned for a
-  SELECT's cost, and a write's cost profile differs.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 116).

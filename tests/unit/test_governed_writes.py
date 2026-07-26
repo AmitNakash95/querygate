@@ -15,6 +15,7 @@ from querygate.compiler.write_compiler import compile_write
 from querygate.core.exceptions import PolicyViolationError, QueryValidationError
 from querygate.policy.models import ColumnMask, ColumnMaskKind, Policy, WritePolicy
 from querygate.query_ast.models import Predicate, StructuredQuery, WhereGroup
+from querygate.validation.policy_validation import validate_policy
 from querygate.validation.write_policy_validation import (
     validate_write_batch_size,
     validate_write_policy,
@@ -518,3 +519,95 @@ def test_converting_a_group_does_not_revalidate_its_leaves():
     group = WriteWhereGroup.model_construct(and_terms=[unvalidated_leaf])
     converted = to_read_where(group)  # must not raise
     assert converted.and_terms[0] is unvalidated_leaf
+
+
+# --------------------------------------------------------------------------- #
+# Write-filter shape caps (TODO.md item 116). A write's WHERE used to be exempt
+# from all three caps the read path enforces, so `delete … where id in [1M ids]`
+# compiled ~1M bind parameters and ran a COUNT(*) over them before
+# `max_affected_rows` was consulted. Same `Policy` fields as reads: a write's
+# WHERE *reads* rows to select them, the same reasoning that already applies the
+# read allow/deny and masking rules to it.
+# --------------------------------------------------------------------------- #
+def _delete_where(where: dict) -> DeleteStatement:
+    return DeleteStatement.model_validate({"op": "delete", "table": "orders", "where": where})
+
+
+def test_write_where_in_list_is_bounded():
+    over = _delete_where({"col": "orders.id", "op": "in", "value": list(range(11))})
+    with pytest.raises(PolicyViolationError, match="exceeds max_in_list_size"):
+        validate_write_policy(over, _writable(max_in_list_size=10), _CONN)
+    at_cap = _delete_where({"col": "orders.id", "op": "in", "value": list(range(10))})
+    validate_write_policy(at_cap, _writable(max_in_list_size=10), _CONN)  # no raise
+
+
+def test_write_where_nesting_depth_is_bounded():
+    deep = {"not": {"not": {"not": {"col": "orders.id", "op": "eq", "value": 1}}}}
+    with pytest.raises(PolicyViolationError, match="write where nesting depth"):
+        validate_write_policy(_delete_where(deep), _writable(max_where_depth=3), _CONN)
+    validate_write_policy(_delete_where(deep), _writable(max_where_depth=4), _CONN)
+
+
+def test_write_where_predicate_count_is_bounded():
+    wide = {"or": [{"col": "orders.id", "op": "eq", "value": i} for i in range(6)]}
+    with pytest.raises(PolicyViolationError, match="write where predicate count 6"):
+        validate_write_policy(_delete_where(wide), _writable(max_where_predicates=5), _CONN)
+    # At-cap positive control, so an off-by-one (>= instead of >) fails here.
+    validate_write_policy(_delete_where(wide), _writable(max_where_predicates=6), _CONN)
+
+
+@pytest.mark.parametrize(
+    "rule", ["_check_where_depth", "_check_predicate_count", "_check_in_list_size"]
+)
+def test_read_and_write_paths_route_through_the_same_shape_rules(monkeypatch, rule):
+    """One implementation, not a write-side copy — proven by spying on each rule and
+    seeing BOTH paths reach it. (Comparing imported names would be tautological:
+    Python's import semantics make that identity hold automatically.)"""
+    from querygate.validation import policy_validation as pv
+
+    calls: list = []
+    original = getattr(pv, rule)
+
+    def _spy(*args, **kwargs):
+        calls.append(rule)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pv, rule, _spy)
+
+    read_query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "where": {"col": "orders.id", "op": "in", "value": [1, 2]},
+        }
+    )
+    validate_policy(read_query, Policy(), _CONN)
+    read_calls = len(calls)
+    assert read_calls, f"the READ path does not use {rule}"
+
+    validate_write_policy(
+        _delete_where({"col": "orders.id", "op": "in", "value": [1, 2]}), _writable(), _CONN
+    )
+    assert len(calls) > read_calls, f"the WRITE path does not use {rule}"
+
+
+@pytest.mark.parametrize(
+    "predicate,expected_target",
+    [
+        ({"col": "orders.status", "op": "in", "value": ["a", "b"]}, "'orders.status'"),
+        (
+            {
+                "col_fn": {"fn": "lower", "args": [{"col": "orders.status"}]},
+                "op": "in",
+                "value": ["a", "b"],
+            },
+            r"'lower\(\.\.\.\)'",
+        ),
+    ],
+)
+def test_in_list_rejection_names_which_target_exceeded_the_cap(predicate, expected_target):
+    """The message's target ladder (`col` -> `col_fn(...)` -> expression) was
+    asserted by nothing, so mutating it failed no test — and an operator reading the
+    rejection needs to know WHICH filter was too wide."""
+    with pytest.raises(PolicyViolationError, match=f"in list for {expected_target} exceeds"):
+        validate_write_policy(_delete_where(predicate), _writable(max_in_list_size=1), _CONN)

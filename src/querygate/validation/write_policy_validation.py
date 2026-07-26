@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from querygate.core.exceptions import PolicyViolationError, QueryValidationError
 from querygate.policy.models import Policy
+from querygate.validation.policy_validation import enforce_predicate_shape_caps
 from querygate.validation.schema_validation import (
     iter_where_predicates,
     parse_column_ref,
@@ -80,7 +81,18 @@ def validate_write_policy(statement: WriteStatement, policy: Policy, connection_
         # Narrowed write filter -> the read WhereNode the ONE canonical predicate
         # walk understands (item 114). A read node passes through unchanged, which
         # is what keeps the rejections below reachable as defence in depth.
-        for pred in iter_where_predicates(to_read_where(where)):
+        read_where = to_read_where(where)
+        # Shape caps FIRST (item 116): a write filter used to be exempt from
+        # max_where_depth / max_where_predicates / max_in_list_size, so
+        # `delete … where id in [<huge list>]` was rendered in full client-side
+        # (100,000 values -> a 689 KB statement) before `max_affected_rows` was
+        # consulted, and past the driver's parameter limit it failed there rather
+        # than being refused cleanly here. These are the
+        # READ caps by design — a write's WHERE *reads* rows in order to select
+        # them, which is the same reasoning that already applies the read
+        # allow/deny and masking rules to it (2026-07-26 Decision Log).
+        enforce_predicate_shape_caps(read_where, policy, label="write where")
+        for pred in iter_where_predicates(read_where):
             # A subquery predicate (item 97's `value_subquery` / IN (subquery)) is
             # a READ-only capability — writes never pass a compiler `ctx`, so the
             # write compiler can't render one and would fail deep inside

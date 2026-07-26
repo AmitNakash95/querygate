@@ -454,3 +454,64 @@ async def test_rest_still_accepts_a_boolean_group_write_filter(sqlite_app):
     payload = resp.json()
     assert payload["executed"] is False
     assert payload["affected_rows"] >= 1
+
+
+# --------------------------------------------------------------------------- #
+# Write-filter shape caps (TODO.md item 116) at the transport. The acceptance
+# criterion is not just "rejected" — it is rejected *before any statement runs*,
+# because the defect was the work performed (~1M bind parameters and a COUNT(*)
+# over them) rather than the end state. Proven the same way item 108 proved its
+# own guard: by observing what actually reached the database.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_over_size_in_list_write_is_refused_before_any_statement_runs(sqlite_app, request):
+    # Writes enabled, plus a low in-list cap — the same shape `_enable_writes`
+    # builds, with one read cap tightened.
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                max_in_list_size=10,
+                write=WritePolicy(
+                    enabled=True,
+                    allowed_tables=["orders"],
+                    allowed_operations=["insert", "update", "delete"],
+                    max_affected_rows=100000,
+                ),
+            ),
+            overrides={},
+        )
+    )
+    executed = _record_sql(request)
+
+    body = {
+        "op": "delete",
+        "table": "orders",
+        "where": {"col": "orders.id", "op": "in", "value": list(range(50))},
+    }
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        preview = await client.post("/api/v1/demo/write/preview", json=body)
+        execute = await client.post("/api/v1/demo/write/execute", json=body)
+
+    assert preview.status_code == 422, preview.text
+    assert execute.status_code == 422, execute.text
+    # Both rejections name the cap, so neither can pass for an unrelated reason.
+    assert "max_in_list_size" in preview.text
+    assert "max_in_list_size" in execute.text
+    # The point of the item: not one statement — no COUNT(*), no DELETE — was sent.
+    assert executed == [], executed
+
+
+@pytest.mark.asyncio
+async def test_a_within_cap_in_list_write_still_previews(sqlite_app):
+    """Positive control, so the guard above cannot degrade into refusing every
+    `in` filter."""
+    _enable_writes()
+    body = {
+        "op": "delete",
+        "table": "orders",
+        "where": {"col": "orders.id", "op": "in", "value": [1, 2]},
+    }
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        resp = await client.post("/api/v1/demo/write/preview", json=body)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["executed"] is False
