@@ -47,15 +47,28 @@ field's own schema description covers its exact contract (order_by.dir's
 strict enum, intent's audit-only purpose, a join's cross-connection
 `connection` field, and so on) — read it rather than guessing.
 
-## Scalar functions and CASE in select, and in WHERE/HAVING
-A select item may also be a whitelisted scalar function (coalesce/lower/
-upper/trim/concat) or a CASE WHEN...THEN...ELSE expression — see
-ScalarFunctionSelectItem/CaseSelectItem's own field schemas for the exact
-argument shape. The same whitelisted functions are also usable as a
-WHERE/HAVING predicate's LEFT side via Predicate.col_fn instead of col
-(e.g. lower(Customer.Email) = 'x') — see Predicate.col_fn's own field
-description. No function nesting anywhere (a function's arguments are
-always a column ref or a literal, never another function call).
+## Computed values: expressions, scalar functions and CASE
+Anywhere a scalar value belongs — a select item (`{"expr": ..., "as": ...}`),
+an aggregate's `arg`, a CASE result, or either side of a predicate (`expr` /
+`value_expr`) — you may pass an Expression: a column, a literal, arithmetic
+(+ - * /), a whitelisted function (which MAY nest, e.g. lower(trim(x))), a
+cast, or a CASE. Division is guarded: a zero denominator yields NULL. See the
+Expression schemas for the closed operator/function sets. A computed GROUP BY
+key is expressed by projecting the expression with an alias and grouping by
+that alias. The older one-level spellings still work: a
+ScalarFunctionSelectItem projection and Predicate.col_fn (e.g.
+lower(Customer.Email) = 'x'), neither of which nests.
+
+## Window functions (running totals, moving averages, rank in place)
+A select item may be a window projection: {"fn": ..., "arg": ..., "over":
+{...}, "as": ...} where `over` is required (use {} for OVER ()) and carries
+partition_by / order_by / frame. Functions: sum/avg/min/max/count,
+row_number/rank/dense_rank/ntile, lag/lead/first_value/last_value. Unlike an
+aggregate it keeps every row; unlike top_n it filters nothing. Omit `frame`
+for the SQL default. `over` refs must be real Table.Column values, never a
+select alias. A window cannot be combined with group_by or aggregate select
+items — aggregate in one query and window over that result in a second. See
+WindowSelectItem's own field schemas.
 
 ## Self-joins (the same table more than once in one query)
 Joining a table to itself (e.g. Employee to Employee for a manager lookup)

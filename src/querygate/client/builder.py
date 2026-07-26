@@ -75,6 +75,13 @@ from querygate.query_ast.models import (
     TopNSpec,
     WhereGroup,
     WhereNode,
+    WindowBound,
+    WindowBoundKind,
+    WindowFn,
+    WindowFrame,
+    WindowFrameMode,
+    WindowSelectItem,
+    WindowSpec,
 )
 
 # The concrete Expression classes, for isinstance checks against an already-built
@@ -105,6 +112,8 @@ __all__ = [
     "expr_select",
     "case_expr",
     "cast",
+    "window",
+    "frame",
     "Column",
     "FnColumn",
     "Literal",
@@ -586,6 +595,74 @@ def percentile_cont(
     """A continuous-interpolation percentile, e.g.
     ``percentile_cont("orders.total_amount", 0.5, as_="median")``."""
     return PercentileContSelectItem(col=_colname(column), fraction=fraction, alias=as_)
+
+
+def _to_window_bound(
+    value: Union[None, int, WindowBoundKind, WindowBound], *, is_start: bool
+) -> WindowBound:
+    """Accept a `WindowBound`, an explicit bound name, or SQL's own shorthand:
+    ``None`` = unbounded (in this bound's direction), ``0`` = current row, a
+    negative int = that many rows preceding, a positive int = following."""
+    if isinstance(value, WindowBound):
+        return value
+    if value is None:
+        return WindowBound(bound="unbounded_preceding" if is_start else "unbounded_following")
+    if isinstance(value, str):
+        return WindowBound(bound=value)
+    if value == 0:
+        return WindowBound(bound="current_row")
+    return WindowBound(
+        bound="preceding" if value < 0 else "following",
+        offset=abs(value),
+    )
+
+
+def frame(
+    mode: WindowFrameMode,
+    start: Union[None, int, WindowBoundKind, WindowBound],
+    end: Union[None, int, WindowBoundKind, WindowBound],
+) -> WindowFrame:
+    """A window frame, e.g. the last 7 rows: ``frame("rows", -6, 0)`` — the same
+    as ``frame("rows", "preceding" …)`` spelled out. ``None`` means unbounded."""
+    return WindowFrame(
+        mode=mode,
+        start=_to_window_bound(start, is_start=True),
+        end=_to_window_bound(end, is_start=False),
+    )
+
+
+def window(
+    fn_name: WindowFn,
+    arg: Any = None,
+    *,
+    as_: str,
+    partition_by: Sequence[Union[str, Column]] = (),
+    order_by: Sequence[Union[str, Column, OrderBySpec]] = (),
+    frame: Optional[WindowFrame] = None,
+    offset: Optional[int] = None,
+    buckets: Optional[int] = None,
+) -> WindowSelectItem:
+    """A window-function projection (item 101), e.g. a running total::
+
+        window("sum", col("orders.amount"), as_="running_total",
+               order_by=[asc("orders.created_at")],
+               frame=frame("rows", None, 0))
+
+    ``arg`` is omitted for the ranking functions and for ``COUNT(*) OVER``;
+    ``offset`` applies to lag/lead and ``buckets`` to ntile.
+    """
+    return WindowSelectItem(
+        fn=fn_name,
+        arg=(_to_expression(_require_wrapped(arg)) if arg is not None else None),
+        over=WindowSpec(
+            partition_by=[_colname(c) for c in partition_by],
+            order_by=[_to_orderby(o) for o in order_by],
+            frame=frame,
+        ),
+        offset=offset,
+        buckets=buckets,
+        alias=as_,
+    )
 
 
 def when(condition: WhereNode, then: Any) -> CaseWhen:

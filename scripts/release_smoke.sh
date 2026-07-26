@@ -61,6 +61,29 @@ assert all(set(row) == {"id", "name"} for row in payload["rows"]), payload
 print("release smoke passed: container queried real Postgres through the structured API")
 PY
 
+# ── Window function round-trip (item 101) — the shipped image must actually run
+# an OVER() clause against a real server, not merely accept the AST. A running
+# total is the canonical case, and its correctness is self-evident from the rows:
+# the last row's running total equals the sum of every row's value.
+window_response=$(curl --fail --silent \
+    -H 'Content-Type: application/json' \
+    -d '{"from":"order_items","select":["order_items.id","order_items.quantity",{"fn":"sum","arg":{"col":"order_items.quantity"},"over":{"order_by":[{"col":"order_items.id"}],"frame":{"mode":"rows","start":{"bound":"unbounded_preceding"},"end":{"bound":"current_row"}}},"as":"running_quantity"}],"order_by":[{"col":"order_items.id"}],"limit":10}' \
+    "$BASE_URL/api/v1/demo/query")
+
+RESPONSE="$window_response" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["RESPONSE"])
+rows = payload["rows"]
+assert len(rows) > 1, payload
+assert all(set(row) == {"id", "quantity", "running_quantity"} for row in rows), payload
+running = [float(row["running_quantity"]) for row in rows]
+assert running == sorted(running), running
+assert running[-1] == sum(float(row["quantity"]) for row in rows), payload
+print("release smoke passed: container ran a window function (running total) on real Postgres")
+PY
+
 # ── Governed WRITE round-trip (item 93): preview -> execute a capped insert ->
 # verify -> execute a governed delete -> verify — proving the shipped image
 # mutates safely, not just reads. Uses a high id it inserts then deletes, so the

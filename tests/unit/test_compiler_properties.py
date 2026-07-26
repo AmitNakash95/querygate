@@ -43,6 +43,10 @@ from querygate.query_ast.models import (
     StructuredQuery,
     TopNSpec,
     WhereGroup,
+    WindowBound,
+    WindowFrame,
+    WindowSelectItem,
+    WindowSpec,
 )
 
 _NULLS = st.one_of(st.none(), st.sampled_from(["first", "last"]))
@@ -212,6 +216,57 @@ def _case_conditions(draw):
 
 
 @st.composite
+def _window_items(draw):
+    """A random window projection (item 101). Folded into the row-select strategy
+    below rather than given its own query strategy — a window is only legal on a
+    non-aggregate query, which is exactly what that strategy generates.
+    """
+    fn = draw(
+        st.sampled_from(
+            ["sum", "avg", "count", "min", "max", "row_number", "rank", "lag", "lead", "ntile"]
+        )
+    )
+    needs_order = fn in ("row_number", "rank", "lag", "lead", "ntile")
+    order_by = (
+        [OrderBySpec(col="orders.id", dir=draw(st.sampled_from(["asc", "desc"])))]
+        if needs_order or draw(st.booleans())
+        else []
+    )
+    frame = None
+    if order_by and fn in ("sum", "avg", "count", "min", "max") and draw(st.booleans()):
+        # ROWS with a real offset, or an unbounded RANGE — the two forms every
+        # dialect accepts (a numeric RANGE offset is MSSQL-rejected, and this
+        # strategy compiles at the default Postgres dialect only, same posture
+        # the aggregate strategy takes for array_agg/percentile_cont).
+        if draw(st.booleans()):
+            frame = WindowFrame(
+                mode="rows",
+                start=WindowBound(bound="preceding", offset=draw(st.integers(1, 5))),
+                end=WindowBound(bound="current_row"),
+            )
+        else:
+            frame = WindowFrame(
+                mode="range",
+                start=WindowBound(bound="unbounded_preceding"),
+                end=WindowBound(bound="current_row"),
+            )
+    return WindowSelectItem(
+        fn=fn,
+        arg=(None if fn in ("row_number", "rank", "ntile") else ColArg(col="orders.total_amount")),
+        offset=(draw(st.integers(1, 3)) if fn in ("lag", "lead") else None),
+        buckets=(draw(st.integers(1, 4)) if fn == "ntile" else None),
+        over=WindowSpec(
+            partition_by=draw(
+                st.lists(st.sampled_from(["orders.status", "orders.customer_id"]), max_size=1)
+            ),
+            order_by=order_by,
+            frame=frame,
+        ),
+        alias="wnd",
+    )
+
+
+@st.composite
 def _row_select_queries(draw):
     """Random plain (non-aggregate) row-select shapes: optional join, select
     width, an optional where tree, order_by, and limit.
@@ -243,6 +298,9 @@ def _row_select_queries(draw):
                 alias="label",
             )
         ]
+
+    if draw(st.booleans()):  # item 101: a window projection
+        select_cols = select_cols + [draw(_window_items())]
 
     extra_on = (
         [["orders.status", "customers.country"]]  # item 76: composite join key

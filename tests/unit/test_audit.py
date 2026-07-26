@@ -519,3 +519,84 @@ async def test_app_lifecycle_configures_and_resets_jsonl_sink(tmp_path):
 
     assert path.exists()
     assert isinstance(get_audit_sink(), NullAuditSink)
+
+
+def test_normalized_query_shape_handles_window_select_item():
+    """item 101: a window's audited shape names the function, the columns it
+    touched, and the frame's SHAPE — never a frame offset, a lag distance, or a
+    literal, which are caller values (non-negotiable 3)."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": [
+                "orders.id",
+                {
+                    "fn": "sum",
+                    "arg": {
+                        "op": "*",
+                        "left": {"col": "orders.total_amount"},
+                        "right": {"literal": 1.07},
+                    },
+                    "over": {
+                        "partition_by": ["orders.status"],
+                        "order_by": [{"col": "orders.created_at"}],
+                        "frame": {
+                            "mode": "rows",
+                            "start": {"bound": "preceding", "offset": 6},
+                            "end": {"bound": "current_row"},
+                        },
+                    },
+                    "as": "trailing_total",
+                },
+            ],
+            "limit": 10,
+        }
+    )
+    shape = normalize_query_shape(query)
+    serialized = json.dumps(shape)
+    assert '"kind": "window"' in serialized
+    assert '"function": "sum"' in serialized
+    assert "orders.total_amount" in serialized
+    assert "orders.status" in serialized
+    assert "orders.created_at" in serialized
+    assert '"mode": "rows"' in serialized
+    assert '"start": "preceding"' in serialized
+    # No values: not the arithmetic literal, and not the frame's row distance.
+    assert "1.07" not in serialized
+    assert "6" not in serialized.replace('"limit": 10', "")
+
+
+def test_normalized_query_shape_covers_every_select_item_type():
+    """`_select_shape` raises on an unknown select item, so a new AST select-item
+    type would crash the audit path (which runs on EVERY request) until taught
+    here. Pinned by construction rather than by remembering."""
+    import typing
+
+    from querygate.query_ast.models import SelectItem
+
+    payloads = {
+        "str": "orders.id",
+        "AggregateSelectItem": {"fn": "count", "col": "*"},
+        "DateBucketSelectItem": {"col": "orders.created_at", "granularity": "month"},
+        "StringAggSelectItem": {"col": "orders.status", "delimiter": ","},
+        "ArrayAggSelectItem": {"col": "orders.status"},
+        "PercentileContSelectItem": {"col": "orders.total_amount", "fraction": 0.5},
+        "ScalarFunctionSelectItem": {"fn": "upper", "args": [{"col": "orders.status"}]},
+        "CaseSelectItem": {
+            "when": [
+                {"when": {"col": "orders.id", "op": "eq", "value": 1}, "then": {"literal": 1}}
+            ],
+            "as": "k",
+        },
+        "ExpressionSelectItem": {"expr": {"col": "orders.id"}, "as": "e"},
+        "WindowSelectItem": {
+            "fn": "row_number",
+            "over": {"order_by": [{"col": "orders.id"}]},
+            "as": "rn",
+        },
+    }
+    members = {m.__name__ if m is not str else "str" for m in typing.get_args(SelectItem)}
+    assert members == set(payloads)
+    for name, payload in payloads.items():
+        query = StructuredQuery.model_validate({"from": "orders", "select": [payload]})
+        assert normalize_query_shape(query)["select"], name

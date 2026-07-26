@@ -109,6 +109,16 @@ contribution (multi-query differencing).
   thin aggregate is allowed) and
   `test_min_group_size_closes_the_single_row_aggregate_singling_out` /
   `test_sqlite_end_to_end.py`'s suppression tests (set → suppressed).
+  **Window functions cannot route around it (TODO.md item 101).** An aggregate
+  window (`COUNT(*) OVER ()`, `AVG(x) OVER (PARTITION BY …)`) computes an
+  aggregate without producing a result *group* for the `HAVING` floor to filter,
+  and `COUNT(*) OVER ()` needs no projected column at all — so a below-*k* count
+  would be readable even where every column of the table is denied. While
+  `min_group_size` is set, aggregate window functions are therefore **rejected**
+  at policy validation; ranking and offset windows (`row_number`/`rank`/
+  `dense_rank`/`ntile`/`lag`/`lead`/`first_value`/`last_value`) stay allowed
+  because they only surface values the caller may already project bare. Asserted
+  by `test_window_aggregate_cannot_dodge_the_k_anonymity_floor`.
 - **Multi-query differencing: still residual.** Isolating an individual by
   subtracting two *independently* compliant aggregates (each ≥ *k*) is not
   closed by a per-query group-size floor; defending it needs query-set auditing
