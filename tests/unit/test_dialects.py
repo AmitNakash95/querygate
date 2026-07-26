@@ -153,3 +153,68 @@ def test_register_query_timeout_wires_a_listener_for_mssql():
     register_query_timeout(engine, "mssql", timeout_seconds=5)
     assert _connect_listener_count(engine) == before + 1
     asyncio.run(engine.dispose())
+
+
+# --------------------------------------------------------------------------- #
+# Session guardrails — what each adapter actually issues (TODO.md item 102).
+#
+# These exist because the UTC pin was, until this test, provable ONLY by
+# `make test-postgres-live` against a deliberately non-UTC server. Deleting the
+# line passed the default suite, `-m unit`, `-m integration` and
+# `make test-security` — while `docs/PRODUCT_GUIDE.md` promises every date
+# answer is UTC, and the already-shipped `date_bucket` depends on it. A
+# customer-facing guarantee needs a guard in the tier that always runs.
+# --------------------------------------------------------------------------- #
+class _RecordingSession:
+    """Captures the SQL text of every `execute` without a database."""
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    async def execute(self, statement):
+        self.statements.append(str(statement))
+        return None
+
+
+@pytest.mark.asyncio
+async def test_postgres_session_guardrails_pin_the_timezone_to_utc():
+    session = _RecordingSession()
+    await PostgresSessionAdapter().apply_session_guardrails(
+        session, lock_timeout_seconds=3, statement_timeout_seconds=7
+    )
+    assert session.statements == [
+        "SET LOCAL lock_timeout = '3s'",
+        "SET LOCAL statement_timeout = '7s'",
+        "SET LOCAL TIME ZONE 'UTC'",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_postgres_timezone_pin_is_transaction_scoped():
+    """`SET LOCAL`, not `SET`: the pin must not outlive the transaction, or a
+    pooled connection would carry it to unrelated work (and it would be unsafe
+    under transaction-level connection pooling)."""
+    session = _RecordingSession()
+    await PostgresSessionAdapter().apply_session_guardrails(
+        session, lock_timeout_seconds=1, statement_timeout_seconds=1
+    )
+    timezone_statements = [s for s in session.statements if "TIME ZONE" in s]
+    assert timezone_statements == ["SET LOCAL TIME ZONE 'UTC'"]
+    assert all(s.startswith("SET LOCAL") for s in session.statements)
+
+
+@pytest.mark.asyncio
+async def test_mssql_session_guardrails_set_no_timezone():
+    """T-SQL has no session time zone to pin — MSSQL carries the UTC guarantee
+    in `SYSUTCDATETIME()` at compile time instead. Issuing a timezone statement
+    here would be a silent no-op at best and an error at worst."""
+    session = _RecordingSession()
+    await MSSQLSessionAdapter().apply_session_guardrails(
+        session, lock_timeout_seconds=3, statement_timeout_seconds=7
+    )
+    assert session.statements == [
+        "SET LOCK_TIMEOUT 3000",
+        "SET XACT_ABORT ON",
+        "SET DEADLOCK_PRIORITY LOW",
+    ]
+    assert not any("TIME ZONE" in s for s in session.statements)

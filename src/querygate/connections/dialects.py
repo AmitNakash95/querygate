@@ -98,6 +98,17 @@ class PostgresSessionAdapter(SessionDialectAdapter):
         await session.execute(sa.text(f"SET LOCAL lock_timeout = '{lock_timeout_seconds}s'"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
         await session.execute(sa.text(f"SET LOCAL statement_timeout = '{statement_timeout_seconds}s'"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
         # fmt: on
+        # UTC, deliberately (TODO.md item 102, 2026-07-26 Decision Log). Postgres
+        # resolves `EXTRACT`, `date_trunc` and every timestamp<->timestamptz
+        # conversion against the SESSION TimeZone, so without this pin the value
+        # QueryGate returns for `extract(hour from a timestamptz)` or a
+        # `date_bucket` depends on the server's configured zone rather than on
+        # the query — the same input yielding different answers on two
+        # deployments, invisible to any test that only inspects generated SQL.
+        # MSSQL has no session time zone to set (its adapter reads the clock via
+        # SYSUTCDATETIME instead) and SQLite's 'now' is already UTC, so this is
+        # what makes all three dialects agree. Fixed literal, no interpolation.
+        await session.execute(sa.text("SET LOCAL TIME ZONE 'UTC'"))
 
 
 class MSSQLSessionAdapter(SessionDialectAdapter):

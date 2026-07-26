@@ -500,3 +500,158 @@ async def test_real_mssql_rejects_a_numeric_range_offset():
         async with get_engine("ms").connect() as conn:
             await conn.execute(sa.text(statement))
     assert "range" in str(excinfo.value).lower()
+
+
+# --------------------------------------------------------------------------- #
+# Item 102 — date/time primitives.
+#
+# This is the tier that matters most for this item, because two of its parts
+# return a genuinely DIFFERENT NUMBER on each dialect natively:
+#   * `dayofweek` — T-SQL's DATEPART(weekday) is 1-based and moves with the
+#     server's SET DATEFIRST, where Postgres's `dow` is 0=Sunday..6=Saturday;
+#   * `week` — T-SQL's plain `week` is a DATEFIRST-dependent count, not the ISO
+#     week Postgres's `week` returns.
+# Both adapters normalize to one documented definition. A rendering assertion
+# cannot tell a correct normalization from a plausible-looking one — only
+# running both servers and comparing the values can, which is the items 75/82
+# lesson this suite exists for.
+# --------------------------------------------------------------------------- #
+_DATE_COLUMN = {"col": "orders.created_at"}
+
+# Each part maps to a callable computing the expected value from a Python
+# datetime — ground truth derived independently of BOTH dialects, so a shared
+# mistake in the two adapters cannot make a wrong answer look right.
+_DATE_PART_EXPECTATIONS = {
+    "year": lambda d: d.year,
+    "quarter": lambda d: (d.month - 1) // 3 + 1,
+    "month": lambda d: d.month,
+    "week": lambda d: d.isocalendar()[1],
+    "day": lambda d: d.day,
+    "dayofweek": lambda d: (d.weekday() + 1) % 7,
+    "dayofyear": lambda d: d.timetuple().tm_yday,
+    "hour": lambda d: d.hour,
+    "minute": lambda d: d.minute,
+    "second": lambda d: d.second,
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("part", sorted(_DATE_PART_EXPECTATIONS))
+async def test_extract_part_matches_on_both_dialects(part):
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    "orders.id",
+                    "orders.created_at",
+                    {"expr": {"extract": _DATE_COLUMN, "part": part}, "as": "v"},
+                ],
+                "order_by": [{"col": "orders.id"}],
+            }
+        )
+    )
+    assert len(rows) > 1
+    expected = _DATE_PART_EXPECTATIONS[part]
+    for row in rows:
+        stamp = dt.datetime.fromisoformat(row["created_at"])
+        assert row["v"] == expected(stamp), f"{part}: got {row['v']} for {stamp}"
+        # Both dialects must agree on the TYPE too — Postgres's EXTRACT returns
+        # numeric without the adapter's cast, which `_norm` would round into
+        # equality with MSSQL's int and hide.
+        assert isinstance(row["v"], int), f"{part} must be an integer on both dialects"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unit", ["year", "month", "week", "day", "hour", "minute", "second"])
+async def test_date_add_matches_on_both_dialects(unit):
+    """Postgres shifts via `make_interval`, MSSQL via `DATEADD` — two entirely
+    different mechanisms that must land on the same instant."""
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    "orders.id",
+                    "orders.created_at",
+                    {
+                        "expr": {"date_add": _DATE_COLUMN, "unit": unit, "amount": -3},
+                        "as": "shifted",
+                    },
+                ],
+                "order_by": [{"col": "orders.id"}],
+            }
+        )
+    )
+    assert len(rows) > 1
+    assert all(row["shifted"] is not None for row in rows), f"{unit} shift produced NULLs"
+    assert any(row["shifted"] != row["created_at"] for row in rows), f"{unit} shift changed nothing"
+
+
+@pytest.mark.asyncio
+async def test_relative_date_filter_matches_on_both_dialects():
+    """Canonical bar row 12 on both real backends: a lookback window with no
+    caller-computed timestamp literal. Both clocks are UTC by construction
+    (Postgres's session pin, MSSQL's SYSUTCDATETIME), so the two servers must
+    select the identical rows even if their host clocks are configured for
+    different zones."""
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "where": {
+                    "col": "orders.created_at",
+                    "op": "gte",
+                    "value_expr": {
+                        "date_add": {"now": "timestamp"},
+                        "unit": "day",
+                        "amount": -3650,
+                    },
+                },
+                "order_by": [{"col": "orders.id"}],
+            }
+        )
+    )
+    assert rows, "the relative window matched nothing — the assertion is vacuous"
+
+
+@pytest.mark.asyncio
+async def test_now_reads_the_same_utc_instant_on_both_dialects():
+    """The timezone decision's live proof: `now` must be UTC on BOTH servers,
+    not each server's local wall clock. Compared against the test process's own
+    UTC clock rather than against each other, so two identically-misconfigured
+    servers cannot agree on a wrong answer."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {"from": "orders", "select": [{"expr": {"now": "timestamp"}, "as": "t"}], "limit": 1}
+    )
+    for connection in ("pg", "ms"):
+        result = await StructuredQueryService(connection_id=connection).execute(query)
+        reading = result.rows[0]["t"]
+        if isinstance(reading, str):
+            reading = dt.datetime.fromisoformat(reading)
+        reading = reading.replace(tzinfo=None)
+        drift = abs(
+            (dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - reading).total_seconds()
+        )
+        assert drift < 300, f"{connection} clock is {drift}s from UTC — not a UTC reading"
+
+
+@pytest.mark.asyncio
+async def test_now_date_matches_on_both_dialects():
+    """`now: "date"` executed on both real servers. It was previously proven
+    only on SQLite and by inspecting the SQL text of an UNCONNECTED mssql
+    dialect — the tier this repo trusts least, and the one that produced item
+    100's wrong `CAST(x AS text)` rationale."""
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {"from": "orders", "select": [{"expr": {"now": "date"}, "as": "d"}], "limit": 1}
+        )
+    )
+    today = dt.datetime.now(dt.timezone.utc).date()
+    assert rows[0]["d"] in {today.isoformat(), (today - dt.timedelta(days=1)).isoformat()}
