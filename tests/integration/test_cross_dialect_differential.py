@@ -21,6 +21,7 @@ import os
 from decimal import Decimal
 
 import pytest
+import pytest_asyncio
 
 from querygate.connections.engine import reset_engines
 from querygate.connections.models import ConnectionProfile
@@ -57,6 +58,10 @@ _TABLES = ["customers", "orders", "order_items", "products", "employees"]
 
 
 def _setup() -> None:
+    _setup_with_tables(_TABLES)
+
+
+def _setup_with_tables(tables) -> None:
     from querygate.core.config import config as shared_config
 
     shared_config.odbc_driver = _MSSQL_DRIVER.replace(" ", "+")
@@ -65,10 +70,10 @@ def _setup() -> None:
         ConnectionRegistry(
             {
                 "pg": ConnectionProfile(
-                    id="pg", dialect="postgresql", connection_string=_PG_URL, known_tables=_TABLES
+                    id="pg", dialect="postgresql", connection_string=_PG_URL, known_tables=tables
                 ),
                 "ms": ConnectionProfile(
-                    id="ms", dialect="mssql", connection_string=_MSSQL_URL, known_tables=_TABLES
+                    id="ms", dialect="mssql", connection_string=_MSSQL_URL, known_tables=tables
                 ),
             }
         )
@@ -655,3 +660,170 @@ async def test_now_date_matches_on_both_dialects():
     )
     today = dt.datetime.now(dt.timezone.utc).date()
     assert rows[0]["d"] in {today.isoformat(), (today - dt.timedelta(days=1)).isoformat()}
+
+
+# --------------------------------------------------------------------------- #
+# A purpose-built probe table on BOTH servers, for the date facts the shared
+# demo corpus structurally cannot express.
+#
+# This exists because live mutation testing found the item-102 differential
+# cases above could NOT catch two real defects:
+#   * every seeded `created_at` is exactly midnight with no fractional part, so
+#     the Postgres `EXTRACT(second …)` rounding bug (59.7 -> 60) was invisible;
+#   * the seeded range never touches a year boundary, so T-SQL's non-ISO `week`
+#     agreed with the ISO week on every row and swapping them changed nothing.
+# Both are exactly the "two dialects quietly disagree on a VALUE" class this
+# suite exists for, so the corpus is extended rather than the claim softened.
+# --------------------------------------------------------------------------- #
+_PROBE_ROWS = [
+    # (id, timestamp) — chosen so each row discriminates something specific.
+    #
+    # 2024-12-30 is the load-bearing one: it is ISO week 1 **of 2025**, while
+    # T-SQL's DATEPART(week, …) counts it as week 53 of 2024. Any date away from
+    # a year boundary has the two agreeing, which is why the demo corpus missed
+    # it entirely.
+    (1, "2024-12-30 10:20:30.600"),
+    (2, "2025-01-01 13:45:59.700"),  # fractional second that ROUNDS UP to 60
+    (3, "2025-06-15 23:59:59.900"),  # rounds up across an hour AND a day
+]
+
+
+async def _create_probe_tables() -> None:
+    """Create + seed `date_probe` on both live servers, using each dialect's own
+    DDL. Dropped first so a previous failed run cannot poison the data."""
+    import sqlalchemy as sa
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    pg = create_async_engine(_PG_URL)
+    async with pg.begin() as conn:
+        await conn.execute(sa.text("DROP TABLE IF EXISTS date_probe"))
+        await conn.execute(sa.text("CREATE TABLE date_probe (id int, at timestamp)"))
+        for probe_id, stamp in _PROBE_ROWS:
+            await conn.execute(
+                sa.text(f"INSERT INTO date_probe VALUES ({probe_id}, TIMESTAMP '{stamp}')")
+            )
+    await pg.dispose()
+
+    ms = create_async_engine(
+        _MSSQL_URL + f"?driver={_MSSQL_DRIVER.replace(' ', '+')}&TrustServerCertificate=Yes"
+    )
+    async with ms.begin() as conn:
+        await conn.execute(
+            sa.text("IF OBJECT_ID('date_probe','U') IS NOT NULL DROP TABLE date_probe")
+        )
+        await conn.execute(sa.text("CREATE TABLE date_probe (id int, at datetime2(3))"))
+        for probe_id, stamp in _PROBE_ROWS:
+            await conn.execute(sa.text(f"INSERT INTO date_probe VALUES ({probe_id}, '{stamp}')"))
+    await ms.dispose()
+
+
+@pytest_asyncio.fixture
+async def date_probe_tables():
+    await _create_probe_tables()
+    _setup_with_tables(_TABLES + ["date_probe"])
+    try:
+        yield
+    finally:
+        import sqlalchemy as sa
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        # Each server's drop gets its OWN try/finally: sharing one body means a
+        # Postgres failure strands the MSSQL table until a later run's
+        # drop-before-create happens to recover it.
+        try:
+            pg = create_async_engine(_PG_URL)
+            async with pg.begin() as conn:
+                await conn.execute(sa.text("DROP TABLE IF EXISTS date_probe"))
+            await pg.dispose()
+        finally:
+            ms = create_async_engine(
+                _MSSQL_URL + f"?driver={_MSSQL_DRIVER.replace(' ', '+')}&TrustServerCertificate=Yes"
+            )
+            async with ms.begin() as conn:
+                await conn.execute(
+                    sa.text("IF OBJECT_ID('date_probe','U') IS NOT NULL DROP TABLE date_probe")
+                )
+            await ms.dispose()
+            reset_engines()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("part", sorted(_DATE_PART_EXPECTATIONS))
+async def test_extract_part_matches_on_both_dialects_at_the_hard_dates(part, date_probe_tables):
+    """The same per-part comparison as above, over timestamps chosen to break
+    ties the demo corpus cannot: a year boundary (ISO vs T-SQL week) and
+    fractional seconds (Postgres numeric->integer rounding)."""
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "date_probe",
+                "select": [
+                    "date_probe.id",
+                    "date_probe.at",
+                    {"expr": {"extract": {"col": "date_probe.at"}, "part": part}, "as": "v"},
+                ],
+                "order_by": [{"col": "date_probe.id"}],
+            }
+        )
+    )
+    assert len(rows) == len(_PROBE_ROWS)
+    expected = _DATE_PART_EXPECTATIONS[part]
+    for row in rows:
+        stamp = dt.datetime.fromisoformat(row["at"])
+        assert row["v"] == expected(stamp), f"{part} at {stamp}: got {row['v']}"
+        assert isinstance(row["v"], int)
+        if part == "second":
+            assert row["v"] < 60, "a second field of 60 is not a time"
+
+
+@pytest.mark.asyncio
+async def test_mssql_clock_is_utc_not_the_servers_local_time():
+    """`SYSUTCDATETIME()`, never `GETDATE()`/`SYSDATETIME()`.
+
+    T-SQL has no session time zone to pin, so MSSQL's UTC guarantee lives
+    entirely in the choice of function — and that choice is invisible unless the
+    server's own clock is NOT UTC. Both the compose service and both CI service
+    blocks therefore set a non-UTC `TZ`.
+
+    Crucially this test DETECTS the vacuum rather than documenting it: if the
+    server's local clock equals its UTC clock, the assertion below cannot
+    distinguish `SYSUTCDATETIME()` from `GETDATE()`, so it skips loudly instead
+    of reporting a green tick that certifies nothing. A documented vacuum is
+    still a vacuum.
+    """
+    import sqlalchemy as sa
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(
+        _MSSQL_URL + f"?driver={_MSSQL_DRIVER.replace(' ', '+')}&TrustServerCertificate=Yes"
+    )
+    try:
+        async with engine.connect() as conn:
+            local, utc = (
+                await conn.execute(sa.text("SELECT SYSDATETIME(), SYSUTCDATETIME()"))
+            ).one()
+    finally:
+        await engine.dispose()
+    if abs((local - utc).total_seconds()) < 60:
+        pytest.skip(
+            "SQL Server's clock is UTC, so SYSUTCDATETIME() and GETDATE() agree and "
+            "this assertion cannot discriminate. Set TZ on the mssql service "
+            "(see docker-compose.yml / ci.yml) to make it meaningful."
+        )
+
+    _setup()
+    result = await StructuredQueryService(connection_id="ms").execute(
+        StructuredQuery.model_validate(
+            {"from": "orders", "select": [{"expr": {"now": "timestamp"}, "as": "t"}], "limit": 1}
+        )
+    )
+    reading = result.rows[0]["t"]
+    if isinstance(reading, str):
+        reading = dt.datetime.fromisoformat(reading)
+    drift = abs(
+        (dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - reading.replace(tzinfo=None))
+    ).total_seconds()
+    assert drift < 300, (
+        f"MSSQL clock is {drift}s from UTC — it is reading the server's local "
+        "time, not SYSUTCDATETIME()"
+    )
