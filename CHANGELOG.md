@@ -25,12 +25,13 @@ All notable changes to QueryGate are documented here.
   container) sees no change. Rationale in `docs/PRODUCT_GUIDE.md`'s Decision Log
   (2026-07-26).
 
-- **`extract` and `date_add` require a date column.** Either one over a column
-  that is not a date/time type is rejected at validation with a typed 4xx. Both
-  primitives are new in this same release, so no released caller is broken — the
-  note is here because the behavior is surprising on SQL Server, and because the
-  older `date_bucket` select item is deliberately **not** covered yet (same
-  divergence, tracked as a follow-up). T-SQL implicitly
+- **A date primitive requires a date column** (TODO.md items 102 and 117).
+  `extract`, `date_add` and `date_bucket` over a column that is not a date/time
+  type are rejected at validation with a typed 4xx. `extract`/`date_add` are new
+  in this release; `date_bucket` has shipped for some time, but no caller can be
+  broken because none had correct behavior — over an INTEGER column Postgres
+  errors, SQL Server returns `1900-01-02` and SQLite returns `-4712-01-05`.
+  T-SQL implicitly
   converts an int or a string to a datetime counted from 1900-01-01, so
   `DATEPART(hour, <int or varchar column>)` used to return a value (`0`, and
   `1900-01-03` for a shift) where Postgres errored — the same query, a hard

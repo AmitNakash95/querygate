@@ -627,13 +627,10 @@ idiom and `iso_week`. Where a dialect genuinely lacks the capability it still
 function, so `extract(week)` raises and points at `date_bucket`'s `week`
 granularity.
 
-**`extract` and `date_add` require a date column.** Either one over a column
-that is not a date/time type is rejected before the database is touched.
-(Scope, stated precisely: this covers `extract` and `date_add`. The older
-`date_bucket` select item is **not** yet covered and still exhibits the same
-divergence over a non-temporal column — tracked as a follow-up rather than
-silently folded in, since extending it changes behavior for an already-shipped
-feature.) That is not
+**A date primitive requires a date column.** `extract`, `date_add` **and**
+`date_bucket` over a column that is not a date/time type are all rejected before
+the database is touched (items 102 and 117; the third was added once measurement
+showed no caller could have correct behavior to lose). That is not
 pedantry: with an INTEGER operand, Postgres *errors* while SQL Server silently
 returns `0` (and `1900-01-03` for a shift), because T-SQL implicitly converts an
 int to a datetime counted from 1900-01-01 — the same query, a hard failure on one
@@ -3081,10 +3078,14 @@ reasoning behind them, newest first. Added to incrementally as work happens
   column** operand is checked, since that is the only case with a reflected type;
   Postgres `interval` columns are allowed (`EXTRACT(hour FROM interval_col)` is
   real Postgres, measured), and the cast hint is offered only for string columns
-  because casting an integer reproduces the divergence. **Known gap, recorded
-  rather than papered over:** the older `date_bucket` select item is not yet
-  covered by this rule and still shows the same divergence; extending it changes
-  behavior for an already-shipped feature and is a decision, not a slip.
+  because casting an integer reproduces the divergence. **Extended to
+  `date_bucket` as item 117**, once measurement settled the question that had made
+  it look risky: over an INTEGER column Postgres errors, MSSQL returns
+  `1900-01-02`, and the internal SQLite path returns `-4712-01-05` — three
+  backends, three different wrong answers, so no caller had correct behavior to
+  lose and the change is a bug fix rather than a breaking one. All three date
+  primitives now go through one shared operand walk, with a coverage test that
+  fails if a fourth is added without being wired in.
 
   **Two further calls recorded with it.** (1) **`max_interval_days` bounds a
   `date_add`'s magnitude** — computed from the amount with *upper-bound* unit

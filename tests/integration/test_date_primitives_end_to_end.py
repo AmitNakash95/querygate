@@ -465,3 +465,38 @@ async def test_validation_stands_aside_for_a_computed_operand(sqlite_app):
         },
     )
     assert "date/time column" not in resp.text, "validation should not reject a computed operand"
+
+
+@pytest.mark.asyncio
+async def test_date_bucket_over_a_non_temporal_column_is_refused(sqlite_app):
+    """item 117 — the third date primitive, held to the same rule.
+
+    Before this, `date_bucket` over an INTEGER column passed validation and
+    produced a live Postgres error, `1900-01-02` on MSSQL, and `-4712-01-05` on
+    this SQLite path: three backends, three different wrong answers."""
+    resp = await _post(
+        sqlite_app,
+        {
+            "from": "orders",
+            "select": [{"col": "orders.id", "granularity": "day", "as": "bucket"}],
+        },
+    )
+    assert resp.status_code == 422, resp.text
+    assert "date/time column" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_date_bucket_over_a_real_timestamp_still_works(sqlite_app):
+    """The positive control: the rule must not have broken date bucketing."""
+    rows = await _rows(
+        sqlite_app,
+        {
+            "from": "orders",
+            "select": [
+                {"col": "orders.created_at", "granularity": "month", "as": "bucket"},
+                {"fn": "count", "col": "orders.id", "as": "n"},
+            ],
+            "group_by": ["bucket"],
+        },
+    )
+    assert rows and all(row["n"] > 0 for row in rows)

@@ -846,3 +846,49 @@ async def test_mssql_clock_is_utc_not_the_servers_local_time():
         f"MSSQL clock is {drift}s from UTC — it is reading the server's local "
         "time, not SYSUTCDATETIME()"
     )
+
+
+@pytest.mark.asyncio
+async def test_date_bucket_over_a_non_temporal_column_is_refused_on_both_dialects(
+    date_probe_tables,
+):
+    """item 117, on both real servers.
+
+    Measured before the fix: Postgres raised `function date_trunc(unknown,
+    integer) does not exist` while MSSQL happily returned `1900-01-02`. Both are
+    now the same typed pre-database rejection, which is the whole point — a
+    divergence is closed by making the two agree, not by picking a winner.
+    """
+    from querygate.core.exceptions import QueryValidationError
+
+    query = StructuredQuery.model_validate(
+        {
+            "from": "date_probe",
+            "select": [{"col": "date_probe.id", "granularity": "day", "as": "bucket"}],
+        }
+    )
+    for connection in ("pg", "ms"):
+        with pytest.raises(QueryValidationError, match="date/time column"):
+            await StructuredQueryService(connection_id=connection).execute(query)
+
+
+@pytest.mark.asyncio
+async def test_date_bucket_over_a_real_timestamp_still_matches_on_both_dialects(
+    date_probe_tables,
+):
+    """Positive control for the rule above: bucketing a genuine timestamp must
+    still work, and still agree across dialects."""
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "date_probe",
+                "select": [
+                    "date_probe.id",
+                    {"col": "date_probe.at", "granularity": "day", "as": "bucket"},
+                ],
+                "order_by": [{"col": "date_probe.id"}],
+            }
+        )
+    )
+    assert len(rows) == len(_PROBE_ROWS)
+    assert all(row["bucket"] is not None for row in rows)

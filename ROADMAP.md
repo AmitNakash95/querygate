@@ -515,11 +515,14 @@ already-planned initiatives.
 
 ### Review Phase 3 — Architecture and maintainability
 
-- [ ] **117** — `date_bucket` over a non-temporal column diverges across dialects
-  (Postgres errors; MSSQL silently returns a 1900-epoch value). *The third date
-  primitive, left uncovered by item 102's operand rule because rejecting it is a
-  behavior change for an already-shipped feature — a deliberate decision, not a
-  side effect. Surfaced by item 102's confirmation review.* **Depends on 102.**
+- [x] **117** — `date_bucket` over a non-temporal column diverges across dialects.
+  ✅ **Shipped** (all three date primitives now share one operand walk, guarded by
+  a coverage test that fails if a fourth is added without being wired in).
+  *Measurement is what settled it: over an INTEGER column Postgres errors, MSSQL
+  returns 1900-01-02 and SQLite returns -4712-01-05 — three different wrong
+  answers, so no caller had correct behavior and the change is a bug fix rather
+  than the breaking one it looked like. Surfaced by item 102's confirmation
+  review.* **Depends on 102.**
 
 - [x] **116** — A write's WHERE was exempt from `max_where_depth`,
   `max_where_predicates` and `max_in_list_size`. ✅ **Shipped** (each rule is now a
