@@ -327,6 +327,12 @@ expected:
 | `FunctionExpr` | `{"fn": "lower", "args": [ … ]}` | `lower(trim(name))` |
 | `CastExpr` | `{"cast": …, "to": "numeric"}` | `CAST(x AS NUMERIC)` |
 | `CaseExpr` | `{"when": [ … ], "else": …}` | conditional aggregation |
+| `ExtractExpr` | `{"extract": …, "part": "hour"}` | one field of a timestamp (item 102) |
+| `NowExpr` | `{"now": "timestamp"}` | the current UTC instant (item 102) |
+| `DateAddExpr` | `{"date_add": …, "unit": "day", "amount": -7}` | shift a timestamp (item 102) |
+
+The last three are covered in
+[Dates and relative time](#dates-and-relative-time-the-last-30-days-without-doing-the-arithmetic).
 
 It appears in four positions: a new `ExpressionSelectItem` projection
 (`{"expr": …, "as": "line_total"}`), an aggregate's `arg`, and **both** sides
@@ -539,6 +545,121 @@ live SQL Server in `tests/integration/test_cross_dialect_differential.py`, with
 the returned rows asserted equal — and a test enforces that a new window function
 cannot ship without such a case. That is the items 75/82 lesson applied: `RANGE 2
 PRECEDING` compiles cleanly for the MSSQL dialect and then fails on the server.
+
+### Dates and relative time: "the last 30 days" without doing the arithmetic
+
+**Files:** `src/querygate/query_ast/models.py` (`ExtractExpr`, `NowExpr`,
+`DateAddExpr`), `src/querygate/compiler/dialect_adapters.py` (`extract_part`,
+`current_timestamp`, `date_add`), `src/querygate/connections/dialects.py` (the
+UTC session pin).
+**Item:** TODO.md 102 — Phase 3a of the
+[Expressive Query Engine plan](ENGINE_EXPRESSIVENESS_PLAN.md).
+
+Three nodes join item 100's `Expression` union, so each is legal anywhere a
+scalar is — a projection, an aggregate argument, either side of a predicate,
+inside a `CASE`:
+
+| Node | Wire form | What it is |
+| --- | --- | --- |
+| `extract` | `{"extract": {"col": "orders.created_at"}, "part": "hour"}` | One integer field of a date/timestamp |
+| `now` | `{"now": "timestamp"}` or `{"now": "date"}` | The current UTC instant, or midnight UTC today |
+| `date_add` | `{"date_add": {"now": "timestamp"}, "unit": "day", "amount": -7}` | Shift a date/timestamp; negative goes back |
+
+`part` is one of `year`, `quarter`, `month`, `week`, `day`, `dayofweek`,
+`dayofyear`, `hour`, `minute`, `second`. `unit` is the seven you can actually
+shift by — `year`, `month`, `week`, `day`, `hour`, `minute`, `second` — the three
+others (`quarter`, `dayofweek`, `dayofyear`) being *derived* fields you can read
+but not add. Both are closed enums: there is no free-string date format, no
+time-zone name a caller can pass, and no way to name a function.
+
+So "orders in the last 7 days" stops being something the caller computes:
+
+```json
+{"from": "orders",
+ "select": [{"fn": "count", "col": "orders.id", "as": "n"}],
+ "where": {"col": "orders.created_at", "op": "gte",
+           "value_expr": {"date_add": {"now": "timestamp"},
+                          "unit": "day", "amount": -7}}}
+```
+
+**Honest framing of what this unlocks.** Relative-date filtering was *always*
+expressible — the agent computed the cutoff and passed a timestamp literal. This
+is native convenience, not a removed wall, and it was prioritized accordingly
+(row 12 of the plan's regression bar was 🟡, not ❌). What it genuinely fixes is
+correctness rather than reach: a caller-computed cutoff is computed in the
+*caller's* clock, and every agent had to get the timezone right on its own.
+
+**Everything here is UTC, and the Postgres session is pinned to make that true.**
+This is the part worth reading even if you never use these nodes. Postgres
+resolves `EXTRACT`, `date_trunc` and every `timestamp`↔`timestamptz` conversion
+against the session `TimeZone`; QueryGate never set one, so those answers
+followed whatever zone the server happened to be configured for. Sessions now
+issue `SET LOCAL TIME ZONE 'UTC'` alongside the existing lock and statement
+timeouts. MSSQL has no session zone, so its adapter reads the clock with
+`SYSUTCDATETIME()`; SQLite's `'now'` is already UTC.
+
+**This changes existing behavior, and exactly who is affected is worth being
+precise about** (it was measured, not assumed):
+
+- A **`timestamptz`** column on a Postgres server whose zone is not UTC: its
+  `date_bucket` values and extracted fields **change**. Previously they followed
+  the server's zone; now they are UTC.
+- A naive **`timestamp`** column: **nothing changes.** Postgres never consulted
+  the session zone for those, so `EXTRACT(hour …)` and `date_trunc` returned the
+  stored wall-clock value before and still do.
+- Any comparison between `now()` and a naive `timestamp` column: **changes on
+  every non-UTC deployment**, because that conversion always went through the
+  session zone. This is the case the pin exists for.
+
+Write filters are affected identically — the session guardrails run on the write
+path too, so a write's `WHERE` selects rows under the same UTC semantics, and
+preview and execute stay mutually consistent. Columns are never converted:
+QueryGate cannot know what a naive `timestamp` column means, so it reads it as
+stored. See the [Decision Log](#decision-log).
+
+**Two parts mean the same thing on every dialect, by definition rather than by
+luck.** `dayofweek` is `0`=Sunday..`6`=Saturday, and `week` is the ISO-8601 week
+number. T-SQL's natural spellings disagree with both — `DATEPART(weekday)` is
+1-based *and* shifts with the server's `SET DATEFIRST`, and its plain `week` is a
+different count from ISO — so the MSSQL adapter renders the DATEFIRST-independent
+idiom and `iso_week`. Where a dialect genuinely lacks the capability it still
+**rejects** rather than approximating: the internal SQLite path has no ISO-week
+function, so `extract(week)` raises and points at `date_bucket`'s `week`
+granularity.
+
+**Bounds:** `max_interval_days` caps how far one `date_add` may shift (default
+3,653 ≈ 10 years; `0` allows only a no-op shift). It is computed from the amount
+with **upper-bound** unit lengths — a year counts as 366 days, a month as 31 — so
+a bigger unit can't launder a bigger reach past the cap. It is deliberately *not*
+a row-count guardrail: a caller who wants everything omits the filter, which
+`max_limit` and the mandatory row filters bound. What it prevents is a
+caller-triggerable server error — a 10,000-year *lookback* overflows T-SQL's
+datetime range and makes Postgres raise "timestamp out of range" — and an
+unbounded lookback masquerading as a filter. The nodes
+also count toward `max_expression_depth`/`max_expression_nodes` like any other
+expression, and every column inside them goes through the item-96 canonical
+visitor, so a denied column can't hide in an `extract` and a masked one can't be
+shifted by a `date_add`.
+
+To **group by** an extracted field, project it with an alias and group on the
+alias — the same route `date_bucket` has always used:
+
+```json
+{"from": "orders",
+ "select": [{"expr": {"extract": {"col": "orders.created_at"}, "part": "month"},
+             "as": "mth"},
+            {"fn": "count", "col": "orders.id", "as": "n"}],
+ "group_by": ["mth"]}
+```
+
+**Proven on both real backends:** every date part and every interval unit
+executes against a live Postgres *and* a live SQL Server in
+`tests/integration/test_cross_dialect_differential.py` with the values compared
+against ground truth computed in Python (not against each other, so two
+identically-wrong adapters can't agree), and a test makes a live case mandatory
+for each part. The UTC pin has its own live proof in
+`tests/integration/test_postgres_date_primitives.py`, which sets the server's
+zone to UTC−09:30 and asserts the extracted hour is still UTC.
 
 **What bounds a write's `WHERE`.** Two things beyond the write policy itself, both
 easy to miss because they live on the *read* side of `Policy`: the filter's columns
@@ -1538,6 +1659,8 @@ expression substrate (item 100; see
 `max_partition_by` for ranked/windowed queries, `max_window_specs` and
 `max_window_frame_offset` for window functions (item 101; see
 [Window functions](#window-functions-running-totals-moving-averages-rank-in-place)),
+`max_interval_days` for how far a relative-date shift may reach (item 102; see
+[Dates and relative time](#dates-and-relative-time-the-last-30-days-without-doing-the-arithmetic)),
 `max_limit`/`max_limit_aggregate`
 for row counts, `max_response_bytes` for response size), execution
 guardrails (`timeout_seconds`, `max_concurrency`, queue-depth caps),
@@ -2884,6 +3007,65 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-07-26 — every date/time answer QueryGate gives is UTC, and the Postgres
+  session is pinned to make that true rather than claimed (TODO.md item 102).**
+  Item 102 adds `extract`, `now` and `date_add`, and the plan required the
+  timezone semantics (UTC vs server-local) to be settled before code. The
+  finding that decided it: **Postgres resolves `EXTRACT`, `date_trunc` and every
+  `timestamp`↔`timestamptz` conversion against the session `TimeZone`**, which
+  QueryGate never set. So `extract(hour from a timestamptz)` — and the
+  already-shipped `date_bucket` — silently returned whatever the server's
+  configured zone implied. The same query, the same data, two deployments, two
+  different answers, with nothing in the SQL text to show it.
+  **The decision: UTC everywhere, enforced per dialect where each dialect
+  actually decides it.** `PostgresSessionAdapter.apply_session_guardrails` now
+  issues `SET LOCAL TIME ZONE 'UTC'` beside the existing lock/statement timeouts;
+  MSSQL has no session zone to pin, so its adapter reads the clock with
+  `SYSUTCDATETIME()` rather than `GETDATE()`/`SYSDATETIME()`; SQLite's `'now'` is
+  already UTC. Under the pin, `now()` compares correctly against both `timestamptz`
+  and naive `timestamp` columns — neither is correct without it.
+  **This is a behavior change, and the blast radius was measured rather than
+  assumed** — an earlier draft of this entry over-claimed it. On a Postgres server
+  whose zone is not UTC: **`timestamptz`** columns see different `date_bucket` and
+  `EXTRACT` values than before (previously server-local, now UTC); naive
+  **`timestamp`** columns see **no change at all**, because Postgres never
+  consulted the session zone for those; and any comparison between `now()` and a
+  naive column changes on every such deployment, since that conversion always did.
+  That last case is the one the pin exists for. **Write filters are affected
+  identically** — `apply_session_guardrails` runs on the write path too, so a
+  write's `WHERE` selects rows under the same UTC semantics, and preview and
+  execute stay mutually consistent. The previous behavior was not a different
+  valid choice; it was an unstated dependency on server configuration. Columns are
+  never converted: QueryGate reads a naive `timestamp` as stored and guarantees
+  only that *its own* clock readings and field extractions are UTC.
+  Proven live in `tests/integration/test_postgres_date_primitives.py`, which sets
+  the role's default zone to `Pacific/Marquesas` (UTC−09:30, a half-hour offset so
+  no plausible off-by-N bug can imitate it) and asserts a row stored at 12:00 UTC
+  still extracts hour 12. Removing the pin makes it 2.
+  **Two further calls recorded with it.** (1) **`max_interval_days` bounds a
+  `date_add`'s magnitude** — computed from the amount with *upper-bound* unit
+  lengths (a year counts as 366 days, a month as 31) so a larger unit cannot
+  launder a bigger reach past the cap. Be precise about what it is: **not** a
+  row-count guardrail (a caller who wants everything just omits the filter, which
+  `max_limit` and the mandatory row filters bound). It prevents a caller-triggerable
+  *server-side error* — a 10,000-year **lookback** overflows T-SQL's datetime range
+  and makes Postgres raise "timestamp out of range" — and keeps a relative-date
+  filter an honestly-bounded lookback. (Direction matters, and was measured rather
+  than reasoned: 10,000 years *forward* is fine on Postgres, landing in 12026.)
+  Default 3,660 days = 10 x 366, i.e. ten years counted exactly the way the cap
+  counts a year — at 3,653 the cap rejected `{"unit": "year", "amount": -10}`,
+  the most natural spelling of the window it advertised.
+  (2) **Two parts have a QueryGate-defined value, not a passed-through keyword**:
+  `dayofweek` is 0=Sunday..6=Saturday and `week` is the ISO-8601 week, on every
+  dialect. T-SQL's natural spellings of both disagree — `DATEPART(weekday)` is
+  1-based *and* moves with the server's `SET DATEFIRST`, and plain `week` is a
+  different count from ISO — so the MSSQL adapter renders the DATEFIRST-independent
+  idiom and `iso_week`. This is mechanical translation of a defined primitive (the
+  `date_bucket` category), not synthesized structure. Where a dialect genuinely
+  lacks the capability it still **rejects**: the internal SQLite path has no
+  ISO-week function, so `extract(week)` raises and points at `date_bucket`'s
+  `week` granularity — the item-74 posture, unchanged.
 
 - **2026-07-26 — a write's WHERE is bounded by the READ shape caps, not new
   write-specific ones (TODO.md item 116).** `validate_write_policy` enforced none of

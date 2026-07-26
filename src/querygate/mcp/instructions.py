@@ -113,6 +113,19 @@ order_by may reference its alias — default bucket_<Column>_<granularity>
 if you omit `as`). Grouping by the raw column instead of the alias gives
 one bucket per exact timestamp, not a real trend.
 
+## Dates and relative time
+Three Expressions cover date work, usable anywhere a scalar belongs:
+{"extract": <expr>, "part": "hour"} for one integer field of a timestamp,
+{"now": "timestamp"} (or "date") for the current time, and
+{"date_add": <expr>, "unit": "day", "amount": -7} to shift it (negative goes
+back). So "the last 7 days" is a `gte` predicate whose `value_expr` is
+date_add(now, day, -7) — do not compute a timestamp literal yourself.
+Clock readings and extracted fields are UTC; stored columns are read as-is, so
+a column holding local time still reads as local time. dayofweek is
+0=Sunday..6=Saturday and week is the ISO-8601 week, on every backend. Policy caps how far one shift may reach
+(max_interval_days); to group by an extracted field, project it with an alias
+and group by that alias, as with date_bucket.
+
 ## Guardrails + multi-query decomposition (REQUIRED)
 Every connection has a policy enforcing caps on joins, where-nesting depth,
 select items, group_by columns, top_n.n, and top_n partition_by columns,

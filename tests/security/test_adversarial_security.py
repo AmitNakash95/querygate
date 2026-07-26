@@ -14,6 +14,7 @@ import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pydantic
 import pytest
 import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
@@ -1844,12 +1845,38 @@ async def test_per_principal_quota_refuses_execution_before_touching_the_databas
 # ordinary predicate tree the ref walk has to cross into and back out of.
 # --------------------------------------------------------------------------- #
 def _buried(leaf: dict) -> dict:
-    """`leaf` placed at the deepest position the expression grammar allows."""
+    """`leaf` placed at the deepest position the expression grammar allows.
+
+    Every union member that can HOLD another expression appears on the path, so
+    a member whose ref walk was never wired up hides the leaf and fails these
+    tests. Item 102's `extract`/`date_add` are on the path for exactly that
+    reason — they are the two newest containers, and a container the walker
+    doesn't descend into is a silent policy AND masking bypass.
+
+    Only reached by validation-layer tests, so the operand types here need not
+    make sense to a database — no query built from this is ever executed.
+    """
+    # `leaf` appears EXACTLY ONCE, on a single path through every container.
+    # That is the whole mechanism: if any one of BinaryOpExpr.left,
+    # FunctionExpr.args, CastExpr.cast, ExtractExpr.extract or
+    # DateAddExpr.date_add is not descended into, the leaf becomes invisible and
+    # these tests fail. Placing it twice — as an earlier revision of this helper
+    # did — makes every branch individually redundant and silently reduces the
+    # suite to proving nothing about the walker.
     return {
         "op": "+",
         "left": {
             "fn": "coalesce",
-            "args": [{"cast": leaf, "to": "numeric"}, {"literal": 0}],
+            "args": [
+                {
+                    "cast": {
+                        "extract": {"date_add": leaf, "unit": "day", "amount": 1},
+                        "part": "year",
+                    },
+                    "to": "numeric",
+                },
+                {"literal": 0},
+            ],
         },
         "right": {"literal": 1},
     }
@@ -2197,3 +2224,132 @@ def test_window_frame_offsets_never_reach_a_persisted_audit_event():
     shape = json.dumps(normalize_query_shape(query))
     for needle in ("987654321", "123456789"):
         assert needle not in shape, f"{needle} leaked into the audited query shape"
+
+
+# --------------------------------------------------------------------------- #
+# Item 102 — date/time primitives (EXTRACT, now, date_add).
+#
+# The denied/masked-column vectors are already covered above: `_buried` routes
+# every leaf through `extract` and `date_add`, so all ten position tests apply
+# to them. What is left is what is SPECIFIC to a date primitive — the interval
+# magnitude as a new cost lever, and the interval amount as a new caller value
+# that must not reach a persisted audit event.
+# --------------------------------------------------------------------------- #
+def test_interval_magnitude_cannot_be_laundered_through_a_larger_unit():
+    """`max_interval_days` is a bound on REACH, not on the digit a caller types.
+    A cap that compared `amount` directly would let `-500 years` past a 30-day
+    limit while refusing `-31 days`."""
+    policy = Policy(max_interval_days=30)
+    for unit, amount in (("year", -500), ("month", -12), ("week", -5), ("hour", -1000)):
+        query = StructuredQuery.model_validate(
+            {
+                "from": "customers",
+                "select": ["customers.id"],
+                "where": {
+                    "col": "customers.created_at",
+                    "op": "gte",
+                    "value_expr": {
+                        "date_add": {"now": "timestamp"},
+                        "unit": unit,
+                        "amount": amount,
+                    },
+                },
+            }
+        )
+        with pytest.raises(PolicyViolationError, match="max_interval_days"):
+            validate_policy(query, policy, connection_id="demo")
+
+
+def test_interval_cap_is_enforced_inside_a_subquery():
+    """Item 97's rule applied to the new cap: a nested scope is validated in
+    full, so a subquery is not a place to hide an over-cap magnitude."""
+    policy = Policy(max_interval_days=30)
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": ["customers.id"],
+            "where": {
+                "col": "customers.id",
+                "op": "in",
+                "value_subquery": {
+                    "from": "orders",
+                    "select": [
+                        {
+                            "expr": {
+                                "date_add": {"col": "orders.created_at"},
+                                "unit": "year",
+                                "amount": -99,
+                            },
+                            "as": "v",
+                        }
+                    ],
+                },
+            },
+        }
+    )
+    with pytest.raises(PolicyViolationError, match="max_interval_days"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_date_primitives_add_no_new_free_string_to_the_ast():
+    """The non-goal-#7 boundary: neither `part` nor `unit` may be caller text.
+    Both are closed enums, so a caller cannot name a function, a time zone, or
+    anything else the adapter would pass through toward SQL."""
+    for payload in (
+        {"extract": {"col": "customers.created_at"}, "part": "epoch OR 1=1"},
+        {"date_add": {"col": "customers.created_at"}, "unit": "day' --", "amount": 1},
+        {"now": "timestamp AT TIME ZONE 'x'"},
+    ):
+        with pytest.raises(pydantic.ValidationError):
+            StructuredQuery.model_validate(
+                {"from": "customers", "select": [{"expr": payload, "as": "v"}]}
+            )
+
+
+def test_interval_amounts_never_reach_a_persisted_audit_event():
+    """A `date_add` amount is a caller-supplied NUMBER — the same class as a
+    predicate literal and item 101's frame offsets, both of which are already
+    withheld. A persisted event carries structure, never values
+    (non-negotiable 3)."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [
+                {
+                    "expr": {
+                        "date_add": {"col": "customers.created_at"},
+                        "unit": "day",
+                        "amount": -987654321,
+                    },
+                    "as": "shifted",
+                }
+            ],
+            "where": {
+                "col": "customers.created_at",
+                "op": "gte",
+                "value_expr": {
+                    "date_add": {"now": "timestamp"},
+                    "unit": "second",
+                    "amount": -123456789,
+                },
+            },
+        }
+    )
+    shape = json.dumps(normalize_query_shape(query))
+    for needle in ("987654321", "123456789"):
+        assert needle not in shape, f"{needle} leaked into the audited query shape"
+    # The STRUCTURE is still recorded — withholding the value must not degrade
+    # into withholding the fact that a date shift happened at all.
+    assert "date_add" in shape and "day" in shape
+
+
+def test_now_is_not_a_channel_for_reading_server_configuration():
+    """`now` takes a closed kind, not a format string or a time zone name, so it
+    cannot be steered into disclosing the server's locale/zone settings."""
+    with pytest.raises(pydantic.ValidationError):
+        StructuredQuery.model_validate(
+            {
+                "from": "customers",
+                "select": [{"expr": {"now": "%Y-%m-%d %Z%z"}, "as": "v"}],
+            }
+        )

@@ -5836,6 +5836,152 @@ write's `WHERE` reuses the read `Predicate` and reaches `StructuredQuery` →
 deployment gets no aggregate windows, and windows over grouped results wait for
 item 105.
 
+### 102. Query engine: `EXTRACT`/date_part + relative-date/interval helpers ✅ DONE
+
+**Effort: M. Priority: medium (flagship pillar; high everyday value). Depends on:
+item 100 (shipped). Decision Log entry recorded 2026-07-26 before code (plan §8
+entry 4).** Full spec: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 3a**. Phase 3a of the
+Expressive Query Engine — the **Structural** pillar.
+
+**What shipped.** Three new members of item 100's closed `Expression` union, so
+each is legal anywhere a scalar is (projection, aggregate argument, either side of
+a predicate, inside a `CASE`):
+
+- `{"extract": <expr>, "part": …}` — one integer field of a date/timestamp, over
+  `year`/`quarter`/`month`/`week`/`day`/`dayofweek`/`dayofyear`/`hour`/`minute`/`second`.
+- `{"now": "timestamp"|"date"}` — the current UTC instant, or midnight UTC today.
+- `{"date_add": <expr>, "unit": …, "amount": <signed int>}` — shift by whole units.
+
+Plus `Policy.max_interval_days` (default 3,660), three `DialectAdapter` methods
+(`extract_part`/`current_timestamp`/`date_add`) implemented on all three adapters,
+`SET LOCAL TIME ZONE 'UTC'` in the Postgres session guardrails, `extract`/`now`/
+`date_add` in the typed Python builder, and the three nodes wired into the audit
+shape normalizer.
+
+**Why each is its own union member rather than a `FunctionExpr`.** The item text
+said "extends item 100's `FunctionExpr`", and that turned out to be wrong for all
+three: `part`, `unit` and the clock `kind` are **keywords, not scalars**, so
+folding them into `args` would have required an `Any`-shaped or free-string
+argument — the exact escape hatch the substrate forbids. `CastExpr.to` set the
+precedent. What deliberately does *not* exist is an `interval` union member: an
+interval is not a scalar (it cannot be projected on MSSQL, compared to a number,
+or grouped by), so admitting one would break the property that every `Expression`
+is legal everywhere a scalar is expected — the same trade §5's row-15 note refuses
+for windows. `DateAddExpr` carries the magnitude as a capped keyword+integer pair
+and yields a timestamp, so the union stays all-scalar.
+
+**The real finding — the timezone pin.** Recorded as the item's Decision Log
+entry. **Postgres resolves `EXTRACT`, `date_trunc` and every
+`timestamp`↔`timestamptz` conversion against the session `TimeZone`**, and
+QueryGate never set one. So the *already-shipped* `date_bucket` was silently
+server-config dependent: the same query on the same data returned different
+answers on two deployments, with nothing in the SQL text to show it. The decision
+is UTC, enforced where each dialect actually decides it — a `SET LOCAL TIME ZONE
+'UTC'` for Postgres, `SYSUTCDATETIME()` (not `GETDATE()`) for MSSQL, and SQLite's
+`'now'` which is already UTC. **This is a behavior change**: a deployment whose
+Postgres server zone is not UTC will see different `date_bucket` and `EXTRACT`
+values than before. Columns are never converted — QueryGate cannot know what a
+naive `timestamp` column means, so it reads it as stored and guarantees only that
+its own clock readings and field extractions are UTC.
+
+The pin is invisible to every rendering assertion *and* to any test run against a
+server that is already UTC (which the demo container is), so it is proven live in
+`test_postgres_date_primitives.py` by setting the role's default zone to
+`Pacific/Marquesas` — UTC−09:30, a **half-hour** offset chosen so no plausible
+off-by-N bug can imitate it — and asserting a row stored at 12:00 UTC still
+extracts hour 12. Removing the pin makes it 2.
+
+**Two parts are defined, not passed through.** `dayofweek` is 0=Sunday..6=Saturday
+and `week` is the ISO-8601 week, on every dialect. T-SQL disagrees natively on
+both: `DATEPART(weekday)` is 1-based *and* moves with the server's `SET DATEFIRST`,
+and plain `week` is a different count from ISO. The MSSQL adapter renders the
+DATEFIRST-independent idiom `(DATEPART(weekday, x) + @@DATEFIRST - 1) % 7` and
+`iso_week`. This is mechanical translation of a defined primitive (the
+`date_bucket` category), not synthesized structure — and where a dialect genuinely
+lacks the capability it still **rejects**: the internal SQLite path has no ISO-week
+function (`%W` is a different count and `%V` postdates the builds CPython ships),
+so `extract(week)` raises and points at `date_bucket`'s `week` granularity.
+
+**What the cap is and is not.** `max_interval_days` is computed from the amount
+with **upper-bound** unit lengths (a year counts as 366 days, a month as 31, and
+sub-day units round up), so a larger unit cannot launder a bigger reach past it.
+It is explicitly **not** a row-count guardrail — a caller who wants everything
+omits the filter, which `max_limit` and the mandatory row filters bound. It
+prevents a caller-triggerable *server-side* error (`DATEADD(year, 10000, …)`
+overflows T-SQL's datetime range; Postgres raises "timestamp out of range") and
+keeps a relative-date filter an honestly-bounded lookback. Default 3,660 days
+(~10 years) sits above every realistic analytic window and below either dialect's
+overflow point even when `max_expression_depth` nested shifts compound it.
+
+**Five defects found by measuring rather than reading**, each of which passed a
+careful reading of the diff first:
+
+1. **Postgres `amount * interval '1 day'` was wrong.** Postgres defines only
+   `interval * double precision`, so the caller's bound integer would have been
+   resolved to a float by operator inference. Replaced with `make_interval`, whose
+   parameters are typed integers in fixed positions.
+2. **MSSQL `now: "date"` did not truncate — in the rendering tier.** The generic
+   `sa.Date` renders `DATETIME` against an *unconnected* mssql dialect, so
+   `now: "date"` looked like it kept the clock reading. Stated precisely (the first
+   draft of this entry was not): SQLAlchemy falls back to `DATETIME` only when
+   `server_version_info < (10,)`, which is true for an unconnected dialect and
+   false for any connected SQL Server 2008+, so a live server would have rendered
+   `DATE` correctly anyway. Naming the concrete `mssql.DATE` removes the version
+   dependency and makes the rendering tier trustworthy — but this was a
+   test-fidelity defect, not a live one, and counting it as a live bug would be the
+   same unconnected-vs-connected confusion item 100's `CAST(x AS text)` rationale
+   fell into.
+3. **SQLite `quarter` returned a float.** SQLAlchemy's `/` is true division, so
+   month 2 gave 1.33 rather than quarter 1.
+4. **SQLite has no `weeks` date modifier.** `datetime(x, '-2 weeks')` returns
+   **NULL** rather than erroring, so a week shift would have been a silently empty
+   column. Expressed in days instead (a week is exactly 7 days, unlike a month).
+5. **A fourth recursion over the `Expression` union had no exhaustiveness guard.**
+   `audit/events.py`'s shape normalizer fails closed on an unknown node — correct —
+   but the walk and the compiler both had union-parameterized guards and it did not.
+   So the three new members passed the entire 2,021-test default suite (unit +
+   integration) while *every query using one* raised at execution time. Only running one against a real
+   database surfaced it. A guard per recursion now exists, and the compiler guard
+   was widened to cover ref-free members (`LiteralExpr` was never compiler-tested
+   either).
+
+**Testing.** 58 unit tests (`test_date_primitives.py`), 21 end-to-end
+(`test_date_primitives_end_to_end.py`), 7 real-Postgres
+(`test_postgres_date_primitives.py`), and the cross-dialect differential suite
+gained a live PG+MSSQL case per date part and per interval unit. Expected values
+come from Python rather than from comparing the dialects to each other, so two
+identically-wrong adapters cannot agree on a wrong answer — for the date parts,
+and (after the audit) for the fixed-length interval units too; year and month are
+calendar units with no fixed `timedelta`, so those rest on cross-dialect equality
+plus the Postgres-side calendar assertions. A coverage test makes a live case
+mandatory for every `DatePart`, and lives in the unit tier so it actually fires
+outside the two-database CI job. The adversarial suite's
+`_buried` helper now routes every leaf through `extract` and `date_add`, so all
+ten denied/masked-column position tests cover them, plus five item-102-specific
+cases (unit-laundering, subquery cap, no free strings, no interval amount in a
+persisted audit event).
+
+**Every new enforcement rule was mutation-verified** — each broken deliberately,
+the suite re-run, and a failure confirmed *for that reason*. Two passes: 16
+mutations before review (the cap itself, the upper-bound unit lengths, the
+ceil-division, both MSSQL normalizations, the Postgres integer cast, the
+`mssql.DATE` target, `SYSUTCDATETIME` vs `GETDATE`, the SQLite week rejection, the
+SQLite quarter cast, the SQLite week→day conversion, the `make_interval` position
+mapping, both visitor branches, the audit-shape omission), and 8 more after the
+audit covering the fixes it produced (the restored `_buried` chain against three
+separate visitor branches, the `minute`/`second` multipliers, the Postgres `FLOOR`,
+the corrected cap default, and a swapped SQLite `%H`/`%M`). 24 caught, 0 missed.
+
+**Accepted cost.** MCP schema 104,042 → **108,167** chars (+4,125: ~3,400 for the
+three nodes plus ~700 for the agent-facing instructions section), **no budget bump
+needed** — but headroom is now **~1.7%**, well below the ~5% the budget file
+targets, so item 103 will have to raise it.
+
+**Regression bar 9/16 → 10/16** (row 12). Stated honestly: row 12 was 🟡, not ❌ —
+relative-date filtering was always composable with a caller-computed literal, and
+this is native convenience. The larger outcome of the item is the timezone pin,
+which fixed a correctness gap in a capability that had already shipped.
+
 ### 107. Batch query execution double-reserves quota on an approval retry ✅ DONE
 
 **Effort: S. Priority: medium (real throughput bug, narrow blast radius).
