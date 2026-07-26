@@ -99,12 +99,23 @@ from querygate.mcp.server import create_mcp_server
 # (110,000) is back below item 100's 123,000 but is still ~2,000 ABOVE the 108,000
 # in force before item 100 — it is the measured *total* that is now lower.
 #
-# NOT bumped 2026-07-26 (item 102: extract/now/date_add) — measured 108,329, a
-# +4,287 rise (three new `Expression` members at ~3,400, ~700 for the instructions
-# section teaching the relative-date idiom, and ~160 for the non-temporal-operand
-# rejection message), which fits the existing 110,000. Recorded rather than left
-# silent because it changes the advice below: headroom is now ~1.5%, not ~5%, so
-# the NEXT engine item will have to raise this.
+# NOT bumped 2026-07-26 (item 102: extract/now/date_add) — measured 108,329,
+# which fits the existing 110,000. Recorded rather than left silent because it
+# changes the advice below: headroom is now ~1.5%, not ~5%, so the NEXT engine
+# item will have to raise this.
+#
+# Breakdown, MEASURED against each parent commit rather than attributed:
+# ~3,400 for the three new `Expression` members, ~700 for the instructions
+# section teaching the relative-date idiom, and **47** for the
+# `"maximum": 2147483647, "minimum": -2147483648` fragment Pydantic emits from
+# `DateAddExpr.amount`'s int32 bound — one occurrence, in run_structured_queries'
+# params. An earlier version of this note credited that last item ~160 chars to
+# the non-temporal-operand *rejection message*. That is false in a way anyone can
+# check: `"date/time column"` appears 0 times across every tool description,
+# parameter schema and output schema, because a runtime QueryValidationError
+# string cannot reach an MCP schema at all. Left on the record because this note's
+# whole job is steering the next budget decision, and the wrong version sends a
+# maintainer to shorten error messages instead of auditing field constraints.
 # The three nodes' maintainer rationale went into `#` comments, not model
 # docstrings, per the note below — their agent-facing docstrings are 2-3 lines each.
 #
