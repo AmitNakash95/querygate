@@ -32,3 +32,36 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  # Real SQL Server for the `mssql_live` suite (TODO.md item 2). Behind the
+  # `mssql` profile so a plain `docker compose up -d` does NOT start it — it is
+  # a heavyweight image that most local work does not need, and on Apple Silicon
+  # it runs under amd64 emulation (slow to boot, ~2GB RAM). Start it with
+  # `make compose-up-mssql`, which `make test-mssql-live` does for you.
+  #
+  # The credentials are throwaway and match `setup_mssql_test_db.py`'s defaults
+  # and the CI service definition — they are dev-only, never real.
+  querygate-mssql:
+    profiles: ["mssql"]
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    # Pinned explicitly: the image is amd64-only, so without this Docker on
+    # arm64 hosts fails to pull rather than falling back to emulation.
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "QueryGate_Test_Pw1!"
+      MSSQL_PID: Developer
+    ports:
+      - "127.0.0.1:${QUERYGATE_MSSQL_PORT:-14330}:1433"
+    healthcheck:
+      # `sqlcmd -Q` against master is the only reliable readiness signal: the
+      # container accepts TCP well before the engine finishes recovery.
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s

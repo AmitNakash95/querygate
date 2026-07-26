@@ -6,6 +6,7 @@ from typing import Dict
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy.dialects import mssql, postgresql, sqlite
 
 from querygate.compiler.sqlalchemy_compiler import clamp_limit, compile_structured_query
 from querygate.core.auth import Principal
@@ -1226,3 +1227,335 @@ class TestMinGroupSize:
         stmt, _ = compile_structured_query(query, tables, Policy(min_group_size=None))
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "having" not in compiled.lower()
+
+
+class TestExpressionSubstrate:
+    """TODO.md item 100 — the bounded scalar Expression substrate.
+
+    Rendering only; the safety properties (visitor coverage, allow/deny, masking,
+    caps) live in test_reference_visitor.py / test_policy_validation.py /
+    tests/security, and the end-to-end *values* in
+    tests/integration/test_expression_end_to_end.py.
+    """
+
+    # Compile against the REAL per-dialect SQL compiler, not the generic one:
+    # part of item 100's rendering (CAST target type names) is chosen by
+    # SQLAlchemy's dialect compiler rather than by our adapter, and a generic
+    # compile would silently show identical SQL for every dialect — the exact
+    # "renders fine, breaks live" blind spot items 75/82 flagged.
+    _DIALECT_COMPILERS = {
+        "postgresql": postgresql.dialect(),
+        "mssql": mssql.dialect(),
+        "sqlite": sqlite.dialect(),
+    }
+
+    @classmethod
+    def _sql(
+        cls, query: StructuredQuery, dialect: str = "postgresql", policy: Policy = None
+    ) -> str:
+        stmt, _ = compile_structured_query(
+            query, _make_tables(), policy or Policy(), dialect=dialect
+        )
+        return str(
+            stmt.compile(
+                dialect=cls._DIALECT_COMPILERS[dialect],
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+
+    def test_arithmetic_projection(self):
+        query = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    {
+                        "expr": {
+                            "op": "*",
+                            "left": {"col": "orders.total_amount"},
+                            "right": {"literal": 2},
+                        },
+                        "as": "doubled",
+                    }
+                ],
+            }
+        )
+        sql = self._sql(query)
+        assert "orders.total_amount * 2 AS doubled" in sql
+
+    def test_division_is_guarded_with_nullif_on_every_dialect(self):
+        """2026-07-25 Decision Log: `/` renders `left / NULLIF(right, 0)` so a
+        zero denominator yields NULL identically everywhere, rather than
+        inheriting Postgres's hard error and MSSQL's XACT_ABORT transaction
+        abort."""
+        query = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    {
+                        "expr": {
+                            "op": "/",
+                            "left": {"col": "orders.total_amount"},
+                            "right": {"col": "orders.id"},
+                        },
+                        "as": "ratio",
+                    }
+                ],
+            }
+        )
+        for dialect in ("postgresql", "mssql", "sqlite"):
+            sql = self._sql(query, dialect=dialect).lower()
+            assert "nullif(orders.id, 0)" in sql, dialect
+
+    def test_aggregate_over_an_expression(self):
+        """Regression bar row 1: SUM(quantity * unit_price)."""
+        query = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    {
+                        "fn": "sum",
+                        "arg": {
+                            "op": "*",
+                            "left": {"col": "orders.total_amount"},
+                            "right": {"literal": 3},
+                        },
+                        "as": "revenue",
+                    }
+                ],
+            }
+        )
+        assert "sum(orders.total_amount * 3) AS revenue" in self._sql(query)
+
+    def test_conditional_aggregation(self):
+        """Regression bar row 2: SUM(CASE WHEN status='paid' THEN amount ELSE 0 END)."""
+        query = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    {
+                        "fn": "sum",
+                        "arg": {
+                            "when": [
+                                {
+                                    "when": {"col": "orders.status", "op": "eq", "value": "paid"},
+                                    "then": {"col": "orders.total_amount"},
+                                }
+                            ],
+                            "else": {"literal": 0},
+                        },
+                        "as": "paid_total",
+                    }
+                ],
+            }
+        )
+        sql = self._sql(query)
+        assert "sum(CASE WHEN (orders.status = 'paid') THEN orders.total_amount ELSE 0 END)" in sql
+
+    def test_nested_functions(self):
+        query = StructuredQuery.model_validate(
+            {
+                "from": "customers",
+                "select": [
+                    {
+                        "expr": {
+                            "fn": "lower",
+                            "args": [{"fn": "trim", "args": [{"col": "customers.name"}]}],
+                        },
+                        "as": "normalized",
+                    }
+                ],
+            }
+        )
+        assert "lower(trim(customers.name)) AS normalized" in self._sql(query)
+
+    def test_literal_operands_are_bound_not_evaluated_in_python(self):
+        """Two literal operands must be combined by the DATABASE. If the compiler
+        used the raw Python values, `'a' * 2` would silently become the string
+        'aa' here instead of the type error the database should reject."""
+        query = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    {
+                        "expr": {"op": "*", "left": {"literal": "a"}, "right": {"literal": 2}},
+                        "as": "oops",
+                    }
+                ],
+            }
+        )
+        sql = self._sql(query)
+        assert "'a' * 2" in sql
+        assert "'aa'" not in sql
+
+    def test_cast_renders_per_dialect_type_names(self):
+        query = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [{"expr": {"cast": {"col": "orders.id"}, "to": "text"}, "as": "id_text"}],
+            }
+        )
+        # `to: text` renders NVARCHAR(max) on MSSQL. NOTE: this asserts the
+        # rendering only. The *reason* for choosing Unicode over Text is that a
+        # connected server renders Text as VARCHAR(max), which silently mangles
+        # non-ASCII — invisible in SQL text, so it is proven by the round-trip
+        # assertion in tests/integration/test_mssql_expression_substrate.py.
+        assert "CAST(orders.id AS VARCHAR)" in self._sql(query, dialect="postgresql")
+        assert "CAST(orders.id AS NVARCHAR(max))" in self._sql(query, dialect="mssql")
+
+    @pytest.mark.parametrize(
+        "fn_name,args,expected",
+        [
+            ("length", [{"col": "customers.name"}], {"postgresql": "length(", "mssql": "LEN("}),
+            (
+                "ceil",
+                [{"col": "orders.total_amount"}],
+                {"postgresql": "ceil(", "mssql": "CEILING("},
+            ),
+            (
+                # The syntax genuinely differs: Postgres takes the SQL-standard
+                # SUBSTRING(x FROM a FOR b), T-SQL only the comma form, and the
+                # `substring` name is only a SQLite alias since 3.34 so the
+                # internal dialect uses the always-present substr().
+                "substring",
+                [{"col": "customers.name"}, {"literal": 1}, {"literal": 3}],
+                {
+                    "postgresql": "SUBSTRING(customers.name FROM 1 FOR 3)",
+                    "mssql": "substring(customers.name, 1, 3)",
+                    "sqlite": "substr(customers.name, 1, 3)",
+                },
+            ),
+        ],
+    )
+    def test_divergent_functions_go_through_the_dialect_adapter(self, fn_name, args, expected):
+        """The four functions whose SQL genuinely differs are rendered by a
+        DialectAdapter method, never an inline `if dialect ==` in the compiler."""
+        query = StructuredQuery.model_validate(
+            {
+                "from": "customers",
+                "select": [{"expr": {"fn": fn_name, "args": args}, "as": "v"}],
+            }
+        )
+        for dialect, fragment in expected.items():
+            assert fragment in self._sql(query, dialect=dialect), (fn_name, dialect)
+
+    def test_two_argument_round_casts_to_numeric_on_postgres_only(self):
+        """Postgres has no round(double precision, integer) — only
+        round(numeric, integer) — so the adapter casts. That is mechanical
+        per-dialect rendering of the same operation, not synthesized structure."""
+        query = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    {
+                        "expr": {
+                            "fn": "round",
+                            "args": [{"col": "orders.total_amount"}, {"literal": 2}],
+                        },
+                        "as": "rounded",
+                    }
+                ],
+            }
+        )
+        assert "round(CAST(orders.total_amount AS NUMERIC), 2)" in self._sql(query)
+        assert "ROUND(orders.total_amount, 2)" in self._sql(query, dialect="mssql")
+
+    def test_one_argument_round_gets_mssqls_required_length_argument(self):
+        query = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    {
+                        "expr": {"fn": "round", "args": [{"col": "orders.total_amount"}]},
+                        "as": "rounded",
+                    }
+                ],
+            }
+        )
+        assert "ROUND(orders.total_amount, 0)" in self._sql(query, dialect="mssql")
+        assert "round(orders.total_amount)" in self._sql(query)
+
+    def test_expression_predicate_on_both_sides(self):
+        query = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "where": {
+                    "expr": {
+                        "op": "*",
+                        "left": {"col": "orders.total_amount"},
+                        "right": {"literal": 2},
+                    },
+                    "op": "gt",
+                    "value_expr": {
+                        "op": "+",
+                        "left": {"col": "orders.id"},
+                        "right": {"literal": 1},
+                    },
+                },
+            }
+        )
+        assert "orders.total_amount * 2 > orders.id + 1" in self._sql(query)
+
+    def test_group_by_an_expression_select_alias(self):
+        """Computed group keys are expressed by projecting the expression and
+        grouping by its alias — the same route date_bucket has always used, so
+        the engine needs no second inline grammar for group keys."""
+        query = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    {
+                        "expr": {
+                            "when": [
+                                {
+                                    "when": {
+                                        "col": "orders.total_amount",
+                                        "op": "gt",
+                                        "value": 100,
+                                    },
+                                    "then": {"literal": "big"},
+                                }
+                            ],
+                            "else": {"literal": "small"},
+                        },
+                        "as": "size_bucket",
+                    },
+                    {"fn": "count", "col": "*", "as": "n"},
+                ],
+                "group_by": ["size_bucket"],
+            }
+        )
+        sql = self._sql(query)
+        assert "GROUP BY" in sql and "size_bucket" in sql
+
+    def test_aggregate_col_sugar_still_renders_identically(self):
+        """The `col` spelling normalizes to `arg`, so it must produce the exact
+        same SQL as the canonical form (2026-07-25 Decision Log)."""
+        sugar = StructuredQuery.model_validate(
+            {"from": "orders", "select": [{"fn": "sum", "col": "orders.total_amount"}]}
+        )
+        canonical = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    {"fn": "sum", "arg": {"col": "orders.total_amount"}, "as": "sum_total_amount"}
+                ],
+            }
+        )
+        assert self._sql(sugar) == self._sql(canonical)
+
+    def test_count_distinct_over_an_expression(self):
+        query = StructuredQuery.model_validate(
+            {
+                "from": "customers",
+                "select": [
+                    {
+                        "fn": "count",
+                        "arg": {"fn": "lower", "args": [{"col": "customers.name"}]},
+                        "distinct": True,
+                        "as": "distinct_names",
+                    }
+                ],
+            }
+        )
+        assert "count(DISTINCT lower(customers.name))" in self._sql(query)

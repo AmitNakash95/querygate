@@ -27,7 +27,10 @@ from querygate.query_ast.models import Predicate, StructuredQuery
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_db, pytest.mark.mssql_live]
 
-_HOST = os.environ.get("QUERYGATE_TEST_MSSQL_HOST", "localhost")
+# 127.0.0.1, not "localhost": on macOS localhost resolves to ::1 first while
+# docker-compose publishes this port on IPv4 only, so "localhost" hangs on IPv6
+# and fails with a misleading Login timeout. CI sets the env var explicitly.
+_HOST = os.environ.get("QUERYGATE_TEST_MSSQL_HOST", "127.0.0.1")
 _PORT = os.environ.get("QUERYGATE_TEST_MSSQL_PORT", "14330")
 _PW = os.environ.get("QUERYGATE_TEST_MSSQL_SA_PASSWORD", "QueryGate_Test_Pw1!")
 _DRIVER = os.environ.get("QUERYGATE_TEST_MSSQL_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")

@@ -253,10 +253,21 @@ class Policy(pyd.BaseModel):
     max_where_predicates: int = pyd.Field(default=100)
     max_in_list_size: int = pyd.Field(default=1000)
 
-    # Caps the number of WHEN branches in any single CaseSelectItem — the
-    # same "structural size" guardrail philosophy as the caps above, applied
-    # to CASE expressions once those became expressible in SELECT.
+    # Caps the number of WHEN branches in any single CASE — the same
+    # "structural size" guardrail philosophy as the caps above, applied to CASE
+    # expressions once those became expressible in SELECT. Since item 100 it
+    # covers every CaseExpr too, wherever it is nested.
     max_case_branches: int = pyd.Field(default=10)
+
+    # The two caps that keep item 100's scalar `Expression` substrate BOUNDED
+    # rather than open-ended — the third of the five non-goal-#7 boundaries
+    # recorded in the 2026-07-25 Decision Log. `max_expression_depth` bounds how
+    # deeply one tree may nest (a pathological deep nest is a compile/plan CPU
+    # lever); `max_expression_nodes` bounds total expression size and is summed
+    # TREE-WIDE across the query and every subquery (item 97's rule), so nesting
+    # an expression inside a subquery cannot multiply the budget.
+    max_expression_depth: int = pyd.Field(default=5, ge=1)
+    max_expression_nodes: int = pyd.Field(default=200, ge=1)
 
     # k-anonymity guardrail (TODO.md item 88): the minimum number of underlying
     # rows any aggregate result group must be backed by. When set, the compiler
