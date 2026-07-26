@@ -16,8 +16,7 @@ from querygate.core.config import AppConfig
 from querygate.core.exceptions import ApprovalRequiredError
 from querygate.execution.write_execution import WriteExecutionService, WriteResult
 from querygate.mcp.tools import write as wtool
-from querygate.query_ast.models import Predicate
-from querygate.write_ast.models import DeleteStatement
+from querygate.write_ast.models import DeleteStatement, WritePredicate
 
 pytestmark = pytest.mark.unit
 
@@ -25,7 +24,9 @@ _CALLER = Principal(subject="agent-1")
 
 
 def _delete(value: int) -> DeleteStatement:
-    return DeleteStatement(table="orders", where=Predicate(col="orders.id", op="eq", value=value))
+    return DeleteStatement(
+        table="orders", where=WritePredicate(col="orders.id", op="eq", value=value)
+    )
 
 
 @pytest.mark.asyncio
@@ -122,3 +123,232 @@ async def test_tool_execute_mode_passes_resolver_only_when_enabled(monkeypatch):
         monkeypatch.setattr(wtool, "get_mcp_config", lambda: _config(True))
         await wtool.run_structured_writes("demo", [_delete(1)], mode="execute", ctx=None)
         assert captured["resolver"] is None
+
+
+# --------------------------------------------------------------------------- #
+# The write CONTRACT (TODO.md item 114): the schema must advertise exactly what
+# a write accepts. Advertising a field the server refuses invites an agent to
+# build a write it will be denied — the "hit a wall, route around the gate"
+# failure the engine plan exists to prevent — and spends agent context to do it.
+# --------------------------------------------------------------------------- #
+_READ_ONLY_DEFINITIONS = (
+    "value_subquery",  # item 97/110 — rejected on the write path
+    "BinaryOpExpr",  # item 100's Expression union
+    "FunctionExpr",
+    "CaseExpr",
+    "CastExpr",
+    "WindowSelectItem",  # item 101
+    "WindowSpec",
+    "AggregateSelectItem",
+    "StructuredQuery",  # the whole read AST, pulled in by value_subquery
+)
+
+
+def _write_tool_schema() -> str:
+    import json
+
+    from querygate.mcp.server import create_mcp_server
+
+    tools = create_mcp_server()._tool_manager._tools
+    return json.dumps(tools["run_structured_writes"].parameters)
+
+
+@pytest.mark.parametrize("definition", _READ_ONLY_DEFINITIONS)
+def test_write_tool_schema_advertises_no_read_only_definition(definition):
+    assert definition not in _write_tool_schema(), (
+        f"{definition} is inlined into the write tool's schema but the write path "
+        "rejects it — see TODO.md item 114"
+    )
+
+
+def test_write_tool_schema_definitions_are_an_exact_set():
+    """An allowlist, not just the denylist above: this catches the NEXT read-only
+    node (item 102's date/interval, item 104's set ops) instead of only the nine
+    named today, and it catches an accidental re-widening in one assertion."""
+    import json
+
+    from querygate.mcp.server import create_mcp_server
+
+    tools = create_mcp_server()._tool_manager._tools
+    schema = json.loads(json.dumps(tools["run_structured_writes"].parameters))
+    assert set(schema["$defs"]) == {
+        "ColumnExpr",  # a col_fn argument
+        "LiteralExpr",  # a col_fn argument
+        "ScalarFunctionCall",  # Predicate.col_fn, deliberately kept
+        "WritePredicate",
+        "WriteWhereGroup",
+        "InsertStatement",
+        "UpdateStatement",
+        "DeleteStatement",
+        "UpsertStatement",
+    }
+
+
+def test_write_predicate_is_a_strict_narrowing_of_the_read_predicate():
+    """The field-level relationship, so drift is caught in BOTH directions: a read
+    field that a write should accept cannot be silently missing, and a new
+    read-only field forces a decision here rather than being quietly absent."""
+    from querygate.query_ast.models import Predicate
+    from querygate.write_ast.models import WritePredicate
+
+    write_fields = set(WritePredicate.model_fields)
+    read_fields = set(Predicate.model_fields)
+    assert write_fields < read_fields, "a write predicate field must exist on the read predicate"
+    assert read_fields - write_fields == {"expr", "value_expr", "value_subquery"}, (
+        "the read predicate grew or lost a field — decide whether writes accept it, "
+        "then update this set (see TODO.md item 114)"
+    )
+
+
+def test_write_tool_schema_still_advertises_what_writes_do_accept():
+    """The narrowing must not have thrown away the real contract."""
+    schema = _write_tool_schema()
+    for expected in (
+        "WritePredicate",
+        "WriteWhereGroup",
+        "value_col",
+        "col_fn",
+        "conflict_columns",
+    ):
+        assert expected in schema, expected
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"op": "insert", "table": "orders", "rows": [{"id": 1, "status": "new"}]},
+        {
+            "op": "update",
+            "table": "orders",
+            "set": {"status": "shipped"},
+            "where": {"col": "orders.id", "op": "eq", "value": 1},
+        },
+        {
+            "op": "update",
+            "table": "orders",
+            "set": {"status": "shipped"},
+            "where": {"col": "orders.total_amount", "op": "gt", "value_col": "orders.paid_amount"},
+        },
+        {
+            "op": "delete",
+            "table": "orders",
+            "where": {
+                "and": [
+                    {"col": "orders.status", "op": "eq", "value": "draft"},
+                    {"or": [{"col": "orders.id", "op": "lt", "value": 10}]},
+                    {"not": {"col": "orders.id", "op": "eq", "value": 3}},
+                ]
+            },
+        },
+        {
+            "op": "delete",
+            "table": "orders",
+            "where": {
+                "col_fn": {"fn": "lower", "args": [{"col": "orders.status"}]},
+                "op": "eq",
+                "value": "draft",
+            },
+        },
+        {
+            "op": "delete",
+            "table": "orders",
+            "where": {"col": "orders.id", "op": "between", "value": [1, 5]},
+        },
+        {"op": "delete", "table": "orders", "where": {"col": "orders.status", "op": "is_null"}},
+        {
+            "op": "delete",
+            "table": "orders",
+            "where": {"col": "orders.status", "op": "is_not_null"},
+        },
+        # in/not_in — the commonest write filter of all ("delete these ids").
+        {
+            "op": "delete",
+            "table": "orders",
+            "where": {"col": "orders.id", "op": "in", "value": [1, 2, 3]},
+        },
+        {
+            "op": "delete",
+            "table": "orders",
+            "where": {"col": "orders.status", "op": "not_in", "value": ["sent", "paid"]},
+        },
+        {"op": "delete", "table": "orders", "where": {"col": "orders.id", "op": "neq", "value": 1}},
+        {"op": "delete", "table": "orders", "where": {"col": "orders.id", "op": "lte", "value": 9}},
+        {"op": "delete", "table": "orders", "where": {"col": "orders.id", "op": "gte", "value": 2}},
+        {
+            "op": "delete",
+            "table": "orders",
+            "where": {"col": "orders.status", "op": "like", "value": "draft%"},
+        },
+        # A top-level or/not group, and col_fn with a literal argument.
+        {
+            "op": "delete",
+            "table": "orders",
+            "where": {"or": [{"col": "orders.id", "op": "eq", "value": 1}]},
+        },
+        {
+            "op": "delete",
+            "table": "orders",
+            "where": {"not": {"col": "orders.id", "op": "eq", "value": 1}},
+        },
+        {
+            "op": "delete",
+            "table": "orders",
+            "where": {
+                "col_fn": {
+                    "fn": "coalesce",
+                    "args": [{"col": "orders.status"}, {"literal": "draft"}],
+                },
+                "op": "eq",
+                "value": "draft",
+            },
+        },
+        {
+            "op": "upsert",
+            "table": "orders",
+            "rows": [{"id": 1, "status": "new"}],
+            "conflict_columns": ["id"],
+            "update_columns": ["status"],
+        },
+    ],
+)
+def test_every_previously_valid_write_payload_still_validates(payload):
+    """The narrowing is to fields the runtime already rejected, so no payload a
+    caller could legitimately send may break. Round-tripped through the real
+    discriminated union the transports parse."""
+    import pydantic
+
+    from querygate.write_ast.models import WriteStatement
+
+    adapter = pydantic.TypeAdapter(WriteStatement)
+    parsed = adapter.validate_python(payload)
+    assert parsed.table == "orders"
+    # Byte-identical round trip — the property the docs claim, asserted rather
+    # than assumed: serialize back out and compare to the caller's own payload.
+    assert parsed.model_dump(by_alias=True, exclude_none=True) == payload
+    assert adapter.validate_python(parsed.model_dump(by_alias=True, exclude_none=True))
+
+
+@pytest.mark.parametrize(
+    "bad_value_shape",
+    [
+        {"col": "orders.id", "op": "between", "value": [1]},
+        {"col": "orders.id", "op": "in", "value": []},
+        {"col": "orders.id", "op": "is_null", "value": 1},
+        {"col": "orders.id", "op": "like", "value_col": "orders.status"},
+        {"col": "orders.id", "op": "eq"},
+        {"col": "orders.id", "op": "eq", "value": 1, "value_col": "orders.status"},
+        {"op": "eq", "value": 1},
+        {"col": "id", "op": "eq", "value": 1},
+    ],
+)
+def test_write_predicate_enforces_the_read_predicates_value_rules(bad_value_shape):
+    """`WritePredicate` validates by building the read `Predicate`, so the
+    operator/value rules are the SAME rules, not a second copy that can drift."""
+    import pydantic
+
+    from querygate.write_ast.models import DeleteStatement
+
+    with pytest.raises(pydantic.ValidationError):
+        DeleteStatement.model_validate(
+            {"op": "delete", "table": "orders", "where": bad_value_shape}
+        )

@@ -52,7 +52,6 @@ from querygate.core.exceptions import (
 )
 from querygate.execution.approval import verify_approval_token, write_fingerprint
 from querygate.execution.concurrency import concurrency_slot
-from querygate.execution.write_preview import _reject_subquery_in_write_where
 from querygate.policy.loader import get_policy
 from querygate.policy.models import WritePolicy
 from querygate.validation.write_policy_validation import (
@@ -64,6 +63,7 @@ from querygate.write_ast.models import (
     InsertStatement,
     UpsertStatement,
     WriteStatement,
+    to_read_where,
 )
 
 if TYPE_CHECKING:
@@ -144,7 +144,6 @@ class WriteExecutionService:
             # Kept inside the try so a *rejected* write attempt (denied table,
             # over-cap, unqualified) is audited too — the same as the read path.
             validate_write_policy(statement, policy, self._connection_id)
-            _reject_subquery_in_write_where(getattr(statement, "where", None))
             table = await validate_write_schema(statement, self._connection_id, self._principal)
             dml = compile_write(statement, table, self._connection_dialect())
             sql = str(dml.compile(compile_kwargs={"literal_binds": False}))
@@ -226,7 +225,6 @@ class WriteExecutionService:
                 async with session_scope(self._connection_id, policy=policy) as session:
                     for stmt in statements:
                         validate_write_policy(stmt, policy, self._connection_id)
-                        _reject_subquery_in_write_where(getattr(stmt, "where", None))
                         table = await validate_write_schema(
                             stmt, self._connection_id, self._principal
                         )
@@ -369,7 +367,7 @@ class WriteExecutionService:
             .select_from(table)
             .where(
                 _compile_where(
-                    statement.where,
+                    to_read_where(statement.where),
                     {statement.table: table},
                     {},
                     self._connection_dialect(),

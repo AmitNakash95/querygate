@@ -25,7 +25,12 @@ from querygate.execution.write_execution import WriteExecutionService
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy, WritePolicy
 from querygate.query_ast.models import Predicate, StructuredQuery
-from querygate.write_ast.models import DeleteStatement, InsertStatement, UpdateStatement
+from querygate.write_ast.models import (
+    DeleteStatement,
+    InsertStatement,
+    UpdateStatement,
+    WritePredicate,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_db, pytest.mark.postgres_live]
 
@@ -62,6 +67,8 @@ async def _status_of(reader: StructuredQueryService, order_id: int):
         StructuredQuery(
             from_table="orders",
             select=["orders.id", "orders.status"],
+            # A READ query's filter stays the read Predicate; only a write
+            # statement's `where` is the narrowed WritePredicate (item 114).
             where=Predicate(col="orders.id", op="eq", value=order_id),
         )
     )
@@ -70,7 +77,9 @@ async def _status_of(reader: StructuredQueryService, order_id: int):
 
 async def _delete_test_row(writer: WriteExecutionService) -> None:
     await writer.execute(
-        DeleteStatement(table="orders", where=Predicate(col="orders.id", op="eq", value=_TEST_ID))
+        DeleteStatement(
+            table="orders", where=WritePredicate(col="orders.id", op="eq", value=_TEST_ID)
+        )
     )
 
 
@@ -103,7 +112,7 @@ async def test_write_round_trip_commits_against_postgres():
             UpdateStatement(
                 table="orders",
                 set={"status": "pg-handled"},
-                where=Predicate(col="orders.id", op="eq", value=_TEST_ID),
+                where=WritePredicate(col="orders.id", op="eq", value=_TEST_ID),
             )
         )
         assert updated.affected_rows == 1
@@ -111,7 +120,7 @@ async def test_write_round_trip_commits_against_postgres():
 
         deleted = await writer.execute(
             DeleteStatement(
-                table="orders", where=Predicate(col="orders.id", op="eq", value=_TEST_ID)
+                table="orders", where=WritePredicate(col="orders.id", op="eq", value=_TEST_ID)
             )
         )
         assert deleted.affected_rows == 1
@@ -133,7 +142,7 @@ async def test_over_cap_write_rolls_back_against_postgres():
     )
     with pytest.raises(Exception):
         await writer.execute(
-            DeleteStatement(table="orders", where=Predicate(col="orders.id", op="gt", value=0))
+            DeleteStatement(table="orders", where=WritePredicate(col="orders.id", op="gt", value=0))
         )
     after = await reader.execute(
         StructuredQuery(from_table="orders", select=["orders.id"], limit=100000)
