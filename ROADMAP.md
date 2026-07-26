@@ -494,6 +494,14 @@ already-planned initiatives.
 
 ### Review Phase 3 — Architecture and maintainability
 
+- [ ] **116** — A write's WHERE is exempt from `max_where_depth`,
+  `max_where_predicates` and `max_in_list_size`, so a `delete … where id in [1M
+  ids]` compiles ~1M bind params and counts them before `max_affected_rows` is
+  consulted. *Surfaced 2026-07-26 by the item-114 audit (three reviewers,
+  independently). Pre-existing since item 93; sequenced here with 114/115 as
+  guardrail work on shipped surfaces. Adding the caps changes which writes are
+  accepted, so it needs a maintainer decision, not a rider on another item.*
+
 - [x] **115** — The hand-maintained guardrail-field lists had drifted from
   `Policy`'s cap set. ✅ **Shipped** (all **four** copies —
   `admin/access_diff.py`, `EffectiveGuardrails`, `help/service.py` and the admin
@@ -504,14 +512,14 @@ already-planned initiatives.
   run). *Surfaced 2026-07-26 while adding item 101's two caps: nine caps were
   invisible to at least one surface, so loosening one was diffed as "no change".*
 
-- [ ] **114** — The write tool's MCP schema advertises read-only predicate
-  fields it rejects (`expr`/`value_expr`/`value_subquery`, plus the whole read
-  `StructuredQuery` definition), making `run_structured_writes` the largest tool
-  schema. *Surfaced 2026-07-25 while measuring item 100's MCP budget increase:
-  4,871 of those chars are item 100's Expression union inlined into a tool that
-  refuses it. Deliberately NOT folded into item 100 — it is a write-contract
-  change and gets its own PR. Sequenced here rather than in a Phase, since it is
-  maintainability work on an already-shipped surface.*
+- [x] **114** — The write tool's MCP schema advertised read-only predicate fields
+  it rejects. ✅ **Shipped** (the write AST gets its own narrowed
+  `WritePredicate`/`WriteWhereGroup`, converted to the read `WhereNode` at the
+  validation boundary — one predicate walk, one compiler, and the runtime
+  rejections kept as defence in depth. MCP context budget **down 19%**
+  (128,551 -> 104,042; the write tool -63%), putting the ceiling back below item
+  100's. A fifth hand-rolled predicate enumerator was found — and deleted, being
+  both unreachable and untested.)
 
 - [x] **110** — Explicitly reject `value_subquery` in a write's WHERE at the
   write-validation layer instead of relying on the compiler's `ctx=None`

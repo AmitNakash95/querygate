@@ -5797,6 +5797,22 @@ would have hit a policy rejection. Caught by writing the test.)
 running total over real Postgres from inside the release image, alongside the
 existing read and governed-write round-trips.
 
+**The two caps are backed by a measurement, not judgement** (added 2026-07-26,
+`tests/integration/test_postgres_window_cost.py`): at the default
+`max_window_specs=5` a windowed query costs ~15x a plain scan of the same 25,000
+rows, and the per-window cost rises past that. For `max_window_frame_offset` the
+finding is sharper — **Postgres does not price the frame at all** (identical
+`EXPLAIN` cost for a 10-row and a 10,000-row frame) while a non-invertible
+aggregate over a wide frame really is O(rows x frame) (12 ms / 574 ms / 3.4 s at
+10 / 1,000 / 10,000 preceding), so item 26's cost gate is structurally blind there
+and this cap is the only guardrail that sees it. Three qualifications are recorded
+with it rather than glossed: `SUM`/`AVG` are only free over
+integer/numeric/money/interval (a `double precision` column rescans like `MAX`),
+the timings are unlimited-scan numbers whereas a top-level read is LIMIT-clamped
+(the full cost is reachable inside an `IN (subquery)`, whose LIMIT is stripped),
+and MSSQL's estimator is unmeasured. The test pins the order-of-magnitude
+findings, not the individual timings.
+
 **Canonical regression bar (plan §5):** row 5 (running cumulative total) went ✅.
 8/16 → **9/16**. Two table corrections were recorded rather than glossed: **row 3**
 (7-day moving average of *daily* orders) needs item 105's derived table, not this
@@ -6059,6 +6075,14 @@ cannot be leaf-flattened — a legitimately distinct operation, not a missed
 duplicate. So a new `WhereGroup` combinator is now handled in exactly one place
 for every leaf-oriented traversal.
 
+> **Correction (2026-07-26, from item 114).** That "only remaining" claim was
+> wrong as written. `execution/write_preview.py` held a **fifth** leaf-oriented
+> enumerator this consolidation missed (item 114 found it unreachable and deleted
+> it), and `audit/events.py`'s `_where_shape` and the compiler's `_compile_where`
+> are two further structure-dependent recursions that legitimately remain, in the
+> same category as `_where_depth`. The accurate claim is: one shared predicate
+> *enumerator*, plus a small set of deliberately structure-dependent walks.
+
 **No behavior change**, by construction (the four walks were identical) and by
 proof: the full default suite (1613) and the security suite (260) pass unchanged.
 Added two direct contract tests in `tests/unit/test_reference_visitor.py` (the
@@ -6138,6 +6162,93 @@ acceptance criterion (a nightly/weekly workflow runs the CVE/SBOM/lockfile check
 and `make test-soak` against `main` independent of code changes) is satisfied by
 the declared `schedule:` trigger plus every invoked command proven green above.
 
+### 114. The write tool's MCP schema advertised read-only predicate fields it rejects ✅ DONE
+
+**Effort: M. Priority: medium (agent-facing correctness + MCP token budget).
+Depended on: item 93.** Its own PR, as the item's own text required — this is a
+write-contract change, not a rider on a read-engine item.
+
+**The defect.** `UpdateStatement`/`DeleteStatement` reused the READ `Predicate`
+verbatim, so `run_structured_writes` was the largest MCP tool schema in the
+product (38,964 chars — larger than the read tool). A write's `where` dragged in
+`expr`/`value_expr` (item 100's entire `Expression` union), `value_subquery`
+(item 110), and through that the whole read `StructuredQuery` definition —
+`SelectItem`, aggregates, and after item 101 the window nodes too. **Every one of
+those is rejected by `validate_write_policy` at runtime.**
+
+**Why it mattered beyond bytes.** The schema is the agent's contract. Advertising
+a field the server refuses invites the agent to build a write it will be denied —
+the "hit a wall, route around the gate" failure `ENGINE_EXPRESSIVENESS_PLAN.md`
+exists to prevent — and it spent that context on every single MCP session to do
+it.
+
+**The fix: narrow at the wire, converge internally.** `WritePredicate` and
+`WriteWhereGroup` carry exactly what a write accepts (`col`, `col_fn`, `op`,
+`value`, `value_col`, and boolean groups). They are a **narrowing**, not a
+parallel grammar:
+
+- `to_read_where` converts at the validation boundary, so the canonical predicate
+  walk (item 111), `_compile_where`, and every downstream guarantee stay the
+  single read implementation. There is no second compile path and no second
+  predicate-*enumerating* walk: `to_read_where` is a structural conversion, the
+  same legitimately-distinct category as `_where_depth` and `audit/events.py`'s
+  `_where_shape`, and it fails closed on a node it does not recognise.
+- The value-shape rules are **not restated**: `WritePredicate` validates by
+  constructing the read `Predicate`, so one rule set is enforced (at parse time),
+  and the two cannot drift on what `between` or `in` means.
+- Read nodes pass through `to_read_where` unchanged, which is what keeps the
+  runtime rejections reachable as **defence in depth** — they are still tested,
+  now via `model_construct` (the only way to reach that state), and a new test
+  asserts the parse-time refusal separately.
+
+**Result: the MCP context budget went DOWN, not up.** **128,551 -> 104,042**
+chars total (**-19%**); `run_structured_writes` 38,964 -> **14,455** (-63%).
+The baseline is item 115's tree: it had added 1,851 chars over item 101's 126,700
+(a wider `EffectiveGuardrails` in `describe_my_querygate_access`'s output schema)
+without needing a budget bump, so quoting 126,700 understated the drop. `_MAX_TOTAL_CHARS` drops
+132,000 -> 110,000 — back below item 100's 123,000, but ~2,000 **above** the
+108,000 ceiling that predated item 100. (An earlier draft of this write-up
+claimed the ceiling was lower than pre-item-100; it is not. The measured *total*
+is what improved.)
+
+**A fifth hand-rolled predicate enumerator found — and deleted.**
+`write_preview.py`'s `_reject_subquery_in_write_where` traversed the boolean tree
+with its own stack, a copy item 111's four-validator consolidation missed. Once
+it was on the canonical walk the more useful fact emerged: it was **unreachable**
+— all three call sites ran it immediately after `validate_write_policy`, which
+rejects the same thing over the same walk (item 110) — and it had zero tests. A
+layer that cannot fire and is not tested is not defence in depth, so it was
+deleted; the schema refusal and the validator rejection remain.
+
+**Coverage.** `tests/unit/test_mcp_write_tool.py`: the schema contains none of
+nine read-only definitions (parameterized, so a future reuse of a read model
+fails loudly), it still advertises what writes *do* accept, **18
+previously-valid write payloads round-trip unchanged** through the real
+discriminated union (the "no caller can break" acceptance criterion), and eight
+malformed value shapes are still refused by the read predicate's own rules.
+`tests/unit/test_governed_writes.py`: the parse-time refusal of
+`expr`/`value_expr`/`value_subquery`, the defence-in-depth validation rejections
+for all three (both `expr` and `value_expr` disjuncts, not just the first), the
+write-vocabulary error property, the dotted-ref rule on both column fields, and
+— the gap the audit caught — **every branch of `to_read_where`**: and/or/not
+conversion, nested groups, read-node identity pass-through, fail-closed on an
+unknown node, and a denied *and* masked column buried inside a group. Those
+boolean branches shipped with no test at all; a swapped `and_terms`/`or_terms`
+would have made `DELETE ... WHERE a OR b` execute as `a AND b`, with the preview,
+the diff and the execution all agreeing on the wrong blast radius because they
+re-derive from that one conversion.
+
+**Accepted cost.** Python-level construction of a write statement now uses
+`WritePredicate` instead of `Predicate` (a dozen test call sites migrated); wire
+payloads are unchanged, which the round-trip test now pins field-for-field
+across 18 payloads covering every `CompareOp`, both `col_fn` argument kinds and
+top-level `and`/`or`/`not` groups. `col_fn` is deliberately KEPT on the write
+predicate — it works on the write path today and removing it would have broken
+currently-valid payloads, which the acceptance criteria forbid. One payload shape
+*is* now refused earlier: a bare (non-dotted) `col`, which could never have
+succeeded (it bypassed the ref walk and failed in the compiler) — recorded because
+"every previously-valid payload still validates" is imprecise about it.
+
 ### 115. The hand-maintained guardrail-field lists had drifted from `Policy` ✅ DONE
 
 **Effort: S. Priority: medium (operator-facing correctness on shipped surfaces).
@@ -6208,4 +6319,3 @@ inverted field losing its inversion, a new ambiguously-named cap, and dropping
 the `approval_sensitivities` change all fail the suite. The ninth — adding a
 plain `max_*` cap — is *designed* to pass: it is auto-included everywhere and its
 direction is unambiguous, so there is nothing left to forget.
-

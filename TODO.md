@@ -144,8 +144,9 @@ order-of-magnitude, not commitments.
 | 111 | ✅ Duplicated WHERE-predicate tree walk across four validators | S | — |
 | 112 | ✅ No scheduled (cron) CI run — dependency/security scans only fire on push/PR | S | — |
 | 113 | ✅ OBSOLETE — metrics for the removed write-undo / compensation store | — | — |
-| 114 |  Write tool MCP schema advertises read-only predicate fields it rejects | M | 93 |
+| 114 | ✅  Write tool MCP schema advertises read-only predicate fields it rejects | M | 93 |
 | 115 | ✅  Guardrail-field lists in admin/help have drifted from `Policy`'s caps | S | — |
+| 116 |  A write's WHERE is exempt from every shape cap the read path enforces | S | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2217,43 +2218,18 @@ longer exists. If write-*execution* metrics are wanted later, that is a fresh,
 separately-scoped item (not undo-specific).
 
 
-### 114. The write tool's MCP schema advertises read-only predicate fields it rejects
+### 114. The write tool's MCP schema advertised read-only predicate fields it rejects ✅ DONE
 
-**Effort: M. Priority: medium (agent-facing correctness + MCP token budget).
-Depends on: item 93 (governed writes) — this is a write-contract change and
-should be its own PR, not a rider on a read-engine item.**
+A write's `where` reused the READ `Predicate`, so `run_structured_writes` inlined
+item 100's whole `Expression` union, item 101's window nodes and the entire read
+`StructuredQuery` — all rejected at runtime. The write AST now has its own
+narrowed `WritePredicate`/`WriteWhereGroup`, converted to the read `WhereNode` at
+the validation boundary so there is still one predicate walk and one compiler.
+The MCP context budget DROPPED 19% (128,551 -> 104,042; the write tool -63%), and
+a fifth hand-rolled predicate enumerator in `write_preview.py` was deleted as
+unreachable.
 
-`run_structured_writes` is now the LARGEST MCP tool schema (34,594 chars,
-larger than the read tool) because a write statement's `where` reuses the READ
-`Predicate`/`WhereNode` models verbatim. That drags in three field groups the
-write path explicitly **rejects** at validation:
-
-- `expr` / `value_expr` — item 100's scalar Expression (rejected in
-  `validate_write_policy`; **4,871 chars** of `Expression` union definitions are
-  inlined into the write tool because of it),
-- `value_subquery` — rejected since item 110, which also pulls the entire read
-  `StructuredQuery` definition into the write tool's schema.
-
-**Why it matters beyond bytes:** the schema is the agent's contract. Advertising
-a field the server refuses at runtime invites the agent to build a write it will
-be denied, which is exactly the "hit a wall, route around the gate" failure the
-engine plan exists to prevent — and it spends agent context on every session to
-do it.
-
-**Scope:** give the write AST its own predicate/where types carrying only the
-fields writes actually accept (`col`, `op`, `value`, `value_col`, boolean
-groups), instead of reusing the read `Predicate`. The runtime rejections stay as
-defence in depth.
-
-**Acceptance criteria:**
-- The write tool's JSON schema contains no `expr`/`value_expr`/`value_subquery`
-  and no inlined read `StructuredQuery`/`Expression` definitions.
-- Every currently-valid write payload still validates unchanged (this is a pure
-  narrowing to fields already rejected at runtime — assert with a round-trip
-  test over the existing write corpus).
-- The existing runtime rejections keep their tests (defence in depth, not
-  replaced by the schema narrowing).
-- `_MAX_TOTAL_CHARS` in `tests/unit/test_mcp_token_budget.py` drops accordingly.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 114).
 
 ### 115. The hand-maintained guardrail-field lists had drifted from `Policy` ✅ DONE
 
@@ -2267,3 +2243,45 @@ state its direction (`min_group_size` and `quota_window_seconds` run the opposit
 way) or a test fails.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 115).
+
+### 116. A write's WHERE is exempt from every shape cap the read path enforces
+
+**Effort: S. Priority: medium (resource-exhaustion guardrail parity). Depends on:
+nothing.** Surfaced 2026-07-26 by the item-114 audit — three reviewers flagged it
+independently. Pre-existing since item 93; item 114 is what made it salient, since
+the write filter now has its own type and therefore an obvious home for the caps.
+
+`validate_write_policy` enforces none of `Policy.max_where_depth`,
+`max_where_predicates`, or `max_in_list_size`. All three live only in
+`policy_validation.py`, which the write path never calls. So:
+
+- **`max_in_list_size` (default 1000) is the concrete one.** A
+  `{"op":"delete","table":"orders","where":{"col":"orders.id","op":"in","value":[…1e6 ids…]}}`
+  compiles ~1M bind parameters and runs a `COUNT(*)` over them **before**
+  `max_affected_rows` is consulted — the read path refuses the same list.
+- **Depth** is at least fail-safe: ~800 nested `not` levels return a clean
+  Pydantic `ValidationError` (422), not a `RecursionError` — but a write filter may
+  nest ~250 levels where a read caps at 5, and the tree is now walked four times
+  (`to_read_where`, two validator walks, `_compile_where`).
+- **Predicate count** is likewise unbounded.
+
+**Why it was not fixed inside item 114:** adding the caps changes which writes are
+*accepted*, which is a policy-behaviour decision for the maintainer, not a
+side-effect of a schema narrowing. It is also the write sibling of a read
+guardrail, so the natural implementation reuses `_check_where_depth` and the
+in-list check rather than inventing write-specific ones.
+
+**Scope:** `validation/write_policy_validation.py`; possibly a shared helper with
+`policy_validation.py` so the two cannot drift.
+
+**Acceptance criteria:**
+- A write WHERE is bounded by `max_where_depth`, `max_where_predicates` and
+  `max_in_list_size`, enforced before any DML is compiled or any `COUNT(*)` runs.
+- The over-cap rejection is a clean typed `PolicyViolationError`, audited like any
+  other rejected write attempt.
+- Tests: each cap fires on a write; an over-size `in` list is refused before the
+  affected-row count executes (assert no statement reaches the database, the
+  technique item 108 used); and the read-path caps keep their existing tests.
+- Decide explicitly whether the write caps are the same fields or write-specific
+  ones (`WritePolicy.max_*`), and record it — the read caps are tuned for a
+  SELECT's cost, and a write's cost profile differs.

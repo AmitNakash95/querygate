@@ -495,7 +495,38 @@ why that trade is a maintainer call rather than a convenience we take.
 
 **Bounds:** `max_window_specs` (how many windows, summed across the query and
 its subqueries; `0` turns the feature off per connection) and
-`max_window_frame_offset` (how far a frame or a `lag`/`lead` may reach).
+`max_window_frame_offset` (how far a frame or a `lag`/`lead` may reach). **Both
+defaults were chosen against a measurement, not a guess** —
+`tests/integration/test_postgres_window_cost.py` re-runs it on the live-Postgres
+suite against the 25,000-row table the large-domain stress suite seeds (it skips
+with the seeding command when that data is absent). Five windows costs ~15x a
+plain scan and the marginal cost per window rises past that, which is where the
+cap sits — the rise is the argument for capping at all; 5 itself is a judgement
+inside the measured range.
+
+The frame cap is the load-bearing one. For an aggregate the engine can't compute
+with inverse transitions, the work is O(rows × frame) — 12 ms at 10 preceding,
+574 ms at 1,000, **3.4 s at 10,000** over 25k rows. Three qualifications that
+matter for tuning it:
+
+- **Which aggregates rescan** is narrower than "`MIN`/`MAX`": Postgres has an
+  inverse transition for `SUM`/`AVG` over integer/numeric/money/interval only —
+  over `real`/`double precision` they rescan like `MIN`/`MAX`, so a **float**
+  metric column pays the full cost.
+- **Those are unlimited-scan numbers — and the row limit does not save you.** A
+  top-level read is LIMIT-clamped (default 50, max 100), which bounds the rescan
+  *only* while the query's `order_by` is already satisfied by the window's own
+  ordering. Order by anything else and the plan becomes `Limit → Sort →
+  WindowAgg`, and that blocking sort runs the window over every row anyway:
+  measured **0.7 ms aligned vs 583 ms with an unrelated `ORDER BY`**, both at
+  `LIMIT 50`. So the full cost is reachable at the top level under default
+  policy — and always inside an `IN (subquery)`, where the LIMIT is stripped.
+- **Postgres does not price the frame at all**, reporting an identical `EXPLAIN`
+  cost for a 10-row and a 10,000-row frame, so the cost-estimation gate is
+  structurally blind to it there and the cap is the only guardrail that sees it,
+  with `timeout_seconds` as the backstop. MSSQL's estimator is unmeasured for
+  this.
+
 `PARTITION BY` columns count against the same `max_partition_by` budget `top_n`
 uses. Every column a window touches — in `arg`, `partition_by`, **and**
 `order_by` — goes through the item-96 canonical visitor, so a denied column is
@@ -2843,6 +2874,55 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-26 — a write's WHERE gets its own narrowed predicate types instead of
+  reusing the read `Predicate` (TODO.md item 114).** `run_structured_writes` was
+  the largest MCP tool schema in the product — larger than the *read* tool —
+  because an `UPDATE`/`DELETE` filter reused the read `Predicate` verbatim,
+  inlining `expr`/`value_expr` (item 100's whole `Expression` union),
+  `value_subquery` (item 110) and, through that, the entire read
+  `StructuredQuery` definition, windows included. **Every one of those is
+  rejected by write validation at runtime.**
+  **The schema is the agent's contract**, and advertising a field the server
+  refuses invites the agent to build a write it will be denied — the
+  "hit a wall, route around the gate" failure the engine plan exists to prevent —
+  while spending that context on every session. So `WritePredicate` /
+  `WriteWhereGroup` now carry exactly what a write accepts (`col`, `col_fn`,
+  `op`, `value`, `value_col`, boolean groups).
+  **They are a narrowing, not a parallel grammar** — the distinction that keeps
+  this from re-opening the item-96/111 duplication: `to_read_where` converts at
+  the validation boundary, so the canonical predicate walk and the one compiler
+  are still the read implementation, and `WritePredicate` validates by
+  *constructing* a read `Predicate`, so the **operator/value** rules are literally
+  the same rules rather than a second copy that can drift. Two rules are
+  deliberately write-only and stricter: `col` and `value_col` must be dotted
+  `Table.Column` refs, where the read side defers dottedness (a HAVING clause may
+  legitimately name a select alias). For `col` that closed a real latent gap — an
+  undotted ref was *skipped* by the reference walk, so it bypassed allow/deny and
+  masking entirely before failing in the compiler; for `value_col` it only moves an
+  existing rejection earlier. Error messages are re-raised in the write
+  vocabulary, because the read predicate's own text offers `value_expr`/
+  `value_subquery` as alternatives — the removed fields — which would move this
+  item's defect from the schema into the error channel. Read nodes pass through
+  the conversion unchanged, which is what keeps the runtime rejections reachable
+  as defence in depth; anything else fails closed, since the permissive version
+  would have silently dropped the terms of a future combinator.
+  **The MCP context budget went down, not up:** 128,551 → 104,042 chars (**-19%**;
+  the baseline is item 115's tree, which had itself added 1,851 chars over item
+  101's 126,700 without a budget note), and the write tool 38,964 → 14,455
+  (-63%). `_MAX_TOTAL_CHARS` drops 132,000 → 110,000: back below item 100's
+  123,000, though still ~2,000 above the 108,000 ceiling that predated item 100 —
+  the earlier claim that it was *lower* than pre-item-100 was simply wrong, and
+  the measured *total* being lower is the accurate version of it. Along the way,
+  `write_preview.py`'s subquery rejection — a fifth hand-rolled predicate
+  enumerator that item 111's four-validator consolidation had missed — was found
+  to be **unreachable** (every call site ran after the validator that already
+  rejects the same thing) and untested, so it was deleted rather than kept as
+  decorative defence in depth.
+  **Accepted cost:** `col_fn` is deliberately kept — it works on the write path
+  today, and removing it would break currently-valid payloads. Python-level
+  construction of a write statement now uses `WritePredicate`; wire payloads are
+  field-for-field identical, pinned by a round-trip test over 18
+  previously-valid payloads covering every comparison operator.
 - **2026-07-26 — the four "which caps are in force" surfaces are derived from
   `Policy` instead of hand-listed, and a cap's *direction* must now be stated
   (TODO.md item 115).** Four places answered that question — the semantic access

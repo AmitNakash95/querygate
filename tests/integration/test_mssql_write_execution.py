@@ -25,7 +25,12 @@ from querygate.execution.write_execution import WriteExecutionService
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy, WritePolicy
 from querygate.query_ast.models import Predicate, StructuredQuery
-from querygate.write_ast.models import DeleteStatement, InsertStatement, UpdateStatement
+from querygate.write_ast.models import (
+    DeleteStatement,
+    InsertStatement,
+    UpdateStatement,
+    WritePredicate,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_db, pytest.mark.mssql_live]
 
@@ -102,7 +107,9 @@ async def test_insert_against_mssql():
     status = "mssql-insert"
 
     await writer.execute(
-        DeleteStatement(table="orders", where=Predicate(col="orders.status", op="eq", value=status))
+        DeleteStatement(
+            table="orders", where=WritePredicate(col="orders.status", op="eq", value=status)
+        )
     )
     try:
         inserted = await writer.execute(_new_order(status))
@@ -111,7 +118,7 @@ async def test_insert_against_mssql():
     finally:
         await writer.execute(
             DeleteStatement(
-                table="orders", where=Predicate(col="orders.status", op="eq", value=status)
+                table="orders", where=WritePredicate(col="orders.status", op="eq", value=status)
             )
         )
 
@@ -126,7 +133,7 @@ async def test_update_against_mssql():
     seed_status = "mssql-update-seed"
     await writer.execute(
         DeleteStatement(
-            table="orders", where=Predicate(col="orders.status", op="eq", value=seed_status)
+            table="orders", where=WritePredicate(col="orders.status", op="eq", value=seed_status)
         )
     )
     await writer.execute(_new_order(seed_status))
@@ -143,14 +150,16 @@ async def test_update_against_mssql():
             UpdateStatement(
                 table="orders",
                 set={"status": "mssql-update-changed"},
-                where=Predicate(col="orders.id", op="eq", value=target),
+                where=WritePredicate(col="orders.id", op="eq", value=target),
             )
         )
         assert updated.affected_rows == 1
         assert await _count_status(reader, "mssql-update-changed") == 1
     finally:
         await writer.execute(
-            DeleteStatement(table="orders", where=Predicate(col="orders.id", op="eq", value=target))
+            DeleteStatement(
+                table="orders", where=WritePredicate(col="orders.id", op="eq", value=target)
+            )
         )
 
 
@@ -163,11 +172,15 @@ async def test_delete_against_mssql():
     status = "mssql-delete"
 
     await writer.execute(
-        DeleteStatement(table="orders", where=Predicate(col="orders.status", op="eq", value=status))
+        DeleteStatement(
+            table="orders", where=WritePredicate(col="orders.status", op="eq", value=status)
+        )
     )
     await writer.execute(_new_order(status))
     deleted = await writer.execute(
-        DeleteStatement(table="orders", where=Predicate(col="orders.status", op="eq", value=status))
+        DeleteStatement(
+            table="orders", where=WritePredicate(col="orders.status", op="eq", value=status)
+        )
     )
     assert deleted.affected_rows == 1
     assert await _count_status(reader, status) == 0

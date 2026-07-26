@@ -269,17 +269,50 @@ class Policy(pyd.BaseModel):
     max_expression_depth: int = pyd.Field(default=5, ge=1)
     max_expression_nodes: int = pyd.Field(default=200, ge=1)
 
-    # The two caps that bound item 101's window functions. `max_window_specs`
-    # counts `WindowSelectItem`s summed TREE-WIDE (item 97's rule) — each window
-    # is a potential extra sort/pass over the row set, so this is the cost lever
-    # that matters; 0 disables window functions entirely for a connection.
+    # The two caps that bound item 101's window functions. Both defaults were
+    # chosen against a measurement rather than a guess — see
+    # tests/integration/test_postgres_window_cost.py, which re-runs it against
+    # 25,000 real rows and pins the order-of-magnitude findings (the ratios and
+    # the planner's blindness), though not the individual timings quoted below.
+    #
+    # `max_window_specs` counts `WindowSelectItem`s summed TREE-WIDE (item 97's
+    # rule); 0 disables window functions entirely for a connection. Default 5:
+    # at 5 windows a query costs ~15x a plain scan of the same table, and the
+    # marginal cost per window rises across the measured range (7.3 ms/window at
+    # 5, 17.7 at 20). That rise is the shape argument for capping; 5 is a
+    # judgement inside the measured range, not a knee three data points could
+    # locate.
+    #
     # `max_window_frame_offset` bounds the caller-supplied distance in an
     # `N PRECEDING`/`N FOLLOWING` frame bound and in a `lag`/`lead` offset — the
-    # only unbounded magnitudes in the window AST. Unbounded frame ends are NOT
-    # separately gated: `UNBOUNDED PRECEDING … CURRENT ROW` is the running-total
-    # idiom and also SQL's own default frame, and an unbounded-both-ends frame is
-    # semantically the same whole-partition scan as omitting the frame — see the
-    # 2026-07-26 Decision Log entry.
+    # only unbounded magnitudes in the window AST. Default 1000, and this is the
+    # load-bearing one: for an aggregate the engine cannot compute with inverse
+    # transitions the work is O(rows x frame) — 12 ms at 10 preceding, 574 ms at
+    # 1,000, 3.4 s at 10,000 over 25k rows, and linear in row count too, so a
+    # deployment with much larger tables should lower it.
+    #   * Which aggregates rescan is narrower than "MIN/MAX": Postgres provides an
+    #     inverse transition for `SUM`/`AVG` over int2/int4/int8/numeric/money/
+    #     interval ONLY — over `real`/`double precision` they rescan like
+    #     `MIN`/`MAX`, so a float metric column pays the full cost.
+    #   * Those timings are for an UNLIMITED scan, and a top-level read IS
+    #     LIMIT-clamped (`clamp_limit`, default 50 / max 100) — but the clamp only
+    #     bounds the rescan while the query's `order_by` is already satisfied by the
+    #     window's own ordering. Order by anything else and the plan becomes
+    #     `Limit -> Sort -> WindowAgg`, whose blocking sort runs the window over
+    #     every row regardless: measured 0.7 ms aligned vs **583 ms** with an
+    #     unrelated `ORDER BY`, both at `LIMIT 50`. So the full cost is reachable at
+    #     the top level under default policy — and always inside an `IN (subquery)`,
+    #     whose LIMIT is deliberately stripped.
+    #   * **Postgres does not price the frame at all** (identical `EXPLAIN` cost
+    #     for a 10-row and a 10,000-row frame), so item 26's cost-estimation gate
+    #     is structurally blind to it there and cannot substitute for this cap;
+    #     `timeout_seconds` is the only backstop behind it. MSSQL's
+    #     `SHOWPLAN_XML` estimator has not been measured for this.
+    #
+    # Unbounded frame ends are NOT separately gated: `UNBOUNDED PRECEDING …
+    # CURRENT ROW` is the running-total idiom and also SQL's own default frame,
+    # and an unbounded-both-ends frame is semantically the same whole-partition
+    # scan as omitting the frame — see the 2026-07-26 Decision Log entry.
     max_window_specs: int = pyd.Field(default=5, ge=0)
     max_window_frame_offset: int = pyd.Field(default=1000, ge=1)
 

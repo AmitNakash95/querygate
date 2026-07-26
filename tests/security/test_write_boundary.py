@@ -23,12 +23,12 @@ from querygate.core.exceptions import ApprovalRequiredError, PolicyViolationErro
 from querygate.execution.approval import issue_approval_token, write_fingerprint
 from querygate.execution.write_execution import WriteExecutionService
 from querygate.policy.models import Policy, WritePolicy
-from querygate.query_ast.models import Predicate
 from querygate.write_ast.models import (
     DeleteStatement,
     InsertStatement,
     UpdateStatement,
     UpsertStatement,
+    WritePredicate,
 )
 
 pytestmark = pytest.mark.security
@@ -116,8 +116,10 @@ def test_no_raw_dml_field_on_any_write_statement(field):
             cls(**{**base, field: "DELETE FROM orders"})
 
 
-def _eq() -> Predicate:
-    return Predicate(col="orders.id", op="eq", value=1)
+def _eq() -> WritePredicate:
+    # The write AST's own predicate type since item 114 — same wire shape, minus
+    # the read-only fields (expr/value_expr/value_subquery) writes reject.
+    return WritePredicate(col="orders.id", op="eq", value=1)
 
 
 def test_unqualified_update_and_delete_cannot_be_constructed():
@@ -155,7 +157,7 @@ def test_update_set_value_is_bound_data_not_sql():
 def test_delete_where_value_is_bound_data_not_sql():
     stmt = compile_write(
         DeleteStatement(
-            table="orders", where=Predicate(col="orders.status", op="eq", value=_ATTACK)
+            table="orders", where=WritePredicate(col="orders.status", op="eq", value=_ATTACK)
         ),
         _orders_table(),
     )
@@ -209,7 +211,7 @@ def test_where_on_a_read_denied_column_cannot_target_a_write():
     # A column readable-denied cannot be used to *select* rows to mutate.
     policy = _writable(policy_kwargs={"denied_columns": {"orders": ["customer_id"]}})
     stmt = DeleteStatement(
-        table="orders", where=Predicate(col="orders.customer_id", op="eq", value=7)
+        table="orders", where=WritePredicate(col="orders.customer_id", op="eq", value=7)
     )
     with pytest.raises(PolicyViolationError):
         validate_write_policy(stmt, policy, "demo")
@@ -246,8 +248,10 @@ def test_approval_token_bound_to_one_write_is_rejected_for_another(monkeypatch):
         allowed_operations=["delete"],
         require_approval_over_rows=0,
     )
-    approved = DeleteStatement(table="orders", where=Predicate(col="orders.id", op="eq", value=1))
-    other = DeleteStatement(table="orders", where=Predicate(col="orders.id", op="eq", value=2))
+    approved = DeleteStatement(
+        table="orders", where=WritePredicate(col="orders.id", op="eq", value=1)
+    )
+    other = DeleteStatement(table="orders", where=WritePredicate(col="orders.id", op="eq", value=2))
     token = issue_approval_token(
         fingerprint=write_fingerprint(approved), approver_subject="a", key="k"
     )

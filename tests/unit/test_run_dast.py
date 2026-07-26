@@ -61,6 +61,9 @@ def test_pruning_removes_the_recursive_ast_components():
         "WindowSpec",
         "WindowFrame",
         "WindowBound",
+        # item 114's write filter types — self-recursive like WhereGroup.
+        "WritePredicate",
+        "WriteWhereGroup",
     }
     assert not (remaining & must_be_gone), sorted(remaining & must_be_gone)
 

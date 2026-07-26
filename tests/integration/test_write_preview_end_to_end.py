@@ -384,3 +384,73 @@ async def test_writes_denied_by_default_is_a_clean_rejection(sqlite_app):
         )
     assert resp.status_code == 422  # PolicyViolationError -> 422
     assert "not enabled" in resp.json()["detail"].lower()
+
+
+# --------------------------------------------------------------------------- #
+# The write CONTRACT at the transport (TODO.md item 114). The narrowing is what
+# an agent actually sees, so the refusal has to be asserted where the agent hits
+# it — as a clean 4xx that leaks no internals — not only against the model.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "read_only_field",
+    [
+        {"expr": {"op": "*", "left": {"col": "orders.id"}, "right": {"literal": 2}}},
+        {"value_expr": {"col": "orders.id"}},
+        {"value_subquery": {"from": "customers", "select": ["customers.id"]}},
+    ],
+)
+@pytest.mark.parametrize("path", ["write/preview", "write/execute"])
+async def test_rest_refuses_a_read_only_predicate_field_in_a_write(
+    sqlite_app, read_only_field, path
+):
+    _enable_writes()
+    body = {
+        "op": "delete",
+        "table": "orders",
+        "where": {"col": "orders.id", "op": "eq", "value": 1, **read_only_field},
+    }
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        resp = await client.post(f"/api/v1/demo/{path}", json=body)
+    assert resp.status_code in (400, 422), resp.text
+    text = resp.text
+    # Clean rejection: no server internals. (Echoing the caller's OWN field name
+    # back is correct — it is how they learn which field was refused — and
+    # test_malformed_input_fuzzing.py's token list deliberately treats echoed
+    # input as non-sensitive.)
+    for leak in ("Traceback", "sqlalchemy", "site-packages", "/Users/", "asyncpg"):
+        assert leak not in text, f"{leak} leaked into the rejection: {text[:300]}"
+    assert "not permitted" in text
+    # The item-114 property: the error must never OFFER a removed field as an
+    # alternative. The read predicate's own message does exactly that
+    # ("requires a value, value_col, value_expr, or value_subquery"), which is why
+    # WritePredicate re-raises in the write vocabulary.
+    for offered in (
+        "value_col, value_expr",
+        "'value_col', 'value_expr'",
+        "'col_fn', or 'expr'",
+    ):
+        assert offered not in text, f"the rejection offers a removed field: {text[:300]}"
+
+
+@pytest.mark.asyncio
+async def test_rest_still_accepts_a_boolean_group_write_filter(sqlite_app):
+    """The narrowing must not have cost the real contract: an and/or/not filter is
+    still accepted and previewed over the wire."""
+    _enable_writes()
+    body = {
+        "op": "delete",
+        "table": "orders",
+        "where": {
+            "and": [
+                {"col": "orders.id", "op": "gt", "value": 0},
+                {"or": [{"col": "orders.status", "op": "eq", "value": "completed"}]},
+            ]
+        },
+    }
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        resp = await client.post("/api/v1/demo/write/preview", json=body)
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["executed"] is False
+    assert payload["affected_rows"] >= 1

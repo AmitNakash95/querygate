@@ -31,8 +31,8 @@ from querygate.execution.service import StructuredQueryService
 from querygate.execution.write_execution import WriteExecutionService
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy, WritePolicy
-from querygate.query_ast.models import Predicate, StructuredQuery
-from querygate.write_ast.models import DeleteStatement, InsertStatement
+from querygate.query_ast.models import StructuredQuery
+from querygate.write_ast.models import DeleteStatement, InsertStatement, WritePredicate
 
 pytestmark = [
     pytest.mark.integration,
@@ -93,7 +93,9 @@ async def _order_count(reader: StructuredQueryService) -> int:
 
 async def _delete_id(writer: WriteExecutionService, order_id: int) -> None:
     await writer.execute(
-        DeleteStatement(table="orders", where=Predicate(col="orders.id", op="eq", value=order_id))
+        DeleteStatement(
+            table="orders", where=WritePredicate(col="orders.id", op="eq", value=order_id)
+        )
     )
 
 
@@ -107,7 +109,9 @@ async def test_concurrent_over_cap_writes_all_reject_and_change_nothing():
     results = await asyncio.gather(
         *(
             writer.execute(
-                DeleteStatement(table="orders", where=Predicate(col="orders.id", op="gt", value=0))
+                DeleteStatement(
+                    table="orders", where=WritePredicate(col="orders.id", op="gt", value=0)
+                )
             )
             for _ in range(8)
         ),
