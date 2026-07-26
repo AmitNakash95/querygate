@@ -1427,3 +1427,53 @@ async def test_database_type_error_becomes_a_clean_typed_validation_error():
     # The client-safe projection of this exception is the message itself (it is
     # a QueryValidationError), so the same non-leak guarantee holds on the wire.
     assert public_error_message(excinfo.value) == message
+
+
+@pytest.mark.asyncio
+async def test_window_type_error_becomes_a_clean_typed_validation_error():
+    """The same mapping must cover item 101: `SUM(<text column>) OVER (...)` is a
+    statement the database refuses, and its driver message names the real column
+    and types. A window is not a second execution path — this pins that it is
+    covered by the one mapping rather than assumed to be.
+    """
+    table = _company_table()
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [
+                "customers.id",
+                {
+                    "fn": "sum",
+                    "arg": {"col": "customers.name"},
+                    "over": {"order_by": [{"col": "customers.id"}]},
+                    "as": "running",
+                },
+            ],
+            "limit": 10,
+        }
+    )
+    mock_session = AsyncMock()
+    mock_session.execute.side_effect = ProgrammingError(
+        "SELECT sum(customers.secret_salary) OVER (ORDER BY customers.id)",
+        {},
+        Exception('function sum(text) does not exist HINT: column "secret_salary"'),
+    )
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    set_policy_store(PolicyStore(default=Policy(), overrides={}))
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        with pytest.raises(QueryValidationError) as excinfo:
+            await service.execute(query)
+
+    message = str(excinfo.value)
+    assert "not valid for the referenced columns" in message
+    for leak in ("secret_salary", "does not exist", "HINT"):
+        assert leak not in message, leak
+    assert public_error_message(excinfo.value) == message

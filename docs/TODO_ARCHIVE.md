@@ -5649,6 +5649,177 @@ bug in the substrate is a bug everywhere — the deliberate trade for reviewing 
 node hard, once, instead of five special cases each with its own visitor wiring to
 forget.
 
+### 101. Query engine: general window functions (`WindowSelectItem`) ★ ✅ DONE
+
+**Effort: L. Priority: high (flagship pillar; second expressiveness pillar).
+Depended on: items 96, 100.** Full spec: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 2.**
+
+**Shipped.** `top_n` was the only `OVER()` surface in the product and it did
+exactly one thing — rank rows within partitions and *keep the top N*. A new
+`WindowSelectItem` select item projects a window value without collapsing or
+filtering rows, covering all thirteen window functions:
+`sum/avg/min/max/count`, `row_number/rank/dense_rank/ntile`, and
+`lag/lead/first_value/last_value`, with `PARTITION BY`, `ORDER BY`, and
+`ROWS`/`RANGE` frames. Running totals, moving averages, rank-in-place,
+per-partition totals, and lag/lead gap analysis are expressible now.
+
+```json
+{"fn": "sum", "arg": {"col": "orders.total_amount"},
+ "over": {"order_by": [{"col": "orders.id"}],
+          "frame": {"mode": "rows",
+                    "start": {"bound": "unbounded_preceding"},
+                    "end": {"bound": "current_row"}}},
+ "as": "running_total"}
+```
+
+**`over` is required, and that is load-bearing.** `{fn, arg, as}` is already the
+plain aggregate; `over` (possibly `{}`, meaning `OVER ()`) is what makes the
+`SelectItem` union resolve unambiguously instead of Pydantic silently preferring
+`AggregateSelectItem` for a payload the caller meant as `SUM(x) OVER ()`. It also
+reads like SQL. `arg` is item 100's `Expression`, so `SUM(qty * price) OVER (…)`
+works and inherits every guarantee of that substrate rather than adding a parallel
+scalar shape.
+
+**Four bounds, all maintainer-ratified before build** (`docs/PRODUCT_GUIDE.md`
+Decision Log, 2026-07-26; plan §8 entry 3):
+1. **No default frame is synthesized** — omitting `frame` emits no `ROWS`/`RANGE`
+   clause, so the dialect's SQL-standard default applies (identical on PG/MSSQL);
+   inventing one is the item-74 line. A **numeric `RANGE` offset is rejected on
+   MSSQL** (T-SQL's `RANGE` takes only unbounded/current-row bounds) pointing at
+   `mode: "rows"`, not rewritten to `ROWS`, which treats ties differently.
+2. **Unbounded frame ends are not separately gated; offsets are capped instead.**
+   `UNBOUNDED PRECEDING … CURRENT ROW` is both the running-total idiom and SQL's
+   own default, and unbounded-both-ends is the same whole-partition scan as no
+   frame — gating it while the no-frame form stays legal would be theater. The
+   genuinely unbounded magnitudes get the caps.
+3. **No window with `group_by`/aggregate select items** — a window over
+   *aggregated* rows needs the aggregation materialized as a derived table (item
+   105); rejected at the AST layer rather than growing a second bespoke
+   materialization path beside `_apply_top_n`'s.
+4. **No aggregate window when `Policy.min_group_size` is set** — the item-88
+   k-anonymity floor is a `HAVING count(*) >= k` on grouped results, and a window
+   aggregate has no group to filter, so `COUNT(*) OVER ()` would report a
+   below-floor count *with no column projected at all*. Fails closed; ranking and
+   offset windows stay allowed since they only surface values the caller may
+   already project bare.
+
+**Caps (new):** `Policy.max_window_specs` (default 5, summed **tree-wide** per item
+97; `0` disables windows for a connection) and `Policy.max_window_frame_offset`
+(default 1000 — bounds both a frame's `N PRECEDING/FOLLOWING` distance and a
+`lag`/`lead` offset, the only unbounded magnitudes in the AST). Window
+`PARTITION BY` shares `max_partition_by` with `top_n` — same cost, one budget, so
+the cap's message changed from `top_n.partition_by exceeds` to
+`partition_by exceeds`.
+
+**Portability enforced at the AST layer, not per dialect.** `ORDER BY` inside
+`OVER` is required wherever T-SQL requires it (every ranking/offset function, and
+any framed window), a frame is rejected for the functions T-SQL won't accept one
+for, and `over.partition_by`/`over.order_by` refs must be dotted `Table.Column` —
+no dialect lets an `OVER` clause reference a peer select alias, so the spelling is
+refused up front instead of producing invalid SQL. Frame bounds are checked for
+sanity (no start after end, no start at `unbounded_following`). One AST that
+renders on Postgres and fails live on MSSQL is the failure mode all of this exists
+to prevent.
+
+**Safety.** All three ref-bearing positions — `arg`, `partition_by`, `order_by` —
+flow through the item-96 canonical visitor at `SELECT_NESTED`, so a denied column
+is rejected and a masked one cannot be ordered or partitioned by (which leaks its
+value by inference). No new `RefPosition` member: every window ref is a
+non-projection use inside a select item, which is the only distinction enforcement
+branches on. A window's alias is deliberately **absent** from `_select_aliases`, so
+`top_n` cannot rank by it — that would nest one window inside another's `OVER`
+clause. `audit/events.py` records a redaction-safe window shape (function, columns,
+frame mode + bound *kinds*) and no offsets, distances, or literals. The
+`window_frame` adapter method is the sixth `DialectAdapter` variance point.
+
+**Coverage.** Unit: rendering per dialect + frame forms + the MSSQL RANGE and
+NULLS rejections (`test_compiler.py`, `TestWindowFunctions`), every AST shape rule
+(`TestWindowAstRules`), adapter frame matrix (`test_dialect_adapters.py`), the two
+new caps + the tree-wide sum across a subquery + the k-anonymity rule + **every
+item-100 bound reaching inside a window argument** (depth, node budget, CASE
+branches, CASE-condition depth/breadth, in-list size, no-subquery-in-a-CASE) in
+`test_policy_validation.py`, ref-resolution and the undeclared-table check
+(`test_schema_validation.py`), the redaction-safe audit shape (`test_audit.py`), a
+database type error inside a window mapping to a clean typed 4xx with no driver
+text (`test_service.py`), builder parity (`test_client_builder.py`). Security:
+denied **and** masked column in each of **four** window ref positions — including
+a predicate buried in a CASE condition inside the window's argument, which lives
+outside the `Expression` union entirely — the k-anonymity bypass attempt, the
+tree-wide cap bypass, no offsets in audit (`test_adversarial_security.py`), plus
+six malformed window payloads at the REST/MCP boundary
+(`test_malformed_input_fuzzing.py`) and windows folded into the property-based
+compiler fuzzer (`test_compiler_properties.py`). Integration: SQLite end-to-end
+value checks against ground truth computed through the same pipeline, both
+published composition recipes, and the masked-column caveat
+(`test_window_end_to_end.py`); and — the plan's headline requirement — **every one
+of the thirteen functions plus each frame form executed against a live Postgres
+AND a live SQL Server with rows asserted equal**
+(`test_cross_dialect_differential.py`), with a coverage test that fails if a new
+window function ships without a live both-dialects case.
+
+**Three guards added beyond the item** (the same drift class items 96/111 exist
+for): a parameterized test that the canonical visitor yields a marker column from
+**every** `SelectItem` union member; one that `normalize_query_shape` handles
+every member — the audit path runs on every request and previously raised on an
+unknown select item, so a new type would have 500'd until noticed; and a
+`WindowFn`-parameterized live case, so a new window function cannot ship without
+being executed on both real backends.
+
+**Verified by mutation, not by assertion alone**, and one mutation found a real
+hole that the first round of tests did not:
+
+- Deleting the window branch from `select_item_column_refs` fails the window ref
+  tests and the `referenced_tables` test. ✅
+- Deleting `WindowSelectItem` from **`select_item_expressions`** — the single line
+  that makes a window's `arg` an item-100 `Expression` for enforcement purposes —
+  originally failed **nothing**: all 1801 tests passed while the depth cap, the
+  node budget, `max_case_branches`, the CASE-condition depth/breadth budgets,
+  `max_in_list_size`, and the no-`value_subquery`-in-a-CASE rule all silently
+  stopped applying inside a window argument. Six targeted tests now fail on that
+  mutation. This is exactly the failure the plan's §9 warns about ("do not let the
+  adversarial suite lag the capability surface") and it was invisible because the
+  ref walk reaches window args through a *different* path than the caps do.
+- The MSSQL `RANGE 2 PRECEDING` rejection is backed by a live-server test proving
+  Postgres runs that statement and SQL Server refuses it, while SQLAlchemy
+  compiles it for both without complaint.
+
+**Composition is documented AND executed.** The plan's DoD requires that anything
+deliberately left to composition ships with the recipe written down, so
+`docs/PRODUCT_GUIDE.md` publishes both — the two-query moving average over daily
+aggregates, and percent-of-total via a projected window total — and
+`test_window_end_to_end.py` runs both verbatim, including the caveat that a
+*masked* column cannot be a window argument. A recipe nothing executes is a claim,
+not a primitive. (The first draft of the percent-of-total recipe used
+`orders.total_amount`, which the shipped demo policy masks — a reader pasting it
+would have hit a policy rejection. Caught by writing the test.)
+
+**The shipped container runs a window**: `make release-smoke` now asserts a
+running total over real Postgres from inside the release image, alongside the
+existing read and governed-write round-trips.
+
+**Canonical regression bar (plan §5):** row 5 (running cumulative total) went ✅.
+8/16 → **9/16**. Two table corrections were recorded rather than glossed: **row 3**
+(7-day moving average of *daily* orders) needs item 105's derived table, not this
+item — it is a window over aggregated rows — and **row 15** (percent-of-total in
+one expression) needs a window to be an `Expression` operand, which is recorded in
+§5 as a wall for the maintainer to weigh as its own item rather than smuggled in
+here.
+
+**Also surfaced, not silently fixed:** three hand-maintained guardrail-field lists
+(`admin/access_diff.py`, `admin/models.py`'s `EffectiveGuardrails`,
+`help/service.py`) have drifted from `Policy`'s cap set — nine caps from items
+68–72/88/97/100/101 are missing, so the semantic access diff can report "no
+change" for a loosened cap. Recorded as **item 115** rather than fixed here: it
+widens a public REST response model and wants its own PR.
+
+**Accepted cost.** The MCP schema grew 9,600 chars (126,700 total; budget bumped to
+132,000) — but only ~4,370 of that is the new capability: the identical window
+definitions are inlined a *second* time into `run_structured_writes`, because a
+write's `WHERE` reuses the read `Predicate` and reaches `StructuredQuery` →
+`SelectItem`. **Item 114 would have absorbed this entire raise.** A k-anonymity
+deployment gets no aggregate windows, and windows over grouped results wait for
+item 105.
+
 ### 107. Batch query execution double-reserves quota on an approval retry ✅ DONE
 
 **Effort: S. Priority: medium (real throughput bug, narrow blast radius).

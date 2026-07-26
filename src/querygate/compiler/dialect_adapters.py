@@ -7,7 +7,8 @@ in `_ADAPTERS` — not hunting through `sqlalchemy_compiler.py` for every place
 a dialect assumption might have leaked in. Dropping a dialect means deleting
 its adapter and registry entry. Scoped deliberately to the compiler's own
 variance points (date bucketing, ORDER BY nulls handling, statistical
-aggregate function names) — `connections/dialects.py`'s session guardrails
+aggregate function names, window frame grammar) — `connections/dialects.py`'s
+session guardrails
 and `execution/cost_estimation.py`'s Postgres-only EXPLAIN hook are separate
 concerns with their own dialect handling, not folded in here.
 """
@@ -83,6 +84,24 @@ class DialectAdapter(ABC):
         """
 
     @abstractmethod
+    def window_frame(
+        self, mode: Literal["rows", "range"], start: Optional[int], end: Optional[int]
+    ) -> Dict[str, Any]:
+        """The `over()` keyword arguments rendering one item-101 window frame.
+
+        `start`/`end` arrive in SQLAlchemy's own frame encoding (None = unbounded,
+        0 = current row, -n = n preceding, +n = n following), so an implementation
+        can inspect them without importing the AST. Returns `{"rows": (start, end)}`
+        or `{"range_": (start, end)}`.
+
+        A dialect that genuinely lacks a frame form rejects it with
+        `QueryValidationError` pointing at the form to use instead — SQLAlchemy
+        compiles every frame identically for every dialect with no guard of its
+        own, so a real gap is invisible until it hits a live server (the items
+        75/82 trap).
+        """
+
+    @abstractmethod
     def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
         """Transform col_expr so the database itself returns a masked value
         (TODO.md item 49). NULL/BUCKET render identically everywhere; HASH and
@@ -93,6 +112,14 @@ class DialectAdapter(ABC):
 
 def _direction_expr(col_expr: Any, direction: Literal["asc", "desc"]) -> Any:
     return col_expr.asc() if direction == "asc" else col_expr.desc()
+
+
+def _frame_kwargs(
+    mode: Literal["rows", "range"], start: Optional[int], end: Optional[int]
+) -> Dict[str, Any]:
+    """The plain `over()` frame kwargs — shared by every dialect that supports the
+    full frame grammar, so only a genuine per-dialect gap needs its own method body."""
+    return {"rows" if mode == "rows" else "range_": (start, end)}
 
 
 def _bucket_mask(col_expr: Any, mask: ColumnMask) -> Any:
@@ -147,6 +174,13 @@ class PostgresDialectAdapter(DialectAdapter):
                 return sa.func.round(sa.cast(args[0], sa.Numeric), args[1])
             return sa.func.round(args[0])
         raise QueryValidationError(f"Unsupported scalar function {name!r} on Postgres")
+
+    def window_frame(
+        self, mode: Literal["rows", "range"], start: Optional[int], end: Optional[int]
+    ) -> Dict[str, Any]:
+        # Postgres supports the full frame grammar, including RANGE with numeric
+        # offsets (11+).
+        return _frame_kwargs(mode, start, end)
 
     def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
         if mask.kind is ColumnMaskKind.NULL:
@@ -259,6 +293,24 @@ class MSSQLDialectAdapter(DialectAdapter):
             return sa.func.ROUND(args[0], args[1] if len(args) == 2 else 0)
         raise QueryValidationError(f"Unsupported scalar function {name!r} on MSSQL")
 
+    def window_frame(
+        self, mode: Literal["rows", "range"], start: Optional[int], end: Optional[int]
+    ) -> Dict[str, Any]:
+        # T-SQL's RANGE accepts ONLY `UNBOUNDED PRECEDING/FOLLOWING` and
+        # `CURRENT ROW` — a numeric RANGE offset (`RANGE 6 PRECEDING`) is a real
+        # capability gap, not a spelling difference, so it is rejected rather than
+        # silently rewritten to ROWS (which has genuinely different semantics with
+        # ties). SQLAlchemy compiles `RANGE 6 PRECEDING` for the mssql dialect
+        # without complaint, so nothing else would catch this before a live
+        # failure. ROWS with offsets is fully supported here.
+        if mode == "range" and (start not in (None, 0) or end not in (None, 0)):
+            raise QueryValidationError(
+                "a RANGE frame with a numeric offset is not supported on MSSQL: "
+                "T-SQL's RANGE accepts only unbounded_preceding/current_row/"
+                "unbounded_following. Use mode 'rows' for an N-row window."
+            )
+        return _frame_kwargs(mode, start, end)
+
     def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
         if mask.kind is ColumnMaskKind.NULL:
             return sa.null()
@@ -361,6 +413,13 @@ class SQLiteDialectAdapter(DialectAdapter):
         raise QueryValidationError(
             f"Unsupported scalar function {name!r} on the internal SQLite test/example dialect"
         )
+
+    def window_frame(
+        self, mode: Literal["rows", "range"], start: Optional[int], end: Optional[int]
+    ) -> Dict[str, Any]:
+        # SQLite has full window support since 3.25 and RANGE offsets since 3.28,
+        # which is why the end-to-end suite can execute real frames on this path.
+        return _frame_kwargs(mode, start, end)
 
     def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
         if mask.kind is ColumnMaskKind.NULL:

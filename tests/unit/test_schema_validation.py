@@ -510,3 +510,50 @@ def test_aggregate_default_alias_matches_the_compilers_for_an_unaliased_column_a
     sv._validate_top_n(query, {"orders": orders})  # no raise
     stmt, _ = compile_structured_query(query, {"orders": orders}, Policy())
     assert "sum_total_amount" in str(stmt.compile(compile_kwargs={"literal_binds": True}))
+
+
+@pytest.mark.asyncio
+class TestWindowSchemaValidation:
+    """item 101 — every ref a window carries must resolve against a real
+    reflected column before the query reaches a database."""
+
+    @staticmethod
+    def _query(**over) -> StructuredQuery:
+        return StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    "orders.id",
+                    {"fn": "sum", "arg": {"col": "orders.id"}, "over": over, "as": "w"},
+                ],
+            }
+        )
+
+    async def test_accepts_a_window_over_real_columns(self, monkeypatch):
+        _patch_load_table(monkeypatch, _make_tables())
+        await sv.validate_schema(
+            self._query(partition_by=["orders.status"], order_by=[{"col": "orders.id"}]),
+            connection_id="demo",
+        )
+
+    @pytest.mark.parametrize(
+        "over",
+        [
+            {"partition_by": ["orders.missing"]},
+            {"order_by": [{"col": "orders.missing"}]},
+        ],
+    )
+    async def test_rejects_an_unknown_column_in_the_over_clause(self, monkeypatch, over):
+        _patch_load_table(monkeypatch, _make_tables())
+        with pytest.raises(ValueError, match="not found"):
+            await sv.validate_schema(self._query(**over), connection_id="demo")
+
+    async def test_rejects_an_undeclared_table_reached_only_through_a_window(self, monkeypatch):
+        """A window's PARTITION BY cannot smuggle in a table the query never
+        joined — the ref flows through the canonical visitor, so it hits the same
+        undeclared-table check as any other reference."""
+        _patch_load_table(monkeypatch, _make_tables())
+        with pytest.raises(ValueError, match="undeclared"):
+            await sv.validate_schema(
+                self._query(partition_by=["customers.name"]), connection_id="demo"
+            )

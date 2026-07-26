@@ -38,6 +38,7 @@ from querygate.query_ast.models import (
     StringAggSelectItem,
     StructuredQuery,
     WhereNode,
+    WindowSelectItem,
     _AGGREGATE_SELECT_ITEM_TYPES,
 )
 from querygate.validation.schema_validation import (
@@ -68,6 +69,22 @@ _RANK_FNS = {
     "row_number": sa.func.row_number,
     "rank": sa.func.rank,
     "dense_rank": sa.func.dense_rank,
+}
+
+# Window functions (item 101). Every one of these is spelled identically on
+# Postgres, MSSQL and SQLite — the genuine per-dialect variance is in the FRAME
+# grammar, which is why `DialectAdapter.window_frame` exists and this stays a
+# flat dict (the right-weight version of the registry pattern, per CLAUDE.md's
+# "don't over-apply this" note). Ranking fns are reused from `_RANK_FNS`, so
+# `top_n` and a window projection can never drift on what `rank` means.
+_WINDOW_FNS = {
+    **_AGG_FNS,
+    **_RANK_FNS,
+    "ntile": sa.func.ntile,
+    "lag": sa.func.lag,
+    "lead": sa.func.lead,
+    "first_value": sa.func.first_value,
+    "last_value": sa.func.last_value,
 }
 
 _STAT_FNS = {"stddev", "variance"}
@@ -224,6 +241,53 @@ def _compile_expression(expr: Expression, tables: Dict[str, sa.Table], dialect: 
         )
         return sa.case(*whens, else_=else_value)
     raise QueryValidationError(f"Unsupported expression node {type(expr).__name__}")
+
+
+def _compile_window(item: WindowSelectItem, tables: Dict[str, sa.Table], dialect: str) -> Any:
+    """Compile one item-101 `WindowSelectItem` into `fn(...) OVER (...)`.
+
+    Every reference resolves to a real reflected column: no dialect lets an OVER
+    clause reference a peer SELECT alias, so the AST requires dotted Table.Column
+    refs here and this function deliberately has no `alias_map` to fall back on —
+    the same rule `_apply_top_n` works around by materializing an aggregation as a
+    subquery first.
+
+    The window's own `arg` goes through `_compile_expression`, so an aggregate
+    window over a computed value (`SUM(qty * price) OVER (...)`) and the guarded
+    division, cap, and visitor guarantees of item 100 all apply unchanged.
+    """
+    adapter = get_dialect_adapter(dialect)
+    args: List[Any] = []
+    if item.arg is not None:
+        args.append(_compile_expression(item.arg, tables, dialect))
+    # `sa.literal(..., type_=Integer)`, never `literal_column`: a bucket count and
+    # a lag/lead offset are caller input, and caller input binds as a typed
+    # parameter rather than reaching SQL as text (plan §1 invariant 1). Explicit
+    # typing keeps Postgres's function resolution unambiguous.
+    if item.fn == "ntile":
+        args.append(sa.literal(item.buckets, type_=sa.Integer))
+    if item.offset is not None:
+        args.append(sa.literal(item.offset, type_=sa.Integer))
+
+    frame_kwargs: Dict[str, Any] = {}
+    frame = item.over.frame
+    if frame is not None:
+        # Per-dialect frame grammar (MSSQL rejects a numeric RANGE offset).
+        frame_kwargs = adapter.window_frame(
+            frame.mode, frame.start.sqlalchemy_bound(), frame.end.sqlalchemy_bound()
+        )
+    # No frame given -> no ROWS/RANGE clause is synthesized; the dialect's
+    # SQL-standard default frame applies (2026-07-26 Decision Log).
+
+    partition_cols = [_column(tables, ref) for ref in item.over.partition_by] or None
+    order_terms = [
+        term
+        for order in item.over.order_by
+        for term in adapter.order_by_terms(_column(tables, order.col), order.dir, order.nulls)
+    ] or None
+    return _WINDOW_FNS[item.fn](*args).over(
+        partition_by=partition_cols, order_by=order_terms, **frame_kwargs
+    )
 
 
 class _WhereCtx(NamedTuple):
@@ -456,6 +520,16 @@ def _build_select_columns(
             labeled = expr.label(alias)
             columns.append(labeled)
             alias_map[alias] = labeled
+            continue
+
+        if isinstance(item, WindowSelectItem):
+            labeled = _compile_window(item, tables, dialect).label(item.alias)
+            columns.append(labeled)
+            # In alias_map so the query's own ORDER BY may sort by the window's
+            # output name. It is deliberately NOT in `_select_aliases`, so
+            # `top_n` can't reference it — that would nest one window inside
+            # another's OVER clause, which no dialect allows.
+            alias_map[item.alias] = labeled
             continue
 
         if isinstance(item, (CaseSelectItem, ExpressionSelectItem)):

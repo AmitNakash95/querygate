@@ -434,3 +434,111 @@ def test_compiler_fails_closed_on_an_unknown_expression_node():
 
     with pytest.raises(QueryValidationError, match="Unsupported expression node"):
         _compile_expression(NotAnExpression(), {}, "postgresql")
+
+
+# --------------------------------------------------------------------------- #
+# Window functions (TODO.md item 101)
+# --------------------------------------------------------------------------- #
+def test_window_arg_partition_and_order_refs_are_all_visited():
+    """A window carries refs in THREE places, and every one is a non-projection
+    use: an unvisited PARTITION BY or window ORDER BY ref would let a denied or
+    masked column ride into the query inside an OVER clause."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "t",
+            "select": [
+                "t.id",
+                {
+                    "fn": "sum",
+                    "arg": {"op": "*", "left": {"col": "t.qty"}, "right": {"col": "t.price"}},
+                    "over": {
+                        "partition_by": ["t.region"],
+                        "order_by": [{"col": "t.created_at"}],
+                        "frame": {
+                            "mode": "rows",
+                            "start": {"bound": "unbounded_preceding"},
+                            "end": {"bound": "current_row"},
+                        },
+                    },
+                    "as": "running",
+                },
+            ],
+        }
+    )
+    refs = list(iter_column_refs(query))
+    assert {r.ref for r in refs} == {"t.id", "t.qty", "t.price", "t.region", "t.created_at"}
+    nested = {r.ref for r in refs if r.position is RefPosition.SELECT_NESTED}
+    assert nested == {"t.qty", "t.price", "t.region", "t.created_at"}
+    # The bare projection is the ONLY ref exempt from the masked-column rule.
+    assert [r.ref for r in refs if r.position is RefPosition.SELECT_PROJECTION_BARE] == ["t.id"]
+
+
+def test_referenced_tables_sees_a_table_reachable_only_through_a_window():
+    """Table-level allow/deny reads `referenced_tables`; a table named only in a
+    window's PARTITION BY must still be checked."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "joins": [{"table": "items", "on": ["orders.id", "items.order_id"]}],
+            "select": [
+                "orders.id",
+                {
+                    "fn": "row_number",
+                    "over": {
+                        "partition_by": ["items.sku"],
+                        "order_by": [{"col": "items.qty", "dir": "desc"}],
+                    },
+                    "as": "rn",
+                },
+            ],
+        }
+    )
+    assert referenced_tables(query) == {"orders", "items"}
+
+
+# One instance of every SelectItem union member, each wrapping the marker column,
+# so a member whose refs the visitor does not yield fails here. This is the
+# select-item sibling of the `_MEMBER_PAYLOADS` guard above: item 101 added the
+# third select-item type that carries refs in more than one place, and a missing
+# branch in `select_item_column_refs` is a silent policy+masking bypass.
+_SELECT_ITEM_PAYLOADS = {
+    "str": _MARKER,
+    "AggregateSelectItem": {"fn": "sum", "col": _MARKER},
+    "DateBucketSelectItem": {"col": _MARKER, "granularity": "month"},
+    "StringAggSelectItem": {"col": _MARKER, "delimiter": ","},
+    "ArrayAggSelectItem": {"col": _MARKER},
+    "PercentileContSelectItem": {"col": _MARKER, "fraction": 0.5},
+    "ScalarFunctionSelectItem": {"fn": "upper", "args": [{"col": _MARKER}]},
+    "CaseSelectItem": {
+        "when": [{"when": {"col": _MARKER, "op": "eq", "value": 1}, "then": {"literal": 1}}],
+        "as": "k",
+    },
+    "ExpressionSelectItem": {"expr": {"col": _MARKER}, "as": "e"},
+    # The marker sits in PARTITION BY, the one position only the window branch
+    # yields — putting it in `arg` would pass on the shared Expression branch
+    # alone and the guard would not notice a missing window branch.
+    "WindowSelectItem": {
+        "fn": "sum",
+        "arg": {"col": "t.other_col"},
+        "over": {"partition_by": [_MARKER]},
+        "as": "w",
+    },
+}
+
+
+def test_every_select_item_union_member_has_a_payload_under_test():
+    """Guard on the guard: a new select-item type must be added here, so the
+    ref-coverage test below can never silently stop covering the union."""
+    import typing
+
+    from querygate.query_ast.models import SelectItem
+
+    members = {m.__name__ if m is not str else "str" for m in typing.get_args(SelectItem)}
+    assert members == set(_SELECT_ITEM_PAYLOADS)
+
+
+@pytest.mark.parametrize("member", sorted(_SELECT_ITEM_PAYLOADS))
+def test_visitor_yields_the_column_inside_every_select_item_member(member):
+    query = StructuredQuery.model_validate({"from": "t", "select": [_SELECT_ITEM_PAYLOADS[member]]})
+    refs = {r.ref for r in iter_column_refs(query)}
+    assert _MARKER in refs, f"{member} hides its column refs from the canonical visitor"

@@ -262,3 +262,241 @@ async def test_searched_case_condition_matches():
     # All three branches must actually be exercised, or the AND/NOT conditions
     # aren't being tested — a CASE where every row lands in ELSE proves nothing.
     assert {"big-done", "not-done", "small-done"} == {r["label"] for r in labelled}
+
+
+# --------------------------------------------------------------------------- #
+# Window functions (TODO.md item 101)
+# --------------------------------------------------------------------------- #
+# Every window function and frame form is spelled identically on Postgres and
+# T-SQL, so this differential harness — same AST, both live servers, rows
+# compared — is exactly the guard the plan asks for: "assert it RUNS on real
+# Postgres AND real MSSQL, not just that SQL text compiles" (the items 75/82
+# trap, where `within_group`/`stddev` rendered fine and failed live). The one
+# genuine gap, a numeric RANGE offset, is asserted below to fail on the real
+# server, which is what justifies the adapter rejecting it.
+
+_BY_CUSTOMER = {"partition_by": ["orders.customer_id"]}
+_BY_AMOUNT_DESC = {
+    "partition_by": ["orders.customer_id"],
+    "order_by": [{"col": "orders.total_amount", "dir": "desc"}],
+}
+_BY_ID = {"order_by": [{"col": "orders.id"}]}
+_AMOUNT = {"col": "orders.total_amount"}
+
+# One live case per member of the closed `WindowFn` set. Parameterized rather
+# than hand-listed so a new window function cannot ship without a live
+# both-dialects case: the coverage test below fails until it is added here.
+_WINDOW_CASES = {
+    "sum": {"arg": _AMOUNT, "over": _BY_CUSTOMER},
+    "avg": {"arg": _AMOUNT, "over": _BY_CUSTOMER},
+    "min": {"arg": _AMOUNT, "over": _BY_CUSTOMER},
+    "max": {"arg": _AMOUNT, "over": _BY_CUSTOMER},
+    "count": {"over": {}},
+    "row_number": {"over": _BY_AMOUNT_DESC},
+    "rank": {"over": _BY_AMOUNT_DESC},
+    "dense_rank": {"over": _BY_AMOUNT_DESC},
+    "ntile": {"buckets": 4, "over": {"order_by": [{"col": "orders.total_amount"}]}},
+    "lag": {"arg": _AMOUNT, "offset": 2, "over": _BY_ID},
+    "lead": {"arg": _AMOUNT, "over": _BY_ID},
+    "first_value": {"arg": _AMOUNT, "over": _BY_ID},
+    "last_value": {"arg": _AMOUNT, "over": _BY_ID},
+}
+
+
+def test_every_window_function_has_a_live_both_dialects_case():
+    """A window function that renders on both dialects but only *runs* on one is
+    the items 75/82 failure mode; this makes a live case mandatory."""
+    import typing
+
+    from querygate.query_ast.models import WindowFn
+
+    assert set(typing.get_args(WindowFn)) == set(_WINDOW_CASES)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fn", sorted(_WINDOW_CASES))
+async def test_window_function_matches_on_both_dialects(fn):
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    "orders.id",
+                    {"fn": fn, **_WINDOW_CASES[fn], "as": "w"},
+                ],
+                "order_by": [{"col": "orders.id"}],
+            }
+        )
+    )
+    values = [r["w"] for r in rows]
+    assert len(values) > 1
+    # Discriminating: the window must have produced real values, not all-NULL
+    # (which two dialects would agree on trivially). `lag`/`lead` legitimately
+    # NULL at the edges, so only the interior is checked for them.
+    assert any(v is not None for v in values), f"{fn} produced no values"
+    if fn == "count":
+        assert len(set(values)) == 1, "COUNT(*) OVER () is constant across rows"
+
+
+@pytest.mark.asyncio
+async def test_running_total_matches():
+    """Canonical bar row 5 (a running cumulative total), on both real backends."""
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    "orders.id",
+                    {
+                        "fn": "sum",
+                        "arg": _AMOUNT,
+                        "over": {
+                            **_BY_ID,
+                            "frame": {
+                                "mode": "rows",
+                                "start": {"bound": "unbounded_preceding"},
+                                "end": {"bound": "current_row"},
+                            },
+                        },
+                        "as": "running_total",
+                    },
+                ],
+                "order_by": [{"col": "orders.id"}],
+            }
+        )
+    )
+    # A running total over positive amounts must grow monotonically.
+    totals = [r["running_total"] for r in rows]
+    assert len(totals) > 1 and totals == sorted(totals) and totals[0] != totals[-1]
+
+
+@pytest.mark.asyncio
+async def test_bounded_rows_frame_moving_average_matches():
+    """A trailing 3-row average — the frame must really bound the window on both
+    servers rather than averaging the whole partition."""
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    "orders.id",
+                    {
+                        "fn": "avg",
+                        "arg": _AMOUNT,
+                        "over": {
+                            **_BY_ID,
+                            "frame": {
+                                "mode": "rows",
+                                "start": {"bound": "preceding", "offset": 2},
+                                "end": {"bound": "current_row"},
+                            },
+                        },
+                        "as": "trailing_avg",
+                    },
+                ],
+                "order_by": [{"col": "orders.id"}],
+            }
+        )
+    )
+    unbounded = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    "orders.id",
+                    {"fn": "avg", "arg": _AMOUNT, "over": {}, "as": "trailing_avg"},
+                ],
+                "order_by": [{"col": "orders.id"}],
+            }
+        )
+    )
+    assert [r["trailing_avg"] for r in rows] != [r["trailing_avg"] for r in unbounded]
+
+
+@pytest.mark.asyncio
+async def test_unbounded_range_frame_matches():
+    """`RANGE UNBOUNDED PRECEDING … CURRENT ROW` is the one RANGE form T-SQL
+    accepts, and it must behave identically to Postgres's."""
+    _setup()
+    await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    "orders.id",
+                    {
+                        "fn": "sum",
+                        "arg": _AMOUNT,
+                        "over": {
+                            **_BY_ID,
+                            "frame": {
+                                "mode": "range",
+                                "start": {"bound": "unbounded_preceding"},
+                                "end": {"bound": "current_row"},
+                            },
+                        },
+                        "as": "running_total",
+                    },
+                ],
+                "order_by": [{"col": "orders.id"}],
+            }
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_window_over_a_computed_expression_matches():
+    """Item 100's `Expression` inside a window argument, on both backends — the
+    two engine pillars composing."""
+    _setup()
+    await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "order_items",
+                "select": [
+                    "order_items.id",
+                    {
+                        "fn": "sum",
+                        "arg": {
+                            "op": "*",
+                            "left": {"col": "order_items.quantity"},
+                            "right": {"col": "order_items.unit_price"},
+                        },
+                        "over": {"partition_by": ["order_items.order_id"]},
+                        "as": "order_revenue",
+                    },
+                ],
+                "order_by": [{"col": "order_items.id"}],
+            }
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_mssql_rejects_a_numeric_range_offset():
+    """The live fact `MSSQLDialectAdapter.window_frame`'s rejection exists for.
+
+    SQLAlchemy compiles `RANGE 2 PRECEDING` for the mssql dialect without
+    complaint, so nothing but the adapter stands between that AST and a live
+    failure. Asserted directly against both servers: Postgres runs it, SQL Server
+    refuses it. If T-SQL ever gains numeric RANGE offsets this test starts
+    failing and the rejection can be revisited.
+    """
+    _setup()
+    import sqlalchemy as sa
+
+    from querygate.connections.engine import get_engine
+
+    statement = (
+        "SELECT SUM(total_amount) OVER (ORDER BY id RANGE BETWEEN 2 PRECEDING "
+        "AND CURRENT ROW) FROM orders"
+    )
+    async with get_engine("pg").connect() as conn:
+        assert (await conn.execute(sa.text(statement))).first() is not None
+    with pytest.raises(Exception) as excinfo:
+        async with get_engine("ms").connect() as conn:
+            await conn.execute(sa.text(statement))
+    assert "range" in str(excinfo.value).lower()

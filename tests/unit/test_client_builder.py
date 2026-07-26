@@ -37,12 +37,14 @@ from querygate.client import (
     expr_select,
     fn,
     fn_select,
+    frame,
     lit,
     not_,
     or_,
     percentile_cont,
     string_agg,
     when,
+    window,
 )
 from querygate.client.builder import _to_expression
 from querygate.query_ast import models as m
@@ -406,6 +408,15 @@ def test_every_non_string_select_item_type_is_constructible():
         type(fn_select("upper", col("customers.name"))),
         type(case(when(col("orders.id") == 1, lit("x")), as_="k")),
         type(expr_select(col("order_items.quantity") * col("order_items.price"), as_="line")),
+        type(
+            window(
+                "sum",
+                col("orders.total_amount"),
+                as_="running_total",
+                order_by=[asc("orders.created_at")],
+                frame=frame("rows", None, 0),
+            )
+        ),
     }
     union_members = {arg for arg in typing.get_args(m.SelectItem) if arg is not str}
     assert produced == union_members

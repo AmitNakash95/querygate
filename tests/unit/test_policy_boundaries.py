@@ -155,7 +155,9 @@ def test_max_partition_by_one_over_cap_rejected(n):
             n=1,
         ),
     )
-    with pytest.raises(PolicyViolationError, match="top_n.partition_by exceeds"):
+    # The message says "partition_by", not "top_n.partition_by": since item 101
+    # the cap is one budget shared by top_n and window PARTITION BY clauses.
+    with pytest.raises(PolicyViolationError, match="partition_by exceeds"):
         validate_policy(query, Policy(max_partition_by=n), connection_id="demo")
 
 

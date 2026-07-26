@@ -57,6 +57,10 @@ def test_pruning_removes_the_recursive_ast_components():
         "ColumnExpr",
         "LiteralExpr",
         "ExpressionSelectItem",
+        "WindowSelectItem",
+        "WindowSpec",
+        "WindowFrame",
+        "WindowBound",
     }
     assert not (remaining & must_be_gone), sorted(remaining & must_be_gone)
 

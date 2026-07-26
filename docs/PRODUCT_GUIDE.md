@@ -267,10 +267,12 @@ native `date_trunc()` that handles every granularity directly, MSSQL has
 no equivalent so it's built from `DATEADD`/`DATEDIFF` (the standard MSSQL
 truncation idiom), SQLite (test/example path only) uses `strftime()`
 string formatting. The interface also defines `order_by_terms`, `stat_fn`,
-`string_agg`, `array_agg`, and `percentile_cont` for five dialect-sensitive
-features (NULLS FIRST/LAST ordering, `stddev`/`variance` aggregates, the
-`string_agg` aggregate, the `array_agg` aggregate, and the `percentile_cont`
-aggregate — see the corresponding TODO.md items). `string_agg` is the one
+`string_agg`, `array_agg`, `percentile_cont`, `scalar_function`, and
+`window_frame` for the dialect-sensitive features (NULLS FIRST/LAST ordering,
+`stddev`/`variance` aggregates, the `string_agg` aggregate, the `array_agg`
+aggregate, the `percentile_cont` aggregate, the handful of item-100 scalar
+functions that genuinely diverge, and the item-101 window frame grammar — see
+the corresponding TODO.md items). `string_agg` is the one
 case where the internal SQLite adapter does real work instead of raising:
 SQLite's `group_concat(expr, sep)` happens to share the exact `(expr,
 separator)` shape as Postgres's `string_agg`/MSSQL's `STRING_AGG`, unlike
@@ -379,6 +381,133 @@ at write validation, the same posture item 110 established for subqueries —
 the write path re-derives that WHERE for its affected-row count, its diff, and
 its row cap, so widening it is a separately-scoped decision, not a side effect
 of widening reads.
+
+### Window functions: running totals, moving averages, rank in place
+
+**Files:** `src/querygate/query_ast/models.py` (`WindowSelectItem`),
+`src/querygate/compiler/sqlalchemy_compiler.py` (`_compile_window`),
+`src/querygate/compiler/dialect_adapters.py` (`window_frame`).
+**Item:** TODO.md 101 — the second pillar of the
+[Expressive Query Engine plan](ENGINE_EXPRESSIVENESS_PLAN.md).
+
+Until item 101, `top_n` was the **only** `OVER()` surface QueryGate had, and it
+did exactly one thing: rank rows within partitions and *keep the top N*. So
+"show me each order with a running total", "the 7-order trailing average", "each
+customer's orders numbered 1..n", and "how much did this order change from the
+previous one" were all unreachable — not because the database couldn't do it, but
+because the AST had nowhere to say it.
+
+A `WindowSelectItem` projects a window value without collapsing or filtering
+rows:
+
+```json
+{"fn": "sum",
+ "arg": {"col": "orders.total_amount"},
+ "over": {"order_by": [{"col": "orders.id"}],
+          "frame": {"mode": "rows",
+                    "start": {"bound": "unbounded_preceding"},
+                    "end": {"bound": "current_row"}}},
+ "as": "running_total"}
+```
+
+| Part | What it is |
+| --- | --- |
+| `fn` | `sum`/`avg`/`min`/`max`/`count`, `row_number`/`rank`/`dense_rank`/`ntile`, `lag`/`lead`/`first_value`/`last_value` |
+| `arg` | The value to read — any item-100 `Expression`, so `SUM(qty * price) OVER (…)` works. Omitted for the ranking functions and for `COUNT(*) OVER` |
+| `over` | The `OVER (…)` clause: `partition_by`, `order_by`, `frame`. **Required** — `{}` means `OVER ()` |
+| `offset` / `buckets` | `lag`/`lead` row distance; `ntile` bucket count |
+| `as` | Required output name |
+
+`over` being required is not ceremony: `{"fn": "sum", "arg": …}` is the plain
+aggregate and `{"fn": "sum", "arg": …, "over": {…}}` is the window, and the two
+shapes are otherwise identical — the `over` key is what makes the select-item
+union unambiguous instead of guessing.
+
+**What it deliberately does not do**, each recorded in the
+[Decision Log](#decision-log):
+
+- **No frame is invented.** Omit `frame` and no `ROWS`/`RANGE` clause is emitted,
+  so you get the dialect's SQL-standard default (identical on Postgres and
+  MSSQL). A **numeric `RANGE` offset is rejected on MSSQL** — T-SQL's `RANGE`
+  takes only unbounded/current-row bounds — pointing you at `mode: "rows"`,
+  rather than being quietly rewritten into `ROWS`, which treats ties differently.
+- **A window can't be combined with `group_by` or aggregate select items.** A
+  window over *aggregated* rows needs the aggregate materialized as a derived
+  table (item 105); until then, use the two-query recipe below.
+- **A window isn't an expression operand**, so `amount / SUM(amount) OVER ()` is
+  two projected columns plus client-side division, not one expression — recipe
+  below.
+- **Aggregate windows are refused when `min_group_size` (k-anonymity) is set** —
+  a window aggregate has no result group for the floor to filter, so it would be
+  a way around it. Ranking and offset windows stay available.
+
+**The two composition recipes**, written out rather than left implicit — this is
+the "expose primitives, don't spoon-feed the agent" doctrine in practice: both
+are things a human SQL author would compose from what's already here.
+
+*1 — a moving average over **daily** (aggregated) values.* Two round trips: first
+the daily aggregate, then the window over what came back. The agent already holds
+the intermediate result, so the second query is over its own data, not the
+database's:
+
+```json
+{"from": "orders",
+ "select": [{"col": "orders.created_at", "granularity": "day", "as": "day"},
+            {"fn": "count", "col": "*", "as": "orders_that_day"}],
+ "group_by": ["day"], "order_by": [{"col": "day"}]}
+```
+
+…then compute the 7-point rolling mean over `orders_that_day` client-side (or, if
+the smoothing must happen in the database, wait for item 105's derived table,
+which lets the aggregate become the `FROM` of a windowed query in one statement).
+
+*2 — each row's percent of total.* Project the row value and the window total as
+two columns and divide in the caller — here each line item's share of its order,
+which is also the two engine pillars composing (an item-100 expression inside an
+item-101 window):
+
+```json
+{"from": "order_items",
+ "select": ["order_items.id",
+            "order_items.order_id",
+            {"expr": {"op": "*",
+                      "left": {"col": "order_items.quantity"},
+                      "right": {"col": "order_items.unit_price"}},
+             "as": "line_total"},
+            {"fn": "sum",
+             "arg": {"op": "*",
+                     "left": {"col": "order_items.quantity"},
+                     "right": {"col": "order_items.unit_price"}},
+             "over": {"partition_by": ["order_items.order_id"]},
+             "as": "order_total"}],
+ "order_by": [{"col": "order_items.id"}]}
+```
+
+Every row carries its order's total, so `line_total / order_total` is one
+division in the agent; drop `partition_by` for a share of the whole result set.
+(Both recipes are executed end-to-end by
+`tests/integration/test_window_end_to_end.py`, and both stay inside the shipped
+demo policy — note that a *masked* column such as the demo's `orders.total_amount`
+cannot be a window argument at all, since that is a non-projection use.) What
+QueryGate deliberately does *not* do is let the division happen inside the AST by
+making a window an expression operand — see the [Decision Log](#decision-log) for
+why that trade is a maintainer call rather than a convenience we take.
+
+**Bounds:** `max_window_specs` (how many windows, summed across the query and
+its subqueries; `0` turns the feature off per connection) and
+`max_window_frame_offset` (how far a frame or a `lag`/`lead` may reach).
+`PARTITION BY` columns count against the same `max_partition_by` budget `top_n`
+uses. Every column a window touches — in `arg`, `partition_by`, **and**
+`order_by` — goes through the item-96 canonical visitor, so a denied column is
+rejected and a masked one can't be ordered or partitioned by (which would leak
+its value by inference).
+
+**Proven on both real backends, not on rendered SQL:** every one of the thirteen
+window functions and each frame form executes against a live Postgres *and* a
+live SQL Server in `tests/integration/test_cross_dialect_differential.py`, with
+the returned rows asserted equal — and a test enforces that a new window function
+cannot ship without such a case. That is the items 75/82 lesson applied: `RANGE 2
+PRECEDING` compiles cleanly for the MSSQL dialect and then fails on the server.
 
 ### 4. Concurrency control — don't overwhelm the database
 
@@ -2699,6 +2828,68 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-26 — general window functions enter the read AST as a *projection*
+  with four deliberate bounds (TODO.md item 101; maintainer-ratified before
+  build, as ENGINE_EXPRESSIVENESS_PLAN.md §8 entry 3 requires).** Before it,
+  `top_n` was the only `OVER()` surface in the product and it was hard-wired to
+  rank-and-filter-top-N, so a running total, a moving average, a rank projected
+  *alongside* the rows, and lag/lead gap analysis were all inexpressible.
+  `WindowSelectItem` adds them. The four calls that shape what it is — each one a
+  place a looser design would have produced an AST that renders on Postgres and
+  fails on a live SQL Server, or that silently answers a different question than
+  the caller asked:
+  1. **No default frame is synthesized.** Omitting `frame` emits no `ROWS`/`RANGE`
+     clause at all, so the dialect's own SQL-standard default applies (with
+     `order_by`: everything up to the current row's peers; without it: the whole
+     partition) — identical on Postgres and MSSQL. Inventing a frame the AST
+     didn't ask for is precisely the item-74 line. **A numeric `RANGE` offset is
+     rejected on MSSQL** (T-SQL's `RANGE` accepts only unbounded/current-row
+     bounds) pointing at `ROWS`, rather than being rewritten to `ROWS`, which has
+     different tie semantics. Verified live: Postgres runs `RANGE 2 PRECEDING`,
+     SQL Server refuses it, and SQLAlchemy compiles it happily for both — so the
+     adapter is the only thing standing between that AST and a live failure.
+  2. **Unbounded frame ends are NOT separately gated, and the cap is on
+     *offsets* instead.** `UNBOUNDED PRECEDING … CURRENT ROW` *is* the
+     running-total idiom and also SQL's own default frame, and an
+     unbounded-both-ends frame is the same whole-partition scan as omitting the
+     frame — so a flag forbidding it would be theater while the no-frame form
+     stays legal. What is genuinely unbounded is the caller-supplied *magnitude*
+     in `N PRECEDING`/`N FOLLOWING` and in a `lag`/`lead` offset, so those get
+     `Policy.max_window_frame_offset` (default 1000), and the count of windows
+     gets `Policy.max_window_specs` (default 5, summed tree-wide per item 97;
+     0 disables windows). Window `PARTITION BY` shares `max_partition_by` with
+     `top_n` — same cost, one budget.
+  3. **A window cannot be combined with `group_by` or aggregate select items.** A
+     window over *aggregated* values needs the aggregation materialized as a
+     derived table first, which is item 105's job; the alternative was to grow a
+     second bespoke materialization path beside `_apply_top_n`'s and to let a
+     window's refs name select aliases (which `ColumnExpr` forbids, since no
+     dialect lets an `OVER` clause reference a peer alias). Rejected at the AST
+     layer with a message pointing at composition. **Accepted cost:** a 7-day
+     moving average of *daily* order counts (§5 regression-bar row 3) is still
+     two queries, and the plan's claim that item 101 alone unblocks that row was
+     optimistic — §5 now records the correction rather than the aspiration.
+  4. **An aggregate window is rejected when `Policy.min_group_size` is set.** The
+     item-88 k-anonymity floor is enforced as `HAVING count(*) >= k` on grouped
+     results; a window aggregate produces no group to filter, and `COUNT(*) OVER
+     ()` would report a below-floor count that the aggregate path suppresses —
+     with no column projected at all, so even a table whose every column is
+     denied would leak its size. No in-statement construct can re-impose the
+     floor without `QUALIFY`/a derived table, so windows fail closed while the
+     floor is on. Ranking/offset windows (`row_number`/`rank`/`dense_rank`/
+     `ntile`/`lag`/`lead`/`first_value`/`last_value`) stay allowed: they only
+     surface values the caller may already project bare. **Accepted cost:** a
+     k-anonymity deployment gets no running totals; the floor's guarantee wins
+     over the convenience, and `min_group_size` is off by default.
+  **Also decided: a window is a select item, not an `Expression` operand.** So
+  `amount / SUM(amount) OVER ()` (§5 row 15) is *composable* — project both
+  columns and divide client-side — but not expressible in one scalar expression.
+  Making `WindowSelectItem` a union member would give `Expression` a member that
+  is legal in some positions and illegal in others (never in `WHERE`, never
+  inside an aggregate, never as a group key), breaking the "legal everywhere a
+  scalar is expected" property that makes item 100's substrate reviewable in one
+  place. Recorded in §5 as a discovered wall, for the maintainer to weigh as its
+  own item rather than smuggled in here.
 - **2026-07-25 — the roadmap is re-sequenced so the Expressive Query Engine
   (items 99–106) becomes ROADMAP.md Phase 4, ahead of adoption/breadth.** The
   engine pillar was previously a subsection at the *bottom* of "Phase 4 — Adoption

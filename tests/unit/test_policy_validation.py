@@ -574,7 +574,7 @@ def test_in_list_size_checked_inside_case_condition():
             {
                 "when": [
                     {
-                        "when": {"col": "orders.status", "op": "in", "value": ["a", "b", "c"]},
+                        "when": {"col": "customers.country", "op": "in", "value": ["a", "b", "c"]},
                         "then": {"literal": 1},
                     }
                 ],
@@ -772,3 +772,322 @@ def test_subquery_inside_an_expression_case_condition_is_rejected():
     )
     with pytest.raises(PolicyViolationError, match="only supported in a WHERE clause"):
         validate_policy(query, Policy(), connection_id="demo")
+
+
+# --------------------------------------------------------------------------- #
+# Window functions (TODO.md item 101)
+# --------------------------------------------------------------------------- #
+def _window_query(count: int = 1, **over) -> StructuredQuery:
+    spec = over or {"order_by": [{"col": "orders.created_at"}]}
+    return StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": [
+                {
+                    "fn": "sum",
+                    "arg": {"col": "orders.total_amount"},
+                    "over": spec,
+                    "as": f"w{i}",
+                }
+                for i in range(count)
+            ],
+        }
+    )
+
+
+def test_max_window_specs_caps_the_number_of_windows():
+    validate_policy(_window_query(2), Policy(max_window_specs=2), connection_id="demo")
+    with pytest.raises(PolicyViolationError, match="window function count 3 exceeds"):
+        validate_policy(_window_query(3), Policy(max_window_specs=2), connection_id="demo")
+
+
+def test_max_window_specs_zero_disables_window_functions():
+    with pytest.raises(PolicyViolationError, match="window function count 1 exceeds"):
+        validate_policy(_window_query(1), Policy(max_window_specs=0), connection_id="demo")
+
+
+def test_max_window_specs_is_summed_across_a_subquery():
+    """Item 97's rule: a count cap is the SUM across the query tree, so hiding a
+    second window inside a subquery must not multiply the budget."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": [
+                "orders.id",
+                {
+                    "fn": "row_number",
+                    "over": {"order_by": [{"col": "orders.created_at"}]},
+                    "as": "rn",
+                },
+            ],
+            "where": {
+                "col": "orders.customer_id",
+                "op": "in",
+                "value_subquery": {
+                    "from": "customers",
+                    "select": [
+                        {
+                            "fn": "row_number",
+                            "over": {"order_by": [{"col": "customers.id"}]},
+                            "as": "rn2",
+                        }
+                    ],
+                },
+            },
+        }
+    )
+    with pytest.raises(PolicyViolationError, match="window function count 2 exceeds"):
+        validate_policy(query, Policy(max_window_specs=1), connection_id="demo")
+
+
+def test_window_partition_by_shares_the_top_n_partition_budget():
+    query = _window_query(partition_by=["orders.status", "orders.customer_id"])
+    validate_policy(query, Policy(max_partition_by=2), connection_id="demo")
+    with pytest.raises(PolicyViolationError, match="partition_by exceeds"):
+        validate_policy(query, Policy(max_partition_by=1), connection_id="demo")
+
+
+def test_max_window_frame_offset_caps_a_frame_bound():
+    query = _window_query(
+        order_by=[{"col": "orders.created_at"}],
+        frame={
+            "mode": "rows",
+            "start": {"bound": "preceding", "offset": 5_000},
+            "end": {"bound": "current_row"},
+        },
+    )
+    with pytest.raises(PolicyViolationError, match="window row offset 5000 exceeds"):
+        validate_policy(query, Policy(max_window_frame_offset=1000), connection_id="demo")
+    validate_policy(query, Policy(max_window_frame_offset=5000), connection_id="demo")
+
+
+def test_max_window_frame_offset_caps_a_lag_offset():
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": [
+                {
+                    "fn": "lag",
+                    "arg": {"col": "orders.total_amount"},
+                    "offset": 2_000,
+                    "over": {"order_by": [{"col": "orders.created_at"}]},
+                    "as": "prev",
+                }
+            ],
+        }
+    )
+    with pytest.raises(PolicyViolationError, match="window row offset 2000 exceeds"):
+        validate_policy(query, Policy(max_window_frame_offset=100), connection_id="demo")
+
+
+def test_aggregate_window_is_rejected_when_min_group_size_is_set():
+    """The k-anonymity floor (item 88) is a HAVING on grouped results; a window
+    aggregate has no group to apply it to, and `COUNT(*) OVER ()` would otherwise
+    report a below-floor count the aggregate path suppresses."""
+    with pytest.raises(PolicyViolationError, match="not allowed when min_group_size is set"):
+        validate_policy(_window_query(1), Policy(min_group_size=5), connection_id="demo")
+
+
+def test_ranking_windows_stay_allowed_when_min_group_size_is_set():
+    """A ranking/offset window only surfaces values the caller may already
+    project bare, so the floor has nothing to protect there."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": [
+                "orders.id",
+                {
+                    "fn": "row_number",
+                    "over": {"order_by": [{"col": "orders.created_at"}]},
+                    "as": "rn",
+                },
+                {
+                    "fn": "lag",
+                    "arg": {"col": "orders.total_amount"},
+                    "over": {"order_by": [{"col": "orders.created_at"}]},
+                    "as": "prev",
+                },
+            ],
+        }
+    )
+    validate_policy(query, Policy(min_group_size=5), connection_id="demo")
+
+
+def test_denied_column_inside_a_window_is_rejected_in_every_position():
+    for over, arg in (
+        ({"order_by": [{"col": "orders.created_at"}]}, {"col": "orders.total_amount"}),
+        ({"partition_by": ["orders.total_amount"]}, {"col": "orders.id"}),
+        ({"order_by": [{"col": "orders.total_amount"}]}, {"col": "orders.id"}),
+    ):
+        query = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [{"fn": "sum", "arg": arg, "over": over, "as": "w"}],
+            }
+        )
+        policy = Policy(denied_columns={"orders": ["total_amount"]})
+        with pytest.raises(PolicyViolationError, match="not accessible under the active policy"):
+            validate_policy(query, policy, connection_id="demo")
+
+
+def test_masked_column_inside_a_window_is_rejected_in_every_position():
+    """A window value is a non-projection use, so surfacing a masked column
+    through one would leak the real value by inference (item 49)."""
+    mask = {"orders": [ColumnMask(column="total_amount", kind="hash")]}
+    for over, arg in (
+        ({"order_by": [{"col": "orders.created_at"}]}, {"col": "orders.total_amount"}),
+        ({"partition_by": ["orders.total_amount"]}, {"col": "orders.id"}),
+        ({"order_by": [{"col": "orders.total_amount"}]}, {"col": "orders.id"}),
+    ):
+        query = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [{"fn": "sum", "arg": arg, "over": over, "as": "w"}],
+            }
+        )
+        with pytest.raises(PolicyViolationError, match="masked by policy"):
+            validate_policy(query, Policy(column_masks=mask), connection_id="demo")
+
+
+# --------------------------------------------------------------------------- #
+# A window's `arg` is an item-100 Expression, so item 100's bounds must reach
+# INSIDE a window. `select_item_expressions` is the single wiring point that
+# makes that true; without these tests the whole suite passes with that wiring
+# deleted (verified by mutation), which would silently exempt window arguments
+# from the depth/node/CASE caps and from the no-subquery-in-a-CASE rule.
+# --------------------------------------------------------------------------- #
+def _window_with_arg(arg: dict) -> StructuredQuery:
+    """A window whose argument is the given expression. Built on `customers` so it
+    can reuse the shared `_nested_arithmetic` helper above rather than a second
+    copy of it (an earlier draft of these tests defined a duplicate and silently
+    shadowed it, breaking an existing test's expected node count)."""
+    return StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [{"fn": "sum", "arg": arg, "over": {}, "as": "w"}],
+        }
+    )
+
+
+def test_max_expression_depth_fires_inside_a_window_argument():
+    query = _window_with_arg(_nested_arithmetic(3))
+    validate_policy(query, Policy(max_expression_depth=4), connection_id="demo")
+    with pytest.raises(PolicyViolationError, match="expression nesting depth 4 exceeds"):
+        validate_policy(query, Policy(max_expression_depth=3), connection_id="demo")
+
+
+def test_max_expression_nodes_counts_a_window_argument():
+    query = _window_with_arg(_nested_arithmetic(3))
+    with pytest.raises(PolicyViolationError, match="expression node count 7 exceeds"):
+        validate_policy(query, Policy(max_expression_nodes=6), connection_id="demo")
+
+
+def test_max_case_branches_fires_on_a_case_inside_a_window_argument():
+    branch = {
+        "when": {"col": "customers.country", "op": "eq", "value": "GB"},
+        "then": {"literal": 1},
+    }
+    query = _window_with_arg({"when": [branch, branch, branch]})
+    with pytest.raises(PolicyViolationError, match="case when branches exceeds"):
+        validate_policy(query, Policy(max_case_branches=2), connection_id="demo")
+
+
+def test_case_condition_caps_apply_inside_a_window_argument():
+    """A searched-CASE condition buried in a window argument is depth- and
+    breadth-bound exactly like a top-level WHERE tree."""
+    deep = {"and": [{"or": [{"not": {"col": "customers.country", "op": "eq", "value": "x"}}]}]}
+    query = _window_with_arg({"when": [{"when": deep, "then": {"literal": 1}}]})
+    with pytest.raises(PolicyViolationError, match="case condition nesting depth"):
+        validate_policy(query, Policy(max_where_depth=2), connection_id="demo")
+
+    wide = {"or": [{"col": "orders.status", "op": "eq", "value": f"s{i}"} for i in range(4)]}
+    query = _window_with_arg({"when": [{"when": wide, "then": {"literal": 1}}]})
+    with pytest.raises(PolicyViolationError, match="case condition predicate count"):
+        validate_policy(query, Policy(max_where_predicates=3), connection_id="demo")
+
+
+def test_in_list_size_applies_inside_a_window_arguments_case_condition():
+    query = _window_with_arg(
+        {
+            "when": [
+                {
+                    "when": {"col": "customers.country", "op": "in", "value": ["a", "b", "c"]},
+                    "then": {"literal": 1},
+                }
+            ]
+        }
+    )
+    with pytest.raises(PolicyViolationError, match="exceeds max_in_list_size"):
+        validate_policy(query, Policy(max_in_list_size=2), connection_id="demo")
+
+
+def test_subquery_inside_a_window_arguments_case_condition_is_rejected():
+    """`iter_query_scopes` only descends WHERE/HAVING predicates, so a
+    value_subquery reachable only through a window's CASE condition would never be
+    schema-validated. It must fail closed with a clean typed error."""
+    query = _window_with_arg(
+        {
+            "when": [
+                {
+                    "when": {
+                        "col": "customers.id",
+                        "op": "in",
+                        "value_subquery": {"from": "orders", "select": ["orders.customer_id"]},
+                    },
+                    "then": {"literal": 1},
+                }
+            ]
+        }
+    )
+    with pytest.raises(PolicyViolationError, match="only supported in a WHERE clause"):
+        validate_policy(query, Policy(), connection_id="demo")
+
+
+def test_min_group_size_rejection_applies_inside_a_subquery_scope():
+    """Per-scope rules are enforced on every scope, so an aggregate window cannot
+    hide from the k-anonymity floor inside a nested IN (subquery)."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "where": {
+                "col": "orders.customer_id",
+                "op": "in",
+                "value_subquery": {
+                    "from": "customers",
+                    "select": [{"fn": "count", "over": {}, "as": "n"}],
+                },
+            },
+        }
+    )
+    with pytest.raises(PolicyViolationError, match="not allowed when min_group_size is set"):
+        validate_policy(query, Policy(min_group_size=5), connection_id="demo")
+
+
+def test_masked_column_cannot_be_a_subquerys_window_output():
+    """A subquery's single select item feeds an IN comparison — a non-projection
+    use — so a masked column inside a window there is rejected too."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "where": {
+                "col": "orders.customer_id",
+                "op": "in",
+                "value_subquery": {
+                    "from": "customers",
+                    "select": [
+                        {
+                            "fn": "first_value",
+                            "arg": {"col": "customers.name"},
+                            "over": {"order_by": [{"col": "customers.id"}]},
+                            "as": "first_name",
+                        }
+                    ],
+                },
+            },
+        }
+    )
+    policy = Policy(column_masks={"customers": [ColumnMask(column="name", kind="hash")]})
+    with pytest.raises(PolicyViolationError, match="masked by policy"):
+        validate_policy(query, policy, connection_id="demo")

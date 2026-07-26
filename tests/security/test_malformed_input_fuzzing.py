@@ -137,6 +137,61 @@ _MALFORMED_QUERIES: dict[str, object] = {
         "select": ["customers.id"],
         "totally_unknown": True,
     },
+    # Window functions (item 101): the new select-item surface at the transport
+    # boundary. Each of these is schema-invalid and must be refused before the
+    # service is reached, not coerced into some nearby valid window.
+    "window_bad_fn": {
+        "from": "customers",
+        "select": [{"fn": "obliterate", "over": {}, "as": "w"}],
+    },
+    "window_missing_alias": {
+        "from": "customers",
+        "select": [{"fn": "sum", "arg": {"col": "customers.id"}, "over": {}}],
+    },
+    "window_over_is_a_string": {
+        "from": "customers",
+        "select": [{"fn": "sum", "arg": {"col": "customers.id"}, "over": "everything", "as": "w"}],
+    },
+    "window_frame_bad_bound": {
+        "from": "customers",
+        "select": [
+            {
+                "fn": "sum",
+                "arg": {"col": "customers.id"},
+                "over": {
+                    "order_by": [{"col": "customers.id"}],
+                    "frame": {
+                        "mode": "rows",
+                        "start": {"bound": "sideways"},
+                        "end": {"bound": "current_row"},
+                    },
+                },
+                "as": "w",
+            }
+        ],
+    },
+    "window_frame_offset_is_a_string": {
+        "from": "customers",
+        "select": [
+            {
+                "fn": "sum",
+                "arg": {"col": "customers.id"},
+                "over": {
+                    "order_by": [{"col": "customers.id"}],
+                    "frame": {
+                        "mode": "rows",
+                        "start": {"bound": "preceding", "offset": "lots"},
+                        "end": {"bound": "current_row"},
+                    },
+                },
+                "as": "w",
+            }
+        ],
+    },
+    "window_ntile_without_buckets": {
+        "from": "customers",
+        "select": [{"fn": "ntile", "over": {"order_by": [{"col": "customers.id"}]}, "as": "w"}],
+    },
 }
 
 # The no-raw-SQL invariant (QG-01) stated as its own corpus: every one of these
