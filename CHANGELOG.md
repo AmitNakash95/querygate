@@ -4,7 +4,40 @@ All notable changes to QueryGate are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Postgres sessions are now pinned to UTC** (TODO.md item 102). QueryGate
+  issues `SET LOCAL TIME ZONE 'UTC'` alongside the existing per-session lock and
+  statement timeouts. Postgres resolves `EXTRACT`, `date_trunc` and every
+  `timestamp`/`timestamptz` conversion against the session time zone, which
+  QueryGate previously never set — so those answers silently followed whatever
+  zone the server happened to be configured for, and the same query could return
+  different values on two deployments.
+  **Upgrade impact, on a Postgres server whose zone is not UTC:** a
+  `timestamptz` column's `date_bucket` values and extracted date fields
+  **change** (previously server-local, now UTC); a naive `timestamp` column is
+  **unaffected**, because Postgres never consulted the session zone for those;
+  and any comparison between the new `now()` and a naive column uses UTC. Write
+  filters are affected identically, since the same session guardrails run on the
+  write path. Columns are never converted — QueryGate reads a naive `timestamp`
+  as stored and guarantees only that its own clock readings and field
+  extractions are UTC. A server already running UTC (the default in the shipped
+  container) sees no change. Rationale in `docs/PRODUCT_GUIDE.md`'s Decision Log
+  (2026-07-26).
+
 ### Added
+
+- Date and relative-time query primitives (TODO.md item 102). Three new members
+  of the structured-query expression substrate — `{"extract": <expr>, "part":
+  …}` for one integer field of a timestamp, `{"now": "timestamp"|"date"}` for
+  the current UTC instant, and `{"date_add": <expr>, "unit": …, "amount": …}` to
+  shift one — so an agent can express "orders in the last 30 days" without
+  computing a cutoff timestamp itself. Usable anywhere a scalar belongs
+  (projection, aggregate argument, either side of a predicate, inside a `CASE`).
+  `dayofweek` is 0=Sunday..6=Saturday and `week` is the ISO-8601 week on every
+  backend, normalized per dialect rather than passed through. Bounded by a new
+  `Policy.max_interval_days` guardrail (default 3,660 ≈ 10 years) computed with
+  upper-bound unit lengths so a larger unit cannot launder a longer reach.
 
 - Admin observability overview API, phase 1 (TODO.md item 44). A new
   `admin:observability:read`-scoped `GET /api/v1/admin/observability/overview`

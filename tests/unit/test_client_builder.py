@@ -31,15 +31,18 @@ from querygate.client import (
     cast,
     col,
     col_fn,
+    date_add,
     date_bucket,
     desc,
     expr_fn,
     expr_select,
+    extract,
     fn,
     fn_select,
     frame,
     lit,
     not_,
+    now,
     or_,
     percentile_cont,
     string_agg,
@@ -434,8 +437,23 @@ def test_every_expression_union_member_is_constructible():
         type(expr_fn("lower", col("t.c")).node),
         type(cast(col("t.c"), "integer").node),
         type(case_expr(when(col("t.a") == 1, lit(2))).node),
+        type(extract("hour", col("t.c")).node),
+        type(now().node),
+        type(date_add(now(), "day", -7).node),
     }
     assert produced == set(typing.get_args(m.Expression))
+
+
+def test_date_helpers_wire_their_arguments_to_the_right_fields():
+    """Type-only assertions above would pass with `unit` and `amount` swapped,
+    since both helpers build the right NODE regardless of argument order."""
+    shift = date_add(now("date"), "month", -3).node
+    assert (shift.unit, shift.amount) == ("month", -3)
+    assert shift.date_add.now == "date"
+
+    part = extract("dayofweek", col("t.c")).node
+    assert part.part == "dayofweek"
+    assert part.extract.col == "t.c"
 
 
 def test_every_compare_op_is_reachable_through_the_dsl():

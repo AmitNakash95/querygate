@@ -12,10 +12,12 @@ from querygate.core.exceptions import PolicyViolationError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     CaseExpr,
+    DateAddExpr,
     Predicate,
     StructuredQuery,
     WhereNode,
     WindowSelectItem,
+    interval_magnitude_days,
 )
 from querygate.validation.schema_validation import (
     RefPosition,
@@ -242,6 +244,24 @@ def _validate_scope(query: StructuredQuery, policy: Policy) -> None:
                 raise PolicyViolationError(
                     f"case when branches exceeds max of {policy.max_case_branches}"
                 )
+            # The magnitude of one `date_add` shift (item 102) — a per-node
+            # bound, like `max_window_frame_offset`, not a summed count: two
+            # sibling shifts of N days are two independently bounded reaches.
+            # NESTED shifts do compound (`date_add(date_add(x, -N), -N)` reaches
+            # 2N), and that is deliberate: `max_expression_depth` already bounds
+            # the nesting, so the worst case is depth x cap — accounted for when
+            # the default was chosen (see Policy.max_interval_days).
+            # Walking `iter_expression_nodes` (rather than the select list) is
+            # what stops a date_add buried inside an aggregate argument, a CASE
+            # branch, or a WHERE predicate's arithmetic from escaping the cap.
+            if isinstance(node, DateAddExpr):
+                days = interval_magnitude_days(node)
+                if days > policy.max_interval_days:
+                    raise PolicyViolationError(
+                        f"date_add interval of {node.amount} {node.unit}(s) reaches "
+                        f"{days} days, exceeding max_interval_days of "
+                        f"{policy.max_interval_days}"
+                    )
 
     for window in _scope_windows(query):
         # The only unbounded magnitudes in a window spec: a frame's N PRECEDING/

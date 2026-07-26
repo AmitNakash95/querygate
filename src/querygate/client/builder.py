@@ -36,6 +36,7 @@ Example::
 from __future__ import annotations
 
 from typing import Any, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Literal as PyLiteral
 
 from querygate.query_ast.models import (
     AggregateFn,
@@ -51,16 +52,21 @@ from querygate.query_ast.models import (
     ColArg,
     ColumnExpr,
     CompareOp,
+    DateAddExpr,
     DateBucketSelectItem,
     DateGranularity,
+    DatePart,
     Expression,
     ExpressionSelectItem,
     ExprFn,
+    ExtractExpr,
     FunctionExpr,
+    IntervalUnit,
     JoinSpec,
     JoinType,
     LiteralArg,
     LiteralExpr,
+    NowExpr,
     OrderBySpec,
     PercentileContSelectItem,
     Predicate,
@@ -86,7 +92,17 @@ from querygate.query_ast.models import (
 
 # The concrete Expression classes, for isinstance checks against an already-built
 # AST node handed straight to a builder helper.
-ExpressionModels = (ColumnExpr, LiteralExpr, BinaryOpExpr, FunctionExpr, CastExpr, CaseExpr)
+ExpressionModels = (
+    ColumnExpr,
+    LiteralExpr,
+    BinaryOpExpr,
+    FunctionExpr,
+    CastExpr,
+    CaseExpr,
+    ExtractExpr,
+    NowExpr,
+    DateAddExpr,
+)
 
 __all__ = [
     "Query",
@@ -112,6 +128,9 @@ __all__ = [
     "expr_select",
     "case_expr",
     "cast",
+    "extract",
+    "now",
+    "date_add",
     "window",
     "frame",
     "Column",
@@ -429,6 +448,28 @@ def expr_fn(name: ExprFn, *args: Any) -> Expr:
 def cast(value: Any, to: CastType) -> Expr:
     """``CAST(value AS type)`` over the closed target-type set."""
     return Expr(CastExpr(cast=_to_expression(_require_wrapped(value)), to=to))
+
+
+def extract(part: DatePart, value: Any) -> Expr:
+    """``EXTRACT(part FROM value)`` as an integer — ``extract("hour",
+    col("o.created_at"))``. Evaluated in UTC on every dialect; ``dayofweek`` is
+    0=Sunday..6=Saturday and ``week`` is the ISO-8601 week number."""
+    return Expr(ExtractExpr(extract=_to_expression(_require_wrapped(value)), part=part))
+
+
+def now(kind: PyLiteral["timestamp", "date"] = "timestamp") -> Expr:
+    """The current UTC time — ``"timestamp"`` for the clock reading,
+    ``"date"`` for midnight UTC today."""
+    return Expr(NowExpr(now=kind))
+
+
+def date_add(value: Any, unit: IntervalUnit, amount: int) -> Expr:
+    """Shift a date/timestamp by ``amount`` whole ``unit``s; negative goes back,
+    so ``date_add(now(), "day", -7)`` is "7 days ago". Bounded by the policy's
+    ``max_interval_days``."""
+    return Expr(
+        DateAddExpr(date_add=_to_expression(_require_wrapped(value)), unit=unit, amount=amount)
+    )
 
 
 def case_expr(*whens: CaseWhen, else_: Any = None) -> Expr:

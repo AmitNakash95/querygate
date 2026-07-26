@@ -26,11 +26,14 @@ from querygate.query_ast.models import (
     CastExpr,
     ColArg,
     ColumnExpr,
+    DateAddExpr,
     DateBucketSelectItem,
     Expression,
     ExpressionSelectItem,
+    ExtractExpr,
     FunctionExpr,
     LiteralExpr,
+    NowExpr,
     PercentileContSelectItem,
     Predicate,
     ScalarFunctionSelectItem,
@@ -117,7 +120,9 @@ def iter_expression_parts(expr: Expression, _depth: int = 1) -> Iterator[Express
     trigger this; only a code change can, and the tests below catch it.
     """
     yield ExpressionPart(_depth, expr, False)
-    if isinstance(expr, (ColumnExpr, LiteralExpr)):
+    # `NowExpr` is a leaf like the other two: a clock reading has no operand and
+    # carries no column ref, so there is nothing below it to visit.
+    if isinstance(expr, (ColumnExpr, LiteralExpr, NowExpr)):
         return  # leaves
     if isinstance(expr, BinaryOpExpr):
         yield from iter_expression_parts(expr.left, _depth + 1)
@@ -129,6 +134,12 @@ def iter_expression_parts(expr: Expression, _depth: int = 1) -> Iterator[Express
         return
     if isinstance(expr, CastExpr):
         yield from iter_expression_parts(expr.cast, _depth + 1)
+        return
+    if isinstance(expr, ExtractExpr):
+        yield from iter_expression_parts(expr.extract, _depth + 1)
+        return
+    if isinstance(expr, DateAddExpr):
+        yield from iter_expression_parts(expr.date_add, _depth + 1)
         return
     if isinstance(expr, CaseExpr):
         for branch in expr.when:

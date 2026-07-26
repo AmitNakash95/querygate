@@ -17,10 +17,13 @@ from querygate.query_ast.models import (
     CastExpr,
     ColArg,
     ColumnExpr,
+    DateAddExpr,
     DateBucketSelectItem,
     ExpressionSelectItem,
+    ExtractExpr,
     FunctionExpr,
     LiteralExpr,
+    NowExpr,
     PercentileContSelectItem,
     Predicate,
     ScalarFunctionSelectItem,
@@ -345,6 +348,20 @@ def _expression_shape(expr: object) -> Dict[str, Any]:
         }
     if isinstance(expr, CastExpr):
         return {"node": "cast", "to": expr.to, "operand": _expression_shape(expr.cast)}
+    if isinstance(expr, ExtractExpr):
+        # `part` is a closed enum chosen from a fixed list, not caller data —
+        # the same class of structural fact as an operator or a cast target,
+        # which are already recorded. It cannot carry a value.
+        return {"node": "extract", "part": expr.part, "operand": _expression_shape(expr.extract)}
+    if isinstance(expr, NowExpr):
+        return {"node": "now", "kind": expr.now}
+    if isinstance(expr, DateAddExpr):
+        # `unit` is an enum, so it is recorded; `amount` is a caller-supplied
+        # NUMBER and is deliberately omitted — "shifted by some days" is shape,
+        # "shifted by 90 days" is a predicate value, and a persisted event
+        # carries no values (non-negotiable 3). Same line `_expression_shape`
+        # holds for every literal and the one item-101 frame offsets sit on.
+        return {"node": "date_add", "unit": expr.unit, "operand": _expression_shape(expr.date_add)}
     if isinstance(expr, CaseExpr):
         return {
             "node": "case",

@@ -25,12 +25,15 @@ from querygate.query_ast.models import (
     CastExpr,
     ColArg,
     ColumnExpr,
+    DateAddExpr,
     DateBucketSelectItem,
     Expression,
     ExpressionSelectItem,
     ExprFn,
+    ExtractExpr,
     FunctionExpr,
     LiteralExpr,
+    NowExpr,
     PercentileContSelectItem,
     Predicate,
     ScalarFunctionArg,
@@ -225,6 +228,18 @@ def _compile_expression(expr: Expression, tables: Dict[str, sa.Table], dialect: 
         # SQLAlchemy renders the per-dialect type name itself (Text -> VARCHAR(max)
         # on MSSQL, Boolean -> BIT), so a cast needs no adapter method.
         return sa.cast(_compile_expression(expr.cast, tables, dialect), _CAST_TYPES[expr.to]())
+    # The three item-102 date/time nodes route entirely through the adapter:
+    # unlike a cast, every one of them differs per dialect in FUNCTION NAME,
+    # ARGUMENT ORDER and — for dayofweek/week — the returned VALUE, so there is
+    # no dialect-universal form to share here.
+    if isinstance(expr, ExtractExpr):
+        operand = _compile_expression(expr.extract, tables, dialect)
+        return get_dialect_adapter(dialect).extract_part(expr.part, operand)
+    if isinstance(expr, NowExpr):
+        return get_dialect_adapter(dialect).current_timestamp(expr.now)
+    if isinstance(expr, DateAddExpr):
+        operand = _compile_expression(expr.date_add, tables, dialect)
+        return get_dialect_adapter(dialect).date_add(operand, expr.unit, expr.amount)
     if isinstance(expr, CaseExpr):
         whens = [
             # alias_map={} — a CASE condition can't reference a peer select

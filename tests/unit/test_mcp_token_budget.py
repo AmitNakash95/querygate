@@ -99,6 +99,14 @@ from querygate.mcp.server import create_mcp_server
 # (110,000) is back below item 100's 123,000 but is still ~2,000 ABOVE the 108,000
 # in force before item 100 — it is the measured *total* that is now lower.
 #
+# NOT bumped 2026-07-26 (item 102: extract/now/date_add) — measured 108,167, a
+# +4,125 rise (three new `Expression` members at ~3,400, plus ~700 for the
+# instructions section teaching the relative-date idiom), which fits the existing
+# 110,000. Recorded rather than left silent because it changes the advice below:
+# headroom is now ~1.7%, not ~5%, so the NEXT engine item will have to raise this.
+# The three nodes' maintainer rationale went into `#` comments, not model
+# docstrings, per the note below — their agent-facing docstrings are 2-3 lines each.
+#
 # The budget keeps ~5% headroom. Before raising it again: check whether the
 # growth is real new capability or another duplicated definition, and move
 # maintainer rationale out of model docstrings into `#` comments first (a
