@@ -16,11 +16,14 @@ import sqlalchemy as sa
 
 from querygate.catalog.loader import CatalogStore, set_catalog_store
 from querygate.core.auth import Principal
+from sqlalchemy.exc import ProgrammingError
+
 from querygate.core.exceptions import (
     CapacityTimeoutError,
     CostEstimateExceededError,
     QueryValidationError,
     QueueFullError,
+    public_error_message,
 )
 from querygate.execution import concurrency as cc
 from querygate.execution import service as svc
@@ -1381,3 +1384,46 @@ async def test_execute_usage_signal_emission_never_raises_on_failure(monkeypatch
     monkeypatch.setattr(svc.app_config, "catalog_file", "catalog.yaml")
     with patch.object(svc, "get_catalog_store", side_effect=RuntimeError("boom")):
         await _execute_join_query()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_database_type_error_becomes_a_clean_typed_validation_error():
+    """A statement the database itself refuses — a type/operator mismatch, which
+    item 100's arithmetic makes an ordinary caller mistake — must surface as a
+    typed 4xx, not a 500, and must not echo the driver's message.
+
+    The driver text is the leak risk: `psycopg` reports the failing operator and
+    the real column types, so returning it (or storing it as the audit rejection
+    reason) would disclose schema. Mirrors the write path's constraint-error
+    mapping in `write_execution.py`.
+    """
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+    mock_session = AsyncMock()
+    leaky = ProgrammingError(
+        "SELECT customers.secret_salary * 'x'",
+        {},
+        Exception('operator does not exist: numeric * text HINT: column "secret_salary"'),
+    )
+    mock_session.execute.side_effect = leaky
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    set_policy_store(PolicyStore(default=Policy(), overrides={}))
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        with pytest.raises(QueryValidationError) as excinfo:
+            await service.execute(query)
+
+    message = str(excinfo.value)
+    assert "not valid for the referenced columns" in message
+    for leak in ("secret_salary", "operator does not exist", "HINT"):
+        assert leak not in message, leak
+    # The client-safe projection of this exception is the message itself (it is
+    # a QueryValidationError), so the same non-leak guarantee holds on the wire.
+    assert public_error_message(excinfo.value) == message

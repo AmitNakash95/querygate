@@ -367,7 +367,14 @@ class WriteExecutionService:
         count_stmt = (
             sa.select(sa.func.count())
             .select_from(table)
-            .where(_compile_where(statement.where, {statement.table: table}, alias_map={}))
+            .where(
+                _compile_where(
+                    statement.where,
+                    {statement.table: table},
+                    {},
+                    self._connection_dialect(),
+                )
+            )
         )
         result = await session.execute(count_stmt)
         return int(result.scalar_one())

@@ -326,7 +326,7 @@ class TestStructuredQueryModels:
         assert p.col_fn.fn == "lower"
 
     def test_predicate_col_and_col_fn_both_set_rejected(self):
-        with pytest.raises(ValueError, match="exactly one of 'col' or 'col_fn'"):
+        with pytest.raises(ValueError, match="exactly one of 'col', 'col_fn', or 'expr'"):
             Predicate(
                 col="customers.email",
                 col_fn={"fn": "lower", "args": [{"col": "customers.email"}]},
@@ -335,7 +335,7 @@ class TestStructuredQueryModels:
             )
 
     def test_predicate_neither_col_nor_col_fn_rejected(self):
-        with pytest.raises(ValueError, match="exactly one of 'col' or 'col_fn'"):
+        with pytest.raises(ValueError, match="exactly one of 'col', 'col_fn', or 'expr'"):
             Predicate(op="eq", value="x")
 
     def test_predicate_col_fn_works_with_in_op(self):

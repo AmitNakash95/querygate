@@ -20,9 +20,17 @@ from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
     ArrayAggSelectItem,
+    BinaryOpExpr,
+    CaseExpr,
     CaseSelectItem,
+    CastExpr,
     ColArg,
+    ColumnExpr,
     DateBucketSelectItem,
+    Expression,
+    ExpressionSelectItem,
+    FunctionExpr,
+    LiteralExpr,
     PercentileContSelectItem,
     Predicate,
     ScalarFunctionSelectItem,
@@ -68,12 +76,167 @@ def effective_name_map(query: StructuredQuery) -> Dict[str, str]:
     return mapping
 
 
+class ExpressionPart(NamedTuple):
+    """One element yielded by `iter_expression_parts`, the single canonical walk
+    over an `Expression` tree.
+
+    `node` is an `Expression` node, unless `is_condition` — in which case it is a
+    `CaseExpr` branch's `when`, a `WhereNode` rather than an expression. That
+    distinction is the reason this walk yields a tagged part instead of a plain
+    node: collecting column refs has to cross out of the expression union into
+    the boolean-condition layer, while the node/depth caps must not count the
+    condition tree as expression structure.
+    """
+
+    depth: int
+    node: object
+    is_condition: bool
+
+
+def iter_expression_parts(expr: Expression, _depth: int = 1) -> Iterator[ExpressionPart]:
+    """THE single recursion over the closed `Expression` union (item 100).
+
+    Everything else that needs to traverse an expression — column-ref collection
+    (`expression_column_refs`), the node-count and depth caps
+    (`iter_expression_nodes` / `expression_depth`), and the nested-CASE rules
+    (`iter_expression_case_conditions`) — is a *filter* over this one walk rather
+    than its own recursion. That matters because those four questions are all
+    load-bearing for safety, and four hand-maintained walks over one union is
+    exactly the drift failure class items 96 and 111 exist to prevent: a new
+    union member added to three of four walks opens a silent hole in the fourth.
+
+    It descends into expressions reachable ONLY through a `CaseExpr` branch's
+    condition predicates (`CASE WHEN a > b * 2 THEN …`) — the deepest position
+    the grammar allows.
+
+    **Fails closed on an unknown node.** A future union member that reaches here
+    without a branch raises rather than being silently yielded childless, which
+    would contribute neither its refs (a policy/mask bypass) nor its size (a cap
+    bypass). The closed union plus Pydantic validation means a caller cannot
+    trigger this; only a code change can, and the tests below catch it.
+    """
+    yield ExpressionPart(_depth, expr, False)
+    if isinstance(expr, (ColumnExpr, LiteralExpr)):
+        return  # leaves
+    if isinstance(expr, BinaryOpExpr):
+        yield from iter_expression_parts(expr.left, _depth + 1)
+        yield from iter_expression_parts(expr.right, _depth + 1)
+        return
+    if isinstance(expr, FunctionExpr):
+        for arg in expr.args:
+            yield from iter_expression_parts(arg, _depth + 1)
+        return
+    if isinstance(expr, CastExpr):
+        yield from iter_expression_parts(expr.cast, _depth + 1)
+        return
+    if isinstance(expr, CaseExpr):
+        for branch in expr.when:
+            yield ExpressionPart(_depth, branch.when, True)
+            for pred in iter_where_predicates(branch.when):
+                for nested in predicate_expressions(pred):
+                    yield from iter_expression_parts(nested, _depth + 1)
+            yield from iter_expression_parts(branch.then, _depth + 1)
+        if expr.else_ is not None:
+            yield from iter_expression_parts(expr.else_, _depth + 1)
+        return
+    raise QueryValidationError(
+        f"Unsupported expression node {type(expr).__name__} — it was added to the "
+        "Expression union without being taught to iter_expression_parts"
+    )
+
+
+def iter_expression_nodes(expr: Expression) -> Iterator[Expression]:
+    """Every `Expression` node in a tree (a `CaseExpr` condition is a `WhereNode`,
+    not an expression node, so it is excluded). Feeds `max_expression_nodes` and
+    the per-`CaseExpr` branch cap."""
+    return (part.node for part in iter_expression_parts(expr) if not part.is_condition)
+
+
+def iter_expression_case_conditions(expr: Expression) -> Iterator[WhereNode]:
+    """Every `CaseExpr` branch condition inside an expression tree, at any depth."""
+    return (part.node for part in iter_expression_parts(expr) if part.is_condition)
+
+
+def expression_column_refs(expr: Expression) -> Iterator[str]:
+    """Every Table.Column ref anywhere inside an `Expression` tree — including
+    the refs a nested `CaseExpr` branch's CONDITION carries, which are not
+    `ColumnExpr` nodes at all but ordinary `Predicate` refs (`col`, `col_fn`
+    args, `value_col`). An unvisited ref here is a silent policy AND masking
+    bypass, the single most important rule in
+    docs/ENGINE_EXPRESSIVENESS_PLAN.md §1.
+
+    A condition contributes only its predicates' *direct* refs: any expression
+    those predicates carry is descended into by the walk itself, so taking the
+    full `predicate_column_refs` here would double-report them.
+    """
+    for part in iter_expression_parts(expr):
+        if part.is_condition:
+            for pred in iter_where_predicates(part.node):
+                yield from predicate_direct_column_refs(pred)
+        elif isinstance(part.node, ColumnExpr):
+            yield part.node.col
+
+
+def expression_depth(expr: Expression) -> int:
+    """Nesting depth of an `Expression` tree, counting a `CaseExpr` branch's
+    condition-predicate expressions as children too — so `max_expression_depth`
+    bounds every path a caller can build, not just the arithmetic one."""
+    return max(part.depth for part in iter_expression_parts(expr) if not part.is_condition)
+
+
+def predicate_expressions(pred: Predicate) -> Iterator[Expression]:
+    """The `Expression` trees a single predicate carries directly (item 100) —
+    its computed left side and its computed right side."""
+    if pred.expr is not None:
+        yield pred.expr
+    if pred.value_expr is not None:
+        yield pred.value_expr
+
+
+def select_item_expressions(item: SelectItem) -> Iterator[Expression]:
+    """The `Expression` trees a single select item carries directly.
+    `CaseSelectItem` is projected through `as_expression()` so CASE logic is
+    walked by exactly one code path (see that method)."""
+    if isinstance(item, ExpressionSelectItem):
+        yield item.expr
+    elif isinstance(item, CaseSelectItem):
+        yield item.as_expression()
+    elif isinstance(item, AggregateSelectItem) and item.arg is not None:
+        yield item.arg
+
+
+def iter_scope_expressions(query: StructuredQuery) -> Iterator[Expression]:
+    """Every top-level `Expression` tree in ONE query scope: those carried by
+    its select items and by the predicates of its WHERE/HAVING trees. Not
+    recursive into nested scopes (`value_subquery` is its own scope, walked by
+    `iter_query_scopes`), and not recursive into the expressions themselves —
+    callers compose this with `iter_expression_nodes` for the full walk.
+    """
+    for item in query.select:
+        yield from select_item_expressions(item)
+    for pred in iter_where_and_having_predicates(query):
+        yield from predicate_expressions(pred)
+
+
+def iter_scope_case_conditions(query: StructuredQuery) -> Iterator[WhereNode]:
+    """Every searched-CASE condition tree reachable in one scope, wherever the
+    CASE sits — a `CaseSelectItem`, a `CaseExpr` inside an aggregate argument,
+    or one buried in a WHERE predicate's arithmetic. The caps that bound a CASE
+    condition (`max_where_depth`, the case-condition predicate budget,
+    `max_in_list_size`) and the no-subquery-in-a-CASE rule all walk this, so a
+    condition cannot escape them by being nested one level deeper.
+    """
+    for expr in iter_scope_expressions(query):
+        yield from iter_expression_case_conditions(expr)
+
+
 def select_item_column_refs(item: SelectItem) -> Iterator[str]:
     """Every Table.Column ref a single select item touches, across every
     variant — a bare string, an aggregate/date_bucket's `.col`, a scalar
-    function's column-typed args, or a CASE expression's when/then/else.
-    Shared by schema validation (which tables/columns to reflect/resolve)
-    and policy validation (which refs column-level policy must check).
+    function's column-typed args, a CASE expression's when/then/else, or any
+    `Expression` the item carries (item 100). Shared by schema validation
+    (which tables/columns to reflect/resolve) and policy validation (which
+    refs column-level policy must check).
     """
     if isinstance(item, str):
         yield item
@@ -83,30 +246,27 @@ def select_item_column_refs(item: SelectItem) -> Iterator[str]:
             if isinstance(arg, ColArg):
                 yield arg.col
         return
-    if isinstance(item, CaseSelectItem):
-        for branch in item.when:
-            # branch.when is a full WhereNode (item 99) — walk the whole boolean
-            # tree so every nested condition column is visited, not just a
-            # single predicate's.
-            yield from _where_column_refs(branch.when)
-            if isinstance(branch.then, ColArg):
-                yield branch.then.col
-        if isinstance(item.else_, ColArg):
-            yield item.else_.col
+    # ExpressionSelectItem / CaseSelectItem / an aggregate with an `arg` are all
+    # Expression-carrying; one walk covers every ref at any depth, including the
+    # ones inside a CASE branch's condition (item 99's WhereNode).
+    expressions = list(select_item_expressions(item))
+    if expressions:
+        for expr in expressions:
+            yield from expression_column_refs(expr)
         return
-    # AggregateSelectItem / DateBucketSelectItem / StringAggSelectItem /
-    # ArrayAggSelectItem / PercentileContSelectItem
+    # DateBucketSelectItem / StringAggSelectItem / ArrayAggSelectItem /
+    # PercentileContSelectItem, plus count(*)'s star form.
     if item.col != "*":
         yield item.col
 
 
-def predicate_column_refs(pred: Predicate) -> Iterator[str]:
-    """Every Table.Column ref a Predicate's LEFT side touches: `col` if it's
-    a dotted Table.Column (a bare alias — valid only in HAVING — is skipped
-    here; enforcing that strictly is `_validate_predicate_columns`'s job,
-    not this collector's), else each `ColArg` in `col_fn.args` — plus
-    `value_col` if set. Single source of truth shared by policy validation's
-    ref walk and this module's own table-collection/reflection logic.
+def predicate_direct_column_refs(pred: Predicate) -> Iterator[str]:
+    """The refs a Predicate carries WITHOUT descending into its expressions:
+    `col` if dotted, each `ColArg` in `col_fn.args`, and `value_col`.
+
+    Split out from `predicate_column_refs` for one caller —
+    `expression_column_refs`, whose walk already descends into `expr`/
+    `value_expr` itself and would otherwise report those refs twice.
     """
     if pred.col is not None:
         if "." in pred.col:
@@ -117,6 +277,19 @@ def predicate_column_refs(pred: Predicate) -> Iterator[str]:
                 yield arg.col
     if pred.value_col is not None:
         yield pred.value_col
+
+
+def predicate_column_refs(pred: Predicate) -> Iterator[str]:
+    """Every Table.Column ref a Predicate touches: its direct refs (see above —
+    a bare alias in `col`, valid only in HAVING, is skipped; enforcing that
+    strictly is `_validate_predicate_columns`'s job, not this collector's) plus
+    every ref inside a computed `expr`/`value_expr`. Single source of truth
+    shared by policy validation's ref walk and this module's own
+    table-collection/reflection logic.
+    """
+    yield from predicate_direct_column_refs(pred)
+    for expression in predicate_expressions(pred):
+        yield from expression_column_refs(expression)
 
 
 class RefPosition(enum.Enum):
@@ -270,11 +443,17 @@ def _date_bucket_alias(item: DateBucketSelectItem, tables: Dict[str, sa.Table]) 
 
 
 def _aggregate_alias(item: AggregateSelectItem) -> str:
+    """The output name an aggregate will carry. MUST stay identical to the
+    compiler's own default-alias logic in `_build_select_columns` — `top_n`
+    resolves its refs against the names this returns, so a divergence would
+    reject a valid top_n (or accept one the compiler then can't resolve)."""
     if item.alias:
         return item.alias
-    if item.col == "*":
+    if item.arg is None:  # count(*)
         return f"{item.fn}_all"
-    _, col_name = parse_column_ref(item.col)
+    # A computed argument always carries an explicit alias (the AST requires
+    # it), so an unaliased aggregate here is always over a bare column.
+    _, col_name = parse_column_ref(item.arg.col)
     return f"{item.fn}_{col_name}"
 
 
@@ -324,8 +503,25 @@ def _select_aliases(query: StructuredQuery, tables: Dict[str, sa.Table]) -> Set[
             aliases.add(_percentile_cont_alias(item))
         elif isinstance(item, ScalarFunctionSelectItem):
             aliases.add(_scalar_function_alias(item))
-        elif isinstance(item, CaseSelectItem):
+        elif isinstance(item, (CaseSelectItem, ExpressionSelectItem)):
             aliases.add(item.alias)
+    return aliases
+
+
+def groupable_select_aliases(query: StructuredQuery, tables: Dict[str, sa.Table]) -> Set[str]:
+    """Select-item aliases a GROUP BY may legitimately reference: computed,
+    NON-aggregate values. A date_bucket alias has always been groupable; item
+    100 adds `ExpressionSelectItem`, which is what makes `GROUP BY <a CASE
+    bucket>` expressible — the agent projects the CASE as an expression item
+    and groups by its alias, rather than the engine growing a second inline
+    grammar for group keys. Aggregate aliases stay excluded (grouping by an
+    aggregate is not valid SQL)."""
+    aliases = {
+        _date_bucket_alias(item, tables)
+        for item in query.select
+        if isinstance(item, DateBucketSelectItem)
+    }
+    aliases |= {item.alias for item in query.select if isinstance(item, ExpressionSelectItem)}
     return aliases
 
 
@@ -509,6 +705,13 @@ async def _reflect_and_validate_scope(
     _validate_select_columns(query, tables)
     _validate_join_columns(query, tables)
     _validate_group_by(query, tables)
+    # Every searched-CASE condition in this scope, wherever the CASE sits (a
+    # CaseSelectItem, an aggregate's CaseExpr argument, one nested in a WHERE
+    # predicate's arithmetic), is held to the same strictness as a top-level
+    # WHERE tree: no bare-alias `when` — a condition must reference a real
+    # column, the same reasoning `_validate_where_columns` applies to `where`.
+    for condition in iter_scope_case_conditions(query):
+        _validate_where_columns(condition, tables, allow_alias=False)
     if query.where is not None:
         _validate_where_columns(query.where, tables, allow_alias=False)
     if query.having is not None:
@@ -529,13 +732,6 @@ def _validate_select_columns(query: StructuredQuery, tables: Dict[str, sa.Table]
     for item in query.select:
         if isinstance(item, AggregateSelectItem) and item.col == "*" and item.fn != "count":
             raise QueryValidationError("Only count(*) is allowed as a star aggregate")
-        if isinstance(item, CaseSelectItem):
-            # Same strictness as a top-level WHERE tree (no bare-alias `when` —
-            # a searched-CASE condition must reference a real column, same
-            # reasoning `_validate_where_columns` applies to `where`). The
-            # condition is a full WhereNode (item 99), so validate the whole tree.
-            for branch in item.when:
-                _validate_where_columns(branch.when, tables, allow_alias=False)
         for ref in select_item_column_refs(item):
             t, c = parse_column_ref(ref)
             resolve_column(tables[t], c)
@@ -549,19 +745,15 @@ def _validate_join_columns(query: StructuredQuery, tables: Dict[str, sa.Table]) 
 
 
 def _validate_group_by(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None:
-    bucket_aliases = {
-        _date_bucket_alias(item, tables)
-        for item in query.select
-        if isinstance(item, DateBucketSelectItem)
-    }
+    groupable = groupable_select_aliases(query, tables)
     for col_ref in query.group_by:
         if "." in col_ref:
             t, c = parse_column_ref(col_ref)
             resolve_column(tables[t], c)
-        elif col_ref not in bucket_aliases:
+        elif col_ref not in groupable:
             raise QueryValidationError(
-                f"group_by reference {col_ref!r} is not a Table.Column or a "
-                "date_bucket select alias"
+                f"group_by reference {col_ref!r} is not a Table.Column, a date_bucket "
+                "select alias, or an expression select alias"
             )
 
     has_aggregate = any(isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in query.select)
@@ -618,17 +810,12 @@ def _validate_where_columns(
 def _validate_predicate_columns(
     pred: Predicate, tables: Dict[str, sa.Table], allow_alias: bool
 ) -> None:
-    if pred.col_fn is not None:
-        for arg in pred.col_fn.args:
-            if isinstance(arg, ColArg):
-                t, c = parse_column_ref(arg.col)
-                resolve_column(tables[t], c)
-    elif "." not in pred.col:
-        if not allow_alias:
-            raise QueryValidationError(f"Column reference must be 'Table.Column', got {pred.col!r}")
-    else:
-        t, c = parse_column_ref(pred.col)
+    # A bare (undotted) `col` is a select-alias reference, legal only in HAVING.
+    # It is the one ref `predicate_column_refs` deliberately does not yield, so
+    # it is checked here and every other ref comes from that canonical collector
+    # — including the ones nested inside a computed `expr`/`value_expr`.
+    if pred.col is not None and "." not in pred.col and not allow_alias:
+        raise QueryValidationError(f"Column reference must be 'Table.Column', got {pred.col!r}")
+    for ref in predicate_column_refs(pred):
+        t, c = parse_column_ref(ref)
         resolve_column(tables[t], c)
-    if pred.value_col is not None:
-        vt, vc = parse_column_ref(pred.value_col)
-        resolve_column(tables[vt], vc)

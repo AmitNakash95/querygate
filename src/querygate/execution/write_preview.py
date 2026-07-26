@@ -138,7 +138,9 @@ class WritePreviewService:
             count_stmt = (
                 sa.select(sa.func.count())
                 .select_from(table)
-                .where(_compile_where(statement.where, {statement.table: table}, alias_map={}))
+                .where(
+                    _compile_where(statement.where, {statement.table: table}, {}, profile.dialect)
+                )
             )
             async with session_scope(self._connection_id, policy=policy) as session:
                 affected = int((await session.execute(count_stmt)).scalar_one())
@@ -153,6 +155,7 @@ class WritePreviewService:
                         table,
                         dml,
                         policy,
+                        profile.dialect,
                         within_cap=affected <= max_rows,
                     )
                 # Defense-in-depth: never leave a transaction open that could
@@ -201,6 +204,7 @@ class WritePreviewService:
         table: sa.Table,
         dml,
         policy: Policy,
+        dialect: str,
         *,
         within_cap: bool = True,
     ) -> WriteDiff:
@@ -221,7 +225,7 @@ class WritePreviewService:
         is an approximation (it can't reflect DB-side defaults/triggers/coercion),
         which is the right trade for a write that will not be allowed to run."""
         limit = policy.write.max_diff_rows
-        where = _compile_where(statement.where, {statement.table: table}, alias_map={})
+        where = _compile_where(statement.where, {statement.table: table}, {}, dialect)
         before_stmt = sa.select(table).where(where).limit(limit + 1)
         before_rows = [dict(r) for r in (await session.execute(before_stmt)).mappings().all()]
         truncated = len(before_rows) > limit

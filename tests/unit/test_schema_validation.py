@@ -16,7 +16,16 @@ from querygate.core.auth import Principal
 from querygate.core.exceptions import NotFoundError
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
-from querygate.query_ast.models import JoinSpec, Predicate, StructuredQuery, WhereGroup
+from querygate.compiler.sqlalchemy_compiler import compile_structured_query
+from querygate.query_ast.models import (
+    AggregateSelectItem,
+    JoinSpec,
+    OrderBySpec,
+    Predicate,
+    StructuredQuery,
+    TopNSpec,
+    WhereGroup,
+)
 from querygate.validation import schema_validation as sv
 
 
@@ -465,3 +474,39 @@ class TestCrossConnectionJoins:
                 connection_id="primary",
                 principal=Principal(subject="agent-a"),
             )
+
+
+def test_aggregate_default_alias_matches_the_compilers_for_an_unaliased_column_aggregate():
+    """`top_n` resolves its refs against the names `_aggregate_alias` returns,
+    while the compiler labels the column with its OWN default-alias logic. The
+    two must agree, or a valid top_n over an unaliased aggregate is rejected.
+
+    Regression: when item 100 normalized `col` into `arg`, `_aggregate_alias`
+    still read `item.col` — now `None` for a column aggregate — and raised
+    `TypeError` instead of returning `sum_total_amount`.
+    """
+    item = AggregateSelectItem(fn="sum", col="orders.total_amount")
+    assert item.col is None and item.arg is not None  # normalized to `arg`
+    assert sv._aggregate_alias(item) == "sum_total_amount"
+    assert sv._aggregate_alias(AggregateSelectItem(fn="count", col="*")) == "count_all"
+
+    # And the compiler agrees, which is the property that actually matters.
+    metadata = sa.MetaData()
+    orders = sa.Table(
+        "orders",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("customer_id", sa.Integer),
+        sa.Column("total_amount", sa.Numeric(10, 2)),
+    )
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.customer_id", item],
+        group_by=["orders.customer_id"],
+        top_n=TopNSpec(
+            partition_by=[], order_by=[OrderBySpec(col="sum_total_amount", dir="desc")], n=1
+        ),
+    )
+    sv._validate_top_n(query, {"orders": orders})  # no raise
+    stmt, _ = compile_structured_query(query, {"orders": orders}, Policy())
+    assert "sum_total_amount" in str(stmt.compile(compile_kwargs={"literal_binds": True}))

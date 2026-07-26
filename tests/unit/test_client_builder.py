@@ -27,10 +27,14 @@ from querygate.client import (
     array_agg,
     asc,
     case,
+    case_expr,
+    cast,
     col,
     col_fn,
     date_bucket,
     desc,
+    expr_fn,
+    expr_select,
     fn,
     fn_select,
     lit,
@@ -40,6 +44,7 @@ from querygate.client import (
     string_agg,
     when,
 )
+from querygate.client.builder import _to_expression
 from querygate.query_ast import models as m
 
 pytestmark = pytest.mark.unit
@@ -67,7 +72,11 @@ def test_builder_matches_handwritten_wire_dict():
         "from": "orders",
         "select": [
             "customers.name",
-            {"fn": "sum", "col": "orders.total_amount", "as": "total_spend"},
+            # An aggregate serializes in its CANONICAL form: `col` is accepted
+            # on the wire as sugar but is normalized to `arg` by the model's
+            # before-validator, so exactly one shape reaches the compiler, the
+            # caps, and the reference visitor (item 100, 2026-07-25 Decision Log).
+            {"fn": "sum", "arg": {"col": "orders.total_amount"}, "as": "total_spend"},
         ],
         "joins": [{"table": "customers", "on": ["orders.customer_id", "customers.id"]}],
         "where": {"col": "customers.country", "op": "eq", "value": "GB"},
@@ -76,6 +85,26 @@ def test_builder_matches_handwritten_wire_dict():
         "limit": 5,
         "intent": "top GB customers by total spend",
     }
+
+
+def test_aggregate_col_sugar_and_arg_parse_to_the_identical_model():
+    """`col` is kept permanently as sugar for `arg` (2026-07-25 Decision Log).
+    It is a SPELLING, not a second structural shape: both wire forms must
+    produce byte-identical models, or the "one shape at the enforcement layer"
+    property that justified keeping the sugar is lost."""
+    sugar = m.AggregateSelectItem.model_validate(
+        {"fn": "sum", "col": "orders.total_amount", "as": "t"}
+    )
+    canonical = m.AggregateSelectItem.model_validate(
+        {"fn": "sum", "arg": {"col": "orders.total_amount"}, "as": "t"}
+    )
+    assert sugar == canonical
+    assert sugar.col is None and isinstance(sugar.arg, m.ColumnExpr)
+
+    with pytest.raises(pydantic.ValidationError, match="exactly one of 'col' or 'arg'"):
+        m.AggregateSelectItem.model_validate(
+            {"fn": "sum", "col": "orders.total_amount", "arg": {"col": "orders.total_amount"}}
+        )
 
 
 def test_output_roundtrips_through_the_real_model():
@@ -376,9 +405,26 @@ def test_every_non_string_select_item_type_is_constructible():
         type(percentile_cont("orders.total_amount", 0.5)),
         type(fn_select("upper", col("customers.name"))),
         type(case(when(col("orders.id") == 1, lit("x")), as_="k")),
+        type(expr_select(col("order_items.quantity") * col("order_items.price"), as_="line")),
     }
     union_members = {arg for arg in typing.get_args(m.SelectItem) if arg is not str}
     assert produced == union_members
+
+
+def test_every_expression_union_member_is_constructible():
+    """The same drift guard, one level down: a new `Expression` member added to
+    the AST fails here until the builder can produce it. Item 100's substrate is
+    the dependency of every later engine item, so the SDK must not fall behind
+    it silently."""
+    produced = {
+        type(_to_expression(col("t.c"))),
+        type(_to_expression(lit(1))),
+        type((col("t.a") * col("t.b")).node),
+        type(expr_fn("lower", col("t.c")).node),
+        type(cast(col("t.c"), "integer").node),
+        type(case_expr(when(col("t.a") == 1, lit(2))).node),
+    }
+    assert produced == set(typing.get_args(m.Expression))
 
 
 def test_every_compare_op_is_reachable_through_the_dsl():
