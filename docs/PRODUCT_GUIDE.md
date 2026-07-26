@@ -627,8 +627,13 @@ idiom and `iso_week`. Where a dialect genuinely lacks the capability it still
 function, so `extract(week)` raises and points at `date_bucket`'s `week`
 granularity.
 
-**A date primitive requires a date.** `extract`/`date_add` over a column that
-is not a date/time type is rejected before the database is touched. That is not
+**`extract` and `date_add` require a date column.** Either one over a column
+that is not a date/time type is rejected before the database is touched.
+(Scope, stated precisely: this covers `extract` and `date_add`. The older
+`date_bucket` select item is **not** yet covered and still exhibits the same
+divergence over a non-temporal column — tracked as a follow-up rather than
+silently folded in, since extending it changes behavior for an already-shipped
+feature.) That is not
 pedantry: with an INTEGER operand, Postgres *errors* while SQL Server silently
 returns `0` (and `1900-01-03` for a shift), because T-SQL implicitly converts an
 int to a datetime counted from 1900-01-01 — the same query, a hard failure on one
@@ -667,10 +672,10 @@ alias — the same route `date_bucket` has always used:
 executes against a live Postgres *and* a live SQL Server in
 `tests/integration/test_cross_dialect_differential.py`, with values compared to
 ground truth computed in Python — not to each other, so two identically-wrong
-adapters cannot agree. The corpus deliberately includes the dates that break ties
-the demo data cannot: a year boundary (where T-SQL's non-ISO `week` returns 53 and
-the ISO week returns 1) and fractional seconds (where an unfloored Postgres
-`EXTRACT(second …)` returns 60). The SQL Server runs on a **non-UTC clock** —
+adapters cannot agree. The corpus deliberately includes sharper
+discriminators than the demo data: a year boundary (where T-SQL's non-ISO `week`
+returns 53 against the ISO week's 1) and fractional seconds (where an unfloored
+Postgres `EXTRACT(second …)` returns 60 — a value no clock produces). The SQL Server runs on a **non-UTC clock** —
 `TZ` is set on the compose service and on both CI service blocks — so
 `SYSUTCDATETIME()` versus `GETDATE()` is a real assertion rather than a vacuous
 one, and the test *skips loudly* rather than passing if it ever finds itself
@@ -3061,6 +3066,26 @@ reasoning behind them, newest first. Added to incrementally as work happens
   the role's default zone to `Pacific/Marquesas` (UTC−09:30, a half-hour offset so
   no plausible off-by-N bug can imitate it) and asserts a row stored at 12:00 UTC
   still extracts hour 12. Removing the pin makes it 2.
+  **Two bounds added after this item's audit, each measured on a live server
+  before being written down.** (1) `DateAddExpr.amount` is capped at signed 32-bit
+  independently of `max_interval_days`, because the two bound different things and
+  only this one tracks the dialect's limit: `DATEADD(second, 2147483647, …)`
+  succeeds on SQL Server 2022 and `…, 2147483648` raises "Arithmetic overflow
+  error converting expression to data type int" — reachable once a deployment
+  raises `max_interval_days` above 24,855. (2) `extract`/`date_add` over a
+  **non-temporal column** is rejected at schema validation. With an INTEGER
+  operand, Postgres *errors* while MSSQL silently returns `0` (and `1900-01-03`
+  for a shift), because T-SQL implicitly converts an int to a datetime counted
+  from 1900-01-01 — the same AST, a hard failure on one backend and a plausible
+  wrong answer on the other, which is the items 75/82 class. Only a **bare
+  column** operand is checked, since that is the only case with a reflected type;
+  Postgres `interval` columns are allowed (`EXTRACT(hour FROM interval_col)` is
+  real Postgres, measured), and the cast hint is offered only for string columns
+  because casting an integer reproduces the divergence. **Known gap, recorded
+  rather than papered over:** the older `date_bucket` select item is not yet
+  covered by this rule and still shows the same divergence; extending it changes
+  behavior for an already-shipped feature and is a decision, not a slip.
+
   **Two further calls recorded with it.** (1) **`max_interval_days` bounds a
   `date_add`'s magnitude** — computed from the amount with *upper-bound* unit
   lengths (a year counts as 366 days, a month as 31) so a larger unit cannot

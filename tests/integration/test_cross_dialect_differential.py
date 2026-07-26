@@ -523,6 +523,10 @@ async def test_real_mssql_rejects_a_numeric_range_offset():
 # --------------------------------------------------------------------------- #
 _DATE_COLUMN = {"col": "orders.created_at"}
 
+# Every unit that gets a live both-dialects case. Pinned against `IntervalUnit`
+# by the coverage test below, so a new unit cannot ship without one.
+_LIVE_INTERVAL_UNITS = ("year", "month", "week", "day", "hour", "minute", "second")
+
 # Each part maps to a callable computing the expected value from a Python
 # datetime — ground truth derived independently of BOTH dialects, so a shared
 # mistake in the two adapters cannot make a wrong answer look right.
@@ -568,8 +572,19 @@ async def test_extract_part_matches_on_both_dialects(part):
         assert isinstance(row["v"], int), f"{part} must be an integer on both dialects"
 
 
+def test_every_interval_unit_has_a_live_both_dialects_case():
+    """The `IntervalUnit` sibling of the DatePart coverage gate — previously the
+    unit list below was hand-written, so a new unit would have shipped with no
+    live case at all."""
+    import typing
+
+    from querygate.query_ast.models import IntervalUnit
+
+    assert set(typing.get_args(IntervalUnit)) == set(_LIVE_INTERVAL_UNITS)
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unit", ["year", "month", "week", "day", "hour", "minute", "second"])
+@pytest.mark.parametrize("unit", sorted(_LIVE_INTERVAL_UNITS))
 async def test_date_add_matches_on_both_dialects(unit):
     """Postgres shifts via `make_interval`, MSSQL via `DATEADD` — two entirely
     different mechanisms that must land on the same instant."""
@@ -669,11 +684,15 @@ async def test_now_date_matches_on_both_dialects():
 # This exists because live mutation testing found the item-102 differential
 # cases above could NOT catch two real defects:
 #   * every seeded `created_at` is exactly midnight with no fractional part, so
-#     the Postgres `EXTRACT(second …)` rounding bug (59.7 -> 60) was invisible;
-#   * the seeded range never touches a year boundary, so T-SQL's non-ISO `week`
-#     agreed with the ISO week on every row and swapping them changed nothing.
-# Both are exactly the "two dialects quietly disagree on a VALUE" class this
-# suite exists for, so the corpus is extended rather than the claim softened.
+#     the MSSQL side of the `EXTRACT(second …)` rounding (59.7 -> 60) had no
+#     differential-tier case at all.
+# It is NOT true that the corpus could not discriminate ISO week — 3 of the 20
+# seeded dates diverge at DATEFIRST=7 (2025-01-05 is ISO 1 / T-SQL 2, plus
+# 2024-11-10 and 2025-06-01). A `week` mutation once appeared to survive here, but
+# that was a dead lookup map, not a thin corpus; blaming the corpus was a
+# misdiagnosis, corrected in docs/TODO_ARCHIVE.md. The probe is kept anyway
+# because 2024-12-30 (T-SQL week 53 vs ISO 1) is a far stronger discriminator
+# than the incidental rows, and the fractional-second rows close a real gap.
 # --------------------------------------------------------------------------- #
 _PROBE_ROWS = [
     # (id, timestamp) — chosen so each row discriminates something specific.

@@ -147,6 +147,7 @@ order-of-magnitude, not commitments.
 | 114 | ✅  Write tool MCP schema advertises read-only predicate fields it rejects | M | 93 |
 | 115 | ✅  Guardrail-field lists in admin/help have drifted from `Policy`'s caps | S | — |
 | 116 | ✅  A write's WHERE is exempt from every shape cap the read path enforces | S | — |
+| 117 | `date_bucket` over a non-temporal column diverges across dialects | S | 102 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2250,3 +2251,37 @@ applies them — to every statement of a batch up front — before any DML compi
 proven by observing that no statement reaches the database.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 116).
+
+
+### 117. `date_bucket` over a non-temporal column diverges across dialects
+
+Item 102 added `_validate_date_operands`, which rejects `extract`/`date_add` over
+a column that is not a date/time type — because with an INTEGER operand Postgres
+*errors* while MSSQL silently returns a 1900-epoch value (T-SQL implicitly
+converts an int to a datetime counted from 1900-01-01). The same AST is therefore
+a hard failure on one backend and a plausible wrong answer on the other, which is
+the items 75/82 class.
+
+`DateBucketSelectItem` is the third date primitive and is **not** covered by that
+rule. Measured through the real pipeline over an INTEGER column: validation
+passes, and it compiles to `date_trunc('day', t.id)` on Postgres (live error) vs
+`dateadd(day, datediff(day, 0, t.id), 0)` on MSSQL (silent 1900-epoch date) —
+bit-for-bit the divergence item 102 closed for its own two nodes.
+
+- Why it was not folded into item 102: `date_bucket` has shipped for far longer,
+  so rejecting a previously-accepted query is a behavior change for existing
+  callers of an established feature — a decision to take deliberately rather than
+  as a side effect of another item. Surfaced by that item's confirmation review.
+- Scope: `validation/schema_validation.py` (`_validate_date_operands` already has
+  the reflected-type machinery; `DateBucketSelectItem.col` is a bare
+  `Table.Column`, so the same check drops in), plus `CHANGELOG.md` and the
+  `docs/PRODUCT_GUIDE.md` scope note item 102 left pointing here.
+- Acceptance criteria:
+  - `date_bucket` over a non-temporal column raises a typed `QueryValidationError`
+    pre-DB on every dialect; regression test per dialect.
+  - The `docs/PRODUCT_GUIDE.md` "known gap" paragraph and the item-102 CHANGELOG
+    caveat are removed once it holds.
+  - A live PG+MSSQL case, since the whole point is that the two disagree.
+
+**Effort: S. Priority: medium (correctness; same class as a shipped guardrail).
+Depends on: item 102.**

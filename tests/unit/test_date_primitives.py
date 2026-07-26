@@ -508,6 +508,27 @@ def test_no_date_part_map_is_dead_code():
         "dead code, and the real position lookup is somewhere else"
     )
 
+    # The two `date_add` unit maps. `_MSSQL_DATEADD_UNITS` is an IDENTITY
+    # mapping, so an inline copy of it renders byte-identical SQL — no rendering
+    # assertion, and no live differential run, could ever tell the difference.
+    # The only observable coupling is the rejection: remove a unit from the map
+    # and the adapter must refuse it. If it still renders, the map is dead.
+    for dialect, mapping, unit in (
+        ("mssql", da._MSSQL_DATEADD_UNITS, "day"),
+        ("sqlite", da._SQLITE_DATEADD_UNITS, "hour"),
+    ):
+        adapter = da.get_dialect_adapter(dialect)
+        is_set = isinstance(mapping, frozenset)
+        removed = mapping - {unit} if is_set else {k: v for k, v in mapping.items() if k != unit}
+        target = "_SQLITE_DATEADD_UNITS" if is_set else "_MSSQL_DATEADD_UNITS"
+        monkeypatch_target = getattr(da, target)
+        setattr(da, target, removed)
+        try:
+            with pytest.raises(QueryValidationError, match="not supported"):
+                adapter.date_add(sa.column("c"), unit, 1)
+        finally:
+            setattr(da, target, monkeypatch_target)
+
 
 @pytest.mark.parametrize("dialect", ["postgresql", "mssql", "sqlite"])
 def test_an_unknown_date_part_raises_a_typed_error_not_a_keyerror(dialect):
