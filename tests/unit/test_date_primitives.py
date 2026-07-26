@@ -669,6 +669,54 @@ def test_date_operand_type_rule_per_column_type(monkeypatch, column, allowed):
             asyncio.run(sv.validate_schema(query, "demo"))
 
 
+@pytest.mark.parametrize("column,allowed", [("ts", True), ("n", False), ("s", False)])
+def test_date_bucket_is_held_to_the_same_operand_rule(monkeypatch, column, allowed):
+    """item 117 — `date_bucket` is the THIRD date primitive, and item 102's rule
+    originally covered only the two new ones while the docs described the general
+    property. Measured over an INTEGER column: Postgres errors, MSSQL returns
+    1900-01-02, the internal SQLite path returns -4712-01-05. Three backends,
+    three different wrong answers, none usable — which is why closing it is a bug
+    fix, not a behavior change."""
+    import asyncio
+
+    sv = _patched_load_table(monkeypatch)
+    query = StructuredQuery.model_validate(
+        {
+            "from": "events",
+            "select": [{"col": f"events.{column}", "granularity": "day", "as": "bucket"}],
+        }
+    )
+    if allowed:
+        asyncio.run(sv.validate_schema(query, "demo"))
+    else:
+        with pytest.raises(QueryValidationError, match="date/time column"):
+            asyncio.run(sv.validate_schema(query, "demo"))
+
+
+def test_every_date_primitive_is_covered_by_the_operand_rule():
+    """The guard that would have caught item 117 at the time item 102 shipped.
+
+    Enumerates the AST shapes that apply a date function to a column and asserts
+    each is reachable through the one shared operand walk. A fourth date
+    primitive added later fails here until it is wired in — which is exactly the
+    drift that let `date_bucket` read as covered while it was not."""
+    from querygate.validation.schema_validation import _iter_date_operands
+
+    shapes = {
+        "extract": {"select": [{"expr": {"extract": {"col": "t.c"}, "part": "hour"}, "as": "v"}]},
+        "date_add": {
+            "select": [
+                {"expr": {"date_add": {"col": "t.c"}, "unit": "day", "amount": 1}, "as": "v"}
+            ]
+        },
+        "date_bucket": {"select": [{"col": "t.c", "granularity": "day", "as": "v"}]},
+    }
+    for name, body in shapes.items():
+        query = StructuredQuery.model_validate({"from": "t", **body})
+        refs = [ref for ref, _label in _iter_date_operands(query)]
+        assert refs == ["t.c"], f"{name} is not reached by the shared operand walk"
+
+
 def test_date_operand_rule_reaches_a_where_predicate_and_a_subquery(monkeypatch):
     """Two positions the integration cases never covered."""
     import asyncio

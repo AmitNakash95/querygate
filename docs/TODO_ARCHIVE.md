@@ -6022,7 +6022,13 @@ defect is recorded above as rendering-tier only. **30 caught, 0 missed, 1 proven
 un-catchable.** The re-review then added guards for the rules the first pass had
 left half-covered: `date_add`'s unit is now exhaustive on all three dialects (it
 had been guarded on Postgres only), the fourth dispatch map has a dead-code check,
-and `_validate_date_operands` gained the unit tier it shipped without.
+and `_validate_date_operands` gained the unit tier it shipped without. A final round
+verified those fixes by breaking each one (9 more mutations, all caught), because
+the previous round's report had asserted its fixes were clean without checking —
+which is how the *preceding* round's unlanded correction got through.
+
+**Total: 39 mutations caught, 0 missed, 1 proven un-catchable** across four
+harnesses (pre-review, post-audit, live PG+MSSQL, and confirmation).
 
 **Accepted cost.** MCP schema 104,042 → **108,329** chars, **no budget bump
 needed** — but headroom is now **~1.5%**, well below the ~5% the budget file
@@ -6604,3 +6610,45 @@ silently weakened reads).
 predicates or >5 nesting levels now needs a policy change — the same conversation a
 read of that shape has always required.
 
+### 117. `date_bucket` over a non-temporal column diverges across dialects ✅ DONE
+
+**Effort: S. Priority: medium (correctness; same class as a shipped guardrail).
+Depends on: item 102.** Surfaced by item 102's confirmation review.
+
+**The defect.** Item 102 added `_validate_date_operands`, rejecting `extract` and
+`date_add` over a column that is not a date/time type — because the same AST was a
+hard error on Postgres and a silent 1900-epoch value on MSSQL. `DateBucketSelectItem`
+is the **third** date primitive and was not covered, while item 102's own
+documentation described the general property ("A date primitive requires a date").
+So the third one stayed broken while reading as covered — the same
+documentation-outruns-code failure that item's write-up is otherwise about.
+
+**Measured before deciding, which is what settled it.** `date_bucket` day-truncation
+over an INTEGER column:
+
+| Backend | Result |
+| --- | --- |
+| Postgres | `ERROR: function date_trunc(unknown, integer) does not exist` |
+| SQL Server | `1900-01-02 00:00:00` |
+| SQLite (internal) | `-4712-01-05` |
+
+Three backends, three different wrong answers, none of them usable. That is what
+turned this from a risky behavior change into a plain bug fix: rejecting these
+queries takes nothing away from anyone, because no caller had correct behavior.
+It was deliberately NOT folded into item 102 — at that point the risk was unknown,
+and changing a long-shipped feature as a side effect of another item is the kind of
+thing that should be a decision. The measurement made the decision easy.
+
+**What shipped.** `_iter_date_operands` — one walk yielding every (column, label)
+pair a date primitive applies to, across all three shapes — with
+`_validate_date_operands` consuming it. Plus `test_every_date_primitive_is_covered_by_the_operand_rule`,
+the guard that would have caught this when item 102 shipped: it enumerates the date
+primitives and asserts each is reachable through the shared walk, so a fourth fails
+until it is wired in.
+
+**Testing.** Per-type unit cases for `date_bucket` (reject int/string, allow
+timestamp), the coverage gate, an end-to-end rejection plus a positive control that
+bucketing a real timestamp still works, and a live PG+MSSQL pair asserting both
+servers now give the *same* typed rejection — a divergence is closed by making the
+two agree, not by picking a winner. Mutation-verified: reverting the `date_bucket`
+branch fails 4 tests, including the coverage gate.
