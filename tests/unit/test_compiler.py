@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Dict
 
+import pydantic
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.dialects import mssql, postgresql, sqlite
@@ -24,7 +25,10 @@ from querygate.query_ast.models import (
     StructuredQuery,
     TopNSpec,
     WhereGroup,
+    WindowBound,
+    WindowSelectItem,
 )
+from querygate.validation.schema_validation import _validate_top_n
 
 
 def _make_tables() -> Dict[str, sa.Table]:
@@ -1559,3 +1563,353 @@ class TestExpressionSubstrate:
             }
         )
         assert "count(DISTINCT lower(customers.name))" in self._sql(query)
+
+
+class TestWindowFunctions:
+    """TODO.md item 101 — general window functions.
+
+    Rendering and AST-shape rules only. The safety properties live in
+    test_reference_visitor.py (every ref is visited), test_policy_validation.py
+    (caps, the k-anonymity rule), tests/security (denied/masked columns), and the
+    executed *values* in tests/integration/test_window_end_to_end.py plus the two
+    real-database suites.
+    """
+
+    _DIALECT_COMPILERS = TestExpressionSubstrate._DIALECT_COMPILERS
+
+    @classmethod
+    def _sql(cls, payload: dict, dialect: str = "postgresql", policy: Policy = None) -> str:
+        query = StructuredQuery.model_validate(payload)
+        stmt, _ = compile_structured_query(
+            query, _make_tables(), policy or Policy(), dialect=dialect
+        )
+        return str(
+            stmt.compile(
+                dialect=cls._DIALECT_COMPILERS[dialect],
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+
+    @staticmethod
+    def _window(**overrides) -> dict:
+        item = {
+            "fn": "sum",
+            "arg": {"col": "orders.total_amount"},
+            "over": {"order_by": [{"col": "orders.created_at"}]},
+            "as": "w",
+        }
+        item.update(overrides)
+        return {"from": "orders", "select": ["orders.id", item]}
+
+    def test_running_total_renders_on_every_dialect(self):
+        """Regression bar row 5: a running cumulative total."""
+        payload = self._window(
+            over={
+                "order_by": [{"col": "orders.created_at"}],
+                "frame": {
+                    "mode": "rows",
+                    "start": {"bound": "unbounded_preceding"},
+                    "end": {"bound": "current_row"},
+                },
+            }
+        )
+        for dialect in ("postgresql", "mssql", "sqlite"):
+            sql = self._sql(payload, dialect=dialect).lower()
+            assert "sum(orders.total_amount) over (order by orders.created_at asc " in sql, dialect
+            assert "rows between unbounded preceding and current row) as w" in sql, dialect
+
+    def test_moving_average_frame_offset_renders_as_a_row_count(self):
+        payload = self._window(
+            fn="avg",
+            over={
+                "partition_by": ["orders.customer_id"],
+                "order_by": [{"col": "orders.created_at"}],
+                "frame": {
+                    "mode": "rows",
+                    "start": {"bound": "preceding", "offset": 6},
+                    "end": {"bound": "current_row"},
+                },
+            },
+        )
+        sql = self._sql(payload).lower()
+        assert "avg(orders.total_amount) over (partition by orders.customer_id" in sql
+        assert "rows between 6 preceding and current row" in sql
+
+    def test_omitting_the_frame_emits_no_frame_clause(self):
+        """2026-07-26 Decision Log: no default frame is synthesized — the
+        dialect's own SQL-standard default applies."""
+        sql = self._sql(self._window()).lower()
+        assert "over (order by orders.created_at asc) as w" in sql
+        assert "rows between" not in sql
+        assert "range between" not in sql
+
+    def test_count_star_over_empty_window(self):
+        payload = self._window(fn="count", arg=None, over={}, **{"as": "total_rows"})
+        assert "count(*) OVER () AS total_rows" in self._sql(payload)
+
+    def test_ranking_functions_render_with_partition_and_order(self):
+        for fn in ("row_number", "rank", "dense_rank"):
+            payload = self._window(
+                fn=fn,
+                arg=None,
+                over={
+                    "partition_by": ["orders.customer_id"],
+                    "order_by": [{"col": "orders.total_amount", "dir": "desc"}],
+                },
+            )
+            sql = self._sql(payload).lower()
+            assert (
+                f"{fn}() over (partition by orders.customer_id "
+                "order by orders.total_amount desc) as w" in sql
+            ), fn
+
+    def test_lag_offset_and_ntile_buckets_bind_as_typed_parameters(self):
+        """A lag distance and a bucket count are caller input, so they bind as
+        parameters — never `literal_column` text (plan §1 invariant 1)."""
+        lag = self._window(fn="lag", offset=2)
+        assert "lag(orders.total_amount, 2) OVER (ORDER BY orders.created_at ASC)" in self._sql(lag)
+        ntile = self._window(fn="ntile", arg=None, buckets=4)
+        assert "ntile(4) OVER (ORDER BY orders.created_at ASC)" in self._sql(ntile)
+
+    def test_first_and_last_value_accept_a_frame(self):
+        payload = self._window(
+            fn="last_value",
+            over={
+                "order_by": [{"col": "orders.created_at"}],
+                "frame": {
+                    "mode": "rows",
+                    "start": {"bound": "current_row"},
+                    "end": {"bound": "unbounded_following"},
+                },
+            },
+        )
+        sql = self._sql(payload).lower()
+        assert "last_value(orders.total_amount) over" in sql
+        assert "rows between current row and unbounded following" in sql
+
+    def test_window_over_a_computed_expression(self):
+        """A window's `arg` is item 100's `Expression`, so a computed measure
+        windows exactly like a bare column."""
+        payload = self._window(
+            arg={"op": "*", "left": {"col": "orders.total_amount"}, "right": {"literal": 2}}
+        )
+        assert "sum(orders.total_amount * 2) OVER" in self._sql(payload)
+
+    def test_query_order_by_may_sort_by_a_window_alias(self):
+        payload = self._window()
+        payload["order_by"] = [{"col": "w", "dir": "desc"}]
+        assert "ORDER BY w DESC" in self._sql(payload)
+
+    def test_range_frame_with_a_numeric_offset_is_rejected_on_mssql_only(self):
+        """T-SQL's RANGE accepts only unbounded/current-row bounds. SQLAlchemy
+        compiles the offset form for every dialect regardless, so the adapter is
+        the only thing standing between this and a live failure."""
+        payload = self._window(
+            over={
+                "order_by": [{"col": "orders.id"}],
+                "frame": {
+                    "mode": "range",
+                    "start": {"bound": "preceding", "offset": 5},
+                    "end": {"bound": "current_row"},
+                },
+            }
+        )
+        assert "range between 5 preceding" in self._sql(payload, dialect="postgresql").lower()
+        with pytest.raises(QueryValidationError, match="RANGE frame with a numeric offset"):
+            self._sql(payload, dialect="mssql")
+
+    def test_unbounded_range_frame_is_accepted_on_mssql(self):
+        payload = self._window(
+            over={
+                "order_by": [{"col": "orders.id"}],
+                "frame": {
+                    "mode": "range",
+                    "start": {"bound": "unbounded_preceding"},
+                    "end": {"bound": "current_row"},
+                },
+            }
+        )
+        assert "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW" in self._sql(
+            payload, dialect="mssql"
+        )
+
+    def test_nulls_ordering_inside_a_window_is_rejected_on_mssql(self):
+        """The item-74 posture reaches inside OVER too, because the window's
+        ORDER BY goes through the same `order_by_terms` adapter method."""
+        payload = self._window(over={"order_by": [{"col": "orders.created_at", "nulls": "last"}]})
+        assert "NULLS LAST" in self._sql(payload, dialect="postgresql")
+        with pytest.raises(QueryValidationError, match="nulls first/last"):
+            self._sql(payload, dialect="mssql")
+
+    def test_window_with_top_n_ranks_over_the_projected_window(self):
+        """`top_n` still materializes its own subquery; the window column rides
+        out through it by output name."""
+        payload = self._window()
+        payload["top_n"] = {"order_by": [{"col": "orders.id", "dir": "desc"}], "n": 3}
+        sql = self._sql(payload).lower()
+        assert "sum(orders.total_amount) over" in sql
+        assert "__rank <= 3" in sql
+
+
+class TestWindowAstRules:
+    """The AST-layer rules that keep one window AST from rendering fine on
+    Postgres and breaking live on MSSQL, or from meaning two different things."""
+
+    @staticmethod
+    def _validate(**overrides):
+        item = {"fn": "sum", "arg": {"col": "orders.total_amount"}, "over": {}, "as": "w"}
+        item.update(overrides)
+        return StructuredQuery.model_validate({"from": "orders", "select": [item]})
+
+    def test_over_is_required_so_a_window_is_never_confused_with_an_aggregate(self):
+        """Without `over` the payload is the plain `SUM(x)` aggregate — the two
+        share {fn, arg, as}, so `over` is what makes the union unambiguous."""
+        item = {"fn": "sum", "arg": {"col": "orders.total_amount"}, "as": "w"}
+        query = StructuredQuery.model_validate({"from": "orders", "select": [item]})
+        assert isinstance(query.select[0], AggregateSelectItem)
+        assert isinstance(self._validate().select[0], WindowSelectItem)
+
+    def test_ranking_functions_reject_an_argument(self):
+        with pytest.raises(pydantic.ValidationError, match="takes no 'arg'"):
+            self._validate(fn="row_number", over={"order_by": [{"col": "orders.id"}]})
+
+    def test_value_functions_require_an_argument(self):
+        with pytest.raises(pydantic.ValidationError, match="requires an 'arg'"):
+            self._validate(fn="sum", arg=None)
+
+    def test_ranking_and_offset_functions_require_order_by(self):
+        for fn, extra in (
+            ("row_number", {"arg": None}),
+            ("rank", {"arg": None}),
+            ("ntile", {"arg": None, "buckets": 4}),
+            ("lag", {}),
+            ("first_value", {}),
+        ):
+            with pytest.raises(pydantic.ValidationError, match="requires over.order_by"):
+                self._validate(fn=fn, over={}, **extra)
+
+    def test_a_frame_requires_order_by(self):
+        with pytest.raises(pydantic.ValidationError, match="requires over.order_by"):
+            self._validate(
+                over={
+                    "frame": {
+                        "mode": "rows",
+                        "start": {"bound": "unbounded_preceding"},
+                        "end": {"bound": "current_row"},
+                    }
+                }
+            )
+
+    def test_a_frame_is_rejected_for_a_ranking_function(self):
+        with pytest.raises(pydantic.ValidationError, match="frame is not valid"):
+            self._validate(
+                fn="row_number",
+                arg=None,
+                over={
+                    "order_by": [{"col": "orders.id"}],
+                    "frame": {
+                        "mode": "rows",
+                        "start": {"bound": "unbounded_preceding"},
+                        "end": {"bound": "current_row"},
+                    },
+                },
+            )
+
+    def test_offset_and_buckets_are_scoped_to_their_own_functions(self):
+        with pytest.raises(pydantic.ValidationError, match="only valid for lag/lead"):
+            self._validate(offset=2)
+        with pytest.raises(pydantic.ValidationError, match="only valid for ntile"):
+            self._validate(buckets=4)
+        with pytest.raises(pydantic.ValidationError, match="ntile requires 'buckets'"):
+            self._validate(fn="ntile", arg=None, over={"order_by": [{"col": "orders.id"}]})
+
+    def test_over_refs_must_be_dotted_columns_not_select_aliases(self):
+        """No dialect lets an OVER clause reference a peer select alias, so the
+        AST refuses the spelling outright rather than emitting invalid SQL."""
+        with pytest.raises(pydantic.ValidationError, match="window partition_by"):
+            self._validate(over={"partition_by": ["w"]})
+        with pytest.raises(pydantic.ValidationError, match="window order_by col"):
+            self._validate(over={"order_by": [{"col": "w"}]})
+
+    def test_frame_bounds_must_be_ordered_and_sensible(self):
+        rows = {"mode": "rows"}
+        with pytest.raises(pydantic.ValidationError, match="cannot start at"):
+            self._validate(
+                over={
+                    "order_by": [{"col": "orders.id"}],
+                    "frame": {
+                        **rows,
+                        "start": {"bound": "unbounded_following"},
+                        "end": {"bound": "unbounded_following"},
+                    },
+                }
+            )
+        with pytest.raises(pydantic.ValidationError, match="cannot end at"):
+            self._validate(
+                over={
+                    "order_by": [{"col": "orders.id"}],
+                    "frame": {
+                        **rows,
+                        "start": {"bound": "unbounded_preceding"},
+                        "end": {"bound": "unbounded_preceding"},
+                    },
+                }
+            )
+        with pytest.raises(pydantic.ValidationError, match="start must not come after"):
+            self._validate(
+                over={
+                    "order_by": [{"col": "orders.id"}],
+                    "frame": {
+                        **rows,
+                        "start": {"bound": "following", "offset": 2},
+                        "end": {"bound": "preceding", "offset": 2},
+                    },
+                }
+            )
+
+    def test_frame_bound_offsets_are_required_exactly_where_they_apply(self):
+        with pytest.raises(pydantic.ValidationError, match="requires an offset"):
+            WindowBound.model_validate({"bound": "preceding"})
+        with pytest.raises(pydantic.ValidationError, match="takes no offset"):
+            WindowBound.model_validate({"bound": "current_row", "offset": 1})
+
+    def test_a_window_cannot_be_combined_with_grouping(self):
+        """A window is computed over the query's rows; windowing *aggregated*
+        values needs the aggregation materialized first (item 105)."""
+        window = {"fn": "sum", "arg": {"col": "orders.total_amount"}, "over": {}, "as": "w"}
+        with pytest.raises(pydantic.ValidationError, match="cannot be combined with group_by"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "orders",
+                    "select": ["orders.customer_id", window],
+                    "group_by": ["orders.customer_id"],
+                }
+            )
+        with pytest.raises(pydantic.ValidationError, match="cannot be combined with group_by"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "orders",
+                    "select": [{"fn": "sum", "col": "orders.total_amount"}, window],
+                }
+            )
+
+    def test_top_n_cannot_rank_by_a_window_alias(self):
+        """Ranking by a window's output would nest one window inside another's
+        OVER clause; rejected at schema validation, where top_n refs resolve."""
+        query = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": [
+                    "orders.id",
+                    {
+                        "fn": "sum",
+                        "arg": {"col": "orders.total_amount"},
+                        "over": {"order_by": [{"col": "orders.created_at"}]},
+                        "as": "running",
+                    },
+                ],
+                "top_n": {"order_by": [{"col": "running", "dir": "desc"}], "n": 1},
+            }
+        )
+        with pytest.raises(QueryValidationError, match="top_n reference 'running'"):
+            _validate_top_n(query, _make_tables())

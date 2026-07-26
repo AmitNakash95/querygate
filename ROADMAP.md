@@ -199,10 +199,15 @@ gate is the *first step of the item*, not a reason to defer it.
   division; visitor-verified at every depth. Regression bar 5/16 → **8/16**.)
   *The centerpiece — it unlocked the most walls at once, and items 101–106 now
   build on its `Expression` rather than adding parallel scalar shapes.*
-- [ ] **101** — ★ General window functions (`WindowSelectItem`: OVER, LAG/LEAD,
-  frames). *Second expressiveness pillar; running totals / moving averages.
-  Depends on 96 (100 for windowed exprs); **Decision Log entry (frames) before
-  build.***
+- [x] **101** — ★ General window functions (`WindowSelectItem`: OVER, LAG/LEAD,
+  frames). ✅ **Shipped** (all 13 window fns + `ROWS`/`RANGE` frames as a
+  projection; `arg` reuses item 100's `Expression`; `max_window_specs` summed
+  tree-wide + `max_window_frame_offset`; no synthesized default frame; rejected
+  with `group_by`/aggregates and under `min_group_size`; every fn/frame executed
+  on live Postgres **and** live MSSQL with rows compared. Regression bar 8/16 →
+  **9/16**.) *Second expressiveness pillar — running totals and rank-in-place;
+  §5 rows 3 and 15 were corrected to point at item 105 and a possible
+  window-as-expression item rather than this one.*
 - [ ] **102** — `EXTRACT`/date_part + relative-date/interval helpers. *High
   everyday agent value. Depends on 100; **Decision Log entry (interval cap + TZ).***
 - [ ] **103** — Non-equi/range joins + FULL OUTER / CROSS. *Range/temporal joins.
@@ -354,12 +359,15 @@ the live frontier: `roadmap-next` should walk Phase 4 in order (100 → 106),
 drafting each item's Decision Log entry for approval as step 1 of that item.
 Adoption/breadth (Phase 5) and catalog/UI (Phase 6) wait behind it.
 
-**Engine progress (updated 2026-07-25):** **99 and 100 have shipped.** The
-`Expression` substrate every remaining engine item depends on is real, so
-**101 (general window functions) is the next roadmap item** — its `arg` reuses
-item 100's `Expression`, and its Decision Log entry (default frame +
-unbounded-frame cap, plan §8 entry 3) is that item's own first step. The
-canonical regression bar is 8/16 (`docs/ENGINE_EXPRESSIVENESS_PLAN.md` §5).
+**Engine progress (updated 2026-07-26):** **99, 100 and 101 have shipped.** The
+`Expression` substrate every remaining engine item depends on is real, and item
+101's `WindowSelectItem.arg` is the worked example of reusing it. **102
+(`EXTRACT`/date_part + relative-date helpers) is the next roadmap item** — it
+extends item 100's `FunctionExpr`, and its Decision Log entry (interval cap +
+timezone semantics, plan §8 entry 4) is that item's own first step. The canonical
+regression bar is 9/16 (`docs/ENGINE_EXPRESSIVENESS_PLAN.md` §5); item 101's build
+corrected two of that table's claims (row 3 needs item 105's derived table, row 15
+needs a window to be an `Expression` operand — recorded there as a wall, not built).
 
 ### Fourth pass (2026-07-23), retained for history
 
@@ -486,6 +494,14 @@ already-planned initiatives.
 
 ### Review Phase 3 — Architecture and maintainability
 
+- [ ] **115** — The three hand-maintained guardrail-field lists
+  (`admin/access_diff.py`, `admin/models.py`'s `EffectiveGuardrails`,
+  `help/service.py`) have drifted from `Policy`'s cap set — nine caps from items
+  68–72/88/97/100/101 are missing, so the semantic access diff can report "no
+  change" for a loosened cap. *Surfaced 2026-07-26 while adding item 101's two
+  caps. Sequenced here, not in a Phase, for the same reason as 114: maintainability
+  on already-shipped surfaces. Widens a REST response model, so it is its own PR.*
+
 - [ ] **114** — The write tool's MCP schema advertises read-only predicate
   fields it rejects (`expr`/`value_expr`/`value_subquery`, plus the whole read
   `StructuredQuery` definition), making `run_structured_writes` the largest tool
@@ -544,9 +560,9 @@ currently triggers it — flagged for awareness, matches the documented
 3. The **next item** is the first one that is *not* fully `✅ DONE`, is *not* in
    the Decision-gated list, is *not* in the Coordination-gated / externally-blocked
    list, and whose TODO.md dependencies are satisfied. Skip (and report) any gated
-   item reached before it. **As of 2026-07-25 this resolves to item 100** — the
+   item reached before it. **As of 2026-07-26 this resolves to item 102** — the
    walk skips 58 ph2 and 30·89 ph2 (externally blocked), 53 (external vendor),
-   and lands on Phase 4's engine pillar.
+   and lands on Phase 4's engine pillar (99, 100 and 101 have shipped).
    **A required Decision Log entry is not a skip condition.** Items 100–106 each
    need one recorded in `docs/PRODUCT_GUIDE.md` before code — that is the item's
    own first step (draft it, get maintainer ratification, then build), not a

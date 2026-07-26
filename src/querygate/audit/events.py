@@ -28,6 +28,7 @@ from querygate.query_ast.models import (
     StructuredQuery,
     WhereGroup,
     WhereNode,
+    WindowSelectItem,
 )
 from querygate.validation.schema_validation import select_item_column_refs
 
@@ -296,6 +297,26 @@ def _select_shape(item: object) -> Dict[str, Any]:
             "branch_count": len(item.when),
             "columns": list(select_item_column_refs(item)),
         }
+    if isinstance(item, WindowSelectItem):
+        # Structure only (item 101): which window function ran, over which
+        # columns, and the frame's SHAPE. No frame offset, no lag/lead distance —
+        # those are caller literals, and a persisted event carries no values
+        # (non-negotiable 3), the same line `_expression_shape` holds.
+        shape = {
+            "kind": "window",
+            "function": item.fn,
+            "alias": item.alias,
+            "columns": list(select_item_column_refs(item)),
+        }
+        if item.arg is not None:
+            shape["expression"] = _expression_shape(item.arg)
+        if item.over.frame is not None:
+            shape["frame"] = {
+                "mode": item.over.frame.mode,
+                "start": item.over.frame.start.bound,
+                "end": item.over.frame.end.bound,
+            }
+        return shape
     raise TypeError(f"Unsupported select item: {type(item).__name__}")
 
 

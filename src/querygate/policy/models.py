@@ -269,6 +269,20 @@ class Policy(pyd.BaseModel):
     max_expression_depth: int = pyd.Field(default=5, ge=1)
     max_expression_nodes: int = pyd.Field(default=200, ge=1)
 
+    # The two caps that bound item 101's window functions. `max_window_specs`
+    # counts `WindowSelectItem`s summed TREE-WIDE (item 97's rule) — each window
+    # is a potential extra sort/pass over the row set, so this is the cost lever
+    # that matters; 0 disables window functions entirely for a connection.
+    # `max_window_frame_offset` bounds the caller-supplied distance in an
+    # `N PRECEDING`/`N FOLLOWING` frame bound and in a `lag`/`lead` offset — the
+    # only unbounded magnitudes in the window AST. Unbounded frame ends are NOT
+    # separately gated: `UNBOUNDED PRECEDING … CURRENT ROW` is the running-total
+    # idiom and also SQL's own default frame, and an unbounded-both-ends frame is
+    # semantically the same whole-partition scan as omitting the frame — see the
+    # 2026-07-26 Decision Log entry.
+    max_window_specs: int = pyd.Field(default=5, ge=0)
+    max_window_frame_offset: int = pyd.Field(default=1000, ge=1)
+
     # k-anonymity guardrail (TODO.md item 88): the minimum number of underlying
     # rows any aggregate result group must be backed by. When set, the compiler
     # injects `HAVING count(*) >= min_group_size` into every aggregate query

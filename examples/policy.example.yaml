@@ -48,6 +48,16 @@ default:
   max_expression_depth: 5
   max_expression_nodes: 200
 
+  # Bounds on window functions (TODO.md item 101). max_window_specs counts the
+  # window projections in a query summed across it AND every subquery — each one
+  # is a potential extra sort — and 0 disables window functions entirely for this
+  # connection. max_window_frame_offset bounds how far from the current row a
+  # window may reach: an `N PRECEDING`/`N FOLLOWING` frame bound and a lag/lead
+  # row offset. A window's PARTITION BY columns count against max_partition_by,
+  # the same budget top_n uses.
+  max_window_specs: 5
+  max_window_frame_offset: 1000
+
   timeout_seconds: 30
   max_concurrency: 8
   concurrency_wait_seconds: 10

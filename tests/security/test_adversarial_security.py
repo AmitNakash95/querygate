@@ -2007,3 +2007,193 @@ def test_expression_literals_never_reach_a_persisted_audit_event():
     shape = json.dumps(normalize_query_shape(query))
     for needle in ("SECRET-COUNTRY", "SECRET-ELSE", "987654321"):
         assert needle not in shape, f"{needle} leaked into the audited query shape"
+
+
+# --------------------------------------------------------------------------- #
+# Window functions (TODO.md item 101)
+# --------------------------------------------------------------------------- #
+def _window_positions(leaf: dict) -> dict:
+    """The same query with `leaf`'s column in each of the three places a window
+    can carry a reference. All three are non-projection uses."""
+    return {
+        "window_arg": {
+            "from": "customers",
+            "select": [
+                {
+                    "fn": "sum",
+                    "arg": {"op": "*", "left": leaf, "right": {"literal": 2}},
+                    "over": {"order_by": [{"col": "customers.id"}]},
+                    "as": "w",
+                }
+            ],
+        },
+        "window_partition_by": {
+            "from": "customers",
+            "select": [
+                {
+                    "fn": "row_number",
+                    "over": {
+                        "partition_by": [leaf["col"]],
+                        "order_by": [{"col": "customers.id"}],
+                    },
+                    "as": "w",
+                }
+            ],
+        },
+        "window_order_by": {
+            "from": "customers",
+            "select": [
+                {
+                    "fn": "rank",
+                    "over": {"order_by": [{"col": leaf["col"], "dir": "desc"}]},
+                    "as": "w",
+                }
+            ],
+        },
+        "window_arg_case_condition": {
+            # The subtle one: the leaf is in a *predicate* inside a CASE condition
+            # inside the window's argument — outside the Expression union entirely,
+            # so it is only reached if the window's ref walk descends into the arg
+            # AND that walk crosses into the boolean-condition layer.
+            "from": "customers",
+            "select": [
+                {
+                    "fn": "sum",
+                    "arg": {
+                        "when": [
+                            {
+                                "when": {"col": leaf["col"], "op": "eq", "value": 1},
+                                "then": {"literal": 1},
+                            }
+                        ]
+                    },
+                    "over": {"order_by": [{"col": "customers.id"}]},
+                    "as": "w",
+                }
+            ],
+        },
+    }
+
+
+@pytest.mark.parametrize("position", list(_window_positions({"col": "customers.id"})))
+def test_denied_column_inside_a_window_is_rejected(position):
+    """An OVER clause is not a back door: a denied column is rejected in a
+    window's argument, its PARTITION BY, and its ORDER BY alike."""
+    query = StructuredQuery.model_validate(
+        _window_positions({"col": "customers.secret_code"})[position]
+    )
+    policy = Policy(denied_columns={"customers": ["secret_code"]})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+@pytest.mark.parametrize("position", list(_window_positions({"col": "customers.id"})))
+def test_masked_column_inside_a_window_is_rejected(position):
+    """Ordering or partitioning by a masked column leaks its real value by
+    inference even though the column itself is never projected."""
+    query = StructuredQuery.model_validate(_window_positions({"col": "customers.phone"})[position])
+    policy = Policy(
+        column_masks={"customers": [ColumnMask(column="phone", kind=ColumnMaskKind.NULL)]}
+    )
+    with pytest.raises(PolicyViolationError, match="masked"):
+        validate_policy(query, policy, connection_id="demo")
+
+
+def test_window_cannot_pull_in_an_undeclared_table():
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [
+                {
+                    "fn": "row_number",
+                    "over": {
+                        "partition_by": ["secrets.value"],
+                        "order_by": [{"col": "customers.id"}],
+                    },
+                    "as": "w",
+                }
+            ],
+        }
+    )
+    with pytest.raises(QueryValidationError, match="undeclared"):
+        asyncio.run(sv.validate_schema(query, "demo"))
+
+
+def test_window_aggregate_cannot_dodge_the_k_anonymity_floor():
+    """`COUNT(*) OVER ()` would report a row count for a razor-thin filter that
+    the aggregate path suppresses with `HAVING count(*) >= min_group_size` —
+    there is no group for the floor to filter. Rejected while the floor is on."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [{"fn": "count", "over": {}, "as": "how_many"}],
+            "where": {"col": "customers.phone", "op": "eq", "value": "+44 7700 900001"},
+        }
+    )
+    with pytest.raises(PolicyViolationError, match="min_group_size"):
+        validate_policy(query, Policy(min_group_size=5), connection_id="demo")
+
+
+def test_window_count_is_summed_tree_wide_so_a_subquery_cannot_multiply_the_budget():
+    """N windows outside plus N inside a subquery is 2N windows of work; the cap
+    is enforced on the sum, never per level (item 97's rule)."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [
+                "customers.id",
+                {"fn": "row_number", "over": {"order_by": [{"col": "customers.id"}]}, "as": "a"},
+            ],
+            "where": {
+                "col": "customers.id",
+                "op": "in",
+                "value_subquery": {
+                    "from": "orders",
+                    "select": [
+                        {
+                            "fn": "row_number",
+                            "over": {"order_by": [{"col": "orders.id"}]},
+                            "as": "b",
+                        }
+                    ],
+                },
+            },
+        }
+    )
+    with pytest.raises(PolicyViolationError, match="window function count 2 exceeds"):
+        validate_policy(query, Policy(max_window_specs=1), connection_id="demo")
+
+
+def test_window_frame_offsets_never_reach_a_persisted_audit_event():
+    """A frame distance and a lag offset are caller-supplied values, so they stay
+    out of the audit trail like every other literal (non-negotiable 3)."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": [
+                {
+                    "fn": "lag",
+                    "arg": {"col": "customers.id"},
+                    "offset": 987654321,
+                    "over": {"order_by": [{"col": "customers.id"}]},
+                    "as": "prev",
+                },
+                {
+                    "fn": "sum",
+                    "arg": {"col": "customers.id"},
+                    "over": {
+                        "order_by": [{"col": "customers.id"}],
+                        "frame": {
+                            "mode": "rows",
+                            "start": {"bound": "preceding", "offset": 123456789},
+                            "end": {"bound": "current_row"},
+                        },
+                    },
+                    "as": "trailing",
+                },
+            ],
+        }
+    )
+    shape = json.dumps(normalize_query_shape(query))
+    for needle in ("987654321", "123456789"):
+        assert needle not in shape, f"{needle} leaked into the audited query shape"

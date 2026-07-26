@@ -1,12 +1,13 @@
 # Expressive Query Engine — Path to 10/10 (Flagship Pillar Plan)
 
-**Status (2026-07-25):** in progress — **Phase 0 (item 99) and Phase 1 (item 100)
-have shipped.** Phase 2 (item 101, general window functions) is next; its Decision
-Log entry (§8 entry 3 — default frame + unbounded-frame cap) is the first step of
-that item. Phases 3–5 (items 102–106) are unstarted. **The `Expression` substrate
-items 101–106 all build on is now real** (`query_ast/models.py`'s `Expression`
-union + `_compile_expression`); reuse it rather than adding a parallel scalar
-shape. **Owner:** engine. **Audience:** the
+**Status (2026-07-26):** in progress — **Phase 0 (item 99), Phase 1 (item 100) and
+Phase 2 (item 101) have shipped.** Phase 3a (item 102, `EXTRACT`/date_part +
+relative-date helpers) is next; its Decision Log entry (§8 entry 4 — interval cap
++ timezone semantics) is the first step of that item. Phases 3b–5 (items 103–106)
+are unstarted. **The `Expression` substrate items 102–106 all build on is real**
+(`query_ast/models.py`'s `Expression` union + `_compile_expression`); reuse it
+rather than adding a parallel scalar shape — item 101's `WindowSelectItem.arg`
+is the worked example. **Owner:** engine. **Audience:** the
 implementing agent (Claude) + reviewers.
 **Authority:** this is the *deep spec* the read-engine expressiveness items point
 to. Item **content** and `✅ DONE` status live in `TODO.md`; execution **order**
@@ -474,9 +475,9 @@ report becomes a new row here first, then an item.
 | --- | --- | --- | --- |
 | 1 | `SUM(quantity*unit_price)` where paid | ✅ **100** | 100 |
 | 2 | Per-region `SUM(CASE WHEN status='paid' THEN amount ELSE 0 END)` | ✅ **100** | 100 |
-| 3 | 7-day moving average of daily orders | ❌ | 101 |
+| 3 | 7-day moving average of daily orders | ❌ (2 queries) | 105 (**not** 101 — see below) |
 | 4 | Each customer's most-recent order | ✅ | `top_n` (n=1) |
-| 5 | Running cumulative total | ❌ | 101 |
+| 5 | Running cumulative total | ✅ **101** | 101 |
 | 6 | Cohort retention via CTE | ❌ (multi-query) | 105 |
 | 7 | Top category per region **by revenue** | ✅ **100** | 100 |
 | 8 | UNION of high-value + dormant segments | ❌ (client merge) | 104 |
@@ -486,17 +487,40 @@ report becomes a new row here first, then an item.
 | 12 | Orders in last 7 days | 🟡 (literal today) | 102 |
 | 13 | Case-insensitive name search | ✅ | `lower(col) like …` |
 | 14 | Rank products with ties (WITH TIES) | ✅ | `top_n fn=rank` |
-| 15 | Each order's % of total (`amount / SUM(amount) OVER ()`) | 🟡 arithmetic ✅ (100); needs `OVER` | 100 + 101 |
+| 15 | Each order's % of total (`amount / SUM(amount) OVER ()`) | 🟡 both halves exist; not in one expression | a window-as-`Expression` item (see below) |
 | 16 | Price-band join (`ON price BETWEEN lo AND hi`) | ❌ | 103 |
 
 Baseline at plan time: **5/16 fully expressible, 2 cleanly composable.** After
-items 99 + 100 (both shipped): **8/16 fully expressible** — rows 1, 2 and 7 went
-green, each covered end-to-end in
+items 99 + 100: **8/16** — rows 1, 2 and 7 went green, each covered end-to-end in
 `tests/integration/test_expression_end_to_end.py` and again on real Postgres in
-`tests/integration/test_postgres_expression_substrate.py`. Row 15's arithmetic half
-is done and it now waits only on `OVER` (item 101). After item 101 the ❌ set
-collapses to 6, 8, 11, 16 — set-ops/CTE/correlated/non-equi, which Phases 3b–5
-finish.
+`tests/integration/test_postgres_expression_substrate.py`. After item 101:
+**9/16** — row 5 (running cumulative total) went green, covered in
+`tests/integration/test_window_end_to_end.py` and on real Postgres *and* real
+MSSQL in `tests/integration/test_cross_dialect_differential.py`. The remaining ❌
+set is 3, 6, 8, 11, 16 — derived-table/set-ops/correlated/non-equi, which Phases
+3b–5 finish.
+
+**Two corrections item 101's build forced on this table, recorded per this
+section's own rule rather than left as an aspiration:**
+
+- **Row 3 is unblocked by item 105, not 101.** A 7-day moving average of *daily*
+  order counts is a window over **aggregated** rows, and item 101's window is
+  computed over the query's row scope — a window over grouped values needs the
+  aggregation materialized as a derived table (105). Item 101 rejects the
+  `group_by`+window combination outright rather than growing a second bespoke
+  materialization path beside `_apply_top_n`'s (2026-07-26 Decision Log). A moving
+  average over *row-level* values, which 101 does unblock, is covered instead.
+- **Row 15 needs a new item, and it is deliberately not created here.** Both
+  halves now exist (arithmetic from 100, `OVER` from 101) but a window is a
+  select-item **projection**, not an `Expression` operand, so
+  `amount / SUM(amount) OVER ()` is two projected columns plus client-side
+  division. Making `WindowSelectItem` an `Expression` member would introduce a
+  union member that is legal in some positions and illegal in others (never in
+  `WHERE`, never inside an aggregate, never as a group key) — breaking the
+  "legal everywhere a scalar is expected" property that keeps the substrate
+  reviewable in one place. Whether that trade is worth a bounded
+  projection-only exception is a maintainer call, so it is a recorded wall here,
+  not a silently-added feature.
 
 **One wall found during item 100's build, recorded here per this section's own
 rule** ("a new 'I couldn't express X' report becomes a new row here first"): a
@@ -580,7 +604,18 @@ open **before** implementation, not discovered after:
    our `MSSQLSessionDialectAdapter` does not set — and that adapter DOES set
    `XACT_ABORT ON`, under which an unguarded divide-by-zero aborts the whole
    transaction, not just the row. Guarding makes it deterministic on both.*
-3. **Window frame bounds.** The default frame and the cap on unbounded frames.
+3. ✅ **RECORDED 2026-07-26** — **Window frame bounds.** The default frame and the
+   cap on unbounded frames. *Outcome: **no default frame is synthesized** (omitting
+   `frame` emits no `ROWS`/`RANGE` clause, so the dialect's SQL-standard default
+   applies, identical on PG/MSSQL), and unbounded frame ends are **not** separately
+   gated — `UNBOUNDED PRECEDING … CURRENT ROW` is both the running-total idiom and
+   SQL's own default, and an unbounded-both-ends frame is the same whole-partition
+   scan as no frame at all, so gating it would be theater. The caps land on the
+   genuinely unbounded magnitudes instead: `max_window_frame_offset` (frame and
+   `lag`/`lead` distances) and `max_window_specs` (summed tree-wide). Three further
+   bounds ride along: no window with `group_by`/aggregates, no aggregate window
+   under `min_group_size`, and a numeric `RANGE` offset rejected on MSSQL. See the
+   `docs/PRODUCT_GUIDE.md` Decision Log entry dated 2026-07-26.*
 4. **Interval/relative-date cap and timezone semantics** (UTC vs server-local).
 5. **CROSS JOIN gating** (policy flag default-off + row-cap rationale).
 6. **Recursive CTE exclusion** — record that it is deliberately out of scope pending

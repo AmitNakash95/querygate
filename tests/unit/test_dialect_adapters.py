@@ -191,3 +191,38 @@ class TestPercentileCont:
         col = sa.column("total_amount")
         with pytest.raises(QueryValidationError, match="ordered-set aggregate"):
             SQLiteDialectAdapter().percentile_cont(col, 0.5)
+
+
+class TestWindowFrame:
+    """item 101 — the frame grammar is the one genuinely per-dialect part of a
+    window, so it is the one part that lives on the adapter."""
+
+    _ADAPTERS = {
+        "postgres": PostgresDialectAdapter(),
+        "mssql": MSSQLDialectAdapter(),
+        "sqlite": SQLiteDialectAdapter(),
+    }
+
+    @pytest.mark.parametrize("name", sorted(_ADAPTERS))
+    def test_rows_frames_are_supported_everywhere(self, name):
+        adapter = self._ADAPTERS[name]
+        assert adapter.window_frame("rows", None, 0) == {"rows": (None, 0)}
+        assert adapter.window_frame("rows", -6, 2) == {"rows": (-6, 2)}
+
+    @pytest.mark.parametrize("name", sorted(_ADAPTERS))
+    def test_unbounded_and_current_row_range_frames_are_supported_everywhere(self, name):
+        adapter = self._ADAPTERS[name]
+        assert adapter.window_frame("range", None, 0) == {"range_": (None, 0)}
+        assert adapter.window_frame("range", 0, None) == {"range_": (0, None)}
+
+    @pytest.mark.parametrize("start,end", [(-6, 0), (0, 3), (-1, 1)])
+    def test_mssql_rejects_a_numeric_range_offset(self, start, end):
+        """T-SQL's RANGE takes only UNBOUNDED/CURRENT ROW. Rejected rather than
+        rewritten to ROWS, which has different tie semantics — the item-74
+        reject-don't-emulate posture."""
+        with pytest.raises(QueryValidationError, match="RANGE frame with a numeric offset"):
+            MSSQLDialectAdapter().window_frame("range", start, end)
+
+    @pytest.mark.parametrize("name", ["postgres", "sqlite"])
+    def test_numeric_range_offsets_are_supported_off_mssql(self, name):
+        assert self._ADAPTERS[name].window_frame("range", -6, 0) == {"range_": (-6, 0)}

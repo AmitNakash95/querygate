@@ -48,12 +48,14 @@ from querygate.client.builder import (
     expr_select,
     fn,
     fn_select,
+    frame,
     lit,
     not_,
     or_,
     percentile_cont,
     string_agg,
     when,
+    window,
 )
 
 __all__ = [
@@ -80,6 +82,8 @@ __all__ = [
     "expr_select",
     "case_expr",
     "cast",
+    "window",
+    "frame",
     "Column",
     "FnColumn",
     "Literal",

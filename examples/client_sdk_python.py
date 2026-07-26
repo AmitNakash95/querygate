@@ -29,7 +29,20 @@ from __future__ import annotations
 import json
 import sys
 
-from querygate.client import Query, agg, and_, case, col, desc, fn_select, lit, when
+from querygate.client import (
+    Query,
+    agg,
+    and_,
+    asc,
+    case,
+    col,
+    desc,
+    fn_select,
+    frame,
+    lit,
+    when,
+    window,
+)
 
 # NOTE: the demo policy (examples/policy.example.yaml) masks orders.total_amount
 # so it may only appear as a bare SELECT projection, and denies customers.email.
@@ -90,10 +103,35 @@ def top_line_items_per_order() -> Query:
     )
 
 
+def running_order_value() -> Query:
+    """A window projection (item 101) over a computed value (item 100): the
+    running total of line-item value within each order, without collapsing or
+    filtering a single row — `frame("rows", None, 0)` is
+    `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.
+    """
+    return (
+        Query.from_("order_items")
+        .select(
+            "order_items.order_id",
+            "order_items.id",
+            window(
+                "sum",
+                col("order_items.quantity") * col("order_items.unit_price"),
+                as_="running_order_value",
+                partition_by=["order_items.order_id"],
+                order_by=[asc("order_items.id")],
+                frame=frame("rows", None, 0),
+            ),
+        )
+        .order_by("order_items.id")
+    )
+
+
 EXAMPLES = {
     "orders_per_customer": orders_per_customer,
     "order_item_value_buckets": order_item_value_buckets,
     "top_line_items_per_order": top_line_items_per_order,
+    "running_order_value": running_order_value,
 }
 
 

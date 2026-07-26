@@ -470,6 +470,28 @@ Expression = Union[
 ]
 
 
+# Defined here rather than beside TopNSpec below because WindowSelectItem's
+# `over.order_by` needs it; TopNSpec and StructuredQuery use the same class.
+class OrderBySpec(pyd.BaseModel):
+    """Sort key. dir must be the exact string "asc" or "desc" — other spellings
+    (e.g. "direction", "sort", a boolean desc flag) are rejected, not silently
+    defaulted to ascending.
+    """
+
+    col: str
+    dir: SortDir = "asc"
+    nulls: Optional[Literal["first", "last"]] = pyd.Field(
+        default=None,
+        description=(
+            "Where NULLs sort relative to non-NULL values — omit for each dialect's "
+            "own default ordering. Not supported on MSSQL (T-SQL has no NULLS "
+            "FIRST/LAST syntax); order by a CASE 0/1 'is null' bucket first instead."
+        ),
+    )
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
 class CaseSelectItem(pyd.BaseModel):
     """CASE WHEN ... THEN ... [ELSE ...] END, evaluated top-to-bottom —
     the first matching `when` wins. `alias` is REQUIRED (unlike aggregates/
@@ -520,6 +542,256 @@ class ExpressionSelectItem(pyd.BaseModel):
     model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
 
 
+# --------------------------------------------------------------------------
+# General window functions (TODO.md item 101), the second expressiveness
+# pillar of docs/ENGINE_EXPRESSIVENESS_PLAN.md.
+#
+# `top_n` was previously the ONLY OVER() surface, hard-wired to
+# rank-and-filter-top-N. A `WindowSelectItem` only *projects* a window value
+# (running totals, moving averages, rank-in-place, lag/lead gap analysis); the
+# two stay separate types deliberately — see TopNSpec.
+#
+# Every bound below is either a portability requirement or a cost cap, and each
+# is recorded in the 2026-07-26 Decision Log entry in docs/PRODUCT_GUIDE.md:
+#   * a window is a PROJECTION, not an `Expression` operand — so it cannot be
+#     nested inside arithmetic/aggregates, which is also why it cannot appear in
+#     WHERE/HAVING or as a group key;
+#   * `over` is REQUIRED (possibly empty) — it is what structurally distinguishes
+#     `SUM(x) OVER ()` from the plain `SUM(x)` aggregate, which otherwise share
+#     the {fn, arg, as} shape and would resolve ambiguously in the SelectItem
+#     union;
+#   * refs inside `over` must be real Table.Columns: no dialect lets an OVER
+#     clause reference a peer SELECT alias;
+#   * ORDER BY inside OVER is required wherever T-SQL requires it, on every
+#     dialect, so one AST cannot render fine on Postgres and break live on MSSQL;
+#   * frames are only accepted where T-SQL accepts them, and no frame is
+#     synthesized when `frame` is omitted (the SQL-standard default applies).
+# --------------------------------------------------------------------------
+
+WindowFn = Literal[
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "count",
+    "row_number",
+    "rank",
+    "dense_rank",
+    "ntile",
+    "lag",
+    "lead",
+    "first_value",
+    "last_value",
+]
+
+# Aggregate-style windows compute an aggregate over the frame. Called out as a
+# set because `Policy.min_group_size` (the item-88 k-anonymity floor) has to
+# reject exactly these: the floor is a HAVING on grouped results, and a window
+# aggregate produces no group to filter (see policy_validation).
+_WINDOW_AGGREGATE_FNS = frozenset({"sum", "avg", "min", "max", "count"})
+# Ranking functions take no argument at all.
+_WINDOW_NO_ARG_FNS = frozenset({"row_number", "rank", "dense_rank", "ntile"})
+# T-SQL REQUIRES ORDER BY inside OVER for these; Postgres/SQLite merely make
+# them meaningless without it. Required everywhere — the stricter rule wins, the
+# same reasoning that pins `substring` to exactly 3 arguments.
+_WINDOW_ORDERED_FNS = _WINDOW_NO_ARG_FNS | {"lag", "lead", "first_value", "last_value"}
+# A ROWS/RANGE frame is only accepted by T-SQL for aggregate windows and
+# FIRST_VALUE/LAST_VALUE, so it is rejected elsewhere rather than silently
+# ignored (Postgres tolerates more).
+_WINDOW_FRAMEABLE_FNS = _WINDOW_AGGREGATE_FNS | {"first_value", "last_value"}
+_WINDOW_OFFSET_FNS = frozenset({"lag", "lead"})
+
+WindowBoundKind = Literal[
+    "unbounded_preceding",
+    "preceding",
+    "current_row",
+    "following",
+    "unbounded_following",
+]
+WindowFrameMode = Literal["rows", "range"]
+
+
+class WindowBound(pyd.BaseModel):
+    """One end of a window frame, e.g. {"bound": "preceding", "offset": 6}."""
+
+    bound: WindowBoundKind
+    offset: Optional[int] = pyd.Field(
+        default=None,
+        ge=1,
+        description=(
+            "Distance from the current row — required for preceding/following, "
+            "forbidden for the unbounded/current_row kinds. Capped by "
+            "Policy.max_window_frame_offset."
+        ),
+    )
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _validate_offset(self) -> "WindowBound":
+        needs_offset = self.bound in ("preceding", "following")
+        if needs_offset and self.offset is None:
+            raise ValueError(f"window frame bound {self.bound!r} requires an offset")
+        if not needs_offset and self.offset is not None:
+            raise ValueError(f"window frame bound {self.bound!r} takes no offset")
+        return self
+
+    # SQLAlchemy's frame encoding: None = unbounded (which end is implied by the
+    # bound's position, and WindowFrame rejects the two nonsensical positions),
+    # 0 = current row, -n = n preceding, +n = n following.
+    def sqlalchemy_bound(self) -> Optional[int]:
+        if self.bound in ("unbounded_preceding", "unbounded_following"):
+            return None
+        if self.bound == "current_row":
+            return 0
+        return -self.offset if self.bound == "preceding" else self.offset
+
+    # Ordering position on the frame's number line, used only to reject an
+    # inverted frame (start after end) at the AST layer.
+    def _position(self) -> float:
+        if self.bound == "unbounded_preceding":
+            return float("-inf")
+        if self.bound == "unbounded_following":
+            return float("inf")
+        return float(self.sqlalchemy_bound())
+
+
+class WindowFrame(pyd.BaseModel):
+    """Which rows around the current one the window covers, e.g. the last 7 rows:
+    {"mode": "rows", "start": {"bound": "preceding", "offset": 6},
+     "end": {"bound": "current_row"}}. Omit `frame` entirely for the SQL default.
+    `mode` "range" only accepts unbounded/current_row bounds on MSSQL (T-SQL has
+    no numeric RANGE offsets) — use "rows" for an N-row window.
+    """
+
+    mode: WindowFrameMode
+    start: WindowBound
+    end: WindowBound
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _validate_bounds(self) -> "WindowFrame":
+        if self.start.bound == "unbounded_following":
+            raise ValueError("a window frame cannot start at 'unbounded_following'")
+        if self.end.bound == "unbounded_preceding":
+            raise ValueError("a window frame cannot end at 'unbounded_preceding'")
+        if self.start._position() > self.end._position():
+            raise ValueError("a window frame's start must not come after its end")
+        return self
+
+
+class WindowSpec(pyd.BaseModel):
+    """The OVER (...) clause: which rows the window covers and in what order.
+    Every column ref here must be a real Table.Column — no dialect allows an
+    OVER clause to reference another select item's alias.
+    """
+
+    partition_by: List[str] = pyd.Field(
+        default_factory=list,
+        description=(
+            "Table.Column refs to compute the window within (omit for one "
+            "partition over all rows). Counted against Policy.max_partition_by."
+        ),
+    )
+    order_by: List[OrderBySpec] = pyd.Field(
+        default_factory=list,
+        description=(
+            "Ordering inside each partition; each col must be a Table.Column, "
+            "never a select alias. Required for the ranking/offset functions and "
+            "whenever `frame` is set."
+        ),
+    )
+    frame: Optional[WindowFrame] = pyd.Field(
+        default=None,
+        description=(
+            "ROWS/RANGE frame. Omit for the dialect's SQL-standard default frame "
+            "(with order_by: everything up to the current row's peers; without it: "
+            "the whole partition). Only valid for sum/avg/min/max/count/"
+            "first_value/last_value."
+        ),
+    )
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _validate_refs(self) -> "WindowSpec":
+        for ref in self.partition_by:
+            _require_column_ref(ref, "window partition_by")
+        for order in self.order_by:
+            _require_column_ref(order.col, "window order_by col")
+        return self
+
+
+class WindowSelectItem(pyd.BaseModel):
+    """A window function projection — fn(arg) OVER (partition/order/frame) — for
+    running totals, moving averages, rank-in-place, and lag/lead comparisons.
+    Unlike an aggregate it does NOT collapse rows, and unlike `top_n` it does not
+    filter them. `over` is required (use {} for OVER ()); `as` names the output.
+    Cannot be combined with group_by or aggregate select items, and cannot be
+    nested inside another expression.
+    """
+
+    fn: WindowFn
+    over: WindowSpec = pyd.Field(
+        description="The OVER (...) clause — {} for OVER (), i.e. one partition of all rows."
+    )
+    arg: Optional["Expression"] = pyd.Field(
+        default=None,
+        description=(
+            "The scalar expression the function reads — required for sum/avg/min/max/"
+            "lag/lead/first_value/last_value, optional for count (omit for COUNT(*)), "
+            "and forbidden for row_number/rank/dense_rank/ntile."
+        ),
+    )
+    offset: Optional[int] = pyd.Field(
+        default=None,
+        ge=1,
+        description="lag/lead only: how many rows back/forward to read (default 1).",
+    )
+    buckets: Optional[int] = pyd.Field(
+        default=None,
+        ge=1,
+        description="ntile only: how many buckets to split each partition into.",
+    )
+    alias: str = pyd.Field(
+        validation_alias=pyd.AliasChoices("as", "alias"),
+        serialization_alias="as",
+    )
+
+    model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
+
+    @pyd.model_validator(mode="after")
+    def _validate_shape(self) -> "WindowSelectItem":
+        if self.fn in _WINDOW_NO_ARG_FNS:
+            if self.arg is not None:
+                raise ValueError(f"window function {self.fn} takes no 'arg'")
+        elif self.arg is None and self.fn != "count":
+            raise ValueError(f"window function {self.fn} requires an 'arg'")
+        if self.offset is not None and self.fn not in _WINDOW_OFFSET_FNS:
+            raise ValueError(f"'offset' is only valid for lag/lead, not {self.fn}")
+        if self.fn == "ntile" and self.buckets is None:
+            raise ValueError("window function ntile requires 'buckets'")
+        if self.buckets is not None and self.fn != "ntile":
+            raise ValueError(f"'buckets' is only valid for ntile, not {self.fn}")
+        if self.over.frame is not None and self.fn not in _WINDOW_FRAMEABLE_FNS:
+            raise ValueError(
+                f"a ROWS/RANGE frame is not valid for window function {self.fn} — "
+                "frames apply to sum/avg/min/max/count/first_value/last_value"
+            )
+        if not self.over.order_by and (
+            self.fn in _WINDOW_ORDERED_FNS or self.over.frame is not None
+        ):
+            reason = "a frame" if self.fn not in _WINDOW_ORDERED_FNS else f"{self.fn}"
+            raise ValueError(f"{reason} requires over.order_by")
+        return self
+
+    def is_aggregate_window(self) -> bool:
+        """Whether this window computes an aggregate over its frame — the form the
+        k-anonymity floor (`Policy.min_group_size`) cannot enforce."""
+        return self.fn in _WINDOW_AGGREGATE_FNS
+
+
 SelectItem = Union[
     str,
     AggregateSelectItem,
@@ -530,6 +802,7 @@ SelectItem = Union[
     ScalarFunctionSelectItem,
     CaseSelectItem,
     ExpressionSelectItem,
+    WindowSelectItem,
 ]
 
 # Select item types that make a query an aggregate query for is_aggregate/
@@ -760,26 +1033,6 @@ WhereNode = Union[Predicate, WhereGroup]
 # once every model in it exists.
 
 
-class OrderBySpec(pyd.BaseModel):
-    """Sort key. dir must be the exact string "asc" or "desc" — other spellings
-    (e.g. "direction", "sort", a boolean desc flag) are rejected, not silently
-    defaulted to ascending.
-    """
-
-    col: str
-    dir: SortDir = "asc"
-    nulls: Optional[Literal["first", "last"]] = pyd.Field(
-        default=None,
-        description=(
-            "Where NULLs sort relative to non-NULL values — omit for each dialect's "
-            "own default ordering. Applied identically across dialects even though "
-            "MSSQL has no native NULLS FIRST/LAST syntax (emulated internally)."
-        ),
-    )
-
-    model_config = pyd.ConfigDict(extra="forbid")
-
-
 class TopNSpec(pyd.BaseModel):
     """Rank rows within partitions and keep the top n per partition.
 
@@ -912,6 +1165,25 @@ class StructuredQuery(pyd.BaseModel):
                 )
         return self
 
+    @pyd.model_validator(mode="after")
+    def _validate_window_scope(self) -> "StructuredQuery":
+        """A window function (item 101) is computed over the query's ROW scope, so
+        it cannot coexist with grouping — SQL would evaluate it after the GROUP BY
+        over columns that no longer exist per row, and expressing a window over
+        *aggregated* values needs the aggregation materialized as a derived table
+        (TODO.md item 105). Rejected here at the AST layer: no DB touch, dialect-
+        independent, and the same structural class of check as the alias rule above.
+        """
+        if not any(isinstance(item, WindowSelectItem) for item in self.select):
+            return self
+        if self.group_by or any(isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in self.select):
+            raise ValueError(
+                "a window function cannot be combined with group_by or aggregate "
+                "select items — a window projects a value per row, so aggregate in "
+                "one query and window over that result in a second query"
+            )
+        return self
+
 
 # StructuredQuery references Predicate (via WhereNode) and Predicate now references
 # StructuredQuery (value_subquery) — a recursive cycle (TODO.md item 97). CaseWhen
@@ -926,6 +1198,7 @@ CastExpr.model_rebuild()
 CaseExpr.model_rebuild()
 AggregateSelectItem.model_rebuild()
 ExpressionSelectItem.model_rebuild()
+WindowSelectItem.model_rebuild()
 Predicate.model_rebuild()
 WhereGroup.model_rebuild()
 CaseWhen.model_rebuild()

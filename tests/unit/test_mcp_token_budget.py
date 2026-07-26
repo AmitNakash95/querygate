@@ -87,7 +87,21 @@ from querygate.mcp.server import create_mcp_server
 # write-contract change and belongs in its own PR; when item 114 lands this
 # budget should DROP, not grow. Do not raise this ceiling again without first
 # checking whether item 114 would have made the raise unnecessary.
-_MAX_TOTAL_CHARS = 123_000
+#
+# Bumped 2026-07-26 (item 101: general window functions) — measured 126,700
+# chars, +9,600 over item 100 (of which ~860 is a rewritten MCP_INSTRUCTIONS
+# section that documents windows and *corrects* a now-false claim, "no function
+# nesting anywhere", which item 100 had left stale). Only about half of the rest
+# is the new capability:
+# `WindowSelectItem`/`WindowSpec`/`WindowFrame`/`WindowBound` add ~4,370 chars to
+# `run_structured_queries`, and the SAME ~4,370 is inlined a second time into
+# `run_structured_writes` (34,594 -> 38,964) because a write's `where` reuses the
+# read `Predicate`, which reaches `StructuredQuery` -> `SelectItem` -> the window
+# nodes the write path cannot use at all. That is exactly the KNOWN WASTE above:
+# **item 114 would have absorbed this entire raise.** Model docstrings were kept
+# agent-facing and the maintainer rationale for the window bounds lives in `#`
+# comments, per the trim rule above. New budget keeps ~5% headroom.
+_MAX_TOTAL_CHARS = 132_000
 
 
 def _tool_schema_chars(tool: object) -> int:

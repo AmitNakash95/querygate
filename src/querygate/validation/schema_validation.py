@@ -38,6 +38,7 @@ from querygate.query_ast.models import (
     StringAggSelectItem,
     StructuredQuery,
     WhereNode,
+    WindowSelectItem,
     _AGGREGATE_SELECT_ITEM_TYPES,
 )
 from querygate.schema.reflection import get_table_schema, sanitize_table_name
@@ -201,7 +202,10 @@ def select_item_expressions(item: SelectItem) -> Iterator[Expression]:
         yield item.expr
     elif isinstance(item, CaseSelectItem):
         yield item.as_expression()
-    elif isinstance(item, AggregateSelectItem) and item.arg is not None:
+    elif isinstance(item, (AggregateSelectItem, WindowSelectItem)) and item.arg is not None:
+        # A window's `arg` is an ordinary Expression (item 101), so the expression
+        # depth/node caps, the nested-CASE rules, and the ref walk all reach into
+        # a window argument with no extra wiring.
         yield item.arg
 
 
@@ -233,8 +237,9 @@ def iter_scope_case_conditions(query: StructuredQuery) -> Iterator[WhereNode]:
 def select_item_column_refs(item: SelectItem) -> Iterator[str]:
     """Every Table.Column ref a single select item touches, across every
     variant — a bare string, an aggregate/date_bucket's `.col`, a scalar
-    function's column-typed args, a CASE expression's when/then/else, or any
-    `Expression` the item carries (item 100). Shared by schema validation
+    function's column-typed args, a CASE expression's when/then/else, any
+    `Expression` the item carries (item 100), or a window's arg/partition/order
+    refs (item 101). Shared by schema validation
     (which tables/columns to reflect/resolve) and policy validation (which
     refs column-level policy must check).
     """
@@ -245,6 +250,18 @@ def select_item_column_refs(item: SelectItem) -> Iterator[str]:
         for arg in item.args:
             if isinstance(arg, ColArg):
                 yield arg.col
+        return
+    if isinstance(item, WindowSelectItem):
+        # A window carries refs in THREE places (item 101) — its `arg` expression,
+        # its PARTITION BY, and its ORDER BY — and all three must be yielded or a
+        # denied/masked column could ride into the query inside an OVER clause.
+        # Must come before the Expression branch below, which would return early
+        # after the `arg` alone.
+        if item.arg is not None:
+            yield from expression_column_refs(item.arg)
+        yield from item.over.partition_by
+        for order in item.over.order_by:
+            yield order.col
         return
     # ExpressionSelectItem / CaseSelectItem / an aggregate with an `arg` are all
     # Expression-carrying; one walk covers every ref at any depth, including the
@@ -299,8 +316,13 @@ class RefPosition(enum.Enum):
     on: a *bare* top-level select projection item is the only position a
     masked column (TODO.md item 49) is allowed to appear — every other
     position would leak the raw value. `SELECT_NESTED` is a column inside a
-    scalar-fn/CASE/aggregate select item, which is NOT a bare projection and so
-    is subject to the masked-column rule like any other non-projection ref.
+    scalar-fn/CASE/aggregate/window select item, which is NOT a bare projection
+    and so is subject to the masked-column rule like any other non-projection
+    ref. A window's `arg`/PARTITION BY/ORDER BY refs (item 101) all land in
+    `SELECT_NESTED` rather than taking positions of their own: every one of them
+    is a non-projection use inside a select item, which is the only distinction
+    enforcement branches on, and inventing three more members that no rule reads
+    would be taxonomy without enforcement.
     """
 
     SELECT_PROJECTION_BARE = "select_projection_bare"
@@ -489,6 +511,10 @@ def _scalar_function_alias(item: ScalarFunctionSelectItem) -> str:
 
 
 def _select_aliases(query: StructuredQuery, tables: Dict[str, sa.Table]) -> Set[str]:
+    """Select-item output names `top_n` may rank by. A `WindowSelectItem`'s alias
+    is deliberately absent (item 101): `top_n`'s rank is computed in the same
+    SELECT, so ranking by a window's output would nest one window inside another's
+    OVER clause, which no dialect allows."""
     aliases: Set[str] = set()
     for item in query.select:
         if isinstance(item, AggregateSelectItem):

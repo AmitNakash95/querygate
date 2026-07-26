@@ -203,7 +203,9 @@ no trust and cannot bypass any guardrail. Predicate operators (`==`, `>`,
 `.in_`, `.between`, `.is_null`), boolean groups (`and_`/`or_`/`not_`),
 aggregates (`agg.*`), `date_bucket`, `string_agg`/`array_agg`,
 `percentile_cont`, scalar functions (`fn`/`fn_select`), `case`/`when`,
-`top_n`, and a bounded `IN (subquery)` (a predicate's `value_subquery` — a
+computed expressions (`expr`/`expr_fn`/`cast` and Python `+ - * /` over
+columns; item 100), window functions (`window`/`frame`; item 101), `top_n`,
+and a bounded `IN (subquery)` (a predicate's `value_subquery` — a
 nested `StructuredQuery`, not raw SQL; uncorrelated, single-connection,
 depth-capped, with all caps summed tree-wide; item 97) cover the AST.
 Runnable end-to-end demo:
@@ -1211,7 +1213,13 @@ MCP with `connection: "demo"` and `queries: [<that object>]` — runs it.
 Supported: multi-column select, inner/left joins (including cross-connection
 joins within a policy `join_group`), nested and/or `where`, `group_by` /
 `having`, `order_by`, `limit`/`offset`, aggregate and date-bucket select
-items, and `top_n` per-partition ranking (top-N-per-group).
+items, `top_n` per-partition ranking (top-N-per-group), computed **expressions**
+anywhere a scalar belongs — arithmetic, nested functions, casts, `CASE`,
+including inside an aggregate, so `SUM(quantity * unit_price)` and conditional
+aggregation are expressible (item 100) — and **window functions** for running
+totals, moving averages, rank-in-place and lag/lead (item 101). Every one of
+those is a typed AST node checked against the policy and the live schema; none
+of them is a SQL string.
 
 ## Example MCP usage
 

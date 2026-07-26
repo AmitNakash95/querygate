@@ -10,7 +10,13 @@ from typing import List, Optional, Set
 
 from querygate.core.exceptions import PolicyViolationError
 from querygate.policy.models import Policy
-from querygate.query_ast.models import CaseExpr, Predicate, StructuredQuery, WhereNode
+from querygate.query_ast.models import (
+    CaseExpr,
+    Predicate,
+    StructuredQuery,
+    WhereNode,
+    WindowSelectItem,
+)
 from querygate.validation.schema_validation import (
     RefPosition,
     effective_name_map,
@@ -65,6 +71,11 @@ def _scope_case_condition_predicate_count(query: StructuredQuery) -> int:
     `iter_scope_case_conditions` rather than only the select list — otherwise
     burying the CASE one level deeper would dodge the budget entirely."""
     return sum(1 for cond in iter_scope_case_conditions(query) for _ in iter_where_predicates(cond))
+
+
+def _scope_windows(query: StructuredQuery) -> List[WindowSelectItem]:
+    """Every window projection in one scope (item 101)."""
+    return [item for item in query.select if isinstance(item, WindowSelectItem)]
 
 
 def _scope_expression_node_count(query: StructuredQuery) -> int:
@@ -123,10 +134,22 @@ def _enforce_tree_wide_caps(scopes: List[StructuredQuery], policy: Policy) -> No
             f"expression node count {total} exceeds max of {policy.max_expression_nodes}"
             f"{_suffix(total, nested)}"
         )
-    total = sum(len(q.top_n.partition_by) for q in scopes if q.top_n is not None)
+    windows = [window for q in scopes for window in _scope_windows(q)]
+    total = len(windows)
+    if total > policy.max_window_specs:
+        raise PolicyViolationError(
+            f"window function count {total} exceeds max_window_specs of "
+            f"{policy.max_window_specs}{_suffix(total, nested)}"
+        )
+    # One budget for every PARTITION BY in the query tree, whether it came from
+    # `top_n` or from a window projection — they are the same cost (a partitioned
+    # sort), so they share the cap rather than each getting their own N.
+    total = sum(len(q.top_n.partition_by) for q in scopes if q.top_n is not None) + sum(
+        len(window.over.partition_by) for window in windows
+    )
     if total > policy.max_partition_by:
         raise PolicyViolationError(
-            f"top_n.partition_by exceeds max of {policy.max_partition_by} columns"
+            f"partition_by exceeds max of {policy.max_partition_by} columns"
             f"{_suffix(total, nested)}"
         )
     total = sum(q.top_n.n for q in scopes if q.top_n is not None)
@@ -169,6 +192,40 @@ def _validate_scope(query: StructuredQuery, policy: Policy) -> None:
                 raise PolicyViolationError(
                     f"case when branches exceeds max of {policy.max_case_branches}"
                 )
+
+    for window in _scope_windows(query):
+        # The only unbounded magnitudes in a window spec: a frame's N PRECEDING/
+        # N FOLLOWING distance and a lag/lead row offset. Both are how far from the
+        # current row the engine must reach, so one cap covers both.
+        offsets = [window.offset] if window.offset is not None else []
+        if window.over.frame is not None:
+            offsets += [
+                bound.offset
+                for bound in (window.over.frame.start, window.over.frame.end)
+                if bound.offset is not None
+            ]
+        for offset in offsets:
+            if offset > policy.max_window_frame_offset:
+                raise PolicyViolationError(
+                    f"window row offset {offset} exceeds max_window_frame_offset of "
+                    f"{policy.max_window_frame_offset}"
+                )
+        # k-anonymity (item 88) is enforced as `HAVING count(*) >= min_group_size`
+        # on AGGREGATE queries. An aggregate window produces no group to filter —
+        # `COUNT(*) OVER ()` would report a below-floor count that the aggregate
+        # path suppresses, and no in-statement construct can re-impose the floor
+        # without a QUALIFY/derived table. So when the floor is configured, an
+        # aggregate window is rejected rather than silently exempted (maintainer
+        # decision, 2026-07-26 Decision Log). Ranking/offset windows stay allowed:
+        # they only surface values the caller may already project bare.
+        if policy.min_group_size is not None and window.is_aggregate_window():
+            raise PolicyViolationError(
+                f"aggregate window function {window.fn!r} is not allowed when "
+                f"min_group_size is set: the k-anonymity floor is enforced on grouped "
+                "results, and a window aggregate has no group to apply it to. Use an "
+                "aggregate query with group_by, or a ranking/offset window "
+                "(row_number/rank/dense_rank/ntile/lag/lead/first_value/last_value)."
+            )
 
     # In-list-size is checked on every predicate the scope can carry: WHERE tree,
     # HAVING tree, and every searched-CASE condition tree (item 99), including
