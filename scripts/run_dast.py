@@ -63,11 +63,11 @@ import re
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,7 +88,10 @@ SCHEMATHESIS_IMAGE = os.environ.get(
 # QUERYGATE_DAST_MAX_EXAMPLES for a heavier sweep.
 MAX_EXAMPLES = os.environ.get("QUERYGATE_DAST_MAX_EXAMPLES", "25")
 READINESS_TIMEOUT_S = 30
-# 137/143 = 128 + SIGKILL/SIGTERM; subprocess also reports these as -9/-15.
+# Schemathesis exits 1 when a check fails; anything else non-zero means it did
+# not run (2 = usage error, 137/143 = 128 + SIGKILL/SIGTERM, also reported as
+# -9/-15 by subprocess).
+_FINDINGS_EXIT_CODE = 1
 _KILLED_EXIT_CODES = frozenset({137, 143, -9, -15})
 _SCHEMA_REF_PREFIX = "#/components/schemas/"
 
@@ -124,6 +127,56 @@ def _schema_refs(node: object, found: set) -> None:
     elif isinstance(node, list):
         for value in node:
             _schema_refs(value, found)
+
+
+def _serve_schema(document: dict) -> tuple[ThreadingHTTPServer, int]:
+    """Serve ``document`` as JSON on an ephemeral port, for the scanner to fetch.
+
+    The pruned schema is handed over via HTTP rather than a Docker bind mount.
+    A mount looked simpler and worked on macOS, but failed on the Linux CI
+    runner with "The specified file does not exist": `tempfile` directories are
+    created 0700 for the *creating* user, and the Schemathesis image runs as a
+    different UID, so the container could not traverse into it. Docker Desktop
+    hides that with UID translation; a Linux runner does not.
+
+    Serving over HTTP has no filesystem, ownership, or path-translation
+    semantics to get wrong, and it is how the scanner consumed the schema
+    originally — the only change is that it now reads our pruned copy.
+    """
+    payload = json.dumps(document).encode("utf-8")
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler's API
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args: object) -> None:
+            """Silence per-request logging; the scanner's own output is enough."""
+
+    # Binds all interfaces for the same reason the app does: the scanner reaches
+    # it from inside a container over the Docker host gateway.
+    httpd = ThreadingHTTPServer((BIND_HOST, 0), _Handler)  # nosec B104 — ephemeral local server
+    threading.Thread(target=httpd.serve_forever, name="dast-schema", daemon=True).start()
+    port = httpd.server_address[1]
+
+    # Prove it serves valid JSON before handing the URL to the scanner. Without
+    # this, a broken handler surfaces as Schemathesis failing to load the schema
+    # — which reads like a finding rather than a bug in this script, the same
+    # confusion the unreadable bind mount caused.
+    try:
+        with urllib.request.urlopen(  # nosec B310 — fixed loopback URL to our own server
+            f"http://{LOOPBACK}:{port}/openapi.json", timeout=10
+        ) as resp:
+            json.load(resp)
+    except Exception:
+        httpd.shutdown()
+        httpd.server_close()
+        raise
+
+    return httpd, port
 
 
 def prune_schema(spec: dict) -> dict:
@@ -235,12 +288,12 @@ def main() -> int:
         print(
             f"[dast] schema pruned to {len(pruned['paths'])}/{len(spec['paths'])} paths and "
             f"{len(pruned.get('components', {}).get('schemas', {}))}/{len(all_components)} "
-            "component schemas (AST-accepting operations are covered by tests/security/)"
+            "component schemas (AST-accepting operations are covered by tests/security/)",
+            flush=True,
         )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            (Path(tmpdir) / "openapi.json").write_text(json.dumps(pruned), encoding="utf-8")
-
+        schema_server, schema_port = _serve_schema(pruned)
+        try:
             cmd = [
                 "docker",
                 "run",
@@ -248,14 +301,12 @@ def main() -> int:
                 # Make the host reachable as host.docker.internal on Linux CI too
                 # (Docker Desktop already provides it; this is harmless there).
                 "--add-host=host.docker.internal:host-gateway",
-                # The pruned document, mounted read-only. Schemathesis reads the
-                # schema from here but sends requests to --base-url, so the app
-                # under test is still the real running server.
-                "-v",
-                f"{tmpdir}:/schema:ro",
                 SCHEMATHESIS_IMAGE,
                 "run",
-                "/schema/openapi.json",
+                # The pruned document, served over HTTP from this process — no
+                # bind mount, so no UID/permission divergence between macOS and
+                # a Linux CI runner (see _serve_schema).
+                f"http://{CONTAINER_HOST}:{schema_port}/openapi.json",
                 # FastAPI's documented operation paths already include the /api/v1
                 # prefix, so the base URL is the server root — not the prefix, or
                 # every request double-prefixes to /api/v1/api/v1/... and 404s.
@@ -274,33 +325,49 @@ def main() -> int:
                 "--fixups",
                 "fast_api",
             ]
-            print(f"[dast] fuzzing {container_base}{API_PREFIX} (max-examples={MAX_EXAMPLES})\n")
+            print(
+                f"[dast] fuzzing {container_base}{API_PREFIX} (max-examples={MAX_EXAMPLES})\n",
+                flush=True,
+            )
             result = subprocess.run(cmd, cwd=ROOT, env=env)  # nosec B603 — fixed argv, no shell
+        finally:
+            schema_server.shutdown()
+            schema_server.server_close()
 
         if result.returncode == 0:
             print(
                 "\n[dast] PASS — no server errors and all schema-violating input "
-                "was rejected at the validation boundary."
+                "was rejected at the validation boundary.",
+                flush=True,
             )
-        elif result.returncode in _KILLED_EXIT_CODES:
-            # Distinguish "the scanner died" from "the scanner found something".
-            # Reporting a SIGKILL as a security finding sends the next person
-            # hunting a nonexistent 5xx — which is exactly what happened when a
-            # recursive-schema blow-up OOM-killed the container (see the module
-            # docstring), and the misleading message cost real debugging time.
+        elif result.returncode != _FINDINGS_EXIT_CODE:
+            # Anything that is not "clean" (0) or "found something" (1) means the
+            # scanner failed to run: a usage error (2), or a signal (137/143 =
+            # 128 + SIGKILL/SIGTERM, typically out-of-memory). Saying "found a
+            # server error" for those sends the next person hunting a 5xx that
+            # never existed — which is exactly what happened twice while fixing
+            # this job, first for an OOM kill and then for an unreadable schema
+            # mount. Both times the misleading message cost real debugging time.
+            reason = (
+                "killed by a signal — usually out-of-memory while processing the schema; "
+                "check whether a new recursive model reached components.schemas and "
+                "whether prune_schema() still removes it (tests/unit/test_run_dast.py "
+                "catches that in the fast suite)"
+                if result.returncode in _KILLED_EXIT_CODES
+                else "could not run — check the scanner's own error above (bad arguments, "
+                "or it could not fetch the schema)"
+            )
             print(
-                f"\n[dast] ERROR — the scanner was killed (exit {result.returncode}); it did "
-                "NOT report a finding. Usually out-of-memory while processing the schema: "
-                "check whether a new recursive model reached components.schemas, and whether "
-                "prune_schema() still removes it. tests/unit/test_run_dast.py catches this "
-                "case in the fast suite.",
+                f"\n[dast] ERROR — the scanner {reason}. It did NOT report a finding.",
                 file=sys.stderr,
+                flush=True,
             )
         else:
             print(
                 "\n[dast] FAIL — Schemathesis found a server error or an accepted "
                 "malformed payload. See the report above.",
                 file=sys.stderr,
+                flush=True,
             )
         return result.returncode
     finally:
