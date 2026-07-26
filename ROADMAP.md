@@ -515,6 +515,12 @@ already-planned initiatives.
 
 ### Review Phase 3 — Architecture and maintainability
 
+- [ ] **117** — `date_bucket` over a non-temporal column diverges across dialects
+  (Postgres errors; MSSQL silently returns a 1900-epoch value). *The third date
+  primitive, left uncovered by item 102's operand rule because rejecting it is a
+  behavior change for an already-shipped feature — a deliberate decision, not a
+  side effect. Surfaced by item 102's confirmation review.* **Depends on 102.**
+
 - [x] **116** — A write's WHERE was exempt from `max_where_depth`,
   `max_where_predicates` and `max_in_list_size`. ✅ **Shipped** (each rule is now a
   single function both paths reach, verified by spying rather than by name identity;

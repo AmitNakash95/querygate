@@ -862,7 +862,6 @@ def _validate_date_operands(query: StructuredQuery, tables: Dict[str, sa.Table])
     than guessed at — this rejects what is known-wrong, never what is merely
     unrecognized.
     """
-    name_to_physical = effective_name_map(query)
     for expr in iter_scope_expressions(query):
         for node in iter_expression_nodes(expr):
             if isinstance(node, ExtractExpr):
