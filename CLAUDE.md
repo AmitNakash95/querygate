@@ -131,6 +131,7 @@ Prefer these skills over improvising the workflow; they encode the repo's rules.
 | Continuing development in priority order | `roadmap-next` (or `next-item` for capacity-scoped selection) |
 | Marking a fully-shipped item done + archiving it | `ship-item` |
 | Touching the request pipeline, connections models, catalog governance, audit, or any REST/MCP surface | `security-invariant-check` (before commit) |
+| Before declaring any top-level user task complete | `auditors` — mandatory final completion gate; run it even when every reviewer is N/A |
 | Adding/extending per-dialect SQL rendering | `dialect-primitive` |
 | About to commit a non-trivial change / prep a release | `release-gate` |
 | After a feature/design change touched docs-worthy surface | `product-guide-sync` |
@@ -145,11 +146,29 @@ Prefer these skills over improvising the workflow; they encode the repo's rules.
 
 ## Working agreement — definition of done + self-review
 
-A task isn't done when it "works." Before reporting completion on any non-trivial
-change (skip only trivial one-liners, pure formatting, or explicitly-throwaway
-work):
+A task isn't done when it "works."
 
-**Definition of done:**
+**Mandatory final completion gate — every top-level user task:**
+
+- Run `auditors` after implementation, docs, and relevant checks, and before
+  committing (when requested) or sending the final completion response. This is
+  mandatory for trivial, formatting-only, docs-only, test-only, and read-only
+  work too. If no reviewer applies, the skill must record each reviewer as N/A;
+  do not silently skip it.
+- Capture `git status --short` before editing so the audit can separate the
+  task's delta from unrelated pre-existing work.
+- Do not declare completion while a reviewer is pending, a finding is
+  untriaged, an accepted fix is unverified, or an owner decision is outstanding.
+  If the tree changes after the audit, rerun the affected review on the final
+  tree.
+- Reviewer subagents launched by `auditors` are internal stages of their parent
+  audit, not top-level user tasks. They return their report to the parent and
+  **must not invoke `auditors` recursively**.
+
+**Definition of done for non-trivial repository changes** (skip the following
+change-specific checks only for trivial one-liners, pure formatting,
+read-only/report-only tasks, or explicitly-throwaway work):
+
 - `poetry run black src/ tests/` clean, and the relevant test tier green
   (`pytest -m unit` at minimum; add integration/security/real-db per the surface
   you touched).
