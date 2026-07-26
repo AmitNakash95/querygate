@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import pydantic as pyd
 
-from querygate.policy.models import CostEstimationMode
+from querygate.policy.models import GUARDRAIL_FIELDS, CostEstimationMode, Policy
 from querygate.query_ast.models import StructuredQuery
 
 
@@ -295,28 +295,23 @@ class MandatoryFilterReadiness(pyd.BaseModel):
     model_config = pyd.ConfigDict(extra="forbid")
 
 
-class EffectiveGuardrails(pyd.BaseModel):
-    max_joins: int
-    max_select_columns: int
-    max_where_depth: int
-    max_group_by: int
-    max_limit: int
-    max_limit_aggregate: int
-    default_limit: int
-    max_top_n: int
-    max_partition_by: int
-    max_batch_size: int
-    max_response_bytes: int
-    timeout_seconds: int
-    max_concurrency: int
-    concurrency_wait_seconds: float
-    max_queue_depth: Optional[int]
-    max_queue_depth_per_principal: Optional[int]
-    max_estimated_rows: Optional[int]
-    max_estimated_cost: Optional[float]
-    cost_estimation_mode: CostEstimationMode
-
-    model_config = pyd.ConfigDict(extra="forbid")
+# Built FROM `Policy` rather than hand-listed (TODO.md item 115). The previous
+# hand-written version had silently fallen nine caps behind — items 68-72's
+# WHERE/CASE guardrails, 88's k-anonymity floor, 97's subquery depth, 100's
+# expression bounds and 101's window bounds were all absent, so an operator
+# asking "what are my limits" got an answer that omitted them. Generating the
+# model keeps every field's type and optionality identical to Policy's own, so
+# the two cannot disagree either. Widening a response model is additive:
+# existing consumers are unaffected.
+EffectiveGuardrails = pyd.create_model(
+    "EffectiveGuardrails",
+    __config__=pyd.ConfigDict(extra="forbid"),
+    __doc__=(
+        "Every scalar guardrail in force for a connection, derived from `Policy` "
+        "so a newly added cap is reported here automatically."
+    ),
+    **{name: (Policy.model_fields[name].annotation, ...) for name in GUARDRAIL_FIELDS},
+)
 
 
 CandidateSimulationReasonCode = Literal[

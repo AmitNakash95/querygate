@@ -494,13 +494,15 @@ already-planned initiatives.
 
 ### Review Phase 3 — Architecture and maintainability
 
-- [ ] **115** — The three hand-maintained guardrail-field lists
-  (`admin/access_diff.py`, `admin/models.py`'s `EffectiveGuardrails`,
-  `help/service.py`) have drifted from `Policy`'s cap set — nine caps from items
-  68–72/88/97/100/101 are missing, so the semantic access diff can report "no
-  change" for a loosened cap. *Surfaced 2026-07-26 while adding item 101's two
-  caps. Sequenced here, not in a Phase, for the same reason as 114: maintainability
-  on already-shipped surfaces. Widens a REST response model, so it is its own PR.*
+- [x] **115** — The hand-maintained guardrail-field lists had drifted from
+  `Policy`'s cap set. ✅ **Shipped** (all **four** copies —
+  `admin/access_diff.py`, `EffectiveGuardrails`, `help/service.py` and the admin
+  UI panel — now derive from one `GUARDRAIL_FIELDS`; `EffectiveGuardrails` is
+  generated from `Policy`, so it cannot drift in membership or type;
+  `approval_sensitivities` gets its own diff change; and a new cap must state its
+  direction or a test fails — which caught two unconsidered fields on its first
+  run). *Surfaced 2026-07-26 while adding item 101's two caps: nine caps were
+  invisible to at least one surface, so loosening one was diffed as "no change".*
 
 - [ ] **114** — The write tool's MCP schema advertises read-only predicate
   fields it rejects (`expr`/`value_expr`/`value_subquery`, plus the whole read

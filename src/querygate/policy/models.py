@@ -479,3 +479,87 @@ class Policy(pyd.BaseModel):
                 if mask.column.lower() == col:
                     return mask
         return None
+
+
+# ---------------------------------------------------------------------------
+# The guardrail field set (TODO.md item 115) — ONE derivation, four consumers.
+#
+# Four surfaces answer "which caps are in force": the semantic access diff
+# (`admin/access_diff.py`, item 40), the effective-guardrails view
+# (`admin/models.py`, items 45/95), the queryable product guide
+# (`help/service.py`), and the admin UI's policy panel
+# (`api/admin_ui_routes.py`). Each used to hand-list the fields, and all four
+# had rotted: nine caps added by items 68-72, 88, 97, 100 and 101 were missing
+# from at least one, so a config change that loosened `max_expression_nodes` or
+# `max_window_specs` was reported to a reviewer as **no guardrail change**.
+#
+# Derived, not listed — the same posture as
+# `sqlalchemy_compiler.DIALECT_ROUTED_EXPR_FNS`. A new cap on `Policy` is
+# reported everywhere by default; a new field that is NOT a cap must be named
+# below, with a reason. That inverts the failure mode: forgetting is now
+# loud (a non-scalar field trips `test_policy_guardrails.py`) instead of silent.
+# ---------------------------------------------------------------------------
+
+# Policy fields that are not scalar caps. Each is excluded for a stated reason,
+# NOT because it doesn't matter:
+#   * the structural access rules are already diffed field-by-field by
+#     access_diff (tables, columns, masks, row filters) — reporting them again
+#     as opaque scalars would be worse, not better;
+#   * `write` is a nested WritePolicy with its own caps; diffing those needs its
+#     own change category and is deliberately out of scope here;
+#   * `approval_sensitivities` is a list of labels, so it has no scalar
+#     permissiveness — access_diff reports it with its own dedicated change.
+_NON_GUARDRAIL_POLICY_FIELDS = frozenset(
+    {
+        "enabled",
+        "allowed_tables",
+        "denied_tables",
+        "allowed_columns",
+        "denied_columns",
+        "column_masks",
+        "mandatory_row_filters",
+        "join_group",
+        "write",
+        "approval_sensitivities",
+    }
+)
+
+# Declaration order, so every consumer reports the same fields in the same
+# deterministic order without maintaining an order of its own.
+GUARDRAIL_FIELDS: tuple[str, ...] = tuple(
+    name for name in Policy.model_fields if name not in _NON_GUARDRAIL_POLICY_FIELDS
+)
+
+# Caps where a HIGHER value is MORE restrictive — the opposite of every other
+# entry, and the trap a naive "just add the field names" fix falls into.
+# `min_group_size`: a larger k suppresses more result groups.
+# `quota_window_seconds`: the same request budget spread over a longer window is
+# a lower sustained rate.
+INVERTED_GUARDRAIL_FIELDS = frozenset({"min_group_size", "quota_window_seconds"})
+
+# Deriving the field set fixes "a new cap is invisible", but a new cap could
+# still be diffed in the WRONG DIRECTION — the same silent-wrongness one layer
+# down. Direction is guessable from the name for the common case (`max_*` is a
+# ceiling: higher = looser), so those need no ceremony. Every guardrail whose
+# name does NOT say which way it runs must be listed here, meaning its direction
+# was actually considered; `test_policy_guardrails.py` fails until it is. Being
+# in this set is not a claim about direction — `INVERTED_GUARDRAIL_FIELDS` above
+# is that — only that someone decided.
+_DIRECTION_REVIEWED_GUARDRAILS = frozenset(
+    {
+        "default_limit",  # rows returned when the caller asks for none: higher = looser
+        "timeout_seconds",  # longer query budget = looser
+        "concurrency_wait_seconds",  # longer admission wait = looser
+        "quota_window_seconds",  # INVERTED: same budget over longer = lower rate
+        "min_group_size",  # INVERTED: a larger k-anonymity floor hides more
+        "cost_estimation_mode",  # OBSERVE never blocks; ENFORCE can
+        "log_query_literals",  # logging raw literals is the looser posture
+        # Approval thresholds, not caps: a HIGHER threshold means fewer queries
+        # are stopped for a human, so higher is looser — the normal direction,
+        # but stated because "approval_max_*" does not read like a ceiling on
+        # what a query may do. (This test caught both of these on its first run,
+        # which is the point of it.)
+        "approval_max_estimated_rows",
+        "approval_max_estimated_cost",
+    }
+)

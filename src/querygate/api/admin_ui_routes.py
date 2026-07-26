@@ -26,6 +26,7 @@ from querygate.core.config import AppConfig, AuditSinkBackend
 from querygate.core.exceptions import PolicyViolationError
 from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE, ADMIN_CONFIG_WRITE_SCOPE
 from querygate.policy.loader import PolicyStore, get_policy_store
+from querygate.policy.models import GUARDRAIL_FIELDS
 from querygate.templates.models import QueryTemplateFile
 
 _AUDIT_EVENT_ADAPTER = pyd.TypeAdapter(PersistableEvent)
@@ -233,25 +234,9 @@ def _template_document(templates_yaml: str) -> Dict[str, Any]:
 
 
 def _guardrail_summary(policy: Any) -> Dict[str, Any]:
-    fields = (
-        "max_joins",
-        "max_select_columns",
-        "max_where_depth",
-        "max_group_by",
-        "max_limit",
-        "max_limit_aggregate",
-        "default_limit",
-        "max_batch_size",
-        "max_response_bytes",
-        "timeout_seconds",
-        "max_concurrency",
-        "concurrency_wait_seconds",
-        "max_queue_depth",
-        "max_queue_depth_per_principal",
-        "max_estimated_rows",
-        "max_estimated_cost",
-        "cost_estimation_mode",
-    )
+    # Derived from Policy (TODO.md item 115), not hand-listed: this panel had
+    # the shortest of the four copies, missing even max_top_n/max_partition_by.
+    fields = GUARDRAIL_FIELDS
     return {
         field: (
             getattr(policy, field).value

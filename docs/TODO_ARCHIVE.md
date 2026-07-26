@@ -6137,3 +6137,75 @@ config declaration, not runtime logic — so there is no in-repo test to add; th
 acceptance criterion (a nightly/weekly workflow runs the CVE/SBOM/lockfile checks
 and `make test-soak` against `main` independent of code changes) is satisfied by
 the declared `schedule:` trigger plus every invoked command proven green above.
+
+### 115. The hand-maintained guardrail-field lists had drifted from `Policy` ✅ DONE
+
+**Effort: S. Priority: medium (operator-facing correctness on shipped surfaces).
+Depended on: nothing.** Surfaced 2026-07-26 while shipping item 101's two caps.
+
+**The defect.** Four surfaces answer "which caps are in force" and each kept its
+own typed-out field list, with nothing checking any of them against `Policy`:
+`admin/access_diff.py` (the item-40 semantic diff), `admin/models.py`'s
+`EffectiveGuardrails` (the item-45 "my access" view, also served by the help
+API), `help/service.py` (the queryable product guide), and
+`api/admin_ui_routes.py` (the admin UI's policy panel — the shortest list of the
+four, missing even `max_top_n`/`max_partition_by`). **Nine caps** added by items
+68–72 (`max_where_predicates`, `max_in_list_size`, `max_case_branches`), 88
+(`min_group_size`), 97 (`max_subquery_depth`), 100 (`max_expression_depth`,
+`max_expression_nodes`) and 101 (`max_window_specs`,
+`max_window_frame_offset`) were absent from at least one.
+
+**Why that is more than untidy.** `/admin/config/diff` exists to make a staged
+policy change legible *before* it ships. A cap it cannot see is reported to the
+approving reviewer as **"no guardrail change"** — a governance surface stating the
+opposite of the truth. Raising `max_window_specs` from 1 to 50 produced an empty
+diff.
+
+**The fix inverts the failure mode.** `GUARDRAIL_FIELDS` is now derived from
+`Policy.model_fields` minus a small, reasoned exclusion set, the same
+derived-not-listed posture as `DIALECT_ROUTED_EXPR_FNS`:
+
+- structural allow/deny rules (tables, columns, masks, row filters) are excluded
+  because `access_diff` already itemizes them properly — reporting them again as
+  opaque scalars would be worse;
+- the nested `WritePolicy` is excluded: its caps deserve their own change
+  category, deliberately out of scope here and stated as such;
+- `approval_sensitivities` is excluded because it is a *list* with no scalar
+  permissiveness — and it now gets its own dedicated diff change rather than
+  staying invisible, which is what the old lists did to it.
+
+`EffectiveGuardrails` is **generated** from those fields, so the response model
+cannot drift from the enforcement model in membership *or* type. It widens from
+19 fields to 34 — additive for consumers, but a public response shape, which is
+exactly why this was split out of item 101 rather than ridden along with it.
+
+**The second-order trap, closed too.** Deriving the field set fixes "a new cap is
+invisible" and leaves "a new cap is diffed **backwards**". Direction is not
+derivable in general: a larger `min_group_size` suppresses *more* groups and the
+same budget over a longer `quota_window_seconds` is a *lower* rate, so both are
+tightening while every `max_*` cap loosens as it grows. A `max_*` name states its
+own direction; every other guardrail must appear in
+`_DIRECTION_REVIEWED_GUARDRAILS`, and a test fails until it does. **That test
+caught two fields on its first run** — `approval_max_estimated_rows`/`_cost`,
+whose direction had never actually been considered (they follow the normal
+direction, but now that is stated rather than inherited).
+
+**Coverage.** `tests/unit/test_policy_guardrails.py` is the guard whose absence
+caused the rot: the partition over `Policy.model_fields` is exhaustive, every
+excluded field still exists, every guardrail is scalar (so the next
+`approval_sensitivities`-shaped field fails loudly instead of being compared as a
+number), all four surfaces report the identical set, the generated model's types
+match `Policy`'s, and every direction is either obvious from the name or
+reviewed. `tests/unit/test_config_semantic_diff.py` adds behavior: a change to
+**every** field in `GUARDRAIL_FIELDS` produces a change (driven off the constant,
+so a future cap is covered automatically), the `max_window_specs` false negative
+is pinned as a regression, both inverted directions are asserted in both
+directions, and the `approval_sensitivities` change is asserted.
+
+**Verified by mutation, 8 of 9 caught:** adding a collection field without
+excluding it, a stale exclusion, either surface re-growing a private list, either
+inverted field losing its inversion, a new ambiguously-named cap, and dropping
+the `approval_sensitivities` change all fail the suite. The ninth — adding a
+plain `max_*` cap — is *designed* to pass: it is auto-included everywhere and its
+direction is unambiguous, so there is nothing left to forget.
+

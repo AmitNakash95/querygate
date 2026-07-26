@@ -145,7 +145,7 @@ order-of-magnitude, not commitments.
 | 112 | ✅ No scheduled (cron) CI run — dependency/security scans only fire on push/PR | S | — |
 | 113 | ✅ OBSOLETE — metrics for the removed write-undo / compensation store | — | — |
 | 114 |  Write tool MCP schema advertises read-only predicate fields it rejects | M | 93 |
-| 115 |  Guardrail-field lists in admin/help have drifted from `Policy`'s caps | S | — |
+| 115 | ✅  Guardrail-field lists in admin/help have drifted from `Policy`'s caps | S | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2255,40 +2255,15 @@ defence in depth.
   replaced by the schema narrowing).
 - `_MAX_TOTAL_CHARS` in `tests/unit/test_mcp_token_budget.py` drops accordingly.
 
-### 115. The three hand-maintained guardrail-field lists have drifted from `Policy`
+### 115. The hand-maintained guardrail-field lists had drifted from `Policy` ✅ DONE
 
-**Effort: S. Priority: medium (agent/operator-facing correctness on shipped
-surfaces). Depends on: nothing.**
+The four surfaces that report "which caps are in force" (the semantic access
+diff, the effective-guardrails view, the help API, the admin UI panel) each kept
+their own field list; nine caps from items 68–72/88/97/100/101 were missing from
+at least one, so a config change loosening one was diffed as "no guardrail
+change". They now derive from `Policy` itself, `EffectiveGuardrails` is generated
+from it, `approval_sensitivities` gets its own diff change, and a new cap must
+state its direction (`min_group_size` and `quota_window_seconds` run the opposite
+way) or a test fails.
 
-Three places enumerate "the policy caps a caller/operator may see" by hand, and
-all three have silently fallen behind `Policy` as caps were added:
-
-- `admin/access_diff.py::_GUARDRAIL_FIELDS` — the item-40 semantic access diff,
-  so a config change that loosens a missing cap is reported as **no change**;
-- `admin/models.py::EffectiveGuardrails` — the "my access" view (item 45) and the
-  help API's policy summary, so an operator reading their effective limits sees
-  an incomplete set;
-- `help/service.py::_GUARDRAIL_FIELDS` — the queryable product guide's redacted
-  policy summary, same problem.
-
-**Missing from all three today:** `max_where_predicates`, `max_in_list_size`,
-`max_case_branches` (items 68–72), `max_subquery_depth` (97), `min_group_size`
-(88), `max_expression_depth`/`max_expression_nodes` (100), and
-`max_window_specs`/`max_window_frame_offset` (101). The pattern is the failure
-class items 96/111 exist to remove, applied to a *field list* instead of a tree
-walk: nothing fails when a new cap is added, so the lists rot.
-
-**Scope:** `admin/access_diff.py`, `admin/models.py`, `help/service.py`, plus a
-drift test. `EffectiveGuardrails` is a REST response model, so this widens a
-public response shape — that is why it is its own item rather than a rider on
-the item that surfaced it (101).
-
-**Acceptance criteria:**
-- One derivation (or one shared constant) covers every numeric/enum cap on
-  `Policy`, so the three surfaces cannot disagree with each other.
-- A test asserts the covered set equals `Policy`'s cap fields, failing when a
-  future item adds a cap without extending it — the guard whose absence caused
-  this drift.
-- The permissiveness comparator in `access_diff.py` handles each newly-covered
-  field's direction (a *higher* `min_group_size` is more restrictive, unlike the
-  other caps — do not assume "bigger is looser").
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 115).

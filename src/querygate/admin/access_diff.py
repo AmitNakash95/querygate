@@ -33,40 +33,27 @@ from querygate.admin.models import (
 )
 from querygate.connections.models import ConnectionProfile
 from querygate.core.auth import Principal
-from querygate.policy.models import CostEstimationMode, Policy
+from querygate.policy.models import (
+    GUARDRAIL_FIELDS,
+    INVERTED_GUARDRAIL_FIELDS,
+    CostEstimationMode,
+    Policy,
+)
 
 if TYPE_CHECKING:
     from querygate.cli import LoadedConfigContext
 
 DEFAULT_MAX_CHANGES = 500
 
-# Guardrail fields compared in a fixed, deterministic order. Direction is
-# derived from a single "permissiveness" comparator (see `_guardrail_perm`):
-# a change that raises permissiveness is loosening, one that lowers it is
-# tightening. For the optional caps (queue depth, cost-estimation thresholds),
-# an unset value means "unlimited" and is therefore the most permissive.
-_GUARDRAIL_FIELDS = (
-    "max_joins",
-    "max_select_columns",
-    "max_where_depth",
-    "max_group_by",
-    "max_limit",
-    "max_limit_aggregate",
-    "default_limit",
-    "max_top_n",
-    "max_partition_by",
-    "max_batch_size",
-    "max_response_bytes",
-    "timeout_seconds",
-    "max_concurrency",
-    "concurrency_wait_seconds",
-    "max_queue_depth",
-    "max_queue_depth_per_principal",
-    "max_estimated_rows",
-    "max_estimated_cost",
-    "cost_estimation_mode",
-    "log_query_literals",
-)
+# Guardrail fields come from `Policy` itself (item 115) — one derivation shared
+# with the effective-guardrails view, the help API and the admin UI, so a cap
+# added to Policy is diffed here automatically instead of being invisible until
+# someone notices. Direction is derived from a single "permissiveness"
+# comparator (see `_guardrail_perm`): a change that raises permissiveness is
+# loosening, one that lowers it is tightening. For the optional caps (queue
+# depth, cost-estimation thresholds), an unset value means "unlimited" and is
+# therefore the most permissive.
+_GUARDRAIL_FIELDS = GUARDRAIL_FIELDS
 
 
 def _guardrail_perm(field: str, value: object) -> float:
@@ -76,8 +63,17 @@ def _guardrail_perm(field: str, value: object) -> float:
     if field == "cost_estimation_mode":
         # OBSERVE never blocks a query; ENFORCE can. OBSERVE is more permissive.
         return 1.0 if value == CostEstimationMode.OBSERVE else 0.0
-    # Numeric caps. The optional ones use None to mean "unlimited".
-    return math.inf if value is None else float(value)
+    # Numeric caps. The optional ones use None to mean "unlimited"/"disabled",
+    # which is the most permissive setting either way.
+    if value is None:
+        return math.inf
+    # A few caps run the other way: a larger `min_group_size` suppresses MORE
+    # groups, and the same request budget over a longer `quota_window_seconds`
+    # is a lower sustained rate. Reporting those as "loosening" would tell a
+    # reviewer the exact opposite of what the change does.
+    if field in INVERTED_GUARDRAIL_FIELDS:
+        return -float(value)
+    return float(value)
 
 
 def _guardrail_display(value: object) -> str:
@@ -173,6 +169,36 @@ def _diff_guardrails(diff: _Diff, connection: str, before: Policy, after: Policy
                     f"Guardrail {field!r} on connection {connection!r} "
                     f"{direction.replace('ing', 'ed')} from "
                     f"{_guardrail_display(before_val)} to {_guardrail_display(after_val)}."
+                ),
+            )
+        )
+
+    # `approval_sensitivities` is a LIST of catalog labels, so it has no scalar
+    # permissiveness and is excluded from the derived guardrail set — but a
+    # change to it still gates queries behind a human, so it gets its own change
+    # rather than being invisible (item 115).
+    if set(before.approval_sensitivities) != set(after.approval_sensitivities):
+        before_labels = sorted(label.value for label in before.approval_sensitivities)
+        after_labels = sorted(label.value for label in after.approval_sensitivities)
+        if len(after_labels) > len(before_labels):
+            direction = "tightening"
+        elif len(after_labels) < len(before_labels):
+            direction = "loosening"
+        else:
+            direction = "neutral"
+        diff.add(
+            SemanticAccessChange(
+                category="guardrail",
+                connection=connection,
+                object="approval_sensitivities",
+                change_type="modified",
+                direction=direction,
+                before=", ".join(before_labels) or "none",
+                after=", ".join(after_labels) or "none",
+                detail=(
+                    f"Approval trigger 'approval_sensitivities' on connection {connection!r} "
+                    f"{direction.replace('ing', 'ed')}: queries touching these catalog "
+                    "sensitivity labels require human approval."
                 ),
             )
         )

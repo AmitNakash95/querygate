@@ -15,7 +15,13 @@ from querygate.cli import LoadedConfigContext
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry
 from querygate.policy.loader import PolicyStore
-from querygate.policy.models import MandatoryRowFilter, Policy
+from querygate.catalog.models import SensitivityClass
+from querygate.policy.models import (
+    GUARDRAIL_FIELDS,
+    CostEstimationMode,
+    MandatoryRowFilter,
+    Policy,
+)
 
 
 def _profile(connection_id: str = "demo", **overrides) -> ConnectionProfile:
@@ -259,3 +265,82 @@ def test_truncation_keeps_loosening_first_and_flags_truncated():
     assert diff.summary.total == 1
     assert diff.changes[0].direction == "loosening"
     assert any("truncated" in reason.lower() for reason in diff.incomplete_reasons)
+
+
+# --------------------------------------------------------------------------- #
+# Guardrail coverage and direction (TODO.md item 115). The diff's whole job is
+# to make a policy change's effect legible before it ships; a cap it cannot see
+# is reported to the reviewer as "no change", which is worse than no diff at all.
+# --------------------------------------------------------------------------- #
+def _guardrail_change(before: Policy, after: Policy):
+    changes = _changes_by(compute_access_diff(_ctx(before), _ctx(after)), "guardrail")
+    assert len(changes) == 1, changes
+    return changes[0]
+
+
+def test_every_guardrail_field_produces_a_change_when_it_moves():
+    """The regression that motivated item 115: nine caps were missing from the
+    hand-written field list, so loosening one was diffed as nothing at all. Driven
+    off `GUARDRAIL_FIELDS` itself, so a cap added later is covered automatically.
+    """
+    # A value that differs from the default for each field's type, chosen so the
+    # change is unambiguous rather than clever.
+    for field in GUARDRAIL_FIELDS:
+        current = getattr(Policy(), field)
+        if field == "cost_estimation_mode":
+            moved = CostEstimationMode.OBSERVE
+        elif isinstance(current, bool):
+            moved = not current
+        elif current is None:
+            moved = 7
+        else:
+            moved = type(current)(current + 1)
+        change = _guardrail_change(Policy(), Policy(**{field: moved}))
+        assert change.object == field, field
+        assert change.direction in ("loosening", "tightening"), (field, change.direction)
+
+
+def test_window_cap_change_is_reported_not_silently_dropped():
+    """The concrete false negative item 115 was filed for: raising the item-101
+    window budget used to produce an empty diff."""
+    change = _guardrail_change(Policy(max_window_specs=1), Policy(max_window_specs=50))
+    assert change.object == "max_window_specs"
+    assert change.direction == "loosening"
+
+
+def test_min_group_size_direction_is_inverted():
+    """A LARGER k-anonymity floor suppresses more groups, so it is tightening —
+    the opposite of every other numeric cap, and the trap a naive fix falls into."""
+    assert _guardrail_change(Policy(min_group_size=2), Policy(min_group_size=5)).direction == (
+        "tightening"
+    )
+    assert _guardrail_change(Policy(min_group_size=5), Policy(min_group_size=2)).direction == (
+        "loosening"
+    )
+    # Unset means no floor at all — the most permissive setting, so turning it on
+    # is tightening even though the value goes from None to a number.
+    assert _guardrail_change(Policy(), Policy(min_group_size=5)).direction == "tightening"
+
+
+def test_quota_window_direction_is_inverted():
+    """The same request budget spread over a longer window is a lower sustained
+    rate, so a longer window is tightening."""
+    assert (
+        _guardrail_change(
+            Policy(max_requests_per_window=100, quota_window_seconds=60),
+            Policy(max_requests_per_window=100, quota_window_seconds=3600),
+        ).direction
+        == "tightening"
+    )
+
+
+def test_approval_sensitivities_change_is_reported():
+    """A list, so it has no scalar permissiveness and is excluded from the derived
+    set — but it gates queries behind a human, so it gets its own change."""
+    change = _guardrail_change(
+        Policy(),
+        Policy(approval_sensitivities=[SensitivityClass.PII]),
+    )
+    assert change.object == "approval_sensitivities"
+    assert change.direction == "tightening"
+    assert change.before == "none" and change.after == "pii"

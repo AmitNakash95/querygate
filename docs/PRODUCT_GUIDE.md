@@ -1493,12 +1493,27 @@ of those positions are the same `WhereNode` tree and are bounded identically
 expression substrate (item 100; see
 [Computed expressions](#computed-expressions-arithmetic-conditional-aggregation-nested-functions)),
 `max_group_by`, `max_top_n` and
-`max_partition_by` for windowed queries, `max_limit`/`max_limit_aggregate`
+`max_partition_by` for ranked/windowed queries, `max_window_specs` and
+`max_window_frame_offset` for window functions (item 101; see
+[Window functions](#window-functions-running-totals-moving-averages-rank-in-place)),
+`max_limit`/`max_limit_aggregate`
 for row counts, `max_response_bytes` for response size), execution
 guardrails (`timeout_seconds`, `max_concurrency`, queue-depth caps),
 `mandatory_row_filters` (a filter always AND-ed into every query touching a
 table — e.g. tenant scoping, see below), and `join_group` (which other
 connections this one may be joined with in a single query).
+
+**Every one of those caps is reported by the same four surfaces**, derived from
+`Policy` itself rather than hand-listed (item 115): the semantic access diff
+(`/admin/config/diff`, which classifies a staged change as tightening or
+loosening), the effective-guardrails view, the help API's policy summary, and
+the admin UI's policy panel. Each of the four used to keep its own list and all
+four had rotted — nine caps were invisible to at least one, so a change that
+loosened, say, `max_expression_nodes` was shown to a reviewer as *no guardrail
+change*. Adding a cap to `Policy` now reports it everywhere by default, and a
+test fails if a surface grows a private list again or if a new cap's direction
+is ambiguous (a larger `min_group_size` is more restrictive, not less — the
+kind of thing a naive list gets backwards).
 
 It's resolved *per connection* (`policy/loader.py`'s `PolicyStore`,
 optionally narrowed further per authenticated principal) rather than being
@@ -2828,6 +2843,43 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-26 — the four "which caps are in force" surfaces are derived from
+  `Policy` instead of hand-listed, and a cap's *direction* must now be stated
+  (TODO.md item 115).** Four places answered that question — the semantic access
+  diff (item 40), the effective-guardrails view (item 45), the help API's policy
+  summary, and the admin UI's policy panel — each with its own typed-out field
+  list and nothing checking any of them against `Policy`. All four had rotted:
+  nine caps from items 68–72, 88, 97, 100 and 101 were missing from at least one,
+  and the shortest list (the admin UI's) omitted even `max_top_n`. The concrete
+  harm is not cosmetic: `/admin/config/diff` exists to make a staged policy
+  change legible *before* it ships, so a cap it cannot see is reported to the
+  approving reviewer as **"no guardrail change"** — a governance surface telling a
+  human the opposite of the truth, which is worse than having no diff.
+  **The fix inverts the failure mode.** `GUARDRAIL_FIELDS` is derived from
+  `Policy.model_fields` minus a small, reasoned exclusion set (structural
+  allow/deny rules, which the diff already itemizes properly; the nested
+  `WritePolicy`; and `approval_sensitivities`, a *list* with no scalar
+  permissiveness, which now gets its own dedicated change instead of being
+  invisible). So a new cap is reported everywhere **by default**, and forgetting
+  is loud rather than silent: a non-scalar field that nobody excluded fails a
+  test, a surface that re-grows a private list fails a test, and a stale
+  exclusion fails a test. `EffectiveGuardrails` is *generated* from those fields,
+  so the response model cannot drift from the enforcement model in either
+  membership or type.
+  **The second-order trap, closed too:** deriving the field set fixes "a new cap
+  is invisible" but leaves "a new cap is diffed **backwards**". Direction is not
+  derivable in general — a larger `min_group_size` suppresses *more* groups, and
+  the same request budget over a longer `quota_window_seconds` is a *lower* rate,
+  so both are tightening while every `max_*` cap loosens as it grows. A `max_*`
+  name states its own direction; every other guardrail must be listed as
+  direction-reviewed, and a test fails until it is. That test caught two fields
+  on its first run (`approval_max_estimated_rows`/`_cost`) whose direction had
+  never actually been considered.
+  **Accepted cost:** `EffectiveGuardrails` widens from 19 fields to 34 — additive
+  for consumers, but it is a public response shape, which is why this was split
+  out of item 101 rather than ridden along with it. The naming convention
+  (`max_*` = ceiling) is now load-bearing for the direction exemption, and is
+  itself asserted rather than assumed.
 - **2026-07-26 — general window functions enter the read AST as a *projection*
   with four deliberate bounds (TODO.md item 101; maintainer-ratified before
   build, as ENGINE_EXPRESSIVENESS_PLAN.md §8 entry 3 requires).** Before it,

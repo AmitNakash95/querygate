@@ -47,7 +47,7 @@ from querygate.help.models import (
     SetupChecklistResponse,
     SetupStep,
 )
-from querygate.policy.models import Policy
+from querygate.policy.models import GUARDRAIL_FIELDS, Policy
 
 _REFERENCE_RE = re.compile(r"^\$\{([^}]+)\}$")
 
@@ -510,28 +510,9 @@ def _redacted_connection(raw: object) -> RedactedConnection:
     )
 
 
-_GUARDRAIL_FIELDS = (
-    "max_joins",
-    "max_select_columns",
-    "max_where_depth",
-    "max_group_by",
-    "max_limit",
-    "max_limit_aggregate",
-    "default_limit",
-    "max_top_n",
-    "max_partition_by",
-    "max_batch_size",
-    "max_response_bytes",
-    "timeout_seconds",
-    "max_concurrency",
-    "concurrency_wait_seconds",
-    "max_queue_depth",
-    "max_queue_depth_per_principal",
-    "log_query_literals",
-    "max_estimated_rows",
-    "max_estimated_cost",
-    "cost_estimation_mode",
-)
+# One derivation, shared with the access diff, the effective-guardrails view
+# and the admin UI (TODO.md item 115) — this copy had fallen nine caps behind.
+_GUARDRAIL_FIELDS = GUARDRAIL_FIELDS
 
 
 def _policy_summary(policy: Policy) -> RedactedPolicySummary:
