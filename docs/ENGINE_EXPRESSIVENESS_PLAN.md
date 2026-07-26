@@ -1,8 +1,12 @@
 # Expressive Query Engine — Path to 10/10 (Flagship Pillar Plan)
 
-**Status (2026-07-25):** in progress — **Phase 0 (item 99) has shipped**; Phase 1
-(item 100) is next and its Decision Log entries (§8 entries 1–2) are **recorded**.
-Phases 2–5 (items 101–106) are unstarted. **Owner:** engine. **Audience:** the
+**Status (2026-07-25):** in progress — **Phase 0 (item 99) and Phase 1 (item 100)
+have shipped.** Phase 2 (item 101, general window functions) is next; its Decision
+Log entry (§8 entry 3 — default frame + unbounded-frame cap) is the first step of
+that item. Phases 3–5 (items 102–106) are unstarted. **The `Expression` substrate
+items 101–106 all build on is now real** (`query_ast/models.py`'s `Expression`
+union + `_compile_expression`); reuse it rather than adding a parallel scalar
+shape. **Owner:** engine. **Audience:** the
 implementing agent (Claude) + reviewers.
 **Authority:** this is the *deep spec* the read-engine expressiveness items point
 to. Item **content** and `✅ DONE` status live in `TODO.md`; execution **order**
@@ -468,13 +472,13 @@ report becomes a new row here first, then an item.
 
 | # | Query | Works today? | Unblocked by |
 | --- | --- | --- | --- |
-| 1 | `SUM(quantity*unit_price)` where paid | ❌ | 100 |
-| 2 | Per-region `SUM(CASE WHEN status='paid' THEN amount ELSE 0 END)` | ❌ | 100 |
+| 1 | `SUM(quantity*unit_price)` where paid | ✅ **100** | 100 |
+| 2 | Per-region `SUM(CASE WHEN status='paid' THEN amount ELSE 0 END)` | ✅ **100** | 100 |
 | 3 | 7-day moving average of daily orders | ❌ | 101 |
 | 4 | Each customer's most-recent order | ✅ | `top_n` (n=1) |
 | 5 | Running cumulative total | ❌ | 101 |
 | 6 | Cohort retention via CTE | ❌ (multi-query) | 105 |
-| 7 | Top category per region **by revenue** | ❌ (only arithmetic missing) | 100 |
+| 7 | Top category per region **by revenue** | ✅ **100** | 100 |
 | 8 | UNION of high-value + dormant segments | ❌ (client merge) | 104 |
 | 9 | Median order value per region | ✅ PG / ⛔ MSSQL | `percentile_cont` |
 | 10 | Customers with no orders (anti-join) | ✅ | LEFT JOIN + `is_null` |
@@ -482,12 +486,27 @@ report becomes a new row here first, then an item.
 | 12 | Orders in last 7 days | 🟡 (literal today) | 102 |
 | 13 | Case-insensitive name search | ✅ | `lower(col) like …` |
 | 14 | Rank products with ties (WITH TIES) | ✅ | `top_n fn=rank` |
-| 15 | Each order's % of total (`amount / SUM(amount) OVER ()`) | ❌ | 100 + 101 |
+| 15 | Each order's % of total (`amount / SUM(amount) OVER ()`) | 🟡 arithmetic ✅ (100); needs `OVER` | 100 + 101 |
 | 16 | Price-band join (`ON price BETWEEN lo AND hi`) | ❌ | 103 |
 
-Baseline at plan time: **5/16 fully expressible, 2 cleanly composable.** After items
-99–101 the ❌ set collapses to 6, 8, 11, 16 — i.e. set-ops/CTE/correlated/non-equi,
-which Phases 3b–5 finish.
+Baseline at plan time: **5/16 fully expressible, 2 cleanly composable.** After
+items 99 + 100 (both shipped): **8/16 fully expressible** — rows 1, 2 and 7 went
+green, each covered end-to-end in
+`tests/integration/test_expression_end_to_end.py` and again on real Postgres in
+`tests/integration/test_postgres_expression_substrate.py`. Row 15's arithmetic half
+is done and it now waits only on `OVER` (item 101). After item 101 the ❌ set
+collapses to 6, 8, 11, 16 — set-ops/CTE/correlated/non-equi, which Phases 3b–5
+finish.
+
+**One wall found during item 100's build, recorded here per this section's own
+rule** ("a new 'I couldn't express X' report becomes a new row here first"): a
+computed **GROUP BY / ORDER BY key** is expressible but only *indirectly* — project
+the expression with an alias and reference the alias, the same route `date_bucket`
+has always used. That was judged sufficient rather than widening `group_by`/
+`order_by` to accept an inline `Expression`: the alias route already works, costs
+the caller one extra select item, and keeps those two fields a flat list of names
+that every cap and walker treats uniformly. Revisit only if real usage shows the
+extra projection is a genuine obstacle.
 
 ---
 

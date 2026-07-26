@@ -192,10 +192,13 @@ gate is the *first step of the item*, not a reason to defer it.
   `max_where_depth`/`max_where_predicates` extended to HAVING and CASE-condition
   trees + a new tree-wide case-condition predicate budget; no new policy field, no
   dialect code. Breaking wire change: `"having": [{…}]` → `"having": {…}`).
-- [ ] **100** — ★ Bounded scalar `Expression` substrate (arithmetic, conditional
-  aggregation, nested fns, expression-CASE). *The centerpiece — one closed,
-  depth-capped node unlocks the most walls at once. Depends on 96, 99; **requires
-  a Decision Log entry (non-goal #7 boundary + division) before build.***
+- [x] **100** — ★ Bounded scalar `Expression` substrate (arithmetic, conditional
+  aggregation, nested fns, expression-CASE). ✅ **Shipped** (one closed
+  depth-capped union across projections/aggregate args/CASE results/both predicate
+  sides; `max_expression_depth` + tree-wide `max_expression_nodes`; guarded
+  division; visitor-verified at every depth. Regression bar 5/16 → **8/16**.)
+  *The centerpiece — it unlocked the most walls at once, and items 101–106 now
+  build on its `Expression` rather than adding parallel scalar shapes.*
 - [ ] **101** — ★ General window functions (`WindowSelectItem`: OVER, LAG/LEAD,
   frames). *Second expressiveness pillar; running totals / moving averages.
   Depends on 96 (100 for windowed exprs); **Decision Log entry (frames) before
@@ -351,6 +354,13 @@ the live frontier: `roadmap-next` should walk Phase 4 in order (100 → 106),
 drafting each item's Decision Log entry for approval as step 1 of that item.
 Adoption/breadth (Phase 5) and catalog/UI (Phase 6) wait behind it.
 
+**Engine progress (updated 2026-07-25):** **99 and 100 have shipped.** The
+`Expression` substrate every remaining engine item depends on is real, so
+**101 (general window functions) is the next roadmap item** — its `arg` reuses
+item 100's `Expression`, and its Decision Log entry (default frame +
+unbounded-frame cap, plan §8 entry 3) is that item's own first step. The
+canonical regression bar is 8/16 (`docs/ENGINE_EXPRESSIVENESS_PLAN.md` §5).
+
 ### Fourth pass (2026-07-23), retained for history
 
 Successive batches shipped everything buildable without a new maintainer
@@ -475,6 +485,15 @@ already-planned initiatives.
   item.
 
 ### Review Phase 3 — Architecture and maintainability
+
+- [ ] **114** — The write tool's MCP schema advertises read-only predicate
+  fields it rejects (`expr`/`value_expr`/`value_subquery`, plus the whole read
+  `StructuredQuery` definition), making `run_structured_writes` the largest tool
+  schema. *Surfaced 2026-07-25 while measuring item 100's MCP budget increase:
+  4,871 of those chars are item 100's Expression union inlined into a tool that
+  refuses it. Deliberately NOT folded into item 100 — it is a write-contract
+  change and gets its own PR. Sequenced here rather than in a Phase, since it is
+  maintainability work on an already-shipped surface.*
 
 - [x] **110** — Explicitly reject `value_subquery` in a write's WHERE at the
   write-validation layer instead of relying on the compiler's `ctx=None`

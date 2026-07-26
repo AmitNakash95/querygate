@@ -130,7 +130,7 @@ order-of-magnitude, not commitments.
 | 96 | ✅ Unify the AST reference-walk into a single canonical visitor | M | — |
 | 97 | ✅ Bounded nested subqueries (phase 1: `IN (subquery)`/`NOT IN`, tree-wide caps; phase 2: `FROM (subquery)` derived table not started) | L | 96 |
 | 99 | ✅ ★ `HAVING` as `WhereNode` + searched `CASE` condition | S | 96 |
-| 100 | ★ Bounded scalar `Expression` substrate (arithmetic, conditional aggregation, nested fns, expression-CASE) | XL | 96, 99 |
+| 100 | ✅ ★ Bounded scalar `Expression` substrate (arithmetic, conditional aggregation, nested fns, expression-CASE) | XL | 96, 99 |
 | 101 | ★ General window functions (`WindowSelectItem`: OVER, LAG/LEAD, frames) | L | 96, 100 (windowed exprs) |
 | 102 | ★ `EXTRACT`/date_part + relative-date/interval helpers | M | 100 |
 | 103 | ★ Non-equi/range joins + FULL OUTER / CROSS | M | 96, 99 |
@@ -144,6 +144,7 @@ order-of-magnitude, not commitments.
 | 111 | ✅ Duplicated WHERE-predicate tree walk across four validators | S | — |
 | 112 | ✅ No scheduled (cron) CI run — dependency/security scans only fire on push/PR | S | — |
 | 113 | ✅ OBSOLETE — metrics for the removed write-undo / compensation store | — | — |
+| 114 |  Write tool MCP schema advertises read-only predicate fields it rejects | M | 93 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2049,25 +2050,17 @@ no new policy field and no dialect code. Breaking wire change: `"having": [{…}
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 99).
 
-### 100. Query engine: bounded scalar `Expression` substrate ★
+### 100. Query engine: bounded scalar `Expression` substrate ★ ✅ DONE
 
-The centerpiece. Introduce one **closed, depth-capped** recursive `Expression`
-union (column | literal | binary-op `+ - * /` | function-call with nesting | CASE)
-used everywhere a scalar value is expected, and give aggregates an `Expression`
-argument. Unlocks — in one item — arithmetic (`quantity * unit_price`), conditional
-aggregation (`SUM(CASE WHEN status='paid' THEN amount END)`), nested functions
-(`lower(trim(x))`), expression-valued CASE, computed group/order keys, and a batch
-of scalar fns (`cast`/`round`/`floor`/`ceil`/`abs`/`substring`/`nullif`/`replace`).
-Arithmetic + conditional aggregation are deliberately ONE item (shared substrate) —
-do not split. New caps `max_expression_depth` / `max_expression_nodes` summed
-tree-wide; guarded division; visitor recursion into every `Expression` is the
-make-or-break safety step.
+One closed, depth-capped recursive `Expression` union (column | literal |
+arithmetic | nested function | cast | CASE) now backs projections, aggregate
+arguments, CASE results, and both sides of a predicate — unlocking
+`SUM(quantity * unit_price)`, conditional aggregation, `lower(trim(x))`, and
+computed group keys in one item. Capped by `max_expression_depth` /
+`max_expression_nodes` (summed tree-wide), visited by the item-96 canonical
+visitor at every depth, guarded division, and reject-not-emulate per dialect.
 
-**Effort: XL. Priority: high (flagship pillar; highest expressiveness unlock).
-Depends on: items 96, 99. Requires a recorded Decision Log entry in
-`docs/PRODUCT_GUIDE.md` before build** — the bounded-vs-open-ended-grammar boundary
-(non-goal #7) and division semantics (plan §8, entries 1–2). Full spec +
-acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 1.**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 100).
 
 ### 101. Query engine: general window functions (`WindowSelectItem`) ★
 
@@ -2224,3 +2217,42 @@ Added `.github/workflows/scheduled.yml` — a nightly (07:00 UTC) + `workflow_di
 compensation store or undo path left to instrument, so this observability gap no
 longer exists. If write-*execution* metrics are wanted later, that is a fresh,
 separately-scoped item (not undo-specific).
+
+
+### 114. The write tool's MCP schema advertises read-only predicate fields it rejects
+
+**Effort: M. Priority: medium (agent-facing correctness + MCP token budget).
+Depends on: item 93 (governed writes) — this is a write-contract change and
+should be its own PR, not a rider on a read-engine item.**
+
+`run_structured_writes` is now the LARGEST MCP tool schema (34,594 chars,
+larger than the read tool) because a write statement's `where` reuses the READ
+`Predicate`/`WhereNode` models verbatim. That drags in three field groups the
+write path explicitly **rejects** at validation:
+
+- `expr` / `value_expr` — item 100's scalar Expression (rejected in
+  `validate_write_policy`; **4,871 chars** of `Expression` union definitions are
+  inlined into the write tool because of it),
+- `value_subquery` — rejected since item 110, which also pulls the entire read
+  `StructuredQuery` definition into the write tool's schema.
+
+**Why it matters beyond bytes:** the schema is the agent's contract. Advertising
+a field the server refuses at runtime invites the agent to build a write it will
+be denied, which is exactly the "hit a wall, route around the gate" failure the
+engine plan exists to prevent — and it spends agent context on every session to
+do it.
+
+**Scope:** give the write AST its own predicate/where types carrying only the
+fields writes actually accept (`col`, `op`, `value`, `value_col`, boolean
+groups), instead of reusing the read `Predicate`. The runtime rejections stay as
+defence in depth.
+
+**Acceptance criteria:**
+- The write tool's JSON schema contains no `expr`/`value_expr`/`value_subquery`
+  and no inlined read `StructuredQuery`/`Expression` definitions.
+- Every currently-valid write payload still validates unchanged (this is a pure
+  narrowing to fields already rejected at runtime — assert with a round-trip
+  test over the existing write corpus).
+- The existing runtime rejections keep their tests (defence in depth, not
+  replaced by the schema narrowing).
+- `_MAX_TOTAL_CHARS` in `tests/unit/test_mcp_token_budget.py` drops accordingly.

@@ -11,9 +11,16 @@ import pydantic as pyd
 from querygate.query_ast.models import (
     AggregateSelectItem,
     ArrayAggSelectItem,
+    BinaryOpExpr,
+    CaseExpr,
     CaseSelectItem,
+    CastExpr,
     ColArg,
+    ColumnExpr,
     DateBucketSelectItem,
+    ExpressionSelectItem,
+    FunctionExpr,
+    LiteralExpr,
     PercentileContSelectItem,
     Predicate,
     ScalarFunctionSelectItem,
@@ -224,10 +231,31 @@ def _select_shape(item: object) -> Dict[str, Any]:
     if isinstance(item, str):
         return {"kind": "column", "column": item}
     if isinstance(item, AggregateSelectItem):
-        shape: Dict[str, Any] = {"kind": "aggregate", "function": item.fn, "column": item.col}
+        shape: Dict[str, Any] = {"kind": "aggregate", "function": item.fn}
+        if item.arg is None:
+            shape["column"] = item.col  # count(*)'s star form
+        elif isinstance(item.arg, ColumnExpr):
+            # The `col` sugar and the canonical bare-column `arg` must produce
+            # the identical audited shape — they are one spelling of one query.
+            shape["column"] = item.arg.col
+        else:
+            # A computed argument (item 100): record the STRUCTURE only. The
+            # column set says which data was touched; `expression` names the
+            # node kinds. No operator constants, function arguments, or CASE
+            # literals — a persisted event never carries values (non-negotiable
+            # 3), and expressiveness must not become an exfiltration channel.
+            shape["expression"] = _expression_shape(item.arg)
+            shape["columns"] = list(select_item_column_refs(item))
         if item.alias is not None:
             shape["alias"] = item.alias
         return shape
+    if isinstance(item, ExpressionSelectItem):
+        return {
+            "kind": "expression",
+            "alias": item.alias,
+            "expression": _expression_shape(item.expr),
+            "columns": list(select_item_column_refs(item)),
+        }
     if isinstance(item, DateBucketSelectItem):
         shape = {
             "kind": "date_bucket",
@@ -271,16 +299,56 @@ def _select_shape(item: object) -> Dict[str, Any]:
     raise TypeError(f"Unsupported select item: {type(item).__name__}")
 
 
+def _expression_shape(expr: object) -> Dict[str, Any]:
+    """The redaction-safe SHAPE of a scalar Expression (item 100): which node
+    kinds it is built from and which columns it reads — never a literal value,
+    never an operator's operands. Recursion mirrors the union so a nested CASE
+    or function is described structurally rather than flattened away.
+    """
+    if isinstance(expr, ColumnExpr):
+        return {"node": "column", "column": expr.col}
+    if isinstance(expr, LiteralExpr):
+        # Deliberately no `value` key — this is the whole point.
+        return {"node": "literal"}
+    if isinstance(expr, BinaryOpExpr):
+        return {
+            "node": "binary_op",
+            "operator": expr.op,
+            "operands": [_expression_shape(expr.left), _expression_shape(expr.right)],
+        }
+    if isinstance(expr, FunctionExpr):
+        return {
+            "node": "function",
+            "function": expr.fn,
+            "args": [_expression_shape(arg) for arg in expr.args],
+        }
+    if isinstance(expr, CastExpr):
+        return {"node": "cast", "to": expr.to, "operand": _expression_shape(expr.cast)}
+    if isinstance(expr, CaseExpr):
+        return {
+            "node": "case",
+            "branch_count": len(expr.when),
+            "conditions": [_where_shape(branch.when) for branch in expr.when],
+            "results": [_expression_shape(branch.then) for branch in expr.when],
+            **({"else": _expression_shape(expr.else_)} if expr.else_ is not None else {}),
+        }
+    raise TypeError(f"Unsupported expression node: {type(expr).__name__}")
+
+
 def _predicate_shape(predicate: Predicate) -> Dict[str, Any]:
     shape: Dict[str, Any] = {"operator": predicate.op}
     if predicate.col is not None:
         shape["column"] = predicate.col
-    else:
-        assert (
-            predicate.col_fn is not None
-        )  # nosec B101 — type-narrowing invariant guaranteed by the preceding else branch
+    elif predicate.col_fn is not None:
         shape["function"] = predicate.col_fn.fn
         shape["columns"] = [arg.col for arg in predicate.col_fn.args if isinstance(arg, ColArg)]
+    else:
+        assert (
+            predicate.expr is not None
+        )  # nosec B101 — the AST guarantees exactly one of col/col_fn/expr
+        shape["expression"] = _expression_shape(predicate.expr)
+    if predicate.value_expr is not None:
+        shape["value_expression"] = _expression_shape(predicate.value_expr)
     return shape
 
 
