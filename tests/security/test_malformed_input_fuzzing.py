@@ -606,3 +606,52 @@ async def test_mcp_oversized_body_is_rejected_as_413_before_execution():
     assert resp.status_code == 413, f"got {resp.status_code}: {resp.text[:200]!r}"
     _assert_no_internal_leak(resp.text)
     m_many.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------- #
+# The WRITE endpoints' deep-nesting boundary (gap found by item 116's audit: the
+# corpus above only ever pointed at the read routes, so a write filter's own
+# recursion depth was never fuzzed — and a write's WHERE is a different type since
+# item 114, with its own recursive group).
+# --------------------------------------------------------------------------- #
+def _deep_write_where_raw(depth: int) -> str:
+    inner = '{"col":"orders.id","op":"eq","value":1}'
+    return '{"and":[' * depth + inner + "]}" * depth
+
+
+_DEEP_WRITE_BODIES: dict[str, str] = {
+    "write_deeply_nested_where_1000": (
+        '{"op":"delete","table":"orders","where":' + _deep_write_where_raw(1000) + "}"
+    ),
+    "write_deeply_nested_where_50000": (
+        '{"op":"delete","table":"orders","where":' + _deep_write_where_raw(50000) + "}"
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case_id", list(_DEEP_WRITE_BODIES))
+@pytest.mark.parametrize("path", ["write/preview", "write/execute"])
+async def test_rest_deeply_nested_write_filter_is_rejected_cleanly(case_id: str, path: str):
+    """A clean 4xx, never a 5xx or a RecursionError, and nothing reaches the write
+    services. Depth is bounded by `max_where_depth` once parsing succeeds (item 116)
+    and by the parser's own recursion guard before that; either way the caller gets a
+    client error and no internals."""
+    from unittest.mock import AsyncMock, patch
+
+    body = _DEEP_WRITE_BODIES[case_id]
+    app = create_app(_settings())
+    preview = patch(
+        "querygate.execution.write_preview.WritePreviewService.preview", new_callable=AsyncMock
+    )
+    execute = patch(
+        "querygate.execution.write_execution.WriteExecutionService.execute", new_callable=AsyncMock
+    )
+    with preview as m_preview, execute as m_execute:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                f"/api/v1/demo/{path}", content=body, headers={"Content-Type": "application/json"}
+            )
+    assert 400 <= resp.status_code < 500, f"{resp.status_code}: {resp.text[:200]}"
+    _assert_no_internal_leak(resp.text)
+    assert not m_preview.called and not m_execute.called
