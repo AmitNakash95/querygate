@@ -627,8 +627,19 @@ idiom and `iso_week`. Where a dialect genuinely lacks the capability it still
 function, so `extract(week)` raises and points at `date_bucket`'s `week`
 granularity.
 
+**A date primitive requires a date.** `extract`/`date_add` over a column that
+is not a date/time type is rejected before the database is touched. That is not
+pedantry: with an INTEGER operand, Postgres *errors* while SQL Server silently
+returns `0` (and `1900-01-03` for a shift), because T-SQL implicitly converts an
+int to a datetime counted from 1900-01-01 — the same query, a hard failure on one
+backend and a plausible wrong answer on the other. Only a **bare column** operand
+is checked, since that is the only case with a known type; an explicit
+`{"cast": …, "to": "timestamp"}` is the documented way through, and the rejection
+message says so.
+
 **Bounds:** `max_interval_days` caps how far one `date_add` may shift (default
-3,653 ≈ 10 years; `0` allows only a no-op shift). It is computed from the amount
+3,660 = 10 x 366, i.e. ten years counted the way the cap counts a year; `0` allows
+only a no-op shift). It is computed from the amount
 with **upper-bound** unit lengths — a year counts as 366 days, a month as 31 — so
 a bigger unit can't launder a bigger reach past the cap. It is deliberately *not*
 a row-count guardrail: a caller who wants everything omits the filter, which
@@ -654,10 +665,17 @@ alias — the same route `date_bucket` has always used:
 
 **Proven on both real backends:** every date part and every interval unit
 executes against a live Postgres *and* a live SQL Server in
-`tests/integration/test_cross_dialect_differential.py` with the values compared
-against ground truth computed in Python (not against each other, so two
-identically-wrong adapters can't agree), and a test makes a live case mandatory
-for each part. The UTC pin has its own live proof in
+`tests/integration/test_cross_dialect_differential.py`, with values compared to
+ground truth computed in Python — not to each other, so two identically-wrong
+adapters cannot agree. The corpus deliberately includes the dates that break ties
+the demo data cannot: a year boundary (where T-SQL's non-ISO `week` returns 53 and
+the ISO week returns 1) and fractional seconds (where an unfloored Postgres
+`EXTRACT(second …)` returns 60). The SQL Server runs on a **non-UTC clock** —
+`TZ` is set on the compose service and on both CI service blocks — so
+`SYSUTCDATETIME()` versus `GETDATE()` is a real assertion rather than a vacuous
+one, and the test *skips loudly* rather than passing if it ever finds itself
+against a UTC-clocked server. A test makes a live case mandatory for each part, and
+lives in the unit tier so it fires outside the two-database job. The UTC pin has its own live proof in
 `tests/integration/test_postgres_date_primitives.py`, which sets the server's
 zone to UTC−09:30 and asserts the extracted hour is still UTC.
 

@@ -405,3 +405,63 @@ async def test_over_cap_interval_is_refused_by_the_api(sqlite_app):
     )
     assert resp.status_code == 422, resp.text
     assert "max_interval_days" in resp.text
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"extract": {"col": "orders.id"}, "part": "hour"},
+        {"date_add": {"col": "orders.id"}, "unit": "day", "amount": 1},
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_date_primitive_over_a_non_temporal_column_is_refused(sqlite_app, payload):
+    """Measured cross-dialect divergence, closed at validation.
+
+    With an INTEGER operand against live servers: Postgres ERRORS on both
+    `EXTRACT(hour FROM id)` and the day shift, while MSSQL silently returns `0`
+    and `1900-01-03` respectively — T-SQL implicitly converts an int to a
+    datetime counted from 1900-01-01. The identical AST was therefore a hard
+    failure on one backend and a plausible-looking wrong answer on the other.
+    Now it is one typed rejection, before any database is touched.
+    """
+    resp = await _post(
+        sqlite_app,
+        {"from": "orders", "select": [{"expr": payload, "as": "v"}]},
+    )
+    assert resp.status_code == 422, resp.text
+    assert "date/time column" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_validation_stands_aside_for_a_computed_operand(sqlite_app):
+    """The rule rejects what is known-wrong, not what is merely computed.
+
+    The operand here is `orders.id` — genuinely NON-temporal, so the bare-column
+    form is rejected by the test above. Wrapped in a cast it is no longer a bare
+    column, has no reflected type to check, and validation stands aside. An
+    earlier version of this test cast `created_at`, which is already temporal —
+    so it passed whether or not the escape-hatch branch existed, proving nothing
+    about the gate its name describes.
+
+    Deliberately asserts only that validation does not reject: an integer cast to
+    a timestamp is a meaningless VALUE, and the point is the boundary, not the
+    result.
+    """
+    resp = await _post(
+        sqlite_app,
+        {
+            "from": "orders",
+            "select": [
+                {
+                    "expr": {
+                        "extract": {"cast": {"col": "orders.id"}, "to": "timestamp"},
+                        "part": "year",
+                    },
+                    "as": "v",
+                }
+            ],
+            "limit": 1,
+        },
+    )
+    assert "date/time column" not in resp.text, "validation should not reject a computed operand"

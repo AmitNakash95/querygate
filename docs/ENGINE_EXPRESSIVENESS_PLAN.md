@@ -639,13 +639,17 @@ open **before** implementation, not discovered after:
    ZONE 'UTC'`; MSSQL has no session zone so its adapter uses `SYSUTCDATETIME()`
    over `GETDATE()`; SQLite's `'now'` is already UTC. A live proof sets the
    server zone to UTC−09:30 and asserts the extracted hour is still UTC. The cap
-   is `max_interval_days` (default 3,653), computed with **upper-bound** unit
+   is `max_interval_days` (default 3,660 = 10 x 366), computed with **upper-bound** unit
    lengths so a larger unit cannot launder a bigger reach; it is explicitly not a
    row-count guardrail but a bound on caller-triggerable overflow
    (`DATEADD(year, 10000, …)`) and on unbounded lookback. Two parts get a
    QueryGate-defined value rather than a passed-through keyword — `dayofweek` is
    0=Sunday..6=Saturday and `week` is ISO-8601 — because T-SQL's native spellings
-   disagree with Postgres on both. See the `docs/PRODUCT_GUIDE.md` Decision Log
+   disagree with Postgres on both. Two further bounds were added after the item's
+   audit, each measured on a live SQL Server: `amount` is capped at signed 32-bit
+   (T-SQL's `DATEADD` overflows past it, reachable once `max_interval_days` exceeds
+   24,855), and a date primitive over a **non-temporal column** is rejected —
+   Postgres errors there while MSSQL silently returns a 1900-epoch value. See the `docs/PRODUCT_GUIDE.md` Decision Log
    entry dated 2026-07-26.*
 5. **CROSS JOIN gating** (policy flag default-off + row-cap rationale).
 6. **Recursive CTE exclusion** — record that it is deliberately out of scope pending

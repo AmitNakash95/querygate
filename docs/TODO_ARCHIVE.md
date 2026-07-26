@@ -5945,8 +5945,8 @@ careful reading of the diff first:
    was widened to cover ref-free members (`LiteralExpr` was never compiler-tested
    either).
 
-**Testing.** 58 unit tests (`test_date_primitives.py`), 21 end-to-end
-(`test_date_primitives_end_to_end.py`), 7 real-Postgres
+**Testing.** 82 unit tests (`test_date_primitives.py`), 24 end-to-end
+(`test_date_primitives_end_to_end.py`), 9 real-Postgres
 (`test_postgres_date_primitives.py`), and the cross-dialect differential suite
 gained a live PG+MSSQL case per date part and per interval unit. Expected values
 come from Python rather than from comparing the dialects to each other, so two
@@ -5961,21 +5961,93 @@ ten denied/masked-column position tests cover them, plus five item-102-specific
 cases (unit-laundering, subquery cap, no free strings, no interval amount in a
 persisted audit event).
 
+**Proven against a real SQL Server, not only in CI.** A live SQL Server 2022
+was stood up (deliberately on a **UTC-09:30 clock**, so `SYSUTCDATETIME()` vs
+`GETDATE()` is discriminating rather than vacuous) and the full differential suite
+run against it plus live Postgres: 57 pass. That run **found three defects the
+green suite had not**:
+
+1. **A refactor had silently not applied.** `MSSQLDialectAdapter.extract_part` was
+   still on the inline `.get(part, part)` passthrough while `_MSSQL_DATEPART_FIELDS`
+   sat beside it as dead code — so the fail-open behavior was still live and a
+   mutation test that edited the map proved nothing. Cause: a multi-replace script
+   that asserted only "something changed". A test now perturbs each map and asserts
+   the rendered SQL changes, which is the only check that couples a map to its code
+   path.
+2. **The differential corpus was thin on time-of-day.** Every seeded timestamp is
+   midnight with no fractional part, so the *MSSQL side* of the `EXTRACT(second …)`
+   rounding was invisible to the differential tier. A `date_probe` table now seeds
+   year-boundary and fractional-second timestamps on **both** servers.
+   *Corrected after re-review, and the correction matters more than the finding.*
+   The first version of this entry also claimed the corpus could not discriminate
+   ISO week from T-SQL's `week`. **Measured: it could** — 3 of the 20 seeded dates
+   diverge at `DATEFIRST=7` (`2025-01-05` is ISO 1 / T-SQL 2, plus `2024-11-10` and
+   `2025-06-01`). The `week` mutation survived because of defect (1) above: it
+   edited a map nothing read. Blaming the corpus was a misdiagnosis of the author's
+   own bug — the same "measured on the wrong tier" error this item's write-up is
+   otherwise built around. The second-rounding half was likewise already pinned
+   Postgres-side by `test_extract_second_truncates_rather_than_rounds`; the probe
+   extends it to MSSQL, which is coverage widening rather than a missed defect. The
+   probe is kept on both counts: `2024-12-30` (53 vs 1) is a far stronger
+   discriminator than the incidental rows, and the fractional rows close a real
+   differential-tier gap.
+3. **The mutation harness itself had a false-positive bug**, matching the substring
+   "error" against pytest's `RefResolutionError` warning — so *every* run reported
+   "caught". Corrected to match the summary line, and every earlier result re-run.
+   This is the one that should be read as a process finding rather than a code
+   one: it means an earlier progress report of "16 caught, 0 missed" was made on a
+   harness that could not fail.
+
+A fourth, found by re-review rather than by the live run: the non-UTC clock the
+MSSQL assertion depends on existed only on the developer's ad-hoc container, so in
+CI — the only place that runs automatically — the assertion was vacuous while the
+guide claimed it was not. `TZ` is now set on the compose service and both CI
+service blocks, and the test skips loudly instead of passing when it detects a UTC
+server. A documented vacuum is still a vacuum.
+
 **Every new enforcement rule was mutation-verified** — each broken deliberately,
 the suite re-run, and a failure confirmed *for that reason*. Two passes: 16
 mutations before review (the cap itself, the upper-bound unit lengths, the
 ceil-division, both MSSQL normalizations, the Postgres integer cast, the
 `mssql.DATE` target, `SYSUTCDATETIME` vs `GETDATE`, the SQLite week rejection, the
 SQLite quarter cast, the SQLite week→day conversion, the `make_interval` position
-mapping, both visitor branches, the audit-shape omission), and 8 more after the
-audit covering the fixes it produced (the restored `_buried` chain against three
-separate visitor branches, the `minute`/`second` multipliers, the Postgres `FLOOR`,
-the corrected cap default, and a swapped SQLite `%H`/`%M`). 24 caught, 0 missed.
+mapping, both visitor branches, the audit-shape omission); 8 more after the audit
+covering the fixes it produced (the restored `_buried` chain against three separate
+visitor branches, the `minute`/`second` multipliers, the Postgres `FLOOR`, the
+corrected cap default, a swapped SQLite `%H`/`%M`); and 7 against the **live**
+Postgres+SQL Server pair, of which 6 are caught and 1 is a verified no-op —
+`sa.Date` vs `mssql.DATE` renders identically on a *connected* SQL Server 2022
+(measured: both emit `CAST(… AS DATE)` and return a `date`), which is why that
+defect is recorded above as rendering-tier only. **30 caught, 0 missed, 1 proven
+un-catchable.** The re-review then added guards for the rules the first pass had
+left half-covered: `date_add`'s unit is now exhaustive on all three dialects (it
+had been guarded on Postgres only), the fourth dispatch map has a dead-code check,
+and `_validate_date_operands` gained the unit tier it shipped without.
 
-**Accepted cost.** MCP schema 104,042 → **108,167** chars (+4,125: ~3,400 for the
-three nodes plus ~700 for the agent-facing instructions section), **no budget bump
-needed** — but headroom is now **~1.7%**, well below the ~5% the budget file
-targets, so item 103 will have to raise it.
+**Accepted cost.** MCP schema 104,042 → **108,329** chars, **no budget bump
+needed** — but headroom is now **~1.5%**, well below the ~5% the budget file
+targets, so item 103 will have to raise it. Breakdown, measured rather than
+attributed: ~3,400 for the three nodes, ~700 for the agent-facing instructions
+section, and **~50** for the `minimum`/`maximum` keywords Pydantic emits from
+`DateAddExpr.amount`'s int32 bound. An earlier draft credited that last ~160 to the
+non-temporal-operand rejection *message* — wrong in a checkable way, since a
+runtime error string never appears in a tool schema at all. Recorded because this
+note exists to steer the next budget decision, and the wrong version would have
+sent someone shortening error messages instead of auditing constraints.
+
+**Two bounds added after the audit, both measured against the live server
+first.** (1) `DateAddExpr.amount` is bounded to signed 32-bit independently of
+`max_interval_days`: the two bound different things, and only this one tracks
+T-SQL's limit — `DATEADD(second, 2147483647, …)` succeeds and `…, 2147483648`
+raises "Arithmetic overflow error converting expression to data type int", which a
+deployment raising `max_interval_days` above 24,855 could reach. (2)
+`extract`/`date_add` over a **non-temporal column** is now rejected at schema
+validation: with an INTEGER operand, Postgres *errors* while MSSQL silently returns
+`0` and `1900-01-03` (T-SQL implicitly converts an int to a datetime from
+1900-01-01) — the same AST, a hard failure on one backend and a plausible wrong
+answer on the other. Only a **bare column** operand is checked, since that is the
+only case with a reflected type; a computed operand (an explicit cast, a CASE) is
+left to the database, and the rejection message names the cast to use.
 
 **Regression bar 9/16 → 10/16** (row 12). Stated honestly: row 12 was 🟡, not ❌ —
 relative-date filtering was always composable with a caller-computed literal, and

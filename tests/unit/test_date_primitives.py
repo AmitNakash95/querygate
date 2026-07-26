@@ -458,3 +458,256 @@ def test_adapter_interface_covers_every_dialect():
         assert callable(adapter.extract_part)
         assert callable(adapter.current_timestamp)
         assert callable(adapter.date_add)
+
+
+def test_no_date_part_map_is_dead_code():
+    """Every per-dialect part map must be the one the adapter actually reads.
+
+    This exists because a refactor silently left `MSSQLDialectAdapter` on an
+    inline `.get(part, part)` passthrough while `_MSSQL_DATEPART_FIELDS` sat
+    beside it unused — so the fail-open behavior was still live, the map was
+    dead, and a mutation test that edited the map proved nothing. Every other
+    tier passed. Perturbing each map and observing the rendered SQL change is
+    the only check that couples the map to the code path.
+    """
+    from querygate.compiler import dialect_adapters as da
+
+    cases = [
+        ("postgresql", da._PG_EXTRACT_FIELDS, "year", "_PG_EXTRACT_FIELDS"),
+        ("mssql", da._MSSQL_DATEPART_FIELDS, "week", "_MSSQL_DATEPART_FIELDS"),
+        ("sqlite", da._SQLITE_STRFTIME_PARTS, "year", "_SQLITE_STRFTIME_PARTS"),
+    ]
+    for dialect, mapping, part, name in cases:
+        expr = ExtractExpr(extract={"col": "orders.created_at"}, part=part)
+        original = mapping[part]
+        baseline = _sql(expr, dialect)
+        mapping[part] = "qg_sentinel_value"
+        try:
+            mutated = _sql(expr, dialect)
+        finally:
+            mapping[part] = original
+        assert mutated != baseline and "qg_sentinel_value" in mutated, (
+            f"{name} is not read by the {dialect} adapter — it is dead code, and "
+            "the real lookup is somewhere else"
+        )
+
+    # The fourth dispatch map. It holds argument POSITIONS, not keywords, so a
+    # string sentinel is not usable — move `day` to a different `make_interval`
+    # slot and assert the rendered call changes.
+    positions = da._PG_MAKE_INTERVAL_POSITIONS
+    shift = DateAddExpr(date_add=NowExpr(now="timestamp"), unit="day", amount=5)
+    baseline = _sql(shift, "postgresql")
+    original = positions["day"]
+    positions["day"] = 0 if original != 0 else 1
+    try:
+        mutated = _sql(shift, "postgresql")
+    finally:
+        positions["day"] = original
+    assert mutated != baseline, (
+        "_PG_MAKE_INTERVAL_POSITIONS is not read by the Postgres adapter — it is "
+        "dead code, and the real position lookup is somewhere else"
+    )
+
+
+@pytest.mark.parametrize("dialect", ["postgresql", "mssql", "sqlite"])
+def test_an_unknown_date_part_raises_a_typed_error_not_a_keyerror(dialect):
+    """A future `DatePart` member added without teaching an adapter must surface
+    as a clean 4xx naming the dialect, never a KeyError 500 and never a silent
+    passthrough into SQL text."""
+    from querygate.compiler.dialect_adapters import get_dialect_adapter
+
+    adapter = get_dialect_adapter(dialect)
+    with pytest.raises(QueryValidationError, match="not supported"):
+        adapter.extract_part("nanocentury", sa.column("c"))
+
+
+@pytest.mark.parametrize("dialect", ["postgresql", "mssql", "sqlite"])
+def test_an_unknown_interval_unit_raises_a_typed_error_on_every_dialect(dialect):
+    """The `date_add` half of the same rule, which the first version of the
+    exhaustiveness refactor left out — it guarded `extract_part` on all three
+    dialects but `date_add` on Postgres only.
+
+    SQLite is why this matters most: an unmapped unit reaching its
+    `datetime(x, '+N units')` modifier returns **NULL** rather than erroring, so
+    a future `IntervalUnit` would have become a silently empty column — the
+    exact failure `weeks` already caused once."""
+    from querygate.compiler.dialect_adapters import get_dialect_adapter
+
+    adapter = get_dialect_adapter(dialect)
+    with pytest.raises(QueryValidationError, match="not supported"):
+        adapter.date_add(sa.column("c"), "nanocentury", 3)
+
+
+def test_date_add_amount_is_bounded_to_int32():
+    """`max_interval_days` bounds calendar REACH; this bounds the NUMBER handed
+    to the dialect, and only the latter tracks T-SQL's own limit.
+
+    Measured on SQL Server 2022: `DATEADD(second, 2147483647, …)` succeeds and
+    `…, 2147483648` raises "Arithmetic overflow error converting expression to
+    data type int" — a driver error, not a typed rejection. The two bounds
+    diverge once a deployment raises `max_interval_days` above 24,855, since a
+    `second`-unit amount inside the day-cap can still exceed int32.
+    """
+    # BOTH boundaries on the accepted side — an off-by-one at `ge` would
+    # otherwise slip through with only the upper bound pinned.
+    for edge in (2_147_483_647, -2_147_483_648):
+        DateAddExpr.model_validate(
+            {"date_add": {"now": "timestamp"}, "unit": "second", "amount": edge}
+        )
+    for over in (2_147_483_648, -2_147_483_649):
+        with pytest.raises(pydantic.ValidationError):
+            DateAddExpr.model_validate(
+                {"date_add": {"now": "timestamp"}, "unit": "second", "amount": over}
+            )
+
+
+def test_a_raised_interval_cap_cannot_reach_the_mssql_int32_overflow():
+    """The scenario the bound exists for, end to end: an operator raises
+    `max_interval_days` well past the default, and a `second`-unit shift that
+    the day-cap would happily admit is still refused before it can become a
+    live `DATEADD` overflow."""
+    generous = Policy(max_interval_days=100_000)
+    # The int32 bound is an AST bound, so it fires at model construction and is
+    # policy-independent — that half is covered above. What is new here is the
+    # interaction: under a cap generous enough that `max_interval_days` would
+    # NOT refuse a 2-billion-second shift, the request still validates only
+    # because the amount is inside int32.
+    validate_policy(
+        _query({"date_add": {"now": "timestamp"}, "unit": "second", "amount": -2_000_000_000}),
+        generous,
+        "demo",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# `_validate_date_operands` — the unit tier the rule shipped without.
+#
+# It previously had only two integration cases, so its fail-OPEN branches (a
+# type with no Python mapping) and its allow-list edges (time, interval) were
+# untested — exactly the branches that decide whether a guard is a guard.
+# Patches the module-level `_load_table`, which is the seam CLAUDE.md documents
+# for testing schema validation without a database.
+# --------------------------------------------------------------------------- #
+_PROBE_COLUMNS = {
+    "ts": sa.DateTime(),
+    "d": sa.Date(),
+    "t": sa.Time(),
+    "span": sa.Interval(),  # Postgres `interval` -> timedelta
+    "n": sa.Integer(),
+    "s": sa.String(50),
+    "unknown": sa.types.NullType(),  # vendor/unmapped type: python_type raises
+}
+
+
+def _patched_load_table(monkeypatch):
+    import querygate.validation.schema_validation as sv
+
+    metadata = sa.MetaData()
+    table = sa.Table("events", metadata, *(sa.Column(n, t) for n, t in _PROBE_COLUMNS.items()))
+
+    async def _load(connection_id, table_name, table_connection):
+        return table
+
+    monkeypatch.setattr(sv, "_load_table", _load)
+    return sv
+
+
+@pytest.mark.parametrize(
+    "column,allowed",
+    [
+        ("ts", True),
+        ("d", True),
+        ("t", True),
+        # Allowed deliberately: Postgres's `interval` maps to timedelta and
+        # `EXTRACT(hour FROM interval_col)` is real Postgres. Rejecting it would
+        # refuse a capability the dialect has.
+        ("span", True),
+        # Unmapped/vendor types fail OPEN — reject what is known-wrong, never
+        # what is merely unrecognized.
+        ("unknown", True),
+        ("n", False),
+        ("s", False),
+    ],
+)
+def test_date_operand_type_rule_per_column_type(monkeypatch, column, allowed):
+    import asyncio
+
+    sv = _patched_load_table(monkeypatch)
+    query = StructuredQuery.model_validate(
+        {
+            "from": "events",
+            "select": [
+                {"expr": {"extract": {"col": f"events.{column}"}, "part": "hour"}, "as": "v"}
+            ],
+        }
+    )
+    if allowed:
+        asyncio.run(sv.validate_schema(query, "demo"))
+    else:
+        with pytest.raises(QueryValidationError, match="date/time column"):
+            asyncio.run(sv.validate_schema(query, "demo"))
+
+
+def test_date_operand_rule_reaches_a_where_predicate_and_a_subquery(monkeypatch):
+    """Two positions the integration cases never covered."""
+    import asyncio
+
+    sv = _patched_load_table(monkeypatch)
+    in_where = StructuredQuery.model_validate(
+        {
+            "from": "events",
+            "select": ["events.ts"],
+            "where": {
+                "col": "events.ts",
+                "op": "gte",
+                "value_expr": {"date_add": {"col": "events.n"}, "unit": "day", "amount": 1},
+            },
+        }
+    )
+    with pytest.raises(QueryValidationError, match="date/time column"):
+        asyncio.run(sv.validate_schema(in_where, "demo"))
+
+    in_subquery = StructuredQuery.model_validate(
+        {
+            "from": "events",
+            "select": ["events.ts"],
+            "where": {
+                "col": "events.n",
+                "op": "in",
+                "value_subquery": {
+                    "from": "events",
+                    "select": [
+                        {"expr": {"extract": {"col": "events.n"}, "part": "year"}, "as": "v"}
+                    ],
+                },
+            },
+        }
+    )
+    with pytest.raises(QueryValidationError, match="date/time column"):
+        asyncio.run(sv.validate_schema(in_subquery, "demo"))
+
+
+def test_only_a_string_operand_is_told_to_cast(monkeypatch):
+    """The remedy is scoped, because casting an INTEGER reproduces the very
+    divergence the rule closes (Postgres errors on `CAST(int AS TIMESTAMP)`;
+    MSSQL yields a 1900-epoch datetime). A string that holds a timestamp is the
+    one case where the cast genuinely works."""
+    import asyncio
+
+    sv = _patched_load_table(monkeypatch)
+
+    def _message(column: str) -> str:
+        query = StructuredQuery.model_validate(
+            {
+                "from": "events",
+                "select": [
+                    {"expr": {"extract": {"col": f"events.{column}"}, "part": "hour"}, "as": "v"}
+                ],
+            }
+        )
+        with pytest.raises(QueryValidationError) as excinfo:
+            asyncio.run(sv.validate_schema(query, "demo"))
+        return str(excinfo.value)
+
+    assert "Cast it first" in _message("s")
+    assert "Cast it first" not in _message("n")

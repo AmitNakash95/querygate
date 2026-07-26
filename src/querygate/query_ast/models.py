@@ -501,7 +501,18 @@ class DateAddExpr(pyd.BaseModel):
 
     date_add: "Expression"
     unit: IntervalUnit
-    amount: int
+    # Bounded to signed 32-bit independently of `max_interval_days`, because the
+    # two bound DIFFERENT things and only one of them tracks the dialect's own
+    # limit. `max_interval_days` bounds calendar REACH in days; this bounds the
+    # NUMBER handed to the dialect. T-SQL's `DATEADD` takes an `int`, and going
+    # one past it is a live server error, not a typed rejection — measured on
+    # SQL Server 2022: `DATEADD(second, 2147483647, …)` succeeds, `…, 2147483648`
+    # raises "Arithmetic overflow error converting expression to data type int".
+    # The two only diverge once a deployment raises `max_interval_days` above
+    # 24,855 (at which point a `second`-unit amount within the day-cap can still
+    # exceed int32), so without this a deployment could tune itself into a driver
+    # error. Deny-by-default at the narrowest limit across supported dialects.
+    amount: int = pyd.Field(ge=-2_147_483_648, le=2_147_483_647)
 
     model_config = pyd.ConfigDict(extra="forbid")
 
