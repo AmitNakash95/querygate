@@ -182,11 +182,26 @@ read-only/report-only tasks, or explicitly-throwaway work):
 1. **Re-read the actual diff** (not your memory of it) against the bar this repo
    sets — the [Non-negotiables](#non-negotiables--read-first-never-violate-without-an-explicit-recorded-decision),
    the primitives doctrine, the composable-interface rule, the testing gotchas.
-2. **Rate it honestly, 1–10**, and name the one or two things holding it back. A
+2. **Mutation-verify every new enforcement point *before* reporting completion.**
+   For each line the change adds that enforces something — a cap, a rejection, a
+   ref walk, a conversion, a dialect guard — break it deliberately, run the suite,
+   and confirm a test fails *for that reason*. Revert, then move on. This is not
+   optional polish: on 2026-07-26 items 101 and 114 each *first passed self-review*
+   with a green suite over an unguarded enforcement line (the item-100 caps silently
+   not reaching a window argument; `to_read_where`'s boolean branches, where a
+   swapped `and`/`or` would have made `DELETE … WHERE a OR b` delete on `a AND b`).
+   Both were invisible to 1,800 passing tests and to a careful reading of the diff,
+   both were caught by this technique before landing, and both took ten minutes to
+   find. Bound the effort to each enforcement *rule*, not each line.
+   **Measure the shape the product actually emits**, too: a guardrail rationale
+   measured on raw un-LIMITed SQL cannot be quoted as if it described a compiled
+   query, and a claimed cost ("~1M bind parameters") must be measured rather than
+   reasoned — the driver's parameter limit made that one wrong.
+3. **Rate it honestly, 1–10**, and name the one or two things holding it back. A
    passing suite is the floor, not a 10. Look specifically for: under-testing, a
    leaked assumption, a missed edge case, dead/duplicated code, inconsistency
    with an existing pattern, a doc that now drifts from behavior.
-3. **Close the gap, don't just narrate it.** If the fix is small and safe (a
+4. **Close the gap, don't just narrate it.** If the fix is small and safe (a
    rename, an added test, a tightened type, a doc reconciliation, deleting dead
    code), **do it now** and re-check — don't ask permission to reach the bar you
    should have hit. If it's large, risky, or a judgment call (a design change, a

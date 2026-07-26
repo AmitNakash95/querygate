@@ -6319,3 +6319,70 @@ inverted field losing its inversion, a new ambiguously-named cap, and dropping
 the `approval_sensitivities` change all fail the suite. The ninth — adding a
 plain `max_*` cap — is *designed* to pass: it is auto-included everywhere and its
 direction is unambiguous, so there is nothing left to forget.
+
+### 116. A write's WHERE was exempt from every shape cap the read path enforces ✅ DONE
+
+**Effort: S. Priority: medium (resource-exhaustion guardrail parity). Depended on:
+nothing.** Surfaced 2026-07-26 by item 114's `auditors` audit — three of four
+reviewers flagged it independently. Pre-existing since item 93; item 114 is what
+made it salient, since the write filter then had its own type and therefore an
+obvious home for the caps.
+
+**The defect.** `validate_write_policy` enforced none of `Policy.max_where_depth`,
+`max_where_predicates` or `max_in_list_size`. All three lived only in
+`policy_validation.py`, which the write path never calls. The concrete one was the
+in-list cap: a
+`{"op":"delete","table":"orders","where":{"col":"orders.id","op":"in","value":[…1e6 ids…]}}`
+compiled ~1M bind parameters and ran a `COUNT(*)` over them **before**
+`max_affected_rows` was consulted — while the read path refused the same list at
+1,000. Depth was at least fail-safe (~800 nested `not` levels return a clean 422,
+not a `RecursionError`), but a write filter could nest ~250 levels where a read
+caps at 5, and that tree is walked four times.
+
+**The fix is one implementation of each rule, not a write-side copy.** All three
+rules are now single functions in `policy_validation.py` —
+`_check_where_depth`, `_check_predicate_count` and `_check_in_list_size` (the last
+two extracted from inline code by this item) — and BOTH paths reach them. What
+differs, deliberately, is the scope counted over: reads sum predicate counts
+tree-wide across subqueries as item 97 requires, while a write filter is one tree,
+so the write path composes the three through `enforce_predicate_shape_caps` and the
+read path calls them from its own wider scoping. The composition adds no rule of its
+own, so a fourth shape cap added to a primitive lands on both paths.
+
+Proven by spying: three parameterized tests monkeypatch each rule function and
+assert **both** `validate_policy` and `validate_write_policy` route through it. (The
+first version of this test compared imported names for identity, which Python's
+import semantics make true automatically — it would still have passed while the
+count rule was implemented twice, which is exactly what the audit found.)
+
+**Decision recorded: the write caps are the READ `Policy` fields, not new
+`WritePolicy.max_*` ones.** A write's WHERE *reads* rows in order to select them —
+the same reasoning that already applies the read allow/deny and masked-column rules
+to a write filter (item 93). Splitting them would mean two numbers for one cost and
+a second place to forget. The acceptance criteria asked for this to be decided
+explicitly rather than defaulted.
+
+**A batch now validates up front.** `_execute_many_atomically` validated policy
+*inside* its per-statement loop inside the open session, so statement N's caps were
+applied only after 1..N-1 had compiled and issued DML (rolled back — but the work
+was performed, which is the defect this item is about). Policy for every statement
+now runs before a concurrency slot is taken or a session opened, mirroring item
+109's up-front batch-size check; schema validation stays in the loop because it
+needs the connection.
+
+**Coverage.** Unit (`test_governed_writes.py`): each of the three caps fires on a
+write, each with an at-cap positive control (including the count cap, whose control
+catches an off-by-one), the three spy tests above, and the `in`-list message's
+target ladder (`col` / `col_fn(...)`), which nothing had asserted. Integration (`test_write_preview_end_to_end.py`): an over-size `in`
+list is refused at **both** `/write/preview` and `/write/execute` with a clean 422,
+and — the acceptance criterion that actually matters, proven the way item 108 proved
+its own guard — `before_cursor_execute` observes that **not one statement reached
+the database**, with a within-cap positive control so the guard cannot degrade into
+refusing every `in` filter. Five mutations verified caught, including each rule
+individually and the read path's own in-list check (so the extraction cannot have
+silently weakened reads).
+
+**Accepted cost.** A write filter that legitimately needed >1,000 `in` values, >100
+predicates or >5 nesting levels now needs a policy change — the same conversation a
+read of that shape has always required.
+

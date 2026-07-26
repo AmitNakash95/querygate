@@ -113,21 +113,14 @@ def _enforce_tree_wide_caps(scopes: List[StructuredQuery], policy: Policy) -> No
         raise PolicyViolationError(
             f"group_by exceeds max of {policy.max_group_by} columns{_suffix(total, nested)}"
         )
-    total = sum(_scope_where_predicate_count(q) for q in scopes)
-    if total > policy.max_where_predicates:
-        raise PolicyViolationError(
-            f"where predicate count {total} exceeds max of {policy.max_where_predicates}"
-        )
-    total = sum(_scope_having_predicate_count(q) for q in scopes)
-    if total > policy.max_where_predicates:
-        raise PolicyViolationError(
-            f"having predicate count {total} exceeds max of {policy.max_where_predicates}"
-        )
-    total = sum(_scope_case_condition_predicate_count(q) for q in scopes)
-    if total > policy.max_where_predicates:
-        raise PolicyViolationError(
-            f"case condition predicate count {total} exceeds max of {policy.max_where_predicates}"
-        )
+    # Counted tree-wide (item 97), then handed to the SHARED rule so the read and
+    # write paths cannot disagree on the limit or the message — only on the scope
+    # they count over, which differs deliberately (a write has no subqueries).
+    _check_predicate_count(sum(_scope_where_predicate_count(q) for q in scopes), policy, "where")
+    _check_predicate_count(sum(_scope_having_predicate_count(q) for q in scopes), policy, "having")
+    _check_predicate_count(
+        sum(_scope_case_condition_predicate_count(q) for q in scopes), policy, "case condition"
+    )
     total = sum(_scope_expression_node_count(q) for q in scopes)
     if total > policy.max_expression_nodes:
         raise PolicyViolationError(
@@ -169,6 +162,63 @@ def _check_where_depth(node: Optional[WhereNode], policy: Policy, label: str) ->
         raise PolicyViolationError(
             f"{label} nesting depth {depth} exceeds max {policy.max_where_depth}"
         )
+
+
+def _check_in_list_size(pred: Predicate, policy: Policy) -> None:
+    """Bound one `in`/`not_in` predicate's literal list. A value_subquery predicate
+    has no literal list to size (it is validated as its own scope), so only literal
+    lists have a `max_in_list_size`."""
+    if pred.op not in ("in", "not_in") or pred.value is None:
+        return
+    if len(pred.value) <= policy.max_in_list_size:
+        return
+    if pred.col is not None:
+        target = pred.col
+    elif pred.col_fn is not None:
+        target = f"{pred.col_fn.fn}(...)"
+    else:
+        target = "expression"
+    raise PolicyViolationError(
+        f"{pred.op} list for {target!r} exceeds max_in_list_size of "
+        f"{policy.max_in_list_size} items"
+    )
+
+
+def _check_predicate_count(total: int, policy: Policy, label: str) -> None:
+    """Bound how many predicate leaves a filter carries. Split out so the read path
+    (which counts tree-wide across scopes, item 97) and the write path (one tree)
+    share the rule and the message while counting over different scopes."""
+    if total > policy.max_where_predicates:
+        raise PolicyViolationError(
+            f"{label} predicate count {total} exceeds max of {policy.max_where_predicates}"
+        )
+
+
+def enforce_predicate_shape_caps(node: WhereNode, policy: Policy, *, label: str) -> None:
+    """The three shape caps for ONE predicate tree: nesting depth, predicate count,
+    and `in`/`not_in` list size.
+
+    All three RULES are shared with the read path — `_check_where_depth`,
+    `_check_predicate_count` and `_check_in_list_size` are the single
+    implementations, and reads reach them through
+    `_validate_scope`/`_enforce_tree_wide_caps`. What differs, deliberately, is the
+    SCOPE counted over: reads sum predicate counts tree-wide across subqueries
+    (item 97), while a write filter is one tree. This composition adds no rule of
+    its own, so a fourth shape cap added to a primitive applies to both paths.
+
+    Without it a write filter was exempt from all three, so
+    `delete … where id in [<huge list>]` rendered the whole list client-side before
+    `max_affected_rows` was ever consulted — measured: 100,000 values compile and
+    render to a 689 KB statement in ~25 ms, and beyond Postgres's 32,767-parameter
+    limit (T-SQL's 2,100) the driver refuses the statement outright. The read path
+    refused the same list at `max_in_list_size` (default 1,000); the write path
+    turned it into either wasted CPU or a driver-level failure.
+    """
+    _check_where_depth(node, policy, label)
+    predicates = list(iter_where_predicates(node))
+    _check_predicate_count(len(predicates), policy, label)
+    for pred in predicates:
+        _check_in_list_size(pred, policy)
 
 
 def _validate_scope(query: StructuredQuery, policy: Policy) -> None:
@@ -243,20 +293,7 @@ def _validate_scope(query: StructuredQuery, policy: Policy) -> None:
         if node is not None:
             all_predicates.extend(iter_where_predicates(node))
     for pred in all_predicates:
-        # A value_subquery predicate has no literal list to size; it's validated
-        # as its own scope. Only literal in/not_in lists have a max_in_list_size.
-        if pred.op in ("in", "not_in") and pred.value is not None:
-            if len(pred.value) > policy.max_in_list_size:
-                if pred.col is not None:
-                    target = pred.col
-                elif pred.col_fn is not None:
-                    target = f"{pred.col_fn.fn}(...)"
-                else:
-                    target = "expression"
-                raise PolicyViolationError(
-                    f"{pred.op} list for {target!r} exceeds max_in_list_size of "
-                    f"{policy.max_in_list_size} items"
-                )
+        _check_in_list_size(pred, policy)
 
     # One walk of the canonical visitor (this scope only — it does not descend
     # into value_subquery) feeds both the table/column allow-deny checks and the

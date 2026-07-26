@@ -213,6 +213,15 @@ class WriteExecutionService:
         dialect = self._connection_dialect()
         cap = policy.write.max_affected_rows
         oks: List[WriteBatchItemResult] = []
+        # Policy for EVERY statement up front, before a slot is taken or a session
+        # opened (item 116): validation is pure CPU, and checking it inside the loop
+        # meant statement N's caps were only applied after 1..N-1 had already
+        # compiled and issued DML — rolled back, but the work was performed, which is
+        # the very thing the shape caps exist to prevent. Mirrors item 109's
+        # up-front batch-size check. Schema validation stays in the loop: it needs
+        # the connection.
+        for statement in statements:
+            validate_write_policy(statement, policy, self._connection_id)
         try:
             async with concurrency_slot(
                 self._connection_id,

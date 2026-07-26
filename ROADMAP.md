@@ -494,13 +494,15 @@ already-planned initiatives.
 
 ### Review Phase 3 — Architecture and maintainability
 
-- [ ] **116** — A write's WHERE is exempt from `max_where_depth`,
-  `max_where_predicates` and `max_in_list_size`, so a `delete … where id in [1M
-  ids]` compiles ~1M bind params and counts them before `max_affected_rows` is
-  consulted. *Surfaced 2026-07-26 by the item-114 audit (three reviewers,
-  independently). Pre-existing since item 93; sequenced here with 114/115 as
-  guardrail work on shipped surfaces. Adding the caps changes which writes are
-  accepted, so it needs a maintainer decision, not a rider on another item.*
+- [x] **116** — A write's WHERE was exempt from `max_where_depth`,
+  `max_where_predicates` and `max_in_list_size`. ✅ **Shipped** (each rule is now a
+  single function both paths reach, verified by spying rather than by name identity;
+  enforced on writes — and on every statement of a batch up front — before any DML
+  compiles or any `COUNT(*)` runs, with a test proving no statement reaches the
+  database; the read `Policy` fields are used deliberately, since a write's WHERE
+  reads rows to select them). *Surfaced 2026-07-26 by the item-114 audit; a
+  `delete … where id in [<huge list>]` used to be rendered in full client-side
+  first — 100,000 values measured at a 689 KB statement.*
 
 - [x] **115** — The hand-maintained guardrail-field lists had drifted from
   `Policy`'s cap set. ✅ **Shipped** (all **four** copies —

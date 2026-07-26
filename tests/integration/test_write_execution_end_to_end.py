@@ -9,6 +9,8 @@ mutation), and the approval gate pauses a large write until a token is supplied.
 from __future__ import annotations
 
 import pytest
+
+from querygate.core.exceptions import PolicyViolationError
 from httpx import ASGITransport, AsyncClient
 
 from querygate.execution.approval import issue_approval_token, write_fingerprint
@@ -310,3 +312,70 @@ async def test_atomic_batch_is_all_or_nothing(sqlite_app):
                     "where": {"col": "orders.id", "op": "eq", "value": oid},
                 },
             )
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_atomic_batch_validates_every_statement_before_touching_the_database(
+    sqlite_app, request
+):
+    """Item 116: policy for the WHOLE batch runs before a session opens.
+
+    Previously validation sat inside the per-statement loop inside the open
+    session, so a shape-cap violation on statement 2 was only caught after
+    statement 1 had already compiled and issued its DML — rolled back, but the work
+    was performed, which is precisely what the shape caps exist to prevent. Proven
+    by observing what reached the database, the same way item 108 proved its guard.
+    """
+    from sqlalchemy import event
+
+    from querygate.execution.write_execution import WriteExecutionService
+    from querygate.policy.loader import PolicyStore, set_policy_store
+    from querygate.policy.models import Policy, WritePolicy
+    from querygate.write_ast.models import DeleteStatement
+
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                max_in_list_size=2,
+                write=WritePolicy(
+                    enabled=True,
+                    allowed_tables=["orders"],
+                    allowed_operations=["delete"],
+                    max_affected_rows=1000,
+                    max_batch_size=10,
+                ),
+            ),
+            overrides={},
+        )
+    )
+
+    import querygate.execution.service as svc_module
+
+    engine = svc_module.get_engine("demo")
+    executed: list = []
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _on_execute(conn, cursor, statement, parameters, context, executemany):
+        executed.append(statement)
+
+    request.addfinalizer(
+        lambda: event.remove(engine.sync_engine, "before_cursor_execute", _on_execute)
+    )
+
+    ok = DeleteStatement.model_validate(
+        {"op": "delete", "table": "orders", "where": {"col": "orders.id", "op": "eq", "value": 1}}
+    )
+    over_cap = DeleteStatement.model_validate(
+        {
+            "op": "delete",
+            "table": "orders",
+            "where": {"col": "orders.id", "op": "in", "value": [1, 2, 3]},
+        }
+    )
+
+    with pytest.raises(PolicyViolationError, match="max_in_list_size"):
+        await WriteExecutionService("demo").execute_many([ok, over_cap], atomic=True)
+
+    # The FIRST statement must not have run either — no COUNT(*), no DELETE.
+    assert executed == [], executed

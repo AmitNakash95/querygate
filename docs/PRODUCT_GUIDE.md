@@ -540,6 +540,17 @@ the returned rows asserted equal — and a test enforces that a new window funct
 cannot ship without such a case. That is the items 75/82 lesson applied: `RANGE 2
 PRECEDING` compiles cleanly for the MSSQL dialect and then fails on the server.
 
+**What bounds a write's `WHERE`.** Two things beyond the write policy itself, both
+easy to miss because they live on the *read* side of `Policy`: the filter's columns
+are checked against read allow/deny **and** the masked-column rule (a masked column
+cannot be used to target a mutation at all), and since item 116 the filter's *shape*
+is bounded by `max_where_depth`, `max_where_predicates` and `max_in_list_size` — the
+same caps and the same numbers a read gets, because a write's `WHERE` reads rows in
+order to select them. So a `DELETE` filtering on a 5,000-element `IN` list needs a
+policy change, exactly as the equivalent `SELECT` would. Since item 114 the filter
+is also its own narrowed type (`WritePredicate`/`WriteWhereGroup`): no computed
+expressions and no subqueries, refused by the schema rather than at runtime.
+
 ### 4. Concurrency control — don't overwhelm the database
 
 **File:** `src/querygate/execution/concurrency.py`
@@ -2874,6 +2885,28 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-26 — a write's WHERE is bounded by the READ shape caps, not new
+  write-specific ones (TODO.md item 116).** `validate_write_policy` enforced none of
+  `max_where_depth`, `max_where_predicates` or `max_in_list_size` — they lived only
+  in the read validator, which the write path never calls. So a
+  `delete … where id in [<huge list>]` was rendered in full client-side *before*
+  `max_affected_rows` was consulted (measured: 100,000 values → a 689 KB statement
+  in ~25 ms; past Postgres's 32,767-parameter limit the driver refuses it instead
+  of QueryGate refusing it cleanly), while a read of the same shape was already
+  capped at 1,000. Surfaced by item 114's audit, where three of four
+  reviewers found it independently.
+  **The decision** the item asked to be made explicitly rather than defaulted: the
+  write path uses the **same `Policy` fields as reads**. A write's WHERE *reads*
+  rows in order to select them — the identical reasoning that already applies the
+  read allow/deny and masked-column rules to a write filter — so splitting them
+  would mean two numbers for one cost and a second place to forget one. Each of the
+  three rules is now a single function both paths reach — verified by spying on each
+  one and asserting the read *and* write validators route through it — while the
+  scope counted over still differs by design: reads sum predicate counts tree-wide
+  across subqueries per item 97, a write filter is one tree.
+  **Accepted cost:** a write that legitimately needs >1,000 `in` values, >100
+  predicates or >5 nesting levels now needs a policy change — the same conversation
+  a read of that shape has always required.
 - **2026-07-26 — a write's WHERE gets its own narrowed predicate types instead of
   reusing the read `Predicate` (TODO.md item 114).** `run_structured_writes` was
   the largest MCP tool schema in the product — larger than the *read* tool —
