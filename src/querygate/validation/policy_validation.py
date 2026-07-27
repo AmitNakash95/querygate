@@ -39,7 +39,7 @@ from querygate.validation.schema_validation import (
 )
 
 
-def referenced_tables(query: StructuredQuery, cte_names: Set[str] = frozenset()) -> Set[str]:
+def referenced_tables(query: StructuredQuery, cte_names: Optional[Set[str]] = None) -> Set[str]:
     """Return every PHYSICAL table touched by a query: the structural from/join
     tables, plus the physical table behind every column reference the canonical
     visitor (`iter_column_refs`) finds. Each ref's effective/alias name is
@@ -57,7 +57,18 @@ def referenced_tables(query: StructuredQuery, cte_names: Set[str] = frozenset())
     Passing them matters in both directions: an allow-list policy would otherwise
     reject every cte reference as an unknown table, and a report of "tables read"
     would name something that does not exist in the database.
+
+    Omitting it derives the names from `query` itself rather than defaulting to
+    "none" — deliberately, because the two differ exactly when it matters. A
+    default of `frozenset()` is fail-OPEN: a future caller who forgets the
+    argument silently gets pre-cte behavior and reports a block's name as a table.
+    Self-defaulting makes the forgetful call correct for a root query and no worse
+    than before for any other. `_validate_scope` still passes the ROOT's names
+    explicitly, because a nested scope declares none of its own yet must know
+    which of ITS names denote the statement's blocks.
     """
+    if cte_names is None:
+        cte_names = declared_cte_names(query)
     name_to_physical = effective_name_map(query)
     tables = {query.from_table, *(join.table for join in query.joins)}
     for column_ref in iter_column_refs(query):
@@ -282,9 +293,7 @@ def enforce_predicate_shape_caps(node: WhereNode, policy: Policy, *, label: str)
         _check_in_list_size(pred, policy)
 
 
-def _validate_scope(
-    query: StructuredQuery, policy: Policy, cte_names: Set[str] = frozenset()
-) -> None:
+def _validate_scope(query: StructuredQuery, policy: Policy, cte_names: Set[str]) -> None:
     """Per-scope checks (applied to the outer query AND each subquery
     independently): the non-summable caps and the column allow/deny + masked-
     column rule against THIS scope's own tables (item 97 — a subquery's base
