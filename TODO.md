@@ -2035,8 +2035,10 @@ RHS in WHERE and HAVING, and correlation via a **declared, capped**
 `StructuredQuery.correlate` list checked against the ENCLOSING scope. An undeclared
 outer ref still fails exactly as before, so correlation is opt-in per subquery and
 the pre-106 uncorrelated model is the default. A scalar subquery must be an
-aggregate with no `group_by`, making exactly-one-row true by construction. Closes
-regression bar row 11 -> **15/16**, completing Phase 4 of
+aggregate with no `group_by`, making exactly-one-row true by construction. A scalar
+subquery in a SELECT **projection** is deliberately NOT part of this — it composes
+from item 105's cte + LEFT JOIN, and the recipe is recorded in the Decision Log.
+Closes regression bar row 11 -> **15/16**, completing Phase 4 of
 `docs/ENGINE_EXPRESSIVENESS_PLAN.md`. 13/13 enforcement points mutation-verified.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 106).

@@ -71,6 +71,32 @@ default:
   # routinely combine more segments.
   max_set_op_arms: 3
 
+  # Named WITH blocks — ctes (TODO.md item 105). How many multi-stage blocks one
+  # query may declare; 0 turns the feature off for this connection. Not summed
+  # tree-wide because only the ROOT query may declare them, so there is no second
+  # place for a count to hide — but every COUNT cap above already counts each
+  # block's body, so N blocks share one budget rather than each getting a fresh
+  # one. Note what does NOT bound a block: max_rows is deliberately not applied to
+  # one, because a block's rows are input to a join or an aggregate and truncating
+  # them would silently change a total rather than refuse the query. What bounds a
+  # block is timeout_seconds, max_response_bytes and the concurrency limiter.
+  max_cte_count: 3
+
+  # Correlated subquery references (TODO.md item 106). How many OUTER columns a
+  # query tree's subqueries may declare in their `correlate` lists, summed
+  # tree-wide; 0 disables correlation entirely and keeps this connection on the
+  # pre-106 model where a subquery resolves only against its own tables.
+  #
+  # This caps the correlation SURFACE, not its cost, and the distinction matters:
+  # a correlated subquery is re-evaluated per candidate outer row, so its cost is
+  # driven by the outer scan, which no count here bounds — timeout_seconds, the
+  # concurrency limiter and (where enabled) the cost gate do. What this bounds is
+  # how many outer columns a nested scope can pull into its namespace, which is
+  # the policy/masking surface and the part that must not grow silently. Every
+  # declared ref is checked against the ENCLOSING query's table/column allow-deny
+  # and mask rules; an undeclared outer reference is rejected outright.
+  max_correlated_refs: 2
+
   # CROSS JOIN (TODO.md item 103) — deny-by-default, and the only join type that
   # needs an explicit opt-in. Every other join must connect to the query's table
   # graph, so before item 103 a cartesian product could not be expressed at all;

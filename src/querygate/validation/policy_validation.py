@@ -683,8 +683,30 @@ def _validate_correlation(query: StructuredQuery, scoped: List, policy: Policy) 
             )
         )
 
+    # A declared ref the subquery never actually uses is dead structure: it widens
+    # the nested scope's namespace and spends `max_correlated_refs` while
+    # contributing nothing to the SQL. Rejected for the same reason item 105
+    # rejects an unreferenced cte — the two containers should not disagree about
+    # whether a declaration that does nothing is acceptable.
+    for correlation in correlations:
+        used = {ref.ref.lower() for ref in iter_column_refs(correlation.child)}
+        if correlation.ref.lower() not in used:
+            raise PolicyViolationError(
+                f"correlate {correlation.ref!r} is declared but never referenced by the "
+                "subquery — use it in the subquery, or remove it."
+            )
+
     for correlation in correlations:
         # Resolved against the PARENT's name map — the load-bearing line.
+        #
+        # This ref is checked TWICE, deliberately. `_validate_scope` also walks the
+        # subquery and sees the same ref as an ordinary WHERE reference, so the
+        # generic table/column/mask rules apply to it there too. That redundancy is
+        # why disabling the mask check below still leaves the query rejected — the
+        # check earns its place by naming the correlation specifically, not by being
+        # the only guard. Neither layer may be removed on the assumption the other
+        # covers it: this one runs against the PARENT's name map, that one against
+        # the child's, and only the parent's is correct for an aliased outer table.
         name_to_physical = effective_name_map(correlation.parent)
         table, column = parse_column_ref(correlation.ref)
         physical = name_to_physical.get(table.lower(), table)
