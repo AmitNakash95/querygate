@@ -192,6 +192,41 @@ async def test_top_n_per_customer_matches_computed_max(sqlite_app):
 
 
 @pytest.mark.asyncio
+async def test_grouped_top_n_returns_both_same_named_columns_and_orders_by_the_named_one(
+    sqlite_app,
+):
+    expected_max_order_id: dict[int, int] = {}
+    for order in ORDERS_DATA:
+        customer_id = order["customer_id"]
+        expected_max_order_id[customer_id] = max(
+            expected_max_order_id.get(customer_id, 0), order["id"]
+        )
+
+    resp = await _post(
+        sqlite_app,
+        "/api/v1/demo/query",
+        {
+            "from": "orders",
+            "select": ["customers.id", "orders.id"],
+            "joins": [{"table": "customers", "on": ["orders.customer_id", "customers.id"]}],
+            "group_by": ["customers.id", "orders.id"],
+            "top_n": {
+                "partition_by": ["customers.id"],
+                "order_by": [{"col": "orders.id", "dir": "desc"}],
+                "n": 1,
+            },
+            "limit": 50,
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["rows"]
+    assert len(rows) == len(expected_max_order_id)
+    assert all({"id", "id_1"} <= row.keys() for row in rows)
+    assert {row["id"]: row["id_1"] for row in rows} == expected_max_order_id
+
+
+@pytest.mark.asyncio
 async def test_date_bucket_month_matches_distinct_months(sqlite_app):
     expected_months = {o["created_at"].strftime("%Y-%m-01") for o in ORDERS_DATA}
 

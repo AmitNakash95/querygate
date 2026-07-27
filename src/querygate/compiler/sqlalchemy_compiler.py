@@ -8,14 +8,14 @@ known to exist and be policy-permitted.
 from __future__ import annotations
 
 import operator
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, get_args
+from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple, get_args
 
 import sqlalchemy as sa
 
 from querygate.compiler.dialect_adapters import get_dialect_adapter
 from querygate.connections.models import DatabaseDialect
 from querygate.core.auth import Principal
-from querygate.core.exceptions import QueryValidationError
+from querygate.core.exceptions import PolicyViolationError, QueryValidationError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     ArrayAggSelectItem,
@@ -25,6 +25,8 @@ from querygate.query_ast.models import (
     CastExpr,
     ColArg,
     ColumnExpr,
+    CteSpec,
+    EXISTS_OPS,
     DateAddExpr,
     DateBucketSelectItem,
     Expression,
@@ -46,6 +48,7 @@ from querygate.query_ast.models import (
 )
 from querygate.validation.schema_validation import (
     effective_name_map,
+    iter_set_op_arms,
     parse_column_ref,
     resolve_column,
 )
@@ -315,6 +318,27 @@ class _WhereCtx(NamedTuple):
     dialect: str
     principal: Optional[Principal]
     subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]]
+    # Item 105 — carried so an IN (subquery) whose own FROM names a cte binds to
+    # the compiled block, exactly like any other scope.
+    cte_objects: Optional[Dict[str, Any]] = None
+    # Item 106 — HAVING may carry a SCALAR subquery but not a value-set one. Before
+    # this, HAVING was compiled with `ctx=None` and the `ctx is None` guard in
+    # `_compile_in_subquery` was the compiler-side backstop for item 97's
+    # WHERE-only rule. HAVING now needs a ctx, so the backstop is expressed as this
+    # flag instead of being lost — policy validation is still the primary check.
+    allow_value_set_subquery: bool = True
+
+
+# The scalar comparison operators, as callables, so the scalar-subquery branch
+# reuses one mapping instead of repeating the if/elif ladder below it.
+_SCALAR_COMPARATORS = {
+    "eq": operator.eq,
+    "neq": operator.ne,
+    "lt": operator.lt,
+    "lte": operator.le,
+    "gt": operator.gt,
+    "gte": operator.ge,
+}
 
 
 def _compile_in_subquery(pred: Predicate, ctx: Optional["_WhereCtx"]) -> sa.Select:
@@ -327,6 +351,8 @@ def _compile_in_subquery(pred: Predicate, ctx: Optional["_WhereCtx"]) -> sa.Sele
     filters and the tree-wide caps, not by a row limit."""
     if ctx is None or ctx.subquery_tables is None:
         raise QueryValidationError("IN (subquery) is only supported in a WHERE clause")
+    if pred.op in ("in", "not_in") and not ctx.allow_value_set_subquery:
+        raise QueryValidationError("IN (subquery) is only supported in a WHERE clause")
     subq_tables = ctx.subquery_tables.get(id(pred.value_subquery))
     if subq_tables is None:
         raise QueryValidationError("Subquery was not schema-validated")
@@ -337,8 +363,38 @@ def _compile_in_subquery(pred: Predicate, ctx: Optional["_WhereCtx"]) -> sa.Sele
         dialect=ctx.dialect,
         principal=ctx.principal,
         subquery_tables=ctx.subquery_tables,
+        cte_objects=ctx.cte_objects,
     )
     return stmt.limit(None)
+
+
+def _compile_exists(pred: Predicate, ctx: Optional["_WhereCtx"]) -> Any:
+    """Compile an EXISTS / NOT EXISTS test (item 106).
+
+    The subquery goes through the SAME `compile_structured_query` path as any other
+    scope, so it inherits its mandatory row filters, masks and k-anonymity floor —
+    and its LIMIT is stripped for the reason item 97 strips one: EXISTS asks whether
+    ANY row matches, and a limited scan can only make that answer wrong in one
+    direction. Correlation needs no work here: the subquery was schema-validated
+    against the PARENT's own table objects for its declared refs, so SQLAlchemy sees
+    a shared FROM element and emits the correlated form itself.
+    """
+    if ctx is None or ctx.subquery_tables is None:
+        raise QueryValidationError("EXISTS is only supported in a WHERE clause")
+    subq_tables = ctx.subquery_tables.get(id(pred.exists_subquery))
+    if subq_tables is None:
+        raise QueryValidationError("EXISTS subquery was not schema-validated")
+    stmt, _limit = compile_structured_query(
+        pred.exists_subquery,
+        subq_tables,
+        ctx.policy,
+        dialect=ctx.dialect,
+        principal=ctx.principal,
+        subquery_tables=ctx.subquery_tables,
+        cte_objects=ctx.cte_objects,
+    )
+    exists_clause = stmt.limit(None).exists()
+    return ~exists_clause if pred.op == "not_exists" else exists_clause
 
 
 def _apply_predicate(
@@ -350,9 +406,16 @@ def _apply_predicate(
 ) -> Any:
     op = pred.op
     if pred.value_subquery is not None:
-        # IN (subquery) / NOT IN (subquery) — item 97.
         subselect = _compile_in_subquery(pred, ctx)
-        return col.in_(subselect) if op == "in" else ~col.in_(subselect)
+        if op in ("in", "not_in"):
+            # IN (subquery) / NOT IN (subquery) — item 97.
+            return col.in_(subselect) if op == "in" else ~col.in_(subselect)
+        # A SCALAR subquery (item 106). `.scalar_subquery()` is what tells
+        # SQLAlchemy this SELECT is a single value rather than a row source; the
+        # AST layer has already guaranteed it returns exactly one row by requiring
+        # an aggregate with no group_by, so no LIMIT is needed to make that true.
+        scalar = subselect.scalar_subquery()
+        return _SCALAR_COMPARATORS[op](col, scalar)
     # value_col/value_expr are only valid for eq/neq/lt/lte/gt/gte (enforced at
     # the AST layer), so every other op below always sees pred.value here.
     if pred.value_col is not None:
@@ -415,16 +478,6 @@ def _resolve_output_ref(
     raise QueryValidationError(f"Unknown column or alias {ref!r}")
 
 
-def _ref_output_name(ref: str, alias_map: Dict[str, Any]) -> str:
-    """Map a select/group_by ref to the output column name it will have in a subquery."""
-    if ref in alias_map:
-        return alias_map[ref].name
-    if "." in ref:
-        _, col_name = parse_column_ref(ref)
-        return col_name
-    return ref
-
-
 def _compile_where(
     node: WhereNode,
     tables: Dict[str, sa.Table],
@@ -433,6 +486,10 @@ def _compile_where(
     ctx: Optional["_WhereCtx"] = None,
 ) -> Any:
     if isinstance(node, Predicate):
+        if node.op in EXISTS_OPS:
+            # The one predicate with no left-hand operand (item 106) — resolving a
+            # target first would fail, since the AST forbids col/col_fn/expr here.
+            return _compile_exists(node, ctx)
         target = _resolve_predicate_target(node, tables, alias_map, dialect)
         return _apply_predicate(target, node, tables, dialect, ctx)
 
@@ -583,12 +640,132 @@ def _build_select_columns(
     return columns, alias_map
 
 
+def _equality_bound_columns(join: Any) -> Optional[set]:
+    """The joined table's columns pinned by equality to another table's column,
+    lowercased — or None if this join's shape is not a pure equality conjunction.
+
+    Both spellings are read: `on`/`extra_on` pairs, and a `condition` that is a
+    `Predicate` or an all-`and` tree of `eq` predicates comparing `col` to
+    `value_col` (item 103's general form can still express plain equality, and a
+    caller who writes it that way must not be treated as if they had written a
+    range join). Anything else — an inequality, an OR/NOT tree, a computed
+    operand, a cross join — returns None, meaning "cannot be shown to be an
+    equality join".
+    """
+    if join.type == "cross":
+        return None
+
+    joined = (join.alias or join.table).lower()
+    bound: set = set()
+
+    def _take(left_ref: str, right_ref: str) -> bool:
+        for ref, other in ((left_ref, right_ref), (right_ref, left_ref)):
+            table, column = parse_column_ref(ref)
+            other_table, _ = parse_column_ref(other)
+            # Only a comparison against a DIFFERENT table constrains the join's
+            # grain; `a.x = a.y` says nothing about how many right rows match.
+            if table.lower() == joined and other_table.lower() != joined:
+                bound.add(column.lower())
+                return True
+        return False
+
+    if join.on is not None:
+        for pair in [join.on, *join.extra_on]:
+            _take(pair[0], pair[1])
+        return bound
+
+    def _walk(node: Any) -> None:
+        """Collect the equalities that hold unconditionally for every matched row.
+
+        Only top-level conjuncts qualify, and a non-qualifying conjunct is skipped
+        rather than failing the walk — because *narrowing* a condition can never
+        make it match more rows. If one conjunct pins a unique key, at most one
+        right-hand row satisfies it, so the whole (more restrictive) condition
+        matches at most one too: `pk = x AND price BETWEEN lo AND hi` cannot fan
+        out, and neither can `pk = x AND (a OR b)`.
+
+        An OR/NOT subtree is simply not descended into: an equality inside one
+        holds on only some branches, so it constrains nothing. That is what makes
+        a bare `a = b OR c = d` fall through with nothing pinned, and be refused.
+        """
+        if isinstance(node, Predicate):
+            if node.op == "eq" and node.col is not None and node.value_col is not None:
+                _take(node.col, node.value_col)
+            return
+        for term in node.and_terms or []:
+            _walk(term)
+
+    if join.condition is None:
+        return None
+    _walk(join.condition)
+    return bound
+
+
+def _unique_column_sets(source: Any) -> List[set]:
+    """Every set of column names that is unique in `source`, lowercased —
+    its primary key, plus every unique constraint and unique index reflected
+    from the database (backends surface these differently: SQLite reports a
+    `UniqueConstraint`, Postgres typically a unique `Index`, so both are read).
+
+    **Only a `Table` carries that metadata**, and everything else must be handled
+    rather than assumed away — this used to take `sa.Table` and reach straight for
+    `.primary_key.columns`, which raises `AttributeError` on every other FROM
+    element, because `Alias`/`Subquery`/`CTE` expose `.primary_key` as a bare
+    `ColumnSet` with no `.columns`. That was a live crash on a shipped feature
+    (TODO.md item 122): item 118's k-anonymity fan-out check runs on the joined
+    table, so `min_group_size` plus ANY join carrying an `alias` raised instead of
+    deciding — a 500 where a policy answer belonged, and no cte required to reach
+    it. Measured 2026-07-27 while wiring item 105, which joins onto a `CTE` and hit
+    the same line from the new direction.
+
+    An alias of a table keeps that table's uniqueness (same rows, new name), so it
+    looks through to the element. A cte or a subquery has **no declared
+    uniqueness**, so it returns empty — which makes `_join_can_fan_out` answer
+    "yes, this can fan out", the fail-closed direction the k-anonymity floor
+    requires: a computed stage may legitimately hold several rows per join key, and
+    assuming otherwise would silently reopen exactly the leak item 118 closed.
+    """
+    table = source
+    while isinstance(table, sa.Alias):
+        table = table.element
+    if not isinstance(table, sa.Table):
+        return []
+    sets: List[set] = []
+    pk = {c.name.lower() for c in table.primary_key.columns}
+    if pk:
+        sets.append(pk)
+    for constraint in table.constraints:
+        if isinstance(constraint, sa.UniqueConstraint) and len(constraint.columns) > 0:
+            sets.append({c.name.lower() for c in constraint.columns})
+    for index in table.indexes:
+        if index.unique and len(index.columns) > 0:
+            sets.append({c.name.lower() for c in index.columns})
+    return sets
+
+
+def _join_can_fan_out(join: Any, tables: Dict[str, sa.Table]) -> bool:
+    """Can this join match MORE than one right-hand row per left-hand row?
+
+    It cannot, iff the join pins a set of the joined table's columns by equality
+    and that set covers one of the table's unique keys — the ordinary
+    join-to-a-dimension-on-its-primary-key shape. Everything else is assumed to
+    fan out, which is the fail-closed direction: an unreflected uniqueness
+    constraint costs a rejection, a missed fan-out would cost the guarantee.
+    """
+    bound = _equality_bound_columns(join)
+    if bound is None:
+        return True
+    table = _table_by_name(tables, join.alias or join.table)
+    return not any(unique <= bound for unique in _unique_column_sets(table))
+
+
 def _apply_mandatory_row_filters(
     stmt: sa.Select,
     policy: Policy,
     tables: Dict[str, sa.Table],
     name_to_physical: Dict[str, str],
     principal: Optional[Principal],
+    cte_names: FrozenSet[str],
 ) -> sa.Select:
     """AND in every policy-declared mandatory filter whose table is actually
     part of this query's graph — silently skipped for tables outside the
@@ -605,12 +782,21 @@ def _apply_mandatory_row_filters(
     `PolicyViolationError` if `from_claim` is set but the principal lacks
     that claim — a caller with no matching claim can't fall through to an
     unfiltered query).
+
+    `cte_names` (item 105) are skipped: a filter names a TABLE, and a block that
+    happens to share that name is a different thing entirely — applying the filter
+    to its output would filter the wrong rows, or raise if the block projects no
+    column by that name. Policy validation already refuses a cte named after a
+    filtered table, so this is defence in depth on the compile side rather than the
+    only guard. The filter is NOT lost: the block's body is compiled through this
+    same function against its own real tables, which is where those rows are read.
     """
     for row_filter in policy.mandatory_row_filters:
         matches = [
             key
             for key in tables
             if name_to_physical.get(key.lower(), key).lower() == row_filter.table.lower()
+            and name_to_physical.get(key.lower(), key).lower() not in cte_names
         ]
         if not matches:
             continue
@@ -629,16 +815,65 @@ def applied_column_masks(query: StructuredQuery, policy: Policy) -> List[str]:
     Used by the audit trail to distinguish "masked" from "denied" access
     (never the pre-mask value). Names, not `table.column` refs, so it matches
     the response column names a masked caller actually sees.
+
+    Every set-operation arm contributes (item 104), because every arm contributes
+    rows to the one response — reading only the carrying query would under-report
+    a mask applied to arm 2 and make the audit trail say less than the compiler
+    actually did. A nested `value_subquery` deliberately does NOT contribute: its
+    columns feed an `IN` comparison rather than the response, and a masked column
+    is rejected there outright.
+
+    A cte body (item 105) does not contribute either, for that same second reason
+    and with the same rejection behind it: `_validate_cte_constraints` refuses a
+    masked column as a block's projection, so no mask can originate inside one. The
+    outer query's `daily.total` ref then resolves to a cte OUTPUT name, which has no
+    physical (table, column) pair for `policy.column_mask` to match — correctly,
+    since the block it came from could not have carried a masked value. That makes
+    the empty contribution here a consequence of the validation rule rather than an
+    omission; if that rule were ever relaxed, this function would have to walk cte
+    bodies, and `test_cte.py` pins the pairing.
+
+    A later arm's mask is reported under **arm 1's** output name at the same
+    position, because that is the name the response actually carries: a compound
+    SELECT takes its column names from its first arm. Reporting the masked arm's
+    own column name would name a key the caller never receives — which is exactly
+    what this function's "matches the response column names" contract forbids.
+
+    **The set-op semantics are a UNION across arms, and that is deliberate.** An
+    output column is listed when *at least one* arm masks it, so for a set
+    operation this reads "this response column carries masked values for some of
+    its rows", not "for all of them" — a column masked in arm 2 but not arm 1
+    genuinely contains both. Union is the right direction for an audit field whose
+    job is to distinguish masked from denied: it over-states protection rather than
+    under-stating it, so it can never claim a raw value was masked when the
+    opposite is what happened. Reporting per-arm instead would need a shape change
+    to the persisted event, which is not worth it for this distinction.
     """
-    name_to_physical = effective_name_map(query)
+    arms = list(iter_set_op_arms(query))
+    output_names = [_projection_output_name(item) for item in arms[0].select]
     masked: List[str] = []
-    for item in query.select:
-        if not isinstance(item, str):
-            continue
-        if _mask_for_select_ref(item, policy, name_to_physical) is not None:
-            _table, column = parse_column_ref(item)
-            masked.append(column)
+    for arm in arms:
+        name_to_physical = effective_name_map(arm)
+        for index, item in enumerate(arm.select):
+            if not isinstance(item, str):
+                continue
+            if _mask_for_select_ref(item, policy, name_to_physical) is None:
+                continue
+            # Falls back to this arm's own name only when arm 1 projects something
+            # with no statically-known output name at that position (an unaliased
+            # aggregate); every other shape resolves exactly.
+            column = output_names[index] or parse_column_ref(item)[1]
+            if column not in masked:
+                masked.append(column)
     return masked
+
+
+def _projection_output_name(item: Any) -> Optional[str]:
+    """The response key a select item produces, where that is knowable without
+    reflected tables: a bare `Table.Column`'s column name, or an explicit alias."""
+    if isinstance(item, str):
+        return parse_column_ref(item)[1]
+    return getattr(item, "alias", None)
 
 
 def clamp_limit(requested: Optional[int], policy: Policy, *, is_aggregate: bool = False) -> int:
@@ -659,7 +894,7 @@ def _apply_top_n(
 ) -> Tuple[sa.Select, Dict[str, Any]]:
     """Wrap stmt with a rank-per-partition subquery, keeping only the top n rows."""
     spec = query.top_n
-    output_names = [c.name for c in stmt.selected_columns]
+    output_count = len(stmt.selected_columns)
     rank_fn = _RANK_FNS[spec.fn]
     adapter = get_dialect_adapter(dialect)
 
@@ -670,9 +905,14 @@ def _apply_top_n(
         # the same statement, so materialize the aggregation as a subquery
         # first and rank over its real derived-table columns instead.
         agg = stmt.subquery()
+        agg_columns = list(agg.c)
+        agg_alias_map: Dict[str, Any] = {column.name: column for column in agg_columns}
+        for item, column in zip(query.select, agg_columns):
+            if isinstance(item, str):
+                agg_alias_map.setdefault(item, column)
 
         def _agg_col(ref: str) -> Any:
-            return agg.c[_ref_output_name(ref, alias_map)]
+            return _resolve_output_ref(ref, tables, agg_alias_map, allow_table_fallback=False)
 
         partition_cols = [_agg_col(ref) for ref in spec.partition_by] or None
         order_cols = [
@@ -681,7 +921,7 @@ def _apply_top_n(
             for term in adapter.order_by_terms(_agg_col(o.col), o.dir, o.nulls)
         ]
         rank_expr = rank_fn().over(partition_by=partition_cols, order_by=order_cols).label("__rank")
-        ranked = sa.select(*[agg.c[name] for name in output_names], rank_expr).subquery()
+        ranked = sa.select(*agg_columns, rank_expr).subquery()
     else:
         partition_cols = [
             _resolve_output_ref(ref, tables, alias_map, allow_table_fallback=True)
@@ -699,13 +939,19 @@ def _apply_top_n(
         rank_expr = rank_fn().over(partition_by=partition_cols, order_by=order_cols).label("__rank")
         ranked = stmt.add_columns(rank_expr).subquery()
 
-    outer_cols = [ranked.c[name] for name in output_names]
+    # Positional binding is load-bearing here. Two projections can share a base
+    # name (`customers.id`, `orders.id`): SQLAlchemy disambiguates the derived
+    # table's keys, but both columns retain `.name == "id"`. Looking them up by
+    # name therefore selects the first column twice and silently drops the
+    # second. The derived table preserves the SELECT-list order, so position is
+    # the one unambiguous mapping back to `query.select`.
+    outer_cols = list(ranked.c)[:output_count]
     outer_stmt = sa.select(*outer_cols).where(ranked.c["__rank"] <= spec.n)
 
-    outer_alias_map: Dict[str, Any] = dict(zip(output_names, outer_cols))
-    for item in query.select:
-        if isinstance(item, str) and item in alias_map:
-            outer_alias_map.setdefault(item, ranked.c[alias_map[item].name])
+    outer_alias_map: Dict[str, Any] = {column.name: column for column in outer_cols}
+    for item, column in zip(query.select, outer_cols):
+        if isinstance(item, str):
+            outer_alias_map.setdefault(item, column)
 
     return outer_stmt, outer_alias_map
 
@@ -723,70 +969,37 @@ def compile_structured_query(
     dialect: str = DatabaseDialect.POSTGRESQL,
     principal: Optional[Principal] = None,
     subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]] = None,
+    cte_objects: Optional[Dict[str, Any]] = None,
 ) -> Tuple[sa.Select, int]:
     """Compile AST + reflected tables + policy into a Select.
 
-    Returns (statement, effective_limit). `subquery_tables` (item 97) maps each
-    nested value_subquery node's id to its own reflected tables, so an
-    `IN (subquery)` in the WHERE clause compiles through this same path recursively.
+    Returns (statement, effective_limit). `subquery_tables` (items 97 and 104) maps
+    each nested value_subquery node's id — and each set-operation arm's — to its own
+    reflected tables, so an `IN (subquery)` in the WHERE clause and every set-op arm
+    compile through this same path recursively.
+
+    `cte_objects` (item 105) maps each lowercased cte name to the compiled `WITH`
+    block, so a scope referencing one by name binds to the real construct rather
+    than to the typeless placeholder schema validation resolved its columns
+    against. It is built here on the way in and threaded down, never rebuilt.
     """
-    where_ctx = _WhereCtx(
-        policy=policy, dialect=dialect, principal=principal, subquery_tables=subquery_tables
-    )
-    name_to_physical = effective_name_map(query)
-    select_cols, alias_map = _build_select_columns(query, tables, dialect, policy, name_to_physical)
-    base = _table_by_name(tables, query.from_alias or query.from_table)
-    stmt = sa.select(*select_cols).select_from(base)
-    if query.distinct:
-        stmt = stmt.distinct()
+    if cte_objects is None and query.ctes:
+        cte_objects = {}
+        for spec in query.ctes:
+            # Compiled in declaration order, which the no-forward-reference rule
+            # makes dependency order, so a block reading an earlier block finds it
+            # already in `cte_objects` below.
+            cte_objects[spec.name.lower()] = _compile_cte(
+                spec, policy, dialect, principal, subquery_tables, cte_objects
+            )
 
-    for join in query.joins:
-        right = _table_by_name(tables, join.alias or join.table)
-        conditions = []
-        for left_ref, right_ref in [join.on, *join.extra_on]:
-            left_t, left_c = parse_column_ref(left_ref)
-            right_t, right_c = parse_column_ref(right_ref)
-            left_col = resolve_column(_table_by_name(tables, left_t), left_c)
-            right_col = resolve_column(_table_by_name(tables, right_t), right_c)
-            conditions.append(left_col == right_col)
-        condition = sa.and_(*conditions) if len(conditions) > 1 else conditions[0]
-        isouter = join.type == "left"
-        stmt = stmt.join(right, condition, isouter=isouter)
-
-    stmt = _apply_mandatory_row_filters(stmt, policy, tables, name_to_physical, principal)
-
-    if query.where is not None:
-        stmt = stmt.where(_compile_where(query.where, tables, {}, dialect, ctx=where_ctx))
-
-    if query.group_by:
-        stmt = stmt.group_by(
-            *[
-                _resolve_output_ref(ref, tables, alias_map, allow_table_fallback=True)
-                for ref in query.group_by
-            ]
+    if query.set_op is not None:
+        return _compile_set_operation(
+            query, tables, policy, dialect, principal, subquery_tables, cte_objects
         )
-
-    if query.having is not None:
-        # HAVING is a full WhereNode (item 99), compiled through the same
-        # `_compile_where` machinery as WHERE. alias_map is threaded so a HAVING
-        # predicate can reference a select alias (e.g. an aggregate's `as`);
-        # ctx=None keeps `value_subquery` out (WHERE-only, item 97).
-        stmt = stmt.having(_compile_where(query.having, tables, alias_map, dialect))
-
-    is_aggregate = bool(query.group_by) or any(
-        isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in query.select
+    stmt, alias_map, is_aggregate = _compile_scope_body(
+        query, tables, policy, dialect, principal, subquery_tables, cte_objects
     )
-
-    # k-anonymity guardrail (TODO.md item 88): on an aggregate query, suppress
-    # any result group backed by fewer than policy.min_group_size underlying
-    # rows, so a caller can't single out an individual by aggregating over a
-    # razor-thin filter. Injected like a mandatory row filter — policy-driven
-    # and non-removable — and only on aggregate queries (plain row reads are
-    # governed by mandatory row filters, not group size). `count()` with no
-    # argument is COUNT(*), counting rows per group (or the single implicit
-    # group when there's no GROUP BY), ANDed with any caller HAVING above.
-    if is_aggregate and policy.min_group_size is not None:
-        stmt = stmt.having(sa.func.count() >= policy.min_group_size)
 
     allow_table_fallback = True
     if query.top_n is not None:
@@ -804,3 +1017,312 @@ def compile_structured_query(
         stmt = stmt.offset(query.offset)
 
     return stmt, limit
+
+
+def _compile_cte(
+    spec: CteSpec,
+    policy: Policy,
+    dialect: str,
+    principal: Optional[Principal],
+    subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]],
+    cte_objects: Dict[str, Any],
+) -> Any:
+    """Compile one named `WITH` block (item 105) through the SAME
+    `compile_structured_query` path any query takes — so the block inherits its
+    mandatory row filters, its column masks, its `min_group_size` floor and item
+    118's fan-out refusal. There is deliberately no reduced compile path for a cte,
+    for the reason item 104 gave for arms: a second path is somewhere a filter can
+    be forgotten.
+
+    **The row cap is stripped when the caller set no `limit`, and that is a
+    correctness decision rather than a relaxation.** `clamp_limit` would otherwise
+    apply `default_limit`/`max_limit` to a stage whose rows are *input* to a join
+    or an aggregate, silently truncating the population a total is computed over —
+    a wrong answer, which items 102 and 117 established this project treats as
+    worse than a rejection. Item 97's `_compile_in_subquery` strips it for the same
+    reason (an incomplete `IN` list is a wrong membership test). An EXPLICIT limit
+    is kept and stays clamped, because that is the caller asking for "the top 100",
+    not a guardrail. What bounds a block instead: `timeout_seconds`, the tree-wide
+    caps every scope shares, and `max_cte_count`.
+    """
+    body_tables = (subquery_tables or {}).get(id(spec.query))
+    if body_tables is None:
+        # Same fail-closed posture as `_arm_tables`: compiling a block against
+        # another scope's tables would be a silent cross-scope resolution.
+        raise QueryValidationError(f"cte {spec.name!r} was not schema-validated")
+    stmt, _limit = compile_structured_query(
+        spec.query,
+        body_tables,
+        policy,
+        dialect=dialect,
+        principal=principal,
+        subquery_tables=subquery_tables,
+        cte_objects=cte_objects,
+    )
+    if spec.query.limit is None:
+        stmt = stmt.limit(None)
+    return stmt.cte(name=spec.name)
+
+
+def _resolve_cte_references(
+    query: StructuredQuery,
+    tables: Dict[str, sa.Table],
+    cte_objects: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Swap each cte reference's validation placeholder for the compiled `WITH`
+    block (item 105).
+
+    Schema validation resolves `daily.n` against a typeless `sa.Table` standing in
+    for the block's projection, which is the right shape for answering "does this
+    block project that name?" but would render as a reference to a table called
+    `daily` that does not exist. Substituting here — once, at the entry to the
+    scope body — means every downstream site (`_table_by_name`, `_column`, the join
+    loop, mandatory filters) keeps working on whatever it is handed, with no
+    "is this a cte?" branch of its own.
+    """
+    if not cte_objects:
+        return tables
+    name_to_physical = effective_name_map(query)
+    resolved: Dict[str, Any] = dict(tables)
+    for name in tables:
+        source_name = name_to_physical.get(name.lower(), name).lower()
+        cte = cte_objects.get(source_name)
+        if cte is not None:
+            resolved[name] = cte if name.lower() == source_name else cte.alias(name)
+    return resolved
+
+
+def _arm_tables(
+    arm: StructuredQuery, subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]]
+) -> Dict[str, sa.Table]:
+    """One set-operation arm's own reflected tables, from the map schema
+    validation populated. Fails closed with a typed error rather than compiling an
+    arm against the wrong scope's tables — the same guard `_compile_in_subquery`
+    applies to a nested subquery, for the same reason."""
+    scoped = (subquery_tables or {}).get(id(arm))
+    if scoped is None:
+        raise QueryValidationError("Set-operation arm was not schema-validated")
+    return scoped
+
+
+def _compile_set_operation(
+    query: StructuredQuery,
+    tables: Dict[str, sa.Table],
+    policy: Policy,
+    dialect: str,
+    principal: Optional[Principal],
+    subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]],
+    cte_objects: Optional[Dict[str, Any]] = None,
+) -> Tuple[sa.Select, int]:
+    """Compile one item-104 set operation: every arm through the SAME
+    `_compile_scope_body` any single query uses, combined by the dialect adapter,
+    then wrapped in a plain SELECT that carries the shared ORDER BY / LIMIT / OFFSET.
+
+    Two things here are load-bearing rather than stylistic.
+
+    **Every arm goes through `_compile_scope_body`, not a reduced path.** That is
+    what makes each arm inherit its own mandatory row filters, its own column
+    masks, and its own `min_group_size` floor — including item 118's refusal of a
+    fan-out join under that floor. A set operation must not be a channel to dodge a
+    per-table filter, and the way to guarantee that is to have no second compile
+    path where one could be forgotten.
+
+    **The compound is wrapped in a derived table before LIMIT is applied, and that
+    is not cosmetic.** SQLAlchemy's MSSQL dialect SILENTLY DROPS `.limit()` on a
+    `CompoundSelect` (measured: `SELECT ... UNION SELECT ...` renders with no TOP
+    and no FETCH, while Postgres renders `LIMIT`). `clamp_limit` is a policy
+    guardrail, so a dropped LIMIT is an unbounded response on one dialect only.
+    Wrapping makes the limit a limit on a plain SELECT, which both dialects render
+    correctly (`TOP n` / `LIMIT n`), and gives ORDER BY real derived-table columns
+    to resolve against instead of a bare output name.
+    """
+    spec = query.set_op
+    assert spec is not None  # nosec B101 — only reached from the branch above
+    adapter = get_dialect_adapter(dialect)
+
+    arm_statements: List[sa.Select] = []
+    arm_aggregates: List[bool] = []
+    for arm in iter_set_op_arms(query):
+        arm_stmt, _arm_alias_map, arm_is_aggregate = _compile_scope_body(
+            arm,
+            # Identity, not a list index — the same rule `validate_schema` uses to
+            # pick the outer scope's tables, so the two cannot disagree about which
+            # query is the carrier if `iter_set_op_arms`'s ordering ever changes.
+            tables if arm is query else _arm_tables(arm, subquery_tables),
+            policy,
+            dialect,
+            principal,
+            subquery_tables,
+            cte_objects,
+        )
+        arm_aggregates.append(arm_is_aggregate)
+        arm_statements.append(arm_stmt)
+
+    derived = adapter.set_operation(spec.op, spec.all_, arm_statements).subquery()
+    output_columns = list(derived.c)
+    stmt = sa.select(*output_columns).select_from(derived)
+
+    # ORDER BY on a set operation resolves against the OUTPUT of the combined
+    # result, never a table column — `ORDER BY Customer.id` after a UNION is not
+    # valid SQL on any backend. So `allow_table_fallback=False`, and the alias map
+    # is built from the derived table.
+    #
+    # The written-ref half of that map is POSITIONAL, and that is load-bearing
+    # rather than stylistic. `output_columns` is arm 1's select list in order, so
+    # index i is the column item i produced. Keying it by *name* instead — via the
+    # arm's own alias map — silently misbinds whenever two projections share a base
+    # name: SQLAlchemy disambiguates the derived table's keys (`id`, `id_1`) but
+    # both refs still report `.name == "id"`, so `ORDER BY orders.id` bound to
+    # `customers.id`. Measured before the fix: the caller's requested ordering was
+    # replaced by a different column's, and because ORDER BY feeds LIMIT that
+    # returns a different ROW SET, silently, on every dialect. (`_apply_top_n` has
+    # the same name-keyed shape and a worse version of the bug — TODO.md item 119.)
+    alias_map: Dict[str, Any] = {column.name: column for column in output_columns}
+    for item, column in zip(query.select, output_columns):
+        if isinstance(item, str):
+            alias_map.setdefault(item, column)
+
+    for order in query.order_by:
+        col = _resolve_output_ref(order.col, tables, alias_map, allow_table_fallback=False)
+        stmt = stmt.order_by(*adapter.order_by_terms(col, order.dir, order.nulls))
+
+    # The higher aggregate ceiling applies only when EVERY arm is aggregated. One
+    # raw-row arm means the response contains raw rows, which is what
+    # `max_limit` (not `max_limit_aggregate`) is sized for.
+    limit = clamp_limit(query.limit, policy, is_aggregate=all(arm_aggregates))
+    stmt = stmt.limit(limit)
+    if query.offset:
+        stmt = stmt.offset(query.offset)
+    return stmt, limit
+
+
+def _compile_scope_body(
+    query: StructuredQuery,
+    tables: Dict[str, sa.Table],
+    policy: Policy,
+    dialect: str,
+    principal: Optional[Principal],
+    subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]],
+    cte_objects: Optional[Dict[str, Any]] = None,
+) -> Tuple[sa.Select, Dict[str, Any], bool]:
+    """Everything a single SELECT is made of — projection, FROM, joins, mandatory
+    row filters, WHERE, GROUP BY, HAVING and the k-anonymity floor — with no
+    ORDER BY / LIMIT / OFFSET / top_n.
+
+    Split out because those trailing clauses belong to the STATEMENT while
+    everything above belongs to the SELECT: a set-operation arm (item 104) needs
+    exactly this much and no more. Returns the statement, its alias map, and
+    whether it aggregates.
+    """
+    where_ctx = _WhereCtx(
+        policy=policy,
+        dialect=dialect,
+        principal=principal,
+        subquery_tables=subquery_tables,
+        cte_objects=cte_objects,
+    )
+    # One substitution point for the whole scope (item 105) — every use of
+    # `tables` below is a cte reference or a real table without needing to know.
+    tables = _resolve_cte_references(query, tables, cte_objects)
+    name_to_physical = effective_name_map(query)
+    select_cols, alias_map = _build_select_columns(query, tables, dialect, policy, name_to_physical)
+    base = _table_by_name(tables, query.from_alias or query.from_table)
+    stmt = sa.select(*select_cols).select_from(base)
+    if query.distinct:
+        stmt = stmt.distinct()
+
+    for join in query.joins:
+        right = _table_by_name(tables, join.alias or join.table)
+        if join.type == "cross":
+            # SQLAlchemy Core has no cross-join constructor on Select, and a
+            # comma-separated FROM is the older implicit spelling. `ON true`
+            # (rendered `ON 1 = 1` where a dialect has no boolean literal) is the
+            # explicit, portable form and is the same cartesian product to every
+            # planner — no caller-derived content is involved.
+            stmt = stmt.join(right, sa.true())
+            continue
+        if join.condition is not None:
+            # A general join condition (item 103) is compiled by the SAME
+            # `_compile_where` the WHERE clause uses — no second predicate
+            # compiler to drift. `alias_map={}` because a join is evaluated before
+            # the projection exists, and `ctx` is left at its default None so a
+            # `value_subquery` fails closed here too (policy validation already
+            # rejects one with a typed error; this is the defence in depth).
+            condition = _compile_where(join.condition, tables, {}, dialect)
+        else:
+            conditions = []
+            for left_ref, right_ref in [join.on, *join.extra_on]:
+                left_t, left_c = parse_column_ref(left_ref)
+                right_t, right_c = parse_column_ref(right_ref)
+                left_col = resolve_column(_table_by_name(tables, left_t), left_c)
+                right_col = resolve_column(_table_by_name(tables, right_t), right_c)
+                conditions.append(left_col == right_col)
+            condition = sa.and_(*conditions) if len(conditions) > 1 else conditions[0]
+        stmt = stmt.join(right, condition, isouter=join.type == "left", full=join.type == "full")
+
+    stmt = _apply_mandatory_row_filters(
+        stmt, policy, tables, name_to_physical, principal, frozenset(cte_objects or {})
+    )
+
+    if query.where is not None:
+        stmt = stmt.where(_compile_where(query.where, tables, {}, dialect, ctx=where_ctx))
+
+    if query.group_by:
+        stmt = stmt.group_by(
+            *[
+                _resolve_output_ref(ref, tables, alias_map, allow_table_fallback=True)
+                for ref in query.group_by
+            ]
+        )
+
+    if query.having is not None:
+        # HAVING is a full WhereNode (item 99), compiled through the same
+        # `_compile_where` machinery as WHERE. alias_map is threaded so a HAVING
+        # predicate can reference a select alias (e.g. an aggregate's `as`). Since
+        # item 106 it carries a ctx so a SCALAR subquery can compile here, with
+        # `allow_value_set_subquery=False` preserving item 97's WHERE-only rule for
+        # `IN (subquery)` at the compiler layer.
+        having_ctx = where_ctx._replace(allow_value_set_subquery=False)
+        stmt = stmt.having(_compile_where(query.having, tables, alias_map, dialect, ctx=having_ctx))
+
+    is_aggregate = bool(query.group_by) or any(
+        isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in query.select
+    )
+
+    # k-anonymity guardrail (TODO.md item 88): on an aggregate query, suppress
+    # any result group backed by fewer than policy.min_group_size underlying
+    # rows, so a caller can't single out an individual by aggregating over a
+    # razor-thin filter. Injected like a mandatory row filter — policy-driven
+    # and non-removable — and only on aggregate queries (plain row reads are
+    # governed by mandatory row filters, not group size). `count()` with no
+    # argument is COUNT(*), counting rows per group (or the single implicit
+    # group when there's no GROUP BY), ANDed with any caller HAVING above.
+    if is_aggregate and policy.min_group_size is not None:
+        # The floor counts JOINED rows, so a join that matches many right-hand
+        # rows per left-hand row multiplies a group's count and can lift a
+        # single-row group above k — the guarantee silently fails (TODO.md item
+        # 118, measured 2026-07-27: with k=5, a lone person joined to a 10-row
+        # table on a shared non-unique column was returned).
+        #
+        # Rejected rather than silently exempted, the same posture item 101 took
+        # for aggregate windows under this floor: when the floor cannot be
+        # enforced correctly, the query fails closed instead of returning an
+        # answer the policy believes is protected. The rejection is scoped to the
+        # shapes that actually break it — a join onto a unique key (the ordinary
+        # join-to-a-dimension shape) matches at most one row, cannot inflate a
+        # count, and stays allowed.
+        fanning = [
+            join.alias or join.table for join in query.joins if _join_can_fan_out(join, tables)
+        ]
+        if fanning:
+            raise PolicyViolationError(
+                f"join to {fanning[0]!r} can match more than one row per row of the "
+                f"query's other tables, which would inflate the count that "
+                f"min_group_size ({policy.min_group_size}) floors — so the k-anonymity "
+                "guarantee cannot hold for this query. Join on the target table's "
+                "primary key or a unique column, or aggregate without the join and "
+                "combine results client-side."
+            )
+        stmt = stmt.having(sa.func.count() >= policy.min_group_size)
+
+    return stmt, alias_map, is_aggregate

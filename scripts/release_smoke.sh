@@ -84,6 +84,32 @@ assert running[-1] == sum(float(row["quantity"]) for row in rows), payload
 print("release smoke passed: container ran a window function (running total) on real Postgres")
 PY
 
+# -- Range-join round-trip (item 103) -- the shipped image must actually run a
+# non-equi ON clause against a real server, not merely accept the AST. A
+# price-band self-join is the canonical case (regression-bar row 16), and its
+# correctness is self-evident from the rows: every returned pair really does
+# satisfy the band, and a product always bands against itself.
+join_response=$(curl --fail --silent \
+    -H 'Content-Type: application/json' \
+    -d '{"from":"products","from_alias":"p","select":["p.id","p.price","band.id","band.price"],"joins":[{"table":"products","alias":"band","condition":{"and":[{"col":"p.price","op":"gte","value_col":"band.price"},{"col":"p.price","op":"lte","value_expr":{"left":{"col":"band.price"},"op":"*","right":{"literal":2}}}]}}],"order_by":[{"col":"p.id"},{"col":"band.id"}],"limit":50}' \
+    "$BASE_URL/api/v1/demo/query")
+
+RESPONSE="$join_response" python3 - <<'PYJOIN'
+import json
+import os
+
+payload = json.loads(os.environ["RESPONSE"])
+rows = payload["rows"]
+assert len(rows) > 1, payload
+assert all(set(row) == {"id", "price", "id_1", "price_1"} for row in rows), payload
+for row in rows:
+    price, band = float(row["price"]), float(row["price_1"])
+    assert band <= price <= band * 2, row
+# Every product bands against itself, so the self-pair must be present.
+assert any(row["id"] == row["id_1"] for row in rows), payload
+print("release smoke passed: container ran a non-equi range join on real Postgres")
+PYJOIN
+
 # ── Governed WRITE round-trip (item 93): preview -> execute a capped insert ->
 # verify -> execute a governed delete -> verify — proving the shipped image
 # mutates safely, not just reads. Uses a high id it inserts then deletes, so the

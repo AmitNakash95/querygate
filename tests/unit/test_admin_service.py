@@ -304,6 +304,50 @@ default:
     assert result.mandatory_filters[0].ready is False
 
 
+def test_candidate_simulation_sees_a_filtered_table_reached_only_from_a_set_op_arm(
+    tmp_path, monkeypatch
+):
+    """The simulator predicts enforcement, so it must walk the same scopes
+    enforcement does. A mandatory filter whose table appears ONLY in a set-op arm
+    (or a nested subquery) used to be invisible here, so an operator was told a
+    principal was `allow` for a request execution would then refuse on the missing
+    claim (TODO.md item 121)."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_policy = """
+default:
+  enabled: true
+  mandatory_row_filters:
+    - table: orders
+      column: tenant_id
+      from_claim: tenant_id
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            connection="fresh",
+            # `orders` is reachable only from arm 2 — the carrying query never
+            # names it.
+            query={
+                "from": "customers",
+                "select": ["customers.id"],
+                "set_op": {
+                    "op": "union",
+                    "arms": [{"from": "orders", "select": ["orders.id"]}],
+                },
+            },
+        ),
+    )
+
+    assert [readiness.table for readiness in result.mandatory_filters] == ["orders"]
+    assert result.mandatory_filters[0].ready is False
+    assert "mandatory_claim_missing" in {reason.code for reason in result.reasons}
+
+
 @pytest.mark.security
 def test_candidate_simulation_does_not_reveal_filters_for_denied_table(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch)

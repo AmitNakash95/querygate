@@ -50,7 +50,11 @@ def _kitchen_sink() -> StructuredQuery:
                 table="order_items",
                 on=["orders.id", "order_items.order_id"],  # JOIN_ON x2
                 extra_on=[["orders.tenant_id", "order_items.tenant_id"]],  # JOIN_EXTRA_ON x2
-            )
+            ),
+            JoinSpec(  # JOIN_CONDITION x2 (item 103)
+                table="shipments",
+                condition=Predicate(col="shipments.order_id", op="gte", value_col="orders.id"),
+            ),
         ],
         where=WhereGroup(
             and_terms=[
@@ -74,6 +78,10 @@ def test_visitor_covers_every_position_with_expected_refs():
     assert by_position[RefPosition.SELECT_NESTED] == ["orders.status"]
     assert by_position[RefPosition.JOIN_ON] == ["orders.id", "order_items.order_id"]
     assert by_position[RefPosition.JOIN_EXTRA_ON] == ["orders.tenant_id", "order_items.tenant_id"]
+    # A join `condition` (item 103) is a WhereNode, so BOTH sides of its
+    # predicate are refs — a walk that yielded only `col` would let a denied
+    # column ride in as the `value_col` of an ON clause.
+    assert by_position[RefPosition.JOIN_CONDITION] == ["shipments.order_id", "orders.id"]
     assert by_position[RefPosition.WHERE] == ["orders.total", "order_items.sku"]
     assert by_position[RefPosition.GROUP_BY] == ["orders.id"]
     assert by_position[RefPosition.HAVING] == ["orders.total"]

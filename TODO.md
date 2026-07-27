@@ -133,10 +133,10 @@ order-of-magnitude, not commitments.
 | 100 | ✅ ★ Bounded scalar `Expression` substrate (arithmetic, conditional aggregation, nested fns, expression-CASE) | XL | 96, 99 |
 | 101 | ✅ ★ General window functions (`WindowSelectItem`: OVER, LAG/LEAD, frames) | L | 96, 100 (windowed exprs) |
 | 102 | ✅ ★ `EXTRACT`/date_part + relative-date/interval helpers | M | 100 |
-| 103 | ★ Non-equi/range joins + FULL OUTER / CROSS | M | 96, 99 |
-| 104 | ★ Set operations (UNION / INTERSECT / EXCEPT) | L | 96, 97 |
-| 105 | ★ CTE / derived table in FROM (non-recursive) | XL | 96, 97, 104 |
-| 106 | ★ Correlated / EXISTS / scalar subqueries | XL | 96, 97, 105 |
+| 103 | ✅ ★ Non-equi/range joins + FULL OUTER / CROSS | M | 96, 99 |
+| 104 | ✅ ★ Set operations (UNION / INTERSECT / EXCEPT) | L | 96, 97 |
+| 105 | ✅ ★ CTE / derived table in FROM (non-recursive) | XL | 96, 97, 104 |
+| 106 | ✅ ★ Correlated / EXISTS / scalar subqueries | XL | 96, 97, 105 |
 | 107 | ✅ Batch query execution double-reserves quota on an approval retry | S | — |
 | 108 | ✅ Write-preview diff runs the full DML before the affected-row cap is checked | S | — |
 | 109 | ✅ MCP `run_structured_writes` has no batch-size cap | S | — |
@@ -148,6 +148,13 @@ order-of-magnitude, not commitments.
 | 115 | ✅  Guardrail-field lists in admin/help have drifted from `Policy`'s caps | S | — |
 | 116 | ✅  A write's WHERE is exempt from every shape cap the read path enforces | S | — |
 | 117 | ✅  `date_bucket` over a non-temporal column diverges across dialects | S | 102 |
+| 118 | ✅ `min_group_size` was defeated by any fan-out join | M | — |
+| 119 | ✅ `top_n` mis-resolves and DROPS a column on a duplicate output name | S | — |
+| 120 | ✅ Audit shape records nothing for a nested `IN (subquery)` | S | — |
+| 121 | ✅ Report-only surfaces still assume a query has one scope | S | 104 |
+| 122 | ✅ `_unique_column_sets` crashed on a non-`Table` FROM element | S | 118 |
+| 123 | A select-item `CASE`'s conditions are absent from the audit shape | S | 120 |
+| 124 | Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -1935,111 +1942,14 @@ AST reference position is taught in one place. Makes item 97 safe by constructio
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 96).
 
-### 97. Bounded nested subqueries (uncorrelated, single-connection, depth-capped) ✅ DONE (phase 1 — IN (subquery)); phase 2 (FROM (subquery) derived table) not started
+### 97. Bounded nested subqueries (uncorrelated, single-connection, depth-capped) ✅ DONE
 
-**Phase 1 shipped — `IN (subquery)` / `NOT IN (subquery)`:** `Predicate.value_subquery`
-is a nested `StructuredQuery` (recursive AST via `model_rebuild`), valid only for
-`in`/`not_in`, mutually exclusive with value/value_col, must select exactly one
-column. `Policy.max_subquery_depth` (default 1) bounds nesting. The single
-canonical scope-walker `schema_validation.iter_query_scopes` enumerates the outer
-query + every subquery as **independent scopes**; policy validation enforces the
-count caps (select/joins/group_by/where-predicates/top_n) **summed tree-wide**
-(so nesting can't multiply a cap — the core threat), plus per-scope column
-allow/deny + masking (a denied/masked column can't hide one level down), and
-rejects: over-depth, a masked column as the subquery's IN-output, and
-`value_subquery` outside a WHERE clause (HAVING/CASE rejected). Schema validation
-validates each subquery scope independently (a correlated reference to an outer
-table fails as undeclared-in-scope) and rejects cross-connection subqueries. The
-compiler renders `col.in_(subselect)` via the same compile path (so the subquery
-gets mandatory row filters + min-group guardrail), stripping the subquery LIMIT
-so IN membership is complete. Covered by `tests/security/test_subquery_boundary.py`
-(13 adversarial: cap-evasion-via-nesting per cap, denied/masked-in-subquery,
-correlated, cross-connection, over-depth, HAVING/CASE) + `tests/integration/
-test_subquery_end_to_end.py` (real-SQLite IN/NOT-IN match an equivalent join).
-Renders as standard SQL IN(subquery) on Postgres+MSSQL (no dialect-specific
-code); MSSQL execution parity is CI-validated. Decision Log entry recorded.
+`Predicate.value_subquery` gives `IN (subquery)`/`NOT IN`, enumerated as an
+independent scope by `iter_query_scopes` with every count cap summed tree-wide.
+Phase 2 (the `FROM (subquery)` derived table) was **absorbed by item 105**, which
+spells it as a named `WITH` block — so the derived table exists once, not twice.
 
-**Phase 2 (not started):** `FROM (subquery)` — a derived table the outer query
-selects *from*. Additionally needs the outer query to resolve against the inner
-query's OUTPUT aliases (a virtual relation) without reaching past them into inner
-base tables; deferred as a distinct, harder slice. HAVING/CASE `IN (subquery)`
-also deferred.
-
-> **Overlap with item 105 (noted 2026-07-25).** Item 105 (CTE / derived table in
-> FROM) is the same capability generalized — its own text says it "generalizes
-> item 97's `subquery_tables` plumbing and `effective_name_map`". ROADMAP.md
-> Phase 4 now sequences 97 phase 2 immediately before 105 for that reason. Build
-> them as one slice, or fold 97 phase 2 into 105 and stub it — do **not**
-> implement the derived table twice. Which way to resolve it is a call to make
-> when 105 is scoped, not now.
-
-**Effort: L. Priority: medium (capability extension). Depends on: item 96.
-Requires a recorded Decision Log entry in `docs/PRODUCT_GUIDE.md` before build.**
-
-**Why it matters.** Callers naturally compose queries that scope an initial set
-and filter from it (`FROM (subquery)` / `IN (subquery)`). Today the AST is
-single-level: `from_table` is a table-name string and predicate `value`/
-`value_col`/`in`-list are literals/columns — there is no caller-authored nested
-query. Much of the real demand is already served by joins + `group_by`/`having`
-(semi-joins, aggregate-filters) and by the two-round-trip pattern (query 1
-returns IDs → query 2 filters with `in: [...]`), so this item must clear a
-genuine-marginal-value bar, not be added reflexively. It does **not** cross any
-North Star non-goal: a nested `StructuredQuery` is still a fully validated AST,
-never a raw-SQL string.
-
-**Scope — the minimal safe subset only (reject the rest, per the item-74
-"reject, don't emulate" precedent):**
-- ✅ **Uncorrelated** derived table (`FROM (subquery)`) and/or `IN (subquery)`.
-- ❌ **Correlated** subqueries (inner references an outer row) — this is the
-  sharp cliff that defeats "each query is independently bounded"; reject
-  explicitly with a `QueryValidationError` pointing at joins as the primitive.
-- ❌ **Cross-connection** nesting (a subquery carrying its own `connection`) —
-  can't push to one DB; reject.
-- New cap `max_subquery_depth` (default 1). **All existing caps (max_joins,
-  max_where_depth, max_group_by, top_n, in-list size) apply summed tree-wide**,
-  never per-level — otherwise nesting becomes a cap-multiplier bypass.
-
-**What to do (once item 96 lands, this is small).**
-1. Make the model recursive (e.g. `from_table: str | StructuredQuery`, and/or an
-   `in`-subquery predicate variant). Pydantic recurses for free.
-2. Teach the **one** canonical visitor (item 96) to descend nested queries, so
-   policy + schema enforcement follow automatically. Base-table column refs
-   inside a subquery get the full allow/deny + cap treatment; the outer query
-   resolves against the inner query's *output aliases* (a virtual relation),
-   which must NOT let the outer reach past them into inner base tables.
-3. Schema validation computes the inner query's output column set and threads it
-   through as a virtual relation.
-4. Compiler renders via SQLAlchemy Core `.subquery()` (already used for `top_n`
-   at `compiler/sqlalchemy_compiler.py`); nested scopes need their own column
-   resolution frame.
-5. Full `adversarial-probe` pass — every new node is a new bypass surface;
-   codify each vector as a regression test (esp. cap-evasion-via-nesting and
-   masked/denied column hidden in a subquery).
-
-**Acceptance.** Bounded subset above works end-to-end on Postgres + MSSQL;
-correlated/cross-connection/over-depth all rejected with clear errors; caps
-proven to apply tree-wide by adversarial tests; Decision Log entry recorded.
-No raw-SQL surface, no non-goal crossed.
-
----
-
-## Flagship pillar — Expressive Query Engine (items 99–106)
-
-Items 99–106 are one coordinated initiative: take the READ structured query
-engine to 10/10 expressiveness for a fluent SQL author **without weakening any
-safety invariant** — the deepening of the North Star **Structural** pillar (the
-"no raw SQL, ever" bet only wins if the AST rarely walls off a real SQL author).
-The deep, authoritative design/test/validation spec lives in
-**[docs/ENGINE_EXPRESSIVENESS_PLAN.md](docs/ENGINE_EXPRESSIVENESS_PLAN.md)** — each
-item below is scoped there (§4) with its AST shape, compiler seam, validation
-wiring, caps, dialect handling, adversarial cases, and per-item Definition of
-Done. Build them in the order 99 → 106; the plan's §3 checklist and §5 canonical
-regression bar are mandatory acceptance gates for every item.
-
-The unifying safety rule (plan §1, §3): **every new node must be wired into the
-canonical reference visitor (item 96) or its column refs bypass policy allow/deny
-+ masking**, and **every new cost-bearing count must be capped summed tree-wide
-(item 97)**. Reject-don't-emulate (item 74) governs all per-dialect gaps.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 97).
 
 ### 99. Query engine: `HAVING` as `WhereNode` + searched `CASE` condition ✅ DONE
 
@@ -2087,67 +1997,51 @@ makes "every date answer is UTC" true rather than server-config dependent.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 102).
 
-### 103. Query engine: non-equi/range joins + FULL OUTER / CROSS
+### 103. Query engine: non-equi/range joins + FULL OUTER / CROSS ✅ DONE
 
-Generalize `JoinSpec` from equality-pairs to an optional `condition: WhereNode`
-(range/temporal joins, e.g. `ON price BETWEEN band.lo AND band.hi`), keeping the
-equality `on` form as sugar; add `"full"` and `"cross"` `JoinType`s. `CROSS`
-(cartesian) is a cost lever — gate behind a policy flag (`allow_cross_join`,
-default off) + row cap. Non-equi conditions count as join predicates in the caps.
+Shipped `JoinSpec.condition` (a full `WhereNode`, so range/temporal joins) plus
+`full` and `cross` join types, with `cross` gated by a deny-by-default
+`Policy.allow_cross_join` and the ON clause held to every WHERE-clause cap.
 
-**Effort: M. Priority: medium (flagship pillar). Depends on: items 96, 99 (WhereNode
-join condition). Requires a Decision Log entry (CROSS gating; plan §8 entry 5).**
-Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 3b.**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 103).
 
-### 104. Query engine: set operations (UNION / INTERSECT / EXCEPT)
+### 104. Query engine: set operations (UNION / INTERSECT / EXCEPT) ✅ DONE
 
-A new top-level shape wrapping N `StructuredQuery` arms + op + `all: bool`, with
-matching select arity. A new **scope container**: extend `iter_query_scopes` so each
-arm is validated as its own scope (mirror item 97 exactly), all caps summed across
-arms, and mandatory row filters + k-anon min-group applied to every arm (a set op
-must not be a channel to dodge a per-table filter). New cap `max_set_op_arms`.
+Shipped `StructuredQuery.set_op` (UNION/INTERSECT/EXCEPT, with `all`), the first
+top-level scope container — every arm independently validated, compiled, filtered
+and k-anon-floored, capped by a tree-wide `max_set_op_arms`.
 
-**Effort: L. Priority: medium (flagship pillar). Depends on: items 96, 97. Requires
-a recorded Decision Log entry before build.** Full spec + acceptance:
-**ENGINE_EXPRESSIVENESS_PLAN.md Phase 4a.**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 104).
 
-### 105. Query engine: CTE / derived table in FROM (non-recursive)
+### 105. Query engine: CTE / derived table in FROM (non-recursive) ✅ DONE
 
-Allow `from`/`JoinSpec.table` to be a named subquery (a `StructuredQuery` + alias)
-in addition to a physical table — enabling aggregate-then-join / dedup-then-rank in
-one statement. Generalizes item 97's `subquery_tables` plumbing and
-`effective_name_map`; new cap `max_cte_count` + reuse `max_subquery_depth`. A CTE
-must not become a channel to reach a denied table, dodge a mandatory row filter, or
-surface a masked column as a non-projection input. **Recursive CTE is explicitly
-OUT of scope** (unbounded recursion = DoS) pending a separately-recorded hard
-iteration cap.
+Named `WITH` blocks via an additive `StructuredQuery.ctes` list — **not** the union
+on `from`/`JoinSpec.table` the plan sketched, so no existing field changed type and
+a consumer that has never heard of a cte fails closed (the name reflects as a table
+and is rejected) instead of silently mishandling a new union member. Absorbs item
+97 phase 2: an inline derived table is written as a named block, and the derived
+table is therefore implemented once. Regression bar 12/16 -> **14/16** (rows 3 and
+6). Every block is a full scope — its own mandatory row filters, masks, k-anon
+floor and item-118 fan-out refusal — and carries **no `max_rows` clamp**, because
+truncating intermediate work is a silently wrong total. 23/23 enforcement points
+mutation-verified; live Postgres **and** live MSSQL.
 
-> **Overlap with item 97 phase 2 (noted 2026-07-25).** Item 97's remaining phase 2
-> (`FROM (subquery)` derived table) is **the same capability** this item
-> generalizes. ROADMAP.md Phase 4 sequences 97 ph2 immediately before this item for
-> that reason. When scoping 105, decide explicitly: build both as one slice, or
-> fold 97 ph2 into 105 and stub item 97 as fully `✅ DONE`. Do **not** implement the
-> derived table twice.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 105).
 
-**Effort: XL. Priority: medium (flagship pillar). Depends on: items 96, 97, 104.
-Requires a recorded Decision Log entry before build.** Full spec + acceptance:
-**ENGINE_EXPRESSIVENESS_PLAN.md Phase 4b.**
+### 106. Query engine: correlated / EXISTS / scalar subqueries ✅ DONE
 
-### 106. Query engine: correlated / EXISTS / scalar subqueries
+`EXISTS`/`NOT EXISTS` as a `Predicate` operator, scalar subqueries as a comparison
+RHS in WHERE and HAVING, and correlation via a **declared, capped**
+`StructuredQuery.correlate` list checked against the ENCLOSING scope. An undeclared
+outer ref still fails exactly as before, so correlation is opt-in per subquery and
+the pre-106 uncorrelated model is the default. A scalar subquery must be an
+aggregate with no `group_by`, making exactly-one-row true by construction. A scalar
+subquery in a SELECT **projection** is deliberately NOT part of this — it composes
+from item 105's cte + LEFT JOIN, and the recipe is recorded in the Decision Log.
+Closes regression bar row 11 -> **15/16**, completing Phase 4 of
+`docs/ENGINE_EXPRESSIVENESS_PLAN.md`. 13/13 enforcement points mutation-verified.
 
-`EXISTS`/`NOT EXISTS`, correlated subqueries, and scalar subqueries
-(`= (SELECT …)`, subquery in SELECT/HAVING). Highest-risk item: it breaks the
-**uncorrelated** assumption the entire current subquery layer rests on (item 97's
-`_compile_in_subquery` resolves against the subquery's own tables only).
-Correlation must be limited to a **declared, capped** set of outer refs so the
-visitor can enforce policy/masking on them against the outer scope; scalar-subquery
-arity enforced; depth/count caps stay summed tree-wide. Note: scalar-aggregate
-comparison is often achievable today via two round-trips — document that recipe.
-
-**Effort: XL. Priority: medium-low (flagship pillar; do last — largest safety
-surface). Depends on: items 96, 97, 105. Requires a recorded Decision Log entry in
-`docs/PRODUCT_GUIDE.md` before build** (correlation scope model; plan §8 entry 7).
-Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 5.**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 106).
 
 ---
 
@@ -2259,3 +2153,106 @@ Extended item 102's operand rule to the third date primitive, so all three go
 through one shared walk with a coverage test guarding a future fourth.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 117).
+
+### 118. `min_group_size` was defeated by any fan-out join ✅ DONE
+
+The k-anonymity floor counted JOINED rows, so any join matching many right rows
+per left row lifted a singleton group above *k*. Now refused at compile time —
+precisely: a join onto the target's primary key or a unique column cannot inflate
+a count and still runs.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 118).
+
+
+### 119. `top_n` mis-resolves and DROPS a column when two projections share a base name ✅ DONE
+
+`top_n` now binds derived-table projections and rank references positionally, so same-named columns remain distinct and ordering targets the column the caller named.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 119).
+
+### 120. The audit shape records nothing for a nested `IN (subquery)` ✅ DONE
+
+Nested `value_subquery` scopes now appear recursively in persisted redaction-safe query shapes, including their tables, joins, and predicate structure but never their literal values.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 120).
+
+### 121. Report-only surfaces still assume a query has one scope ✅ DONE
+
+`ExplainResult.tables` and the candidate simulator's table set now derive from
+every scope (`referenced_tables_tree_wide` / the populated `scope_tables` map), so
+a set-op arm's or subquery's tables no longer go unreported while the same
+response's `sql` names them.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 121).
+
+### 122. `_unique_column_sets` crashed on any FROM element that is not a `Table` ✅ DONE
+
+Item 118's k-anonymity fan-out check ran on the joined table and reached for
+`.primary_key.columns`, which only a `Table` has — so `min_group_size` plus any
+join carrying an `alias` raised `AttributeError` instead of deciding. An alias now
+looks through to its element; a cte/subquery reports no uniqueness and is treated
+as able to fan out (fail-closed).
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 122).
+
+### 123. A select-item `CASE`'s condition subtree is absent from the audit shape
+
+`_select_shape`'s `CaseSelectItem` branch records `{kind, alias, branch_count,
+columns}` and never walks `item.when[*].when` through `_where_shape`. Every other
+walker reaches its predicates via `as_expression()` — which `query_ast/models.py`
+documents as "the single conversion every walker, cap, and compile path goes
+through" — and `_select_shape` is the one that does not. The identical CASE
+written as an `ExpressionSelectItem` (`CaseExpr`) *does* record its conditions in
+full, so two spellings of one query produce materially different audit detail —
+the exact asymmetry `_predicate_shape` calls out and fixed for joins in item 103.
+
+**Consequence.** A nested `value_subquery` sitting in a select-item CASE condition
+is invisible to the event: the attempt audits as reading only the outer table.
+Policy always rejects such a query (`policy_validation.py` refuses a subquery in
+that position), so nothing executes and this is not a policy bypass — but item
+120's whole rationale is that *rejected attempts stay auditable*, and in this one
+position they do not. Proof-pillar fidelity, not enforcement.
+
+**Found by** the item-119/120 completion audit on 2026-07-27, which also found
+that the redaction test covering this position asserted only the ABSENCE of
+sentinel literals — vacuously true, since the subtree is discarded rather than
+redacted. That test was moved to the expression spelling (where it genuinely
+exercises the walk) and now pins that the condition was actually recorded, so the
+gap is no longer masked. Item 120's write-up was narrowed to match reality.
+
+**Proposed fix.** Have the `CaseSelectItem` branch delegate to
+`_expression_shape(item.as_expression())`, or additively record
+`"conditions": [_where_shape(w.when) for w in item.when]`, mirroring `CaseExpr` in
+`_expression_shape`. Additive either way; it changes the persisted event's shape
+for CASE select items, which is why it is its own item rather than folded into 120.
+
+**Effort: S. Priority: low** (fidelity on a position that is always rejected).
+
+### 124. Most of `tests/unit/` is not selected by `pytest -m unit`
+
+Markers are explicit — there is no auto-marking by directory — and only 26 of the
+78 files in `tests/unit/` carry one. Measured on 2026-07-27: `pytest tests/unit`
+collects **1703** tests, `pytest -m "unit and not real_db"` collects **678** of
+them. So ~60% of the unit directory is invisible to the tier `CLAUDE.md` names as
+the minimum bar ("`pytest -m unit` at minimum") and to the `git commit` pre-commit
+hook, which runs exactly that selection.
+
+**Why it matters.** The gap is silent in both directions: a green pre-commit gate
+does not mean the unit directory passed, and a new test added to an unmarked file
+is never run by the gate that is supposed to protect it. `test_audit.py` — which
+covers the redaction contract, non-negotiable 3 — was one of the unmarked files
+until the item-119/120 audit marked it on 2026-07-27. The full-suite run
+(`poetry run pytest`) does execute everything, so this has hidden a coverage
+illusion rather than a regression.
+
+**Proposed fix.** Either add `pytestmark = pytest.mark.unit` to the remaining 52
+files, or drop the per-file marker convention entirely and derive the tier from
+the directory in `tests/conftest.py` (a `pytest_collection_modifyitems` hook that
+marks by path), which removes the failure mode permanently rather than fixing 52
+instances of it. The second is preferable; it also makes `tests/integration/` and
+`tests/security/` self-consistent.
+
+**Found by** the item-119/120 completion audit, when two newly added regression
+tests passed the file-scoped run but were silently deselected by the gate.
+
+**Effort: S. Priority: medium** (it weakens every gate the repo relies on).

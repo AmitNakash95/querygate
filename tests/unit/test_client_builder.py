@@ -503,3 +503,125 @@ def test_every_scalar_fn_is_reachable():
 
 def test_col_fn_alias_matches_fn():
     assert col_fn("lower", col("t.c")).call == fn("lower", col("t.c")).call
+
+
+# --------------------------------------------------------------------------- #
+# Item 103 — the general join condition and the two new join types
+# --------------------------------------------------------------------------- #
+def test_join_with_a_range_condition_builds_the_condition_form():
+    """`condition=[...]` AND-combines exactly like `.where()`, and leaves `on` unset."""
+    q = (
+        Query.from_("products")
+        .select("products.name")
+        .join(
+            "bands",
+            condition=[
+                col("products.price") >= col("bands.lo"),
+                col("products.price") <= col("bands.hi"),
+            ],
+        )
+    )
+    join = q.to_dict()["joins"][0]
+    # exclude_none drops the unused form entirely, so the wire body carries
+    # exactly one condition spelling — which is the AST's own rule.
+    assert "on" not in join
+    assert join["condition"] == {
+        "and": [
+            {"col": "products.price", "op": "gte", "value_col": "bands.lo"},
+            {"col": "products.price", "op": "lte", "value_col": "bands.hi"},
+        ]
+    }
+
+
+def test_join_with_a_single_condition_is_not_wrapped_in_a_group():
+    """One node passes through unwrapped — the same `_and_combine` rule `.where()` uses."""
+    q = (
+        Query.from_("products")
+        .select("products.name")
+        .join("bands", condition=[col("products.price") >= col("bands.lo")])
+    )
+    assert q.to_dict()["joins"][0]["condition"]["op"] == "gte"
+
+
+def test_cross_join_builds_with_neither_condition_form():
+    q = Query.from_("products").select("products.name").join("bands", type="cross")
+    join = q.to_dict()["joins"][0]
+    assert join["type"] == "cross"
+    assert "on" not in join and "condition" not in join
+
+
+def test_join_with_neither_on_nor_condition_raises_the_servers_own_error():
+    """`on` became optional for the cross/condition forms, so the builder can now
+    express a join with no condition at all — which the server rejects."""
+    with pytest.raises(pydantic.ValidationError, match="exactly one of"):
+        Query.from_("products").select("products.name").join("bands").build()
+
+
+def test_join_with_both_on_and_condition_raises_the_servers_own_error():
+    with pytest.raises(pydantic.ValidationError, match="exactly one of"):
+        (
+            Query.from_("products")
+            .select("products.name")
+            .join(
+                "bands",
+                on=("products.id", "bands.id"),
+                condition=[col("products.price") >= col("bands.lo")],
+            )
+            .build()
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Set operations (item 104)                                                    #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "method,op,kwargs",
+    [
+        ("union", "union", {}),
+        ("union", "union", {"all": True}),
+        ("intersect", "intersect", {}),
+        ("except_", "except", {}),
+    ],
+)
+def test_every_set_operator_is_expressible(method, op, kwargs):
+    q = getattr(
+        Query.from_("customers").select("customers.id"),
+        method,
+    )(Query.from_("leads").select("leads.id"), **kwargs)
+    spec = q.to_dict()["set_op"]
+    assert spec["op"] == op
+    assert spec.get("all", False) is kwargs.get("all", False)
+    assert spec["arms"] == [{"from": "leads", "select": ["leads.id"]}]
+
+
+def test_set_operation_order_by_and_limit_belong_to_the_carrying_query():
+    """The builder must place them on the combined statement, not on an arm —
+    the server rejects an arm that carries either."""
+    wire = (
+        Query.from_("customers")
+        .select("customers.id")
+        .union(Query.from_("leads").select("leads.id"))
+        .order_by("id", desc=True)
+        .limit(5)
+        .to_dict()
+    )
+    assert wire["order_by"] == [{"col": "id", "dir": "desc"}]
+    assert wire["limit"] == 5
+    assert "order_by" not in wire["set_op"]["arms"][0]
+
+
+def test_an_arm_shape_the_server_rejects_raises_the_servers_own_error():
+    """The builder adds no validation of its own and hides none: an arity
+    mismatch surfaces as the same `pydantic.ValidationError` the server would
+    return. (It cannot pin *where* in the chain the error is raised — the arity
+    rule belongs to the carrier and fires at `.build()` — so this asserts the
+    error contract, not the call site.)"""
+    with pytest.raises(pydantic.ValidationError, match="same number of columns"):
+        (
+            Query.from_("customers")
+            .select("customers.id")
+            .union(Query.from_("leads").select("leads.id", "leads.name"))
+            .build()
+        )

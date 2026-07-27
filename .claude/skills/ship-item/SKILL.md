@@ -39,7 +39,10 @@ quick-scan index), so follow it mechanically.
 4. **Reconcile the derived mirrors**: run `make worklist-sync` to regenerate the
    Quick-scan `✅` column and the ROADMAP checkboxes from the headings (never
    hand-edit those two — they are derived). Every item has a table row; keep it.
-5. **Verify cross-refs still resolve**: `grep -rn "item N" .` should still make
+5. **Clear the active claim**: remove your item's `🚧 **CLAIMED**` line from
+   ROADMAP.md in the same final commit. The claim is transient coordination
+   state and must not survive a completed item.
+6. **Verify cross-refs still resolve**: `grep -rn "item N" .` should still make
    sense — the number must NOT change.
 
 ## Hard rules (from CLAUDE.md)

@@ -1231,7 +1231,7 @@ def _orders_and_customers() -> tuple[sa.Table, sa.Table]:
     return orders, customers
 
 
-async def _execute_join_query(*, principal=None):
+async def _execute_join_query(*, principal=None, joins=None):
     from querygate.catalog.schema_memory import ObservedSchemaSnapshot
 
     orders, customers = _orders_and_customers()
@@ -1245,7 +1245,7 @@ async def _execute_join_query(*, principal=None):
     query = StructuredQuery(
         from_table="orders",
         select=["orders.id"],
-        joins=[{"table": "customers", "on": ["orders.customer_id", "customers.id"]}],
+        joins=joins or [{"table": "customers", "on": ["orders.customer_id", "customers.id"]}],
         limit=10,
     )
     mock_result = MagicMock()
@@ -1477,3 +1477,100 @@ async def test_window_type_error_becomes_a_clean_typed_validation_error():
     for leak in ("secret_salary", "does not exist", "HINT"):
         assert leak not in message, leak
     assert public_error_message(excinfo.value) == message
+
+
+@pytest.mark.asyncio
+async def test_usage_signals_survive_a_range_join_that_carries_no_on_pair(monkeypatch):
+    """A range/cross join (item 103) sets `JoinSpec.on` to None, and
+    `_usage_signal_targets` used to unpack it unconditionally.
+
+    The failure was invisible: `_emit_usage_signals` swallows every exception, and
+    the target list is built EAGERLY — so one un-unpackable join discarded the
+    whole batch, including the `table_used` signals computed before it. Item 32C
+    adaptive learning went blind for any query using a range join, leaving only a
+    warning line. Asserted from the outside (which signals actually land), not by
+    calling the private builder.
+    """
+    from querygate.catalog.usage import get_usage_signal_buffer
+
+    monkeypatch.setattr(svc.app_config, "semantic_memory_usage_signals_enabled", True)
+    monkeypatch.setattr(svc.app_config, "catalog_file", "catalog.yaml")
+
+    await _execute_join_query(
+        principal=Principal(subject="alice"),
+        joins=[
+            {
+                "table": "customers",
+                "condition": {
+                    "col": "orders.customer_id",
+                    "op": "gte",
+                    "value_col": "customers.id",
+                },
+            }
+        ],
+    )
+
+    signals = get_usage_signal_buffer().drain("demo")
+    kinds = {signal.kind.value for signal in signals}
+    # Both tables are still recorded as used. No relationship signal, deliberately:
+    # a RANGE join asserts no single [Left.Col, Right.Col] pair to record.
+    assert kinds == {"table_used"}
+    assert {s.target.table for s in signals} == {"orders", "customers"}
+
+
+@pytest.mark.asyncio
+async def test_usage_signals_survive_a_cross_join(monkeypatch):
+    """The other `on is None` shape — same eager-build failure, same blast radius."""
+    from querygate.catalog.usage import get_usage_signal_buffer
+
+    from querygate.policy.loader import PolicyStore, set_policy_store
+    from querygate.policy.models import Policy
+
+    monkeypatch.setattr(svc.app_config, "semantic_memory_usage_signals_enabled", True)
+    monkeypatch.setattr(svc.app_config, "catalog_file", "catalog.yaml")
+    set_policy_store(PolicyStore(default=Policy(allow_cross_join=True), overrides={}))
+
+    await _execute_join_query(
+        principal=Principal(subject="alice"),
+        joins=[{"table": "customers", "type": "cross"}],
+    )
+
+    signals = get_usage_signal_buffer().drain("demo")
+    assert {s.kind.value for s in signals} == {"table_used"}
+    assert {s.target.table for s in signals} == {"orders", "customers"}
+
+
+@pytest.mark.asyncio
+async def test_an_equality_condition_join_emits_the_same_relationship_as_the_on_form(
+    monkeypatch,
+):
+    """Item 103 made `condition` a second way to write `ON a.x = b.y`. The two
+    spellings describe the identical relationship, so the catalog must learn the
+    identical thing from both — otherwise the newer spelling silently teaches it
+    nothing. Same reasoning as `value_column` in the audit shape, one layer over.
+    """
+    from querygate.catalog.usage import get_usage_signal_buffer
+
+    monkeypatch.setattr(svc.app_config, "semantic_memory_usage_signals_enabled", True)
+    monkeypatch.setattr(svc.app_config, "catalog_file", "catalog.yaml")
+
+    await _execute_join_query(
+        principal=Principal(subject="alice"),
+        joins=[
+            {
+                "table": "customers",
+                "condition": {
+                    "col": "orders.customer_id",
+                    "op": "eq",
+                    "value_col": "customers.id",
+                },
+            }
+        ],
+    )
+
+    signals = get_usage_signal_buffer().drain("demo")
+    relationship = next(s for s in signals if s.kind.value == "relationship_used")
+    assert relationship.target.table == "orders"
+    assert relationship.target.column == "customer_id"
+    assert relationship.target.to_table == "customers"
+    assert relationship.target.to_column == "id"

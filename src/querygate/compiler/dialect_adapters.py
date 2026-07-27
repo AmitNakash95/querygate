@@ -7,7 +7,8 @@ in `_ADAPTERS` — not hunting through `sqlalchemy_compiler.py` for every place
 a dialect assumption might have leaked in. Dropping a dialect means deleting
 its adapter and registry entry. Scoped deliberately to the compiler's own
 variance points (date bucketing, ORDER BY nulls handling, statistical
-aggregate function names, window frame grammar) — `connections/dialects.py`'s
+aggregate function names, window frame grammar, set-operation
+availability) — `connections/dialects.py`'s
 session guardrails
 and `execution/cost_estimation.py`'s Postgres-only EXPLAIN hook are separate
 concerns with their own dialect handling, not folded in here.
@@ -100,6 +101,22 @@ class DialectAdapter(ABC):
         compiles every frame identically for every dialect with no guard of its
         own, so a real gap is invisible until it hits a live server (the items
         75/82 trap).
+        """
+
+    @abstractmethod
+    def set_operation(self, op: str, all_rows: bool, selects: List[Any]) -> Any:
+        """Combine `selects` with one item-104 set operation, returning a
+        SQLAlchemy `CompoundSelect`.
+
+        The keywords themselves (`UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT`) are
+        spelled identically on every supported backend, so the ONLY thing that
+        varies here is which combinations exist: `INTERSECT ALL` / `EXCEPT ALL`
+        are Postgres-only. A dialect without them rejects rather than silently
+        dropping the `all` flag — dropping it would return *fewer* rows than the
+        caller asked for with no error anywhere, and SQLAlchemy renders the
+        invalid `INTERSECT ALL` for every dialect with no guard of its own
+        (verified: it is a live syntax error, not a compile error — the items
+        75/82 "renders fine, breaks live" trap).
         """
 
     @abstractmethod
@@ -256,6 +273,47 @@ _SQLITE_STRFTIME_PARTS: Dict[str, str] = {
 }
 
 
+# The SQLAlchemy constructor for each (op, all) pair. Exhaustive rather than a
+# `getattr(sa, ...)` lookup, for the reason the date-part maps are: a future
+# `SetOpKind` member must be given a constructor deliberately, not resolved by
+# name into whatever happens to exist.
+_SET_OPERATIONS: Dict[str, Dict[bool, Callable[..., Any]]] = {
+    "union": {False: sa.union, True: sa.union_all},
+    "intersect": {False: sa.intersect, True: sa.intersect_all},
+    "except": {False: sa.except_, True: sa.except_all},
+}
+
+
+def _compound(op: str, all_rows: bool, selects: List[Any]) -> Any:
+    """The plain constructor lookup, shared by every dialect that supports the
+    requested combination — so only a genuine per-dialect gap needs its own body."""
+    variants = _SET_OPERATIONS.get(op)
+    if variants is None:
+        raise QueryValidationError(f"Unsupported set operation {op!r}")
+    return variants[all_rows](*selects)
+
+
+def _no_all_variant(op: str, dialect: str) -> QueryValidationError:
+    """The typed rejection for `INTERSECT ALL` / `EXCEPT ALL` on a dialect that
+    only has the distinct forms (item 74's reject-don't-emulate rule).
+
+    It says plainly that there is NO equivalent construct, rather than naming one.
+    An earlier version suggested "keep duplicates with a union of the two sides",
+    which is wrong in a way that returns data: `A UNION ALL B` is neither the
+    multiset intersection nor the multiset difference — it is a superset of both.
+    Item 74's own message points at a genuinely equivalent construction (a CASE
+    bucket plus a tie-break sort); when no such construction exists, the honest
+    thing is to say so, because a hint that silently returns the wrong rows is
+    worse than no hint.
+    """
+    return QueryValidationError(
+        f"{op.upper()} ALL is not supported on {dialect}: only {op.upper()} "
+        "(which removes duplicates) exists there, and no other construct preserves "
+        "duplicate multiplicity across it. Drop `all` for the de-duplicated form, "
+        "or compute the multiset result client-side from each side's rows."
+    )
+
+
 def _bucket_mask(col_expr: Any, mask: ColumnMask) -> Any:
     """floor(col / size) * size — round a numeric value down to a bucket.
     Dialect-universal via sa.func.floor, so every adapter shares it."""
@@ -315,6 +373,11 @@ class PostgresDialectAdapter(DialectAdapter):
         # Postgres supports the full frame grammar, including RANGE with numeric
         # offsets (11+).
         return _frame_kwargs(mode, start, end)
+
+    def set_operation(self, op: str, all_rows: bool, selects: List[Any]) -> Any:
+        # Postgres is the only supported backend with all six combinations —
+        # UNION/INTERSECT/EXCEPT each with and without ALL.
+        return _compound(op, all_rows, selects)
 
     def extract_part(self, part: str, expr: Any) -> Any:
         # Postgres's own numbering IS the contract for both special parts —
@@ -485,6 +548,13 @@ class MSSQLDialectAdapter(DialectAdapter):
             )
         return _frame_kwargs(mode, start, end)
 
+    def set_operation(self, op: str, all_rows: bool, selects: List[Any]) -> Any:
+        # T-SQL's INTERSECT/EXCEPT are distinct-only — there is no ALL form of
+        # either to translate into. UNION ALL is fully supported.
+        if all_rows and op != "union":
+            raise _no_all_variant(op, "MSSQL")
+        return _compound(op, all_rows, selects)
+
     def extract_part(self, part: str, expr: Any) -> Any:
         if part == "dayofweek":
             # T-SQL's DATEPART(weekday) is 1-based AND its origin moves with the
@@ -637,6 +707,14 @@ class SQLiteDialectAdapter(DialectAdapter):
         # SQLite has full window support since 3.25 and RANGE offsets since 3.28,
         # which is why the end-to-end suite can execute real frames on this path.
         return _frame_kwargs(mode, start, end)
+
+    def set_operation(self, op: str, all_rows: bool, selects: List[Any]) -> Any:
+        # Same gap as MSSQL, verified by execution rather than by reading the
+        # grammar: `INTERSECT ALL` compiles here and then fails with
+        # `sqlite3.OperationalError: near "ALL": syntax error`.
+        if all_rows and op != "union":
+            raise _no_all_variant(op, "the internal SQLite test/example dialect")
+        return _compound(op, all_rows, selects)
 
     def extract_part(self, part: str, expr: Any) -> Any:
         if part == "week":

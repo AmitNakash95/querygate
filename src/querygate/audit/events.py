@@ -375,6 +375,19 @@ def _expression_shape(expr: object) -> Dict[str, Any]:
 
 def _predicate_shape(predicate: Predicate) -> Dict[str, Any]:
     shape: Dict[str, Any] = {"operator": predicate.op}
+    if predicate.exists_subquery is not None:
+        # An EXISTS test has no left-hand column — the subquery IS the predicate
+        # (item 106) — so it is recorded before the col/col_fn/expr branch below,
+        # which would otherwise assert on an AST the AST layer explicitly permits.
+        #
+        # The nested scope's shape is recorded in full, for the reason item 104
+        # gave for set-op arms and item 105 for cte bodies: without it the event
+        # says a query read `customers` when it also read `orders`. Its `correlate`
+        # list is recorded too, because that is the exact set of outer columns the
+        # nested scope was allowed to see — the most security-relevant fact about a
+        # correlated query, and column identifiers only, never values.
+        shape["exists_subquery"] = normalize_query_shape(predicate.exists_subquery)
+        return shape
     if predicate.col is not None:
         shape["column"] = predicate.col
     elif predicate.col_fn is not None:
@@ -385,8 +398,36 @@ def _predicate_shape(predicate: Predicate) -> Dict[str, Any]:
             predicate.expr is not None
         )  # nosec B101 — the AST guarantees exactly one of col/col_fn/expr
         shape["expression"] = _expression_shape(predicate.expr)
+    if predicate.value_col is not None:
+        # The OTHER side of a column-to-column comparison. A column identifier,
+        # never a value — the same class of content the join `on` pair has always
+        # recorded, so non-negotiable 3 is untouched.
+        #
+        # Added with item 103, because that item made the omission consequential:
+        # a join condition is now a predicate tree, so `JOIN c ON o.cid = c.id`
+        # written as a `condition` audited as `{"operator": "eq", "column":
+        # "o.cid"}` — dropping the join TARGET — while the identical join written
+        # as `on` recorded both sides. Two spellings of one join must not produce
+        # materially different audit detail.
+        shape["value_column"] = predicate.value_col
     if predicate.value_expr is not None:
         shape["value_expression"] = _expression_shape(predicate.value_expr)
+    if predicate.value_subquery is not None:
+        # The nested scope's own shape, recursively (item 120) — for the identical
+        # reason a set-op arm's (item 104) and a cte body's (item 105) are: the
+        # subquery is where the query's other tables, joins and filters live, so
+        # `WHERE x IN (SELECT ... FROM employees)` recorded as just an `in` operator
+        # would have the audit trail claim the query read one table when it read
+        # two. The nested query goes through this same redaction-safe walk, so no
+        # literal escapes the inner scope either. Recursion terminates on the AST as
+        # parsed: pydantic's own recursion detection rejects a chain past ~127 levels
+        # as a 422 before any walker runs, so an UNVALIDATED query is bounded by the
+        # parse step, and `Policy.max_subquery_depth` (default 1) bounds a validated
+        # one. There is no QueryGate-authored parser depth guard on this path — the
+        # bound is pydantic's. That is the same footing the `where`-group recursion
+        # above has always stood on, since the shape is normalized before validation
+        # so a rejected attempt is audited too.
+        shape["value_subquery"] = normalize_query_shape(predicate.value_subquery)
     return shape
 
 
@@ -407,11 +448,17 @@ def normalize_query_shape(query: StructuredQuery) -> Dict[str, Any]:
     shape: Dict[str, Any] = {
         "from": query.from_table,
         "select": [_select_shape(item) for item in query.select],
+        # `on` and `condition` are mutually exclusive by construction (item 103),
+        # and a `cross` join carries neither — so each key appears only when the
+        # caller actually used that form. A condition goes through the same
+        # `_where_shape` as WHERE/HAVING, which records operators and column names
+        # but never a literal, so a range join stays redaction-safe.
         "joins": [
             {
                 "table": join.table,
                 "type": join.type,
-                "on": list(join.on),
+                **({"on": list(join.on)} if join.on is not None else {}),
+                **({"condition": _where_shape(join.condition)} if join.condition else {}),
                 **({"connection": join.connection} if join.connection else {}),
             }
             for join in query.joins
@@ -433,4 +480,29 @@ def normalize_query_shape(query: StructuredQuery) -> Dict[str, Any]:
             "n": query.top_n.n,
             "function": query.top_n.fn,
         }
+    if query.set_op is not None:
+        # Every arm's own shape, recursively (item 104). Recording only the
+        # operator would make the audit trail claim a query read one table when it
+        # read three — the arms are where the other tables, joins and filters are.
+        # The recursion terminates because the AST forbids an arm from carrying its
+        # own set_op, and each arm goes through this same redaction-safe walk, so
+        # no literal reaches the event from an arm either.
+        shape["set_op"] = {
+            "op": query.set_op.op,
+            "all": query.set_op.all_,
+            "arms": [normalize_query_shape(arm) for arm in query.set_op.arms],
+        }
+    if query.correlate:
+        shape["correlate"] = list(query.correlate)
+    if query.ctes:
+        # Every named block's own shape, recursively (item 105) — for the identical
+        # reason the arms above are recorded, and against the identical failure: the
+        # outer query's `from` names a cte, so an event without this would record
+        # that the query read a table called `totals` and nothing else, when the
+        # tables it actually read are all inside the blocks. Recursion terminates
+        # because only the root may declare `ctes`, and each body goes through this
+        # same redaction-safe walk, so no literal escapes a block either.
+        shape["ctes"] = [
+            {"name": spec.name, "query": normalize_query_shape(spec.query)} for spec in query.ctes
+        ]
     return shape
