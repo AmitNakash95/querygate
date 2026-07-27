@@ -346,6 +346,11 @@ _MEMBER_PAYLOADS = {
     "CaseExpr": {
         "when": [{"when": {"col": _MARKER, "op": "eq", "value": 1}, "then": {"literal": 1}}]
     },
+    "ExtractExpr": {"extract": {"col": _MARKER}, "part": "hour"},
+    # A clock reading takes no operand, so like LiteralExpr it can never carry a
+    # ref — the same "leaf, nothing to descend into" property, pinned below.
+    "NowExpr": None,
+    "DateAddExpr": {"date_add": {"col": _MARKER}, "unit": "day", "amount": -7},
 }
 
 
@@ -360,10 +365,22 @@ def test_every_expression_union_member_has_a_payload_under_test():
 
 
 # ColumnExpr IS the marker (a leaf), so it has no children to descend into;
-# LiteralExpr carries no ref at all. Both properties are pinned separately.
-_LEAF_MEMBERS = {"ColumnExpr", "LiteralExpr"}
+# LiteralExpr and NowExpr carry no ref at all. Both properties are pinned
+# separately.
+_LEAF_MEMBERS = {"ColumnExpr", "LiteralExpr", "NowExpr"}
 _REF_BEARING_MEMBERS = [name for name, p in _MEMBER_PAYLOADS.items() if p is not None]
 _COMPOSITE_MEMBERS = [name for name in _REF_BEARING_MEMBERS if name not in _LEAF_MEMBERS]
+
+# The ref-free members still have to COMPILE, so the compiler exhaustiveness
+# test below runs over every member — substituting a payload for the two whose
+# entry above is None precisely because they can't carry a ref. Without this,
+# adding a ref-free member would satisfy the union guard while never once being
+# handed to `_compile_expression`.
+_COMPILABLE_PAYLOADS = {
+    **_MEMBER_PAYLOADS,
+    "LiteralExpr": {"literal": 1},
+    "NowExpr": {"now": "timestamp"},
+}
 
 
 @pytest.mark.parametrize("member", _REF_BEARING_MEMBERS)
@@ -386,12 +403,15 @@ def test_walk_descends_into_every_composite_union_member(member):
     assert len(list(iter_expression_parts(expr))) > 1, f"{member} is not descended into"
 
 
-def test_literal_is_the_only_member_that_contributes_no_refs():
-    """Pinned explicitly so `LiteralExpr` being excluded above reads as a
-    deliberate property, not an oversight in the parameterization."""
+@pytest.mark.parametrize("payload", [{"literal": "x"}, {"now": "timestamp"}])
+def test_the_ref_free_members_really_contribute_no_refs(payload):
+    """Pinned explicitly so `LiteralExpr`/`NowExpr` being excluded above reads as
+    a deliberate property, not an oversight in the parameterization. Both are
+    operand-less leaves: there is no position inside either where a caller could
+    put a column, which is why neither needs a ref payload."""
     from querygate.validation.schema_validation import expression_column_refs
 
-    assert list(expression_column_refs(_to_expression_model({"literal": "x"}))) == []
+    assert list(expression_column_refs(_to_expression_model(payload))) == []
 
 
 def test_walk_fails_closed_on_an_unknown_expression_node():
@@ -408,7 +428,7 @@ def test_walk_fails_closed_on_an_unknown_expression_node():
         list(iter_expression_parts(NotAnExpression()))
 
 
-@pytest.mark.parametrize("member", _REF_BEARING_MEMBERS)
+@pytest.mark.parametrize("member", sorted(_COMPILABLE_PAYLOADS))
 def test_compiler_handles_every_union_member(member):
     """The compiler is the one recursion over the union that cannot be folded
     into the walk (it produces SQL, not a traversal). Pin that it too covers
@@ -420,9 +440,36 @@ def test_compiler_handles_every_union_member(member):
     metadata = sa.MetaData()
     table = sa.Table("t", metadata, sa.Column("marker_col", sa.Integer))
     compiled = _compile_expression(
-        _to_expression_model(_MEMBER_PAYLOADS[member]), {"t": table}, "postgresql"
+        _to_expression_model(_COMPILABLE_PAYLOADS[member]), {"t": table}, "postgresql"
     )
     assert compiled is not None
+
+
+@pytest.mark.parametrize("member", sorted(_COMPILABLE_PAYLOADS))
+def test_audit_shape_handles_every_union_member(member):
+    """The THIRD un-foldable recursion over the union: `audit/events.py` turns an
+    expression into its redaction-safe shape. It too fails closed, which means a
+    member it doesn't know makes the query un-runnable rather than un-audited —
+    correct, but only discoverable by executing one.
+
+    This test exists because item 102 discovered exactly that: the walk and the
+    compiler both had exhaustiveness guards, the audit shaper did not, and three
+    new members passed the whole unit suite while every query using one raised at
+    execution time. Added here so the union has one guard per recursion."""
+    from querygate.audit.events import _expression_shape
+
+    shape = _expression_shape(_to_expression_model(_COMPILABLE_PAYLOADS[member]))
+    assert shape.get("node"), f"{member} produces no audit shape"
+
+
+def test_audit_shape_fails_closed_on_an_unknown_expression_node():
+    from querygate.audit.events import _expression_shape
+
+    class NotAnExpression:
+        pass
+
+    with pytest.raises(TypeError, match="Unsupported expression node"):
+        _expression_shape(NotAnExpression())
 
 
 def test_compiler_fails_closed_on_an_unknown_expression_node():

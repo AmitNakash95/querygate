@@ -51,6 +51,13 @@ services:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: "QueryGate_Test_Pw1!"
       MSSQL_PID: Developer
+      # Deliberately NOT UTC (TODO.md item 102). T-SQL has no session time zone,
+      # so MSSQL's UTC guarantee lives entirely in choosing SYSUTCDATETIME() over
+      # GETDATE() — and that choice is untestable against a UTC-clocked server,
+      # where both return the same value. A half-hour offset is used so no
+      # plausible off-by-N-hours bug can imitate it. Mirrors the ALTER ROLE the
+      # Postgres suite does from inside its own test.
+      TZ: "Pacific/Marquesas"
     ports:
       - "127.0.0.1:${QUERYGATE_MSSQL_PORT:-14330}:1433"
     healthcheck:
