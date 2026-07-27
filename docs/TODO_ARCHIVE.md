@@ -7466,11 +7466,16 @@ positions (the fail-open spelling) fails exactly the aggregate-argument case;
 removing the nested-window check fails only that case; removing the `group_by`
 carry-over fails only that one.
 
-**Left owed.** Row 15's end-to-end coverage runs against SQLite. It has **not** been
-executed against live Postgres and live MSSQL in the differential suite — no live
-servers were available when it landed — so unlike bar rows 3/6/8/12/16 its
-real-backend legs are still outstanding, recorded here and in the plan's §5 rather
-than quietly omitted.
+**Real backends.** Row 15 also runs in the cross-dialect differential suite against
+live Postgres and live MSSQL, asserting both return identical rows
+(`test_regression_bar_row_15_window_as_an_expression_operand_matches`), so it carries
+the same grade of evidence as bar rows 3/6/8/12/16. That leg is load-bearing rather
+than ceremonial: the operand position puts the window inside item 100's guarded
+division (`NULLIF` + `CAST(... AS NUMERIC)`), and T-SQL's integer-division and
+NUMERIC scale rules are not Postgres's — exactly the composition a rendering
+assertion cannot validate. The case also asserts the result set is non-empty and not
+all-NULL, since two empty or two all-NULL columns would compare equal while proving
+the window computed nothing.
 
 **Effort: XL. Priority: high** (closes the ★ flagship pillar's success criterion).
 Depends on: items 100, 101.
