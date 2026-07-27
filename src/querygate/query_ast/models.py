@@ -603,24 +603,6 @@ class CaseExpr(pyd.BaseModel):
     model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
 
 
-# The union is CLOSED: adding a member is a deliberate code change, reviewed
-# against the five boundaries above. Members are structurally distinguishable
-# by their required field names (col / literal / op / fn / cast / when /
-# extract / now / date_add) and every one forbids extras, so Pydantic resolves
-# the union unambiguously — the same approach `ScalarFunctionArg` already uses.
-Expression = Union[
-    ColumnExpr,
-    LiteralExpr,
-    BinaryOpExpr,
-    FunctionExpr,
-    CastExpr,
-    CaseExpr,
-    ExtractExpr,
-    NowExpr,
-    DateAddExpr,
-]
-
-
 # Defined here rather than beside TopNSpec below because WindowSelectItem's
 # `over.order_by` needs it; TopNSpec and StructuredQuery use the same class.
 class OrderBySpec(pyd.BaseModel):
@@ -656,7 +638,7 @@ class CaseSelectItem(pyd.BaseModel):
     """
 
     when: List[CaseWhen] = pyd.Field(min_length=1)
-    else_: Optional[Expression] = pyd.Field(
+    else_: Optional["Expression"] = pyd.Field(
         default=None,
         validation_alias=pyd.AliasChoices("else", "else_"),
         serialization_alias="else",
@@ -684,7 +666,7 @@ class ExpressionSelectItem(pyd.BaseModel):
     may reference this item's alias, which is how a computed group key (such as a
     CASE bucket) is expressed."""
 
-    expr: Expression
+    expr: "Expression"
     alias: str = pyd.Field(
         validation_alias=pyd.AliasChoices("as", "alias"),
         serialization_alias="as",
@@ -874,13 +856,13 @@ class WindowSpec(pyd.BaseModel):
         return self
 
 
-class WindowSelectItem(pyd.BaseModel):
-    """A window function projection — fn(arg) OVER (partition/order/frame) — for
-    running totals, moving averages, rank-in-place, and lag/lead comparisons.
-    Unlike an aggregate it does NOT collapse rows, and unlike `top_n` it does not
-    filter them. `over` is required (use {} for OVER ()); `as` names the output.
-    Cannot be combined with group_by or aggregate select items, and cannot be
-    nested inside another expression.
+class WindowCall(pyd.BaseModel):
+    """The shared fn/over/arg shape of a window function, with no output name.
+
+    Split out by item 125 so the projection spelling (`WindowSelectItem`) and the
+    operand spelling (`WindowExpr`) cannot drift: every arity, frame and ordering
+    rule below is validated once, for both. Same relationship
+    `ScalarFunctionSelectItem` has to `ScalarFunctionCall`.
     """
 
     fn: WindowFn
@@ -905,15 +887,11 @@ class WindowSelectItem(pyd.BaseModel):
         ge=1,
         description="ntile only: how many buckets to split each partition into.",
     )
-    alias: str = pyd.Field(
-        validation_alias=pyd.AliasChoices("as", "alias"),
-        serialization_alias="as",
-    )
 
     model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
 
     @pyd.model_validator(mode="after")
-    def _validate_shape(self) -> "WindowSelectItem":
+    def _validate_shape(self) -> "WindowCall":
         if self.fn in _WINDOW_NO_ARG_FNS:
             if self.arg is not None:
                 raise ValueError(f"window function {self.fn} takes no 'arg'")
@@ -941,6 +919,96 @@ class WindowSelectItem(pyd.BaseModel):
         """Whether this window computes an aggregate over its frame — the form the
         k-anonymity floor (`Policy.min_group_size`) cannot enforce."""
         return self.fn in _WINDOW_AGGREGATE_FNS
+
+
+class WindowSelectItem(WindowCall):
+    """A window function projection — fn(arg) OVER (partition/order/frame) — for
+    running totals, moving averages, rank-in-place, and lag/lead comparisons.
+    Unlike an aggregate it does NOT collapse rows, and unlike `top_n` it does not
+    filter them. `over` is required (use {} for OVER ()); `as` names the output.
+    Cannot be combined with group_by or aggregate select items.
+
+    Use this when the window value IS the projected column. To divide by it, or
+    otherwise use it inside arithmetic, use `WindowExpr` inside an
+    `ExpressionSelectItem` instead (item 125).
+    """
+
+    alias: str = pyd.Field(
+        validation_alias=pyd.AliasChoices("as", "alias"),
+        serialization_alias="as",
+    )
+
+    model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
+
+    def as_expression(self) -> "WindowExpr":
+        """This item's equivalent `WindowExpr`. `model_construct` skips
+        re-validation for the reason `CaseSelectItem.as_expression` does: the
+        arity/frame rules already ran on this instance, and re-running them each
+        time a walker touches the item would re-walk `arg`'s whole subtree."""
+        return WindowExpr.model_construct(
+            fn=self.fn,
+            over=self.over,
+            arg=self.arg,
+            offset=self.offset,
+            buckets=self.buckets,
+        )
+
+
+class WindowExpr(WindowCall):
+    """A window function used as an `Expression` OPERAND — the thing that makes
+    `amount / SUM(amount) OVER ()` one statement instead of two projected columns
+    plus client-side division (item 125, regression-bar row 15).
+
+    Identical to `WindowSelectItem` minus the output name, because here the window
+    is a sub-term of a larger expression that carries the alias.
+
+    **This is the one `Expression` member that is not legal everywhere a scalar
+    is expected.** A window may appear only inside a select-item expression tree;
+    it is rejected in WHERE/HAVING/join conditions, as a group key, inside an
+    aggregate's argument, and inside another window's `arg`. That rule is enforced
+    in one fail-closed place — see the Expression union's comment above and the
+    Decision Log entry for why this is a positional rule rather than a separate
+    projection-only union.
+    """
+
+    model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
+
+
+# The union is CLOSED: adding a member is a deliberate code change, reviewed
+# against the five boundaries above. Members are structurally distinguishable
+# by their required field names (col / literal / op / fn / cast / when /
+# extract / now / date_add) and every one forbids extras, so Pydantic resolves
+# the union unambiguously — the same approach `ScalarFunctionArg` already uses.
+#
+# `WindowExpr` (item 125) is the ONE member that is not legal everywhere a scalar
+# is expected: a window is legal in a projection and nowhere else — never in
+# WHERE/HAVING/a join condition, never as a group key, never inside an aggregate
+# argument, never nested in another window. That exception is deliberate and
+# recorded in docs/PRODUCT_GUIDE.md's Decision Log (2026-07-27); it is enforced by
+# ONE fail-closed rule at the single position-aware walk
+# (`validation.policy_validation._reject_windows_outside_projections`) rather than
+# by a parallel projection-only union, because two divergent expression trees
+# would reintroduce the "one copy missed a rule" class of bug items 96/103/104
+# each had to fix.
+#
+# `WindowExpr` is appended to this union below rather than listed here, because it
+# needs `WindowSpec` -> `OrderBySpec`, both defined further down. It is NOT a
+# string forward reference: `typing.get_args(Expression)` is a real API here —
+# `test_reference_visitor.py` and `test_client_builder.py` both enumerate it to
+# assert no member escapes the visitor or the client builder — and a `ForwardRef`
+# in that tuple would break those guards rather than satisfy them.
+Expression = Union[
+    ColumnExpr,
+    LiteralExpr,
+    BinaryOpExpr,
+    FunctionExpr,
+    CastExpr,
+    CaseExpr,
+    ExtractExpr,
+    NowExpr,
+    DateAddExpr,
+    WindowExpr,
+]
 
 
 SelectItem = Union[
@@ -1683,7 +1751,9 @@ DateAddExpr.model_rebuild()
 CaseExpr.model_rebuild()
 AggregateSelectItem.model_rebuild()
 ExpressionSelectItem.model_rebuild()
+WindowCall.model_rebuild()
 WindowSelectItem.model_rebuild()
+WindowExpr.model_rebuild()
 Predicate.model_rebuild()
 WhereGroup.model_rebuild()
 CaseWhen.model_rebuild()

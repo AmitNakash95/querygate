@@ -155,6 +155,7 @@ order-of-magnitude, not commitments.
 | 122 | ✅ `_unique_column_sets` crashed on a non-`Table` FROM element | S | 118 |
 | 123 | A select-item `CASE`'s conditions are absent from the audit shape | S | 120 |
 | 124 | Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
+| 125 | ✅ ★ A window function as an `Expression` operand (bar row 15 → 16/16) | XL | 100, 101 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2256,3 +2257,15 @@ instances of it. The second is preferable; it also makes `tests/integration/` an
 tests passed the file-scoped run but were silently deselected by the gate.
 
 **Effort: S. Priority: medium** (it weakens every gate the repo relies on).
+
+### 125. Query engine: a window function as an `Expression` operand ★ ✅ DONE
+
+A `WindowExpr` joins the closed `Expression` union, so `amount / SUM(amount) OVER ()`
+is one statement instead of two projected columns plus client-side arithmetic. It is
+the one member not legal everywhere a scalar is expected — legal in a projection and
+nowhere else — enforced by a single fail-closed positional rule rather than a parallel
+projection-only union. Closes regression-bar row 15 -> **16/16**, meeting the flagship
+pillar's success criterion. 4/4 enforcement points mutation-verified.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 125).
+

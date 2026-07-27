@@ -43,6 +43,8 @@ from querygate.query_ast.models import (
     StringAggSelectItem,
     StructuredQuery,
     WhereNode,
+    WindowCall,
+    WindowExpr,
     WindowSelectItem,
     _AGGREGATE_SELECT_ITEM_TYPES,
 )
@@ -202,6 +204,13 @@ def _compile_expression(expr: Expression, tables: Dict[str, sa.Table], dialect: 
     expressiveness. Depth is already bounded by `max_expression_depth` at
     validation time, so this recursion cannot be driven arbitrarily deep.
     """
+    if isinstance(expr, WindowExpr):
+        # Item 125. The SAME renderer the projection spelling uses — a window as an
+        # operand differs from a window as a select item only in carrying no output
+        # name, so routing both through `_compile_window` is what keeps
+        # `SUM(x) OVER (...)` byte-identical in either position (and keeps the
+        # per-dialect frame grammar in one place).
+        return _compile_window(expr, tables, dialect)
     if isinstance(expr, ColumnExpr):
         return _column(tables, expr.col)
     if isinstance(expr, LiteralExpr):
@@ -261,8 +270,13 @@ def _compile_expression(expr: Expression, tables: Dict[str, sa.Table], dialect: 
     raise QueryValidationError(f"Unsupported expression node {type(expr).__name__}")
 
 
-def _compile_window(item: WindowSelectItem, tables: Dict[str, sa.Table], dialect: str) -> Any:
-    """Compile one item-101 `WindowSelectItem` into `fn(...) OVER (...)`.
+def _compile_window(item: WindowCall, tables: Dict[str, sa.Table], dialect: str) -> Any:
+    """Compile one item-101 window call into `fn(...) OVER (...)`.
+
+    Takes the `WindowCall` base, so the projection spelling (`WindowSelectItem`)
+    and the operand spelling (`WindowExpr`, item 125) render through exactly one
+    path — the alias is the only thing that differs between them, and it is
+    applied by the caller.
 
     Every reference resolves to a real reflected column: no dialect lets an OVER
     clause reference a peer SELECT alias, so the AST requires dotted Table.Column
