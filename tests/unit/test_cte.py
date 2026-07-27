@@ -42,6 +42,7 @@ from querygate.policy.models import (
 from querygate.query_ast.models import CteSpec, StructuredQuery
 from querygate.validation import schema_validation as sv
 from querygate.validation.policy_validation import (
+    referenced_tables,
     referenced_tables_tree_wide,
     validate_policy,
 )
@@ -856,3 +857,167 @@ async def test_a_nested_scope_can_READ_a_block_even_though_it_cannot_declare_one
     # Exactly one WITH clause, however many scopes reference it — the block is
     # compiled once and referenced by name, which is the whole point of the shape.
     assert sql.count("WITH block AS") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Combinations that worked but were unproven                                   #
+# --------------------------------------------------------------------------- #
+#
+# A cte body is a full query, so it can carry every other engine primitive. Each
+# of these already worked; none was pinned, which is the drift risk items 96/111
+# exist to prevent — a future change to any of those primitives could break them
+# with nothing failing.
+
+
+async def test_a_cte_body_may_carry_its_own_set_operation():
+    """Item 104 inside item 105: a block whose body is a UNION. The arms are
+    scopes of the block, which `iter_query_scopes` reaches through it."""
+    query = _query(
+        ctes=[
+            {
+                "name": "block",
+                "query": {
+                    "from": "orders",
+                    "select": ["orders.customer_id"],
+                    "set_op": {
+                        "op": "union",
+                        "arms": [{"from": "customers", "select": ["customers.id"]}],
+                    },
+                },
+            }
+        ],
+        **{"from": "block", "select": ["block.customer_id"]},
+    )
+    stmt, _limit = await _compile(query, Policy(max_subquery_depth=2))
+    sql = _sql(stmt)
+    assert "WITH block AS" in sql
+    assert "UNION" in sql
+
+
+async def test_a_cte_body_may_carry_its_own_top_n():
+    """The dedup-then-join shape: rank inside the block, join the winners."""
+    query = _query(
+        ctes=[
+            {
+                "name": "latest",
+                "query": {
+                    "from": "orders",
+                    "select": ["orders.id", "orders.customer_id"],
+                    "top_n": {
+                        "partition_by": ["orders.customer_id"],
+                        "order_by": [{"col": "orders.id", "dir": "desc"}],
+                        "n": 1,
+                    },
+                },
+            }
+        ],
+        **{"from": "latest", "select": ["latest.id"]},
+    )
+    stmt, _limit = await _compile(query)
+    assert "WITH latest AS" in _sql(stmt)
+
+
+async def test_top_n_may_rank_the_rows_of_a_cte():
+    """The other direction — `_apply_top_n` resolving against a block's columns
+    rather than a reflected table's."""
+    query = _query(
+        ctes=[
+            {
+                "name": "block",
+                "query": {"from": "orders", "select": ["orders.id", "orders.customer_id"]},
+            }
+        ],
+        **{
+            "from": "block",
+            "select": ["block.id", "block.customer_id"],
+            "top_n": {
+                "partition_by": ["block.customer_id"],
+                "order_by": [{"col": "block.id", "dir": "desc"}],
+                "n": 1,
+            },
+        },
+    )
+    stmt, _limit = await _compile(query)
+    assert "WITH block AS" in _sql(stmt)
+
+
+def test_max_cte_count_zero_turns_the_feature_off():
+    """The `0 disables it` convention `max_set_op_arms`/`max_window_specs` use —
+    stated in the field's docstring, so it needs to be true."""
+    with pytest.raises(PolicyViolationError, match="ctes exceeds max of 0"):
+        validate_policy(_query(**_joins_totals()), Policy(max_cte_count=0), _CONN)
+
+
+async def test_a_cte_body_may_not_join_to_another_connection():
+    """A NESTED scope stays single-connection (item 97's minimal-safe subset).
+
+    This was measurably NOT true when item 105 shipped: cte bodies are validated
+    in their own dependency-ordered loop, which ran before the `depth > 0` branch
+    the check lived in — so the identical cross-connection join was rejected
+    inside an `IN (subquery)` and ACCEPTED inside a cte. A guardrail that depends
+    on which container the caller picked is one an operator cannot reason about.
+    """
+    cross_join = {
+        "table": "customers",
+        "connection": "other",
+        "on": ["orders.customer_id", "customers.id"],
+    }
+    in_a_cte = _query(
+        ctes=[
+            {
+                "name": "block",
+                "query": {"from": "orders", "select": ["orders.id"], "joins": [cross_join]},
+            }
+        ],
+        **{"from": "block", "select": ["block.id"]},
+    )
+    with pytest.raises(QueryValidationError, match="cross-connection subquery: cte 'block'"):
+        await _validate_schema(in_a_cte)
+
+    # The sibling container's message still names ITS shape, not the cte's.
+    in_a_subquery = _query(
+        **{"from": "orders", "select": ["orders.id"]},
+        where={
+            "col": "orders.id",
+            "op": "in",
+            "value_subquery": {
+                "from": "orders",
+                "select": ["orders.id"],
+                "joins": [cross_join],
+            },
+        },
+    )
+    with pytest.raises(QueryValidationError, match="a nested scope"):
+        await _validate_schema(in_a_subquery)
+
+    # And an arm nested inside a block is reported as the nested scope it is,
+    # not as an `IN (subquery)` the caller never wrote.
+    arm_in_a_cte = _query(
+        ctes=[
+            {
+                "name": "block",
+                "query": {
+                    "from": "orders",
+                    "select": ["orders.id"],
+                    "set_op": {
+                        "op": "union",
+                        "arms": [
+                            {"from": "orders", "select": ["orders.id"], "joins": [cross_join]}
+                        ],
+                    },
+                },
+            }
+        ],
+        **{"from": "block", "select": ["block.id"]},
+    )
+    with pytest.raises(QueryValidationError, match="set-operation arm"):
+        await _validate_schema(arm_in_a_cte)
+
+
+def test_referenced_tables_self_defaults_its_cte_names():
+    """A `frozenset()` default would be fail-OPEN: a caller who forgets the
+    argument reports a block's NAME as a table that was read. Deriving from the
+    query makes the forgetful call correct instead."""
+    query = _query(**_joins_totals())
+    assert referenced_tables(query) == {"customers"}
+    assert "totals" not in referenced_tables(query)
