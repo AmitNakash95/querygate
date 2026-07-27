@@ -412,6 +412,19 @@ def _predicate_shape(predicate: Predicate) -> Dict[str, Any]:
         shape["value_column"] = predicate.value_col
     if predicate.value_expr is not None:
         shape["value_expression"] = _expression_shape(predicate.value_expr)
+    if predicate.value_subquery is not None:
+        # The nested scope's own shape, recursively (item 120) — for the identical
+        # reason a set-op arm's (item 104) and a cte body's (item 105) are: the
+        # subquery is where the query's other tables, joins and filters live, so
+        # `WHERE x IN (SELECT ... FROM employees)` recorded as just an `in` operator
+        # would have the audit trail claim the query read one table when it read
+        # two. The nested query goes through this same redaction-safe walk, so no
+        # literal escapes the inner scope either. Recursion terminates on the AST as
+        # parsed (the parser's own depth guard bounds an unvalidated query, and
+        # `Policy.max_subquery_depth` bounds a validated one) — the same footing the
+        # `where`-group recursion above has always stood on, since the shape is
+        # normalized before validation so a rejected attempt is audited too.
+        shape["value_subquery"] = normalize_query_shape(predicate.value_subquery)
     return shape
 
 

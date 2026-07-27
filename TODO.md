@@ -149,8 +149,8 @@ order-of-magnitude, not commitments.
 | 116 | ✅  A write's WHERE is exempt from every shape cap the read path enforces | S | — |
 | 117 | ✅  `date_bucket` over a non-temporal column diverges across dialects | S | 102 |
 | 118 | ✅ `min_group_size` was defeated by any fan-out join | M | — |
-| 119 | `top_n` mis-resolves and DROPS a column on a duplicate output name | S | — |
-| 120 | Audit shape records nothing for a nested `IN (subquery)` | S | — |
+| 119 | ✅ `top_n` mis-resolves and DROPS a column on a duplicate output name | S | — |
+| 120 | ✅ Audit shape records nothing for a nested `IN (subquery)` | S | — |
 | 121 | ✅ Report-only surfaces still assume a query has one scope | S | 104 |
 | 122 | ✅ `_unique_column_sets` crashed on a non-`Table` FROM element | S | 118 |
 
@@ -2160,46 +2160,17 @@ a count and still runs.
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 118).
 
 
-### 119. `top_n` mis-resolves and DROPS a column when two projections share a base name
+### 119. `top_n` mis-resolves and DROPS a column when two projections share a base name ✅ DONE
 
-- Why: `_apply_top_n` builds its outer projection by **output name**
-  (`output_names = [c.name for c in stmt.selected_columns]`, then
-  `ranked.c[name]`). When two select items produce the same base name — e.g.
-  `select: ["customers.id", "orders.id"]` — SQLAlchemy disambiguates the derived
-  table's keys but `.name` still collides, so the outer SELECT projects the FIRST
-  column twice and the second projected column never reaches the response at all.
-  Measured 2026-07-27: `SELECT anon_1.id, anon_1.id AS id__1 …` — the caller asked
-  for two different columns and got one of them, twice, with no error. The
-  `top_n` ORDER BY/PARTITION BY refs mis-resolve the same way.
-- Item 104 hit the identical root cause on its new set-operation path and fixed it
-  there by binding **positionally** (`zip(query.select, output_columns)`), which is
-  sound because the derived table's columns are arm 1's select list in order. The
-  same fix shape applies here; this was left as its own item because it is a
-  pre-existing wrong-answer bug on a shipped feature, not an item-104 regression.
-- Scope: `compiler/sqlalchemy_compiler.py::_apply_top_n`.
-- Acceptance criteria:
-  - A `top_n` query projecting two same-named columns returns BOTH, and its
-    ordering resolves to the column the caller named; regression test added.
-  - Consider whether duplicate output names deserve a typed rejection instead —
-    the response `dict(row)` collapses them regardless (a separate, older issue).
+`top_n` now binds derived-table projections and rank references positionally, so same-named columns remain distinct and ordering targets the column the caller named.
 
-**Effort: S. Priority: medium (silent wrong answer on a shipped feature).**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 119).
 
-### 120. The audit shape records nothing for a nested `IN (subquery)`
+### 120. The audit shape records nothing for a nested `IN (subquery)` ✅ DONE
 
-- Why: `normalize_query_shape`'s `_predicate_shape` emits operator/column/
-  value_column/value_expression but has no `value_subquery` branch, so an audit
-  event for `WHERE x IN (SELECT … FROM employees)` never names `employees`. The
-  audit trail therefore claims a query read one table when it read two — the exact
-  reasoning item 104 used to justify recursing into set-op arms, applied to the
-  other scope container. True since item 97.
-- Scope: `audit/events.py`.
-- Acceptance criteria:
-  - A `value_subquery`'s shape (its `from`, joins and redaction-safe predicate
-    structure) appears in the persisted event, with a test asserting no literal
-    leaks from the nested scope.
+Nested `value_subquery` scopes now appear recursively in persisted redaction-safe query shapes, including their tables, joins, and predicate structure but never their literal values.
 
-**Effort: S. Priority: medium (audit fidelity — a Proof-pillar surface).**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 120).
 
 ### 121. Report-only surfaces still assume a query has one scope ✅ DONE
 
