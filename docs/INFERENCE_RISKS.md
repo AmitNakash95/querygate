@@ -99,7 +99,7 @@ aggregates with and without a condition can isolate one individual's
 contribution (multi-query differencing).
 
 - **Single-query singling-out: closed by `Policy.min_group_size` (TODO.md item
-  88) — for un-joined queries; see the fan-out-join gap below.** When set, the
+  88), including across joins since item 118.** When set, the
   compiler injects `HAVING count(*) >= k` into every
   aggregate query, so any result group backed by fewer than *k* underlying rows
   is suppressed — `count(*) WHERE id = X` returns nothing rather than revealing
@@ -121,21 +121,22 @@ contribution (multi-query differencing).
   `dense_rank`/`ntile`/`lag`/`lead`/`first_value`/`last_value`) stay allowed
   because they only surface values the caller may already project bare. Asserted
   by `test_window_aggregate_cannot_dodge_the_k_anonymity_floor`.
-- **A fan-out JOIN defeats the floor — an OPEN gap, tracked as TODO.md item 118
-  (2026-07-27).** The floor is compiled as `HAVING count(*) >= k`, which counts
-  **joined** rows, not distinct underlying rows. Any join that fans out multiplies
-  a group's count past *k*, so a group backed by one base row is returned.
-  Measured with `k=5`: with no join the singleton is suppressed; with
-  `JOIN big ON person.tenant = big.tenant` (an **equality** join, against a table
-  sharing that tenant value) it is returned. That equality case uses only the `on`
-  form and therefore **predates item 103** — this is not a non-equi-join
-  regression, and a fix rejecting only inequality conditions would leave the
-  equality spelling open. Item 103 changed reachability, not existence: an
-  equality fan-out needs a suitable low-cardinality key in the schema, while
-  `col != col` always fans out. Until item 118 is decided, the guarantee stated
-  above should be read as holding for **un-joined** aggregate queries; a
-  deployment relying on the floor should pair it with `max_joins: 0` or
-  table-level denies on the tables that would supply the fan-out.
+- **A fan-out JOIN cannot defeat the floor (TODO.md item 118, closed
+  2026-07-27).** The floor counts **joined** rows, so a join matching many
+  right-hand rows per left-hand row would multiply a group's count past *k*.
+  Measured before the fix with `k=5`: with no join the singleton was suppressed;
+  with `JOIN big ON person.tenant = big.tenant` — an **equality** join, so the gap
+  predated item 103's non-equi form and could not be fixed by rejecting
+  inequalities — it was returned. Such a join is now **refused** on an aggregate
+  query rather than answered, the same fail-closed posture item 101 took for
+  aggregate windows under this floor. The refusal is scoped by reflected
+  uniqueness metadata, not blanket: a join whose equality pins a set of the target
+  table's columns covering a primary key or unique constraint matches at most one
+  row, cannot inflate a count, and is allowed — so the ordinary
+  join-to-a-dimension-on-its-key shape is unaffected. Range joins, cross joins,
+  joins on a non-unique column and non-conjunctive conditions are refused.
+  Asserted by `test_k_anonymity_floor_cannot_be_defeated_by_a_fan_out_join`, which
+  was inverted from the test that originally pinned the leak.
 - **Multi-query differencing: still residual.** Isolating an individual by
   subtracting two *independently* compliant aggregates (each ≥ *k*) is not
   closed by a per-query group-size floor; defending it needs query-set auditing
@@ -162,8 +163,7 @@ the exhaustive test above fails if any future AST node reintroduces an
 unharvested reference. Class B (semantic correlation, derived columns,
 aggregate differencing, existence probing) is **not closable by identifier
 allow/deny**; R1 is closed by policy configuration, R3's single-query
-singling-out is closed by the opt-in `Policy.min_group_size` guardrail (item 88)
-for un-joined aggregate queries — a fan-out join still defeats the floor, an open
-gap tracked as TODO.md item 118 — with multi-query differencing left an honest
-residual, and R2/R4 are accepted
+singling-out is closed by the opt-in `Policy.min_group_size` guardrail (item 88),
+including across joins since item 118 — with multi-query differencing left an
+honest residual, and R2/R4 are accepted
 residuals mitigated in depth by mandatory filters, masking, quotas, and audit.

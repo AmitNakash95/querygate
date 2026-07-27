@@ -368,12 +368,12 @@ class Policy(pyd.BaseModel):
     # It bounds single-query singling-out, not multi-query differencing — see
     # docs/INFERENCE_RISKS.md (R3).
     #
-    # KNOWN GAP (TODO.md item 118): the injected floor counts JOINED rows, so any
-    # fan-out join multiplies a singleton group past k and the group is returned.
-    # Measured 2026-07-27 with a plain equality join, so this predates the item-103
-    # non-equi join and is not specific to it. The guarantee above holds for
-    # un-joined aggregate queries; pair this with `max_joins: 0` or table denies if
-    # you are relying on it.
+    # The floor counts JOINED rows, so a join that matches many right-hand rows per
+    # left-hand row would inflate the count and lift a singleton group above k
+    # (TODO.md item 118). Such a join is therefore REFUSED on an aggregate query
+    # while this is set — precisely: joining onto the target's primary key or a
+    # unique column matches at most one row, cannot inflate a count, and is
+    # allowed.
     min_group_size: Optional[int] = pyd.Field(default=None, ge=2)
 
     # `max_limit`/`max_limit_aggregate` cap row *count*; this caps response

@@ -148,7 +148,7 @@ order-of-magnitude, not commitments.
 | 115 | ✅  Guardrail-field lists in admin/help have drifted from `Policy`'s caps | S | — |
 | 116 | ✅  A write's WHERE is exempt from every shape cap the read path enforces | S | — |
 | 117 | ✅  `date_bucket` over a non-temporal column diverges across dialects | S | 102 |
-| 118 | `min_group_size` is defeated by any fan-out join | M | — |
+| 118 | ✅ `min_group_size` was defeated by any fan-out join | M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2257,52 +2257,11 @@ through one shared walk with a coverage test guarding a future fourth.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 117).
 
-### 118. `min_group_size` is defeated by any fan-out join
+### 118. `min_group_size` was defeated by any fan-out join ✅ DONE
 
-The item-88 k-anonymity floor is compiled as `HAVING count(*) >= k`, which counts
-**joined** rows rather than distinct base rows. Any join that fans out multiplies
-a group's count past the floor, so a group backed by a single underlying row is
-returned.
+The k-anonymity floor counted JOINED rows, so any join matching many right rows
+per left row lifted a singleton group above *k*. Now refused at compile time —
+precisely: a join onto the target's primary key or a unique column cannot inflate
+a count and still runs.
 
-**Measured, and the measurement is what scopes the item.** With `k=5`, one person
-at `salary=100` and five at `salary=200`, and a 10-row table sharing a `tenant`
-value:
-
-| query | result |
-| --- | --- |
-| no join (control) | `[200]` — floor works |
-| `JOIN big ON person.tenant = big.tenant` (**equality**, pre-item-103) | `[100, 200]` — **floor defeated** |
-| `JOIN big ON person.id != big.id` (non-equi, item 103) | `[100, 200]` — floor defeated |
-
-**This predates item 103.** The equality row above uses only the `on` form, which
-has shipped since long before the non-equi join existed — so this is not an
-item-103 regression, and a fix that rejected only non-equality conditions would be
-theater, leaving the equality spelling that already does it. What item 103 changed
-is *reachability*: an equality fan-out needs a suitable low-cardinality key to
-exist in the schema, whereas `col != col` always fans out, so the vector went from
-schema-dependent to always-available.
-
-**Why it matters:** every surface describing the floor claimed it suppresses "any
-result group backed by fewer than *k* rows", which does not hold in the presence of
-a join. **Those claims were qualified on 2026-07-27** — `docs/THREAT_MODEL.md`
-QG-29, `docs/INFERENCE_RISKS.md` R3 (headline, the gap bullet, and the closing
-summary), `README.md`, `examples/policy.example.yaml`, `Policy.min_group_size`'s own
-docstring, and the customer-facing `landing/security.html` — each now points here
-and tells an operator to pair the floor with `max_joins: 0` or table denies. That is
-a **stopgap disclosure, not option 3**: narrowing the claim permanently is still one
-of the three choices below, and this item stays open until one is chosen.
-
-**Options (a maintainer decision, deliberately not taken by the implementing
-agent):**
-1. Count distinct base rows instead of joined rows — `HAVING count(DISTINCT <pk>)
-   >= k`. Needs a primary-key notion the AST does not currently carry, and changes
-   the meaning of the floor for existing deployments.
-2. Reject joins outright while `min_group_size` is set — simple, fail-closed,
-   consistent with the item-101 posture for aggregate windows, but a large
-   expressiveness loss for exactly the deployments that turn the floor on.
-3. Accept it and narrow the claim — document the residual in R3/QG-29 as a known
-   limit of a row-count floor, the way R1's residuals are already handled.
-
-**Effort: M. Priority: high (a claimed security guarantee does not hold).
-Depends on: nothing.** Surfaced 2026-07-27 by the item-103 audit; the
-pre-existence was established by measuring the equality-join case, not assumed.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 118).
