@@ -856,15 +856,15 @@ class WindowSpec(pyd.BaseModel):
         return self
 
 
+# Split out by item 125 so the projection spelling (`WindowSelectItem`) and the
+# operand spelling (`WindowExpr`) cannot drift: every arity, frame and ordering
+# rule below is validated once, for both. Same relationship
+# `ScalarFunctionSelectItem` has to `ScalarFunctionCall`.
+#
+# Deliberately NO docstring: a Pydantic docstring becomes the agent-facing schema
+# description and is paid on every MCP session, and this class is maintainer
+# scaffolding — the two concrete subclasses carry the agent-facing prose.
 class WindowCall(pyd.BaseModel):
-    """The shared fn/over/arg shape of a window function, with no output name.
-
-    Split out by item 125 so the projection spelling (`WindowSelectItem`) and the
-    operand spelling (`WindowExpr`) cannot drift: every arity, frame and ordering
-    rule below is validated once, for both. Same relationship
-    `ScalarFunctionSelectItem` has to `ScalarFunctionCall`.
-    """
-
     fn: WindowFn
     over: WindowSpec = pyd.Field(
         description="The OVER (...) clause — {} for OVER (), i.e. one partition of all rows."
@@ -954,21 +954,21 @@ class WindowSelectItem(WindowCall):
         )
 
 
+# The one `Expression` member that is not legal everywhere a scalar is expected.
+# The rule is enforced in one fail-closed place
+# (`policy_validation._reject_windows_outside_projections`); see the Expression
+# union's comment above and the 2026-07-27 Decision Log entry for why this is a
+# positional rule rather than a separate projection-only union.
+#
+# The docstring below is deliberately short: it is the agent-facing schema
+# description, paid on every MCP session, so it states only what a caller must
+# know to use the node correctly. Maintainer rationale stays up here.
 class WindowExpr(WindowCall):
-    """A window function used as an `Expression` OPERAND — the thing that makes
-    `amount / SUM(amount) OVER ()` one statement instead of two projected columns
-    plus client-side division (item 125, regression-bar row 15).
-
-    Identical to `WindowSelectItem` minus the output name, because here the window
-    is a sub-term of a larger expression that carries the alias.
-
-    **This is the one `Expression` member that is not legal everywhere a scalar
-    is expected.** A window may appear only inside a select-item expression tree;
-    it is rejected in WHERE/HAVING/join conditions, as a group key, inside an
-    aggregate's argument, and inside another window's `arg`. That rule is enforced
-    in one fail-closed place — see the Expression union's comment above and the
-    Decision Log entry for why this is a positional rule rather than a separate
-    projection-only union.
+    """A window function used as an operand, e.g. `amount / SUM(amount) OVER ()`.
+    Same shape as a window select item without the output name — the surrounding
+    expression carries the alias. Allowed only in a projection: not in
+    where/having, a join condition, a group key, an aggregate's argument, or
+    another window's `arg`.
     """
 
     model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
