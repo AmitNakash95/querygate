@@ -6482,12 +6482,40 @@ refresh), and `referenced_tables` excludes block names in both directions — an
 allow-list would otherwise reject every reference, and a "tables read" report would
 name something that does not exist.
 
-**Verification.** 23/23 enforcement points mutation-verified; the first pass killed
-18/23 and the four survivors were each a real coverage gap (a wildcard column rule is
-what makes the "a cte output is not a physical column" skips observable). 53 unit +
-20 adversarial-boundary + 6 end-to-end tests, and 4 cross-dialect differential cases
-executed against **live Postgres and live SQL Server** with rows compared equal.
-Regression bar 12/16 -> **14/16** (rows 3 and 6).
+**Verification.** **29/29 enforcement points mutation-verified.** The first pass
+killed 18/23 and each of the four survivors was a real coverage gap — a WILDCARD
+column rule (`{"*": [...]}`) is what makes the "a cte output name is not a physical
+column" skips observable, which is why a table-scoped rule proved nothing there. 63
+unit + 20 adversarial-boundary + 6 end-to-end tests, and 4 cross-dialect differential
+cases executed against **live Postgres and live SQL Server** with rows compared
+equal. Regression bar 12/16 -> **14/16** (rows 3 and 6).
+
+One test in that count is worth naming because it initially proved nothing: the
+"a nested scope can READ a block" case first joined the block in the outer query
+too, which rendered identically whether or not `_WhereCtx` carried `cte_objects`.
+The mutation survived it. It now references the block ONLY from inside the
+subquery, so nothing else can put the `WITH` clause into the statement.
+
+**Found by this item's own completion audit and fixed before it shipped**, listed
+because each is the kind of defect a green suite tolerates:
+1. A block projecting two same-base-named columns escaped a raw
+   `sqlalchemy.exc.DuplicateColumnError` from inside validation — a 500 where a
+   typed 4xx belonged, and item 119's failure class (one column silently
+   unreachable under the name the caller used). Now a typed rejection pointing at
+   the `as` alias that resolves it.
+2. `max_cte_count` ran AFTER the O(N x tree) structural walks it exists to bound,
+   so a caller could drive that work with N far above the cap. It is now first.
+3. **A cte body could join to a second connection while the identical
+   `IN (subquery)` could not** — cte bodies are validated in their own
+   dependency-ordered loop, which ran before the `depth > 0` branch the item-97
+   check lived in. Not a bypass (the `join_group` rule still applied), but a
+   guardrail that depended on which container the caller picked. The check is now
+   a shared helper both containers call, and it names the real container, since
+   the old message reported a set-operation arm nested in a block as an
+   `IN (subquery)` the caller never wrote.
+4. `referenced_tables`'s `cte_names` defaulted to `frozenset()` — fail-OPEN, since
+   a caller who forgot it would report a block's name as a table that was read. It
+   now derives the names from the query, so the forgetful call is correct.
 
 **Side finding — item 122**, pre-existing and unrelated to ctes: `_unique_column_sets`
 crashed on any non-`Table` FROM element, so item 118's floor raised `AttributeError`

@@ -870,6 +870,12 @@ A block's own projections must also have **distinct output names** — its colum
 are referred to by name, so `select: ["orders.id", "customers.id"]` would leave
 `block.id` meaningless; alias one of them with `as` and the meaning is explicit.
 
+**A block stays single-connection**, the same restriction a nested `IN (subquery)`
+has carried since item 97: a block's own joins may not reach a second connection,
+even one in the same `join_group`. Run a query per connection and combine the
+results. (The outer query's joins are unaffected — cross-connection joins there
+work exactly as before.)
+
 **Proven on both real backends:** the aggregate-then-join shape, a two-stage chain,
 the absence of the row cap (a grand total through a block under a row cap of 1 must
 still equal the direct total), and a 7-day moving average over daily order counts

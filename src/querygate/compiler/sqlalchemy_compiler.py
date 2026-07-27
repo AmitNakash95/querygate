@@ -714,7 +714,7 @@ def _apply_mandatory_row_filters(
     tables: Dict[str, sa.Table],
     name_to_physical: Dict[str, str],
     principal: Optional[Principal],
-    cte_names: FrozenSet[str] = frozenset(),
+    cte_names: FrozenSet[str],
 ) -> sa.Select:
     """AND in every policy-declared mandatory filter whose table is actually
     part of this query's graph — silently skipped for tables outside the

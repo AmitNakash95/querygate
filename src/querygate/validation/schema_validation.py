@@ -902,6 +902,7 @@ async def validate_schema(
     # dependency order, so a block reading an earlier block finds it already here.
     cte_tables: Dict[str, sa.Table] = {}
     for spec in query.ctes:
+        _reject_cross_connection_nesting(spec.query, connection_id, f"cte {spec.name!r}")
         body_tables = await _reflect_and_validate_scope(
             spec.query, connection_id, principal, cte_tables
         )
@@ -914,13 +915,15 @@ async def validate_schema(
         if id(scope) in reflected:
             continue  # a cte body, already validated above in dependency order
         if depth > 0:
-            for join in scope.joins:
-                if join.connection is not None and join.connection != connection_id:
-                    raise QueryValidationError(
-                        f"cross-connection subquery: a nested IN (subquery) may not join to "
-                        f"another connection ({join.connection!r}) — run a separate query per "
-                        "connection and combine results instead (item 97)."
-                    )
+            # Not "a nested IN (subquery)": this loop also reaches a set-operation
+            # arm nested inside a subquery OR inside a cte body, and naming the
+            # wrong container tells an operator they wrote a shape they did not.
+            # The cte body itself is rejected above, where its name is known exactly.
+            _reject_cross_connection_nesting(
+                scope,
+                connection_id,
+                "a nested scope (an IN (subquery), or a set-operation arm within one)",
+            )
         scoped_tables = await _reflect_and_validate_scope(
             scope, connection_id, principal, cte_tables
         )
@@ -1067,6 +1070,31 @@ def _validate_set_op_arm_types(
                         "this is refused on every dialect. Cast both sides to the same "
                         "type if the combination is intended."
                     )
+
+
+def _reject_cross_connection_nesting(scope: StructuredQuery, connection_id: str, what: str) -> None:
+    """A NESTED scope stays single-connection — item 97's minimal-safe subset.
+
+    Shared by both nested containers rather than written inline for one, because
+    it was inline for one: item 105 added cte bodies to the scope tree but
+    validated them in their own dependency-ordered loop, which ran BEFORE the
+    `depth > 0` branch this check lived in. The result was measurable and wrong —
+    the identical cross-connection join was rejected inside an `IN (subquery)` and
+    ACCEPTED inside a cte, so the restriction depended on which container a caller
+    picked. `what` names the real container so the message cannot claim a shape
+    the caller did not write.
+
+    Not a bypass either way (`resolve_query_table_connections` still enforces the
+    `join_group` rule on every scope), but a guardrail that applies to one nested
+    container and not its sibling is a guardrail an operator cannot reason about.
+    """
+    for join in scope.joins:
+        if join.connection is not None and join.connection != connection_id:
+            raise QueryValidationError(
+                f"cross-connection subquery: {what} may not join to another connection "
+                f"({join.connection!r}) — run a separate query per connection and "
+                "combine results instead (item 97)."
+            )
 
 
 def _cte_projection_table(spec: CteSpec, body_tables: Dict[str, sa.Table]) -> sa.Table:
