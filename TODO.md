@@ -1387,7 +1387,14 @@ upgrade rather than accepted (see the CVE-remediation bullet).
 **Shipped (phase 1):**
 - **SAST** — **Bandit** (`[tool.bandit]` in `pyproject.toml`, `make sast`, in
   `release-check`) + **Semgrep OSS** (`p/python`, `p/security-audit`,
-  `p/owasp-top-ten`) as a CI job. Deny-by-default; the 5 accepted Bandit findings
+  `p/owasp-top-ten`) as a CI job, reproducible locally with `make semgrep` (which
+  falls back to the official `semgrep/semgrep` image when no binary is installed,
+  the same pattern as `scan-image`/`scan-secrets`; kept out of `release-check`
+  because Semgrep's version *and* its registry rulesets both float, which would
+  make that gate nondeterministic and couple a release to a third-party service —
+  note `release-check` is not offline either way, since `make sbom` resolves the
+  locked set from PyPI and audits it against the advisory database).
+  Deny-by-default; the 7 accepted Bandit findings
   are annotated inline with justified `# nosec <id>` (intentional in-container
   `0.0.0.0` bind, internal invariants/sentinels), never blanket-suppressed.
   CodeQL noted as the paid-GHAS upgrade (free only on public repos).

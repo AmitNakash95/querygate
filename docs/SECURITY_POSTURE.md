@@ -25,7 +25,7 @@ that weakened any of them would fail the build.
 | Area | Gate | Tooling (open-source, industry-standard) | Status | Reproduce |
 |---|---|---|---|---|
 | **Core guarantee** | No raw-SQL path; validated-AST-only | Structured AST + Pydantic `forbid`; enforced by tests | ✅ Enforced | `make test-security` |
-| **SAST** | Static security analysis of source | **Bandit** + **Semgrep OSS** (`p/python`, `p/security-audit`, `p/owasp-top-ten`) | ✅ Clean (deny-by-default) | `make sast` |
+| **SAST** | Static security analysis of source | **Bandit** + **Semgrep OSS** (`p/python`, `p/security-audit`, `p/owasp-top-ten`) | ✅ Clean (deny-by-default) | `make sast` + `make semgrep` |
 | **Dependencies** | Known-CVE audit of the exact shipped set | **pip-audit** against `poetry.lock` `main` group | ✅ Clean — **0 allowlisted** (all fixed) | `make sbom` |
 | **SBOM** | Software bill of materials | **CycloneDX** | ✅ Generated per release | `make sbom` |
 | **Container image** | OS + library CVEs, secrets, misconfig | **Trivy** on the shipped image | ✅ **0 HIGH/CRITICAL** (no exceptions) | `make scan-image` |
@@ -70,13 +70,27 @@ Two complementary open-source static analyzers run on every push:
   intentional in-container `0.0.0.0` bind) — reviewed, never blanket-suppressed.
 - **Semgrep OSS** — community rulesets `p/python`, `p/security-audit`, and
   `p/owasp-top-ten`. Free and works on a private repository (no login/token
-  required for the public rule packs).
+  required for the public rule packs). Same **deny-by-default** posture and same
+  inline-allowlist discipline as Bandit: any finding fails CI, and the accepted
+  ones are annotated `# nosemgrep: <rule-id>` with a written justification. There
+  are currently four, all the same rule (`avoid-sqlalchemy-text`) on the
+  session-guardrail and `EXPLAIN` statements that must interpolate an integer
+  timeout — `connections/dialects.py` (×3) and `execution/cost_estimation.py`.
+  None takes caller input; see the rationale comments at those lines.
 
 > CodeQL is the natural upgrade if GitHub Advanced Security is adopted; it is
 > free only on public repositories. Bandit + Semgrep cover the same
 > static-analysis requirement today at no cost.
 
-Reproduce: `make sast`. CI job: **SAST (Bandit + Semgrep OSS)**.
+Reproduce: `make sast` (Bandit) and `make semgrep` (Semgrep OSS) — or both at once
+via `make security-scan`. Semgrep needs no *install* of its own: the target uses an
+installed `semgrep` binary when present and otherwise falls back to the official
+`semgrep/semgrep` image, the same pattern as the Trivy and gitleaks targets. Two
+prerequisites either way: **network egress** (both paths fetch the `p/...` rule
+packs from the Semgrep registry at run time) and **Docker** on the fallback path.
+Note Semgrep scans **git-tracked files**, so `git add` a new source file before
+relying on a local pass — CI scans a full checkout, where everything is tracked.
+CI job: **SAST (Bandit + Semgrep OSS)**.
 
 ## Supply chain: dependency audit + SBOM
 
@@ -218,14 +232,16 @@ claim here matters more than badge-count:
 ## Reproduce the whole posture
 
 ```bash
-make sast            # Bandit static analysis (Semgrep runs in CI)
+make sast            # Bandit static analysis
+make semgrep         # Semgrep OSS rulesets (uses the official image if not installed)
 make scan-secrets    # gitleaks over full history
 make sbom            # CycloneDX SBOM + pip-audit dependency gate
 make test-dast       # Schemathesis OpenAPI fuzzing
 make test-security   # adversarial regression suite
 make scan-image      # Trivy scan of the built container image
-make security-scan   # SAST + secrets + dependency audit + DAST in one shot
+make security-scan   # sast + semgrep + scan-secrets + sbom + test-dast in one shot
+                     # (test-security and scan-image stay separate)
 ```
 
-*Last reviewed: 2026-07-22. Keep this page honest with the `claim-verify`
+*Last reviewed: 2026-07-27 (bump this date whenever a row changes). Keep this page honest with the `claim-verify`
 workflow — every row must point at a gate that exists and passes.*
