@@ -220,3 +220,50 @@ async def test_intersect_all_is_rejected_before_it_reaches_the_database(sqlite_a
 
     assert response.status_code == 422, response.text
     assert "INTERSECT ALL" in response.text
+
+
+@pytest.mark.asyncio
+async def test_explain_reports_every_arms_tables_not_just_the_first(sqlite_app):
+    """`ExplainResult.tables` and `ExplainResult.sql` describe the same statement,
+    so they must not contradict each other. Before this, a three-arm union named
+    all three tables in `sql` and one of them in `tables` (TODO.md item 121)."""
+    query = {
+        "from": "orders",
+        "select": ["orders.id"],
+        "set_op": {
+            "op": "union",
+            "arms": [
+                {"from": "customers", "select": ["customers.id"]},
+                {"from": "products", "select": ["products.id"]},
+            ],
+        },
+        "limit": 10,
+    }
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        response = await client.post("/api/v1/demo/query/explain", json=query)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert set(body["tables"]) == {"orders", "customers", "products"}, body["tables"]
+    for table in ("orders", "customers", "products"):
+        assert table in body["sql"]
+
+
+@pytest.mark.asyncio
+async def test_explain_reports_a_nested_subquerys_table_too(sqlite_app):
+    """The same fix covers the container item 97 added — an `IN (subquery)`'s table
+    was equally missing from `tables` while appearing in `sql`."""
+    query = {
+        "from": "orders",
+        "select": ["orders.id"],
+        "where": {
+            "col": "orders.customer_id",
+            "op": "in",
+            "value_subquery": {"from": "customers", "select": ["customers.id"]},
+        },
+    }
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        response = await client.post("/api/v1/demo/query/explain", json=query)
+
+    assert response.status_code == 200, response.text
+    assert set(response.json()["tables"]) == {"orders", "customers"}

@@ -6281,6 +6281,26 @@ and the set-op `ORDER BY` allowing a raw table-column fallback (which SQLAlchemy
 resolves by adding the table to the FROM clause — an unasked-for cartesian
 product). Both got tests; the second pass caught 17/17.
 
+**Follow-up round (same day, after the completion audit's rating review).** Three
+residual gaps the audit left open were closed rather than carried:
+
+1. **Arm select TYPES are now checked**, closing the measured divergence above —
+   an integer column against a text cast of it errored on Postgres and *succeeded*
+   on SQL Server. `_validate_set_op_arm_types` compares coarse type families
+   (numeric / text / boolean / temporal) at each position, only where two or more
+   arms have a statically-knowable one, so integer-vs-numeric and
+   date-vs-timestamp stay legal and anything unknowable (arithmetic, functions,
+   CASE) is left to the database. The differential test that recorded the
+   divergence as an accepted residual was **inverted, not deleted** — the item-118
+   precedent.
+2. **`ExplainResult.tables` and the candidate simulator** now report every scope
+   (item 121, closed in the same pass).
+3. **The masked-column list's set-op semantics are stated rather than assumed**: it
+   is a UNION across arms, so a column masked in one arm reads as masked for the
+   whole output column. That over-states protection, never under-states it, which
+   is the safe direction for a field distinguishing masked from denied; a per-arm
+   breakdown would need an audit-event shape change. Pinned by a test.
+
 **MCP context budget** rose a measured **1,485 chars** of tool schema plus 778 of
 instructions (2,263 total; 109,252 -> 111,515, measured against base commit
 e735735 in a worktree), against item 103's prediction that a new top-level shape
@@ -6951,3 +6971,32 @@ two "rule does not apply" cases.
 closing summary), `README.md`, `examples/policy.example.yaml`,
 `Policy.min_group_size`'s docstring and `landing/security.html` — was replaced with
 the accurate statement of what now holds.
+
+### 121. Report-only surfaces still assume a query has one scope ✅ DONE
+
+**Shipped.** Enforcement was always scope-correct (items 97 + 104); three
+*reporting* surfaces were not, and both containers were affected.
+
+* `ExplainResult.tables` (`execution/service.py`) reported only the outer scope's
+  tables while the same response's `sql` named every arm's and every subquery's —
+  two fields of one response contradicting each other. It now derives from the
+  populated `scope_tables` map, so it describes the statement it returns.
+* The candidate policy simulator (`admin/service.py`) built its
+  mandatory-filter-readiness set from the scope-local `referenced_tables`, so a
+  filter whose table appeared only in an arm or a subquery was invisible: an
+  operator could be told a principal was `allow` for a request execution would
+  then refuse on a missing claim. It now uses a new
+  `referenced_tables_tree_wide`.
+
+`referenced_tables` itself was deliberately **left scope-local**: `_validate_scope`
+calls it per scope and must, because a scope's aliases mean nothing outside it.
+The tree-wide version is a separate function for the reporting callers, not a
+change to the enforcement path.
+
+Neither was a bypass — the simulation was strictly *less* permissive than
+enforcement — but a tool whose whole value is predicting enforcement should not be
+wrong about it. Surfaced by the item-104 completion audit.
+
+**Coverage.** `tests/integration/test_set_operation_end_to_end.py` asserts explain
+reports every arm's tables and a nested subquery's table, in both cases checking
+the `tables` field against the `sql` field of the same response.

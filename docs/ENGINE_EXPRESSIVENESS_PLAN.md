@@ -417,8 +417,8 @@ Consequences worth carrying into Phase 4b: the carrier's `order_by`/`limit`/
 bound arm 1 (SQL's own split), an arm may not set those four or nest its own
 `set_op`, and `top_n` is rejected alongside `set_op`.
 
-Arms must have matching select **arity**; **type** compatibility is deliberately
-left to the database — see the amended note below.
+Arms must have matching select **arity** and compatible select **types** — both
+halves of the original spec shipped.
 
 This is a new **scope container**: `iter_query_scopes` yields each arm as its own
 scope, but at the **same depth** as the carrier, *not* one deeper — an arm is a
@@ -427,18 +427,22 @@ depth+1 would additionally make an arm look like an `IN (subquery)` to the two
 rules that branch on `depth > 0`. So this **does not** "mirror item 97's scoping
 exactly", as this section originally said.
 
-**Arm select types — a measured wall, not an oversight.** The original spec said
-"matching select arity/types"; only arity shipped. Measured on both live servers:
-an integer column in arm 1 against a text CAST of it in arm 2 is a hard error on
-Postgres and **succeeds on SQL Server** (data-type precedence converts the varchar
-side back to int). Unlike item 117's date-operand case, neither backend returns
-*wrong data* — Postgres refuses, SQL Server returns correct values under a
-converted type — and the genuinely dangerous shape (integer vs non-numeric text)
-is refused by both. A complete check needs static type inference across every
-select-item kind, not the reflected-column check the narrow cases allow, so it is
-recorded and pinned
-(`test_arm_type_mismatch_diverges_and_is_deliberately_left_to_the_database`)
-rather than half-built. Revisit if real usage hits it.
+**Arm select types — a measured divergence, closed.** Measured on both live
+servers: an integer column in arm 1 against a text CAST of it in arm 2 is a hard
+error on Postgres and **succeeds on SQL Server** (data-type precedence converts
+the varchar side back to int and returns rows). The identical AST was therefore a
+failure on one backend and an answer on the other — the items 75/82 class.
+`_validate_set_op_arm_types` now refuses it pre-database on every dialect.
+
+The check is **narrow by construction**, the same posture `_validate_date_operands`
+takes: it compares coarse type FAMILIES (numeric / text / boolean / temporal) and
+only at positions where two or more arms have a statically-knowable one. Integer
+and numeric are the same family, as are date and timestamp, because both backends
+union them happily — over-rejecting a valid query would be the worse failure.
+Arithmetic, function calls and CASE return "unknown" and are left to the database
+rather than reproducing each backend's promotion rules. Knowable shapes today:
+a bare column (reflected type), a `CastExpr` target, a literal, `count`,
+`date_bucket` and `string_agg`.
 
 **Caps.** `Policy.max_set_op_arms`; all existing caps summed across arms via the
 tree-wide enforcer. Each arm gets full policy/schema validation and its own
