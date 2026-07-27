@@ -686,6 +686,16 @@ than caused by it. None is a policy bypass — enforcement is scope-correct — 
   simulator's `referenced_tables`) still assume one scope. *Operator-facing
   accuracy, not enforcement.*
 
+### Review Phase 8 — Findings from the 2026-07-27 item-119/120 audit
+
+- [ ] **124** — Most of `tests/unit/` is not selected by `pytest -m unit`, so the
+  pre-commit gate silently skips ~60% of it. *Lead this phase: it weakens every
+  other gate, and the fix is a collection hook rather than 52 edits.*
+- [ ] **123** — A select-item `CASE`'s condition subtree is absent from the audit
+  shape, so two spellings of one query audit differently. *Proof-pillar fidelity
+  on a position policy always rejects; the last walker not reaching its predicates
+  through `as_expression()`. Low priority, small fix.*
+
 ### Review Phase 4 — Performance, observability, and developer experience
 
 - [x] **Stale security-posture numbers** — `docs/SECURITY_POSTURE.md` claimed

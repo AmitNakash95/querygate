@@ -3464,9 +3464,11 @@ reasoning behind them, newest first. Added to incrementally as work happens
   fixes subqueries and set-op arms together. The catalog usage signals (32C) had
   the same single-scope assumption, with fidelity rather than safety consequences,
   and were fixed the same way. Note the scope precisely: the **audit shape** was
-  taught about set-op arms only — a nested `value_subquery` still contributes
-  nothing to `normalize_query_shape`, which is tracked separately as TODO.md item
-  120 rather than folded in here.
+  taught about set-op arms only — a nested `value_subquery` contributed nothing
+  to `normalize_query_shape`, which was tracked separately as TODO.md item 120
+  rather than folded in here. *(Item 120 closed that gap on 2026-07-27: a
+  predicate's `value_subquery` now recurses through the same
+  `normalize_query_shape` authority, so a nested scope is named in the event.)*
 
 - **2026-07-27 — the k-anonymity floor now refuses a join it cannot correctly
   bound, instead of answering as if it had (TODO.md item 118).** `min_group_size`

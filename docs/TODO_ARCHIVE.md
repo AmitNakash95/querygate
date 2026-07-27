@@ -7283,12 +7283,16 @@ makes `top_n` behave like the ordinary path instead of turning a valid request
 into a wrong answer. The obsolete name-only `_ref_output_name` helper was removed.
 
 **Coverage.** A compiler regression test asserts grouped `top_n` orders by the
-second derived `id` column and projects both columns. A real SQLite integration
-test runs through the REST request pipeline and proves that, for every customer,
-the response contains both the customer id and the maximum order id the caller
-ranked by. The rank-reference mapping and outer-projection mapping were
-mutation-verified independently: deliberately rebinding either to the first
-column failed both tests for the expected wrong-answer reason.
+second derived `id` column, projects both columns, and resolves an outer
+`ORDER BY` through the rebuilt alias map. A real SQLite integration test runs
+through the REST request pipeline and proves that, for every customer that has an
+order, the response contains both the customer id and the maximum order id the
+caller ranked by. All three derived-table mappings were mutation-verified
+independently: rebinding the rank reference, the outer projection, or the outer
+alias map to the first column each fails a distinct assertion for the expected
+wrong-answer reason. (The alias-map leg was added on 2026-07-27 during the
+completion audit, which found that binding untested — it is only reachable when
+the query carries an outer `order_by`.)
 
 ### 120. The audit shape records nothing for a nested `IN (subquery)` ✅ DONE
 
@@ -7301,18 +7305,25 @@ was an audit-fidelity gap on the Proof pillar, present since item 97.
 **What shipped.** A predicate carrying `value_subquery` now records that nested
 scope through the same recursive `normalize_query_shape` authority used for the
 root query, set-operation arms, and CTE bodies. Because the branch lives in
-`_predicate_shape`, it applies everywhere a read predicate can appear — WHERE,
-HAVING, join conditions, and searched-CASE conditions — including attempts that
-policy or schema validation later rejects. The persisted structure includes the
-nested `from`, joins, select shape, boolean predicate structure, and any deeper
-subquery/set-operation scopes.
+`_predicate_shape`, it applies everywhere that function is reached — WHERE,
+HAVING, join conditions, and a searched CASE written as an *expression*
+(`CaseExpr`) — including attempts that policy or schema validation later reject.
+The persisted structure includes the nested `from`, joins, select shape, boolean
+predicate structure, and any deeper subquery/set-operation scopes.
+
+One position is deliberately **not** covered: a searched CASE written as a
+select-item (`CaseSelectItem`) records `branch_count` and its column refs but not
+its condition subtree, so `_predicate_shape` is never reached there. That is a
+pre-existing gap in `_select_shape`, not one this item introduced, and it is
+tracked as item 123 rather than folded in here.
 
 The redaction contract is unchanged: nested predicates and expressions use the
 same shape walkers as the root, which record operators and column identifiers but
 omit predicate values, CASE results, and other expression literals. Query-shape
-normalization runs before validation so rejected attempts remain auditable; the
-AST parser's recursion guard bounds malformed input, and the policy depth cap
-bounds accepted subqueries.
+normalization runs before validation so rejected attempts remain auditable;
+pydantic's own recursion detection rejects a `value_subquery` chain past ~127
+levels as a 422 before any walker runs, and the policy depth cap
+(`max_subquery_depth`) bounds accepted subqueries.
 
 **Coverage.** Unit tests assert the exact nested table/join/boolean shape, recurse
 through a second subquery plus CASE and set-operation positions, and prove none
