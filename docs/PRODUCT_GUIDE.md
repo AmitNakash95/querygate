@@ -681,6 +681,61 @@ lives in the unit tier so it fires outside the two-database job. The UTC pin has
 `tests/integration/test_postgres_date_primitives.py`, which sets the server's
 zone to UTC−09:30 and asserts the extracted hour is still UTC.
 
+#### Joins: equality sugar, a general `ON` condition, and the four join types
+
+A join is written one of two ways (item 103). `on` is the equality sugar and the
+common case — `"on": ["orders.customer_id", "customers.id"]`, with `extra_on`
+adding further ANDed pairs for a composite key. `condition` is the general form:
+the **same predicate tree** `where` uses, which is what makes a range, temporal or
+inequality join expressible at all.
+
+```json
+{"from": "products", "from_alias": "p",
+ "select": ["p.name", "band.label"],
+ "joins": [{"table": "price_bands", "alias": "band",
+            "condition": {"and": [
+               {"col": "p.price", "op": "gte", "value_col": "band.lo"},
+               {"col": "p.price", "op": "lte", "value_col": "band.hi"}]}}]}
+```
+
+The two forms are **mutually exclusive** — they are two spellings of one clause,
+so accepting both would leave their precedence for the compiler to invent.
+
+`type` is `inner` (default), `left`, `full` or `cross`. A `cross` join takes no
+condition at all and is **off by default**: `Policy.allow_cross_join` must be
+turned on for the connection. It is the only join whose cost is the *product* of
+its inputs, and the only one exempt from the rule below — before item 103 a
+cartesian product was structurally inexpressible, so it now has to be asked for
+explicitly. It still counts against `max_joins`.
+
+**Which tables a condition may name.** It must reference the table being joined,
+must connect to something already in the query graph, and must not
+forward-reference a table joined *later*. A condition naming a third,
+already-joined table is fine (`JOIN c ON c.x = a.x AND c.y = b.y`) — `extra_on`'s
+"same two tables" restriction is a property of that sugar, not of a join.
+
+**The `ON` clause is capped exactly like `WHERE`.** It is the fourth position a
+predicate tree can occupy (after `where`, `having` and a searched-`CASE`
+condition), and it inherits `max_where_depth`, `max_where_predicates` (summed
+tree-wide), `max_in_list_size` and the expression caps — plus the denied-column,
+masked-column and date-operand rules, which apply by construction because the
+condition's refs flow through the same canonical visitor everything else uses.
+`IN (subquery)` is **rejected** in a join condition, as it is in `HAVING` and
+`CASE`.
+
+**One cross-dialect caveat worth knowing.** An outer join can produce NULLs in the
+column you `order_by`, and Postgres sorts those NULLs **last** on ASC while SQL
+Server sorts them **first** — same rows, different order. This predates item 103
+(a plain `LEFT JOIN` behaves identically) and is not papered over, because the
+only in-engine fix is `OrderBySpec.nulls`, which QueryGate deliberately rejects on
+MSSQL rather than emulating (item 74). Order by a non-nullable column when you
+need a deterministic order across both backends.
+
+**Proven on both real backends:** every join type, the range-join shape and the
+cross join's cartesian count all execute against a live Postgres *and* a live SQL
+Server in `tests/integration/test_cross_dialect_differential.py`, and a test makes
+a live both-dialects case mandatory for any future join type.
+
 **What bounds a write's `WHERE`.** Two things beyond the write policy itself, both
 easy to miss because they live on the *read* side of `Policy`: the filter's columns
 are checked against read allow/deny **and** the masked-column rule (a masked column
@@ -1670,9 +1725,9 @@ their own — see the [Decision Log](#decision-log).
 A `Policy` bundles everything that bounds a query against one connection:
 table/column allow and deny lists, per-query complexity caps (`max_joins`,
 `max_select_columns`, `max_where_depth`, `max_where_predicates` and
-`max_in_list_size` for WHERE/HAVING/CASE-condition predicate shape — all three
-of those positions are the same `WhereNode` tree and are bounded identically
-(item 99) — `max_expression_depth` and `max_expression_nodes` for the scalar
+`max_in_list_size` for WHERE/HAVING/CASE-condition/join-condition predicate
+shape — all four of those positions are the same `WhereNode` tree and are bounded
+identically (items 99, 103) — `max_expression_depth` and `max_expression_nodes` for the scalar
 expression substrate (item 100; see
 [Computed expressions](#computed-expressions-arithmetic-conditional-aggregation-nested-functions)),
 `max_group_by`, `max_top_n` and
@@ -1681,6 +1736,9 @@ expression substrate (item 100; see
 [Window functions](#window-functions-running-totals-moving-averages-rank-in-place)),
 `max_interval_days` for how far a relative-date shift may reach (item 102; see
 [Dates and relative time](#dates-and-relative-time-the-last-30-days-without-doing-the-arithmetic)),
+`allow_cross_join` for the one join type whose cost is the product of its inputs
+(item 103, default off; see
+[Joins](#joins-equality-sugar-a-general-on-condition-and-the-four-join-types)),
 `max_limit`/`max_limit_aggregate`
 for row counts, `max_response_bytes` for response size), execution
 guardrails (`timeout_seconds`, `max_concurrency`, queue-depth caps),
@@ -3027,6 +3085,81 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-07-27 — a join's `ON` clause becomes a full predicate tree, and CROSS
+  JOIN is the one join type that is deny-by-default (TODO.md item 103;
+  maintainer-ratified before build, as ENGINE_EXPRESSIVENESS_PLAN.md §8 entry 5
+  requires).** Before it, `JoinSpec` could only express equality pairs (`on` plus
+  `extra_on`), so a price-band join (`ON price BETWEEN lo AND hi`), a temporal
+  join (`ON event.at >= window.start`) and any FULL OUTER join were simply
+  inexpressible — §5 regression-bar row 16. `JoinSpec.condition` is the same
+  `WhereNode` the WHERE clause uses, and `JoinType` gains `full` and `cross`. The
+  four calls that shape what it is:
+  1. **CROSS JOIN is gated by `Policy.allow_cross_join`, default off, and the gate
+     is a *flag*, not a bespoke row cap.** A cross join is the only join whose
+     cost is the **product** of its inputs rather than bounded by a key — and,
+     more to the point, the only one the join-graph rule exempts from having to
+     connect to anything. Before item 103 an accidental cartesian product was
+     structurally *inexpressible*, because every join had to name a table already
+     in the graph; `cross` is the first way to ask for one, so it must be asked
+     for. Cross joins still count against `max_joins`.
+     **What actually bounds one, stated by measurement rather than by
+     assumption** (an earlier draft of this entry claimed the effective `LIMIT`
+     and the item-26 cost gate bounded it "on both dialects" — both halves were
+     checked and neither carries that weight): the always-on bound is
+     `timeout_seconds` (default 30 — Postgres `SET LOCAL statement_timeout`,
+     MSSQL the driver timeout), together with `max_response_bytes` and the
+     concurrency limiter. `LIMIT` bounds **rows returned, not work done** — this
+     item's own live test issues `count(*)` over a cross join, a statement that
+     carries the LIMIT and still makes the server materialize the whole product,
+     and the same is true of any `GROUP BY`/`ORDER BY`/`DISTINCT` over one. The
+     item-26 cost gate is the right pre-execution bound but is **opt-in and off by
+     default**: `max_estimated_rows`/`max_estimated_cost` both default to `None`,
+     so `cost_estimation_enabled` is `False` and no `EXPLAIN`/`SHOWPLAN_XML` runs
+     at all; it can also be set to `OBSERVE` (never blocks) and is fail-open on an
+     unavailable estimate. That gap is precisely *why* the flag is deny-by-default
+     rather than a cap — and an operator enabling `allow_cross_join` should set
+     `max_estimated_rows` alongside it.
+  2. **`on` and `condition` are mutually exclusive, and `cross` takes neither.**
+     They are two spellings of one clause, so accepting both would leave their
+     precedence — ANDed? overriding? — for the compiler to invent. `extra_on`
+     stays tied to `on` (a `condition` expresses composite keys directly). A
+     `cross` join carrying a condition is rejected rather than having it silently
+     dropped, which would answer a different question than the caller asked.
+  3. **A `condition` may reference any table ALREADY joined, not just the joined
+     pair.** `extra_on`'s "same two tables" restriction is a property of that
+     sugar, not of a join: `JOIN c ON c.x = a.x AND c.y = b.y` is ordinary SQL.
+     The connectivity rule therefore generalizes rather than being special-cased
+     — the condition must name the table being joined, must connect to something
+     already known, and must **not forward-reference a table joined later**,
+     which SQLAlchemy would render as a broken or implicitly-cartesian FROM
+     clause rather than the join that was written. That third check is new and is
+     only reachable through `condition`; the `on` path keeps its original message.
+  4. **The ON clause is held to every cap the WHERE clause has.** A join condition
+     is the fourth position a predicate tree can occupy (after WHERE, HAVING and a
+     searched-CASE `when`), so `max_where_depth`, `max_where_predicates` (summed
+     tree-wide, per item 97), `max_in_list_size`, `max_expression_depth`/
+     `max_expression_nodes` and the `date_add` interval cap all reach it — wired
+     in at the two shared walks (`iter_column_refs` gains a `JOIN_CONDITION`
+     position; `iter_scope_expressions` gains join-condition expressions) rather
+     than as parallel checks. That single wiring is what makes the denied-column,
+     masked-column (item 49) and date-operand (item 117) rules apply inside an ON
+     clause by construction. `IN (subquery)` is **rejected** there, matching
+     HAVING and CASE: `iter_query_scopes` descends WHERE/HAVING only, so a
+     subquery in a join condition would never be validated as its own scope.
+
+  **A pre-existing divergence this surfaced, deliberately left standing.** An
+  outer join can NULL out the column a query orders by, and Postgres sorts those
+  NULLs **last** on ASC while SQL Server sorts them **first** — so the same AST
+  returns the same row *set* in a different *order*. Measured on both live
+  servers, this predates item 103: a plain LEFT JOIN diverges identically, and
+  item 103 only makes it reachable from a second join type. It is **not** fixed
+  here, because the only in-engine fix is `OrderBySpec.nulls`, which item 74
+  deliberately *rejects* on MSSQL rather than emulating with a synthesized
+  CASE sort column. Changing that posture is a maintainer decision, not a side
+  effect of this item; it is pinned by
+  `test_outer_join_null_ordering_diverges_and_predates_item_103` so it is
+  recorded rather than rediscovered.
 
 - **2026-07-26 — every date/time answer QueryGate gives is UTC, and the Postgres
   session is pinned to make that true rather than claimed (TODO.md item 102).**

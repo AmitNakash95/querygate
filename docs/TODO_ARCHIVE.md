@@ -6060,6 +6060,92 @@ relative-date filtering was always composable with a caller-computed literal, an
 this is native convenience. The larger outcome of the item is the timezone pin,
 which fixed a correctness gap in a capability that had already shipped.
 
+### 103. Query engine: non-equi/range joins + FULL OUTER / CROSS ✅ DONE
+
+Generalized `JoinSpec` from equality-pairs to a full predicate tree and added the
+two missing join types, taking regression-bar row 16 (a price-band join) from
+inexpressible to executed on both real backends.
+
+**What shipped.**
+
+- **`JoinSpec.condition: Optional[WhereNode]`** — the *same* node type `where`
+  uses, so a join can be a range/temporal/inequality join
+  (`ON Sale.Price BETWEEN Band.Lo AND Band.Hi`, `ON Event.At >= Window.Start`).
+  The equality `on` form stays as the common-case sugar and its rendering is
+  byte-identical to before. `on` and `condition` are mutually exclusive at the AST
+  layer; `extra_on` stays tied to `on`.
+- **`JoinType` gains `"full"` and `"cross"`.** `full` compiles to
+  `stmt.join(..., full=True)`; `cross` to `stmt.join(right, sa.true())` —
+  `ON true` on Postgres, `ON 1 = 1` on MSSQL/SQLite, the same cartesian product
+  to every planner. A `cross` join takes no condition and is rejected (not
+  silently stripped) if given one.
+- **`Policy.allow_cross_join`, default off.** Deny-by-default for the one join
+  type whose cost is the product of its inputs and the only one exempt from the
+  graph-connectivity rule. Cross joins still count against `max_joins`.
+  Registered in `_DIRECTION_REVIEWED_GUARDRAILS` (item 115), since `allow_*`
+  does not read as a ceiling.
+- **The ON clause inherits every WHERE cap**, wired in at the two shared walks
+  rather than as parallel checks: `iter_column_refs` gains a `JOIN_CONDITION`
+  position (so the denied-column and item-49 masked-column rules apply by
+  construction) and `iter_scope_expressions` gains join-condition expressions (so
+  `max_expression_depth`/`max_expression_nodes`, the `max_case_branches` budget,
+  the `date_add` interval cap and the item-117 date-operand type check all reach
+  it). Depth, tree-wide predicate count and `max_in_list_size` are enforced
+  through the same shared rules WHERE/HAVING/CASE use.
+- **`IN (subquery)` is rejected in a join condition**, matching HAVING and CASE:
+  `iter_query_scopes` descends WHERE/HAVING only, so a subquery there would never
+  be validated as its own scope. Rejected with a typed error rather than left to
+  fail on a compiler-internal `ctx=None`.
+- **The join-graph rule generalized rather than special-cased.** A `condition` may
+  name any table *already* in the graph (`JOIN c ON c.x = a.x AND c.y = b.y` is
+  ordinary SQL, and `extra_on`'s same-two-tables restriction is a property of that
+  sugar), must reference the table being joined, and must **not**
+  forward-reference a table joined later — which SQLAlchemy would render as a
+  broken or implicitly-cartesian FROM. The `on` path can only reach the original
+  check, so its message is unchanged.
+- **Audit shape** records the join type plus whichever form was used, with a
+  condition normalized through the same `_where_shape` as WHERE — operators and
+  column names, never a literal.
+
+**Coverage.** `tests/unit/test_nonequi_joins.py` (38 tests across AST form, graph
+rules, caps, per-dialect rendering and the audit shape),
+`tests/integration/test_nonequi_join_end_to_end.py` (9 tests executing every form
+through the REST pipeline, including bar row 16), new `JOIN_CONDITION` cases in
+the visitor contract and the adversarial suite's denied/masked expression-position
+matrix, and 8 new live cases in `tests/integration/test_cross_dialect_differential.py`
+run against real Postgres **and** real SQL Server. Two client-builder tests and
+two `test_service.py` usage-signal tests round it out.
+`test_every_join_type_has_a_live_both_dialects_case` makes a live case mandatory
+for any future `JoinType` and lives in the **unit** tier, not beside the cases it
+guards — the differential module is marked `postgres_live and mssql_live`, so a
+gate placed there would only fire in the one CI job that has both servers. That
+placement is item 102's recorded precedent, and the item-103 audit caught this
+file's first draft getting it wrong.
+
+**Mutation-verified.** All 16 enforcement points this item adds were each broken
+deliberately and confirmed to fail a test *for that reason*. The first pass caught
+13/16; the three misses were real and are why the technique is mandatory — nothing
+pinned the **audit shape** (the item-102 lesson repeating: the normalizer is a
+third un-foldable recursion), nothing pinned **join-condition column resolution**
+at the schema layer, and one mutation string missed. Tests were added for all
+three before landing.
+
+**Regression bar 10/16 → 11/16** (row 16). Unlike row 12, this row was a genuine
+❌ with no composition escape: a range join is not two queries plus a client
+merge, it is a join the AST could not describe.
+
+**A pre-existing divergence surfaced and deliberately left standing.** An outer
+join can NULL out the column a query orders by, and Postgres sorts those NULLs
+last on ASC while SQL Server sorts them first — the same AST, the same row set, a
+different order. Measured on both live servers, this **predates item 103**: a
+plain LEFT JOIN diverges identically, and item 103 only makes it reachable from a
+second join type. Not fixed here, because the only in-engine fix is
+`OrderBySpec.nulls`, which item 74 deliberately rejects on MSSQL rather than
+emulating with a synthesized CASE sort column — changing that posture is a
+maintainer decision, not a side effect of this item. Pinned by
+`test_outer_join_null_ordering_diverges_and_predates_item_103` so it is recorded
+rather than rediscovered.
+
 ### 107. Batch query execution double-reserves quota on an approval retry ✅ DONE
 
 **Effort: S. Priority: medium (real throughput bug, narrow blast radius).

@@ -469,6 +469,14 @@ class StructuredQueryService:
                     )
                 )
                 tables_seen.add(join.table)
+            if join.on is None:
+                # A range or cross join (item 103) asserts no single
+                # [Left.Col, Right.Col] relationship, which is the only thing a
+                # RELATIONSHIP_USED signal can carry. Skip it — the TABLE_USED
+                # signals above still stand. `continue`, never an unpack: this
+                # list is built eagerly, so raising here would discard the whole
+                # batch, including the table signals already collected.
+                continue
             left, right = join.on
             if "." not in left or "." not in right:
                 continue

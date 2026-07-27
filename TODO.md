@@ -133,7 +133,7 @@ order-of-magnitude, not commitments.
 | 100 | ✅ ★ Bounded scalar `Expression` substrate (arithmetic, conditional aggregation, nested fns, expression-CASE) | XL | 96, 99 |
 | 101 | ✅ ★ General window functions (`WindowSelectItem`: OVER, LAG/LEAD, frames) | L | 96, 100 (windowed exprs) |
 | 102 | ✅ ★ `EXTRACT`/date_part + relative-date/interval helpers | M | 100 |
-| 103 | ★ Non-equi/range joins + FULL OUTER / CROSS | M | 96, 99 |
+| 103 | ✅ ★ Non-equi/range joins + FULL OUTER / CROSS | M | 96, 99 |
 | 104 | ★ Set operations (UNION / INTERSECT / EXCEPT) | L | 96, 97 |
 | 105 | ★ CTE / derived table in FROM (non-recursive) | XL | 96, 97, 104 |
 | 106 | ★ Correlated / EXISTS / scalar subqueries | XL | 96, 97, 105 |
@@ -148,6 +148,7 @@ order-of-magnitude, not commitments.
 | 115 | ✅  Guardrail-field lists in admin/help have drifted from `Policy`'s caps | S | — |
 | 116 | ✅  A write's WHERE is exempt from every shape cap the read path enforces | S | — |
 | 117 | ✅  `date_bucket` over a non-temporal column diverges across dialects | S | 102 |
+| 118 | `min_group_size` is defeated by any fan-out join | M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2087,17 +2088,13 @@ makes "every date answer is UTC" true rather than server-config dependent.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 102).
 
-### 103. Query engine: non-equi/range joins + FULL OUTER / CROSS
+### 103. Query engine: non-equi/range joins + FULL OUTER / CROSS ✅ DONE
 
-Generalize `JoinSpec` from equality-pairs to an optional `condition: WhereNode`
-(range/temporal joins, e.g. `ON price BETWEEN band.lo AND band.hi`), keeping the
-equality `on` form as sugar; add `"full"` and `"cross"` `JoinType`s. `CROSS`
-(cartesian) is a cost lever — gate behind a policy flag (`allow_cross_join`,
-default off) + row cap. Non-equi conditions count as join predicates in the caps.
+Shipped `JoinSpec.condition` (a full `WhereNode`, so range/temporal joins) plus
+`full` and `cross` join types, with `cross` gated by a deny-by-default
+`Policy.allow_cross_join` and the ON clause held to every WHERE-clause cap.
 
-**Effort: M. Priority: medium (flagship pillar). Depends on: items 96, 99 (WhereNode
-join condition). Requires a Decision Log entry (CROSS gating; plan §8 entry 5).**
-Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 3b.**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 103).
 
 ### 104. Query engine: set operations (UNION / INTERSECT / EXCEPT)
 
@@ -2259,3 +2256,48 @@ Extended item 102's operand rule to the third date primitive, so all three go
 through one shared walk with a coverage test guarding a future fourth.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 117).
+
+### 118. `min_group_size` is defeated by any fan-out join
+
+The item-88 k-anonymity floor is compiled as `HAVING count(*) >= k`, which counts
+**joined** rows rather than distinct base rows. Any join that fans out multiplies
+a group's count past the floor, so a group backed by a single underlying row is
+returned.
+
+**Measured, and the measurement is what scopes the item.** With `k=5`, one person
+at `salary=100` and five at `salary=200`, and a 10-row table sharing a `tenant`
+value:
+
+| query | result |
+| --- | --- |
+| no join (control) | `[200]` — floor works |
+| `JOIN big ON person.tenant = big.tenant` (**equality**, pre-item-103) | `[100, 200]` — **floor defeated** |
+| `JOIN big ON person.id != big.id` (non-equi, item 103) | `[100, 200]` — floor defeated |
+
+**This predates item 103.** The equality row above uses only the `on` form, which
+has shipped since long before the non-equi join existed — so this is not an
+item-103 regression, and a fix that rejected only non-equality conditions would be
+theater, leaving the equality spelling that already does it. What item 103 changed
+is *reachability*: an equality fan-out needs a suitable low-cardinality key to
+exist in the schema, whereas `col != col` always fans out, so the vector went from
+schema-dependent to always-available.
+
+**Why it matters:** `docs/THREAT_MODEL.md` QG-29 and `docs/INFERENCE_RISKS.md` R3
+both currently claim the floor suppresses "any result group backed by fewer than
+*k* rows". That claim does not hold in the presence of a join, and the docs do not
+say so.
+
+**Options (a maintainer decision, deliberately not taken by the implementing
+agent):**
+1. Count distinct base rows instead of joined rows — `HAVING count(DISTINCT <pk>)
+   >= k`. Needs a primary-key notion the AST does not currently carry, and changes
+   the meaning of the floor for existing deployments.
+2. Reject joins outright while `min_group_size` is set — simple, fail-closed,
+   consistent with the item-101 posture for aggregate windows, but a large
+   expressiveness loss for exactly the deployments that turn the floor on.
+3. Accept it and narrow the claim — document the residual in R3/QG-29 as a known
+   limit of a row-count floor, the way R1's residuals are already handled.
+
+**Effort: M. Priority: high (a claimed security guarantee does not hold).
+Depends on: nothing.** Surfaced 2026-07-27 by the item-103 audit; the
+pre-existence was established by measuring the equality-join case, not assumed.

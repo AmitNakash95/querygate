@@ -73,6 +73,7 @@ from querygate.query_ast.models import (
     StringAggSelectItem,
     StructuredQuery,
     TopNSpec,
+    WhereGroup,
 )
 from querygate.validation import schema_validation as sv
 from querygate.validation.policy_validation import validate_policy
@@ -248,6 +249,48 @@ def _customers_table() -> sa.Table:
                 )
             ],
         ),
+        # A general join `condition` (item 103) whose second predicate is a
+        # range comparison against the denied column — the ON clause is a full
+        # predicate tree now, so it is a new place to hide one.
+        StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            joins=[
+                JoinSpec(
+                    table="customers",
+                    condition=WhereGroup(
+                        and_terms=[
+                            Predicate(col="orders.customer_id", op="eq", value_col="customers.id"),
+                            Predicate(
+                                col="orders.customer_id", op="gte", value_col="customers.email"
+                            ),
+                        ]
+                    ),
+                )
+            ],
+        ),
+        # ...and the same column reached through an ARITHMETIC bound inside that
+        # condition, one level deeper than a direct ref.
+        StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "joins": [
+                    {
+                        "table": "customers",
+                        "condition": {
+                            "col": "orders.customer_id",
+                            "op": "gte",
+                            "value_expr": {
+                                "left": {"col": "customers.email"},
+                                "op": "+",
+                                "right": {"literal": 1},
+                            },
+                        },
+                    }
+                ],
+            }
+        ),
     ],
     ids=[
         "where",
@@ -267,6 +310,8 @@ def _customers_table() -> sa.Table:
         "predicate_col_fn",
         "predicate_value_col",
         "composite_join_extra_on",
+        "join_condition_range_bound",
+        "join_condition_arithmetic_bound",
     ],
 )
 def test_denied_column_cannot_be_used_for_inference(query: StructuredQuery):
@@ -330,6 +375,71 @@ def test_min_group_size_closes_the_single_row_aggregate_singling_out():
     )
     compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
     assert "count(*) >= 5" in compiled.lower()
+
+
+def test_k_anonymity_floor_is_defeated_by_a_fan_out_join_open_gap_item_118():
+    """A RECORDED OPEN GAP, not a passing guarantee — pinned here so it is visible
+    in the security suite rather than only in prose (TODO.md item 118).
+
+    The floor is `HAVING count(*) >= k` over **joined** rows, so any fan-out join
+    multiplies a singleton group past k and the group is returned. Executed against
+    a real (SQLite) database rather than asserted on SQL text, because the point is
+    the rows that come back.
+
+    The join used here is an **equality** `on` join, which has shipped since long
+    before item 103's `condition` form — that is the whole reason this is tracked
+    as a pre-existing gap rather than a non-equi-join regression, and why a fix
+    that rejected only inequality conditions would be theater. This test asserts
+    the leak STILL happens; when item 118 is decided and fixed, it must be
+    inverted, not deleted.
+    """
+    metadata = sa.MetaData()
+    person = sa.Table(
+        "person",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("tenant", sa.Integer),
+        sa.Column("salary", sa.Integer),
+    )
+    big = sa.Table(
+        "big",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("tenant", sa.Integer),
+    )
+    engine = sa.create_engine("sqlite://")
+    metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            person.insert(),
+            [{"id": 1, "tenant": 1, "salary": 100}]
+            + [{"id": i, "tenant": 1, "salary": 200} for i in range(2, 7)],
+        )
+        conn.execute(big.insert(), [{"id": i, "tenant": 1} for i in range(1, 11)])
+
+    tables = {"person": person, "big": big}
+    policy = Policy(min_group_size=5)
+    body = {
+        "from": "person",
+        "select": ["person.salary"],
+        "group_by": ["person.salary"],
+    }
+
+    def _salaries(query_body):
+        query = StructuredQuery.model_validate(query_body)
+        stmt, _ = compile_structured_query(query, tables, policy, dialect="sqlite")
+        with engine.connect() as conn:
+            return sorted(row[0] for row in conn.execute(stmt).fetchall())
+
+    # Control: without a join the floor works — salary=100 is a group of one.
+    assert _salaries(body) == [200]
+
+    # The gap: an equality fan-out join inflates count(*) to 10 for that group.
+    joined = dict(body, joins=[{"table": "big", "on": ["person.tenant", "big.tenant"]}])
+    assert _salaries(joined) == [100, 200], (
+        "the k-anonymity fan-out gap appears to be fixed — invert this test and "
+        "close TODO.md item 118"
+    )
 
 
 def test_denied_table_cannot_be_smuggled_through_a_filter():
@@ -1944,6 +2054,24 @@ def _expression_positions(leaf: dict):
             "from": "customers",
             "select": ["customers.id"],
             "where": {"col": "customers.id", "op": "gt", "value_expr": _buried(leaf)},
+        },
+        "join_condition": {
+            # Item 103's join `condition` is the fourth position a predicate tree
+            # can sit in, so it is a fourth way to bury an expression — and the
+            # only one that is evaluated BEFORE the WHERE clause runs.
+            "from": "orders",
+            "select": ["orders.id"],
+            "joins": [
+                {
+                    "table": "customers",
+                    "condition": {
+                        "and": [
+                            {"col": "orders.customer_id", "op": "eq", "value_col": "customers.id"},
+                            {"col": "orders.customer_id", "op": "gt", "value_expr": _buried(leaf)},
+                        ]
+                    },
+                }
+            ],
         },
     }
 

@@ -119,6 +119,17 @@ from querygate.mcp.server import create_mcp_server
 # The three nodes' maintainer rationale went into `#` comments, not model
 # docstrings, per the note below — their agent-facing docstrings are 2-3 lines each.
 #
+# Item 103 (join `condition` + `full`/`cross` join types) cost a MEASURED 832
+# chars — the enum's two new values, the `condition` field, and three tightened
+# descriptions; `condition` is a `$ref` to the WhereNode already in `$defs`, so
+# the recursive tree it unlocks is free. That is small, but it lands on an
+# already-eroded budget: the total was 104,042 at item 114 and is 109,161 now,
+# so headroom is **0.8%, not the ~5% this note assumes**, and the next engine
+# item (104, set operations — a NEW top-level shape, not a `$ref` to an existing
+# one) will breach it. That is a maintainer decision, deliberately not taken
+# here: raise the ceiling, or do the trim pass the note below describes. The
+# numbers above are recorded so it can be made on data.
+#
 # The budget keeps ~5% headroom. Before raising it again: check whether the
 # growth is real new capability or another duplicated definition, and move
 # maintainer rationale out of model docstrings into `#` comments first (a

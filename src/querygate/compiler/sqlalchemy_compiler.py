@@ -742,16 +742,32 @@ def compile_structured_query(
 
     for join in query.joins:
         right = _table_by_name(tables, join.alias or join.table)
-        conditions = []
-        for left_ref, right_ref in [join.on, *join.extra_on]:
-            left_t, left_c = parse_column_ref(left_ref)
-            right_t, right_c = parse_column_ref(right_ref)
-            left_col = resolve_column(_table_by_name(tables, left_t), left_c)
-            right_col = resolve_column(_table_by_name(tables, right_t), right_c)
-            conditions.append(left_col == right_col)
-        condition = sa.and_(*conditions) if len(conditions) > 1 else conditions[0]
-        isouter = join.type == "left"
-        stmt = stmt.join(right, condition, isouter=isouter)
+        if join.type == "cross":
+            # SQLAlchemy Core has no cross-join constructor on Select, and a
+            # comma-separated FROM is the older implicit spelling. `ON true`
+            # (rendered `ON 1 = 1` where a dialect has no boolean literal) is the
+            # explicit, portable form and is the same cartesian product to every
+            # planner — no caller-derived content is involved.
+            stmt = stmt.join(right, sa.true())
+            continue
+        if join.condition is not None:
+            # A general join condition (item 103) is compiled by the SAME
+            # `_compile_where` the WHERE clause uses — no second predicate
+            # compiler to drift. `alias_map={}` because a join is evaluated before
+            # the projection exists, and `ctx` is left at its default None so a
+            # `value_subquery` fails closed here too (policy validation already
+            # rejects one with a typed error; this is the defence in depth).
+            condition = _compile_where(join.condition, tables, {}, dialect)
+        else:
+            conditions = []
+            for left_ref, right_ref in [join.on, *join.extra_on]:
+                left_t, left_c = parse_column_ref(left_ref)
+                right_t, right_c = parse_column_ref(right_ref)
+                left_col = resolve_column(_table_by_name(tables, left_t), left_c)
+                right_col = resolve_column(_table_by_name(tables, right_t), right_c)
+                conditions.append(left_col == right_col)
+            condition = sa.and_(*conditions) if len(conditions) > 1 else conditions[0]
+        stmt = stmt.join(right, condition, isouter=join.type == "left", full=join.type == "full")
 
     stmt = _apply_mandatory_row_filters(stmt, policy, tables, name_to_physical, principal)
 

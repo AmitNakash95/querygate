@@ -805,24 +805,31 @@ class Query:
     def join(
         self,
         table: str,
-        on: Tuple[Union[str, Column], Union[str, Column]],
+        on: Optional[Tuple[Union[str, Column], Union[str, Column]]] = None,
         *,
         type: JoinType = "inner",
         alias: Optional[str] = None,
         extra_on: Optional[Sequence[Tuple[Union[str, Column], Union[str, Column]]]] = None,
+        condition: Optional[Sequence[WhereNode]] = None,
         connection: Optional[str] = None,
     ) -> "Query":
         """Join ``table`` on an equality pair ``(left, right)``. ``extra_on`` adds
         further ANDed pairs for composite keys; ``connection`` marks a
-        cross-connection join (same join_group only)."""
-        left, right = on
+        cross-connection join (same join_group only).
+
+        Pass ``condition=[...]`` instead of ``on`` for a range/inequality join —
+        the predicates are AND-combined exactly like ``.where()``, e.g.
+        ``condition=[col("Band.Lo") <= col("Sale.Price"), ...]``. A
+        ``type="cross"`` join takes neither (and needs ``allow_cross_join``).
+        """
         self._joins.append(
             JoinSpec(
                 table=table,
                 alias=alias,
                 type=type,
-                on=[_colname(left), _colname(right)],
+                on=[_colname(on[0]), _colname(on[1])] if on is not None else None,
                 extra_on=[[_colname(a), _colname(b)] for a, b in (extra_on or [])],
+                condition=self._and_combine(list(condition)) if condition else None,
                 connection=connection,
             )
         )

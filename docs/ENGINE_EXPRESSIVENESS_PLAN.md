@@ -1,13 +1,14 @@
 # Expressive Query Engine — Path to 10/10 (Flagship Pillar Plan)
 
-**Status (2026-07-26):** in progress — **Phase 0 (item 99), Phase 1 (item 100) and
-Phase 2 (item 101) have shipped.** Phase 3a (item 102, `EXTRACT`/date_part +
-relative-date helpers) is next; its Decision Log entry (§8 entry 4 — interval cap
-+ timezone semantics) is the first step of that item. Phases 3b–5 (items 103–106)
-are unstarted. **The `Expression` substrate items 102–106 all build on is real**
-(`query_ast/models.py`'s `Expression` union + `_compile_expression`); reuse it
-rather than adding a parallel scalar shape — item 101's `WindowSelectItem.arg`
-is the worked example. **Owner:** engine. **Audience:** the
+**Status (2026-07-27):** in progress — **Phase 0 (item 99), Phase 1 (item 100),
+Phase 2 (item 101), Phase 3a (item 102) and Phase 3b (item 103) have shipped.**
+Phase 4a (item 104, set operations) is next; its Decision Log entry is the first
+step of that item. Phases 4b–5 (items 105, 106, plus item 97 phase 2 folded in
+beside 105) are unstarted. **The `Expression` substrate items 104–106 all build on
+is real** (`query_ast/models.py`'s `Expression` union + `_compile_expression`);
+reuse it rather than adding a parallel scalar shape — item 101's
+`WindowSelectItem.arg`, item 102's three date nodes and item 103's
+`JoinSpec.condition` are the worked examples. **Owner:** engine. **Audience:** the
 implementing agent (Claude) + reviewers.
 **Authority:** this is the *deep spec* the read-engine expressiveness items point
 to. Item **content** and `✅ DONE` status live in `TODO.md`; execution **order**
@@ -16,8 +17,10 @@ re-sequence). This document is the reference those items cite — it does not
 replace them.
 
 > **Item numbering.** Items 99–106 are already allocated to this plan's phases and
-> exist in `TODO.md`. The highest allocated item file-wide is **113**, so a genuinely
-> new item takes **114** — never reuse a number in this range. (This line previously
+> exist in `TODO.md`. The highest allocated item file-wide is **118**, so a genuinely
+> new item takes **119** — never reuse a number in this range. (Check the highest
+> `### N` heading in `TODO.md` rather than trusting this line; it has gone stale
+> twice.) (This line previously
 > read "next free number is **99**", which was true only before item 99 was created;
 > it is a trap now, since item numbers are permanent and file-global per CLAUDE.md.)
 
@@ -488,7 +491,7 @@ report becomes a new row here first, then an item.
 | 13 | Case-insensitive name search | ✅ | `lower(col) like …` |
 | 14 | Rank products with ties (WITH TIES) | ✅ | `top_n fn=rank` |
 | 15 | Each order's % of total (`amount / SUM(amount) OVER ()`) | 🟡 both halves exist; not in one expression | a window-as-`Expression` item (see below) |
-| 16 | Price-band join (`ON price BETWEEN lo AND hi`) | ❌ | 103 |
+| 16 | Price-band join (`ON price BETWEEN lo AND hi`) | ✅ **103** | 103 |
 
 Baseline at plan time: **5/16 fully expressible, 2 cleanly composable.** After
 items 99 + 100: **8/16** — rows 1, 2 and 7 went green, each covered end-to-end in
@@ -499,8 +502,21 @@ items 99 + 100: **8/16** — rows 1, 2 and 7 went green, each covered end-to-end
 MSSQL in `tests/integration/test_cross_dialect_differential.py`. After item 102:
 **10/16** — row 12 (orders in the last N days) went green, covered in
 `tests/integration/test_date_primitives_end_to_end.py` and on both real backends
-in the differential suite. The remaining ❌ set is 3, 6, 8, 11, 16 —
-derived-table/set-ops/correlated/non-equi, which Phases 3b–5 finish.
+in the differential suite. After item 103: **11/16** — row 16 (a price-band
+join) went green, covered in `tests/integration/test_nonequi_join_end_to_end.py`
+and on real Postgres *and* real MSSQL in the differential suite. The remaining ❌
+set is 3, 6, 8, 11 — derived-table/set-ops/correlated, which Phases 4a–5 finish.
+
+**What item 103 was worth, stated precisely.** Row 16 was a genuine ❌, not a
+🟡: an equality-only `JoinSpec` had no composition escape — a range join is not
+two queries plus a client merge, it is a join the AST could not describe at all.
+So unlike row 12, the reach gain is the real gain here. The correctness finding
+it surfaced is smaller but recorded: an outer join can NULL out the ordered
+column, and PG/MSSQL place those NULLs on opposite ends. That divergence
+**predates this item** (measured: a plain LEFT JOIN diverges identically) and is
+deliberately left standing, because the only in-engine fix is the `nulls`
+handling item 74 decided to reject rather than emulate. See the §8 entry 5
+outcome and `test_outer_join_null_ordering_diverges_and_predates_item_103`.
 
 **Be precise about what row 12 was worth**, since this table's honesty is the
 point of it: row 12 was 🟡, not ❌ — an agent could always compute the cutoff and
@@ -651,7 +667,27 @@ open **before** implementation, not discovered after:
    24,855), and a date primitive over a **non-temporal column** is rejected —
    Postgres errors there while MSSQL silently returns a 1900-epoch value. See the `docs/PRODUCT_GUIDE.md` Decision Log
    entry dated 2026-07-26.*
-5. **CROSS JOIN gating** (policy flag default-off + row-cap rationale).
+5. ✅ **RECORDED 2026-07-27** — **CROSS JOIN gating** (policy flag default-off +
+   row-cap rationale). *Outcome: **`Policy.allow_cross_join`, default off — and
+   the gate is a flag, not a bespoke row cap.** A cross join is the only join
+   whose cost is the *product* of its inputs rather than bounded by a key, and
+   the only one the join-graph connectivity rule exempts; before item 103 an
+   accidental cartesian product was structurally inexpressible, so `cross` is the
+   first way to ask for one and must be asked for. Cross joins count against
+   `max_joins`. **What bounds one, measured rather than assumed:** `timeout_seconds`
+   (default 30) on both dialects, plus `max_response_bytes` and the concurrency
+   limiter. `LIMIT` bounds rows *returned*, not work — a `count(*)` over a cross
+   join carries the LIMIT and still materializes the whole product. Item 26's cost
+   gate is the right pre-execution bound but is **opt-in and off by default**
+   (both thresholds default `None` → `cost_estimation_enabled` is `False`), and is
+   fail-open. An earlier draft of this entry cited LIMIT + the cost gate as the
+   two bounds; both were checked and neither carries that weight, which is exactly
+   why the flag is deny-by-default rather than a cap. Three further calls ride along: `on`/`condition` are
+   mutually exclusive (and `cross` takes neither, rejected rather than dropped);
+   a `condition` may reference any **already-joined** table but not
+   forward-reference a later one; and the ON clause is held to every WHERE cap,
+   with `IN (subquery)` rejected there as it is in HAVING/CASE. See the
+   `docs/PRODUCT_GUIDE.md` Decision Log entry dated 2026-07-27.*
 6. **Recursive CTE exclusion** — record that it is deliberately out of scope pending
    a hard iteration cap.
 7. **Correlated-subquery scope model** — the declared, capped correlation-ref rule

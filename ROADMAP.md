@@ -219,8 +219,18 @@ gate is the *first step of the item*, not a reason to defer it.
   session `TimeZone` QueryGate never set, so those answers followed server config.
   Sessions are now pinned to UTC — a deliberate behavior change, recorded in the
   Decision Log. Regression bar 9/16 → **10/16**.*
-- [ ] **103** — Non-equi/range joins + FULL OUTER / CROSS. *Range/temporal joins.
-  Depends on 96, 99; **Decision Log entry (CROSS gating).***
+- [x] **103** — Non-equi/range joins + FULL OUTER / CROSS. ✅ **Shipped**
+  (`JoinSpec.condition` is the same `WhereNode` as `where`, so the ON clause
+  inherits every WHERE cap through the item-96 visitor and `iter_scope_expressions`
+  rather than parallel checks; `full` + `cross` join types, with `cross`
+  deny-by-default behind `Policy.allow_cross_join` — a flag rather than a cap
+  *because* the pre-execution bounds are weaker than they look: LIMIT bounds rows
+  returned, not work, and item 26's cost gate is opt-in and off by default, leaving
+  `timeout_seconds` as the always-on bound; every join type executed on live
+  Postgres **and** live MSSQL. Regression bar 10/16 → **11/16**.)
+  *Its side finding: outer joins made the pre-existing PG-vs-MSSQL NULLS-ordering
+  divergence reachable from a second join type — measured, recorded, and left
+  standing, because the only fix is the `nulls` handling item 74 rejects.*
 - [ ] **104** — Set operations (UNION / INTERSECT / EXCEPT). *New scope container;
   caps summed across arms. Depends on 96, 97; **Decision Log entry before build.***
 - [ ] **97 (phase 2)** — `FROM (subquery)` derived table. *Moved here 2026-07-25
@@ -368,27 +378,35 @@ the live frontier: `roadmap-next` should walk Phase 4 in order (100 → 106),
 drafting each item's Decision Log entry for approval as step 1 of that item.
 Adoption/breadth (Phase 5) and catalog/UI (Phase 6) wait behind it.
 
-**Engine progress (updated 2026-07-26):** **99, 100, 101 and 102 have shipped.**
-The `Expression` substrate every remaining engine item depends on is real; item
-101's `WindowSelectItem.arg` and item 102's three date nodes are the worked
-examples of extending it. **103 (non-equi/range joins + FULL OUTER / CROSS) is the
-next roadmap item** — it generalizes `JoinSpec` to an optional `condition:
-WhereNode`, reusing item 99's machinery, and its Decision Log entry (CROSS gating,
-plan §8 entry 5) is that item's own first step. The canonical regression bar is
-**10/16** (`docs/ENGINE_EXPRESSIVENESS_PLAN.md` §5); 103 takes row 16.
+**Engine progress (updated 2026-07-27):** **99, 100, 101, 102 and 103 have
+shipped.** The `Expression` substrate every remaining engine item depends on is
+real; item 101's `WindowSelectItem.arg`, item 102's three date nodes and item
+103's `JoinSpec.condition` are the worked examples of extending it. **104 (set
+operations — UNION / INTERSECT / EXCEPT) is the next roadmap item**, and it is a
+step up in kind from everything before it: 99–103 all extended existing scopes,
+while 104 introduces a **new scope container** — the first since item 97 phase 1's
+`value_subquery`, and the first at the *top level* — each arm validated as its
+own scope through `iter_query_scopes`, all caps summed across arms, and mandatory
+row filters + k-anon applied to *every* arm (a set op must not be a channel to
+dodge a per-table filter). Its Decision Log entry is that item's own first step.
+The canonical regression bar is **11/16** (`docs/ENGINE_EXPRESSIVENESS_PLAN.md`
+§5); 104 takes row 8.
 
-Two lessons from item 102 worth carrying into 103. **(1) Extending the union has a
-fourth touchpoint that had no guard:** `audit/events.py`'s shape normalizer is a
-third un-foldable recursion over `Expression` (beside the walk and the compiler),
-and it had no exhaustiveness test — so three new members passed the whole unit
-suite while every query using one raised at execution. Guards now exist for all
-three; a new member still means checking each. **(2) Measure the dialect, don't
-read it:** five defects in that item (a Postgres operator that only exists for
-`double precision`, an `sa.Date` that renders `DATETIME` unconnected, a SQLite
-true-division, a SQLite modifier that returns NULL instead of erroring, and the
-audit gap) all survived a careful reading of the diff and a green suite. Item 101's
-two corrections to §5's table (row 3 needs item 105's derived table, row 15 needs a
-window to be an `Expression` operand) still stand as recorded walls.
+Three lessons to carry into 104. **(1) The audit normalizer is a third
+un-foldable recursion** (beside the visitor and the compiler) and it keeps being
+the touchpoint that gets missed: item 102 shipped three `Expression` members that
+passed the whole unit suite while every query using one raised at execution, and
+item 103's mutation pass found the *same* gap again — nothing pinned a join
+condition in the normalized shape. A new scope container means checking it a third
+time. **(2) Measure, don't read.** Item 102 had five defects survive a careful diff
+read and a green suite; item 103's `ON true`-vs-`ON 1 = 1` rendering and its
+FULL-OUTER behavior were both settled by executing against live PG and MSSQL, and
+the NULLS-ordering divergence it surfaced was only correctly attributed as
+*pre-existing* by measuring a plain LEFT JOIN rather than assuming. **(3) Mutation
+verification is not optional polish** — item 103's first pass caught 13 of 16
+enforcement points, and all three misses were real test gaps closed before landing.
+Item 101's two corrections to §5's table (row 3 needs item 105's derived table, row
+15 needs a window to be an `Expression` operand) still stand as recorded walls.
 
 ### Fourth pass (2026-07-23), retained for history
 
@@ -573,6 +591,17 @@ already-planned initiatives.
   - Acceptance criteria: one shared predicate-iterator helper; all four
     validators' existing test suites pass unchanged (no behavior change).
 
+### Review Phase 5 — Findings from the 2026-07-27 item-103 audit
+
+- [ ] **118** — `min_group_size` is defeated by any fan-out join. *A claimed
+  security guarantee (QG-29 / INFERENCE_RISKS R3) does not hold in the presence of
+  a join: the floor counts joined rows, so a fan-out multiplies a singleton group
+  past k. **Pre-existing, not an item-103 regression** — measured against an
+  equality join that has shipped for months — but item 103 makes the vector
+  always-available rather than schema-dependent. Placed here rather than in Phase 4
+  because it is a live guarantee gap, not engine breadth; needs a maintainer
+  decision between three recorded options before build (see TODO.md item 118).*
+
 ### Review Phase 4 — Performance, observability, and developer experience
 
 - [x] **Stale security-posture numbers** — `docs/SECURITY_POSTURE.md` claimed
@@ -602,9 +631,9 @@ currently triggers it — flagged for awareness, matches the documented
 3. The **next item** is the first one that is *not* fully `✅ DONE`, is *not* in
    the Decision-gated list, is *not* in the Coordination-gated / externally-blocked
    list, and whose TODO.md dependencies are satisfied. Skip (and report) any gated
-   item reached before it. **As of 2026-07-26 this resolves to item 103** — the
+   item reached before it. **As of 2026-07-27 this resolves to item 104** — the
    walk skips 58 ph2 and 30·89 ph2 (externally blocked), 53 (external vendor),
-   and lands on Phase 4's engine pillar (99, 100, 101 and 102 have shipped).
+   and lands on Phase 4's engine pillar (99, 100, 101, 102 and 103 have shipped).
    **A required Decision Log entry is not a skip condition.** Items 100–106 each
    need one recorded in `docs/PRODUCT_GUIDE.md` before code — that is the item's
    own first step (draft it, get maintainer ratification, then build), not a

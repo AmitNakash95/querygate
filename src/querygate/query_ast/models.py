@@ -28,7 +28,7 @@ CompareOp = Literal[
 ]
 AggregateFn = Literal["count", "sum", "avg", "min", "max", "stddev", "variance"]
 _NO_DISTINCT_AGG_FNS = frozenset({"stddev", "variance"})
-JoinType = Literal["inner", "left"]
+JoinType = Literal["inner", "left", "full", "cross"]
 SortDir = Literal["asc", "desc"]
 RankFn = Literal["row_number", "rank", "dense_rank"]
 DateGranularity = Literal["day", "week", "month", "quarter", "year"]
@@ -952,10 +952,15 @@ class JoinSpec(pyd.BaseModel):
         ),
     )
     type: JoinType = "inner"
-    on: List[str] = pyd.Field(
+    on: Optional[List[str]] = pyd.Field(
+        default=None,
         min_length=2,
         max_length=2,
-        description="Equality join: [LeftTable.Col, RightTable.Col]",
+        description=(
+            "Equality join: [LeftTable.Col, RightTable.Col] — the common-case sugar; "
+            "use `condition` for a range/inequality join. Exactly one of on/condition "
+            "is required; a `cross` join takes neither."
+        ),
     )
     extra_on: List[List[str]] = pyd.Field(
         default_factory=list,
@@ -963,7 +968,18 @@ class JoinSpec(pyd.BaseModel):
             "Additional equality pairs ANDed with `on`, for composite/multi-column join "
             "keys — each entry is a two-element [LeftTable.Col, RightTable.Col] pair "
             "referencing the SAME two tables/aliases as `on` (a join's condition is "
-            "always about the one pair of tables it joins, never a third)."
+            "always about the one pair of tables it joins, never a third). Only valid "
+            "with `on`."
+        ),
+    )
+    condition: Optional["WhereNode"] = pyd.Field(
+        default=None,
+        description=(
+            "General join condition — the same predicate tree `where` uses, so a join "
+            "can be a range/temporal one, e.g. ON Sale.Price BETWEEN Band.Lo AND "
+            "Band.Hi (gte + lte ANDed). Must reference the table this join adds, and "
+            "may only reference tables ALREADY in the graph (the from table or an "
+            "EARLIER join). No IN (subquery) here — that is WHERE-only."
         ),
     )
     connection: Optional[str] = pyd.Field(
@@ -986,6 +1002,46 @@ class JoinSpec(pyd.BaseModel):
                     "Each extra_on entry must be a two-element [LeftTable.Col, "
                     f"RightTable.Col] pair, got {pair!r}"
                 )
+        return self
+
+    @pyd.model_validator(mode="after")
+    def _validate_join_form(self) -> "JoinSpec":
+        """One join carries exactly one condition form (item 103).
+
+        `on`/`extra_on` (equality sugar) and `condition` (the general predicate
+        tree) are two spellings of the same clause, so accepting both would leave
+        their precedence — ANDed? overriding? — up to the compiler to invent.
+        A `cross` join carries neither: an unconditioned cartesian product is the
+        entire point of it, and silently ignoring a condition the caller wrote
+        would answer a different question than they asked.
+        """
+        if self.type == "cross":
+            supplied = [
+                name
+                for name, value in (
+                    ("on", self.on),
+                    ("extra_on", self.extra_on or None),
+                    ("condition", self.condition),
+                )
+                if value is not None
+            ]
+            if supplied:
+                raise ValueError(
+                    f"a 'cross' join takes no condition, got {'/'.join(supplied)} — a "
+                    "cross join is an unconditioned cartesian product; use 'inner' with "
+                    "the condition instead"
+                )
+            return self
+        if (self.on is None) == (self.condition is None):
+            raise ValueError(
+                "exactly one of `on` (equality sugar) or `condition` (general "
+                "predicate tree) is required on a join"
+            )
+        if self.extra_on and self.on is None:
+            raise ValueError(
+                "`extra_on` is additional equality pairs for `on` and cannot be used "
+                "with `condition` — express the extra pairs inside `condition` instead"
+            )
         return self
 
 
@@ -1325,4 +1381,8 @@ Predicate.model_rebuild()
 WhereGroup.model_rebuild()
 CaseWhen.model_rebuild()
 CaseSelectItem.model_rebuild()
+# JoinSpec.condition is a WhereNode (item 103), so JoinSpec joins the cycle too —
+# it is declared before Predicate/WhereGroup and would otherwise keep an
+# unresolved forward ref, making every `condition` fail to validate at request time.
+JoinSpec.model_rebuild()
 StructuredQuery.model_rebuild()
