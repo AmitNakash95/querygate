@@ -1513,7 +1513,7 @@ async def test_usage_signals_survive_a_range_join_that_carries_no_on_pair(monkey
     signals = get_usage_signal_buffer().drain("demo")
     kinds = {signal.kind.value for signal in signals}
     # Both tables are still recorded as used. No relationship signal, deliberately:
-    # a range join asserts no single [Left.Col, Right.Col] pair to record.
+    # a RANGE join asserts no single [Left.Col, Right.Col] pair to record.
     assert kinds == {"table_used"}
     assert {s.target.table for s in signals} == {"orders", "customers"}
 
@@ -1538,3 +1538,39 @@ async def test_usage_signals_survive_a_cross_join(monkeypatch):
     signals = get_usage_signal_buffer().drain("demo")
     assert {s.kind.value for s in signals} == {"table_used"}
     assert {s.target.table for s in signals} == {"orders", "customers"}
+
+
+@pytest.mark.asyncio
+async def test_an_equality_condition_join_emits_the_same_relationship_as_the_on_form(
+    monkeypatch,
+):
+    """Item 103 made `condition` a second way to write `ON a.x = b.y`. The two
+    spellings describe the identical relationship, so the catalog must learn the
+    identical thing from both — otherwise the newer spelling silently teaches it
+    nothing. Same reasoning as `value_column` in the audit shape, one layer over.
+    """
+    from querygate.catalog.usage import get_usage_signal_buffer
+
+    monkeypatch.setattr(svc.app_config, "semantic_memory_usage_signals_enabled", True)
+    monkeypatch.setattr(svc.app_config, "catalog_file", "catalog.yaml")
+
+    await _execute_join_query(
+        principal=Principal(subject="alice"),
+        joins=[
+            {
+                "table": "customers",
+                "condition": {
+                    "col": "orders.customer_id",
+                    "op": "eq",
+                    "value_col": "customers.id",
+                },
+            }
+        ],
+    )
+
+    signals = get_usage_signal_buffer().drain("demo")
+    relationship = next(s for s in signals if s.kind.value == "relationship_used")
+    assert relationship.target.table == "orders"
+    assert relationship.target.column == "customer_id"
+    assert relationship.target.to_table == "customers"
+    assert relationship.target.to_column == "id"

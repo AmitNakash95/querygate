@@ -403,8 +403,15 @@ read and a green suite; item 103's `ON true`-vs-`ON 1 = 1` rendering and its
 FULL-OUTER behavior were both settled by executing against live PG and MSSQL, and
 the NULLS-ordering divergence it surfaced was only correctly attributed as
 *pre-existing* by measuring a plain LEFT JOIN rather than assuming. **(3) Mutation
-verification is not optional polish** — item 103's first pass caught 13 of 16
-enforcement points, and all three misses were real test gaps closed before landing.
+verification is not optional polish, and it has a blind spot worth naming** —
+item 103's first pass caught 13 of the 16 points it probed, and all three misses
+were real. But the technique probes the rules an item *adds*; it does not probe
+the **existing consumers of a field whose type the item changed**. Item 103 made
+`JoinSpec.on` Optional and every enforcement point passed, while
+`_usage_signal_targets` still unpacked it — a live bug behind a swallowed
+`TypeError`, found by the completion audit rather than by mutation. When an item
+widens or nullifies an existing field, grep every consumer as a separate step
+(the discipline CLAUDE.md already documents for `async def` conversions).
 Item 101's two corrections to §5's table (row 3 needs item 105's derived table, row
 15 needs a window to be an `Expression` operand) still stand as recorded walls.
 

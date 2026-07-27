@@ -2282,10 +2282,15 @@ is *reachability*: an equality fan-out needs a suitable low-cardinality key to
 exist in the schema, whereas `col != col` always fans out, so the vector went from
 schema-dependent to always-available.
 
-**Why it matters:** `docs/THREAT_MODEL.md` QG-29 and `docs/INFERENCE_RISKS.md` R3
-both currently claim the floor suppresses "any result group backed by fewer than
-*k* rows". That claim does not hold in the presence of a join, and the docs do not
-say so.
+**Why it matters:** every surface describing the floor claimed it suppresses "any
+result group backed by fewer than *k* rows", which does not hold in the presence of
+a join. **Those claims were qualified on 2026-07-27** — `docs/THREAT_MODEL.md`
+QG-29, `docs/INFERENCE_RISKS.md` R3 (headline, the gap bullet, and the closing
+summary), `README.md`, `examples/policy.example.yaml`, `Policy.min_group_size`'s own
+docstring, and the customer-facing `landing/security.html` — each now points here
+and tells an operator to pair the floor with `max_joins: 0` or table denies. That is
+a **stopgap disclosure, not option 3**: narrowing the claim permanently is still one
+of the three choices below, and this item stays open until one is chosen.
 
 **Options (a maintainer decision, deliberately not taken by the implementing
 agent):**

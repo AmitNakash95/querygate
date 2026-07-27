@@ -864,3 +864,93 @@ async def test_mcp_execute_reports_queue_full_when_max_queue_depth_is_met():
 
         cc.in_process_limiter().semaphore("demo", 1).release()
         await first_task
+
+
+@pytest.mark.asyncio
+async def test_mcp_run_structured_queries_accepts_a_range_join_and_gates_cross():
+    """Item 103's join forms over the MCP transport, not just REST.
+
+    The AST shape is reachable through `run_structured_queries` as well as the
+    REST route, and the two are thin wrappers over one service — but "the schema
+    accepts it and the pipeline compiles it" is a transport-level claim that only
+    a transport-level test settles. Both halves are asserted in one round trip:
+    a `condition` join compiles to real SQL, and a `cross` join is refused by the
+    default policy rather than silently executed.
+    """
+    metadata = sa.MetaData()
+    products = sa.Table(
+        "products",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("price", sa.Numeric(10, 2)),
+    )
+
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_keys=[])
+    app = create_app(settings)
+    with (
+        patch("querygate.execution.service.get_engine", return_value=MagicMock()),
+        patch(
+            "querygate.validation.schema_validation.get_table_schema",
+            AsyncMock(return_value=products),
+        ),
+    ):
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post(
+                "/mcp/",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 21,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "run_structured_queries",
+                        "arguments": {
+                            "connection": "demo",
+                            "mode": "explain",
+                            "queries": [
+                                {
+                                    "from": "products",
+                                    "from_alias": "p",
+                                    "select": ["p.id"],
+                                    "joins": [
+                                        {
+                                            "table": "products",
+                                            "alias": "band",
+                                            "condition": {
+                                                "col": "p.price",
+                                                "op": "gte",
+                                                "value_col": "band.price",
+                                            },
+                                        }
+                                    ],
+                                    "limit": 5,
+                                },
+                                {
+                                    "from": "products",
+                                    "from_alias": "a",
+                                    "select": ["a.id"],
+                                    "joins": [{"table": "products", "alias": "b", "type": "cross"}],
+                                    "limit": 5,
+                                },
+                            ],
+                        },
+                    },
+                },
+                headers=_HEADERS_JSON,
+            )
+
+    assert resp.status_code == 200
+    results = _parse_mcp_response(resp)["result"]["structuredContent"]["result"]["results"]
+
+    # The range join reached the compiler and rendered its inequality.
+    assert results[0]["error"] is None, results[0]
+    assert "p.price >= band.price" in results[0]["sql"]
+
+    # The cross join was refused by policy, over the same transport, in the same batch.
+    assert results[1]["error"] is not None
+    assert "allow_cross_join" in results[1]["error"]

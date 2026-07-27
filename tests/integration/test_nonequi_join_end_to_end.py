@@ -17,10 +17,21 @@ value comparison for the same shapes is in
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 pytestmark = pytest.mark.integration
+
+# SQLite only learned FULL OUTER JOIN in 3.39 (2022-06). SQLite is not a supported
+# registry dialect — it stands in for a real server here — so an older bundled
+# library is an environment limitation, not a product defect. Skip loudly rather
+# than failing with an opaque OperationalError that reads like a compiler bug.
+_needs_full_outer = pytest.mark.skipif(
+    sqlite3.sqlite_version_info < (3, 39),
+    reason=f"SQLite {sqlite3.sqlite_version} has no FULL OUTER JOIN (needs >= 3.39)",
+)
 
 _BASE_URL = "http://localhost"
 
@@ -219,6 +230,7 @@ async def _join_rows(app, join_type):
     )
 
 
+@_needs_full_outer
 async def test_full_outer_join_keeps_rows_that_an_inner_and_a_left_both_drop(sqlite_app):
     """The defining property: from `customers`, the unmatched rows live on the
     RIGHT, so an INNER and a LEFT join both drop them and only FULL keeps them —
@@ -237,6 +249,7 @@ async def test_full_outer_join_keeps_rows_that_an_inner_and_a_left_both_drop(sql
         assert row["id_1"] is not None, row
 
 
+@_needs_full_outer
 async def test_left_join_is_not_silently_promoted_to_full(sqlite_app):
     """Regression guard for the compiler change: `isouter` and `full` became two
     flags on one `stmt.join(...)` call, so swapping or ORing them would turn every
