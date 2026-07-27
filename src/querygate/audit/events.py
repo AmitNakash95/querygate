@@ -407,11 +407,17 @@ def normalize_query_shape(query: StructuredQuery) -> Dict[str, Any]:
     shape: Dict[str, Any] = {
         "from": query.from_table,
         "select": [_select_shape(item) for item in query.select],
+        # `on` and `condition` are mutually exclusive by construction (item 103),
+        # and a `cross` join carries neither — so each key appears only when the
+        # caller actually used that form. A condition goes through the same
+        # `_where_shape` as WHERE/HAVING, which records operators and column names
+        # but never a literal, so a range join stays redaction-safe.
         "joins": [
             {
                 "table": join.table,
                 "type": join.type,
-                "on": list(join.on),
+                **({"on": list(join.on)} if join.on is not None else {}),
+                **({"condition": _where_shape(join.condition)} if join.condition else {}),
                 **({"connection": join.connection} if join.connection else {}),
             }
             for join in query.joins

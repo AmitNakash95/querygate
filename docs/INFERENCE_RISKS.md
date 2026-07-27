@@ -41,6 +41,7 @@ column:
 | `top_n.order_by` | `_iter_column_refs` | `top_n` |
 | join `on` key | `_iter_column_refs` | `join` |
 | join `extra_on` composite key (item 76) | `_iter_column_refs` | `composite_join_extra_on` |
+| join `condition` predicate tree (item 103) | `iter_column_refs` → `predicate_column_refs` | `join_condition_range_bound`, `join_condition_arithmetic_bound`, and the `join_condition` entry in the buried-expression matrix |
 | scalar function arg (items 71/77) | `select_item_column_refs` | `scalar_fn_select` |
 | `CASE WHEN` condition (item 72) | `select_item_column_refs` → `predicate_column_refs` | `case_when_condition` |
 | `CASE ... THEN` value | `select_item_column_refs` | `case_then_value` |
@@ -119,6 +120,21 @@ contribution (multi-query differencing).
   `dense_rank`/`ntile`/`lag`/`lead`/`first_value`/`last_value`) stay allowed
   because they only surface values the caller may already project bare. Asserted
   by `test_window_aggregate_cannot_dodge_the_k_anonymity_floor`.
+- **A fan-out JOIN defeats the floor — an OPEN gap, tracked as TODO.md item 118
+  (2026-07-27).** The floor is compiled as `HAVING count(*) >= k`, which counts
+  **joined** rows, not distinct underlying rows. Any join that fans out multiplies
+  a group's count past *k*, so a group backed by one base row is returned.
+  Measured with `k=5`: with no join the singleton is suppressed; with
+  `JOIN big ON person.tenant = big.tenant` (an **equality** join, against a table
+  sharing that tenant value) it is returned. That equality case uses only the `on`
+  form and therefore **predates item 103** — this is not a non-equi-join
+  regression, and a fix rejecting only inequality conditions would leave the
+  equality spelling open. Item 103 changed reachability, not existence: an
+  equality fan-out needs a suitable low-cardinality key in the schema, while
+  `col != col` always fans out. Until item 118 is decided, the guarantee stated
+  above should be read as holding for **un-joined** aggregate queries; a
+  deployment relying on the floor should pair it with `max_joins: 0` or
+  table-level denies on the tables that would supply the fan-out.
 - **Multi-query differencing: still residual.** Isolating an individual by
   subtracting two *independently* compliant aggregates (each ≥ *k*) is not
   closed by a per-query group-size floor; defending it needs query-set auditing

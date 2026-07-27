@@ -1210,7 +1210,9 @@ bounded to 2000 entries per catalog file.
 
 `POST /api/v1/demo/query` with that body — or `run_structured_queries` over
 MCP with `connection: "demo"` and `queries: [<that object>]` — runs it.
-Supported: multi-column select, inner/left joins (including cross-connection
+Supported: multi-column select, inner/left/full/cross joins with either an
+equality `on` pair or a general `condition` predicate tree for range/temporal
+joins (including cross-connection
 joins within a policy `join_group`), nested and/or `where`, `group_by` /
 `having`, `order_by`, `limit`/`offset`, aggregate and date-bucket select
 items, `top_n` per-partition ranking (top-N-per-group), computed **expressions**

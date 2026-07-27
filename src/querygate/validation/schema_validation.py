@@ -34,6 +34,7 @@ from querygate.query_ast.models import (
     ExpressionSelectItem,
     ExtractExpr,
     FunctionExpr,
+    JoinSpec,
     LiteralExpr,
     NowExpr,
     PercentileContSelectItem,
@@ -222,16 +223,47 @@ def select_item_expressions(item: SelectItem) -> Iterator[Expression]:
         yield item.arg
 
 
+def iter_join_conditions(query: StructuredQuery) -> Iterator[Tuple[JoinSpec, WhereNode]]:
+    """Every `(join, condition)` pair in one scope (TODO.md item 103).
+
+    A join `condition` is a full `WhereNode`, so it is the fourth position — after
+    WHERE, HAVING and a searched-CASE `when` — where a predicate tree can appear.
+    This is the one place that set is enumerated; the shape caps, the expression
+    caps, the column-ref visitor and the no-subquery rule all reach it through
+    here rather than each re-walking `query.joins`.
+    """
+    for join in query.joins:
+        if join.condition is not None:
+            yield join, join.condition
+
+
+def iter_join_condition_predicates(query: StructuredQuery) -> Iterator[Predicate]:
+    """Every predicate leaf across every join condition in one scope (item 103)."""
+    for _join, condition in iter_join_conditions(query):
+        yield from iter_where_predicates(condition)
+
+
 def iter_scope_expressions(query: StructuredQuery) -> Iterator[Expression]:
     """Every top-level `Expression` tree in ONE query scope: those carried by
-    its select items and by the predicates of its WHERE/HAVING trees. Not
-    recursive into nested scopes (`value_subquery` is its own scope, walked by
-    `iter_query_scopes`), and not recursive into the expressions themselves —
-    callers compose this with `iter_expression_nodes` for the full walk.
+    its select items and by the predicates of its WHERE/HAVING trees and of its
+    join conditions (item 103). Not recursive into nested scopes
+    (`value_subquery` is its own scope, walked by `iter_query_scopes`), and not
+    recursive into the expressions themselves — callers compose this with
+    `iter_expression_nodes` for the full walk.
+
+    Join conditions belong here rather than in a parallel walk because every
+    consumer of this function is a rule that must hold wherever an expression
+    sits: the depth/node budgets, the `date_add` interval cap, the date-operand
+    type check (item 117), and — via `iter_scope_case_conditions` — the CASE
+    branch and condition-predicate budgets. Threading them in at the one shared
+    source is what stops "a range join whose bound is a 200-node arithmetic tree"
+    from being the position that escaped every one of them.
     """
     for item in query.select:
         yield from select_item_expressions(item)
     for pred in iter_where_and_having_predicates(query):
+        yield from predicate_expressions(pred)
+    for pred in iter_join_condition_predicates(query):
         yield from predicate_expressions(pred)
 
 
@@ -342,6 +374,7 @@ class RefPosition(enum.Enum):
     SELECT_NESTED = "select_nested"
     JOIN_ON = "join_on"
     JOIN_EXTRA_ON = "join_extra_on"
+    JOIN_CONDITION = "join_condition"
     WHERE = "where"
     GROUP_BY = "group_by"
     HAVING = "having"
@@ -413,8 +446,9 @@ def iter_query_scopes(
 def iter_column_refs(query: StructuredQuery) -> Iterator[ColumnRef]:
     """THE canonical reference visitor: yield one `ColumnRef(position, ref)` for
     every genuine Table.Column reference a query contains, across every position
-    where one can appear — select (bare vs. nested), join `on`/`extra_on`,
-    where, group_by, having, order_by, and top_n partition/order.
+    where one can appear — select (bare vs. nested), join `on`/`extra_on`, a join
+    `condition` (item 103), where, group_by, having, order_by, and top_n
+    partition/order.
 
     This is the single authority `CLAUDE.md`'s composable-interface doctrine
     asks for: policy validation (column allow/deny + the item-49 masked-column
@@ -435,11 +469,14 @@ def iter_column_refs(query: StructuredQuery) -> Iterator[ColumnRef]:
             for ref in select_item_column_refs(item):
                 yield ColumnRef(RefPosition.SELECT_NESTED, ref)
     for join in query.joins:
-        for side in join.on:
+        for side in join.on or []:
             yield ColumnRef(RefPosition.JOIN_ON, side)
         for pair in join.extra_on:
             for side in pair:
                 yield ColumnRef(RefPosition.JOIN_EXTRA_ON, side)
+        if join.condition is not None:
+            for ref in _where_column_refs(join.condition):
+                yield ColumnRef(RefPosition.JOIN_CONDITION, ref)
     if query.where is not None:
         for ref in _where_column_refs(query.where):
             yield ColumnRef(RefPosition.WHERE, ref)
@@ -630,21 +667,60 @@ def resolve_query_table_connections(
 def _validate_join_graph(query: StructuredQuery) -> None:
     """Require each declared join to connect exactly one new table (by its
     effective name — alias if given, else its own table name) to the graph.
+
+    A `cross` join is the deliberate exception (item 103): a cartesian product
+    asserts there is no relationship, so demanding one would make the join type
+    unusable. It is gated by `Policy.allow_cross_join` in policy validation
+    instead, which the execution pipeline runs first.
+
+    Do not read that ordering as a universal guarantee: this function is
+    deliberately policy-free and is ALSO reachable from the policy-free template
+    diagnostic (`admin/service.py`'s `_check_one_template_schema`, which calls
+    `validate_schema` with no `validate_policy`). Nothing compiles or executes on
+    that path, so it is not a bypass — but the cross gate must stay where it is
+    rather than being "consolidated" here on the assumption policy always ran.
     """
     known = {(query.from_alias or query.from_table).lower()}
     for join in query.joins:
-        left_t, _ = parse_column_ref(join.on[0])
-        right_t, _ = parse_column_ref(join.on[1])
-        sides = {left_t.lower(), right_t.lower()}
         joined_table = (join.alias or join.table).lower()
+        if join.type == "cross":
+            known.add(joined_table)
+            continue
+
+        if join.on is not None:
+            left_t, _ = parse_column_ref(join.on[0])
+            right_t, _ = parse_column_ref(join.on[1])
+            sides = {left_t.lower(), right_t.lower()}
+        else:
+            # A general `condition` may legitimately be about more than the joined
+            # pair (`JOIN c ON c.x = a.x AND c.y = b.y`), so the rule generalizes to
+            # the set of tables it references rather than a fixed pair.
+            assert join.condition is not None  # nosec B101 — the AST guarantees one form
+            sides = {parse_column_ref(ref)[0].lower() for ref in _where_column_refs(join.condition)}
+
         if joined_table not in sides:
             raise QueryValidationError(
                 f"Join condition for {join.table!r} must reference that table "
                 f"(as {joined_table!r})"
             )
-        if not (sides - {joined_table}) & known:
+        # Every OTHER table the condition names must already be in the graph. The
+        # first check is the original one — it is all an `on` pair can ever reach,
+        # since that form names exactly one other side, so its message is
+        # unchanged. The second is new and only a general `condition` can trigger
+        # it: a multi-table condition that connects to the graph AND forward-
+        # references a table joined later, which SQLAlchemy would render as a
+        # broken or implicitly cartesian FROM rather than the join that was asked
+        # for.
+        others = sides - {joined_table}
+        if not others & known:
             raise QueryValidationError(
                 f"Join to {join.table!r} does not connect to the query table graph"
+            )
+        unknown = sorted(others - known)
+        if unknown:
+            raise QueryValidationError(
+                f"Join to {join.table!r} references {unknown} before it is joined — a "
+                "join condition may only reference the from table or an EARLIER join"
             )
         known.add(joined_table)
 
@@ -779,9 +855,13 @@ def _validate_select_columns(query: StructuredQuery, tables: Dict[str, sa.Table]
 
 def _validate_join_columns(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None:
     for join in query.joins:
-        for side in [*join.on, *(ref for pair in join.extra_on for ref in pair)]:
+        for side in [*(join.on or []), *(ref for pair in join.extra_on for ref in pair)]:
             t, c = parse_column_ref(side)
             resolve_column(tables[t], c)
+    # allow_alias=False — a join condition is evaluated before the projection
+    # exists, so it can never reference a select alias, the same rule WHERE gets.
+    for _join, condition in iter_join_conditions(query):
+        _validate_where_columns(condition, tables, allow_alias=False)
 
 
 def _validate_group_by(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None:

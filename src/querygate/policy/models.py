@@ -226,6 +226,12 @@ class Policy(pyd.BaseModel):
 
     # Query complexity caps.
     max_joins: int = pyd.Field(default=5)
+    # CROSS JOIN (TODO.md item 103) — deny by default. Every other join type is
+    # required to connect to the query graph, so before item 103 a cartesian
+    # product was structurally inexpressible; `cross` is the one join a caller has
+    # to deliberately ask for, and the one whose cost is the PRODUCT of its inputs
+    # rather than bounded by a key. Cross joins still count against `max_joins`.
+    allow_cross_join: bool = pyd.Field(default=False)
     max_select_columns: int = pyd.Field(default=30)
     max_where_depth: int = pyd.Field(default=5)
     max_group_by: int = pyd.Field(default=10)
@@ -407,16 +413,19 @@ class Policy(pyd.BaseModel):
     quota_window_seconds: int = pyd.Field(default=60, ge=1)
 
     # Pre-execution cost estimation (execution/cost_estimation.py, TODO.md
-    # item 26 phase 1). Unset (None, the default for both) means disabled —
-    # existing deployments behave identically. When set, `execute()` asks
-    # Postgres to plan (never run) the compiled query via
-    # `EXPLAIN (FORMAT JSON)` before it actually executes, and rejects the
-    # query if the planner's row-count/cost estimate exceeds the configured
-    # threshold. Postgres only for this first pass — MSSQL's estimated-plan
-    # equivalent needs its own connection lifecycle (see
-    # execution/cost_estimation.py's module docstring) and silently has no
-    # effect here, so an MSSQL connection with these set behaves the same as
-    # one without them. `max_estimated_cost` is in Postgres's own arbitrary
+    # item 26). Unset (None, the default for both) means disabled —
+    # existing deployments behave identically, and **this is the default**: with
+    # neither threshold set, `cost_estimation_enabled` is False and no plan is
+    # ever requested. When set, `execute()` asks the database to plan (never run)
+    # the compiled query before it actually executes, and rejects the query if the
+    # planner's row-count/cost estimate exceeds the configured threshold.
+    # **Both dialects are supported since item 26 phase 2** — Postgres via inline
+    # `EXPLAIN (FORMAT JSON)`, MSSQL via `SET SHOWPLAN_XML ON` on a dedicated
+    # connection, dispatched by `StructuredQueryService._estimate_cost`. (An
+    # earlier version of this comment said MSSQL "silently has no effect here";
+    # that has been false since phase 2 shipped.) A dialect with no estimator
+    # returns None and proceeds under the reactive guardrails.
+    # `max_estimated_cost` is in Postgres's own arbitrary
     # planner-cost units (not seconds or bytes) — treat it as a relative
     # complexity signal to tune per deployment/hardware, not a portable
     # absolute number. `cost_estimation_mode` decides whether an over-threshold
@@ -623,6 +632,10 @@ _DIRECTION_REVIEWED_GUARDRAILS = frozenset(
         "min_group_size",  # INVERTED: a larger k-anonymity floor hides more
         "cost_estimation_mode",  # OBSERVE never blocks; ENFORCE can
         "log_query_literals",  # logging raw literals is the looser posture
+        # Permitting the one join whose cost is a cartesian product is looser —
+        # the normal direction, but "allow_*" does not read as a ceiling, so it
+        # is stated rather than guessed (item 103).
+        "allow_cross_join",
         # Approval thresholds, not caps: a HIGHER threshold means fewer queries
         # are stopped for a human, so higher is looser — the normal direction,
         # but stated because "approval_max_*" does not read like a ceiling on

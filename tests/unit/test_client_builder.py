@@ -503,3 +503,69 @@ def test_every_scalar_fn_is_reachable():
 
 def test_col_fn_alias_matches_fn():
     assert col_fn("lower", col("t.c")).call == fn("lower", col("t.c")).call
+
+
+# --------------------------------------------------------------------------- #
+# Item 103 — the general join condition and the two new join types
+# --------------------------------------------------------------------------- #
+def test_join_with_a_range_condition_builds_the_condition_form():
+    """`condition=[...]` AND-combines exactly like `.where()`, and leaves `on` unset."""
+    q = (
+        Query.from_("products")
+        .select("products.name")
+        .join(
+            "bands",
+            condition=[
+                col("products.price") >= col("bands.lo"),
+                col("products.price") <= col("bands.hi"),
+            ],
+        )
+    )
+    join = q.to_dict()["joins"][0]
+    # exclude_none drops the unused form entirely, so the wire body carries
+    # exactly one condition spelling — which is the AST's own rule.
+    assert "on" not in join
+    assert join["condition"] == {
+        "and": [
+            {"col": "products.price", "op": "gte", "value_col": "bands.lo"},
+            {"col": "products.price", "op": "lte", "value_col": "bands.hi"},
+        ]
+    }
+
+
+def test_join_with_a_single_condition_is_not_wrapped_in_a_group():
+    """One node passes through unwrapped — the same `_and_combine` rule `.where()` uses."""
+    q = (
+        Query.from_("products")
+        .select("products.name")
+        .join("bands", condition=[col("products.price") >= col("bands.lo")])
+    )
+    assert q.to_dict()["joins"][0]["condition"]["op"] == "gte"
+
+
+def test_cross_join_builds_with_neither_condition_form():
+    q = Query.from_("products").select("products.name").join("bands", type="cross")
+    join = q.to_dict()["joins"][0]
+    assert join["type"] == "cross"
+    assert "on" not in join and "condition" not in join
+
+
+def test_join_with_neither_on_nor_condition_raises_the_servers_own_error():
+    """`on` became optional for the cross/condition forms, so the builder can now
+    express a join with no condition at all — which the server rejects."""
+    with pytest.raises(pydantic.ValidationError, match="exactly one of"):
+        Query.from_("products").select("products.name").join("bands").build()
+
+
+def test_join_with_both_on_and_condition_raises_the_servers_own_error():
+    with pytest.raises(pydantic.ValidationError, match="exactly one of"):
+        (
+            Query.from_("products")
+            .select("products.name")
+            .join(
+                "bands",
+                on=("products.id", "bands.id"),
+                condition=[col("products.price") >= col("bands.lo")],
+            )
+            .build()
+        )
