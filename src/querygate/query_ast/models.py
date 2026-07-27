@@ -26,6 +26,36 @@ CompareOp = Literal[
     "is_null",
     "is_not_null",
 ]
+# The READ path's operator set: `CompareOp` plus the two subquery-existence tests
+# (item 106). Deliberately a superset type rather than two new members on
+# `CompareOp` itself, because `CompareOp` is shared with the write AST
+# (`write_ast/models.py`) — widening it would advertise `exists` in the write
+# tool's MCP schema while the write path rejects it, which is exactly the defect
+# item 114 was raised to fix. A write predicate keeps the narrow type; the
+# conversion at the validation boundary widens, never narrows, so it stays sound.
+ReadCompareOp = Literal[
+    "eq",
+    "neq",
+    "lt",
+    "lte",
+    "gt",
+    "gte",
+    "in",
+    "not_in",
+    "like",
+    "between",
+    "is_null",
+    "is_not_null",
+    "exists",
+    "not_exists",
+]
+# Operators taking no left-hand operand and no value: the existence tests, whose
+# entire operand is the subquery. Named once so the three validators below and the
+# compiler cannot disagree about which ops are the odd shape.
+EXISTS_OPS = frozenset({"exists", "not_exists"})
+# Comparison operators a SCALAR subquery may feed (item 106). `in`/`not_in` take a
+# value SET and are item 97's shape; these take a single value.
+SCALAR_COMPARISON_OPS = frozenset({"eq", "neq", "lt", "lte", "gt", "gte"})
 AggregateFn = Literal["count", "sum", "avg", "min", "max", "stddev", "variance"]
 _NO_DISTINCT_AGG_FNS = frozenset({"stddev", "variance"})
 JoinType = Literal["inner", "left", "full", "cross"]
@@ -1069,7 +1099,7 @@ class Predicate(pyd.BaseModel):
             "ScalarFunctionCall)."
         ),
     )
-    op: CompareOp
+    op: ReadCompareOp
     value: Optional[Any] = pyd.Field(
         default=None,
         description=(
@@ -1099,14 +1129,29 @@ class Predicate(pyd.BaseModel):
     value_subquery: Optional["StructuredQuery"] = pyd.Field(
         default=None,
         description=(
-            "For in/not_in only: compare col against the value set produced by a "
-            "nested StructuredQuery (an uncorrelated `IN (subquery)`, TODO.md item 97) "
-            "instead of a literal list. The subquery is itself a fully validated AST — "
-            "never raw SQL — must select exactly one column, must resolve entirely "
-            "against its own from/join tables (uncorrelated), and must stay on the same "
-            "connection. Mutually exclusive with value/value_col. All policy caps apply "
-            "summed across the whole query tree; nesting is bounded by "
-            "Policy.max_subquery_depth."
+            "Compare col against the result of a nested StructuredQuery instead of a "
+            "literal. Two shapes: with in/not_in it is a value SET (item 97's "
+            "IN (subquery) — one column, any number of rows); with eq/neq/lt/lte/gt/gte "
+            "it is a SCALAR (item 106, e.g. amount > (SELECT AVG(...))) and must be an "
+            "aggregate with no group_by so it returns exactly one row by construction. "
+            "The subquery is a fully validated AST — never raw SQL — selects exactly one "
+            "column, stays on the same connection, and resolves against its own "
+            "from/join tables plus any outer column it names in its own `correlate` "
+            "list. Mutually exclusive with value/value_col. All policy caps apply summed "
+            "across the whole query tree; nesting is bounded by Policy.max_subquery_depth."
+        ),
+    )
+
+    exists_subquery: Optional["StructuredQuery"] = pyd.Field(
+        default=None,
+        description=(
+            "For op exists/not_exists ONLY: test whether the nested StructuredQuery "
+            "returns any row (item 106). Unlike every other predicate this one has no "
+            "left-hand side — omit col/col_fn/expr and value — because the subquery is "
+            "the whole operand, the same way is_null takes no value. Usually correlated: "
+            "the subquery names the outer columns it may read in its own `correlate` "
+            "list, e.g. EXISTS (SELECT 1 FROM Orders WHERE Orders.CustomerId = "
+            'Customer.Id) with correlate: ["Customer.Id"].'
         ),
     )
 
@@ -1114,6 +1159,25 @@ class Predicate(pyd.BaseModel):
 
     @pyd.model_validator(mode="after")
     def _validate_col_shape(self) -> "Predicate":
+        if self.op in EXISTS_OPS:
+            # The existence tests are the one predicate shape with NO left-hand
+            # operand: the subquery is the entire test. A stray col is rejected
+            # rather than ignored — a caller who wrote one has misunderstood the
+            # operator, and silently obeying half of what they wrote is how an AST
+            # ends up carrying structure the SQL does not contain.
+            if self.col is not None or self.col_fn is not None or self.expr is not None:
+                raise ValueError(
+                    f"Operator {self.op!r} takes no left-hand side — omit col/col_fn/expr; "
+                    "the subquery is the whole test"
+                )
+            if self.exists_subquery is None:
+                raise ValueError(f"Operator {self.op!r} requires 'exists_subquery'")
+            return self
+        if self.exists_subquery is not None:
+            raise ValueError(
+                f"'exists_subquery' is only valid with the exists/not_exists operators, "
+                f"not {self.op!r}"
+            )
         targets = [self.col is not None, self.col_fn is not None, self.expr is not None]
         if sum(targets) != 1:
             raise ValueError("Predicate must set exactly one of 'col', 'col_fn', or 'expr'")
@@ -1121,6 +1185,17 @@ class Predicate(pyd.BaseModel):
 
     @pyd.model_validator(mode="after")
     def _validate_value_shape(self) -> "Predicate":
+        if self.op in EXISTS_OPS:
+            if (
+                self.value is not None
+                or self.value_col is not None
+                or self.value_expr is not None
+                or self.value_subquery is not None
+            ):
+                raise ValueError(
+                    f"Operator {self.op!r} must not include a value — use 'exists_subquery'"
+                )
+            return self
         if self.op in ("is_null", "is_not_null"):
             if (
                 self.value is not None
@@ -1151,12 +1226,35 @@ class Predicate(pyd.BaseModel):
         if self.value_expr is not None and self.op not in ("eq", "neq", "lt", "lte", "gt", "gte"):
             raise ValueError(f"value_expr is not valid with operator {self.op!r}")
         if self.value_subquery is not None:
-            if self.op not in ("in", "not_in"):
+            if self.op not in ("in", "not_in") and self.op not in SCALAR_COMPARISON_OPS:
                 raise ValueError(
-                    f"value_subquery (IN (subquery)) is only valid with in/not_in, not {self.op!r}"
+                    f"value_subquery is only valid with in/not_in (a value set) or "
+                    f"eq/neq/lt/lte/gt/gte (a scalar), not {self.op!r}"
                 )
             if len(self.value_subquery.select) != 1:
-                raise ValueError("An IN (subquery) must select exactly one column (the value set)")
+                raise ValueError("A value_subquery must select exactly one column")
+            if self.op in SCALAR_COMPARISON_OPS:
+                # Exactly-one-ROW, guaranteed structurally rather than by LIMIT 1
+                # (which picks an arbitrary row — a wrong answer with no error) or by
+                # letting the backend raise (dialect-dependent, and only after
+                # execution). An aggregate with no group_by collapses to one row on
+                # every backend, and that is also the shape the use case has:
+                # "> the overall average", "> this customer's own count".
+                if self.value_subquery.set_op is not None:
+                    raise ValueError(
+                        "a scalar value_subquery may not carry a set_op — combining arms "
+                        "produces multiple rows, which defeats the single-row guarantee"
+                    )
+                item = self.value_subquery.select[0]
+                if self.value_subquery.group_by or not isinstance(
+                    item, _AGGREGATE_SELECT_ITEM_TYPES
+                ):
+                    raise ValueError(
+                        f"a scalar value_subquery (op {self.op!r}) must be an aggregate with "
+                        "no group_by, so that it returns exactly one row — e.g. "
+                        "{'fn': 'avg', 'col': 'Orders.Total'}. For a multi-row value set "
+                        "use in/not_in instead."
+                    )
             return self
         if self.value_col is not None and self.op not in ("eq", "neq", "lt", "lte", "gt", "gte"):
             raise ValueError(f"value_col is not valid with operator {self.op!r}")
@@ -1399,6 +1497,19 @@ class StructuredQuery(pyd.BaseModel):
         description=(
             "Combine this query with further queries via UNION/INTERSECT/EXCEPT. "
             "This query is the first arm — see SetOpSpec's own fields."
+        ),
+    )
+    correlate: List[str] = pyd.Field(
+        default_factory=list,
+        description=(
+            "ONLY on a subquery (an exists_subquery or value_subquery): the outer "
+            "Table.Column references this subquery is permitted to read, e.g. "
+            '["Customer.Id"] so its WHERE can say Orders.CustomerId = Customer.Id. '
+            "SQL makes every enclosing column implicitly visible; QueryGate requires "
+            "each one to be declared here, so policy and masking are enforced on it "
+            "against the ENCLOSING query. An outer column not listed here is "
+            "rejected, exactly as it is today. Names resolve one level up, to the "
+            "query that contains this subquery. Capped by Policy.max_correlated_refs."
         ),
     )
     ctes: List[CteSpec] = pyd.Field(
