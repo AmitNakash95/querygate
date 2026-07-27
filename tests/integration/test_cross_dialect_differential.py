@@ -1509,3 +1509,177 @@ async def test_cte_regression_bar_row_3_moving_average_matches():
     )
     rows = await _assert_same(query)
     assert len(rows) > 1, "vacuous - a moving average over one bucket proves nothing"
+
+
+# --------------------------------------------------------------------------- #
+# Correlated / EXISTS / scalar subqueries (TODO.md item 106)                   #
+# --------------------------------------------------------------------------- #
+#
+# The item with the largest safety surface in the plan, and the one whose
+# semantics most plausibly diverge: correlated-subquery planning, EXISTS
+# short-circuiting, and NOT EXISTS over a NULL-bearing correlated column are all
+# places backends historically differ. Rendered SQL cannot tell a correct
+# correlation from one that quietly ignores the outer row — both render fine —
+# so these execute and compare rows.
+
+
+@pytest.mark.asyncio
+async def test_correlated_exists_and_not_exists_match():
+    """EXISTS and NOT EXISTS must partition the outer table identically on both
+    backends. Filtered to `cancelled` deliberately: every customer in the seed has
+    orders, so an unfiltered partition would be all-vs-none — a split that an
+    implementation IGNORING the correlated row would reproduce exactly."""
+    _setup()
+    seen = []
+    for op in ("exists", "not_exists"):
+        query = StructuredQuery.model_validate(
+            {
+                "from": "customers",
+                "select": ["customers.id"],
+                "where": {
+                    "op": op,
+                    "exists_subquery": {
+                        "from": "orders",
+                        "select": ["orders.id"],
+                        "correlate": ["customers.id"],
+                        "where": {
+                            "and": [
+                                {
+                                    "col": "orders.customer_id",
+                                    "op": "eq",
+                                    "value_col": "customers.id",
+                                },
+                                {"col": "orders.status", "op": "eq", "value": "cancelled"},
+                            ]
+                        },
+                    },
+                },
+                "order_by": [{"col": "customers.id"}],
+                "limit": 50,
+            }
+        )
+        seen.append({row["id"] for row in await _assert_same(query)})
+    have, lack = seen
+    assert have and lack, "vacuous - the partition must be non-trivial on both sides"
+    assert have & lack == set()
+
+
+@pytest.mark.asyncio
+async def test_scalar_subquery_comparison_matches():
+    """Regression bar row 11 on both real backends: each row compared against an
+    aggregate over the whole table, in one statement."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id", "orders.total_amount"],
+            "where": {
+                "col": "orders.total_amount",
+                "op": "gt",
+                "value_subquery": {
+                    "from": "orders",
+                    "select": [{"fn": "avg", "col": "orders.total_amount", "as": "a"}],
+                },
+            },
+            "order_by": [{"col": "orders.id"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(query)
+    assert rows, "vacuous - nothing was above average"
+
+
+@pytest.mark.asyncio
+async def test_correlated_scalar_subquery_matches_per_outer_row():
+    """The strongest correlation check: each order against ITS OWN customer's
+    average, not the global one. A backend (or a compiler) that dropped the
+    correlation would silently use the global average — a different, plausible,
+    entirely wrong answer."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "where": {
+                "col": "orders.total_amount",
+                "op": "gt",
+                "value_subquery": {
+                    "from": "orders",
+                    "from_alias": "peer",
+                    "select": [{"fn": "avg", "col": "peer.total_amount", "as": "a"}],
+                    "correlate": ["orders.customer_id"],
+                    "where": {
+                        "col": "peer.customer_id",
+                        "op": "eq",
+                        "value_col": "orders.customer_id",
+                    },
+                },
+            },
+            "order_by": [{"col": "orders.id"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(query)
+    assert rows, "vacuous - no order beat its own customer's average"
+
+
+@pytest.mark.asyncio
+async def test_scalar_subquery_in_having_matches():
+    """The HAVING position, which needed its own compiler context — comparing one
+    aggregate against another."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": [
+                "orders.customer_id",
+                {"fn": "sum", "col": "orders.total_amount", "as": "t"},
+            ],
+            "group_by": ["orders.customer_id"],
+            "having": {
+                "col": "t",
+                "op": "gt",
+                "value_subquery": {
+                    "from": "orders",
+                    "select": [{"fn": "avg", "col": "orders.total_amount", "as": "a"}],
+                },
+            },
+            "order_by": [{"col": "orders.customer_id"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(query)
+    assert rows, "vacuous - no customer's total beat the average order"
+
+
+@pytest.mark.asyncio
+async def test_not_exists_over_a_nullable_correlated_column_matches():
+    """The classic NOT EXISTS / NOT IN divergence. `NOT IN` over a set containing
+    NULL returns no rows on a standards-following backend, while `NOT EXISTS` is
+    NULL-safe. Executing both here records which semantics QueryGate actually has,
+    identically on Postgres and SQL Server, rather than assuming."""
+    _setup()
+    not_exists = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": ["customers.id"],
+            "where": {
+                "op": "not_exists",
+                "exists_subquery": {
+                    "from": "orders",
+                    "select": ["orders.id"],
+                    "correlate": ["customers.id"],
+                    "where": {
+                        "and": [
+                            {"col": "orders.customer_id", "op": "eq", "value_col": "customers.id"},
+                            {"col": "orders.status", "op": "eq", "value": "refunded"},
+                        ]
+                    },
+                },
+            },
+            "order_by": [{"col": "customers.id"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(not_exists)
+    assert rows, "vacuous - every customer had a refunded order"
