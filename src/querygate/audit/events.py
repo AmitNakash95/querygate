@@ -420,10 +420,13 @@ def _predicate_shape(predicate: Predicate) -> Dict[str, Any]:
         # would have the audit trail claim the query read one table when it read
         # two. The nested query goes through this same redaction-safe walk, so no
         # literal escapes the inner scope either. Recursion terminates on the AST as
-        # parsed (the parser's own depth guard bounds an unvalidated query, and
-        # `Policy.max_subquery_depth` bounds a validated one) — the same footing the
-        # `where`-group recursion above has always stood on, since the shape is
-        # normalized before validation so a rejected attempt is audited too.
+        # parsed: pydantic's own recursion detection rejects a chain past ~127 levels
+        # as a 422 before any walker runs, so an UNVALIDATED query is bounded by the
+        # parse step, and `Policy.max_subquery_depth` (default 1) bounds a validated
+        # one. There is no QueryGate-authored parser depth guard on this path — the
+        # bound is pydantic's. That is the same footing the `where`-group recursion
+        # above has always stood on, since the shape is normalized before validation
+        # so a rejected attempt is audited too.
         shape["value_subquery"] = normalize_query_shape(predicate.value_subquery)
     return shape
 

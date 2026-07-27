@@ -24,6 +24,7 @@ from querygate.audit.sinks import (
 from querygate.api.app import create_app
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
+from querygate.core.exceptions import PolicyViolationError
 from querygate.core.logging import ContextLogger, context_logger
 from querygate.execution import concurrency as cc
 from querygate.execution import service as svc
@@ -225,6 +226,19 @@ def test_searched_having_and_case_shapes_carry_structure_but_no_literals():
     assert "4242" not in serialized
 
 
+# These cover the redaction contract (non-negotiable 3), so they belong in the
+# tier the pre-commit gate runs. Without this the whole file is deselected by
+# `-m unit` and only the full-suite run reaches it. The same is true of most of
+# tests/unit/ — tracked as item 124.
+pytestmark = pytest.mark.unit
+
+
+_SCALAR_EMPLOYEE_SUBQUERY = {
+    "from": "employees",
+    "select": [{"fn": "count", "col": "employees.id", "as": "n"}],
+}
+
+
 def test_the_audit_shape_records_a_nested_in_subquery_and_leaks_no_literal():
     """item 120: a `value_subquery` had no branch in `_predicate_shape`, so
     `WHERE customer_id IN (SELECT ... FROM employees JOIN departments)` audited as a
@@ -295,16 +309,26 @@ def test_no_literal_escapes_a_nested_subquery_at_any_depth_or_position():
                                 "from": "regions",
                                 "select": [
                                     {
-                                        "when": [
-                                            {
-                                                "when": {
-                                                    "col": "regions.code",
-                                                    "op": "eq",
-                                                    "value": "DEPTH-2-CASE-SECRET",
-                                                },
-                                                "then": {"literal": "DEPTH-2-THEN-SECRET"},
-                                            }
-                                        ],
+                                        # Deliberately the EXPRESSION spelling of a
+                                        # searched CASE, not `CaseSelectItem`. Only this
+                                        # one routes its conditions through
+                                        # `_expression_shape`; the select-item spelling
+                                        # records `branch_count` alone, so a redaction
+                                        # assertion written against it passes because the
+                                        # subtree is discarded rather than redacted —
+                                        # a vacuous test. See TODO.md item 123.
+                                        "expr": {
+                                            "when": [
+                                                {
+                                                    "when": {
+                                                        "col": "regions.code",
+                                                        "op": "eq",
+                                                        "value": "DEPTH-2-CASE-SECRET",
+                                                    },
+                                                    "then": {"literal": "DEPTH-2-THEN-SECRET"},
+                                                }
+                                            ]
+                                        },
                                         "as": "id",
                                     }
                                 ],
@@ -347,6 +371,10 @@ def test_no_literal_escapes_a_nested_subquery_at_any_depth_or_position():
     # scopes existed: every table the query reads is still named.
     for table in ("orders", "customers", "regions", "archived_regions"):
         assert f'"{table}"' in serialized, f"{table} is missing from the audited query shape"
+    # The literals above must be absent because the walk REDACTED them, not because
+    # it never reached them. Pin that the CASE condition was actually walked, so this
+    # test cannot silently go vacuous if the select-item shape changes.
+    assert '"conditions": [{"operator": "eq", "column": "regions.code"}]' in serialized
 
 
 def test_where_shape_records_a_not_group_rather_than_an_empty_or():
@@ -628,6 +656,78 @@ async def test_persisted_event_names_the_subquerys_tables_without_its_literals(t
     assert event["query_shape"]["where"]["value_subquery"]["from"] == "employees"
     assert "employees.ssn" in raw
     assert "PERSISTED-SECRET" not in raw
+
+
+@pytest.mark.asyncio
+async def test_a_policy_rejected_nested_subquery_is_still_shaped_in_the_event(tmp_path):
+    """Item 120's claim is that normalization runs BEFORE validation, so a
+    rejected attempt stays auditable. The sibling test above proves that for a
+    SCHEMA rejection; this one pins the POLICY stage, which is the earlier of the
+    two and the one an operator most wants a record of. Moving
+    `normalize_query_shape` below `validate_policy` would silently void the claim
+    while every other test stayed green."""
+    path = tmp_path / "policy-rejected.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    # depth 0 admits no subquery at all, so the nested scope is refused by policy.
+    set_policy_store(PolicyStore(default=Policy(max_subquery_depth=0), overrides={}))
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "where": {
+                "col": "orders.customer_id",
+                "op": "in",
+                "value_subquery": {
+                    "from": "employees",
+                    "select": ["employees.customer_id"],
+                    "where": {"col": "employees.ssn", "op": "eq", "value": "REJECTED-SECRET"},
+                },
+            },
+        }
+    )
+    service = StructuredQueryService(connection_id="demo")
+    with pytest.raises(PolicyViolationError):
+        await service.execute(query)
+
+    raw = path.read_text()
+    event = json.loads(raw)
+    assert event["query_shape"]["where"]["value_subquery"]["from"] == "employees"
+    assert "REJECTED-SECRET" not in raw
+
+
+def test_the_nested_scope_is_recorded_in_every_predicate_position():
+    """The recursion lives in `_predicate_shape`, so it reaches HAVING and join
+    conditions for free. That is exactly why it must be pinned: relocating the
+    branch up into `normalize_query_shape`'s `where` handling would keep the
+    WHERE test green while silently dropping the other two positions."""
+    having = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": [{"fn": "count", "col": "orders.id", "as": "cnt"}],
+            "group_by": ["orders.customer_id"],
+            "having": {"col": "cnt", "op": "gt", "value_subquery": _SCALAR_EMPLOYEE_SUBQUERY},
+        }
+    )
+    assert normalize_query_shape(having)["having"]["value_subquery"]["from"] == "employees"
+
+    joined = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "joins": [
+                {
+                    "table": "customers",
+                    "condition": {
+                        "col": "orders.customer_id",
+                        "op": "in",
+                        "value_subquery": _SCALAR_EMPLOYEE_SUBQUERY,
+                    },
+                }
+            ],
+        }
+    )
+    join_shape = normalize_query_shape(joined)["joins"][0]
+    assert join_shape["condition"]["value_subquery"]["from"] == "employees"
 
 
 @pytest.mark.asyncio
