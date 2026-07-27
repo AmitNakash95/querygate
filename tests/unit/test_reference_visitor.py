@@ -359,6 +359,12 @@ _MEMBER_PAYLOADS = {
     # ref — the same "leaf, nothing to descend into" property, pinned below.
     "NowExpr": None,
     "DateAddExpr": {"date_add": {"col": _MARKER}, "unit": "day", "amount": -7},
+    # Item 125. The marker sits in `arg` so this exercises the DESCENT, matching
+    # every other composite member. A window's other two ref positions
+    # (over.partition_by / over.order_by) are not descended into but yielded at
+    # the node itself, so they get their own test below — the parameterized pair
+    # here would not distinguish "walked" from "yielded".
+    "WindowExpr": {"fn": "sum", "over": {}, "arg": {"col": _MARKER}},
 }
 
 
@@ -420,6 +426,35 @@ def test_the_ref_free_members_really_contribute_no_refs(payload):
     from querygate.validation.schema_validation import expression_column_refs
 
     assert list(expression_column_refs(_to_expression_model(payload))) == []
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"partition_by": [_MARKER]},
+        {"order_by": [{"col": _MARKER}]},
+    ],
+    ids=["partition_by", "order_by"],
+)
+def test_the_walk_finds_refs_in_a_nested_windows_over_clause(over):
+    """A `WindowExpr`'s OVER refs are plain strings on the node, not `Expression`
+    children, so the recursion never descends to them — `expression_column_refs`
+    has to yield them at the node or they surface nowhere. Missing them would let
+    a denied or masked column ride into the query inside an OVER clause, which is
+    the hole `select_item_column_refs` already calls out for the projection
+    spelling of the same construct."""
+    from querygate.validation.schema_validation import expression_column_refs
+
+    # Nested one level down, so this also proves the refs survive the descent
+    # rather than only being found on a top-level window.
+    expr = _to_expression_model(
+        {
+            "op": "/",
+            "left": {"literal": 1},
+            "right": {"fn": "sum", "over": over, "arg": {"literal": 1}},
+        }
+    )
+    assert _MARKER in set(expression_column_refs(expr))
 
 
 def test_walk_fails_closed_on_an_unknown_expression_node():
