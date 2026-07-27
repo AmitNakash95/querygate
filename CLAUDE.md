@@ -59,8 +59,10 @@ only when historical extraction context is explicitly needed.
 - **`TODO.md`** — the live worklist (authority for item *content* and `✅ DONE`
   status). `docs/TODO_ARCHIVE.md` holds full write-ups of fully-shipped items.
   Split to keep routine reads cheap.
-- **`ROADMAP.md`** — the **execution order** over `TODO.md` (authority for *order
-  only*; never restates a body). TODO.md leads, ROADMAP.md follows.
+- **`ROADMAP.md`** — the **execution order** over `TODO.md` and the transient
+  active-claim signal used to keep concurrent agents off the same item
+  (authority for *order and coordination only*; never restates a body or owns
+  done-status). TODO.md leads, ROADMAP.md follows.
 - **`docs/ENGINE_EXPRESSIVENESS_PLAN.md`** — flagship-pillar spec for taking the
   READ query engine to 10/10 expressiveness with no safety regression (Structural
   pillar; TODO.md items 99–106, sequenced in ROADMAP.md Phase 4). Authoritative
@@ -73,7 +75,7 @@ automate these):
 - **Item numbers are permanent and file-global.** Never renumber or reuse one —
   the repo has ~176 internal "item N" cross-refs plus CLAUDE.md and test
   references that must keep resolving. A new item takes the next unused number
-  (check the highest `### N` heading in TODO.md; currently 121 — note 98 was
+  (check the highest `### N` heading in TODO.md; currently 122 — note 98 was
   never allocated and is deliberately left unused).
 - **When an item ships fully** (its `###` heading ends in exactly `✅ DONE`, no
   trailing qualifier): move its full body to `docs/TODO_ARCHIVE.md` in numeric
@@ -83,18 +85,31 @@ automate these):
 - **Partially-done items stay full inline in TODO.md.** Anything marked
   `✅ DONE (phase 1)` still carries open work — stub it only once every phase is
   complete.
+- **Claim an item in `ROADMAP.md` before implementation.** Immediately below
+  its checkbox line, add
+  ``🚧 **CLAIMED** — owner: `<agent/session-or-task-id>`; started:
+  `<YYYY-MM-DDTHH:MMZ>` ``. Re-read the item after writing the marker; if
+  another claim is already present or appeared concurrently, stop and choose a
+  different eligible item. A claim makes the item unavailable to every other
+  agent, including when an override names it. Never infer that an old-looking
+  claim is abandoned — only its owner or the maintainer may clear it. The owner
+  removes the marker when the item ships or before handing it back uncompleted.
+  This is transient coordination state, not completion status: never put it in
+  `TODO.md`, never change `[ ]` to `[x]` because of it, and do not make a
+  standalone claim-only commit.
 - Keep ROADMAP.md's checkboxes reconciled to TODO.md. Re-sequencing ROADMAP.md
   is allowed but must be a deliberate, one-line-reasoned edit, not drift.
 - The archive is reference-only: never put an open action item there, and don't
   add a second TODO file or a competing index.
-- **These rules are machine-enforced.** `scripts/check_worklist.py` (run it with
-  `make worklist-check`) verifies every one of them — done items archived +
-  stubbed + pointer present, Quick-scan `✅` column and ROADMAP checkboxes
-  reconciled to the headings, archive in numeric order, no dangling pointer,
-  unique numbers. It runs in the unit suite (`test_worklist_consistency.py`) and
-  blocks `git commit` via the project pre-commit hook. The two *derived* mirrors
-  (the table `✅` column and the bare ROADMAP checkboxes) are regenerated from
-  the headings with `make worklist-sync` — never hand-edit them.
+- **The archival and done-status synchronization rules are machine-enforced.**
+  `scripts/check_worklist.py` (run it with `make worklist-check`) verifies done
+  items archived + stubbed + pointer present, Quick-scan `✅` column and ROADMAP
+  checkboxes reconciled to the headings, archive in numeric order, no dangling
+  pointer, and unique numbers. It runs in the unit suite
+  (`test_worklist_consistency.py`) and blocks `git commit` via the project
+  pre-commit hook. The claim protocol above is procedural. The two *derived*
+  mirrors (the table `✅` column and the bare ROADMAP checkboxes) are regenerated
+  from the headings with `make worklist-sync` — never hand-edit them.
 
 ## Repo map
 

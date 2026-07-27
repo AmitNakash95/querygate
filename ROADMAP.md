@@ -9,11 +9,18 @@ them in, and why that order maximizes product growth and ROI.**
 - **`TODO.md` is the authority for item content and done-status.** An item is
   "done" iff its `###` heading in `TODO.md` ends in exactly `✅ DONE` (no
   trailing qualifier like `(phase 1)`). Never track completion anywhere else.
-- **This file is the authority for order only.** It never restates an item's
-  body — it lists the item number, a one-line ROI rationale, and its position.
+- **This file is the authority for order and transient active claims only.** It
+  never restates an item's body — it lists the item number, a one-line ROI
+  rationale, its position, and (while work is active) its claim marker.
 - The `[ ]` / `[x]` checkboxes below are a **convenience mirror** of TODO.md's
   `✅ DONE`, not a second source of truth. If they ever disagree, TODO.md wins;
   reconcile the checkbox to it.
+- A line in the exact form
+  ``🚧 **CLAIMED** — owner: `<agent/session-or-task-id>`; started:
+  `<YYYY-MM-DDTHH:MMZ>` `` immediately below an item's checkbox means an agent
+  is actively working on it. It is a coordination signal, not done-status.
+  Other agents must leave that item alone; only the owner or maintainer clears
+  the marker.
 - Item numbers are permanent and file-global (see `CLAUDE.md`). This file only
   references them; it never renumbers.
 
@@ -66,6 +73,14 @@ maintainer product decision first and are listed separately at the end.
 
 Work top-to-bottom. Within a phase, order is also intentional. An item is
 eligible only when its TODO.md "Depends on" (if any) is satisfied.
+
+Before changing implementation files, claim the selected item by adding the
+`🚧 **CLAIMED**` line defined above and re-read the item to verify there is
+still exactly one claim and it is yours. A claimed item is unavailable even if
+an agent was explicitly told to work on that number. Continue to the next
+independently eligible item, or stop if roadmap order/dependencies leave none.
+Never steal or auto-expire a claim based on its timestamp. Remove your own
+claim when the work ships or before explicitly handing the item back.
 
 ### Phase 0 — Moat & proof (highest ROI: wins the security review)
 
@@ -687,22 +702,30 @@ currently triggers it — flagged for awareness, matches the documented
    its `TODO.md` `###` heading: if it ends in exactly `✅ DONE` (no phase
    qualifier), it is complete — reconcile this file's checkbox to `[x]` and
    continue.
-3. The **next item** is the first one that is *not* fully `✅ DONE`, is *not* in
-   the Decision-gated list, is *not* in the Coordination-gated / externally-blocked
-   list, and whose TODO.md dependencies are satisfied. Skip (and report) any gated
-   item reached before it. **As of 2026-07-27 this resolves to item 97 phase 2 /
-   105** (the same capability — build them as one slice, see Phase 4's note) — the
-   walk skips 58 ph2 and 30·89 ph2 (externally blocked), 53 (external vendor), and
-   lands on Phase 4's engine pillar (99–104 have shipped).
+3. Treat any item carrying a `🚧 **CLAIMED**` line as unavailable. Report its
+   owner and continue only to an independently eligible item; never steal or
+   auto-expire the claim, including when an item-number override points to it.
+4. The **next item** is the first one that is *not* fully `✅ DONE`, is
+   *unclaimed*, is *not* in the Decision-gated list, is *not* in the
+   Coordination-gated / externally-blocked list, and whose TODO.md dependencies
+   are satisfied. Skip (and report) any gated item reached before it. **As of
+   2026-07-27 this resolves to item 106** — the walk skips 58 ph2 and 30·89 ph2
+   (externally blocked), 53 (external vendor), and lands on Phase 4's engine
+   pillar (99–105 and the item-97 phase-2 slice have shipped).
    **A required Decision Log entry is not a skip condition.** Items 100–106 each
    need one recorded in `docs/PRODUCT_GUIDE.md` before code — that is the item's
    own first step (draft it, get maintainer ratification, then build), not a
    reason to defer the item and move on.
-4. Announce: the last completed item (where the previous agent left off), the
+5. Announce: the last completed item (where the previous agent left off), the
    next item, why it's next, and any items skipped and why.
-5. Implement it with the full `next-item` discipline (scope → production-grade
+6. Add the canonical `🚧 **CLAIMED**` line immediately below the selected
+   item's checkbox, then re-read that roadmap entry. Begin only if exactly one
+   claim is present and it is yours.
+7. Implement it with the full `next-item` discipline (scope → production-grade
    impl → tests → docs → release gates → one clean commit → `ship-item`).
-6. On completion, tick this file's checkbox for that item in the same commit.
+8. On completion, remove the claim and tick this file's checkbox for that item
+   in the same commit. If handing the item back unfinished, remove the claim
+   before stopping.
 
 ## Maintenance rules
 
@@ -713,4 +736,8 @@ currently triggers it — flagged for awareness, matches the documented
   it as unplaced) — a new item is not automatically last.
 - Never move an item's *done-status* here without the matching `✅ DONE` in
   TODO.md. TODO.md leads; this file follows.
+- A claim is temporary coordination state. Keep the canonical owner + UTC
+  timestamp shape, never maintain claims in TODO.md, never steal or auto-expire
+  another owner's claim, and remove your own claim on completion or hand-back.
+  Do not create a standalone commit containing only a claim.
 - Keep the rationale one line per item. Depth lives in TODO.md, not here.
