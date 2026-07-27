@@ -453,12 +453,49 @@ def test_join_condition_appears_in_the_normalized_audit_shape():
             "type": "inner",
             "condition": {
                 "and": [
-                    {"operator": "gte", "column": "products.price"},
-                    {"operator": "lte", "column": "products.price"},
+                    {
+                        "operator": "gte",
+                        "column": "products.price",
+                        "value_column": "bands.lo",
+                    },
+                    {
+                        "operator": "lte",
+                        "column": "products.price",
+                        "value_column": "bands.hi",
+                    },
                 ]
             },
         }
     ]
+
+
+def test_both_join_forms_record_the_same_join_target():
+    """The identical join written two ways must not audit differently.
+
+    Before `value_column` was added to the predicate shape, `JOIN c ON o.cid =
+    c.id` expressed as a `condition` recorded only `o.cid` — dropping the join
+    target — while the `on` form recorded both sides. A reviewer reading the
+    audit trail would have seen strictly less detail for the newer spelling.
+    """
+    on_form = normalize_query_shape(
+        _query([JoinSpec(table="bands", on=["products.id", "bands.id"])])
+    )["joins"][0]
+    condition_form = normalize_query_shape(
+        _query(
+            [
+                JoinSpec(
+                    table="bands",
+                    condition=Predicate(col="products.id", op="eq", value_col="bands.id"),
+                )
+            ]
+        )
+    )["joins"][0]
+
+    assert set(on_form["on"]) == {"products.id", "bands.id"}
+    assert {
+        condition_form["condition"]["column"],
+        condition_form["condition"]["value_column"],
+    } == {"products.id", "bands.id"}
 
 
 def test_join_shape_records_the_type_and_omits_the_form_not_used():
