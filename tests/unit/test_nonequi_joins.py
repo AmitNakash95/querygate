@@ -699,3 +699,280 @@ def test_every_join_type_has_a_live_both_dialects_case():
     from querygate.query_ast.models import JoinType
 
     assert set(typing.get_args(JoinType)) == set(_JOIN_TYPE_CASES)
+
+
+# --- 7. The k-anonymity fan-out rule (item 118) -----------------------------
+#
+# `min_group_size` floors `count(*)` over JOINED rows, so a join matching many
+# right rows per left row inflates the count and lifts a singleton group above k.
+# The rule rejects exactly the joins that can do that, and no others — the
+# precision is the point, since a blanket "no joins under the floor" would be a
+# large expressiveness loss for the deployments most likely to set it.
+
+
+def _kanon_tables() -> Dict[str, sa.Table]:
+    """products keeps its PK; `bands` gains a unique non-PK column and a plain
+    non-unique one, so all three uniqueness verdicts are reachable."""
+    tables = _tables()
+    metadata = tables["bands"].metadata
+    tables["badge"] = sa.Table(
+        "badge",
+        metadata,
+        sa.Column("rowid_", sa.Integer, primary_key=True),
+        sa.Column("product_id", sa.Integer),
+        sa.Column("code", sa.String(10)),
+        sa.Column("alt", sa.String(10)),
+        sa.UniqueConstraint("product_id"),
+        sa.UniqueConstraint("code"),
+    )
+    # A uniqueness declared as a unique INDEX rather than a constraint — the
+    # shape Postgres reflection typically returns, where SQLite returns the
+    # constraint above. Both must be read or the verdict is backend-dependent.
+    tables["tag"] = sa.Table(
+        "tag",
+        metadata,
+        sa.Column("rowid_", sa.Integer, primary_key=True),
+        sa.Column("product_id", sa.Integer),
+    )
+    sa.Index("ix_tag_product_unique", tables["tag"].c.product_id, unique=True)
+    # A COMPOSITE unique key: pinning one of its two columns proves nothing.
+    tables["lot"] = sa.Table(
+        "lot",
+        metadata,
+        sa.Column("rowid_", sa.Integer, primary_key=True),
+        sa.Column("product_id", sa.Integer),
+        sa.Column("region", sa.String(10)),
+        sa.UniqueConstraint("product_id", "region"),
+    )
+    return tables
+
+
+def _kanon_sql(joins) -> str:
+    query = StructuredQuery.model_validate(
+        {
+            "from": "products",
+            "select": [{"fn": "count", "col": "*", "as": "n"}],
+            "group_by": ["products.name"],
+            "joins": joins,
+        }
+    )
+    stmt, _limit = compile_structured_query(
+        query, _kanon_tables(), Policy(min_group_size=5, allow_cross_join=True), dialect="sqlite"
+    )
+    return str(stmt.compile(dialect=_DIALECTS["sqlite"])).replace("\n", " ")
+
+
+@pytest.mark.parametrize(
+    "joins,label",
+    [
+        ([{"table": "bands", "on": ["products.id", "bands.id"]}], "on the target PK"),
+        (
+            [{"table": "badge", "on": ["products.id", "badge.product_id"]}],
+            "on a UNIQUE non-PK column",
+        ),
+        (
+            [
+                {
+                    "table": "bands",
+                    "condition": {
+                        "col": "products.id",
+                        "op": "eq",
+                        "value_col": "bands.id",
+                    },
+                }
+            ],
+            "an equality `condition` on the target PK",
+        ),
+    ],
+)
+def test_a_join_that_cannot_fan_out_keeps_the_k_anonymity_floor(joins, label):
+    """A join matching at most one row per row cannot inflate `count(*)`, so the
+    floor still means what it says and the query is allowed."""
+    sql = _kanon_sql(joins)
+    assert "count(*) >= " in sql.lower(), f"floor missing for a join {label}"
+
+
+@pytest.mark.parametrize(
+    "joins,label",
+    [
+        ([{"table": "bands", "on": ["products.price", "bands.lo"]}], "a non-unique column"),
+        (
+            [
+                {
+                    "table": "bands",
+                    "condition": {
+                        "col": "products.price",
+                        "op": "gte",
+                        "value_col": "bands.lo",
+                    },
+                }
+            ],
+            "a range condition",
+        ),
+        ([{"table": "bands", "type": "cross"}], "a cross join"),
+        (
+            [
+                {
+                    "table": "bands",
+                    "condition": {
+                        "or": [
+                            {"col": "products.id", "op": "eq", "value_col": "bands.id"},
+                            {"col": "products.id", "op": "eq", "value_col": "bands.lo"},
+                        ]
+                    },
+                }
+            ],
+            "an OR tree (not a conjunction, so no column is pinned)",
+        ),
+    ],
+)
+def test_a_join_that_can_fan_out_is_refused_under_the_k_anonymity_floor(joins, label):
+    with pytest.raises(PolicyViolationError, match="min_group_size"):
+        _kanon_sql(joins)
+
+
+def test_the_fan_out_rule_only_applies_when_the_floor_is_set():
+    """`min_group_size` is opt-in; a deployment that never sets it must see no
+    behavior change at all from item 118."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "products",
+            "select": [{"fn": "count", "col": "*", "as": "n"}],
+            "group_by": ["products.name"],
+            "joins": [{"table": "bands", "on": ["products.price", "bands.lo"]}],
+        }
+    )
+    stmt, _limit = compile_structured_query(query, _kanon_tables(), Policy(), dialect="sqlite")
+    assert "count(*) >=" not in str(stmt.compile(dialect=_DIALECTS["sqlite"])).lower()
+
+
+def test_the_fan_out_rule_only_applies_to_aggregate_queries():
+    """The floor is an aggregate guardrail; a plain row read with a fan-out join
+    is governed by mandatory row filters, not by group size."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "products",
+            "select": ["products.name"],
+            "joins": [{"table": "bands", "on": ["products.price", "bands.lo"]}],
+        }
+    )
+    compile_structured_query(
+        query, _kanon_tables(), Policy(min_group_size=5), dialect="sqlite"
+    )  # does not raise
+
+
+@pytest.mark.parametrize(
+    "condition,label",
+    [
+        (
+            {
+                "and": [
+                    {"col": "products.id", "op": "eq", "value_col": "bands.id"},
+                    {"col": "products.price", "op": "gte", "value_col": "bands.lo"},
+                ]
+            },
+            "a PK equality ANDed with a range term",
+        ),
+        (
+            {
+                "and": [
+                    {"col": "products.id", "op": "eq", "value_col": "bands.id"},
+                    {
+                        "or": [
+                            {"col": "products.price", "op": "gte", "value_col": "bands.lo"},
+                            {"col": "products.price", "op": "lte", "value_col": "bands.hi"},
+                        ]
+                    },
+                ]
+            },
+            "a PK equality ANDed with an OR sub-tree",
+        ),
+    ],
+)
+def test_narrowing_a_unique_key_join_does_not_make_it_fan_out(condition, label):
+    """Adding conjuncts can only REMOVE matched rows, so a condition that pins a
+    unique key stays non-fanning however it is further narrowed.
+
+    A first cut of this rule failed the whole walk on any non-equality conjunct
+    and on any OR sub-tree, which refused these two — sound, but needlessly
+    strict, and a mutation pass showed nothing pinned the difference.
+    """
+    sql = _kanon_sql([{"table": "bands", "condition": condition}])
+    assert "count(*) >= " in sql.lower(), f"floor missing for {label}"
+
+
+def test_an_equality_inside_an_or_pins_nothing():
+    """The soundness boundary of the rule above: an equality that holds on only
+    ONE branch of an OR does not constrain the join, so it must not be collected
+    — otherwise `pk = x OR anything` would read as a unique-key join."""
+    with pytest.raises(PolicyViolationError, match="min_group_size"):
+        _kanon_sql(
+            [
+                {
+                    "table": "bands",
+                    "condition": {
+                        "or": [
+                            {"col": "products.id", "op": "eq", "value_col": "bands.id"},
+                            {"col": "products.price", "op": "gte", "value_col": "bands.lo"},
+                        ]
+                    },
+                }
+            ]
+        )
+
+
+def test_uniqueness_declared_as_a_unique_index_is_honored():
+    """Backends disagree on how they surface uniqueness — SQLite reflects a
+    `UniqueConstraint`, Postgres typically a unique `Index`. Reading only one
+    would make the same schema fan-out-safe on one backend and refused on the
+    other, which is the items 75/82 class this repo treats as a defect."""
+    sql = _kanon_sql([{"table": "tag", "on": ["products.id", "tag.product_id"]}])
+    assert "count(*) >= " in sql.lower()
+
+
+def test_a_same_table_equality_pins_nothing():
+    """Soundness boundary: `badge.code = badge.alt` constrains badge's own two
+    columns against each other and says nothing about how many badge rows match a
+    given products row. Counting it would let a self-comparison masquerade as a
+    unique-key join — here `code` is UNIQUE, so a walk that collected it would
+    wrongly conclude the join cannot fan out."""
+    with pytest.raises(PolicyViolationError, match="min_group_size"):
+        _kanon_sql(
+            [
+                {
+                    "table": "badge",
+                    "condition": {
+                        "and": [
+                            {"col": "products.name", "op": "eq", "value_col": "badge.alt"},
+                            {"col": "badge.code", "op": "eq", "value_col": "badge.alt"},
+                        ]
+                    },
+                }
+            ]
+        )
+
+
+def test_pinning_only_part_of_a_composite_unique_key_still_fans_out():
+    """`UNIQUE (product_id, region)` guarantees at most one row only when BOTH
+    columns are pinned. Matching on `product_id` alone can still return every
+    region for that product — so a partial match must not count as unique, or the
+    floor would be silently wrong for exactly the multi-tenant/multi-region
+    schemas most likely to set it."""
+    with pytest.raises(PolicyViolationError, match="min_group_size"):
+        _kanon_sql([{"table": "lot", "on": ["products.id", "lot.product_id"]}])
+
+
+def test_pinning_every_column_of_a_composite_unique_key_does_not_fan_out():
+    """The positive control, and the only thing that makes the test above mean
+    something. `extra_on` is the composite-key spelling, so this is also the
+    coverage for a composite key expressed through the equality sugar."""
+    sql = _kanon_sql(
+        [
+            {
+                "table": "lot",
+                "on": ["products.id", "lot.product_id"],
+                "extra_on": [["products.name", "lot.region"]],
+            }
+        ]
+    )
+    assert "count(*) >= " in sql.lower()

@@ -3086,6 +3086,40 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-27 — the k-anonymity floor now refuses a join it cannot correctly
+  bound, instead of answering as if it had (TODO.md item 118).** `min_group_size`
+  compiles to `HAVING count(*) >= k`, which counts **joined** rows. A join matching
+  many right-hand rows per left-hand row multiplied a group's count, lifting a
+  single-row group above the floor — so a guarantee stated in QG-29, R3, the README
+  and the customer-facing security page did not hold across a join. Measured with
+  `k=5`: no join suppressed the singleton, `JOIN big ON person.tenant = big.tenant`
+  returned it. **That is an equality join**, shipped long before item 103's
+  `condition` form, which is why the fix could not be scoped to non-equi joins and
+  why the gap is recorded as pre-existing rather than an item-103 regression — the
+  item-103 audit surfaced it, it did not cause it.
+  Two calls shape the fix:
+  1. **Refuse, don't silently exempt.** The same posture item 101 took for
+     aggregate windows under this floor: when the floor cannot be enforced
+     correctly, the query fails closed with a typed `PolicyViolationError` rather
+     than returning an answer the policy believes is protected. The alternative —
+     switching the floor to `count(DISTINCT <pk>)` — was rejected because the
+     "individual" a group must be backed by *k* of is genuinely ambiguous once a
+     join is involved (distinct customers? distinct orders?), and picking one
+     silently would trade a visible refusal for an invisible wrong answer.
+  2. **Scope the refusal by reflected uniqueness, not by join type.** A blanket
+     "no joins while the floor is on" would be simple and fail-closed, but it costs
+     the most expressiveness for exactly the deployments that turn the floor on. A
+     join provably cannot fan out when the equalities it pins cover a primary key,
+     unique constraint or unique index of the joined table — the ordinary
+     join-to-a-dimension-on-its-key shape — and those stay allowed. Refused:
+     non-unique columns, range conditions, cross joins, and an equality that sits
+     inside an `OR` (it holds on only one branch, so it pins nothing). **Narrowing
+     never fans out**, so `pk = x AND price BETWEEN lo AND hi` is allowed — an
+     added conjunct can only remove rows. **Partial coverage of a composite unique
+     key does not count**: `UNIQUE (product_id, region)` needs both columns pinned.
+     Direction is fail-closed throughout — an unreflected constraint costs a
+     rejection, a missed fan-out would cost the guarantee.
+
 - **2026-07-27 — a join's `ON` clause becomes a full predicate tree, and CROSS
   JOIN is the one join type that is deny-by-default (TODO.md item 103;
   maintainer-ratified before build, as ENGINE_EXPRESSIVENESS_PLAN.md §8 entry 5

@@ -377,21 +377,21 @@ def test_min_group_size_closes_the_single_row_aggregate_singling_out():
     assert "count(*) >= 5" in compiled.lower()
 
 
-def test_k_anonymity_floor_is_defeated_by_a_fan_out_join_open_gap_item_118():
-    """A RECORDED OPEN GAP, not a passing guarantee — pinned here so it is visible
-    in the security suite rather than only in prose (TODO.md item 118).
+def test_k_anonymity_floor_cannot_be_defeated_by_a_fan_out_join(monkeypatch):
+    """TODO.md item 118, now CLOSED — this test was written to pin the leak and
+    was inverted when the fix landed, exactly as its earlier revision instructed.
 
-    The floor is `HAVING count(*) >= k` over **joined** rows, so any fan-out join
-    multiplies a singleton group past k and the group is returned. Executed against
-    a real (SQLite) database rather than asserted on SQL text, because the point is
-    the rows that come back.
+    The floor is `HAVING count(*) >= k` over **joined** rows, so a join that
+    matches many right-hand rows per left-hand row multiplies a singleton group
+    past k. Measured before the fix: with k=5, one person at salary=100 joined to
+    a 10-row table on a shared non-unique column came back. That used an
+    **equality** `on` join, shipped long before item 103's `condition` form, which
+    is why the fix could not be scoped to inequality conditions.
 
-    The join used here is an **equality** `on` join, which has shipped since long
-    before item 103's `condition` form — that is the whole reason this is tracked
-    as a pre-existing gap rather than a non-equi-join regression, and why a fix
-    that rejected only inequality conditions would be theater. This test asserts
-    the leak STILL happens; when item 118 is decided and fixed, it must be
-    inverted, not deleted.
+    The query is now refused, not silently answered, and the control below proves
+    the refusal is not just "joins are banned": the same query joined onto the
+    target's PRIMARY KEY still runs, because such a join matches at most one row
+    and cannot inflate the count.
     """
     metadata = sa.MetaData()
     person = sa.Table(
@@ -434,12 +434,17 @@ def test_k_anonymity_floor_is_defeated_by_a_fan_out_join_open_gap_item_118():
     # Control: without a join the floor works — salary=100 is a group of one.
     assert _salaries(body) == [200]
 
-    # The gap: an equality fan-out join inflates count(*) to 10 for that group.
+    # The fan-out join is now refused rather than answered.
     joined = dict(body, joins=[{"table": "big", "on": ["person.tenant", "big.tenant"]}])
-    assert _salaries(joined) == [100, 200], (
-        "the k-anonymity fan-out gap appears to be fixed — invert this test and "
-        "close TODO.md item 118"
-    )
+    with pytest.raises(PolicyViolationError, match="min_group_size"):
+        _salaries(joined)
+
+    # ...and the refusal is precise, not a blanket ban on joins: joining onto the
+    # target's PRIMARY KEY matches at most one row, so the count cannot be
+    # inflated and the query still runs — with the floor still suppressing the
+    # singleton.
+    on_pk = dict(body, joins=[{"table": "big", "on": ["person.id", "big.id"]}])
+    assert _salaries(on_pk) == [200]
 
 
 def test_denied_table_cannot_be_smuggled_through_a_filter():

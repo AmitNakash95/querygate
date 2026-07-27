@@ -15,7 +15,7 @@ import sqlalchemy as sa
 from querygate.compiler.dialect_adapters import get_dialect_adapter
 from querygate.connections.models import DatabaseDialect
 from querygate.core.auth import Principal
-from querygate.core.exceptions import QueryValidationError
+from querygate.core.exceptions import PolicyViolationError, QueryValidationError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     ArrayAggSelectItem,
@@ -583,6 +583,102 @@ def _build_select_columns(
     return columns, alias_map
 
 
+def _equality_bound_columns(join: Any) -> Optional[set]:
+    """The joined table's columns pinned by equality to another table's column,
+    lowercased — or None if this join's shape is not a pure equality conjunction.
+
+    Both spellings are read: `on`/`extra_on` pairs, and a `condition` that is a
+    `Predicate` or an all-`and` tree of `eq` predicates comparing `col` to
+    `value_col` (item 103's general form can still express plain equality, and a
+    caller who writes it that way must not be treated as if they had written a
+    range join). Anything else — an inequality, an OR/NOT tree, a computed
+    operand, a cross join — returns None, meaning "cannot be shown to be an
+    equality join".
+    """
+    if join.type == "cross":
+        return None
+
+    joined = (join.alias or join.table).lower()
+    bound: set = set()
+
+    def _take(left_ref: str, right_ref: str) -> bool:
+        for ref, other in ((left_ref, right_ref), (right_ref, left_ref)):
+            table, column = parse_column_ref(ref)
+            other_table, _ = parse_column_ref(other)
+            # Only a comparison against a DIFFERENT table constrains the join's
+            # grain; `a.x = a.y` says nothing about how many right rows match.
+            if table.lower() == joined and other_table.lower() != joined:
+                bound.add(column.lower())
+                return True
+        return False
+
+    if join.on is not None:
+        for pair in [join.on, *join.extra_on]:
+            _take(pair[0], pair[1])
+        return bound
+
+    def _walk(node: Any) -> None:
+        """Collect the equalities that hold unconditionally for every matched row.
+
+        Only top-level conjuncts qualify, and a non-qualifying conjunct is skipped
+        rather than failing the walk — because *narrowing* a condition can never
+        make it match more rows. If one conjunct pins a unique key, at most one
+        right-hand row satisfies it, so the whole (more restrictive) condition
+        matches at most one too: `pk = x AND price BETWEEN lo AND hi` cannot fan
+        out, and neither can `pk = x AND (a OR b)`.
+
+        An OR/NOT subtree is simply not descended into: an equality inside one
+        holds on only some branches, so it constrains nothing. That is what makes
+        a bare `a = b OR c = d` fall through with nothing pinned, and be refused.
+        """
+        if isinstance(node, Predicate):
+            if node.op == "eq" and node.col is not None and node.value_col is not None:
+                _take(node.col, node.value_col)
+            return
+        for term in node.and_terms or []:
+            _walk(term)
+
+    if join.condition is None:
+        return None
+    _walk(join.condition)
+    return bound
+
+
+def _unique_column_sets(table: sa.Table) -> List[set]:
+    """Every set of column names that is unique in `table`, lowercased —
+    its primary key, plus every unique constraint and unique index reflected
+    from the database (backends surface these differently: SQLite reports a
+    `UniqueConstraint`, Postgres typically a unique `Index`, so both are read).
+    """
+    sets: List[set] = []
+    pk = {c.name.lower() for c in table.primary_key.columns}
+    if pk:
+        sets.append(pk)
+    for constraint in table.constraints:
+        if isinstance(constraint, sa.UniqueConstraint) and len(constraint.columns) > 0:
+            sets.append({c.name.lower() for c in constraint.columns})
+    for index in table.indexes:
+        if index.unique and len(index.columns) > 0:
+            sets.append({c.name.lower() for c in index.columns})
+    return sets
+
+
+def _join_can_fan_out(join: Any, tables: Dict[str, sa.Table]) -> bool:
+    """Can this join match MORE than one right-hand row per left-hand row?
+
+    It cannot, iff the join pins a set of the joined table's columns by equality
+    and that set covers one of the table's unique keys — the ordinary
+    join-to-a-dimension-on-its-primary-key shape. Everything else is assumed to
+    fan out, which is the fail-closed direction: an unreflected uniqueness
+    constraint costs a rejection, a missed fan-out would cost the guarantee.
+    """
+    bound = _equality_bound_columns(join)
+    if bound is None:
+        return True
+    table = _table_by_name(tables, join.alias or join.table)
+    return not any(unique <= bound for unique in _unique_column_sets(table))
+
+
 def _apply_mandatory_row_filters(
     stmt: sa.Select,
     policy: Policy,
@@ -802,6 +898,31 @@ def compile_structured_query(
     # argument is COUNT(*), counting rows per group (or the single implicit
     # group when there's no GROUP BY), ANDed with any caller HAVING above.
     if is_aggregate and policy.min_group_size is not None:
+        # The floor counts JOINED rows, so a join that matches many right-hand
+        # rows per left-hand row multiplies a group's count and can lift a
+        # single-row group above k — the guarantee silently fails (TODO.md item
+        # 118, measured 2026-07-27: with k=5, a lone person joined to a 10-row
+        # table on a shared non-unique column was returned).
+        #
+        # Rejected rather than silently exempted, the same posture item 101 took
+        # for aggregate windows under this floor: when the floor cannot be
+        # enforced correctly, the query fails closed instead of returning an
+        # answer the policy believes is protected. The rejection is scoped to the
+        # shapes that actually break it — a join onto a unique key (the ordinary
+        # join-to-a-dimension shape) matches at most one row, cannot inflate a
+        # count, and stays allowed.
+        fanning = [
+            join.alias or join.table for join in query.joins if _join_can_fan_out(join, tables)
+        ]
+        if fanning:
+            raise PolicyViolationError(
+                f"join to {fanning[0]!r} can match more than one row per row of the "
+                f"query's other tables, which would inflate the count that "
+                f"min_group_size ({policy.min_group_size}) floors — so the k-anonymity "
+                "guarantee cannot hold for this query. Join on the target table's "
+                "primary key or a unique column, or aggregate without the join and "
+                "combine results client-side."
+            )
         stmt = stmt.having(sa.func.count() >= policy.min_group_size)
 
     allow_table_fallback = True
