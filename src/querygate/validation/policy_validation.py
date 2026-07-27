@@ -22,6 +22,7 @@ from querygate.query_ast.models import (
 from querygate.validation.schema_validation import (
     RefPosition,
     cte_source_names,
+    iter_correlations,
     declared_cte_names,
     effective_name_map,
     expression_depth,
@@ -468,9 +469,20 @@ def _validate_subquery_constraints(scoped: List, policy: Policy) -> None:
     for depth, scope in scoped:
         if scope.having is not None:
             for pred in iter_where_predicates(scope.having):
-                if pred.value_subquery is not None:
+                # A SCALAR subquery is allowed in HAVING (item 106): comparing an
+                # aggregate against another aggregate — HAVING SUM(x) > (SELECT
+                # AVG(y)) — is the shape HAVING exists for, and the single-row
+                # guarantee makes it well-defined. An `IN (subquery)` stays rejected
+                # (item 97's rule, deliberately not widened), and so does EXISTS,
+                # which asks a per-row question that has no meaning after grouping.
+                if pred.value_subquery is not None and pred.op in ("in", "not_in"):
                     raise PolicyViolationError(
                         "IN (subquery) is only supported in a WHERE clause, not HAVING (item 97)"
+                    )
+                if pred.exists_subquery is not None:
+                    raise PolicyViolationError(
+                        "EXISTS is only supported in a WHERE clause, not HAVING — it tests "
+                        "rows, and HAVING filters groups (item 106)"
                     )
         # Every reachable CASE condition, not just a top-level CaseSelectItem's:
         # since item 100 a CASE can be nested inside an aggregate argument or a
@@ -480,10 +492,10 @@ def _validate_subquery_constraints(scoped: List, policy: Policy) -> None:
         # here keeps that fail-closed AND gives a clean typed error.
         for condition in iter_scope_case_conditions(scope):
             for pred in iter_where_predicates(condition):
-                if pred.value_subquery is not None:
+                if pred.value_subquery is not None or pred.exists_subquery is not None:
                     raise PolicyViolationError(
-                        "IN (subquery) is only supported in a WHERE clause, not a CASE "
-                        "condition (item 97)"
+                        "a subquery is only supported in a WHERE clause, not a CASE "
+                        "condition (items 97/106)"
                     )
         # Same reasoning for a join condition (item 103): `iter_query_scopes`
         # descends WHERE/HAVING predicates only, so a subquery hidden in an ON
@@ -491,10 +503,10 @@ def _validate_subquery_constraints(scoped: List, policy: Policy) -> None:
         # with no policy/schema validation of its own. Rejected here so it fails
         # closed with a typed error rather than on a compiler-internal `ctx=None`.
         for pred in iter_join_condition_predicates(scope):
-            if pred.value_subquery is not None:
+            if pred.value_subquery is not None or pred.exists_subquery is not None:
                 raise PolicyViolationError(
-                    "IN (subquery) is only supported in a WHERE clause, not a join "
-                    "condition (item 97)"
+                    "a subquery is only supported in a WHERE clause, not a join "
+                    "condition (items 97/106)"
                 )
         if depth > 0:
             # This scope is a subquery: its single select item is the value set
@@ -635,6 +647,66 @@ def _validate_cte_constraints(
                     )
 
 
+def _validate_correlation(query: StructuredQuery, scoped: List, policy: Policy) -> None:
+    """Enforce item 106's correlation model: declared, capped, and checked against
+    the ENCLOSING scope.
+
+    This is the item's whole safety argument in one function. SQL would make every
+    outer column implicitly visible to a subquery; QueryGate requires each one to be
+    named, so that each has a known position the enforcement layer can reach — and
+    then applies the outer scope's OWN policy to it here. Checking a correlated ref
+    against the subquery's name map instead would resolve `Customer.Id` against a
+    scope that never declared `Customer`, which is how a correlated reference turns
+    into a hole in table/column allow-deny.
+    """
+    correlations = list(iter_correlations(query))
+
+    # A `correlate` list on a scope that is not a subquery would be silently inert —
+    # nothing would ever read it — so it is rejected rather than ignored. Compared
+    # by identity against the scopes `iter_correlations` actually descends into.
+    correlated_children = {id(c.child) for c in correlations}
+    for scope in (q for _depth, q in scoped):
+        if scope.correlate and id(scope) not in correlated_children:
+            raise PolicyViolationError(
+                "`correlate` is only meaningful on a subquery (an exists_subquery or "
+                "value_subquery) — the top-level query, a cte body and a set_op arm "
+                "have no enclosing scope to correlate to."
+            )
+
+    if len(correlations) > policy.max_correlated_refs:
+        raise PolicyViolationError(
+            f"correlated references exceed max of {policy.max_correlated_refs}"
+            + (
+                f" (total {len(correlations)} across the query and its subqueries)"
+                if len(correlations) > 0
+                else ""
+            )
+        )
+
+    for correlation in correlations:
+        # Resolved against the PARENT's name map — the load-bearing line.
+        name_to_physical = effective_name_map(correlation.parent)
+        table, column = parse_column_ref(correlation.ref)
+        physical = name_to_physical.get(table.lower(), table)
+        if not policy.table_allowed(physical):
+            raise PolicyViolationError(
+                f"Table {physical!r} is not accessible under the active policy"
+            )
+        if not policy.column_allowed(physical, column):
+            raise PolicyViolationError(
+                f"Column {correlation.ref!r} is not accessible under the active policy"
+            )
+        # A correlated ref is a non-projection use by construction — it exists to be
+        # compared inside the subquery — so item 49's rule applies with no position
+        # test: a masked column may only surface as a bare top-level projection, and
+        # this is never that.
+        if policy.column_mask(physical, column) is not None:
+            raise PolicyViolationError(
+                f"Column {correlation.ref!r} is masked by policy and cannot be used as a "
+                "correlated reference — its raw value would be compared inside the subquery"
+            )
+
+
 def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) -> None:
     if not policy.enabled:
         raise PolicyViolationError(f"Connection {connection_id!r} is disabled by policy")
@@ -652,6 +724,7 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
             f"{policy.max_subquery_depth}"
         )
     _validate_subquery_constraints(scoped, policy)
+    _validate_correlation(query, scoped, policy)
     scopes = [q for _, q in scoped]
 
     # Count caps summed tree-wide, then per-scope semantics for each scope.

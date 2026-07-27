@@ -136,7 +136,7 @@ order-of-magnitude, not commitments.
 | 103 | ✅ ★ Non-equi/range joins + FULL OUTER / CROSS | M | 96, 99 |
 | 104 | ✅ ★ Set operations (UNION / INTERSECT / EXCEPT) | L | 96, 97 |
 | 105 | ✅ ★ CTE / derived table in FROM (non-recursive) | XL | 96, 97, 104 |
-| 106 | ★ Correlated / EXISTS / scalar subqueries | XL | 96, 97, 105 |
+| 106 | ✅ ★ Correlated / EXISTS / scalar subqueries | XL | 96, 97, 105 |
 | 107 | ✅ Batch query execution double-reserves quota on an approval retry | S | — |
 | 108 | ✅ Write-preview diff runs the full DML before the affected-row cap is checked | S | — |
 | 109 | ✅ MCP `run_structured_writes` has no batch-size cap | S | — |
@@ -2026,21 +2026,18 @@ mutation-verified; live Postgres **and** live MSSQL.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 105).
 
-### 106. Query engine: correlated / EXISTS / scalar subqueries
+### 106. Query engine: correlated / EXISTS / scalar subqueries ✅ DONE
 
-`EXISTS`/`NOT EXISTS`, correlated subqueries, and scalar subqueries
-(`= (SELECT …)`, subquery in SELECT/HAVING). Highest-risk item: it breaks the
-**uncorrelated** assumption the entire current subquery layer rests on (item 97's
-`_compile_in_subquery` resolves against the subquery's own tables only).
-Correlation must be limited to a **declared, capped** set of outer refs so the
-visitor can enforce policy/masking on them against the outer scope; scalar-subquery
-arity enforced; depth/count caps stay summed tree-wide. Note: scalar-aggregate
-comparison is often achievable today via two round-trips — document that recipe.
+`EXISTS`/`NOT EXISTS` as a `Predicate` operator, scalar subqueries as a comparison
+RHS in WHERE and HAVING, and correlation via a **declared, capped**
+`StructuredQuery.correlate` list checked against the ENCLOSING scope. An undeclared
+outer ref still fails exactly as before, so correlation is opt-in per subquery and
+the pre-106 uncorrelated model is the default. A scalar subquery must be an
+aggregate with no `group_by`, making exactly-one-row true by construction. Closes
+regression bar row 11 -> **15/16**, completing Phase 4 of
+`docs/ENGINE_EXPRESSIVENESS_PLAN.md`. 13/13 enforcement points mutation-verified.
 
-**Effort: XL. Priority: medium-low (flagship pillar; do last — largest safety
-surface). Depends on: items 96, 97, 105. Requires a recorded Decision Log entry in
-`docs/PRODUCT_GUIDE.md` before build** (correlation scope model; plan §8 entry 8).
-Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 5.**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 106).
 
 ---
 

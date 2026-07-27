@@ -6521,6 +6521,77 @@ because each is the kind of defect a green suite tolerates:
 crashed on any non-`Table` FROM element, so item 118's floor raised `AttributeError`
 on any aliased join. See its own entry.
 
+### 106. Query engine: correlated / EXISTS / scalar subqueries ✅ DONE
+
+The last item of the flagship engine pillar, and the only one that deliberately
+REMOVES an invariant the rest of the engine rests on: that every scope resolves
+against its own tables and nothing else.
+
+**Correlation is declared, not ambient.** `StructuredQuery.correlate` lists the
+outer columns a nested subquery may read. SQL makes every enclosing column
+implicitly visible; QueryGate does not, because the enforcement chokepoint is the
+canonical visitor, and a ref resolving against a scope the visitor was not looking
+at is exactly the silent policy-and-mask bypass the plan's invariant 2 names as its
+most important rule. Each declared ref is checked against the **enclosing** scope's
+name map for table allow-deny, column allow-deny and the mask rule. An UNdeclared
+outer ref is rejected exactly as it was before this item, so the pre-106 behavior is
+the default and correlation is opt-in per subquery.
+
+**Reach is one level, and that had to be enforced rather than assumed.** The first
+implementation resolved a child's declared refs against the parent's already-
+reflected tables — which include the tables the PARENT had correlated to. That made
+correlation transitively reach a grandparent, so "one level" held in name only. Found
+by the grandparent case in `test_correlation_boundary.py`; the fix resolves against
+the parent's OWN from/join/cte names.
+
+**Scalar subqueries return exactly one row by construction.** A `value_subquery` on
+a scalar comparison op must be an aggregate with no `group_by`. `LIMIT 1` was
+rejected because it picks an arbitrary row — a wrong answer with no error, the class
+items 102/117 established is worse than a rejection — and letting the backend raise
+was rejected as dialect-dependent and post-execution. The required shape is also
+what the use case actually is: "> the overall average", "> this customer's own
+average". A `set_op` inside a scalar subquery is refused for the same arity reason.
+
+**`EXISTS` is an operator on `Predicate`, not a third `WhereNode` member.** A new
+union member would force `iter_where_predicates`, `_compile_where`,
+`predicate_column_refs`, `where_depth` and both write validators to learn a shape
+whose failure mode is a consumer silently handling only what it knows — the argument
+items 104 and 105 already turned on, now settled precedent. It behaves like the
+`is_null` operators that take no value. The new ops live on a read-only
+`ReadCompareOp`: `CompareOp` is shared with the write AST, so widening it would have
+advertised `exists` in the write tool's MCP schema while the write path rejects it,
+which is precisely item 114's defect. A new test pins the operator-set relationship,
+because the pre-existing field-level narrowing guard cannot see an operator change.
+
+**Placement.** WHERE takes EXISTS and both subquery shapes. HAVING takes a SCALAR
+subquery (comparing an aggregate to an aggregate is what HAVING is for) but not
+EXISTS (a per-row test has no meaning after grouping) and still not `IN (subquery)`
+— item 97's rule, deliberately not widened. HAVING previously compiled with
+`ctx=None`, which WAS the compiler-side backstop for that rule; since it now needs a
+ctx, the backstop is preserved explicitly as `_WhereCtx.allow_value_set_subquery`
+rather than quietly lost.
+
+**Caps.** `max_correlated_refs` (default 2) summed tree-wide; `max_subquery_depth`
+charges an EXISTS scope like any other nesting; every count cap already sums across
+the new scopes because `iter_query_scopes` yields them. Stated honestly in the
+field's own comment: this caps the correlation SURFACE, not its cost — a correlated
+subquery is re-evaluated per candidate outer row, and what bounds that is
+`timeout_seconds`, the concurrency limiter and item 26's cost gate where enabled.
+
+**Audit.** An EXISTS scope's full shape is recorded, and so is each subquery's
+`correlate` list — the exact set of outer columns a nested scope was permitted to
+see is the most security-relevant fact about a correlated query, and it is column
+identifiers only, never values.
+
+**Verification.** 13/13 enforcement points mutation-verified. One survivor on the
+first pass was informative rather than a gap: the masked-correlated-ref check is
+already covered by the generic per-scope mask rule, so it is defence in depth — the
+test now matches its specific message, which pins the layer instead of pinning
+neither. 19 adversarial-boundary + 4 end-to-end tests; the end-to-end EXISTS cases
+filter on `status='cancelled'` deliberately, because every customer in the demo seed
+has orders and an unfiltered EXISTS/NOT EXISTS partition would be reproduced exactly
+by an implementation that ignored the correlated row.
+
 ### 107. Batch query execution double-reserves quota on an approval retry ✅ DONE
 
 **Effort: S. Priority: medium (real throughput bug, narrow blast radius).

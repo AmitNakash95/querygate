@@ -279,9 +279,19 @@ gate is the *first step of the item*, not a reason to defer it.
   118's k-anon fan-out check reached for `.primary_key.columns`, which only a
   `Table` has — so `min_group_size` plus any **aliased** join raised
   `AttributeError` rather than deciding. Reproducible with no cte at all (item 122).*
-- [ ] **106** — Correlated / EXISTS / scalar subqueries. *Do last — largest safety
-  surface (breaks the uncorrelated assumption). Depends on 96, 97, 105; **Decision
-  Log entry (correlation scope model) before build.***
+- [x] **106** — Correlated / EXISTS / scalar subqueries. ✅ **Shipped** — and with
+  it **Phase 4 is complete**. (`EXISTS`/`NOT EXISTS` as a `Predicate` operator;
+  scalar subqueries as a comparison RHS in WHERE and HAVING; correlation via a
+  **declared, capped** `correlate` list checked against the ENCLOSING scope, so an
+  undeclared outer ref still fails exactly as before and correlation is opt-in per
+  subquery. A scalar subquery must be an aggregate with no `group_by`, making
+  exactly-one-row true by construction rather than by a `LIMIT 1` that would pick an
+  arbitrary row. New ops live on a read-only `ReadCompareOp` so the write AST's
+  shared `CompareOp` is not widened — item 114's defect. Regression bar 14/16 ->
+  **15/16**; 13/13 enforcement points mutation-verified.)
+  *Its own build found the defect worth remembering: resolving a child's declared
+  refs against the parent's already-correlated tables made correlation reach a
+  GRANDPARENT, so "one level" held in name only until a test asked for it.*
 
 ### Phase 5 — Adoption & breadth (grow once the engine is deep enough to adopt)
 
@@ -667,8 +677,8 @@ All three are **pre-existing**, surfaced by the item-104 completion audit rather
 than caused by it. None is a policy bypass — enforcement is scope-correct — but
 119 is a silent wrong answer on a shipped feature and should lead.
 
-- [ ] **119** — `top_n` mis-resolves and DROPS a column when two projections share
-  a base name. *Item 104 hit the identical root cause on its own new path and
+- [ ] **119** — `top_n` mis-resolves and DROPS a column when two projections share a base name.
+  *Item 104 hit the identical root cause on its own new path and
   fixed it positionally; the same fix shape applies here.*
 - [ ] **120** — The audit shape records nothing for a nested `IN (subquery)`.
   *The Proof-pillar half of the gap item 104 closed for set-op arms.*

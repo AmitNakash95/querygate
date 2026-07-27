@@ -26,6 +26,7 @@ from querygate.query_ast.models import (
     ColArg,
     ColumnExpr,
     CteSpec,
+    EXISTS_OPS,
     DateAddExpr,
     DateBucketSelectItem,
     Expression,
@@ -320,6 +321,24 @@ class _WhereCtx(NamedTuple):
     # Item 105 — carried so an IN (subquery) whose own FROM names a cte binds to
     # the compiled block, exactly like any other scope.
     cte_objects: Optional[Dict[str, Any]] = None
+    # Item 106 — HAVING may carry a SCALAR subquery but not a value-set one. Before
+    # this, HAVING was compiled with `ctx=None` and the `ctx is None` guard in
+    # `_compile_in_subquery` was the compiler-side backstop for item 97's
+    # WHERE-only rule. HAVING now needs a ctx, so the backstop is expressed as this
+    # flag instead of being lost — policy validation is still the primary check.
+    allow_value_set_subquery: bool = True
+
+
+# The scalar comparison operators, as callables, so the scalar-subquery branch
+# reuses one mapping instead of repeating the if/elif ladder below it.
+_SCALAR_COMPARATORS = {
+    "eq": operator.eq,
+    "neq": operator.ne,
+    "lt": operator.lt,
+    "lte": operator.le,
+    "gt": operator.gt,
+    "gte": operator.ge,
+}
 
 
 def _compile_in_subquery(pred: Predicate, ctx: Optional["_WhereCtx"]) -> sa.Select:
@@ -331,6 +350,8 @@ def _compile_in_subquery(pred: Predicate, ctx: Optional["_WhereCtx"]) -> sa.Sele
     set must be complete or membership is wrong; the subquery is bounded by its
     filters and the tree-wide caps, not by a row limit."""
     if ctx is None or ctx.subquery_tables is None:
+        raise QueryValidationError("IN (subquery) is only supported in a WHERE clause")
+    if pred.op in ("in", "not_in") and not ctx.allow_value_set_subquery:
         raise QueryValidationError("IN (subquery) is only supported in a WHERE clause")
     subq_tables = ctx.subquery_tables.get(id(pred.value_subquery))
     if subq_tables is None:
@@ -347,6 +368,35 @@ def _compile_in_subquery(pred: Predicate, ctx: Optional["_WhereCtx"]) -> sa.Sele
     return stmt.limit(None)
 
 
+def _compile_exists(pred: Predicate, ctx: Optional["_WhereCtx"]) -> Any:
+    """Compile an EXISTS / NOT EXISTS test (item 106).
+
+    The subquery goes through the SAME `compile_structured_query` path as any other
+    scope, so it inherits its mandatory row filters, masks and k-anonymity floor —
+    and its LIMIT is stripped for the reason item 97 strips one: EXISTS asks whether
+    ANY row matches, and a limited scan can only make that answer wrong in one
+    direction. Correlation needs no work here: the subquery was schema-validated
+    against the PARENT's own table objects for its declared refs, so SQLAlchemy sees
+    a shared FROM element and emits the correlated form itself.
+    """
+    if ctx is None or ctx.subquery_tables is None:
+        raise QueryValidationError("EXISTS is only supported in a WHERE clause")
+    subq_tables = ctx.subquery_tables.get(id(pred.exists_subquery))
+    if subq_tables is None:
+        raise QueryValidationError("EXISTS subquery was not schema-validated")
+    stmt, _limit = compile_structured_query(
+        pred.exists_subquery,
+        subq_tables,
+        ctx.policy,
+        dialect=ctx.dialect,
+        principal=ctx.principal,
+        subquery_tables=ctx.subquery_tables,
+        cte_objects=ctx.cte_objects,
+    )
+    exists_clause = stmt.limit(None).exists()
+    return ~exists_clause if pred.op == "not_exists" else exists_clause
+
+
 def _apply_predicate(
     col: Any,
     pred: Predicate,
@@ -356,9 +406,16 @@ def _apply_predicate(
 ) -> Any:
     op = pred.op
     if pred.value_subquery is not None:
-        # IN (subquery) / NOT IN (subquery) — item 97.
         subselect = _compile_in_subquery(pred, ctx)
-        return col.in_(subselect) if op == "in" else ~col.in_(subselect)
+        if op in ("in", "not_in"):
+            # IN (subquery) / NOT IN (subquery) — item 97.
+            return col.in_(subselect) if op == "in" else ~col.in_(subselect)
+        # A SCALAR subquery (item 106). `.scalar_subquery()` is what tells
+        # SQLAlchemy this SELECT is a single value rather than a row source; the
+        # AST layer has already guaranteed it returns exactly one row by requiring
+        # an aggregate with no group_by, so no LIMIT is needed to make that true.
+        scalar = subselect.scalar_subquery()
+        return _SCALAR_COMPARATORS[op](col, scalar)
     # value_col/value_expr are only valid for eq/neq/lt/lte/gt/gte (enforced at
     # the AST layer), so every other op below always sees pred.value here.
     if pred.value_col is not None:
@@ -439,6 +496,10 @@ def _compile_where(
     ctx: Optional["_WhereCtx"] = None,
 ) -> Any:
     if isinstance(node, Predicate):
+        if node.op in EXISTS_OPS:
+            # The one predicate with no left-hand operand (item 106) — resolving a
+            # target first would fail, since the AST forbids col/col_fn/expr here.
+            return _compile_exists(node, ctx)
         target = _resolve_predicate_target(node, tables, alias_map, dialect)
         return _apply_predicate(target, node, tables, dialect, ctx)
 
@@ -1216,9 +1277,12 @@ def _compile_scope_body(
     if query.having is not None:
         # HAVING is a full WhereNode (item 99), compiled through the same
         # `_compile_where` machinery as WHERE. alias_map is threaded so a HAVING
-        # predicate can reference a select alias (e.g. an aggregate's `as`);
-        # ctx=None keeps `value_subquery` out (WHERE-only, item 97).
-        stmt = stmt.having(_compile_where(query.having, tables, alias_map, dialect))
+        # predicate can reference a select alias (e.g. an aggregate's `as`). Since
+        # item 106 it carries a ctx so a SCALAR subquery can compile here, with
+        # `allow_value_set_subquery=False` preserving item 97's WHERE-only rule for
+        # `IN (subquery)` at the compiler layer.
+        having_ctx = where_ctx._replace(allow_value_set_subquery=False)
+        stmt = stmt.having(_compile_where(query.having, tables, alias_map, dialect, ctx=having_ctx))
 
     is_aggregate = bool(query.group_by) or any(
         isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in query.select

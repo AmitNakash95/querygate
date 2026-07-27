@@ -375,6 +375,19 @@ def _expression_shape(expr: object) -> Dict[str, Any]:
 
 def _predicate_shape(predicate: Predicate) -> Dict[str, Any]:
     shape: Dict[str, Any] = {"operator": predicate.op}
+    if predicate.exists_subquery is not None:
+        # An EXISTS test has no left-hand column — the subquery IS the predicate
+        # (item 106) — so it is recorded before the col/col_fn/expr branch below,
+        # which would otherwise assert on an AST the AST layer explicitly permits.
+        #
+        # The nested scope's shape is recorded in full, for the reason item 104
+        # gave for set-op arms and item 105 for cte bodies: without it the event
+        # says a query read `customers` when it also read `orders`. Its `correlate`
+        # list is recorded too, because that is the exact set of outer columns the
+        # nested scope was allowed to see — the most security-relevant fact about a
+        # correlated query, and column identifiers only, never values.
+        shape["exists_subquery"] = normalize_query_shape(predicate.exists_subquery)
+        return shape
     if predicate.col is not None:
         shape["column"] = predicate.col
     elif predicate.col_fn is not None:
@@ -463,6 +476,8 @@ def normalize_query_shape(query: StructuredQuery) -> Dict[str, Any]:
             "all": query.set_op.all_,
             "arms": [normalize_query_shape(arm) for arm in query.set_op.arms],
         }
+    if query.correlate:
+        shape["correlate"] = list(query.correlate)
     if query.ctes:
         # Every named block's own shape, recursively (item 105) — for the identical
         # reason the arms above are recorded, and against the identical failure: the

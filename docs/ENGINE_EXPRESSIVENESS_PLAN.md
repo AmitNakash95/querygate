@@ -2,8 +2,9 @@
 
 **Status (2026-07-27):** in progress — **Phase 0 (item 99), Phase 1 (item 100),
 Phase 2 (item 101), Phase 3a (item 102), Phase 3b (item 103), Phase 4a (item 104)
-and Phase 4b (item 105, which ABSORBED item 97 phase 2) have shipped.** Phase 5
-(item 106) is the last one. **The `Expression`
+Phase 4b (item 105, which ABSORBED item 97 phase 2) and Phase 5 (item 106) have
+ALL shipped — this plan's item list is complete at **15/16** on the regression bar,
+the one gap being a window-as-`Expression` operand that has no item yet. **The `Expression`
 substrate items 105–106 build on is real** (`query_ast/models.py`'s `Expression`
 union + `_compile_expression`); reuse it rather than adding a parallel scalar
 shape — item 101's `WindowSelectItem.arg`, item 102's three date nodes and item
@@ -538,7 +539,7 @@ report becomes a new row here first, then an item.
 | 8 | UNION of high-value + dormant segments | ✅ **104** | 104 |
 | 9 | Median order value per region | ✅ PG / ⛔ MSSQL | `percentile_cont` |
 | 10 | Customers with no orders (anti-join) | ✅ | LEFT JOIN + `is_null` |
-| 11 | Customers spending > overall average | ❌ (two round-trips) | 106 (or compose) |
+| 11 | Customers spending > overall average | ✅ **106** | 106 |
 | 12 | Orders in last 7 days | ✅ **102** | 102 |
 | 13 | Case-insensitive name search | ✅ | `lower(col) like …` |
 | 14 | Rank products with ties (WITH TIES) | ✅ | `top_n fn=rank` |
@@ -562,9 +563,12 @@ and on real Postgres *and* real MSSQL in the differential suite. After item 104:
 the differential suite. After item 105: **14/16** — rows 3 (a 7-day moving average
 over daily order counts) and 6 (cohort retention) went green, covered in
 `tests/integration/test_cte_end_to_end.py` and on real Postgres *and* real MSSQL
-in the differential suite. The remaining ❌/🟡 set is **11** (correlated — item
-106, the last item in this plan) and **15** (a window as an `Expression` operand,
-which is NOT item 106 and has no item yet — see item 101's correction below).
+in the differential suite. After item 106: **15/16** — row 11 (each row compared
+against an aggregate over the whole table, in one statement) went green, covered in
+`tests/integration/test_correlated_end_to_end.py`. The ONLY remaining gap is **15**
+(a window function as an `Expression` operand), which is explicitly NOT item 106 and
+has no item yet — see item 101's correction below. **Phase 5 is complete and this
+plan's item list is finished.**
 
 **What item 104 was worth, stated precisely** — and row 8 needs the same honesty
 row 12 got, including a correction to the first draft of this paragraph. A
@@ -810,8 +814,26 @@ open **before** implementation, not discovered after:
    bypass), and a CTE is NOT clamped to `max_rows` — item 97's precedent, since
    truncating intermediate work is a silent wrong answer. See the
    `docs/PRODUCT_GUIDE.md` Decision Log entry dated 2026-07-27.*
-8. **Correlated-subquery scope model** — the declared, capped correlation-ref rule
-   and how policy/masking is enforced against the outer scope.
+8. ✅ **RECORDED 2026-07-27** — **Correlated-subquery scope model.** *Outcome:
+   **correlation is a DECLARED, capped list (`StructuredQuery.correlate`), never
+   ambient scope.** SQL makes every enclosing column implicitly visible; QueryGate
+   does not, because a ref resolving against a scope the canonical visitor was not
+   looking at is the silent policy-and-mask bypass §1 invariant 2 calls the single
+   most important rule here. Each declared ref is checked against the **enclosing**
+   scope's name map for table/column allow-deny and the mask rule; an UNdeclared
+   outer ref keeps failing exactly as before, so pre-106 behavior is the default and
+   correlation is opt-in per subquery. Reach is **one level**, to the immediately
+   enclosing scope — and the build proved that has to be enforced explicitly: the
+   first implementation resolved against the parent's already-correlated table set,
+   making correlation transitively reach a grandparent. Capped by
+   `max_correlated_refs` (default 2), summed tree-wide. A **scalar** subquery must
+   be an aggregate with no `group_by`, so exactly-one-row holds by construction
+   rather than by `LIMIT 1` (an arbitrary row — a wrong answer with no error) or by
+   letting the backend raise (dialect-dependent). `EXISTS`/`NOT EXISTS` is an
+   operator on `Predicate`, not a third `WhereNode` member — the same union
+   argument items 104 and 105 turned on — and the new ops live on a read-only
+   `ReadCompareOp` so the write AST's shared `CompareOp` is not widened (item 114's
+   defect). See the `docs/PRODUCT_GUIDE.md` Decision Log entry dated 2026-07-27.*
 
 Each phase's PR updates the relevant Decision Log entry and the matching
 `PRODUCT_GUIDE.md` capability section, and refreshes the §5 regression table.

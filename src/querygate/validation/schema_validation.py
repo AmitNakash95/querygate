@@ -443,6 +443,47 @@ def iter_set_op_arms(query: StructuredQuery) -> Iterator[StructuredQuery]:
         yield from query.set_op.arms
 
 
+class Correlation(NamedTuple):
+    """One declared correlated reference (item 106): `ref` is an outer column that
+    `child` may read, and `parent` is the scope it must resolve against.
+
+    Carrying the parent explicitly is the whole point. Correlation is the one place
+    in the engine where a reference does NOT resolve against the scope it is written
+    in, so every consumer has to be handed the right name map rather than reaching
+    for the nearest one — which is precisely the mistake that would silently check a
+    correlated column against the subquery's policy instead of the outer query's.
+    """
+
+    parent: StructuredQuery
+    child: StructuredQuery
+    ref: str
+
+
+def iter_correlations(query: StructuredQuery) -> Iterator[Correlation]:
+    """Every declared correlation in the query tree, paired with the scope it
+    resolves against (item 106).
+
+    THE single authority on the parent/child relationship. `iter_query_scopes`
+    deliberately does not model it — it answers "what are the scopes", flattening
+    the tree, and correlation is the one question whose answer depends on which
+    scope contains which. Rather than give that walker a second meaning, this is a
+    separate walk over the same structure, and everything that needs to enforce a
+    correlated ref (policy allow/deny, the mask rule, schema resolution) consumes
+    it instead of re-deriving parenthood.
+
+    Only descends where a subquery can be attached, so a `correlate` list on a
+    scope that is not a subquery is never yielded — `_validate_correlation` rejects
+    that separately rather than letting it be silently inert.
+    """
+    for _depth, scope in iter_query_scopes(query):
+        for pred in iter_where_and_having_predicates(scope):
+            for nested in (pred.value_subquery, pred.exists_subquery):
+                if nested is None:
+                    continue
+                for ref in nested.correlate:
+                    yield Correlation(parent=scope, child=nested, ref=ref)
+
+
 def declared_cte_names(query: StructuredQuery) -> FrozenSet[str]:
     """Lowercased names of every cte this query declares (item 105).
 
@@ -527,8 +568,13 @@ def iter_query_scopes(
         for arm in query.set_op.arms:
             yield from iter_query_scopes(arm, _depth)
     for pred in iter_where_and_having_predicates(query):
-        if pred.value_subquery is not None:
-            yield from iter_query_scopes(pred.value_subquery, _depth + 1)
+        # Both subquery-bearing predicate shapes (items 97 and 106). Written as one
+        # loop over both fields rather than two walks, so a third subquery-bearing
+        # field cannot be added to one and forgotten in the other — the drift class
+        # items 96 and 111 exist to prevent.
+        for nested in (pred.value_subquery, pred.exists_subquery):
+            if nested is not None:
+                yield from iter_query_scopes(nested, _depth + 1)
 
 
 def iter_column_refs(query: StructuredQuery) -> Iterator[ColumnRef]:
@@ -911,6 +957,11 @@ async def validate_schema(
             scope_tables[id(spec.query)] = body_tables
         cte_tables[spec.name.lower()] = _cte_projection_table(spec, body_tables)
 
+    # A correlated subquery resolves its declared outer refs against the PARENT's
+    # reflected tables, so a parent must be reflected before its children. The scope
+    # walk is depth-first from the root, which is already that order.
+    correlated: Dict[int, Dict[str, sa.Table]] = {}
+
     for depth, scope in iter_query_scopes(query):
         if id(scope) in reflected:
             continue  # a cte body, already validated above in dependency order
@@ -925,11 +976,42 @@ async def validate_schema(
                 "a nested scope (an IN (subquery), or a set-operation arm within one)",
             )
         scoped_tables = await _reflect_and_validate_scope(
-            scope, connection_id, principal, cte_tables
+            scope, connection_id, principal, cte_tables, correlated.get(id(scope))
         )
         reflected[id(scope)] = scoped_tables
         if scope_tables is not None:
             scope_tables[id(scope)] = scoped_tables
+        # Hand each of THIS scope's correlated children the outer tables they
+        # declared, resolved here where the parent's name map is in hand. A ref that
+        # does not resolve in the parent is rejected now, before the child is ever
+        # validated, so the error names the scope the caller got wrong.
+        for pred in iter_where_and_having_predicates(scope):
+            for nested in (pred.value_subquery, pred.exists_subquery):
+                if nested is None or not nested.correlate:
+                    continue
+                # The parent's OWN from/join/cte names — deliberately not
+                # `scoped_tables`, which also holds the tables the PARENT itself
+                # correlated to. Resolving against that made correlation
+                # TRANSITIVE: a child could reach a grandparent's column simply
+                # because its parent had declared it, so "one level" held in name
+                # only. Measured 2026-07-27 by the grandparent case in
+                # `test_correlation_boundary.py`, which this line is what fails.
+                own_names = {n.lower() for n in effective_name_map(scope)}
+                visible: Dict[str, sa.Table] = {}
+                for ref in nested.correlate:
+                    table_name, column_name = parse_column_ref(ref)
+                    outer = scoped_tables.get(table_name)
+                    if outer is not None and table_name.lower() not in own_names:
+                        outer = None  # inherited by the parent, not the parent's own
+                    if outer is None:
+                        raise QueryValidationError(
+                            f"correlate {ref!r} does not name a table of the enclosing "
+                            f"query — a correlated reference reaches exactly one level "
+                            "up, to the query containing this subquery."
+                        )
+                    resolve_column(outer, column_name)
+                    visible[table_name] = outer
+                correlated[id(nested)] = visible
         # Identity, not `depth == 0`: since item 104 a set-operation arm is also a
         # depth-0 scope, so a depth test would hand the compiler the LAST arm's
         # reflected tables as if they were the outer query's.
@@ -1136,11 +1218,18 @@ async def _reflect_and_validate_scope(
     connection_id: str,
     principal: Optional[Principal] = None,
     cte_tables: Optional[Dict[str, sa.Table]] = None,
+    correlated_tables: Optional[Dict[str, sa.Table]] = None,
 ) -> Dict[str, sa.Table]:
     """Reflect + verify one query scope (the outer query, a cte body, or a single
     subquery), independent of any other scope — its column refs resolve only
     against its own from/join tables, plus any cte declared for the whole statement
-    (which is a name it may READ, never a scope it can reach into)."""
+    (which is a name it may READ, never a scope it can reach into).
+
+    ``correlated_tables`` (item 106) are the enclosing scope's tables this subquery
+    DECLARED it may read, already resolved by the caller against the parent's name
+    map. They are added to the resolvable set here and nowhere else, so a scope that
+    declared nothing keeps the pre-106 behavior exactly: an outer reference is an
+    undeclared table, and undeclared tables are rejected below."""
     table_connection = resolve_query_table_connections(
         query, connection_id, principal=principal, cte_names=set(cte_tables or {})
     )
@@ -1153,13 +1242,14 @@ async def _reflect_and_validate_scope(
     # `iter_column_refs`. (extra_on refs add no new tables, being the same pair
     # as `on`, but flow through the visitor harmlessly.)
     needed: Set[str] = {query.from_alias or query.from_table}
+    needed |= set(correlated_tables or {})
     for join in query.joins:
         needed.add(join.alias or join.table)
     for column_ref in iter_column_refs(query):
         t, _ = parse_column_ref(column_ref.ref)
         needed.add(t)
 
-    declared_tables = set(name_to_physical)
+    declared_tables = set(name_to_physical) | {n.lower() for n in (correlated_tables or {})}
     undeclared_tables = sorted(name for name in needed if name.lower() not in declared_tables)
     if undeclared_tables:
         raise QueryValidationError(
@@ -1170,6 +1260,13 @@ async def _reflect_and_validate_scope(
     tables: Dict[str, sa.Table] = {}
     physical_tables: Dict[str, sa.Table] = {}
     for name in needed:
+        # A declared correlated name binds to the PARENT's own table object, not a
+        # fresh reflection of the same table. Identity is what makes the compiled
+        # subquery correlate instead of silently re-scanning an independent copy.
+        outer = (correlated_tables or {}).get(name)
+        if outer is not None:
+            tables[name] = outer
+            continue
         physical_name = name_to_physical[name.lower()]
         physical_key = physical_name.lower()
         # A cte name resolves to the block's projected shape, never to reflection —

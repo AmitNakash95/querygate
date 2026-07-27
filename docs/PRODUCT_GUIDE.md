@@ -882,6 +882,61 @@ still equal the direct total), and a 7-day moving average over daily order count
 all execute against a live Postgres *and* a live SQL Server in
 `tests/integration/test_cross_dialect_differential.py`.
 
+### Asking about rows that relate to other rows: EXISTS and scalar subqueries
+
+Two shapes shipped with item 106, and between them they close the last expressible
+gap in the read engine.
+
+**`EXISTS` / `NOT EXISTS`** tests whether a related row exists, without joining:
+
+```json
+{"from": "customers", "select": ["customers.name"],
+ "where": {"op": "not_exists",
+           "exists_subquery": {"from": "orders", "select": ["orders.id"],
+                               "correlate": ["customers.id"],
+                               "where": {"col": "orders.customer_id", "op": "eq",
+                                         "value_col": "customers.id"}}}}
+```
+
+Note `correlate`. **QueryGate does not give a subquery ambient access to the
+enclosing query's columns the way SQL does.** Every outer column a subquery may read
+must be named in its own `correlate` list, and each named column is then checked
+against the *enclosing* query's policy — table allow-deny, column allow-deny, and the
+masked-column rule. An outer column that is *not* declared is rejected, exactly as it
+was before this feature existed. Correlation is therefore opt-in per subquery, and
+the safe default is unchanged. It reaches exactly one level, to the immediately
+enclosing query. `Policy.max_correlated_refs` (default 2) caps how many columns may
+be pulled in; `0` disables correlation entirely.
+
+**A scalar subquery** compares a value against an aggregate computed by another
+query — "orders above the overall average", in one statement instead of two:
+
+```json
+{"from": "orders", "select": ["orders.id"],
+ "where": {"col": "orders.total_amount", "op": "gt",
+           "value_subquery": {"from": "orders",
+                              "select": [{"fn": "avg", "col": "orders.total_amount",
+                                          "as": "a"}]}}}
+```
+
+A scalar subquery **must be an aggregate with no `group_by`**. That is not a
+restriction for its own sake: a comparison needs exactly one row, and this shape
+guarantees it before the query reaches the database, on every backend. The
+alternative — quietly taking the first row of many — would return a wrong answer
+with no error, which this project treats as worse than a refusal. For a multi-row
+value set, use `in`/`not_in`, which is unchanged.
+
+Scalar subqueries also work in `HAVING` (comparing one aggregate to another).
+`EXISTS` does not: it asks a per-row question, which has no meaning after grouping.
+Neither is permitted in a join condition or a `CASE` condition, where it would reach
+the compiler without having been checked as a scope of its own.
+
+**Cost, stated plainly:** a correlated subquery is re-evaluated per candidate outer
+row. `max_correlated_refs` bounds the *surface* — how many outer columns a nested
+scope can see, which is the part that must not grow silently — not the work. What
+bounds the work is `timeout_seconds`, the concurrency limiter, and the (opt-in)
+query-cost gate.
+
 **What bounds a write's `WHERE`.** Two things beyond the write policy itself, both
 easy to miss because they live on the *read* side of `Policy`: the filter's columns
 are checked against read allow/deny **and** the masked-column rule (a masked column
@@ -3234,6 +3289,62 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-07-27 — correlation is DECLARED and capped, never implicit; a scalar
+  subquery must be a single-group aggregate; and `EXISTS` rides on `Predicate`
+  rather than becoming a third `WhereNode` member (TODO.md item 106).** This is
+  the plan's §8 entry 8 and the last item of the flagship engine pillar. It is
+  also the only item that deliberately *removes* an invariant the rest of the
+  engine was built on, so each part of the model is stated with what it buys.
+
+  **1. Correlation is a declared list, not ambient scope.** `StructuredQuery`
+  gains `correlate: ["Customers.Id", …]` — the outer columns a nested subquery is
+  permitted to see. SQL makes every enclosing column implicitly visible; QueryGate
+  does not, because the enforcement chokepoint is the canonical visitor
+  (`iter_column_refs`), and a ref that resolves against a scope the visitor was
+  not looking at is exactly the silent policy-and-mask bypass the plan's invariant
+  2 names as the single most important rule in the document. With a declaration,
+  every correlated ref has a **known position** the visitor yields, so each one is
+  checked against the *enclosing* scope's name map for table allow/deny, column
+  allow/deny and the masked-column rule before it is usable. Undeclared outer refs
+  keep failing exactly as they do today — `_reflect_and_validate_scope` rejects an
+  undeclared table — so the pre-106 behavior is the default and correlation is
+  opt-in per subquery. Capped by `Policy.max_correlated_refs`, summed tree-wide.
+
+  **Correlation reaches one level, to the immediately enclosing scope.** Not "any
+  ancestor": a scope stack is a second resolution order to keep correct forever,
+  and every query shape this item exists to serve (`EXISTS`, per-row aggregate,
+  anti-join) correlates to its parent. Deeper correlation is expressible by
+  restructuring, and admitting it later is additive.
+
+  **2. A scalar subquery must be an aggregate with no `group_by`.** A subquery
+  feeding a scalar comparison (`amount > (SELECT AVG(…))`) must return exactly one
+  row, and the three ways to get that are not equal. Injecting `LIMIT 1` picks an
+  arbitrary row and returns a *wrong answer with no error* — the failure class
+  items 102/117 established this project treats as worse than a rejection. Letting
+  the database raise leaves the contract dialect-dependent and post-execution.
+  Requiring the single-group aggregate shape makes "exactly one row" true **by
+  construction, pre-database, identically on every backend** — and it costs
+  nothing real, because that shape is what the use case is: the regression bar's
+  row 11 ("customers spending above the overall average") is an `AVG` over no
+  grouping, and a correlated per-row `COUNT(*)` is too. A caller needing a
+  non-aggregate single value uses `in` with a one-row filter, or two round-trips.
+
+  **3. `EXISTS`/`NOT EXISTS` is an operator on `Predicate`, not a new `WhereNode`
+  member.** A third union member would force every `isinstance(node, Predicate)`
+  site — `iter_where_predicates`, `_compile_where`, `predicate_column_refs`,
+  `where_depth`, and both write validators — to learn a new shape, whose failure
+  mode is a consumer silently handling only the members it knows. That is the same
+  argument items 104 and 105 turned on, now for the third time, so it is settled
+  precedent rather than a fresh judgement. `EXISTS` instead behaves like the
+  `is_null` operators that already take no value: the op carries the meaning and
+  `exists_subquery` carries the operand.
+
+  **The new ops go on a READ-only operator type.** `CompareOp` is shared with the
+  write AST (`write_ast/models.py`), so widening it would advertise `exists` in
+  the write tool's MCP schema while the write path rejects it — precisely the
+  defect item 114 was raised to fix. The read `Predicate` takes a superset type;
+  the write path keeps the narrow one.
 
 - **2026-07-27 — a derived table is spelled as a named `WITH` block (`ctes`), not
   as a subquery inlined into `from`/`JoinSpec.table` (TODO.md item 105, which
