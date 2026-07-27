@@ -8,7 +8,7 @@ known to exist and be policy-permitted.
 from __future__ import annotations
 
 import operator
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, get_args
+from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple, get_args
 
 import sqlalchemy as sa
 
@@ -25,6 +25,7 @@ from querygate.query_ast.models import (
     CastExpr,
     ColArg,
     ColumnExpr,
+    CteSpec,
     DateAddExpr,
     DateBucketSelectItem,
     Expression,
@@ -316,6 +317,9 @@ class _WhereCtx(NamedTuple):
     dialect: str
     principal: Optional[Principal]
     subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]]
+    # Item 105 — carried so an IN (subquery) whose own FROM names a cte binds to
+    # the compiled block, exactly like any other scope.
+    cte_objects: Optional[Dict[str, Any]] = None
 
 
 def _compile_in_subquery(pred: Predicate, ctx: Optional["_WhereCtx"]) -> sa.Select:
@@ -338,6 +342,7 @@ def _compile_in_subquery(pred: Predicate, ctx: Optional["_WhereCtx"]) -> sa.Sele
         dialect=ctx.dialect,
         principal=ctx.principal,
         subquery_tables=ctx.subquery_tables,
+        cte_objects=ctx.cte_objects,
     )
     return stmt.limit(None)
 
@@ -645,12 +650,35 @@ def _equality_bound_columns(join: Any) -> Optional[set]:
     return bound
 
 
-def _unique_column_sets(table: sa.Table) -> List[set]:
-    """Every set of column names that is unique in `table`, lowercased —
+def _unique_column_sets(source: Any) -> List[set]:
+    """Every set of column names that is unique in `source`, lowercased —
     its primary key, plus every unique constraint and unique index reflected
     from the database (backends surface these differently: SQLite reports a
     `UniqueConstraint`, Postgres typically a unique `Index`, so both are read).
+
+    **Only a `Table` carries that metadata**, and everything else must be handled
+    rather than assumed away — this used to take `sa.Table` and reach straight for
+    `.primary_key.columns`, which raises `AttributeError` on every other FROM
+    element, because `Alias`/`Subquery`/`CTE` expose `.primary_key` as a bare
+    `ColumnSet` with no `.columns`. That was a live crash on a shipped feature
+    (TODO.md item 122): item 118's k-anonymity fan-out check runs on the joined
+    table, so `min_group_size` plus ANY join carrying an `alias` raised instead of
+    deciding — a 500 where a policy answer belonged, and no cte required to reach
+    it. Measured 2026-07-27 while wiring item 105, which joins onto a `CTE` and hit
+    the same line from the new direction.
+
+    An alias of a table keeps that table's uniqueness (same rows, new name), so it
+    looks through to the element. A cte or a subquery has **no declared
+    uniqueness**, so it returns empty — which makes `_join_can_fan_out` answer
+    "yes, this can fan out", the fail-closed direction the k-anonymity floor
+    requires: a computed stage may legitimately hold several rows per join key, and
+    assuming otherwise would silently reopen exactly the leak item 118 closed.
     """
+    table = source
+    while isinstance(table, sa.Alias):
+        table = table.element
+    if not isinstance(table, sa.Table):
+        return []
     sets: List[set] = []
     pk = {c.name.lower() for c in table.primary_key.columns}
     if pk:
@@ -686,6 +714,7 @@ def _apply_mandatory_row_filters(
     tables: Dict[str, sa.Table],
     name_to_physical: Dict[str, str],
     principal: Optional[Principal],
+    cte_names: FrozenSet[str] = frozenset(),
 ) -> sa.Select:
     """AND in every policy-declared mandatory filter whose table is actually
     part of this query's graph — silently skipped for tables outside the
@@ -702,12 +731,21 @@ def _apply_mandatory_row_filters(
     `PolicyViolationError` if `from_claim` is set but the principal lacks
     that claim — a caller with no matching claim can't fall through to an
     unfiltered query).
+
+    `cte_names` (item 105) are skipped: a filter names a TABLE, and a block that
+    happens to share that name is a different thing entirely — applying the filter
+    to its output would filter the wrong rows, or raise if the block projects no
+    column by that name. Policy validation already refuses a cte named after a
+    filtered table, so this is defence in depth on the compile side rather than the
+    only guard. The filter is NOT lost: the block's body is compiled through this
+    same function against its own real tables, which is where those rows are read.
     """
     for row_filter in policy.mandatory_row_filters:
         matches = [
             key
             for key in tables
             if name_to_physical.get(key.lower(), key).lower() == row_filter.table.lower()
+            and name_to_physical.get(key.lower(), key).lower() not in cte_names
         ]
         if not matches:
             continue
@@ -733,6 +771,16 @@ def applied_column_masks(query: StructuredQuery, policy: Policy) -> List[str]:
     actually did. A nested `value_subquery` deliberately does NOT contribute: its
     columns feed an `IN` comparison rather than the response, and a masked column
     is rejected there outright.
+
+    A cte body (item 105) does not contribute either, for that same second reason
+    and with the same rejection behind it: `_validate_cte_constraints` refuses a
+    masked column as a block's projection, so no mask can originate inside one. The
+    outer query's `daily.total` ref then resolves to a cte OUTPUT name, which has no
+    physical (table, column) pair for `policy.column_mask` to match — correctly,
+    since the block it came from could not have carried a masked value. That makes
+    the empty contribution here a consequence of the validation rule rather than an
+    omission; if that rule were ever relaxed, this function would have to walk cte
+    bodies, and `test_cte.py` pins the pairing.
 
     A later arm's mask is reported under **arm 1's** output name at the same
     position, because that is the name the response actually carries: a compound
@@ -859,6 +907,7 @@ def compile_structured_query(
     dialect: str = DatabaseDialect.POSTGRESQL,
     principal: Optional[Principal] = None,
     subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]] = None,
+    cte_objects: Optional[Dict[str, Any]] = None,
 ) -> Tuple[sa.Select, int]:
     """Compile AST + reflected tables + policy into a Select.
 
@@ -866,11 +915,28 @@ def compile_structured_query(
     each nested value_subquery node's id — and each set-operation arm's — to its own
     reflected tables, so an `IN (subquery)` in the WHERE clause and every set-op arm
     compile through this same path recursively.
+
+    `cte_objects` (item 105) maps each lowercased cte name to the compiled `WITH`
+    block, so a scope referencing one by name binds to the real construct rather
+    than to the typeless placeholder schema validation resolved its columns
+    against. It is built here on the way in and threaded down, never rebuilt.
     """
+    if cte_objects is None and query.ctes:
+        cte_objects = {}
+        for spec in query.ctes:
+            # Compiled in declaration order, which the no-forward-reference rule
+            # makes dependency order, so a block reading an earlier block finds it
+            # already in `cte_objects` below.
+            cte_objects[spec.name.lower()] = _compile_cte(
+                spec, policy, dialect, principal, subquery_tables, cte_objects
+            )
+
     if query.set_op is not None:
-        return _compile_set_operation(query, tables, policy, dialect, principal, subquery_tables)
+        return _compile_set_operation(
+            query, tables, policy, dialect, principal, subquery_tables, cte_objects
+        )
     stmt, alias_map, is_aggregate = _compile_scope_body(
-        query, tables, policy, dialect, principal, subquery_tables
+        query, tables, policy, dialect, principal, subquery_tables, cte_objects
     )
 
     allow_table_fallback = True
@@ -889,6 +955,79 @@ def compile_structured_query(
         stmt = stmt.offset(query.offset)
 
     return stmt, limit
+
+
+def _compile_cte(
+    spec: CteSpec,
+    policy: Policy,
+    dialect: str,
+    principal: Optional[Principal],
+    subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]],
+    cte_objects: Dict[str, Any],
+) -> Any:
+    """Compile one named `WITH` block (item 105) through the SAME
+    `compile_structured_query` path any query takes — so the block inherits its
+    mandatory row filters, its column masks, its `min_group_size` floor and item
+    118's fan-out refusal. There is deliberately no reduced compile path for a cte,
+    for the reason item 104 gave for arms: a second path is somewhere a filter can
+    be forgotten.
+
+    **The row cap is stripped when the caller set no `limit`, and that is a
+    correctness decision rather than a relaxation.** `clamp_limit` would otherwise
+    apply `default_limit`/`max_limit` to a stage whose rows are *input* to a join
+    or an aggregate, silently truncating the population a total is computed over —
+    a wrong answer, which items 102 and 117 established this project treats as
+    worse than a rejection. Item 97's `_compile_in_subquery` strips it for the same
+    reason (an incomplete `IN` list is a wrong membership test). An EXPLICIT limit
+    is kept and stays clamped, because that is the caller asking for "the top 100",
+    not a guardrail. What bounds a block instead: `timeout_seconds`, the tree-wide
+    caps every scope shares, and `max_cte_count`.
+    """
+    body_tables = (subquery_tables or {}).get(id(spec.query))
+    if body_tables is None:
+        # Same fail-closed posture as `_arm_tables`: compiling a block against
+        # another scope's tables would be a silent cross-scope resolution.
+        raise QueryValidationError(f"cte {spec.name!r} was not schema-validated")
+    stmt, _limit = compile_structured_query(
+        spec.query,
+        body_tables,
+        policy,
+        dialect=dialect,
+        principal=principal,
+        subquery_tables=subquery_tables,
+        cte_objects=cte_objects,
+    )
+    if spec.query.limit is None:
+        stmt = stmt.limit(None)
+    return stmt.cte(name=spec.name)
+
+
+def _resolve_cte_references(
+    query: StructuredQuery,
+    tables: Dict[str, sa.Table],
+    cte_objects: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Swap each cte reference's validation placeholder for the compiled `WITH`
+    block (item 105).
+
+    Schema validation resolves `daily.n` against a typeless `sa.Table` standing in
+    for the block's projection, which is the right shape for answering "does this
+    block project that name?" but would render as a reference to a table called
+    `daily` that does not exist. Substituting here — once, at the entry to the
+    scope body — means every downstream site (`_table_by_name`, `_column`, the join
+    loop, mandatory filters) keeps working on whatever it is handed, with no
+    "is this a cte?" branch of its own.
+    """
+    if not cte_objects:
+        return tables
+    name_to_physical = effective_name_map(query)
+    resolved: Dict[str, Any] = dict(tables)
+    for name in tables:
+        source_name = name_to_physical.get(name.lower(), name).lower()
+        cte = cte_objects.get(source_name)
+        if cte is not None:
+            resolved[name] = cte if name.lower() == source_name else cte.alias(name)
+    return resolved
 
 
 def _arm_tables(
@@ -911,6 +1050,7 @@ def _compile_set_operation(
     dialect: str,
     principal: Optional[Principal],
     subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]],
+    cte_objects: Optional[Dict[str, Any]] = None,
 ) -> Tuple[sa.Select, int]:
     """Compile one item-104 set operation: every arm through the SAME
     `_compile_scope_body` any single query uses, combined by the dialect adapter,
@@ -951,6 +1091,7 @@ def _compile_set_operation(
             dialect,
             principal,
             subquery_tables,
+            cte_objects,
         )
         arm_aggregates.append(arm_is_aggregate)
         arm_statements.append(arm_stmt)
@@ -1000,6 +1141,7 @@ def _compile_scope_body(
     dialect: str,
     principal: Optional[Principal],
     subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]],
+    cte_objects: Optional[Dict[str, Any]] = None,
 ) -> Tuple[sa.Select, Dict[str, Any], bool]:
     """Everything a single SELECT is made of — projection, FROM, joins, mandatory
     row filters, WHERE, GROUP BY, HAVING and the k-anonymity floor — with no
@@ -1011,8 +1153,15 @@ def _compile_scope_body(
     whether it aggregates.
     """
     where_ctx = _WhereCtx(
-        policy=policy, dialect=dialect, principal=principal, subquery_tables=subquery_tables
+        policy=policy,
+        dialect=dialect,
+        principal=principal,
+        subquery_tables=subquery_tables,
+        cte_objects=cte_objects,
     )
+    # One substitution point for the whole scope (item 105) — every use of
+    # `tables` below is a cte reference or a real table without needing to know.
+    tables = _resolve_cte_references(query, tables, cte_objects)
     name_to_physical = effective_name_map(query)
     select_cols, alias_map = _build_select_columns(query, tables, dialect, policy, name_to_physical)
     base = _table_by_name(tables, query.from_alias or query.from_table)
@@ -1049,7 +1198,9 @@ def _compile_scope_body(
             condition = sa.and_(*conditions) if len(conditions) > 1 else conditions[0]
         stmt = stmt.join(right, condition, isouter=join.type == "left", full=join.type == "full")
 
-    stmt = _apply_mandatory_row_filters(stmt, policy, tables, name_to_physical, principal)
+    stmt = _apply_mandatory_row_filters(
+        stmt, policy, tables, name_to_physical, principal, frozenset(cte_objects or {})
+    )
 
     if query.where is not None:
         stmt = stmt.where(_compile_where(query.where, tables, {}, dialect, ctx=where_ctx))

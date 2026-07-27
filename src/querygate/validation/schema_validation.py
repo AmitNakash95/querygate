@@ -10,7 +10,7 @@ import datetime as dt
 import decimal
 
 import enum
-from typing import Callable, Dict, Iterator, NamedTuple, Optional, Set, Tuple
+from typing import Callable, Dict, FrozenSet, Iterator, NamedTuple, Optional, Set, Tuple
 
 import sqlalchemy as sa
 
@@ -41,6 +41,7 @@ from querygate.query_ast.models import (
     PercentileContSelectItem,
     Predicate,
     ScalarFunctionSelectItem,
+    CteSpec,
     SelectItem,
     StringAggSelectItem,
     StructuredQuery,
@@ -442,11 +443,60 @@ def iter_set_op_arms(query: StructuredQuery) -> Iterator[StructuredQuery]:
         yield from query.set_op.arms
 
 
+def declared_cte_names(query: StructuredQuery) -> FrozenSet[str]:
+    """Lowercased names of every cte this query declares (item 105).
+
+    Only the ROOT query may declare ctes — `_validate_cte_constraints` enforces
+    that — so this is the whole namespace for the query tree, and the callers that
+    need to tell "this from/join name is a cte" from "this is a physical table"
+    take this one frozenset rather than re-deriving it per scope.
+    """
+    return frozenset(spec.name.lower() for spec in query.ctes)
+
+
+def cte_source_names(query: StructuredQuery) -> Set[str]:
+    """Every lowercased from/join *source* name used anywhere in this query's own
+    scope tree — i.e. the names that could be resolving to a cte.
+
+    Deliberately the `from`/`table` name and NOT the alias: `{"from": "daily",
+    "from_alias": "d"}` reads the block called `daily` and calls it `d` here, so
+    `daily` is the reference and `d` is local naming.
+    """
+    names: Set[str] = set()
+    for _depth, scope in iter_query_scopes(query):
+        names.add(scope.from_table.lower())
+        names.update(join.table.lower() for join in scope.joins)
+    return names
+
+
+def cte_chain_depths(query: StructuredQuery) -> Dict[str, int]:
+    """How deep each cte sits in the *reference chain*, by lowercased name — 1 for
+    a block reading only physical tables, 2 for one reading a 1, and so on.
+
+    This is what `max_subquery_depth` is charged for a cte, and it makes the
+    default cap of 1 deny a cte-reading-a-cte until an operator raises it. Chained
+    stages are real nesting: the database cannot start stage 2 until stage 1 has
+    produced rows, exactly like an `IN (subquery)`.
+
+    Declaration order is relied upon as topological order, which holds ONLY because
+    `_validate_cte_constraints` rejects a forward reference. If that check were
+    removed, a forward-referenced block would not yet be in `depths` and would be
+    charged as though it read a physical table — so the two belong together, and
+    the mutation test on the forward-reference rule covers this line too.
+    """
+    depths: Dict[str, int] = {}
+    for spec in query.ctes:
+        referenced = cte_source_names(spec.query) & set(depths)
+        depths[spec.name.lower()] = 1 + max((depths[name] for name in referenced), default=0)
+    return depths
+
+
 def iter_query_scopes(
     query: StructuredQuery, _depth: int = 0
 ) -> Iterator[Tuple[int, StructuredQuery]]:
-    """Yield `(depth, query)` for the outer query (depth 0), every set-operation
-    arm (item 104), and every nested `value_subquery` (item 97), depth-first. Each
+    """Yield `(depth, query)` for the outer query (depth 0), every cte body (item
+    105), every set-operation arm (item 104), and every nested `value_subquery`
+    (item 97), depth-first. Each
     yielded query is an INDEPENDENT validation scope: its column references resolve
     against its own from/join tables (never an outer scope's), which is exactly what
     makes an `IN (subquery)` structurally uncorrelated. Policy and schema validation
@@ -461,8 +511,18 @@ def iter_query_scopes(
     `IN (subquery)` scope by the `depth > 0` rules in `validate_schema` and
     `_validate_subquery_constraints` — while an arm of a set operation that sits
     INSIDE a subquery correctly inherits that subquery's depth and does get them.
+
+    A cte body IS charged depth, unlike an arm: it is a stage the database must
+    finish before the query reading it can start, which is the same cost shape as
+    an `IN (subquery)` and not the sibling-SELECT shape of an arm. Its depth is its
+    position in the reference chain (`cte_chain_depths`), so two INDEPENDENT ctes
+    both cost 1 rather than the second being punished for being written second.
     """
     yield (_depth, query)
+    if query.ctes:
+        depths = cte_chain_depths(query)
+        for spec in query.ctes:
+            yield from iter_query_scopes(spec.query, _depth + depths[spec.name.lower()])
     if query.set_op is not None:
         for arm in query.set_op.arms:
             yield from iter_query_scopes(arm, _depth)
@@ -588,28 +648,60 @@ def _scalar_function_alias(item: ScalarFunctionSelectItem) -> str:
     return f"{item.fn}_result"
 
 
+def select_item_output_name(item: SelectItem, tables: Dict[str, sa.Table]) -> str:
+    """THE name one select item produces in the result — the single authority on
+    select-item naming (item 105).
+
+    It existed in two hand-maintained copies before this: the helpers above, and
+    the `alias = item.alias or f"..."` lines inlined in the compiler's
+    `_build_select_columns`. That was survivable while the only consumers were
+    `top_n`'s rank targets and GROUP BY aliases, because a disagreement between
+    them merely rejected a valid query. A cte makes it load-bearing: the validator
+    resolves the OUTER query's `cte.column` refs against the names it predicts this
+    block will project, while the compiler labels the real columns — so a
+    divergence is either a valid query rejected or, worse, a ref validated against
+    a name the compiled SQL does not have. One function removes the possibility;
+    `test_cte.py` additionally asserts these names equal the compiled
+    `CTE.c.keys()` for every select-item type, because agreeing with itself is not
+    the same as agreeing with SQLAlchemy.
+
+    A bare "Table.Column" resolves through the reflected table so the result
+    carries the column's REAL casing, which is what the database returns.
+    """
+    if isinstance(item, str):
+        table_name, column_name = parse_column_ref(item)
+        return resolve_column(tables[table_name], column_name).name
+    if isinstance(item, AggregateSelectItem):
+        return _aggregate_alias(item)
+    if isinstance(item, DateBucketSelectItem):
+        return _date_bucket_alias(item, tables)
+    if isinstance(item, StringAggSelectItem):
+        return _string_agg_alias(item)
+    if isinstance(item, ArrayAggSelectItem):
+        return _array_agg_alias(item)
+    if isinstance(item, PercentileContSelectItem):
+        return _percentile_cont_alias(item)
+    if isinstance(item, ScalarFunctionSelectItem):
+        return _scalar_function_alias(item)
+    if isinstance(item, (CaseSelectItem, ExpressionSelectItem, WindowSelectItem)):
+        return item.alias
+    raise QueryValidationError(
+        f"Unsupported select item {type(item).__name__} — it was added to the "
+        "SelectItem union without being given an output name here (item 105)"
+    )
+
+
 def _select_aliases(query: StructuredQuery, tables: Dict[str, sa.Table]) -> Set[str]:
     """Select-item output names `top_n` may rank by. A `WindowSelectItem`'s alias
     is deliberately absent (item 101): `top_n`'s rank is computed in the same
     SELECT, so ranking by a window's output would nest one window inside another's
-    OVER clause, which no dialect allows."""
-    aliases: Set[str] = set()
-    for item in query.select:
-        if isinstance(item, AggregateSelectItem):
-            aliases.add(_aggregate_alias(item))
-        elif isinstance(item, DateBucketSelectItem):
-            aliases.add(_date_bucket_alias(item, tables))
-        elif isinstance(item, StringAggSelectItem):
-            aliases.add(_string_agg_alias(item))
-        elif isinstance(item, ArrayAggSelectItem):
-            aliases.add(_array_agg_alias(item))
-        elif isinstance(item, PercentileContSelectItem):
-            aliases.add(_percentile_cont_alias(item))
-        elif isinstance(item, ScalarFunctionSelectItem):
-            aliases.add(_scalar_function_alias(item))
-        elif isinstance(item, (CaseSelectItem, ExpressionSelectItem)):
-            aliases.add(item.alias)
-    return aliases
+    OVER clause, which no dialect allows. A bare-string item is absent for a
+    different reason — `top_n` resolves those as real table columns, not aliases."""
+    return {
+        select_item_output_name(item, tables)
+        for item in query.select
+        if not isinstance(item, (str, WindowSelectItem))
+    }
 
 
 def groupable_select_aliases(query: StructuredQuery, tables: Dict[str, sa.Table]) -> Set[str]:
@@ -661,6 +753,7 @@ def resolve_query_table_connections(
     connection_id: str,
     principal: Optional[Principal] = None,
     connection_resolver: Optional[ConnectionResolver] = None,
+    cte_names: Optional[Set[str]] = None,
 ) -> Dict[str, str]:
     """Resolve which connection each table belongs to, rejecting any join
     whose connection isn't in the same policy join_group as the primary.
@@ -668,6 +761,12 @@ def resolve_query_table_connections(
     ``connection_resolver`` lets the config simulator run this exact
     production visibility/join-group rule against isolated candidate stores.
     Normal query execution leaves it unset and therefore uses the live stores.
+
+    ``cte_names`` (item 105) are the statement's cte names, lowercased. A cte is
+    computed by this statement rather than living in a database, so naming one as a
+    cross-connection join target is rejected rather than quietly resolved against
+    the primary connection — silently ignoring the field would tell an operator
+    reading the query that a second connection was involved when it was not.
     """
     resolver = connection_resolver or (
         lambda target, actor: resolve_visible_connection(target, principal=actor)
@@ -675,9 +774,15 @@ def resolve_query_table_connections(
     primary, policy = resolver(connection_id, principal)
     primary_group = policy.join_group or primary.effective_join_group()
 
+    known_ctes = cte_names or set()
     table_connection: Dict[str, str] = {(query.from_alias or query.from_table): connection_id}
     for join in query.joins:
         join_connection_id = join.connection or connection_id
+        if join.connection is not None and join.table.lower() in known_ctes:
+            raise QueryValidationError(
+                f"join to cte {join.table!r} may not set `connection` — a cte is computed "
+                "by this query, not read from another connection."
+            )
         if join_connection_id != connection_id:
             other, other_policy = resolver(join_connection_id, principal)
             other_group = other_policy.join_group or other.effective_join_group()
@@ -788,7 +893,26 @@ async def validate_schema(
     # cross-arm type check below compares scopes against EACH OTHER, so it needs
     # every scope's reflection regardless of whether a compiler wanted them.
     reflected: Dict[int, Dict[str, sa.Table]] = {}
+
+    # Each cte becomes a table-like value keyed by the names it PROJECTS, so every
+    # existing column-resolution path (`tables[name]`, `resolve_column`,
+    # `_validate_select_columns`, …) works on a cte reference unchanged instead of
+    # growing a parallel "is this a cte?" branch at each site. Built in declaration
+    # order, which `_validate_cte_constraints`'s no-forward-reference rule makes
+    # dependency order, so a block reading an earlier block finds it already here.
+    cte_tables: Dict[str, sa.Table] = {}
+    for spec in query.ctes:
+        body_tables = await _reflect_and_validate_scope(
+            spec.query, connection_id, principal, cte_tables
+        )
+        reflected[id(spec.query)] = body_tables
+        if scope_tables is not None:
+            scope_tables[id(spec.query)] = body_tables
+        cte_tables[spec.name.lower()] = _cte_projection_table(spec, body_tables)
+
     for depth, scope in iter_query_scopes(query):
+        if id(scope) in reflected:
+            continue  # a cte body, already validated above in dependency order
         if depth > 0:
             for join in scope.joins:
                 if join.connection is not None and join.connection != connection_id:
@@ -797,7 +921,9 @@ async def validate_schema(
                         f"another connection ({join.connection!r}) — run a separate query per "
                         "connection and combine results instead (item 97)."
                     )
-        scoped_tables = await _reflect_and_validate_scope(scope, connection_id, principal)
+        scoped_tables = await _reflect_and_validate_scope(
+            scope, connection_id, principal, cte_tables
+        )
         reflected[id(scope)] = scoped_tables
         if scope_tables is not None:
             scope_tables[id(scope)] = scoped_tables
@@ -943,13 +1069,53 @@ def _validate_set_op_arm_types(
                     )
 
 
+def _cte_projection_table(spec: CteSpec, body_tables: Dict[str, sa.Table]) -> sa.Table:
+    """The table-like shape a cte presents to whatever reads it: one column per
+    select item, named by `select_item_output_name` (item 105).
+
+    Typeless on purpose. This exists to answer "does `daily.n` name something this
+    block projects?" pre-database, and a wrong *type* guess here would be worse
+    than none — the set-operation arm check (`select_item_type_family`) already
+    owns the narrow, deliberately-incomplete type question, and reproducing it
+    would give a second, disagreeing answer.
+
+    **Duplicate output names are rejected rather than disambiguated**, and that is
+    a correctness rule, not a limitation. A block's columns are referred to BY NAME
+    from the outer query, so `select: ["orders.id", "customers.id"]` leaves
+    `block.id` with no defined meaning. SQLAlchemy would quietly rename the second
+    to `id_1`, which is the *exact* failure item 119 records on `top_n`: the caller
+    asked for two columns, one silently becomes unreachable under the name they
+    used. Predicting that renaming instead would also put this function back in the
+    business of guessing SQLAlchemy's internal naming, which is what having a single
+    output-name authority exists to avoid. The caller aliases one of them with `as`
+    — a primitive already exposed — and the meaning becomes explicit.
+    """
+    names = [select_item_output_name(item, body_tables) for item in spec.query.select]
+    seen: Set[str] = set()
+    for name in names:
+        if name.lower() in seen:
+            raise QueryValidationError(
+                f"cte {spec.name!r} projects more than one column named {name!r}, so "
+                f"{spec.name}.{name} would be ambiguous — give one of them a distinct "
+                "`as` alias."
+            )
+        seen.add(name.lower())
+    return sa.Table(spec.name, sa.MetaData(), *[sa.Column(name) for name in names])
+
+
 async def _reflect_and_validate_scope(
-    query: StructuredQuery, connection_id: str, principal: Optional[Principal] = None
+    query: StructuredQuery,
+    connection_id: str,
+    principal: Optional[Principal] = None,
+    cte_tables: Optional[Dict[str, sa.Table]] = None,
 ) -> Dict[str, sa.Table]:
-    """Reflect + verify one query scope (the outer query, or a single subquery),
-    independent of any other scope — its column refs resolve only against its own
-    from/join tables."""
-    table_connection = resolve_query_table_connections(query, connection_id, principal=principal)
+    """Reflect + verify one query scope (the outer query, a cte body, or a single
+    subquery), independent of any other scope — its column refs resolve only
+    against its own from/join tables, plus any cte declared for the whole statement
+    (which is a name it may READ, never a scope it can reach into)."""
+    table_connection = resolve_query_table_connections(
+        query, connection_id, principal=principal, cte_names=set(cte_tables or {})
+    )
     _validate_join_graph(query)
     name_to_physical = effective_name_map(query)
 
@@ -978,14 +1144,18 @@ async def _reflect_and_validate_scope(
     for name in needed:
         physical_name = name_to_physical[name.lower()]
         physical_key = physical_name.lower()
-        if physical_key not in physical_tables:
-            physical_tables[physical_key] = await _load_table(
-                connection_id, physical_name, table_connection.get(name, connection_id)
-            )
-        physical_table = physical_tables[physical_key]
-        tables[name] = (
-            physical_table if name.lower() == physical_key else physical_table.alias(name)
-        )
+        # A cte name resolves to the block's projected shape, never to reflection —
+        # `_load_table` would (correctly) fail to find a table by that name. This is
+        # also the only place a cte reference is turned into something columns
+        # resolve against, so a scope that was handed no `cte_tables` cannot see one.
+        source = (cte_tables or {}).get(physical_key)
+        if source is None:
+            if physical_key not in physical_tables:
+                physical_tables[physical_key] = await _load_table(
+                    connection_id, physical_name, table_connection.get(name, connection_id)
+                )
+            source = physical_tables[physical_key]
+        tables[name] = source if name.lower() == physical_key else source.alias(name)
 
     _validate_select_columns(query, tables)
     _validate_join_columns(query, tables)

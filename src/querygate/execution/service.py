@@ -90,7 +90,11 @@ from querygate.policy.models import CostEstimationMode, Policy
 from querygate.query_ast.models import JoinSpec, Predicate, StructuredQuery
 from querygate.schema.reflection import get_table_schema, list_live_tables, sanitize_table_name
 from querygate.validation.policy_validation import validate_policy
-from querygate.validation.schema_validation import iter_query_scopes, validate_schema
+from querygate.validation.schema_validation import (
+    declared_cte_names,
+    iter_query_scopes,
+    validate_schema,
+)
 
 
 def _join_relationship_pair(join: JoinSpec) -> Optional[Tuple[str, str]]:
@@ -500,10 +504,17 @@ class StructuredQueryService:
                 )
             )
 
+        # A cte name (item 105) is a stage this statement computes, not an object in
+        # the database — teaching 32C that a table by that name exists would put a
+        # phantom into the catalog that no refresh could ever reconcile. The real
+        # tables are still learned: each block's body is its own scope in this walk.
+        cte_names = declared_cte_names(query)
+
         for _depth, scope in iter_query_scopes(query):
-            _add_table(scope.from_table)
+            if scope.from_table.lower() not in cte_names:
+                _add_table(scope.from_table)
             for join in scope.joins:
-                if join.connection is not None:
+                if join.connection is not None or join.table.lower() in cte_names:
                     continue
                 _add_table(join.table)
                 pair = _join_relationship_pair(join)

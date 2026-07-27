@@ -801,6 +801,81 @@ there for a specific reason: SQLAlchemy's MSSQL dialect **silently drops** a
 no-op on one dialect only, so QueryGate wraps the compound in a derived table
 before limiting it.
 
+### Multi-stage analysis in one statement: named `WITH` blocks (`ctes`)
+
+Some questions need two stages: aggregate first, then join the result; or define a
+cohort, then measure it. Before item 105 that meant two round-trips and stitching
+the results together in the agent. Now the first stage is a **named block** the
+rest of the query refers to by name:
+
+```json
+{
+  "ctes": [
+    {"name": "totals",
+     "query": {"from": "orders",
+               "select": ["orders.customer_id",
+                          {"fn": "sum", "col": "orders.total_amount", "as": "total"}],
+               "group_by": ["orders.customer_id"]}}
+  ],
+  "from": "customers",
+  "joins": [{"table": "totals", "on": ["customers.id", "totals.customer_id"]}],
+  "select": ["customers.name", "totals.total"]
+}
+```
+
+A block is referenced exactly like a table — put its `name` in `from` or a join's
+`table`. Because it is referenced by name rather than inlined, **one block can feed
+the FROM clause and several joins** without being written, or planned, more than
+once. Only the top-level query declares blocks (not a `set_op` arm, an
+`IN (subquery)`, or another block), and a block may reference only an **earlier**
+block — which is also why a **recursive CTE cannot be expressed**: it isn't
+forbidden by a special rule, it simply has no way to name itself. That is
+deliberate; unbounded recursion is a real denial-of-service surface, and admitting
+it would need a hard iteration cap designed and recorded first.
+
+**A block is a full scope, not a shortcut past anything.** Its tables get the same
+allow/deny, the same mandatory row filters, the same column masking and the same
+`min_group_size` floor as any other query, because every block compiles through the
+identical code path a top-level query does. Two consequences are worth stating
+outright:
+
+- **A masked column may not be projected by a block.** Inside the block it looks
+  like a bare projection, but the block's rows are an *input* to another scope,
+  where the value could be filtered, joined or ordered on — every position the
+  masking rule exists to keep an unmasked value out of.
+- **Joining onto a block is refused while `min_group_size` is set.** A computed
+  stage carries no uniqueness guarantee, so it may match many rows per key and
+  inflate the count the k-anonymity floor checks. Refusing is the same posture item
+  118 took for any other fan-out join: when the floor cannot be enforced correctly,
+  the query fails rather than returning an answer the policy believes is protected.
+
+**Bounds:** `max_cte_count` (default 3; `0` turns the feature off per connection)
+and `max_subquery_depth`, charged along the **reference chain** — two independent
+blocks each cost 1, while a block reading another block costs 2, so the default
+denies a chain until an operator raises the cap. Every other cap already counts
+block bodies, so blocks share one budget rather than each getting a fresh one.
+
+**A block is deliberately *not* row-capped.** `max_rows` bounds the response, and a
+block's rows are intermediate work feeding a join or an aggregate — clamping it
+would silently truncate the population a total is computed over, which is a wrong
+answer rather than a refusal. An explicit `limit` inside a block is honoured (and
+clamped), because that is the caller asking for "the top 100". Stated plainly, as
+the cross-join gate had to be: what bounds a block is `timeout_seconds`,
+`max_response_bytes`, the concurrency limiter and `max_cte_count` — not a row cap.
+
+**Naming:** a block may not be named after a table this connection's policy has a
+rule for. A block name wins name resolution, so calling one `orders` would make
+every rule the operator wrote about the *table* `orders` unreachable in that query.
+A block's own projections must also have **distinct output names** — its columns
+are referred to by name, so `select: ["orders.id", "customers.id"]` would leave
+`block.id` meaningless; alias one of them with `as` and the meaning is explicit.
+
+**Proven on both real backends:** the aggregate-then-join shape, a two-stage chain,
+the absence of the row cap (a grand total through a block under a row cap of 1 must
+still equal the direct total), and a 7-day moving average over daily order counts
+all execute against a live Postgres *and* a live SQL Server in
+`tests/integration/test_cross_dialect_differential.py`.
+
 **What bounds a write's `WHERE`.** Two things beyond the write policy itself, both
 easy to miss because they live on the *read* side of `Policy`: the filter's columns
 are checked against read allow/deny **and** the masked-column rule (a masked column
@@ -3153,6 +3228,73 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-07-27 — a derived table is spelled as a named `WITH` block (`ctes`), not
+  as a subquery inlined into `from`/`JoinSpec.table` (TODO.md item 105, which
+  absorbs item 97 phase 2).** `ENGINE_EXPRESSIVENESS_PLAN.md` §4 Phase 4b
+  specified "allow `from`/`JoinSpec.table` to be a named subquery (a
+  `StructuredQuery` + alias) in addition to a physical table name" — i.e. turn two
+  `str` fields into unions. That is the *same* shape item 104 rejected one day
+  earlier, for the same reason, and it lost again here. It is the second time this
+  plan's up-front sketch has been beaten by a shape found during the build; the
+  plan text has been corrected rather than left to contradict the code.
+
+  **Why the union loses, stated as the failure it produces.** The risk is not a
+  caller — it is an *unaware consumer*. With `from_table: Union[str, DerivedTable]`,
+  every existing site that reads `query.from_table` receives an object where it
+  expected a string: `referenced_tables` puts a non-string into a set of table
+  names, `normalize_query_shape` records it as the table that was read,
+  `policy.table_allowed(...)` is handed a model. Some of those raise and some
+  return a wrong answer, and Pydantic cannot flag any of it, because the field is
+  legitimately both types. With `ctes`, `from_table` stays a `str` that names
+  *something*, and a consumer that has never heard of a CTE treats `"daily"` as a
+  table name — at which point table allow-deny and schema reflection **reject it**,
+  because no such table exists. The unaware consumer fails closed. That property is
+  the whole argument; efficiency and expressiveness agree with it but did not
+  decide it.
+
+  Three consequences ride along, each decided rather than inherited:
+  1. **One declaration site, and CTE names are a flat namespace.** Only the
+     top-level query carries `ctes`; a set-op arm, a `value_subquery` and a CTE's
+     own query may not. A CTE may reference an *earlier* CTE (declaration order is
+     therefore topological order), never a later one and never itself — the same
+     no-forward-reference posture item 103 gave join conditions, and the rule that
+     keeps **recursive CTE out of scope** without needing a separate check.
+     `max_subquery_depth` is charged along the reference *chain*, so a CTE reading a
+     CTE costs 2 and the default cap of 1 denies it until an operator raises it.
+  2. **A CTE name may not collide with any physical table named anywhere in the
+     query tree.** SQL would let the CTE shadow the table. Shadowing is not itself a
+     policy bypass — a CTE's body is a full scope, so its tables get the complete
+     allow-deny, mandatory-filter and mask treatment at the source — but it makes
+     the audit trail ambiguous about which `Orders` was read, and ambiguity in the
+     Proof pillar is a defect. Rejected at the AST layer, before any DB touch.
+  3. **A CTE does not carry the `max_rows` clamp.** This follows item 97's
+     `_compile_in_subquery`, which strips the limit for the same reason: `max_rows`
+     bounds the *response*, and a CTE is intermediate work feeding a join or an
+     aggregate. Clamping it would silently truncate the input to a total — a wrong
+     answer, which is the failure class items 102 and 117 established this project
+     treats as worse than a rejection. An *explicit* caller `limit` inside a CTE is
+     honored, because that is the caller expressing "the top 100", not a guardrail.
+     Said plainly, as item 103's cross-join entry had to be: what actually bounds a
+     CTE is `timeout_seconds`, `max_response_bytes`, the concurrency limiter and the
+     new `max_cte_count` — not a row cap.
+
+  **Two things this entry got wrong before the build corrected them, recorded
+  because the corrections are the useful part.** (a) The name-collision rule was
+  first written as "a CTE name may not collide with any physical table named
+  anywhere in the query tree," justified on audit legibility. That phrasing is
+  **circular and silently never fires** — the reference to the block *is* such a
+  use, so the check excluded the very name it was testing. Writing its test is what
+  exposed that. The rule is now scoped to names the **policy has a rule for**,
+  which is both checkable and tied to real enforcement: measured, a block named
+  after a mandatory-filtered table would have had that filter applied to the
+  *block's output*, filtering the wrong rows if it happened to project a column of
+  that name and raising a compiler-internal error if it did not. (b) The claim that
+  a CTE "inherits every guardrail because it compiles through the same path" was
+  true but incomplete — the k-anonymity fan-out check reads *reflected uniqueness
+  metadata*, which a CTE has none of, and the function reading it crashed rather
+  than answering. That turned out to be a pre-existing defect reachable with no CTE
+  at all (item 122); it is now the fail-closed answer the floor requires.
 
 - **2026-07-27 — set operations attach to the query as `set_op`, with the
   carrying query as arm 1, rather than becoming a second top-level query type

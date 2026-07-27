@@ -1,17 +1,19 @@
 # Expressive Query Engine — Path to 10/10 (Flagship Pillar Plan)
 
 **Status (2026-07-27):** in progress — **Phase 0 (item 99), Phase 1 (item 100),
-Phase 2 (item 101), Phase 3a (item 102), Phase 3b (item 103) and Phase 4a
-(item 104) have shipped.** Phase 4b (item 105, CTE/derived table — with item 97
-phase 2 folded in beside it) is next, then Phase 5 (item 106). **The `Expression`
+Phase 2 (item 101), Phase 3a (item 102), Phase 3b (item 103), Phase 4a (item 104)
+and Phase 4b (item 105, which ABSORBED item 97 phase 2) have shipped.** Phase 5
+(item 106) is the last one. **The `Expression`
 substrate items 105–106 build on is real** (`query_ast/models.py`'s `Expression`
 union + `_compile_expression`); reuse it rather than adding a parallel scalar
 shape — item 101's `WindowSelectItem.arg`, item 102's three date nodes and item
 103's `JoinSpec.condition` are the worked examples. **The scope-container
-substrate item 105 builds on is real too** (`iter_query_scopes` +
-`iter_set_op_arms` + the per-scope `subquery_tables` map): item 104 is the worked
-example of adding a scope container, and 105 should extend those rather than
-introduce a third scope enumeration. **Owner:** engine. **Audience:** the
+substrate is real** (`iter_query_scopes` + `iter_set_op_arms` + the per-scope
+`subquery_tables` map): items 104 and 105 are the two worked examples of adding a
+scope container, and item 106 should extend those rather than introduce a fourth
+scope enumeration. Item 105 also left `select_item_output_name` as the single
+authority on what a select item is named in the result — item 106's scalar
+subquery will need it. **Owner:** engine. **Audience:** the
 implementing agent (Claude) + reviewers.
 **Authority:** this is the *deep spec* the read-engine expressiveness items point
 to. Item **content** and `✅ DONE` status live in `TODO.md`; execution **order**
@@ -21,7 +23,8 @@ replace them.
 
 > **Item numbering.** Items 99–106 are already allocated to this plan's phases and
 > exist in `TODO.md`. The highest allocated item file-wide is **121**, so a genuinely
-> new item takes **122** — never reuse a number in this range. (Check the highest
+> new item takes **123** (122 was allocated by the item-105 build).
+> Never reuse a number in this range. (Check the highest
 > `### N` heading in `TODO.md` rather than trusting this line; it has gone stale
 > twice.) (This line previously
 > read "next free number is **99**", which was true only before item 99 was created;
@@ -464,13 +467,19 @@ client merge; server-side dedup/`INTERSECT`/`EXCEPT` are the real unblock.
 **Goal.** A subquery as a FROM/JOIN source and named `WITH` blocks, enabling
 multi-stage single-statement analysis (aggregate-then-join, dedup-then-rank).
 
-**AST.** Allow `from`/`JoinSpec.table` to be a named subquery (a `StructuredQuery`
-+ alias) in addition to a physical table name. New scope container → extend
-`iter_query_scopes`, `effective_name_map`, and the reflected-tables plumbing
+**AST.** *(Corrected 2026-07-27 during the build — this paragraph originally
+specified a union on `from`/`JoinSpec.table`; see the `docs/PRODUCT_GUIDE.md`
+Decision Log entry of that date for why it lost, and note it is the same shape
+item 104 rejected the day before.)* A new additive `StructuredQuery.ctes` list of
+named `WITH` blocks. `from`/`JoinSpec.table` **stay `str`** and resolve to a CTE
+when one of that name is declared — so no existing field changes type, and a
+consumer that has never heard of a CTE fails closed (the name reflects as a table
+and is rejected) instead of silently mishandling a new union member. New scope
+container → extend `iter_query_scopes` and the reflected-tables plumbing
 (`subquery_tables` map already exists for item 97 — generalize it).
 
-**Caps.** `Policy.max_cte_count` + reuse `max_subquery_depth` for nesting. Summed
-tree-wide.
+**Caps.** `Policy.max_cte_count` + reuse `max_subquery_depth`, charged along the
+CTE *reference chain* (a CTE reading a CTE costs 2). Summed tree-wide.
 
 **Adversarial / tests.** A CTE must not become a channel to reference a denied
 table, dodge a mandatory row filter, or surface a masked column as a non-projection
@@ -521,10 +530,10 @@ report becomes a new row here first, then an item.
 | --- | --- | --- | --- |
 | 1 | `SUM(quantity*unit_price)` where paid | ✅ **100** | 100 |
 | 2 | Per-region `SUM(CASE WHEN status='paid' THEN amount ELSE 0 END)` | ✅ **100** | 100 |
-| 3 | 7-day moving average of daily orders | ❌ (2 queries) | 105 (**not** 101 — see below) |
+| 3 | 7-day moving average of daily orders | ✅ **105** | 105 (**not** 101 — see below) |
 | 4 | Each customer's most-recent order | ✅ | `top_n` (n=1) |
 | 5 | Running cumulative total | ✅ **101** | 101 |
-| 6 | Cohort retention via CTE | ❌ (multi-query) | 105 |
+| 6 | Cohort retention via CTE | ✅ **105** | 105 |
 | 7 | Top category per region **by revenue** | ✅ **100** | 100 |
 | 8 | UNION of high-value + dormant segments | ✅ **104** | 104 |
 | 9 | Median order value per region | ✅ PG / ⛔ MSSQL | `percentile_cont` |
@@ -550,8 +559,12 @@ join) went green, covered in `tests/integration/test_nonequi_join_end_to_end.py`
 and on real Postgres *and* real MSSQL in the differential suite. After item 104:
 **12/16** — row 8 (a UNION of two customer segments) went green, covered in
 `tests/integration/test_set_operation_end_to_end.py` and on both real backends in
-the differential suite. The remaining ❌ set is 3, 6, 11 —
-derived-table/CTE/correlated, which Phases 4b–5 finish.
+the differential suite. After item 105: **14/16** — rows 3 (a 7-day moving average
+over daily order counts) and 6 (cohort retention) went green, covered in
+`tests/integration/test_cte_end_to_end.py` and on real Postgres *and* real MSSQL
+in the differential suite. The remaining ❌/🟡 set is **11** (correlated — item
+106, the last item in this plan) and **15** (a window as an `Expression` operand,
+which is NOT item 106 and has no item yet — see item 101's correction below).
 
 **What item 104 was worth, stated precisely** — and row 8 needs the same honesty
 row 12 got, including a correction to the first draft of this paragraph. A
@@ -780,8 +793,23 @@ open **before** implementation, not discovered after:
    not an item-74 emulation. Arm select **types** are left to the database, a
    measured wall recorded in §4. See the `docs/PRODUCT_GUIDE.md` Decision Log entry
    dated 2026-07-27.*
-7. **Recursive CTE exclusion** — record that it is deliberately out of scope pending
-   a hard iteration cap.
+7. ✅ **RECORDED 2026-07-27** — **CTE/derived-table AST shape and recursive-CTE
+   exclusion.** *Outcome: **a named `WITH` block via an additive
+   `StructuredQuery.ctes` list**, not the union on `from`/`JoinSpec.table` §4
+   Phase 4b specified — the plan text above is corrected. The deciding argument is
+   the unaware consumer: a union re-types two `str` fields read by
+   `referenced_tables`, the audit shape, the approval gate, the 32C usage signals
+   and the admin surfaces, and its failure mode is a silent wrong answer, whereas
+   an unrecognized CTE **name** reflects as a table and is rejected. **Recursive
+   CTE stays out of scope** and needs no separate check to stay there: a CTE may
+   reference only an EARLIER CTE, so self- and mutual reference are structurally
+   inexpressible rather than merely forbidden. Three further calls: one declaration
+   site (arms, `value_subquery`s and CTE bodies may not declare their own),
+   `max_subquery_depth` charged along the reference chain, a CTE name may not
+   collide with any physical table in the tree (shadowing is audit-ambiguous, not a
+   bypass), and a CTE is NOT clamped to `max_rows` — item 97's precedent, since
+   truncating intermediate work is a silent wrong answer. See the
+   `docs/PRODUCT_GUIDE.md` Decision Log entry dated 2026-07-27.*
 8. **Correlated-subquery scope model** — the declared, capped correlation-ref rule
    and how policy/masking is enforced against the outer scope.
 

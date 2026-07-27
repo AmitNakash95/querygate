@@ -1282,6 +1282,52 @@ class SetOpSpec(pyd.BaseModel):
     model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
 
 
+# Item 105 — the derived table / CTE.
+#
+# Spelled as a named `WITH` block rather than a subquery inlined into
+# `from`/`JoinSpec.table`, which is what ENGINE_EXPRESSIVENESS_PLAN.md §4 Phase 4b
+# originally specified. The plan's shape would have turned two `str` fields into
+# unions, and the failure mode of that is not a caller — it is an *unaware
+# consumer*: every existing site reading `query.from_table` would receive a model
+# where it expected a string (`referenced_tables` putting a non-string into a set
+# of table names, `normalize_query_shape` recording it as the table that was read),
+# with Pydantic unable to flag any of it because the field is legitimately both.
+# Here `from_table` stays a `str` naming *something*, so a consumer that has never
+# heard of a CTE treats the name as a table — and reflection then rejects it,
+# because no such table exists. The unaware consumer fails closed. See the
+# `docs/PRODUCT_GUIDE.md` Decision Log entry dated 2026-07-27.
+class CteSpec(pyd.BaseModel):
+    """One named `WITH` block: a complete query that later stages refer to by name.
+
+    Reference it exactly like a table — put its `name` in `from`/`joins[].table`.
+    Because it is referenced by name rather than inlined, one CTE can feed the FROM
+    clause and several joins without being written (or planned) more than once.
+    """
+
+    name: str = pyd.Field(
+        # Same identifier shape a physical table must have (`VALID_TABLE_NAME`);
+        # restated as a pattern rather than imported so the constraint reaches the
+        # JSON Schema an MCP client sees, and so this stays a pure AST-layer rule
+        # with no dependency from query_ast into schema reflection.
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+        description=(
+            "Name later stages refer to this block by, used in `from` or a join's "
+            "`table` exactly like a physical table name. Must not be the name of a "
+            "real table used anywhere in the query."
+        ),
+    )
+    query: "StructuredQuery" = pyd.Field(
+        description=(
+            "The query this block computes. It is a full scope in its own right: its "
+            "tables get the same allow/deny, mandatory row filters, column masking "
+            "and k-anonymity floor as any other query. It may reference an EARLIER "
+            "cte by name, never a later one and never itself."
+        )
+    )
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
 class StructuredQuery(pyd.BaseModel):
     """Read-only structured query. No raw SQL — every field is a validated,
     schema-checked identifier or literal. Every column reference anywhere in
@@ -1353,6 +1399,17 @@ class StructuredQuery(pyd.BaseModel):
         description=(
             "Combine this query with further queries via UNION/INTERSECT/EXCEPT. "
             "This query is the first arm — see SetOpSpec's own fields."
+        ),
+    )
+    ctes: List[CteSpec] = pyd.Field(
+        default_factory=list,
+        description=(
+            "Named WITH blocks computed before this query and referred to by name in "
+            "`from`/`joins[].table`, for multi-stage analysis in one statement "
+            "(aggregate-then-join, dedup-then-rank). Only the top-level query may "
+            "declare these — not a set_op arm, an IN (subquery), or another cte's "
+            "query. Each may reference an EARLIER cte, never a later one or itself "
+            "(so a recursive cte is not expressible)."
         ),
     )
     intent: Optional[str] = pyd.Field(
@@ -1475,6 +1532,30 @@ class StructuredQuery(pyd.BaseModel):
                 )
         return self
 
+    @pyd.model_validator(mode="after")
+    def _validate_cte_names(self) -> "StructuredQuery":
+        """The one cte rule that is purely LOCAL to this query — names are unique,
+        case-insensitively, because a reference is by name and two blocks answering
+        to one name has no defined meaning (item 105).
+
+        The other cte rules deliberately live in `policy_validation` instead of
+        here: "only the root scope declares ctes", "no forward or self reference",
+        "a name may not collide with a physical table" and "a declared cte must be
+        referenced" all need to walk the query's *scope tree*, and that walk has a
+        single authority (`iter_query_scopes`). Reproducing it here would be a
+        second copy of the traversal items 96 and 111 exist to prevent — and a
+        wrong one, since this validator cannot know whether `self` is the root.
+        """
+        seen: Set[str] = set()
+        for spec in self.ctes:
+            key = spec.name.lower()
+            if key in seen:
+                raise ValueError(
+                    f"Duplicate cte name {spec.name!r} — every cte name must be unique"
+                )
+            seen.add(key)
+        return self
+
 
 # StructuredQuery references Predicate (via WhereNode) and Predicate now references
 # StructuredQuery (value_subquery) — a recursive cycle (TODO.md item 97). CaseWhen
@@ -1503,4 +1584,6 @@ JoinSpec.model_rebuild()
 # SetOpSpec.arms is a forward ref to StructuredQuery, which is declared after it
 # (item 104) — a third cycle into the same knot, resolved the same way.
 SetOpSpec.model_rebuild()
+# CteSpec.query is a forward ref to StructuredQuery for the same reason (item 105).
+CteSpec.model_rebuild()
 StructuredQuery.model_rebuild()
