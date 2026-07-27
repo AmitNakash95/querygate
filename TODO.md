@@ -155,6 +155,7 @@ order-of-magnitude, not commitments.
 | 122 | ✅ `_unique_column_sets` crashed on a non-`Table` FROM element | S | 118 |
 | 123 | A select-item `CASE`'s conditions are absent from the audit shape | S | 120 |
 | 124 | Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
+| 125 | ✅ ★ A window function as an `Expression` operand (bar row 15 → 16/16) | XL | 100, 101 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -1386,7 +1387,14 @@ upgrade rather than accepted (see the CVE-remediation bullet).
 **Shipped (phase 1):**
 - **SAST** — **Bandit** (`[tool.bandit]` in `pyproject.toml`, `make sast`, in
   `release-check`) + **Semgrep OSS** (`p/python`, `p/security-audit`,
-  `p/owasp-top-ten`) as a CI job. Deny-by-default; the 5 accepted Bandit findings
+  `p/owasp-top-ten`) as a CI job, reproducible locally with `make semgrep` (which
+  falls back to the official `semgrep/semgrep` image when no binary is installed,
+  the same pattern as `scan-image`/`scan-secrets`; kept out of `release-check`
+  because Semgrep's version *and* its registry rulesets both float, which would
+  make that gate nondeterministic and couple a release to a third-party service —
+  note `release-check` is not offline either way, since `make sbom` resolves the
+  locked set from PyPI and audits it against the advisory database).
+  Deny-by-default; the 7 accepted Bandit findings
   are annotated inline with justified `# nosec <id>` (intentional in-container
   `0.0.0.0` bind, internal invariants/sentinels), never blanket-suppressed.
   CodeQL noted as the paid-GHAS upgrade (free only on public repos).
@@ -2256,3 +2264,15 @@ instances of it. The second is preferable; it also makes `tests/integration/` an
 tests passed the file-scoped run but were silently deselected by the gate.
 
 **Effort: S. Priority: medium** (it weakens every gate the repo relies on).
+
+### 125. Query engine: a window function as an `Expression` operand ★ ✅ DONE
+
+A `WindowExpr` joins the closed `Expression` union, so `amount / SUM(amount) OVER ()`
+is one statement instead of two projected columns plus client-side arithmetic. It is
+the one member not legal everywhere a scalar is expected — legal in a projection and
+nowhere else — enforced by a single fail-closed positional rule rather than a parallel
+projection-only union. Closes regression-bar row 15 -> **16/16**, meeting the flagship
+pillar's success criterion. 4/4 enforcement points mutation-verified.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 125).
+

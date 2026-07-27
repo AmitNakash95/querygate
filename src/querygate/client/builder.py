@@ -88,6 +88,7 @@ from querygate.query_ast.models import (
     WindowFn,
     WindowFrame,
     WindowFrameMode,
+    WindowExpr,
     WindowSelectItem,
     WindowSpec,
 )
@@ -104,6 +105,7 @@ ExpressionModels = (
     ExtractExpr,
     NowExpr,
     DateAddExpr,
+    WindowExpr,
 )
 
 __all__ = [
@@ -134,6 +136,7 @@ __all__ = [
     "now",
     "date_add",
     "window",
+    "window_expr",
     "frame",
     "Column",
     "FnColumn",
@@ -695,16 +698,61 @@ def window(
     ``offset`` applies to lag/lead and ``buckets`` to ntile.
     """
     return WindowSelectItem(
-        fn=fn_name,
-        arg=(_to_expression(_require_wrapped(arg)) if arg is not None else None),
-        over=WindowSpec(
+        **_window_fields(fn_name, arg, partition_by, order_by, frame, offset, buckets),
+        alias=as_,
+    )
+
+
+def _window_fields(
+    fn_name: WindowFn,
+    arg: Any,
+    partition_by: Sequence[Union[str, Column]],
+    order_by: Sequence[Union[str, Column, OrderBySpec]],
+    frame: Optional[WindowFrame],
+    offset: Optional[int],
+    buckets: Optional[int],
+) -> dict:
+    """The `WindowCall` fields shared by the projection and operand spellings, so
+    `window()` and `window_expr()` cannot drift on how they wire their arguments."""
+    return {
+        "fn": fn_name,
+        "arg": (_to_expression(_require_wrapped(arg)) if arg is not None else None),
+        "over": WindowSpec(
             partition_by=[_colname(c) for c in partition_by],
             order_by=[_to_orderby(o) for o in order_by],
             frame=frame,
         ),
-        offset=offset,
-        buckets=buckets,
-        alias=as_,
+        "offset": offset,
+        "buckets": buckets,
+    }
+
+
+def window_expr(
+    fn_name: WindowFn,
+    arg: Any = None,
+    *,
+    partition_by: Sequence[Union[str, Column]] = (),
+    order_by: Sequence[Union[str, Column, OrderBySpec]] = (),
+    frame: Optional[WindowFrame] = None,
+    offset: Optional[int] = None,
+    buckets: Optional[int] = None,
+) -> Expr:
+    """A window function as an OPERAND rather than a projection (item 125), so it
+    composes with arithmetic — each row against an aggregate over its partition,
+    in one statement::
+
+        expr_select(
+            col("orders.amount") / window_expr("sum", col("orders.amount")),
+            as_="share_of_total",
+        )
+
+    Same arguments as :func:`window` minus ``as_``: here the window is a sub-term
+    of a larger expression, and that expression carries the alias. A window is
+    legal only in a projection — putting one in a filter is rejected, since SQL
+    evaluates windows after WHERE/GROUP BY.
+    """
+    return Expr(
+        WindowExpr(**_window_fields(fn_name, arg, partition_by, order_by, frame, offset, buckets))
     )
 
 

@@ -3,8 +3,9 @@
 **Status (2026-07-27):** in progress — **Phase 0 (item 99), Phase 1 (item 100),
 Phase 2 (item 101), Phase 3a (item 102), Phase 3b (item 103), Phase 4a (item 104)
 Phase 4b (item 105, which ABSORBED item 97 phase 2) and Phase 5 (item 106) have
-ALL shipped — this plan's item list is complete at **15/16** on the regression bar,
-the one gap being a window-as-`Expression` operand that has no item yet. **The `Expression`
+ALL shipped, and item 125 closed the last red row — the regression bar is at
+**16/16**, every row proven on real Postgres and real MSSQL (see §5 for what row 15
+cost). **The `Expression`
 substrate items 105–106 build on is real** (`query_ast/models.py`'s `Expression`
 union + `_compile_expression`); reuse it rather than adding a parallel scalar
 shape — item 101's `WindowSelectItem.arg`, item 102's three date nodes and item
@@ -565,10 +566,28 @@ over daily order counts) and 6 (cohort retention) went green, covered in
 `tests/integration/test_cte_end_to_end.py` and on real Postgres *and* real MSSQL
 in the differential suite. After item 106: **15/16** — row 11 (each row compared
 against an aggregate over the whole table, in one statement) went green, covered in
-`tests/integration/test_correlated_end_to_end.py`. The ONLY remaining gap is **15**
-(a window function as an `Expression` operand), which is explicitly NOT item 106 and
-has no item yet — see item 101's correction below. **Phase 5 is complete and this
+`tests/integration/test_correlated_end_to_end.py`. **Phase 5 is complete and this
 plan's item list is finished.**
+
+**After item 125: 16/16 — the bar is green.** Row 15 (a window function as an
+`Expression` operand) was the last red row. Item 101 recorded it as a *wall* rather
+than a gap, because closing it means admitting one union member that is legal in a
+projection and nowhere else; the maintainer approved that trade on 2026-07-27 and
+the reasoning, including the rejected alternative, is in `docs/PRODUCT_GUIDE.md`'s
+Decision Log. `WindowExpr` now joins the closed union, with the positional rule
+enforced in one fail-closed place (`_reject_windows_outside_projections`). Covered
+by `tests/integration/test_window_operand_end_to_end.py` (executed, asserting the
+computed answer — not the rendered SQL) and `tests/security/test_window_operand_boundary.py`
+(every position SQL forbids one in). 4/4 enforcement points mutation-verified.
+
+Row 15 is covered on **real Postgres and real MSSQL** in the differential suite
+(`test_cross_dialect_differential.py::test_regression_bar_row_15_window_as_an_expression_operand_matches`),
+asserting both backends return identical rows — so it carries the same grade of
+evidence as rows 3/6/8/12/16, not a rendering assertion. That leg is load-bearing
+rather than ceremonial here: the operand position puts the window inside item 100's
+guarded division (`NULLIF` + `CAST(... AS NUMERIC)`), and T-SQL's integer-division
+and NUMERIC scale rules are not Postgres's — precisely the composition that renders
+plausibly on both and could evaluate differently.
 
 **What item 104 was worth, stated precisely** — and row 8 needs the same honesty
 row 12 got, including a correction to the first draft of this paragraph. A
@@ -631,7 +650,16 @@ section's own rule rather than left as an aspiration:**
   `group_by`+window combination outright rather than growing a second bespoke
   materialization path beside `_apply_top_n`'s (2026-07-26 Decision Log). A moving
   average over *row-level* values, which 101 does unblock, is covered instead.
-- **Row 15 needs a new item, and it is deliberately not created here.** Both
+- **Row 15 needed a new item — created and shipped as item 125 on 2026-07-27.**
+  The wall stood as written below for exactly the reason it gives; the maintainer
+  approved the trade, and the resolution was the third option this paragraph did
+  not consider: keep ONE union and one expression tree, and buy back the "legal
+  everywhere a scalar is expected" property with a single fail-closed positional
+  rule instead of with the type. A parallel projection-only union — the shape
+  implied below — was considered and rejected, because two divergent trees
+  reintroduce the "one copy missed a rule" bug class items 96/103/104 each had to
+  fix. The original reasoning is kept verbatim below, since it is why the item
+  needed a decision rather than a patch. Both
   halves now exist (arithmetic from 100, `OVER` from 101) but a window is a
   select-item **projection**, not an `Expression` operand, so
   `amount / SUM(amount) OVER ()` is two projected columns plus client-side

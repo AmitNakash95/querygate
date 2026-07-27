@@ -31,6 +31,7 @@ from querygate.query_ast.models import (
     StructuredQuery,
     WhereGroup,
     WhereNode,
+    WindowExpr,
     WindowSelectItem,
 )
 from querygate.validation.schema_validation import select_item_column_refs
@@ -370,6 +371,28 @@ def _expression_shape(expr: object) -> Dict[str, Any]:
             "results": [_expression_shape(branch.then) for branch in expr.when],
             **({"else": _expression_shape(expr.else_)} if expr.else_ is not None else {}),
         }
+    if isinstance(expr, WindowExpr):
+        # Item 125 — the operand spelling of a window, recorded with exactly the
+        # posture `_select_shape` uses for the projection spelling: which function
+        # ran, over which columns, and the frame's SHAPE. The partition/order refs
+        # are named because they are column identifiers an investigator needs; the
+        # frame's offsets, the ntile bucket count and the lag/lead distance are
+        # caller NUMBERS and stay out, like every other literal (non-negotiable 3).
+        shape: Dict[str, Any] = {
+            "node": "window",
+            "function": expr.fn,
+            "partition_by": list(expr.over.partition_by),
+            "order_by": [order.col for order in expr.over.order_by],
+        }
+        if expr.arg is not None:
+            shape["operand"] = _expression_shape(expr.arg)
+        if expr.over.frame is not None:
+            shape["frame"] = {
+                "mode": expr.over.frame.mode,
+                "start": expr.over.frame.start.bound,
+                "end": expr.over.frame.end.bound,
+            }
+        return shape
     raise TypeError(f"Unsupported expression node: {type(expr).__name__}")
 
 

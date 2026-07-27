@@ -292,6 +292,12 @@ gate is the *first step of the item*, not a reason to defer it.
   *Its own build found the defect worth remembering: resolving a child's declared
   refs against the parent's already-correlated tables made correlation reach a
   GRANDPARENT, so "one level" held in name only until a test asked for it.*
+- [x] **125** — ★ A window function as an `Expression` operand. ✅ **Shipped** — the
+  regression bar is **16/16** and Phase 4's success criterion is met. *Phase 4's item
+  list closed at bar **15/16**; this is the one red row (15) and the pillar's own
+  success criterion is 100% green. Recorded as a wall by item 101 and **approved by
+  the maintainer on 2026-07-27** — Decision Log entry in `docs/PRODUCT_GUIDE.md`
+  precedes the build. Depends on 100, 101.*
 
 ### Phase 5 — Adoption & breadth (grow once the engine is deep enough to adopt)
 
