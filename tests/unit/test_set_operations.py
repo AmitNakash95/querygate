@@ -339,3 +339,90 @@ def test_usage_signals_also_name_a_subquerys_table():
     )
     targets = StructuredQueryService("demo")._usage_signal_targets(query)
     assert {target.table for _kind, target in targets} == {"orders", "customers"}
+
+
+# --------------------------------------------------------------------------- #
+# Arm select-type compatibility                                                #
+# --------------------------------------------------------------------------- #
+
+
+def _typed_tables() -> dict:
+    import sqlalchemy as sa
+
+    metadata = sa.MetaData()
+    return {
+        "orders": sa.Table(
+            "orders",
+            metadata,
+            sa.Column("id", sa.Integer),
+            sa.Column("amount", sa.Numeric(10, 2)),
+            sa.Column("status", sa.String),
+            sa.Column("shipped", sa.Boolean),
+            sa.Column("created_at", sa.DateTime),
+            sa.Column("due_on", sa.Date),
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    "item,expected",
+    [
+        ("orders.id", "numeric"),
+        ("orders.amount", "numeric"),
+        ("orders.status", "text"),
+        ("orders.shipped", "boolean"),
+        ("orders.created_at", "temporal"),
+        ("orders.due_on", "temporal"),
+        ({"fn": "count", "col": "*", "as": "n"}, "numeric"),
+        ({"col": "orders.created_at", "granularity": "month"}, "temporal"),
+        ({"expr": {"cast": {"col": "orders.id"}, "to": "text"}, "as": "x"}, "text"),
+        ({"expr": {"literal": "seg"}, "as": "x"}, "text"),
+        ({"expr": {"literal": 3}, "as": "x"}, "numeric"),
+        # Deliberately unknown — arithmetic reproduces each backend's promotion
+        # rules, so it is left to the database rather than guessed at.
+        (
+            {"expr": {"op": "+", "left": {"col": "orders.id"}, "right": {"literal": 1}}, "as": "x"},
+            None,
+        ),
+        ({"expr": {"literal": None}, "as": "x"}, None),
+    ],
+)
+def test_select_item_type_family_is_narrow_and_correct(item, expected):
+    """`None` always means "allow" — this classifier rejects what is known-wrong,
+    never what is merely unrecognized. A `bool` column must NOT read as numeric,
+    which is the trap Python's `bool`-subclasses-`int` sets."""
+    from querygate.validation.schema_validation import select_item_type_family
+
+    parsed = (
+        item
+        if isinstance(item, str)
+        else StructuredQuery(from_table="orders", select=[item]).select[0]
+    )
+    assert select_item_type_family(parsed, _typed_tables()) == expected
+
+
+def test_cast_target_families_cover_every_cast_type():
+    """Drift guard: a new `CastExpr` target added to the compiler without a family
+    here would silently classify as unknown and stop being union-checked."""
+    from querygate.compiler.sqlalchemy_compiler import CAST_TARGETS
+    from querygate.validation.schema_validation import _CAST_TARGET_FAMILIES
+
+    assert set(_CAST_TARGET_FAMILIES) == set(CAST_TARGETS)
+
+
+def test_a_mask_in_only_one_arm_is_reported_as_a_union_not_as_every_row():
+    """Pins the semantics rather than leaving them to a reader's assumption: the
+    list is a UNION across arms, so an output column appears when at least one arm
+    masks it. That over-states protection (safe direction) and never under-states
+    it, which is the property an audit field distinguishing masked-from-denied
+    needs. A per-arm breakdown would require an audit-event shape change."""
+    policy = Policy(
+        column_masks={"employees": [ColumnMask(column="ssn", kind=ColumnMaskKind.HASH)]}
+    )
+    # Arm 1's `customers.name` is NOT masked; arm 2's `employees.ssn` at the same
+    # position IS. Half the response column's rows are masked, half are raw.
+    query = _union(_arm("customers", "customers.name"), _arm("employees", "employees.ssn"))
+    assert applied_column_masks(query, policy) == ["name"]
+
+    # And with no mask anywhere, nothing is claimed.
+    assert applied_column_masks(query, Policy()) == []

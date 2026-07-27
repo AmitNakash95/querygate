@@ -583,3 +583,88 @@ async def test_a_non_existent_column_in_a_later_arm_is_rejected_pre_database():
     with patch.object(sv, "_load_table", AsyncMock(side_effect=_strict_load)):
         with pytest.raises(QueryValidationError, match="not_a_column"):
             await sv.validate_schema(query, connection_id=_CONN)
+
+
+# --------------------------------------------------------------------------- #
+# Arm select-type compatibility (the cross-dialect divergence it closes)        #
+# --------------------------------------------------------------------------- #
+
+
+async def _typed_load(connection_id, table_name, table_connection):
+    return sa.Table(
+        table_name,
+        sa.MetaData(),
+        sa.Column("id", sa.Integer),
+        sa.Column("name", sa.String),
+        sa.Column("amount", sa.Numeric(10, 2)),
+        sa.Column("created_at", sa.DateTime),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arm_two_select",
+    [
+        ["customers.name"],  # text vs the integer arm 1 projects
+        [{"expr": {"cast": {"col": "customers.id"}, "to": "text"}, "as": "id"}],
+        [{"expr": {"literal": "label"}, "as": "id"}],
+        ["customers.created_at"],  # temporal vs numeric
+    ],
+)
+async def test_arms_disagreeing_on_type_are_rejected_before_the_database(arm_two_select):
+    """Postgres refuses a mismatched union outright; SQL Server applies data-type
+    precedence and may silently convert one side and return rows (both measured on
+    live servers). Refused on every dialect so the same AST behaves the same way
+    everywhere."""
+    query = _union(StructuredQuery.model_validate({"from": "customers", "select": arm_two_select}))
+    with patch.object(sv, "_load_table", AsyncMock(side_effect=_typed_load)):
+        with pytest.raises(QueryValidationError, match="disagree on the type"):
+            await sv.validate_schema(query, connection_id=_CONN)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arm_two_select",
+    [
+        ["customers.id"],  # integer vs integer
+        ["customers.amount"],  # NUMERIC vs INTEGER — same family, unions fine
+        [{"expr": {"literal": 7}, "as": "id"}],
+        # Unknown-typed: arithmetic is left to the database rather than guessed.
+        [
+            {
+                "expr": {"op": "+", "left": {"col": "customers.id"}, "right": {"literal": 1}},
+                "as": "id",
+            }
+        ],
+    ],
+)
+async def test_compatible_or_unknown_arm_types_are_allowed(arm_two_select):
+    """The other half of the rule, and the one that keeps it from over-rejecting:
+    integer/numeric and date/timestamp are the SAME coarse family because both
+    backends union them happily, and an unknown family always means allow."""
+    query = _union(StructuredQuery.model_validate({"from": "customers", "select": arm_two_select}))
+    with patch.object(sv, "_load_table", AsyncMock(side_effect=_typed_load)):
+        await sv.validate_schema(query, connection_id=_CONN)
+
+
+@pytest.mark.asyncio
+async def test_arm_types_are_checked_inside_a_nested_subquerys_set_operation():
+    """The type rule walks every scope, not only the top-level set operation."""
+    nested = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": ["customers.id"],
+            "set_op": {
+                "op": "union",
+                "arms": [{"from": "customers", "select": ["customers.name"]}],
+            },
+        }
+    )
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        where=Predicate(col="orders.id", op="in", value_subquery=nested),
+    )
+    with patch.object(sv, "_load_table", AsyncMock(side_effect=_typed_load)):
+        with pytest.raises(QueryValidationError, match="disagree on the type"):
+            await sv.validate_schema(query, connection_id=_CONN)
