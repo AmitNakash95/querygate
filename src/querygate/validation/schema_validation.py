@@ -427,17 +427,44 @@ def iter_where_predicates(node: WhereNode) -> Iterator[Predicate]:
         yield from iter_where_predicates(child)
 
 
+def iter_set_op_arms(query: StructuredQuery) -> Iterator[StructuredQuery]:
+    """This query and every further arm of its set operation (item 104), in the
+    order they are combined. Just `[query]` when there is no `set_op`.
+
+    Flat by construction: the AST forbids an arm from carrying its own `set_op`,
+    so a set operation is always one N-ary list and this never needs to recurse.
+    The one place "which SELECTs make up this statement's output" is answered, so
+    the compiler, the audit shape and the applied-mask list cannot disagree on it.
+    """
+    yield query
+    if query.set_op is not None:
+        yield from query.set_op.arms
+
+
 def iter_query_scopes(
     query: StructuredQuery, _depth: int = 0
 ) -> Iterator[Tuple[int, StructuredQuery]]:
-    """Yield `(depth, query)` for the outer query (depth 0) and every nested
-    `value_subquery` (item 97), depth-first. Each yielded query is an INDEPENDENT
-    validation scope: its column references resolve against its own from/join
-    tables (never an outer scope's), which is exactly what makes an `IN (subquery)`
-    structurally uncorrelated. Policy and schema validation walk these scopes so
-    a subquery gets the full allow/deny + cap treatment, and so caps can be summed
-    tree-wide (never per-level) to stop nesting being a cap-multiplier bypass."""
+    """Yield `(depth, query)` for the outer query (depth 0), every set-operation
+    arm (item 104), and every nested `value_subquery` (item 97), depth-first. Each
+    yielded query is an INDEPENDENT validation scope: its column references resolve
+    against its own from/join tables (never an outer scope's), which is exactly what
+    makes an `IN (subquery)` structurally uncorrelated. Policy and schema validation
+    walk these scopes so a subquery gets the full allow/deny + cap treatment, and so
+    caps can be summed tree-wide (never per-level) to stop nesting being a
+    cap-multiplier bypass.
+
+    A set-op arm is yielded at the SAME depth as the query carrying the set
+    operation, not one deeper: `max_subquery_depth` bounds caller-authored
+    *nesting*, and an arm is a sibling SELECT, not a nesting level. Keeping the
+    depth flat is also what stops an arm from being mistaken for an
+    `IN (subquery)` scope by the `depth > 0` rules in `validate_schema` and
+    `_validate_subquery_constraints` — while an arm of a set operation that sits
+    INSIDE a subquery correctly inherits that subquery's depth and does get them.
+    """
     yield (_depth, query)
+    if query.set_op is not None:
+        for arm in query.set_op.arms:
+            yield from iter_query_scopes(arm, _depth)
     for pred in iter_where_and_having_predicates(query):
         if pred.value_subquery is not None:
             yield from iter_query_scopes(pred.value_subquery, _depth + 1)
@@ -742,13 +769,15 @@ async def validate_schema(
     *,
     scope_tables: Optional[Dict[int, Dict[str, sa.Table]]] = None,
 ) -> Dict[str, sa.Table]:
-    """Reflect + verify every table/column the query — and every nested
-    value_subquery (item 97) — references exists.
+    """Reflect + verify every table/column the query — every nested
+    value_subquery (item 97) and every set-operation arm (item 104) — references
+    exists.
 
     Returns the OUTER query's reflected tables, keyed by the name the query used,
     for the compiler. If `scope_tables` is provided, it is populated with each
     scope's reflected tables keyed by that scope query's `id`, so the compiler can
-    recursively render `IN (subquery)`. Each subquery is validated as an
+    recursively render `IN (subquery)` and each set-operation arm. Each subquery is
+    validated as an
     independent scope (its refs resolve to its own tables — undeclared-table
     rejection is exactly what makes a correlated reference to an outer table fail),
     and a subquery is required to stay single-connection (cross-connection nesting
@@ -766,7 +795,10 @@ async def validate_schema(
         scoped_tables = await _reflect_and_validate_scope(scope, connection_id, principal)
         if scope_tables is not None:
             scope_tables[id(scope)] = scoped_tables
-        if depth == 0:
+        # Identity, not `depth == 0`: since item 104 a set-operation arm is also a
+        # depth-0 scope, so a depth test would hand the compiler the LAST arm's
+        # reflected tables as if they were the outer query's.
+        if scope is query:
             outer_tables = scoped_tables
     if outer_tables is None:  # unreachable: iter_query_scopes always yields depth 0
         raise QueryValidationError("internal error: query had no top-level scope to validate")

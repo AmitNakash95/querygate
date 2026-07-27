@@ -451,4 +451,16 @@ def normalize_query_shape(query: StructuredQuery) -> Dict[str, Any]:
             "n": query.top_n.n,
             "function": query.top_n.fn,
         }
+    if query.set_op is not None:
+        # Every arm's own shape, recursively (item 104). Recording only the
+        # operator would make the audit trail claim a query read one table when it
+        # read three — the arms are where the other tables, joins and filters are.
+        # The recursion terminates because the AST forbids an arm from carrying its
+        # own set_op, and each arm goes through this same redaction-safe walk, so
+        # no literal reaches the event from an arm either.
+        shape["set_op"] = {
+            "op": query.set_op.op,
+            "all": query.set_op.all_,
+            "arms": [normalize_query_shape(arm) for arm in query.set_op.arms],
+        }
     return shape

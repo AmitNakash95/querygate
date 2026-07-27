@@ -40,7 +40,7 @@ all changes stay in the validate/preview/stage/apply governance workflow.
 
 ## StructuredQuery rules
 Pass a StructuredQuery object: from/select/distinct/joins/where/group_by/
-having/order_by/limit/offset/top_n/intent. Column refs MUST be Table.Column
+having/order_by/limit/offset/top_n/set_op/intent. Column refs MUST be Table.Column
 (e.g. Customer.Name), or Alias.Column once from_alias/JoinSpec.alias is set
 for that table. Raw SQL strings are FORBIDDEN and will be rejected. Each
 field's own schema description covers its exact contract (order_by.dir's
@@ -69,6 +69,18 @@ for the SQL default. `over` refs must be real Table.Column values, never a
 select alias. A window cannot be combined with group_by or aggregate select
 items — aggregate in one query and window over that result in a second. See
 WindowSelectItem's own field schemas.
+
+## Set operations (UNION / INTERSECT / EXCEPT)
+Combine result sets server-side with `set_op`: {"op": "union"|"intersect"|
+"except", "all": bool, "arms": [ ...further queries... ]}. THIS query is the
+first arm — its from/joins/where/group_by/having describe arm 1, while its
+order_by/limit/offset apply to the combined result (as in SQL, where they are
+written once after the last arm). An arm may not set order_by/limit/offset/
+top_n/set_op, every arm must project the same number of columns, and top_n
+cannot be combined with set_op. `all` keeps duplicates; INTERSECT ALL and
+EXCEPT ALL exist on Postgres only and are rejected on MSSQL. Each arm is
+governed independently (its own allow/deny, masks and mandatory row filters),
+and an arm cannot reference another arm's table.
 
 ## Self-joins (the same table more than once in one query)
 Joining a table to itself (e.g. Employee to Employee for a manager lookup)

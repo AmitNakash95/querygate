@@ -6178,6 +6178,119 @@ maintainer decision, not a side effect of this item. Pinned by
 `test_outer_join_null_ordering_diverges_and_predates_item_103` so it is recorded
 rather than rediscovered.
 
+### 104. Query engine: set operations (UNION / INTERSECT / EXCEPT) ✅ DONE
+
+**Shipped.** `StructuredQuery.set_op` combines this query's rows with further
+queries via `UNION` / `INTERSECT` / `EXCEPT` (`all: true` keeps duplicates), the
+first **new scope container at the top level** and the first since item 97
+phase 1's `value_subquery`. Regression bar 11/16 -> **12/16** (row 8).
+
+**The AST shape, and why it is not the one the plan sketched.** The plan called
+for "a new top-level shape wrapping N `StructuredQuery` arms". What shipped is an
+optional `set_op` on `StructuredQuery` whose **carrying query is arm 1**. A second
+top-level type would have turned every signature in the pipeline into a
+`Union[StructuredQuery, SetOperationQuery]` — REST routes, MCP tools, templates,
+audit, approval, cost estimation — or made `from`/`select` optional on every
+query. The failure mode of that change is a consumer that quietly handles one
+member, which is the exact class the item-103 audit found and item 102 hit five
+times. One top-level type means every existing consumer keeps working, and the
+ones that must now see *every arm* are found by a single question: does this walk
+`iter_query_scopes`? Full reasoning in `docs/PRODUCT_GUIDE.md`'s Decision Log
+entry for 2026-07-27.
+
+Four consequences of that shape, each decided rather than inherited:
+
+1. **Clause placement mirrors SQL.** The carrying query's `where`/`joins`/
+   `group_by`/`having` describe arm 1; its `order_by`/`limit`/`offset` bound the
+   combined result — exactly how `SELECT … WHERE … UNION SELECT … ORDER BY …
+   LIMIT …` distributes. An arm setting any of the four is rejected at the AST
+   layer with one typed message rather than producing three dialect-specific
+   errors. `top_n` cannot be combined with `set_op` at all (its refs resolve
+   against table columns the combined result no longer has) — the same
+   reject-rather-than-grow-a-second-materialization-path posture item 101 took
+   for `group_by` + window. Arity is checked at the AST layer; arms do not nest.
+2. **An arm is a scope at the SAME depth as its carrier.** `max_subquery_depth`
+   bounds caller-authored *nesting*, and an arm is a sibling SELECT. Depth+1
+   would have charged a two-arm union against an unrelated budget and — worse —
+   made an arm look like an `IN (subquery)` to the two rules that branch on
+   `depth > 0`. A set operation *inside* a subquery correctly inherits that
+   subquery's depth and does get them.
+3. **The compound is wrapped in a derived table before `LIMIT`.** Measured, not
+   assumed: SQLAlchemy's MSSQL dialect **silently drops** `.limit()` on a
+   `CompoundSelect` — no `TOP`, no `FETCH`, no error — while Postgres renders
+   `LIMIT` normally. `clamp_limit` is a policy guardrail, so the naive form is an
+   unbounded response on one dialect only. Wrapping makes it a limit on a plain
+   SELECT (both dialects render it correctly) and gives `ORDER BY` real
+   derived-table columns instead of a bare output name. This is the engine
+   enforcing its *own* cap, not synthesizing caller structure, so it is not the
+   item-74 line.
+4. **`INTERSECT ALL` / `EXCEPT ALL` are rejected on MSSQL and SQLite.** T-SQL has
+   no `ALL` form of either, and dropping the flag would return *fewer* rows than
+   asked with no error anywhere. SQLAlchemy renders the invalid keyword for every
+   dialect with no guard of its own — verified by execution, where it is a live
+   syntax error rather than a compile error. So it is a `DialectAdapter.set_operation`
+   method that raises and names the primitive to use instead (the `array_agg`
+   posture).
+
+**Every arm is independently governed.** Each arm is validated as its own scope
+(table/column allow-deny, the masked-column rule, schema resolution against its
+own tables) and *compiled* through the same `_compile_scope_body` a single query
+uses — so it carries its own mandatory row filters and its own `min_group_size`
+floor, including item 118's fan-out refusal. There is deliberately no second
+compile path where one could be forgotten. An arm cannot reference another arm's
+table (arms are siblings, not a correlated scope), and cross-connection joins in
+an arm get the outer query's `join_group` rule rather than the stricter
+single-connection rule an `IN (subquery)` gets.
+
+**Cap.** New `Policy.max_set_op_arms` (default 3, counting arm 1, summed
+tree-wide; `0` disables set operations per connection). The default is a
+judgement, and the honest reason it can be low is that it is not the query's cost
+bound: every other count cap is already summed across the arms, so N arms share
+one budget. This bounds only the extra scans plus the dedup sort.
+
+**Two pre-existing single-scope holes closed on the way**, both named rather than
+folded in silently:
+
+- `sensitivity_approval_reasons` (the item-92 human-approval trigger) walked only
+  the outer query, so a catalog-labelled sensitive column reached from inside an
+  `IN (subquery)` never tripped the gate. **True since item 97**, not an item-104
+  regression. It now walks `iter_query_scopes`, fixing subqueries and arms
+  together.
+- The 32C catalog usage signals had the same assumption, with fidelity rather
+  than safety consequences, and were fixed the same way.
+
+**Coverage.** `tests/unit/test_set_operations.py` (33 cases: AST rules, scope
+enumeration, per-dialect availability, and one test per consumer that used to
+assume a single SELECT — audit shape, applied masks, approval gate, fingerprint,
+usage signals); `tests/security/test_set_operation_boundary.py` (20 adversarial
+cases: denied table/column/mask hidden in a later arm, caps summed across arms,
+the arm-count cap and its tree-wide sum, filters and the k-anon floor reaching
+every compiled arm, the MSSQL limit survival, the ORDER BY table-column
+fallback, an unvalidated arm failing closed); `tests/integration/
+test_set_operation_end_to_end.py` (8 executed cases including regression-bar row
+8); and 8 live differential cases in `tests/integration/
+test_cross_dialect_differential.py` run against **real Postgres and real
+MSSQL**. `tests/unit/test_client_builder.py` gains `.union()/.intersect()/
+.except_()` coverage.
+
+**Mutation-verified.** All **17** enforcement points this item adds were broken
+one at a time against the suite; the first pass caught 15 and the two genuine
+misses were real — the aggregate-limit ceiling using `any()` instead of `all()`
+(one raw-row arm would have got the 1000-row aggregate ceiling instead of 100),
+and the set-op `ORDER BY` allowing a raw table-column fallback (which SQLAlchemy
+resolves by adding the table to the FROM clause — an unasked-for cartesian
+product). Both got tests; the second pass caught 17/17.
+
+**MCP context budget** rose a measured **1,485 chars** of tool schema plus 778 of
+instructions (2,263 total; 109,252 -> 111,515, measured against base commit
+e735735 in a worktree), against item 103's prediction that a new top-level shape
+would breach the ceiling badly. `SetOpSpec.arms` is a `$ref` to the
+`StructuredQuery` already in `$defs`, so nothing was duplicated. The ceiling was
+raised 110,000 -> 116,000 after a trim pass found no maintainer rationale left in
+any model docstring to move out. A first draft of this figure said 1,576 and was
+wrong — it double-counted the `SetOpSpec` docstring, which is already inside the
+1,145-char `$def`; the correction is recorded in the budget test's own comment.
+
 ### 107. Batch query execution double-reserves quota on an approval retry ✅ DONE
 
 **Effort: S. Priority: medium (real throughput bug, narrow blast radius).

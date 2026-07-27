@@ -58,6 +58,19 @@ default:
   max_window_specs: 5
   max_window_frame_offset: 1000
 
+  # How many SELECTs one set operation may combine (TODO.md item 104), counting
+  # the query that carries `set_op` as arm 1 and summed across the query AND
+  # every subquery. 0 (or 1) disables UNION/INTERSECT/EXCEPT entirely for this
+  # connection. Note what this does NOT bound: every other cap above
+  # (max_joins, max_select_columns, max_where_predicates, max_expression_nodes)
+  # is already summed across the arms, so N arms share one budget — this bounds
+  # only the number of independent scans plus the dedup sort a non-ALL set
+  # operation adds. (The COUNT caps are what get summed; the per-tree/per-node
+  # bounds above — max_where_depth, max_expression_depth, max_window_frame_offset
+  # — are not summed and apply to each arm on its own.) Raise it if analysts
+  # routinely combine more segments.
+  max_set_op_arms: 3
+
   # CROSS JOIN (TODO.md item 103) — deny-by-default, and the only join type that
   # needs an explicit opt-in. Every other join must connect to the query's table
   # graph, so before item 103 a cartesian product could not be expressed at all;
