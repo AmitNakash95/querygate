@@ -25,6 +25,8 @@ from querygate.validation.schema_validation import (
     expression_depth,
     iter_column_refs,
     iter_expression_nodes,
+    iter_join_condition_predicates,
+    iter_join_conditions,
     iter_query_scopes,
     iter_scope_case_conditions,
     iter_scope_expressions,
@@ -62,6 +64,14 @@ def _scope_having_predicate_count(query: StructuredQuery) -> int:
     """HAVING is a WhereNode (item 99); count every predicate in its boolean
     tree, not a flat list length."""
     return sum(1 for _ in iter_where_predicates(query.having)) if query.having is not None else 0
+
+
+def _scope_join_condition_predicate_count(query: StructuredQuery) -> int:
+    """Every predicate across every join `condition` (item 103) in this scope.
+    A range join's condition is a WhereNode like any other, so its boolean breadth
+    is budgeted rather than left unbounded — otherwise `max_where_predicates`
+    would bound the WHERE clause while a 500-predicate ON clause sailed past."""
+    return sum(1 for _ in iter_join_condition_predicates(query))
 
 
 def _scope_case_condition_predicate_count(query: StructuredQuery) -> int:
@@ -122,6 +132,9 @@ def _enforce_tree_wide_caps(scopes: List[StructuredQuery], policy: Policy) -> No
     _check_predicate_count(sum(_scope_having_predicate_count(q) for q in scopes), policy, "having")
     _check_predicate_count(
         sum(_scope_case_condition_predicate_count(q) for q in scopes), policy, "case condition"
+    )
+    _check_predicate_count(
+        sum(_scope_join_condition_predicate_count(q) for q in scopes), policy, "join condition"
     )
     total = sum(_scope_expression_node_count(q) for q in scopes)
     if total > policy.max_expression_nodes:
@@ -297,10 +310,30 @@ def _validate_scope(query: StructuredQuery, policy: Policy) -> None:
                 "(row_number/rank/dense_rank/ntile/lag/lead/first_value/last_value)."
             )
 
+    # A cartesian product is the one join shape whose cost is the PRODUCT of its
+    # inputs rather than bounded by a key, and (item 103) the only join the graph
+    # rule deliberately exempts from having to connect to anything. So it is
+    # deny-by-default and must be turned on per connection.
+    if not policy.allow_cross_join:
+        for join in query.joins:
+            if join.type == "cross":
+                raise PolicyViolationError(
+                    f"cross join to {join.table!r} is not allowed under the active policy "
+                    "(allow_cross_join is off): a cross join multiplies its inputs "
+                    "row-for-row. Use an inner/left join with a condition, or ask an "
+                    "operator to enable allow_cross_join for this connection."
+                )
+
     # In-list-size is checked on every predicate the scope can carry: WHERE tree,
-    # HAVING tree, and every searched-CASE condition tree (item 99), including
-    # the CASEs item 100 lets sit inside an expression.
+    # HAVING tree, every searched-CASE condition tree (item 99, including the
+    # CASEs item 100 lets sit inside an expression), and every join condition
+    # (item 103).
     all_predicates: List[Predicate] = []
+    for _join, condition in iter_join_conditions(query):
+        # A join condition is a WhereNode — depth-bound it exactly like
+        # WHERE/HAVING/CASE so an ON clause cannot be a compile-time DoS.
+        _check_where_depth(condition, policy, "join condition")
+        all_predicates.extend(iter_where_predicates(condition))
     for condition in iter_scope_case_conditions(query):
         # A searched-CASE condition (item 99) is a WhereNode — depth-bound it
         # exactly like WHERE/HAVING so a deeply-nested condition can't be a
@@ -380,6 +413,17 @@ def _validate_subquery_constraints(scoped: List, policy: Policy) -> None:
                         "IN (subquery) is only supported in a WHERE clause, not a CASE "
                         "condition (item 97)"
                     )
+        # Same reasoning for a join condition (item 103): `iter_query_scopes`
+        # descends WHERE/HAVING predicates only, so a subquery hidden in an ON
+        # clause would never be enumerated as a scope and would reach the compiler
+        # with no policy/schema validation of its own. Rejected here so it fails
+        # closed with a typed error rather than on a compiler-internal `ctx=None`.
+        for pred in iter_join_condition_predicates(scope):
+            if pred.value_subquery is not None:
+                raise PolicyViolationError(
+                    "IN (subquery) is only supported in a WHERE clause, not a join "
+                    "condition (item 97)"
+                )
         if depth > 0:
             # This scope is a subquery: its single select item is the value set
             # feeding IN. A masked column may not be used there.

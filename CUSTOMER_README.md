@@ -133,7 +133,8 @@ The supported model includes:
 - column selection and aliases;
 - `count`, `sum`, `avg`, `min`, and `max` aggregates;
 - nested `and` / `or` filters with a fixed operator set;
-- inner and left equality joins;
+- inner, left, full-outer and (policy-gated) cross joins — on an equality pair or
+  a general condition, so range and temporal joins are expressible;
 - grouping, aggregate filters, sorting, limits, and offsets;
 - day, week, month, quarter, and year date buckets;
 - overall or per-partition top-N ranking; and

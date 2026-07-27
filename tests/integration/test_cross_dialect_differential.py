@@ -892,3 +892,197 @@ async def test_date_bucket_over_a_real_timestamp_still_matches_on_both_dialects(
     )
     assert len(rows) == len(_PROBE_ROWS)
     assert all(row["bucket"] is not None for row in rows)
+
+
+# --- item 103: non-equi/range joins + FULL OUTER / CROSS --------------------
+#
+# FULL OUTER and non-equi joins are universal on PG and MSSQL, so item 103 is
+# mechanical translation with no adapter method and no rejection. That claim is
+# exactly the kind item 102 proved you cannot make by reading a dialect manual,
+# so each form is executed on BOTH live servers and the rows compared.
+
+# One executable join per JoinType. `cross` takes no condition by construction;
+# the rest join customers to products on a deliberately mismatched key (customers
+# are ids 1-8, products 1-10) so the outer types have unmatched rows to keep.
+_JOIN_TYPE_CASES = {
+    "inner": {"table": "products", "on": ["customers.id", "products.id"]},
+    "left": {"table": "products", "type": "left", "on": ["customers.id", "products.id"]},
+    "full": {"table": "products", "type": "full", "on": ["customers.id", "products.id"]},
+    "cross": {"table": "products", "type": "cross"},
+}
+
+
+def _setup_allowing_cross() -> None:
+    """`_setup()` with the one policy field item 103 adds turned on."""
+    _setup()
+    set_policy_store(
+        PolicyStore(default=Policy(max_select_columns=50, allow_cross_join=True), overrides={})
+    )
+
+
+# The exhaustiveness gate over `_JOIN_TYPE_CASES` deliberately lives in the UNIT
+# tier (`tests/unit/test_nonequi_joins.py`), not here — this module is marked
+# `postgres_live` AND `mssql_live`, so a gate placed beside the cases it guards
+# would only fire in the one CI job that has both servers. That is the same
+# reasoning item 102 recorded for its DatePart gate.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("join_type", sorted(_JOIN_TYPE_CASES))
+async def test_join_type_matches_on_both_dialects(join_type):
+    _setup_allowing_cross()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "customers",
+                "select": ["customers.id", "products.id"],
+                "joins": [_JOIN_TYPE_CASES[join_type]],
+                # Ordered by the side that is never NULL here (products 9-10 are
+                # the unmatched rows), NOT by customers.id — see
+                # `test_outer_join_null_ordering_diverges_and_predates_item_103`.
+                "order_by": [{"col": "products.id"}],
+                "limit": 200,
+            }
+        )
+    )
+    assert rows, f"{join_type} join returned nothing — the comparison is vacuous"
+
+
+@pytest.mark.asyncio
+async def test_full_outer_keeps_the_same_unmatched_rows_on_both_dialects():
+    """The rows that distinguish FULL from INNER are the whole point of the type,
+    so assert they exist and are identical, not just that the two agree."""
+    _setup()
+    query = {
+        "from": "customers",
+        "select": ["customers.id", "products.id"],
+        # Ordered by the side that is never NULL here — see
+        # `test_outer_join_null_ordering_diverges_and_predates_item_103`.
+        "order_by": [{"col": "products.id"}],
+        "limit": 200,
+    }
+    inner = await _assert_same(
+        StructuredQuery.model_validate(
+            {**query, "joins": [{"table": "products", "on": ["customers.id", "products.id"]}]}
+        )
+    )
+    full = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                **query,
+                "joins": [
+                    {"table": "products", "type": "full", "on": ["customers.id", "products.id"]}
+                ],
+            }
+        )
+    )
+    assert len(full) > len(inner), "FULL OUTER kept nothing extra — nothing is proven"
+    assert all(row["id"] is None for row in full if row not in inner)
+
+
+@pytest.mark.asyncio
+async def test_range_join_matches_on_both_dialects():
+    """Bar row 16's shape on both real backends: a price-band self-join whose ON
+    clause is two inequalities plus item 100 arithmetic."""
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "products",
+                "from_alias": "p",
+                "select": ["p.id", "band.id"],
+                "joins": [
+                    {
+                        "table": "products",
+                        "alias": "band",
+                        "condition": {
+                            "and": [
+                                {"col": "p.price", "op": "gte", "value_col": "band.price"},
+                                {
+                                    "col": "p.price",
+                                    "op": "lte",
+                                    "value_expr": {
+                                        "left": {"col": "band.price"},
+                                        "op": "*",
+                                        "right": {"literal": 2},
+                                    },
+                                },
+                            ]
+                        },
+                    }
+                ],
+                "order_by": [{"col": "p.id"}, {"col": "band.id"}],
+                "limit": 200,
+            }
+        )
+    )
+    assert len(rows) > len({row["id"] for row in rows}), "no product matched >1 band"
+
+
+@pytest.mark.asyncio
+async def test_cross_join_is_a_real_cartesian_product_on_both_dialects():
+    """`ON true` on Postgres and `ON 1 = 1` on MSSQL must be the same product."""
+    _setup_allowing_cross()
+    counted = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "customers",
+                "select": [{"fn": "count", "col": "*", "as": "n"}],
+                "joins": [{"table": "products", "type": "cross"}],
+            }
+        )
+    )
+    customers = await _assert_same(
+        StructuredQuery.model_validate(
+            {"from": "customers", "select": [{"fn": "count", "col": "*", "as": "n"}]}
+        )
+    )
+    products = await _assert_same(
+        StructuredQuery.model_validate(
+            {"from": "products", "select": [{"fn": "count", "col": "*", "as": "n"}]}
+        )
+    )
+    assert counted[0]["n"] == customers[0]["n"] * products[0]["n"]
+
+
+@pytest.mark.asyncio
+async def test_outer_join_null_ordering_diverges_and_predates_item_103():
+    """A recorded divergence, not a regression — and deliberately NOT fixed here.
+
+    An outer join can NULL out the very column the query orders by, and the two
+    servers place those NULLs differently: Postgres sorts them LAST on ASC,
+    SQL Server sorts them FIRST. So the same AST returns the same row SET in a
+    different ORDER on the two backends.
+
+    Item 103 did not introduce this. Measured on both live servers: a plain LEFT
+    JOIN — shipped long before item 103 — diverges identically, which is what
+    this test asserts. What item 103 changed is only that FULL OUTER makes it
+    reachable from a second join type.
+
+    It is left standing rather than papered over because the only in-engine fix
+    is `OrderBySpec.nulls`, which item 74 deliberately REJECTS on MSSQL (T-SQL
+    has no `NULLS FIRST/LAST`, and synthesizing a CASE-based sort column is the
+    exact "don't spoon-feed the agent" line). Changing that is a maintainer
+    decision, not a side effect of this item. A caller who needs a deterministic
+    order across both backends orders by a non-nullable column — which is what
+    the item-103 tests above do.
+    """
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "from": "products",
+            "select": ["products.id", "customers.id"],
+            "joins": [
+                {"table": "customers", "type": "left", "on": ["products.id", "customers.id"]}
+            ],
+            "order_by": [{"col": "customers.id"}],
+            "limit": 200,
+        }
+    )
+    pg = _rows(await StructuredQueryService(connection_id="pg").execute(query))
+    ms = _rows(await StructuredQueryService(connection_id="ms").execute(query))
+
+    assert sorted(r["id"] for r in pg) == sorted(r["id"] for r in ms), "row SETS must match"
+    assert pg != ms, "the divergence disappeared — re-check item 74's NULLS posture"
+    assert pg[-1]["id_1"] is None, "Postgres is expected to sort NULLs LAST on ASC"
+    assert ms[0]["id_1"] is None, "SQL Server is expected to sort NULLs FIRST on ASC"
