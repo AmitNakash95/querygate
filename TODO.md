@@ -153,6 +153,8 @@ order-of-magnitude, not commitments.
 | 120 | ✅ Audit shape records nothing for a nested `IN (subquery)` | S | — |
 | 121 | ✅ Report-only surfaces still assume a query has one scope | S | 104 |
 | 122 | ✅ `_unique_column_sets` crashed on a non-`Table` FROM element | S | 118 |
+| 123 | A select-item `CASE`'s conditions are absent from the audit shape | S | 120 |
+| 124 | Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2190,3 +2192,65 @@ looks through to its element; a cte/subquery reports no uniqueness and is treate
 as able to fan out (fail-closed).
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 122).
+
+### 123. A select-item `CASE`'s condition subtree is absent from the audit shape
+
+`_select_shape`'s `CaseSelectItem` branch records `{kind, alias, branch_count,
+columns}` and never walks `item.when[*].when` through `_where_shape`. Every other
+walker reaches its predicates via `as_expression()` — which `query_ast/models.py`
+documents as "the single conversion every walker, cap, and compile path goes
+through" — and `_select_shape` is the one that does not. The identical CASE
+written as an `ExpressionSelectItem` (`CaseExpr`) *does* record its conditions in
+full, so two spellings of one query produce materially different audit detail —
+the exact asymmetry `_predicate_shape` calls out and fixed for joins in item 103.
+
+**Consequence.** A nested `value_subquery` sitting in a select-item CASE condition
+is invisible to the event: the attempt audits as reading only the outer table.
+Policy always rejects such a query (`policy_validation.py` refuses a subquery in
+that position), so nothing executes and this is not a policy bypass — but item
+120's whole rationale is that *rejected attempts stay auditable*, and in this one
+position they do not. Proof-pillar fidelity, not enforcement.
+
+**Found by** the item-119/120 completion audit on 2026-07-27, which also found
+that the redaction test covering this position asserted only the ABSENCE of
+sentinel literals — vacuously true, since the subtree is discarded rather than
+redacted. That test was moved to the expression spelling (where it genuinely
+exercises the walk) and now pins that the condition was actually recorded, so the
+gap is no longer masked. Item 120's write-up was narrowed to match reality.
+
+**Proposed fix.** Have the `CaseSelectItem` branch delegate to
+`_expression_shape(item.as_expression())`, or additively record
+`"conditions": [_where_shape(w.when) for w in item.when]`, mirroring `CaseExpr` in
+`_expression_shape`. Additive either way; it changes the persisted event's shape
+for CASE select items, which is why it is its own item rather than folded into 120.
+
+**Effort: S. Priority: low** (fidelity on a position that is always rejected).
+
+### 124. Most of `tests/unit/` is not selected by `pytest -m unit`
+
+Markers are explicit — there is no auto-marking by directory — and only 26 of the
+78 files in `tests/unit/` carry one. Measured on 2026-07-27: `pytest tests/unit`
+collects **1703** tests, `pytest -m "unit and not real_db"` collects **678** of
+them. So ~60% of the unit directory is invisible to the tier `CLAUDE.md` names as
+the minimum bar ("`pytest -m unit` at minimum") and to the `git commit` pre-commit
+hook, which runs exactly that selection.
+
+**Why it matters.** The gap is silent in both directions: a green pre-commit gate
+does not mean the unit directory passed, and a new test added to an unmarked file
+is never run by the gate that is supposed to protect it. `test_audit.py` — which
+covers the redaction contract, non-negotiable 3 — was one of the unmarked files
+until the item-119/120 audit marked it on 2026-07-27. The full-suite run
+(`poetry run pytest`) does execute everything, so this has hidden a coverage
+illusion rather than a regression.
+
+**Proposed fix.** Either add `pytestmark = pytest.mark.unit` to the remaining 52
+files, or drop the per-file marker convention entirely and derive the tier from
+the directory in `tests/conftest.py` (a `pytest_collection_modifyitems` hook that
+marks by path), which removes the failure mode permanently rather than fixing 52
+instances of it. The second is preferable; it also makes `tests/integration/` and
+`tests/security/` self-consistent.
+
+**Found by** the item-119/120 completion audit, when two newly added regression
+tests passed the file-scoped run but were silently deselected by the gate.
+
+**Effort: S. Priority: medium** (it weakens every gate the repo relies on).

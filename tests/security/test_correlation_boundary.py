@@ -434,3 +434,39 @@ def test_a_scalar_subquery_may_not_carry_a_set_operation():
                 },
             },
         )
+
+
+# --------------------------------------------------------------------------- #
+# Interaction with top_n's derived-table materialization (items 106 x 119)     #
+# --------------------------------------------------------------------------- #
+
+
+async def test_top_n_materialization_preserves_a_correlated_exists():
+    """Item 106 (EXISTS/correlation) and item 119 (`_apply_top_n` positional
+    binding) were built on separate branches and first combined by a rebase, so
+    nothing had ever compiled them together. `_apply_top_n` re-selects the whole
+    statement through a derived table; the correlated EXISTS must stay INSIDE that
+    derived table. Hoisted out, it would filter after ranking — a different answer
+    — and the correlation would no longer resolve against the scope that declared
+    it."""
+    query = _q(
+        **{"from": "customers", "select": ["customers.id", "customers.name"]},
+        where=_exists_on(["customers.id"], _MATCH),
+        top_n={
+            "partition_by": ["customers.id"],
+            "order_by": [{"col": "customers.name", "dir": "desc"}],
+            "n": 1,
+        },
+    )
+    stmt, _ = await _run(query, _DEEP)
+    sql = _sql(stmt)
+
+    # Everything up to the derived table's alias is its body; the outer query is
+    # only the `WHERE anon_1.__rank <= n` filter after it.
+    inner, _, outer = sql.partition("AS anon_1")
+    assert "EXISTS" in inner.upper(), sql
+    # It is still the CORRELATED form — the outer column is referenced from inside
+    # the EXISTS, not re-selected into the subquery's own FROM list.
+    assert "orders.customer_id = customers.id" in inner, sql
+    # And the rank filter really is the only thing left outside.
+    assert "EXISTS" not in outer.upper(), sql
