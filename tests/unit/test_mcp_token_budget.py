@@ -119,12 +119,65 @@ from querygate.mcp.server import create_mcp_server
 # The three nodes' maintainer rationale went into `#` comments, not model
 # docstrings, per the note below — their agent-facing docstrings are 2-3 lines each.
 #
+# Item 103 (join `condition` + `full`/`cross` join types) cost a MEASURED 832
+# chars — the enum's two new values, the `condition` field, and three tightened
+# descriptions; `condition` is a `$ref` to the WhereNode already in `$defs`, so
+# the recursive tree it unlocks is free. That is small, but it lands on an
+# already-eroded budget: the total was 104,042 at item 114 and is 109,161 now,
+# so headroom is **0.8%, not the ~5% this note assumes**, and the next engine
+# item (104, set operations — a NEW top-level shape, not a `$ref` to an existing
+# one) will breach it. That is a maintainer decision, deliberately not taken
+# here: raise the ceiling, or do the trim pass the note below describes. The
+# numbers above are recorded so it can be made on data.
+#
+# Bumped 2026-07-27 (item 104: set operations) — 110,000 -> 116,000. Every figure
+# below was measured against base commit e735735 in a worktree, NOT derived:
+#
+#                                  base e735735   working tree     delta
+#   instructions                          9,478         10,256      +778
+#   tool schemas                         99,774        101,259    +1,485
+#   TOTAL                               109,252        111,515    +2,263
+#     run_structured_queries             39,692         41,090    +1,398
+#     describe_my_querygate_access       10,599         10,686        +87
+#
+# This is the breach item 103's note predicted, and the schema half arrived far
+# smaller than that note expected: **1,485 chars**, not the "new top-level shape"
+# cost it warned of. That is a design outcome, not luck — `set_op` hangs off
+# `StructuredQuery` with the carrying query as arm 1, so `SetOpSpec.arms` is a
+# `$ref` to the StructuredQuery already in `$defs` rather than a second top-level
+# query type. The 1,398 decomposes as a 1,145-char `SetOpSpec` `$def` plus a
+# 226-char `set_op` property on `StructuredQuery`. The +87 is `max_set_op_arms`
+# joining `GUARDRAIL_FIELDS` — worth naming because the advice below points at
+# that schema as the next lever, and it grows on its own with every new cap.
+#
+# An earlier version of this entry said "1,576" and split the total as
+# "110,737 AST/schema + 778 instructions". Both were wrong in precisely the way
+# this comment already warns about once: 1,576 was 1,145 + 431, where the 431 was
+# the `SetOpSpec` class docstring **already counted inside the 1,145**; and
+# 110,737 was just 111,515 - 778, which folds 9,478 chars of PRE-EXISTING
+# instructions into "the AST/schema half". Left on the record rather than quietly
+# corrected, because a derived number presented as a measured one is the exact
+# defect this comment exists to prevent.
+#
+# The trim the note below prescribes WAS attempted first, and found nothing to
+# take: the largest remaining definitions in `run_structured_queries`' params
+# ($defs StructuredQuery 3,995, Predicate 3,362, JoinSpec 2,521; the longest
+# single descriptions are PercentileContSelectItem's 630 and CaseWhen's 561) are
+# all agent-facing dialect/shape guidance, not maintainer rationale — item 100's
+# trim already moved that into `#` comments, and item 104's new rationale went
+# there from the start. So the ceiling is raised rather than the content shrunk,
+# and the raise restores the ~4% headroom this note assumes instead of the 0.8%
+# item 103 left. If the next item breaches this too, the honest lever left is
+# the `describe_my_querygate_access` output schema (10,686 chars, and it grows
+# automatically with every new `Policy` cap via GUARDRAIL_FIELDS) — not another
+# pass over the query AST.
+#
 # The budget keeps ~5% headroom. Before raising it again: check whether the
 # growth is real new capability or another duplicated definition, and move
 # maintainer rationale out of model docstrings into `#` comments first (a
 # Pydantic docstring becomes the agent-facing schema description and costs
 # tokens on every session; a `#` comment costs nothing).
-_MAX_TOTAL_CHARS = 110_000
+_MAX_TOTAL_CHARS = 116_000
 
 
 def _tool_schema_chars(tool: object) -> int:

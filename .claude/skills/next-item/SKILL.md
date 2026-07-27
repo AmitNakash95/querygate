@@ -17,7 +17,7 @@ The invokable form of [prompts/continue_dev_prompt](../../../prompts/continue_de
 ## 1. Orient
 
 - Read `README.md`, `TODO.md`, `CLAUDE.md`, `docs/THREAT_MODEL.md`,
-  `docs/RELEASING.md`.
+  `docs/RELEASING.md`, and ROADMAP.md's active `🚧 **CLAIMED**` markers.
 - `git status` + recent commits; confirm the worktree is clean.
 - **Never** reset, amend, delete, or recreate the local `v0.1.0` tag.
 - Don't modify completed (✅) items unless fixing a *verified* regression.
@@ -36,6 +36,9 @@ write its implementation.
 - If `args` gives an item number, use it (capacity rule + phasing still apply).
 - Otherwise scan the Quick-scan table for non-✅ items in ascending number order.
   An item is eligible only when every id in its "Depends on" column is ✅ (or "—").
+- Treat an item carrying a ROADMAP.md `🚧 **CLAIMED**` marker as unavailable,
+  including when `args` names it. Report the owner; never steal or auto-expire
+  another agent's claim. Continue only to an independently eligible item.
 - **Skip** any eligible item whose write-up says it needs a product/design/UX/
   infra decision from a maintainer ("which X to expose", "needs a chosen
   framework", "needs an approval model decided"). Note it, move on.
@@ -45,6 +48,11 @@ write its implementation.
   anything looks stale.
 - State: what you selected, what you skipped and why, how it fits capacity, and
   that deps are genuinely done.
+- Before implementation, add the canonical ROADMAP.md claim immediately below
+  the selected item's checkbox:
+  ``🚧 **CLAIMED** — owner: `<agent/session-or-task-id>`; started:
+  `<YYYY-MM-DDTHH:MMZ>` ``. Re-read the entry and proceed only if exactly one
+  claim exists and it is yours. Do not make a standalone claim-only commit.
 
 ## 4. Scope & implement
 
@@ -75,5 +83,7 @@ write its implementation.
 - Re-check capacity before committing; if tight, stop expanding and finish
   tests/docs/checks/review/commit. Don't claim completion with any check unfinished.
 - Once every phase of the item is done, use the `ship-item` skill to stub+archive it.
+- Remove your ROADMAP.md claim in the item's final commit, or before stopping if
+  you hand the item back unfinished.
 - Commit as **one** informative commit for this item — don't mix in unrelated or
   pre-existing changes. Do **not** push, publish, or move tags without approval.

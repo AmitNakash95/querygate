@@ -25,6 +25,7 @@ skip/dependency/capacity rules below); blank = auto-select.
 - Read `ROADMAP.md`, `TODO.md`, `CLAUDE.md`, `README.md`,
   `docs/THREAT_MODEL.md`, `docs/RELEASING.md`.
 - `git status` + recent commits; confirm the worktree is clean before starting.
+- Inspect ROADMAP.md for `🚧 **CLAIMED**` markers before selecting anything.
 - **Never** reset, amend, delete, or recreate the local `v0.1.0` tag.
 - Don't modify completed (`✅ DONE`) items unless fixing a *verified* regression.
 
@@ -39,22 +40,27 @@ TODO.md is the authority for done-status; ROADMAP.md is the authority for order.
    **not** complete.
 3. If complete: reconcile ROADMAP.md's checkbox for it to `[x]` (fix silently
    if wrong — TODO.md leads) and continue.
-4. The **next item** is the first one that is *all* of:
+4. If an unfinished item has a `🚧 **CLAIMED**` marker, report its owner and
+   treat it as unavailable. Never steal or auto-expire a claim based on its
+   timestamp. Continue only to an independently eligible item.
+5. The **next item** is the first one that is *all* of:
    - not fully `✅ DONE`,
+   - not carrying a `🚧 **CLAIMED**` marker,
    - **not** in ROADMAP.md's "Decision-gated — NOT in the automated order"
      list, and
    - has every TODO.md "Depends on" dependency satisfied (spot-check against
      code/tests; don't trust a stale `✅` blindly).
-5. If a decision-gated item is reached before the next eligible one, **skip and
+6. If a decision-gated item is reached before the next eligible one, **skip and
    report it** — never auto-start a decision-gated item (governed writes,
    NL→StructuredQuery, open AST standard). Same for the write-up test in the
    `next-item` skill: skip anything whose body says it needs a maintainer
    product/design/UX/infra decision.
-6. For **coordination-gated** items (53 audit, 60 bug bounty, 54 mapping): do
+7. For **coordination-gated** items (53 audit, 60 bug bounty, 54 mapping): do
    only the code/doc-preparable parts and clearly flag what needs a
    human/vendor to finish. Don't claim completion of the external part.
-7. If `args` forces an item number, honor it, but still apply the skip and
-   dependency rules and say so.
+8. If `args` forces an item number, honor it only if it is unclaimed; still
+   apply the skip and dependency rules and say so. An existing claim blocks the
+   override.
 
 Then **announce**: the last completed roadmap item (where the previous agent
 left off), the next item and why it's next per the roadmap rationale, and any
@@ -64,6 +70,17 @@ Proof, or delegated-identity / governed-writes, or the success metric). If a
 selected item advances none of them, flag that as a signal to question the item
 with the maintainer before building — the North Star is the check, not an
 afterthought.
+
+Before implementation, add the canonical claim line immediately below the
+selected item's ROADMAP checkbox:
+
+```text
+🚧 **CLAIMED** — owner: `<agent/session-or-task-id>`; started: `<YYYY-MM-DDTHH:MMZ>`
+```
+
+Re-read that roadmap entry after writing it. Proceed only if exactly one claim
+is present and it is yours; otherwise stop and coordinate. Do not commit the
+claim as a standalone change.
 
 ## 3. State remaining session capacity
 
@@ -99,6 +116,8 @@ Follow the `next-item` skill's steps 4–6 exactly for the selected item:
 
 In the **same commit** as the item's work:
 
+- Remove your `🚧 **CLAIMED**` marker. If handing the item back unfinished,
+  remove it before stopping instead.
 - Tick the item's checkbox to `[x]` in `ROADMAP.md` **only if** its TODO.md
   heading now ends in `✅ DONE` (a phased item that only advanced one phase
   stays `[ ]`).

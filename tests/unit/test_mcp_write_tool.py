@@ -194,10 +194,43 @@ def test_write_predicate_is_a_strict_narrowing_of_the_read_predicate():
     write_fields = set(WritePredicate.model_fields)
     read_fields = set(Predicate.model_fields)
     assert write_fields < read_fields, "a write predicate field must exist on the read predicate"
-    assert read_fields - write_fields == {"expr", "value_expr", "value_subquery"}, (
+    assert read_fields - write_fields == {
+        "expr",
+        "value_expr",
+        "value_subquery",
+        # Item 106. A write's WHERE selects rows to mutate; an EXISTS test over a
+        # correlated subquery is a read-shaped question, and admitting it would put
+        # a second query's worth of scan behind every UPDATE/DELETE row match. Kept
+        # read-only deliberately, which is the decision this assertion exists to
+        # force rather than to let pass silently.
+        "exists_subquery",
+    }, (
         "the read predicate grew or lost a field — decide whether writes accept it, "
         "then update this set (see TODO.md item 114)"
     )
+
+
+def test_the_write_operator_set_is_not_widened_by_read_only_operators():
+    """The other half of item 114's defect, which the field check above cannot see:
+    the write tool must not ADVERTISE an operator it rejects.
+
+    Item 106 added `exists`/`not_exists` to the read path. They live on a separate
+    `ReadCompareOp` precisely so `CompareOp` — which `WritePredicate.op` uses — does
+    not grow them. If a future change puts them on the shared type, the write tool's
+    MCP schema starts offering an operator the write validator refuses, which is the
+    exact shape item 114 was raised to fix.
+    """
+    import typing
+
+    from querygate.query_ast.models import CompareOp, EXISTS_OPS, ReadCompareOp
+    from querygate.write_ast.models import WritePredicate
+
+    read_ops = set(typing.get_args(ReadCompareOp))
+    write_ops = set(typing.get_args(CompareOp))
+    assert write_ops < read_ops, "the read operator set must be a strict superset"
+    assert read_ops - write_ops == EXISTS_OPS
+    assert WritePredicate.model_fields["op"].annotation is CompareOp
+    assert not (EXISTS_OPS & write_ops), "an existence test is not a write operator"
 
 
 def test_write_tool_schema_still_advertises_what_writes_do_accept():

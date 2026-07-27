@@ -681,6 +681,262 @@ lives in the unit tier so it fires outside the two-database job. The UTC pin has
 `tests/integration/test_postgres_date_primitives.py`, which sets the server's
 zone to UTC−09:30 and asserts the extracted hour is still UTC.
 
+#### Joins: equality sugar, a general `ON` condition, and the four join types
+
+A join is written one of two ways (item 103). `on` is the equality sugar and the
+common case — `"on": ["orders.customer_id", "customers.id"]`, with `extra_on`
+adding further ANDed pairs for a composite key. `condition` is the general form:
+the **same predicate tree** `where` uses, which is what makes a range, temporal or
+inequality join expressible at all.
+
+```json
+{"from": "products", "from_alias": "p",
+ "select": ["p.name", "band.label"],
+ "joins": [{"table": "price_bands", "alias": "band",
+            "condition": {"and": [
+               {"col": "p.price", "op": "gte", "value_col": "band.lo"},
+               {"col": "p.price", "op": "lte", "value_col": "band.hi"}]}}]}
+```
+
+The two forms are **mutually exclusive** — they are two spellings of one clause,
+so accepting both would leave their precedence for the compiler to invent.
+
+`type` is `inner` (default), `left`, `full` or `cross`. A `cross` join takes no
+condition at all and is **off by default**: `Policy.allow_cross_join` must be
+turned on for the connection. It is the only join whose cost is the *product* of
+its inputs, and the only one exempt from the rule below — before item 103 a
+cartesian product was structurally inexpressible, so it now has to be asked for
+explicitly. It still counts against `max_joins`.
+
+**Which tables a condition may name.** It must reference the table being joined,
+must connect to something already in the query graph, and must not
+forward-reference a table joined *later*. A condition naming a third,
+already-joined table is fine (`JOIN c ON c.x = a.x AND c.y = b.y`) — `extra_on`'s
+"same two tables" restriction is a property of that sugar, not of a join.
+
+**The `ON` clause is capped exactly like `WHERE`.** It is the fourth position a
+predicate tree can occupy (after `where`, `having` and a searched-`CASE`
+condition), and it inherits `max_where_depth`, `max_where_predicates` (summed
+tree-wide), `max_in_list_size` and the expression caps — plus the denied-column,
+masked-column and date-operand rules, which apply by construction because the
+condition's refs flow through the same canonical visitor everything else uses.
+`IN (subquery)` is **rejected** in a join condition, as it is in `HAVING` and
+`CASE`.
+
+**One cross-dialect caveat worth knowing.** An outer join can produce NULLs in the
+column you `order_by`, and Postgres sorts those NULLs **last** on ASC while SQL
+Server sorts them **first** — same rows, different order. This predates item 103
+(a plain `LEFT JOIN` behaves identically) and is not papered over, because the
+only in-engine fix is `OrderBySpec.nulls`, which QueryGate deliberately rejects on
+MSSQL rather than emulating (item 74). Order by a non-nullable column when you
+need a deterministic order across both backends.
+
+**Proven on both real backends:** every join type, the range-join shape and the
+cross join's cartesian count all execute against a live Postgres *and* a live SQL
+Server in `tests/integration/test_cross_dialect_differential.py`, and a test makes
+a live both-dialects case mandatory for any future join type.
+
+### Set operations: UNION, INTERSECT and EXCEPT in one statement
+
+**Shipped by TODO.md item 104.** Combining result sets server-side — "customers
+who are high-value **or** dormant", "IDs in both lists", "in this list but not
+that one" — is a `set_op` on the query:
+
+```json
+{"from": "customers", "select": ["customers.name"],
+ "where": {"col": "customers.lifetime_value", "op": "gt", "value": 10000},
+ "set_op": {"op": "union", "arms": [
+     {"from": "customers", "select": ["customers.name"],
+      "where": {"col": "customers.last_order_at", "op": "lt", "value": "2025-01-01"}}]},
+ "order_by": [{"col": "name"}], "limit": 100}
+```
+
+**The query that carries `set_op` is the first arm.** Its `from`/`joins`/`where`/
+`group_by`/`having` describe arm 1; its `order_by`/`limit`/`offset` apply to the
+*combined* result. That mirrors SQL exactly — `SELECT … WHERE … UNION SELECT …
+ORDER BY … LIMIT …` binds the `WHERE` to one arm and the `ORDER BY`/`LIMIT` to the
+statement — so an arm may not set `order_by`, `limit`, `offset` or `top_n`, and a
+`top_n` cannot be combined with a set operation at all. Every arm must project the
+same number of columns with **compatible types** at each position, and arms don't
+nest: a set operation is one flat `arms` list.
+
+The type rule exists because the backends disagree: an integer column unioned with
+a text cast of it is a hard error on Postgres and *succeeds* on SQL Server, which
+converts one side and returns rows. QueryGate refuses it on both. The check is
+deliberately coarse — integer and numeric are compatible, so are date and
+timestamp — and a value whose type isn't statically knowable (arithmetic, a
+function call, a `CASE`) is left to the database rather than guessed at.
+
+`op` is `union`, `intersect` or `except`; `all: true` keeps duplicates. `UNION ALL`
+works everywhere, but **`INTERSECT ALL` and `EXCEPT ALL` are Postgres-only** —
+T-SQL has neither, so QueryGate rejects them there with a typed error rather than
+silently dropping the flag and returning fewer rows than you asked for.
+
+**Every arm is a full, independently governed scope.** This is the part that
+matters for safety rather than reach: each arm is validated on its own — its own
+table/column allow-deny, its own masked-column rule, its own schema resolution
+against its own tables — and each arm is *compiled* on its own, so it carries its
+own mandatory row filters and its own `min_group_size` floor. **A set operation is
+not a channel to dodge a per-table filter.** An arm also cannot reference another
+arm's table: arms are siblings, not a correlated scope.
+
+**Bounds:** `max_set_op_arms` (default 3, counting arm 1, summed across the query
+and its subqueries; `0` turns the feature off per connection). Every *other* cap —
+`max_joins`, `max_select_columns`, `max_where_predicates`, `max_expression_nodes` —
+is summed across the arms, so arms share one budget rather than each getting their
+own. The higher `max_limit_aggregate` ceiling applies only when **every** arm
+aggregates; one raw-row arm means the response contains raw rows and gets
+`max_limit`.
+
+**Proven on both real backends:** all three operators, `UNION ALL`'s duplicate
+retention, per-arm aggregation, the enforced row limit, and a mandatory row filter
+reaching *every* arm all execute against a live Postgres *and* a live SQL Server in
+`tests/integration/test_cross_dialect_differential.py`. (The `INTERSECT ALL` /
+`EXCEPT ALL` split is proven there too, but asymmetrically and deliberately: the
+Postgres half executes, while the MSSQL half is a client-side rejection raised
+before any SQL is sent — the `array_agg` posture, where the dialect gap is a
+documented fact rather than something we make a server prove.) That last one is
+there for a specific reason: SQLAlchemy's MSSQL dialect **silently drops** a
+`LIMIT` applied to a compound `SELECT`, which would have made a policy guardrail a
+no-op on one dialect only, so QueryGate wraps the compound in a derived table
+before limiting it.
+
+### Multi-stage analysis in one statement: named `WITH` blocks (`ctes`)
+
+Some questions need two stages: aggregate first, then join the result; or define a
+cohort, then measure it. Before item 105 that meant two round-trips and stitching
+the results together in the agent. Now the first stage is a **named block** the
+rest of the query refers to by name:
+
+```json
+{
+  "ctes": [
+    {"name": "totals",
+     "query": {"from": "orders",
+               "select": ["orders.customer_id",
+                          {"fn": "sum", "col": "orders.total_amount", "as": "total"}],
+               "group_by": ["orders.customer_id"]}}
+  ],
+  "from": "customers",
+  "joins": [{"table": "totals", "on": ["customers.id", "totals.customer_id"]}],
+  "select": ["customers.name", "totals.total"]
+}
+```
+
+A block is referenced exactly like a table — put its `name` in `from` or a join's
+`table`. Because it is referenced by name rather than inlined, **one block can feed
+the FROM clause and several joins** without being written, or planned, more than
+once. Only the top-level query declares blocks (not a `set_op` arm, an
+`IN (subquery)`, or another block), and a block may reference only an **earlier**
+block — which is also why a **recursive CTE cannot be expressed**: it isn't
+forbidden by a special rule, it simply has no way to name itself. That is
+deliberate; unbounded recursion is a real denial-of-service surface, and admitting
+it would need a hard iteration cap designed and recorded first.
+
+**A block is a full scope, not a shortcut past anything.** Its tables get the same
+allow/deny, the same mandatory row filters, the same column masking and the same
+`min_group_size` floor as any other query, because every block compiles through the
+identical code path a top-level query does. Two consequences are worth stating
+outright:
+
+- **A masked column may not be projected by a block.** Inside the block it looks
+  like a bare projection, but the block's rows are an *input* to another scope,
+  where the value could be filtered, joined or ordered on — every position the
+  masking rule exists to keep an unmasked value out of.
+- **Joining onto a block is refused while `min_group_size` is set.** A computed
+  stage carries no uniqueness guarantee, so it may match many rows per key and
+  inflate the count the k-anonymity floor checks. Refusing is the same posture item
+  118 took for any other fan-out join: when the floor cannot be enforced correctly,
+  the query fails rather than returning an answer the policy believes is protected.
+
+**Bounds:** `max_cte_count` (default 3; `0` turns the feature off per connection)
+and `max_subquery_depth`, charged along the **reference chain** — two independent
+blocks each cost 1, while a block reading another block costs 2, so the default
+denies a chain until an operator raises the cap. Every other cap already counts
+block bodies, so blocks share one budget rather than each getting a fresh one.
+
+**A block is deliberately *not* row-capped.** `max_rows` bounds the response, and a
+block's rows are intermediate work feeding a join or an aggregate — clamping it
+would silently truncate the population a total is computed over, which is a wrong
+answer rather than a refusal. An explicit `limit` inside a block is honoured (and
+clamped), because that is the caller asking for "the top 100". Stated plainly, as
+the cross-join gate had to be: what bounds a block is `timeout_seconds`,
+`max_response_bytes`, the concurrency limiter and `max_cte_count` — not a row cap.
+
+**Naming:** a block may not be named after a table this connection's policy has a
+rule for. A block name wins name resolution, so calling one `orders` would make
+every rule the operator wrote about the *table* `orders` unreachable in that query.
+A block's own projections must also have **distinct output names** — its columns
+are referred to by name, so `select: ["orders.id", "customers.id"]` would leave
+`block.id` meaningless; alias one of them with `as` and the meaning is explicit.
+
+**A block stays single-connection**, the same restriction a nested `IN (subquery)`
+has carried since item 97: a block's own joins may not reach a second connection,
+even one in the same `join_group`. Run a query per connection and combine the
+results. (The outer query's joins are unaffected — cross-connection joins there
+work exactly as before.)
+
+**Proven on both real backends:** the aggregate-then-join shape, a two-stage chain,
+the absence of the row cap (a grand total through a block under a row cap of 1 must
+still equal the direct total), and a 7-day moving average over daily order counts
+all execute against a live Postgres *and* a live SQL Server in
+`tests/integration/test_cross_dialect_differential.py`.
+
+### Asking about rows that relate to other rows: EXISTS and scalar subqueries
+
+Two shapes shipped with item 106, and between them they close the last expressible
+gap in the read engine.
+
+**`EXISTS` / `NOT EXISTS`** tests whether a related row exists, without joining:
+
+```json
+{"from": "customers", "select": ["customers.name"],
+ "where": {"op": "not_exists",
+           "exists_subquery": {"from": "orders", "select": ["orders.id"],
+                               "correlate": ["customers.id"],
+                               "where": {"col": "orders.customer_id", "op": "eq",
+                                         "value_col": "customers.id"}}}}
+```
+
+Note `correlate`. **QueryGate does not give a subquery ambient access to the
+enclosing query's columns the way SQL does.** Every outer column a subquery may read
+must be named in its own `correlate` list, and each named column is then checked
+against the *enclosing* query's policy — table allow-deny, column allow-deny, and the
+masked-column rule. An outer column that is *not* declared is rejected, exactly as it
+was before this feature existed. Correlation is therefore opt-in per subquery, and
+the safe default is unchanged. It reaches exactly one level, to the immediately
+enclosing query. `Policy.max_correlated_refs` (default 2) caps how many columns may
+be pulled in; `0` disables correlation entirely.
+
+**A scalar subquery** compares a value against an aggregate computed by another
+query — "orders above the overall average", in one statement instead of two:
+
+```json
+{"from": "orders", "select": ["orders.id"],
+ "where": {"col": "orders.total_amount", "op": "gt",
+           "value_subquery": {"from": "orders",
+                              "select": [{"fn": "avg", "col": "orders.total_amount",
+                                          "as": "a"}]}}}
+```
+
+A scalar subquery **must be an aggregate with no `group_by`**. That is not a
+restriction for its own sake: a comparison needs exactly one row, and this shape
+guarantees it before the query reaches the database, on every backend. The
+alternative — quietly taking the first row of many — would return a wrong answer
+with no error, which this project treats as worse than a refusal. For a multi-row
+value set, use `in`/`not_in`, which is unchanged.
+
+Scalar subqueries also work in `HAVING` (comparing one aggregate to another).
+`EXISTS` does not: it asks a per-row question, which has no meaning after grouping.
+Neither is permitted in a join condition or a `CASE` condition, where it would reach
+the compiler without having been checked as a scope of its own.
+
+**Cost, stated plainly:** a correlated subquery is re-evaluated per candidate outer
+row. `max_correlated_refs` bounds the *surface* — how many outer columns a nested
+scope can see, which is the part that must not grow silently — not the work. What
+bounds the work is `timeout_seconds`, the concurrency limiter, and the (opt-in)
+query-cost gate.
+
 **What bounds a write's `WHERE`.** Two things beyond the write policy itself, both
 easy to miss because they live on the *read* side of `Policy`: the filter's columns
 are checked against read allow/deny **and** the masked-column rule (a masked column
@@ -1670,9 +1926,9 @@ their own — see the [Decision Log](#decision-log).
 A `Policy` bundles everything that bounds a query against one connection:
 table/column allow and deny lists, per-query complexity caps (`max_joins`,
 `max_select_columns`, `max_where_depth`, `max_where_predicates` and
-`max_in_list_size` for WHERE/HAVING/CASE-condition predicate shape — all three
-of those positions are the same `WhereNode` tree and are bounded identically
-(item 99) — `max_expression_depth` and `max_expression_nodes` for the scalar
+`max_in_list_size` for WHERE/HAVING/CASE-condition/join-condition predicate
+shape — all four of those positions are the same `WhereNode` tree and are bounded
+identically (items 99, 103) — `max_expression_depth` and `max_expression_nodes` for the scalar
 expression substrate (item 100; see
 [Computed expressions](#computed-expressions-arithmetic-conditional-aggregation-nested-functions)),
 `max_group_by`, `max_top_n` and
@@ -1681,6 +1937,12 @@ expression substrate (item 100; see
 [Window functions](#window-functions-running-totals-moving-averages-rank-in-place)),
 `max_interval_days` for how far a relative-date shift may reach (item 102; see
 [Dates and relative time](#dates-and-relative-time-the-last-30-days-without-doing-the-arithmetic)),
+`allow_cross_join` for the one join type whose cost is the product of its inputs
+(item 103, default off; see
+[Joins](#joins-equality-sugar-a-general-on-condition-and-the-four-join-types)),
+`max_set_op_arms` for how many SELECTs one `UNION`/`INTERSECT`/`EXCEPT` may
+combine (item 104, default 3, `0` disables; see
+[Set operations](#set-operations-union-intersect-and-except-in-one-statement)),
 `max_limit`/`max_limit_aggregate`
 for row counts, `max_response_bytes` for response size), execution
 guardrails (`timeout_seconds`, `max_concurrency`, queue-depth caps),
@@ -3027,6 +3289,321 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-07-27 — correlation is DECLARED and capped, never implicit; a scalar
+  subquery must be a single-group aggregate; and `EXISTS` rides on `Predicate`
+  rather than becoming a third `WhereNode` member (TODO.md item 106).** This is
+  the plan's §8 entry 8 and the last item of the flagship engine pillar. It is
+  also the only item that deliberately *removes* an invariant the rest of the
+  engine was built on, so each part of the model is stated with what it buys.
+
+  **1. Correlation is a declared list, not ambient scope.** `StructuredQuery`
+  gains `correlate: ["Customers.Id", …]` — the outer columns a nested subquery is
+  permitted to see. SQL makes every enclosing column implicitly visible; QueryGate
+  does not, because the enforcement chokepoint is the canonical visitor
+  (`iter_column_refs`), and a ref that resolves against a scope the visitor was
+  not looking at is exactly the silent policy-and-mask bypass the plan's invariant
+  2 names as the single most important rule in the document. With a declaration,
+  every correlated ref has a **known position** the visitor yields, so each one is
+  checked against the *enclosing* scope's name map for table allow/deny, column
+  allow/deny and the masked-column rule before it is usable. Undeclared outer refs
+  keep failing exactly as they do today — `_reflect_and_validate_scope` rejects an
+  undeclared table — so the pre-106 behavior is the default and correlation is
+  opt-in per subquery. Capped by `Policy.max_correlated_refs`, summed tree-wide.
+
+  **Correlation reaches one level, to the immediately enclosing scope.** Not "any
+  ancestor": a scope stack is a second resolution order to keep correct forever,
+  and every query shape this item exists to serve (`EXISTS`, per-row aggregate,
+  anti-join) correlates to its parent. Deeper correlation is expressible by
+  restructuring, and admitting it later is additive.
+
+  **2. A scalar subquery must be an aggregate with no `group_by`.** A subquery
+  feeding a scalar comparison (`amount > (SELECT AVG(…))`) must return exactly one
+  row, and the three ways to get that are not equal. Injecting `LIMIT 1` picks an
+  arbitrary row and returns a *wrong answer with no error* — the failure class
+  items 102/117 established this project treats as worse than a rejection. Letting
+  the database raise leaves the contract dialect-dependent and post-execution.
+  Requiring the single-group aggregate shape makes "exactly one row" true **by
+  construction, pre-database, identically on every backend** — and it costs
+  nothing real, because that shape is what the use case is: the regression bar's
+  row 11 ("customers spending above the overall average") is an `AVG` over no
+  grouping, and a correlated per-row `COUNT(*)` is too. A caller needing a
+  non-aggregate single value uses `in` with a one-row filter, or two round-trips.
+
+  **3. `EXISTS`/`NOT EXISTS` is an operator on `Predicate`, not a new `WhereNode`
+  member.** A third union member would force every `isinstance(node, Predicate)`
+  site — `iter_where_predicates`, `_compile_where`, `predicate_column_refs`,
+  `where_depth`, and both write validators — to learn a new shape, whose failure
+  mode is a consumer silently handling only the members it knows. That is the same
+  argument items 104 and 105 turned on, now for the third time, so it is settled
+  precedent rather than a fresh judgement. `EXISTS` instead behaves like the
+  `is_null` operators that already take no value: the op carries the meaning and
+  `exists_subquery` carries the operand.
+
+  **4. A scalar subquery in a SELECT projection is deliberately NOT built** — the
+  one part of this item's original write-up that did not ship, recorded here rather
+  than left as a silent omission. It is the position with the worst cost profile
+  (evaluated once per output row) and the widest blast radius (a new `SelectItem`
+  member touching output naming, the ref-position taxonomy, set-op arity and
+  `top_n`), and — decisively — it is the one shape an agent can already compose
+  from primitives QueryGate exposes. "Each customer with their order count" is a
+  cte that aggregates plus a LEFT JOIN:
+
+  ```json
+  {"ctes": [{"name": "counts", "query": {
+       "from": "orders", "select": ["orders.customer_id",
+                                    {"fn": "count", "col": "*", "as": "n"}],
+       "group_by": ["orders.customer_id"]}}],
+   "from": "customers",
+   "joins": [{"table": "counts", "type": "left",
+              "on": ["customers.id", "counts.customer_id"]}],
+   "select": ["customers.name", "counts.n"]}
+  ```
+
+  That is the item-74 posture applied to a position rather than a dialect: expose
+  the primitives and point at the composition, rather than grow a second way to
+  express the same result. Item 105 is what makes it a real recipe — before ctes
+  it would have been two round-trips, and this deferral would not have been
+  honest. Revisit only if a caller reports a shape the cte+join form cannot reach.
+
+  **The new ops go on a READ-only operator type.** `CompareOp` is shared with the
+  write AST (`write_ast/models.py`), so widening it would advertise `exists` in
+  the write tool's MCP schema while the write path rejects it — precisely the
+  defect item 114 was raised to fix. The read `Predicate` takes a superset type;
+  the write path keeps the narrow one.
+
+- **2026-07-27 — a derived table is spelled as a named `WITH` block (`ctes`), not
+  as a subquery inlined into `from`/`JoinSpec.table` (TODO.md item 105, which
+  absorbs item 97 phase 2).** `ENGINE_EXPRESSIVENESS_PLAN.md` §4 Phase 4b
+  specified "allow `from`/`JoinSpec.table` to be a named subquery (a
+  `StructuredQuery` + alias) in addition to a physical table name" — i.e. turn two
+  `str` fields into unions. That is the *same* shape item 104 rejected one day
+  earlier, for the same reason, and it lost again here. It is the second time this
+  plan's up-front sketch has been beaten by a shape found during the build; the
+  plan text has been corrected rather than left to contradict the code.
+
+  **Why the union loses, stated as the failure it produces.** The risk is not a
+  caller — it is an *unaware consumer*. With `from_table: Union[str, DerivedTable]`,
+  every existing site that reads `query.from_table` receives an object where it
+  expected a string: `referenced_tables` puts a non-string into a set of table
+  names, `normalize_query_shape` records it as the table that was read,
+  `policy.table_allowed(...)` is handed a model. Some of those raise and some
+  return a wrong answer, and Pydantic cannot flag any of it, because the field is
+  legitimately both types. With `ctes`, `from_table` stays a `str` that names
+  *something*, and a consumer that has never heard of a CTE treats `"daily"` as a
+  table name — at which point table allow-deny and schema reflection **reject it**,
+  because no such table exists. The unaware consumer fails closed. That property is
+  the whole argument; efficiency and expressiveness agree with it but did not
+  decide it.
+
+  Three consequences ride along, each decided rather than inherited:
+  1. **One declaration site, and CTE names are a flat namespace.** Only the
+     top-level query carries `ctes`; a set-op arm, a `value_subquery` and a CTE's
+     own query may not. A CTE may reference an *earlier* CTE (declaration order is
+     therefore topological order), never a later one and never itself — the same
+     no-forward-reference posture item 103 gave join conditions, and the rule that
+     keeps **recursive CTE out of scope** without needing a separate check.
+     `max_subquery_depth` is charged along the reference *chain*, so a CTE reading a
+     CTE costs 2 and the default cap of 1 denies it until an operator raises it.
+  2. **A CTE name may not collide with any physical table named anywhere in the
+     query tree.** SQL would let the CTE shadow the table. Shadowing is not itself a
+     policy bypass — a CTE's body is a full scope, so its tables get the complete
+     allow-deny, mandatory-filter and mask treatment at the source — but it makes
+     the audit trail ambiguous about which `Orders` was read, and ambiguity in the
+     Proof pillar is a defect. Rejected at the AST layer, before any DB touch.
+  3. **A CTE does not carry the `max_rows` clamp.** This follows item 97's
+     `_compile_in_subquery`, which strips the limit for the same reason: `max_rows`
+     bounds the *response*, and a CTE is intermediate work feeding a join or an
+     aggregate. Clamping it would silently truncate the input to a total — a wrong
+     answer, which is the failure class items 102 and 117 established this project
+     treats as worse than a rejection. An *explicit* caller `limit` inside a CTE is
+     honored, because that is the caller expressing "the top 100", not a guardrail.
+     Said plainly, as item 103's cross-join entry had to be: what actually bounds a
+     CTE is `timeout_seconds`, `max_response_bytes`, the concurrency limiter and the
+     new `max_cte_count` — not a row cap.
+
+  **Two things this entry got wrong before the build corrected them, recorded
+  because the corrections are the useful part.** (a) The name-collision rule was
+  first written as "a CTE name may not collide with any physical table named
+  anywhere in the query tree," justified on audit legibility. That phrasing is
+  **circular and silently never fires** — the reference to the block *is* such a
+  use, so the check excluded the very name it was testing. Writing its test is what
+  exposed that. The rule is now scoped to names the **policy has a rule for**,
+  which is both checkable and tied to real enforcement: measured, a block named
+  after a mandatory-filtered table would have had that filter applied to the
+  *block's output*, filtering the wrong rows if it happened to project a column of
+  that name and raising a compiler-internal error if it did not. (b) The claim that
+  a CTE "inherits every guardrail because it compiles through the same path" was
+  true but incomplete — the k-anonymity fan-out check reads *reflected uniqueness
+  metadata*, which a CTE has none of, and the function reading it crashed rather
+  than answering. That turned out to be a pre-existing defect reachable with no CTE
+  at all (item 122); it is now the fail-closed answer the floor requires.
+
+- **2026-07-27 — set operations attach to the query as `set_op`, with the
+  carrying query as arm 1, rather than becoming a second top-level query type
+  (TODO.md item 104).** The plan called for "a new top-level shape wrapping N
+  `StructuredQuery` arms." It did not ship that way, and the reason is the one
+  this repo keeps relearning: a second top-level type would have made every
+  signature in the pipeline a `Union[StructuredQuery, SetOperationQuery]` — every
+  REST route, MCP tool, template, audit call, approval call, cost estimate — or
+  made `from`/`select` optional on every query in the codebase. The failure mode
+  of that change is a consumer that quietly handles only one member, which is
+  precisely the class of bug the item-103 audit found and the item-102 build hit
+  five times. Hanging an optional `set_op` off `StructuredQuery` keeps one
+  top-level type, so every existing consumer keeps working and the ones that must
+  now see *every arm* are found by one question — "does this walk
+  `iter_query_scopes`?" — instead of by a type checker that Python does not run.
+  Four things follow from that choice, each decided rather than inherited:
+  1. **The carrying query is arm 1, and its `order_by`/`limit`/`offset` bound the
+     whole statement while its `where`/`group_by`/`having` bound arm 1.** That
+     reads asymmetric, and it is — but it is SQL's own asymmetry, not one invented
+     here: `SELECT … WHERE … UNION SELECT … ORDER BY … LIMIT …` distributes exactly
+     that way. An arm that sets any of the four is rejected at the AST layer, with
+     one typed message, instead of producing three different dialect errors (MSSQL
+     refuses `ORDER BY` in a compound arm outright).
+  2. **An arm is a scope at the SAME depth as its carrier, not one deeper.**
+     `max_subquery_depth` bounds caller-authored *nesting*; an arm is a sibling
+     SELECT. Making arms depth+1 would have charged a two-arm union against a
+     budget it has nothing to do with — and, worse, would have made an arm look
+     like an `IN (subquery)` to the two rules that branch on `depth > 0`.
+  3. **The compound is wrapped in a derived table before `LIMIT` is applied.**
+     Measured, not assumed: SQLAlchemy's MSSQL dialect **silently drops**
+     `.limit()` on a `CompoundSelect` — no `TOP`, no `FETCH`, no error — while
+     Postgres renders `LIMIT` normally. `clamp_limit` is a policy guardrail, so
+     that is an unbounded response on one dialect only. Wrapping makes the limit a
+     limit on a plain `SELECT`, which both dialects render correctly, and gives
+     `ORDER BY` real derived-table columns instead of a bare output name. This is
+     the engine enforcing *its own* cap, not synthesizing structure the caller
+     didn't ask for, so it is not the item-74 line.
+  4. **`INTERSECT ALL` / `EXCEPT ALL` are rejected on MSSQL and SQLite rather than
+     silently de-duplicated.** T-SQL has no `ALL` form of either. Dropping the flag
+     would return *fewer* rows than asked for with no error anywhere; SQLAlchemy
+     renders the invalid keyword for every dialect with no guard of its own
+     (verified by execution — it is a live syntax error, not a compile error). So
+     it is a `DialectAdapter` method that raises, the array_agg posture.
+
+  One pre-existing hole was closed on the way, and it is worth naming because it
+  was not an item-104 regression: `sensitivity_approval_reasons` — the item-92
+  approval trigger — walked only the outer query, so a catalog-labelled sensitive
+  column reached from inside an `IN (subquery)` never tripped the human-approval
+  gate. That has been true since item 97. It now walks `iter_query_scopes`, which
+  fixes subqueries and set-op arms together. The catalog usage signals (32C) had
+  the same single-scope assumption, with fidelity rather than safety consequences,
+  and were fixed the same way. Note the scope precisely: the **audit shape** was
+  taught about set-op arms only — a nested `value_subquery` contributed nothing
+  to `normalize_query_shape`, which was tracked separately as TODO.md item 120
+  rather than folded in here. *(Item 120 closed that gap on 2026-07-27: a
+  predicate's `value_subquery` now recurses through the same
+  `normalize_query_shape` authority, so a nested scope is named in the event.)*
+
+- **2026-07-27 — the k-anonymity floor now refuses a join it cannot correctly
+  bound, instead of answering as if it had (TODO.md item 118).** `min_group_size`
+  compiles to `HAVING count(*) >= k`, which counts **joined** rows. A join matching
+  many right-hand rows per left-hand row multiplied a group's count, lifting a
+  single-row group above the floor — so a guarantee stated in QG-29, R3, the README
+  and the customer-facing security page did not hold across a join. Measured with
+  `k=5`: no join suppressed the singleton, `JOIN big ON person.tenant = big.tenant`
+  returned it. **That is an equality join**, shipped long before item 103's
+  `condition` form, which is why the fix could not be scoped to non-equi joins and
+  why the gap is recorded as pre-existing rather than an item-103 regression — the
+  item-103 audit surfaced it, it did not cause it.
+  Two calls shape the fix:
+  1. **Refuse, don't silently exempt.** The same posture item 101 took for
+     aggregate windows under this floor: when the floor cannot be enforced
+     correctly, the query fails closed with a typed `PolicyViolationError` rather
+     than returning an answer the policy believes is protected. The alternative —
+     switching the floor to `count(DISTINCT <pk>)` — was rejected because the
+     "individual" a group must be backed by *k* of is genuinely ambiguous once a
+     join is involved (distinct customers? distinct orders?), and picking one
+     silently would trade a visible refusal for an invisible wrong answer.
+  2. **Scope the refusal by reflected uniqueness, not by join type.** A blanket
+     "no joins while the floor is on" would be simple and fail-closed, but it costs
+     the most expressiveness for exactly the deployments that turn the floor on. A
+     join provably cannot fan out when the equalities it pins cover a primary key,
+     unique constraint or unique index of the joined table — the ordinary
+     join-to-a-dimension-on-its-key shape — and those stay allowed. Refused:
+     non-unique columns, range conditions, cross joins, and an equality that sits
+     inside an `OR` (it holds on only one branch, so it pins nothing). **Narrowing
+     never fans out**, so `pk = x AND price BETWEEN lo AND hi` is allowed — an
+     added conjunct can only remove rows. **Partial coverage of a composite unique
+     key does not count**: `UNIQUE (product_id, region)` needs both columns pinned.
+     Direction is fail-closed throughout — an unreflected constraint costs a
+     rejection, a missed fan-out would cost the guarantee.
+
+- **2026-07-27 — a join's `ON` clause becomes a full predicate tree, and CROSS
+  JOIN is the one join type that is deny-by-default (TODO.md item 103;
+  maintainer-ratified before build, as ENGINE_EXPRESSIVENESS_PLAN.md §8 entry 5
+  requires).** Before it, `JoinSpec` could only express equality pairs (`on` plus
+  `extra_on`), so a price-band join (`ON price BETWEEN lo AND hi`), a temporal
+  join (`ON event.at >= window.start`) and any FULL OUTER join were simply
+  inexpressible — §5 regression-bar row 16. `JoinSpec.condition` is the same
+  `WhereNode` the WHERE clause uses, and `JoinType` gains `full` and `cross`. The
+  four calls that shape what it is:
+  1. **CROSS JOIN is gated by `Policy.allow_cross_join`, default off, and the gate
+     is a *flag*, not a bespoke row cap.** A cross join is the only join whose
+     cost is the **product** of its inputs rather than bounded by a key — and,
+     more to the point, the only one the join-graph rule exempts from having to
+     connect to anything. Before item 103 an accidental cartesian product was
+     structurally *inexpressible*, because every join had to name a table already
+     in the graph; `cross` is the first way to ask for one, so it must be asked
+     for. Cross joins still count against `max_joins`.
+     **What actually bounds one, stated by measurement rather than by
+     assumption** (an earlier draft of this entry claimed the effective `LIMIT`
+     and the item-26 cost gate bounded it "on both dialects" — both halves were
+     checked and neither carries that weight): the always-on bound is
+     `timeout_seconds` (default 30 — Postgres `SET LOCAL statement_timeout`,
+     MSSQL the driver timeout), together with `max_response_bytes` and the
+     concurrency limiter. `LIMIT` bounds **rows returned, not work done** — this
+     item's own live test issues `count(*)` over a cross join, a statement that
+     carries the LIMIT and still makes the server materialize the whole product,
+     and the same is true of any `GROUP BY`/`ORDER BY`/`DISTINCT` over one. The
+     item-26 cost gate is the right pre-execution bound but is **opt-in and off by
+     default**: `max_estimated_rows`/`max_estimated_cost` both default to `None`,
+     so `cost_estimation_enabled` is `False` and no `EXPLAIN`/`SHOWPLAN_XML` runs
+     at all; it can also be set to `OBSERVE` (never blocks) and is fail-open on an
+     unavailable estimate. That gap is precisely *why* the flag is deny-by-default
+     rather than a cap — and an operator enabling `allow_cross_join` should set
+     `max_estimated_rows` alongside it.
+  2. **`on` and `condition` are mutually exclusive, and `cross` takes neither.**
+     They are two spellings of one clause, so accepting both would leave their
+     precedence — ANDed? overriding? — for the compiler to invent. `extra_on`
+     stays tied to `on` (a `condition` expresses composite keys directly). A
+     `cross` join carrying a condition is rejected rather than having it silently
+     dropped, which would answer a different question than the caller asked.
+  3. **A `condition` may reference any table ALREADY joined, not just the joined
+     pair.** `extra_on`'s "same two tables" restriction is a property of that
+     sugar, not of a join: `JOIN c ON c.x = a.x AND c.y = b.y` is ordinary SQL.
+     The connectivity rule therefore generalizes rather than being special-cased
+     — the condition must name the table being joined, must connect to something
+     already known, and must **not forward-reference a table joined later**,
+     which SQLAlchemy would render as a broken or implicitly-cartesian FROM
+     clause rather than the join that was written. That third check is new and is
+     only reachable through `condition`; the `on` path keeps its original message.
+  4. **The ON clause is held to every cap the WHERE clause has.** A join condition
+     is the fourth position a predicate tree can occupy (after WHERE, HAVING and a
+     searched-CASE `when`), so `max_where_depth`, `max_where_predicates` (summed
+     tree-wide, per item 97), `max_in_list_size`, `max_expression_depth`/
+     `max_expression_nodes` and the `date_add` interval cap all reach it — wired
+     in at the two shared walks (`iter_column_refs` gains a `JOIN_CONDITION`
+     position; `iter_scope_expressions` gains join-condition expressions) rather
+     than as parallel checks. That single wiring is what makes the denied-column,
+     masked-column (item 49) and date-operand (item 117) rules apply inside an ON
+     clause by construction. `IN (subquery)` is **rejected** there, matching
+     HAVING and CASE: `iter_query_scopes` descends WHERE/HAVING only, so a
+     subquery in a join condition would never be validated as its own scope.
+
+  **A pre-existing divergence this surfaced, deliberately left standing.** An
+  outer join can NULL out the column a query orders by, and Postgres sorts those
+  NULLs **last** on ASC while SQL Server sorts them **first** — so the same AST
+  returns the same row *set* in a different *order*. Measured on both live
+  servers, this predates item 103: a plain LEFT JOIN diverges identically, and
+  item 103 only makes it reachable from a second join type. It is **not** fixed
+  here, because the only in-engine fix is `OrderBySpec.nulls`, which item 74
+  deliberately *rejects* on MSSQL rather than emulating with a synthesized
+  CASE sort column. Changing that posture is a maintainer decision, not a side
+  effect of this item; it is pinned by
+  `test_outer_join_null_ordering_diverges_and_predates_item_103` so it is
+  recorded rather than rediscovered.
 
 - **2026-07-26 — every date/time answer QueryGate gives is UTC, and the Postgres
   session is pinned to make that true rather than claimed (TODO.md item 102).**

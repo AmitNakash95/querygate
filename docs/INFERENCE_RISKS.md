@@ -41,6 +41,7 @@ column:
 | `top_n.order_by` | `_iter_column_refs` | `top_n` |
 | join `on` key | `_iter_column_refs` | `join` |
 | join `extra_on` composite key (item 76) | `_iter_column_refs` | `composite_join_extra_on` |
+| join `condition` predicate tree (item 103) | `iter_column_refs` → `predicate_column_refs` | `join_condition_range_bound`, `join_condition_arithmetic_bound`, and the `join_condition` entry in the buried-expression matrix |
 | scalar function arg (items 71/77) | `select_item_column_refs` | `scalar_fn_select` |
 | `CASE WHEN` condition (item 72) | `select_item_column_refs` → `predicate_column_refs` | `case_when_condition` |
 | `CASE ... THEN` value | `select_item_column_refs` | `case_then_value` |
@@ -98,7 +99,8 @@ aggregates with and without a condition can isolate one individual's
 contribution (multi-query differencing).
 
 - **Single-query singling-out: closed by `Policy.min_group_size` (TODO.md item
-  88).** When set, the compiler injects `HAVING count(*) >= k` into every
+  88), including across joins since item 118.** When set, the
+  compiler injects `HAVING count(*) >= k` into every
   aggregate query, so any result group backed by fewer than *k* underlying rows
   is suppressed — `count(*) WHERE id = X` returns nothing rather than revealing
   a single individual. It is the aggregate analog of a mandatory row filter:
@@ -119,6 +121,22 @@ contribution (multi-query differencing).
   `dense_rank`/`ntile`/`lag`/`lead`/`first_value`/`last_value`) stay allowed
   because they only surface values the caller may already project bare. Asserted
   by `test_window_aggregate_cannot_dodge_the_k_anonymity_floor`.
+- **A fan-out JOIN cannot defeat the floor (TODO.md item 118, closed
+  2026-07-27).** The floor counts **joined** rows, so a join matching many
+  right-hand rows per left-hand row would multiply a group's count past *k*.
+  Measured before the fix with `k=5`: with no join the singleton was suppressed;
+  with `JOIN big ON person.tenant = big.tenant` — an **equality** join, so the gap
+  predated item 103's non-equi form and could not be fixed by rejecting
+  inequalities — it was returned. Such a join is now **refused** on an aggregate
+  query rather than answered, the same fail-closed posture item 101 took for
+  aggregate windows under this floor. The refusal is scoped by reflected
+  uniqueness metadata, not blanket: a join whose equality pins a set of the target
+  table's columns covering a primary key or unique constraint matches at most one
+  row, cannot inflate a count, and is allowed — so the ordinary
+  join-to-a-dimension-on-its-key shape is unaffected. Range joins, cross joins,
+  joins on a non-unique column and non-conjunctive conditions are refused.
+  Asserted by `test_k_anonymity_floor_cannot_be_defeated_by_a_fan_out_join`, which
+  was inverted from the test that originally pinned the leak.
 - **Multi-query differencing: still residual.** Isolating an individual by
   subtracting two *independently* compliant aggregates (each ≥ *k*) is not
   closed by a per-query group-size floor; defending it needs query-set auditing
@@ -145,6 +163,16 @@ the exhaustive test above fails if any future AST node reintroduces an
 unharvested reference. Class B (semantic correlation, derived columns,
 aggregate differencing, existence probing) is **not closable by identifier
 allow/deny**; R1 is closed by policy configuration, R3's single-query
-singling-out is closed by the opt-in `Policy.min_group_size` guardrail (item 88)
-with multi-query differencing left an honest residual, and R2/R4 are accepted
+singling-out is closed by the opt-in `Policy.min_group_size` guardrail (item 88),
+including across joins since item 118 — with multi-query differencing left an
+honest residual, and R2/R4 are accepted
 residuals mitigated in depth by mandatory filters, masking, quotas, and audit.
+
+*Wording note (item 104, 2026-07-27).* "Multi-query differencing" is now slightly
+imprecise: a set operation lets a caller express `A EXCEPT B` in a **single**
+statement, so the differencing is one request, one audit event and one quota unit
+rather than several. The **guarantee is unchanged** — every arm is independently
+policy-checked and independently floored by `min_group_size`, so a set operation
+reveals nothing two separate round-trips did not already reveal, which is why it
+was not treated as a new risk class. What changed is only that this residual is
+now cheaper to exercise and *more* visible in the audit trail, not less.

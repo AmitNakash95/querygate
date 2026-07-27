@@ -76,6 +76,8 @@ from querygate.query_ast.models import (
     ScalarFunctionCall,
     ScalarFunctionSelectItem,
     SelectItem,
+    SetOpKind,
+    SetOpSpec,
     StringAggSelectItem,
     StructuredQuery,
     TopNSpec,
@@ -783,6 +785,7 @@ class Query:
         self._limit: Optional[int] = None
         self._offset = 0
         self._top_n: Optional[TopNSpec] = None
+        self._set_op: Optional[SetOpSpec] = None
         self._intent: Optional[str] = None
 
     @classmethod
@@ -805,24 +808,31 @@ class Query:
     def join(
         self,
         table: str,
-        on: Tuple[Union[str, Column], Union[str, Column]],
+        on: Optional[Tuple[Union[str, Column], Union[str, Column]]] = None,
         *,
         type: JoinType = "inner",
         alias: Optional[str] = None,
         extra_on: Optional[Sequence[Tuple[Union[str, Column], Union[str, Column]]]] = None,
+        condition: Optional[Sequence[WhereNode]] = None,
         connection: Optional[str] = None,
     ) -> "Query":
         """Join ``table`` on an equality pair ``(left, right)``. ``extra_on`` adds
         further ANDed pairs for composite keys; ``connection`` marks a
-        cross-connection join (same join_group only)."""
-        left, right = on
+        cross-connection join (same join_group only).
+
+        Pass ``condition=[...]`` instead of ``on`` for a range/inequality join —
+        the predicates are AND-combined exactly like ``.where()``, e.g.
+        ``condition=[col("Band.Lo") <= col("Sale.Price"), ...]``. A
+        ``type="cross"`` join takes neither (and needs ``allow_cross_join``).
+        """
         self._joins.append(
             JoinSpec(
                 table=table,
                 alias=alias,
                 type=type,
-                on=[_colname(left), _colname(right)],
+                on=[_colname(on[0]), _colname(on[1])] if on is not None else None,
                 extra_on=[[_colname(a), _colname(b)] for a, b in (extra_on or [])],
+                condition=self._and_combine(list(condition)) if condition else None,
                 connection=connection,
             )
         )
@@ -880,6 +890,29 @@ class Query:
         )
         return self
 
+    def union(self, *arms: "Query", all: bool = False) -> "Query":
+        """Combine this query's rows with further queries (``UNION``; pass
+        ``all=True`` to keep duplicates). This query is the first arm, so its
+        ``order_by``/``limit``/``offset`` apply to the combined result and the
+        arms may not set their own."""
+        return self._set_operation("union", all, arms)
+
+    def intersect(self, *arms: "Query") -> "Query":
+        """Rows present in this query AND in every arm."""
+        return self._set_operation("intersect", False, arms)
+
+    def except_(self, *arms: "Query") -> "Query":
+        """Rows present in this query but not in any arm. Trailing underscore
+        because ``except`` is a Python keyword."""
+        return self._set_operation("except", False, arms)
+
+    def _set_operation(self, op: SetOpKind, all_rows: bool, arms: Sequence["Query"]) -> "Query":
+        # `.build()` on each arm, so an arm's own structural rules are checked
+        # where the caller wrote it rather than surfacing later as an error
+        # about "an arm".
+        self._set_op = SetOpSpec(op=op, all_=all_rows, arms=[arm.build() for arm in arms])
+        return self
+
     def intent(self, text: str) -> "Query":
         """Attach a natural-language intent (logged with the compiled SQL for
         audit/debugging; never returned to the caller)."""
@@ -914,6 +947,7 @@ class Query:
             limit=self._limit,
             offset=self._offset,
             top_n=self._top_n,
+            set_op=self._set_op,
             intent=self._intent,
         )
 

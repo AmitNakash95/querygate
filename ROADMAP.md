@@ -9,11 +9,18 @@ them in, and why that order maximizes product growth and ROI.**
 - **`TODO.md` is the authority for item content and done-status.** An item is
   "done" iff its `###` heading in `TODO.md` ends in exactly `✅ DONE` (no
   trailing qualifier like `(phase 1)`). Never track completion anywhere else.
-- **This file is the authority for order only.** It never restates an item's
-  body — it lists the item number, a one-line ROI rationale, and its position.
+- **This file is the authority for order and transient active claims only.** It
+  never restates an item's body — it lists the item number, a one-line ROI
+  rationale, its position, and (while work is active) its claim marker.
 - The `[ ]` / `[x]` checkboxes below are a **convenience mirror** of TODO.md's
   `✅ DONE`, not a second source of truth. If they ever disagree, TODO.md wins;
   reconcile the checkbox to it.
+- A line in the exact form
+  ``🚧 **CLAIMED** — owner: `<agent/session-or-task-id>`; started:
+  `<YYYY-MM-DDTHH:MMZ>` `` immediately below an item's checkbox means an agent
+  is actively working on it. It is a coordination signal, not done-status.
+  Other agents must leave that item alone; only the owner or maintainer clears
+  the marker.
 - Item numbers are permanent and file-global (see `CLAUDE.md`). This file only
   references them; it never renumbers.
 
@@ -66,6 +73,14 @@ maintainer product decision first and are listed separately at the end.
 
 Work top-to-bottom. Within a phase, order is also intentional. An item is
 eligible only when its TODO.md "Depends on" (if any) is satisfied.
+
+Before changing implementation files, claim the selected item by adding the
+`🚧 **CLAIMED**` line defined above and re-read the item to verify there is
+still exactly one claim and it is yours. A claimed item is unavailable even if
+an agent was explicitly told to work on that number. Continue to the next
+independently eligible item, or stop if roadmap order/dependencies leave none.
+Never steal or auto-expire a claim based on its timestamp. Remove your own
+claim when the work ships or before explicitly handing the item back.
 
 ### Phase 0 — Moat & proof (highest ROI: wins the security review)
 
@@ -219,23 +234,64 @@ gate is the *first step of the item*, not a reason to defer it.
   session `TimeZone` QueryGate never set, so those answers followed server config.
   Sessions are now pinned to UTC — a deliberate behavior change, recorded in the
   Decision Log. Regression bar 9/16 → **10/16**.*
-- [ ] **103** — Non-equi/range joins + FULL OUTER / CROSS. *Range/temporal joins.
-  Depends on 96, 99; **Decision Log entry (CROSS gating).***
-- [ ] **104** — Set operations (UNION / INTERSECT / EXCEPT). *New scope container;
-  caps summed across arms. Depends on 96, 97; **Decision Log entry before build.***
-- [ ] **97 (phase 2)** — `FROM (subquery)` derived table. *Moved here 2026-07-25
-  from its old standalone slot: **its remaining phase 2 is the same capability as
-  item 105** (105's own text says it "generalizes item 97's `subquery_tables`
-  plumbing and `effective_name_map`"). Build them together or fold 97 ph2 into
-  105 — do not implement the derived table twice.* **Phase 1 shipped**
-  (`IN (subquery)`/`NOT IN`, tree-wide caps, full adversarial + e2e coverage,
-  Decision Log recorded); box stays `[ ]` for phase 2. **Depends on 96.**
-- [ ] **105** — CTE / derived table in FROM (non-recursive; recursive OUT of
-  scope). *Multi-stage single-statement analysis. Depends on 96, 97, 104;
-  **Decision Log entry before build.***
-- [ ] **106** — Correlated / EXISTS / scalar subqueries. *Do last — largest safety
-  surface (breaks the uncorrelated assumption). Depends on 96, 97, 105; **Decision
-  Log entry (correlation scope model) before build.***
+- [x] **103** — Non-equi/range joins + FULL OUTER / CROSS. ✅ **Shipped**
+  (`JoinSpec.condition` is the same `WhereNode` as `where`, so the ON clause
+  inherits every WHERE cap through the item-96 visitor and `iter_scope_expressions`
+  rather than parallel checks; `full` + `cross` join types, with `cross`
+  deny-by-default behind `Policy.allow_cross_join` — a flag rather than a cap
+  *because* the pre-execution bounds are weaker than they look: LIMIT bounds rows
+  returned, not work, and item 26's cost gate is opt-in and off by default, leaving
+  `timeout_seconds` as the always-on bound; every join type executed on live
+  Postgres **and** live MSSQL. Regression bar 10/16 → **11/16**.)
+  *Its side finding: outer joins made the pre-existing PG-vs-MSSQL NULLS-ordering
+  divergence reachable from a second join type — measured, recorded, and left
+  standing, because the only fix is the `nulls` handling item 74 rejects.*
+- [x] **104** — Set operations (UNION / INTERSECT / EXCEPT). ✅ **Shipped**
+  (`StructuredQuery.set_op` with the carrying query as arm 1 — deliberately not
+  the second top-level query type the plan sketched, because that would have made
+  every pipeline signature a union whose failure mode is a consumer handling one
+  member; every arm is a scope at the SAME depth, independently validated AND
+  independently compiled so it carries its own mandatory filters and k-anon floor;
+  new tree-wide `max_set_op_arms`; `INTERSECT ALL`/`EXCEPT ALL` rejected on MSSQL;
+  17/17 enforcement points mutation-verified. Regression bar 11/16 -> **12/16**.)
+  *Its side finding was a guardrail failure, not a feature gap: SQLAlchemy's MSSQL
+  dialect silently DROPS `.limit()` on a compound SELECT, so `clamp_limit` would
+  have been a no-op on one dialect only — the compound is now wrapped in a derived
+  table before limiting. It also closed a pre-existing item-97 hole where the
+  item-92 approval gate never saw a sensitive column inside an `IN (subquery)`.*
+- [x] **97 (phase 2)** — `FROM (subquery)` derived table. ✅ **ABSORBED BY 105**
+  (2026-07-27), which was the recorded intent of moving it here: 105 spells the
+  derived table as a named `WITH` block, so it is implemented once rather than
+  twice. Item 97 is now fully `✅ DONE`.
+- [x] **105** — CTE / derived table in FROM (non-recursive; recursive OUT of
+  scope). ✅ **Shipped** (an additive `StructuredQuery.ctes` list of named `WITH`
+  blocks — deliberately NOT the union on `from`/`JoinSpec.table` the plan
+  specified, because a union re-types two `str` fields read by ~a dozen consumers
+  whose failure mode is silent, while an unrecognized block NAME reflects as a
+  table and is rejected: the unaware consumer fails closed. Only the root declares
+  blocks; a block may reference only an EARLIER one, which makes **recursive cte
+  structurally inexpressible** rather than merely forbidden; new `max_cte_count`
+  with `max_subquery_depth` charged along the reference chain; a block carries no
+  `max_rows` clamp, since truncating intermediate work is a silently wrong total.
+  23/23 enforcement points mutation-verified; live Postgres **and** live MSSQL.
+  Regression bar 12/16 -> **14/16**.)
+  *Its side finding was a crash on a shipped guardrail, not a feature gap: item
+  118's k-anon fan-out check reached for `.primary_key.columns`, which only a
+  `Table` has — so `min_group_size` plus any **aliased** join raised
+  `AttributeError` rather than deciding. Reproducible with no cte at all (item 122).*
+- [x] **106** — Correlated / EXISTS / scalar subqueries. ✅ **Shipped** — and with
+  it **Phase 4 is complete**. (`EXISTS`/`NOT EXISTS` as a `Predicate` operator;
+  scalar subqueries as a comparison RHS in WHERE and HAVING; correlation via a
+  **declared, capped** `correlate` list checked against the ENCLOSING scope, so an
+  undeclared outer ref still fails exactly as before and correlation is opt-in per
+  subquery. A scalar subquery must be an aggregate with no `group_by`, making
+  exactly-one-row true by construction rather than by a `LIMIT 1` that would pick an
+  arbitrary row. New ops live on a read-only `ReadCompareOp` so the write AST's
+  shared `CompareOp` is not widened — item 114's defect. Regression bar 14/16 ->
+  **15/16**; 13/13 enforcement points mutation-verified.)
+  *Its own build found the defect worth remembering: resolving a child's declared
+  refs against the parent's already-correlated tables made correlation reach a
+  GRANDPARENT, so "one level" held in name only until a test asked for it.*
 
 ### Phase 5 — Adoption & breadth (grow once the engine is deep enough to adopt)
 
@@ -368,27 +424,44 @@ the live frontier: `roadmap-next` should walk Phase 4 in order (100 → 106),
 drafting each item's Decision Log entry for approval as step 1 of that item.
 Adoption/breadth (Phase 5) and catalog/UI (Phase 6) wait behind it.
 
-**Engine progress (updated 2026-07-26):** **99, 100, 101 and 102 have shipped.**
-The `Expression` substrate every remaining engine item depends on is real; item
-101's `WindowSelectItem.arg` and item 102's three date nodes are the worked
-examples of extending it. **103 (non-equi/range joins + FULL OUTER / CROSS) is the
-next roadmap item** — it generalizes `JoinSpec` to an optional `condition:
-WhereNode`, reusing item 99's machinery, and its Decision Log entry (CROSS gating,
-plan §8 entry 5) is that item's own first step. The canonical regression bar is
-**10/16** (`docs/ENGINE_EXPRESSIVENESS_PLAN.md` §5); 103 takes row 16.
+**Engine progress (updated 2026-07-27):** **99, 100, 101, 102, 103 and 104 have
+shipped.** The `Expression` substrate every remaining engine item depends on is
+real; item 101's `WindowSelectItem.arg`, item 102's three date nodes and item
+103's `JoinSpec.condition` are the worked examples of extending it. **The
+scope-container substrate is now real too** — `iter_query_scopes` +
+`iter_set_op_arms` + the per-scope `subquery_tables` map — and item 104 is its
+worked example. **105 (CTE / derived table in FROM, with item 97 phase 2 folded
+in) is the next roadmap item**; it should extend that substrate rather than
+introduce a third scope enumeration. Its Decision Log entry is that item's own
+first step. The canonical regression bar is **12/16**
+(`docs/ENGINE_EXPRESSIVENESS_PLAN.md` §5); 105 takes rows 3 and 6.
 
-Two lessons from item 102 worth carrying into 103. **(1) Extending the union has a
-fourth touchpoint that had no guard:** `audit/events.py`'s shape normalizer is a
-third un-foldable recursion over `Expression` (beside the walk and the compiler),
-and it had no exhaustiveness test — so three new members passed the whole unit
-suite while every query using one raised at execution. Guards now exist for all
-three; a new member still means checking each. **(2) Measure the dialect, don't
-read it:** five defects in that item (a Postgres operator that only exists for
-`double precision`, an `sa.Date` that renders `DATETIME` unconnected, a SQLite
-true-division, a SQLite modifier that returns NULL instead of erroring, and the
-audit gap) all survived a careful reading of the diff and a green suite. Item 101's
-two corrections to §5's table (row 3 needs item 105's derived table, row 15 needs a
-window to be an `Expression` operand) still stand as recorded walls.
+Four lessons to carry into 105. **(1) The audit normalizer is a third un-foldable
+recursion** (beside the visitor and the compiler) and it keeps being the touchpoint
+that gets missed: item 102 shipped three `Expression` members that passed the whole
+unit suite while every query using one raised at execution, and item 103's mutation
+pass found the *same* gap again. Item 104 checked it deliberately and it held — a
+new scope container means checking it every time. **(2) Measure, don't read.**
+Item 102 had five defects survive a careful diff read and a green suite; item 103's
+`ON true`-vs-`ON 1 = 1` rendering was settled by executing against live PG and
+MSSQL; and item 104's single most important finding was invisible to any rendering
+assertion — SQLAlchemy's MSSQL dialect **silently drops `.limit()` on a compound
+SELECT**, which would have turned `clamp_limit` into a no-op on one dialect only.
+**(3) Mutation verification is not optional polish, and it has a blind spot worth
+naming** — item 103's first pass caught 13 of 16; item 104's caught 15 of 17, and
+in both cases every miss was a real defect. The technique probes the rules an item
+*adds*; it does not probe the **existing consumers of a field whose type the item
+changed**. When an item widens or nullifies an existing field, grep every consumer
+as a separate step (the discipline CLAUDE.md already documents for `async def`
+conversions). **(4) New for 105: enumerate the single-scope consumers explicitly.**
+Item 104's real work was not the compiler — it was finding every place that assumed
+a query has exactly one SELECT: the audit shape, `applied_column_masks`, the
+item-92 sensitivity approval gate, and the 32C usage signals. Two of those had been
+silently wrong for `value_subquery` **since item 97**, which is how long a
+single-scope assumption can survive unnoticed. A CTE is another scope container;
+walk that same list first, not last.
+Item 101's two corrections to §5's table (row 3 needs item 105's derived table, row
+15 needs a window to be an `Expression` operand) still stand as recorded walls.
 
 ### Fourth pass (2026-07-23), retained for history
 
@@ -573,6 +646,56 @@ already-planned initiatives.
   - Acceptance criteria: one shared predicate-iterator helper; all four
     validators' existing test suites pass unchanged (no behavior change).
 
+### Review Phase 5 — Findings from the 2026-07-27 item-103 audit
+
+- [x] **118** — `min_group_size` was defeated by any fan-out join. ✅ **Shipped**
+  (the floor counts JOINED rows, so a fan-out lifted a singleton group above *k* —
+  a claimed guarantee, QG-29 / INFERENCE_RISKS R3, that did not hold across a join.
+  Such a join is now **refused** on an aggregate query while the floor is set,
+  scoped by reflected uniqueness metadata so the ordinary join-onto-a-primary-key
+  shape still runs. The security test that pinned the leak was **inverted**, not
+  deleted.) *Pre-existing, not an item-103 regression — measured against an
+  equality join that had shipped for months, which is precisely why a fix scoped to
+  non-equi conditions would have been theater. Surfaced by the item-103 completion
+  audit.*
+
+### Review Phase 7 — Findings from the 2026-07-27 item-105 build
+
+- [x] **122** — `_unique_column_sets` crashed on any FROM element that is not a
+  `Table`, so item 118's k-anonymity floor raised `AttributeError` on **any
+  aliased join** instead of making a policy decision. ✅ **Shipped** (an alias
+  looks through to its element; a cte/subquery reports no uniqueness and is
+  treated as able to fan out — the fail-closed direction the floor requires).
+  *Pre-existing and live since item 118. It is the blind spot this file's frontier
+  note already named: mutation testing probes the rules an item ADDS, not the
+  existing consumers of a value whose TYPE widened — here `sa.Table` -> any FROM
+  element. Found by measuring, not by reading the diff.*
+
+### Review Phase 6 — Findings from the 2026-07-27 item-104 audit
+
+All three are **pre-existing**, surfaced by the item-104 completion audit rather
+than caused by it. None is a policy bypass — enforcement is scope-correct — but
+119 is a silent wrong answer on a shipped feature and should lead.
+
+- [x] **119** — `top_n` mis-resolves and DROPS a column when two projections share
+  a base name. *Item 104 hit the identical root cause on its own new path and
+  fixed it positionally; the same fix shape applies here.*
+- [x] **120** — The audit shape records nothing for a nested `IN (subquery)`.
+  *The Proof-pillar half of the gap item 104 closed for set-op arms.*
+- [x] **121** — Report-only surfaces (`ExplainResult.tables`, the candidate
+  simulator's `referenced_tables`) still assume one scope. *Operator-facing
+  accuracy, not enforcement.*
+
+### Review Phase 8 — Findings from the 2026-07-27 item-119/120 audit
+
+- [ ] **124** — Most of `tests/unit/` is not selected by `pytest -m unit`, so the
+  pre-commit gate silently skips ~60% of it. *Lead this phase: it weakens every
+  other gate, and the fix is a collection hook rather than 52 edits.*
+- [ ] **123** — A select-item `CASE`'s condition subtree is absent from the audit
+  shape, so two spellings of one query audit differently. *Proof-pillar fidelity
+  on a position policy always rejects; the last walker not reaching its predicates
+  through `as_expression()`. Low priority, small fix.*
+
 ### Review Phase 4 — Performance, observability, and developer experience
 
 - [x] **Stale security-posture numbers** — `docs/SECURITY_POSTURE.md` claimed
@@ -599,21 +722,30 @@ currently triggers it — flagged for awareness, matches the documented
    its `TODO.md` `###` heading: if it ends in exactly `✅ DONE` (no phase
    qualifier), it is complete — reconcile this file's checkbox to `[x]` and
    continue.
-3. The **next item** is the first one that is *not* fully `✅ DONE`, is *not* in
-   the Decision-gated list, is *not* in the Coordination-gated / externally-blocked
-   list, and whose TODO.md dependencies are satisfied. Skip (and report) any gated
-   item reached before it. **As of 2026-07-26 this resolves to item 103** — the
-   walk skips 58 ph2 and 30·89 ph2 (externally blocked), 53 (external vendor),
-   and lands on Phase 4's engine pillar (99, 100, 101 and 102 have shipped).
+3. Treat any item carrying a `🚧 **CLAIMED**` line as unavailable. Report its
+   owner and continue only to an independently eligible item; never steal or
+   auto-expire the claim, including when an item-number override points to it.
+4. The **next item** is the first one that is *not* fully `✅ DONE`, is
+   *unclaimed*, is *not* in the Decision-gated list, is *not* in the
+   Coordination-gated / externally-blocked list, and whose TODO.md dependencies
+   are satisfied. Skip (and report) any gated item reached before it. **As of
+   2026-07-27 this resolves to item 106** — the walk skips 58 ph2 and 30·89 ph2
+   (externally blocked), 53 (external vendor), and lands on Phase 4's engine
+   pillar (99–105 and the item-97 phase-2 slice have shipped).
    **A required Decision Log entry is not a skip condition.** Items 100–106 each
    need one recorded in `docs/PRODUCT_GUIDE.md` before code — that is the item's
    own first step (draft it, get maintainer ratification, then build), not a
    reason to defer the item and move on.
-4. Announce: the last completed item (where the previous agent left off), the
+5. Announce: the last completed item (where the previous agent left off), the
    next item, why it's next, and any items skipped and why.
-5. Implement it with the full `next-item` discipline (scope → production-grade
+6. Add the canonical `🚧 **CLAIMED**` line immediately below the selected
+   item's checkbox, then re-read that roadmap entry. Begin only if exactly one
+   claim is present and it is yours.
+7. Implement it with the full `next-item` discipline (scope → production-grade
    impl → tests → docs → release gates → one clean commit → `ship-item`).
-6. On completion, tick this file's checkbox for that item in the same commit.
+8. On completion, remove the claim and tick this file's checkbox for that item
+   in the same commit. If handing the item back unfinished, remove the claim
+   before stopping.
 
 ## Maintenance rules
 
@@ -624,4 +756,8 @@ currently triggers it — flagged for awareness, matches the documented
   it as unplaced) — a new item is not automatically last.
 - Never move an item's *done-status* here without the matching `✅ DONE` in
   TODO.md. TODO.md leads; this file follows.
+- A claim is temporary coordination state. Keep the canonical owner + UTC
+  timestamp shape, never maintain claims in TODO.md, never steal or auto-expire
+  another owner's claim, and remove your own claim on completion or hand-back.
+  Do not create a standalone commit containing only a claim.
 - Keep the rationale one line per item. Depth lives in TODO.md, not here.

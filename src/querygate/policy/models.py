@@ -226,6 +226,12 @@ class Policy(pyd.BaseModel):
 
     # Query complexity caps.
     max_joins: int = pyd.Field(default=5)
+    # CROSS JOIN (TODO.md item 103) — deny by default. Every other join type is
+    # required to connect to the query graph, so before item 103 a cartesian
+    # product was structurally inexpressible; `cross` is the one join a caller has
+    # to deliberately ask for, and the one whose cost is the PRODUCT of its inputs
+    # rather than bounded by a key. Cross joins still count against `max_joins`.
+    allow_cross_join: bool = pyd.Field(default=False)
     max_select_columns: int = pyd.Field(default=30)
     max_where_depth: int = pyd.Field(default=5)
     max_group_by: int = pyd.Field(default=10)
@@ -236,6 +242,54 @@ class Policy(pyd.BaseModel):
     # additionally enforced SUMMED across the whole query tree, so nesting can
     # never multiply the effective cap.
     max_subquery_depth: int = pyd.Field(default=1, ge=0)
+    # How many SELECTs one set operation (item 104) may combine, counting the
+    # query that carries `set_op` as arm 1, and SUMMED tree-wide like every other
+    # count cap — so putting a second set operation inside an `IN (subquery)`
+    # cannot multiply the budget. 0 (or 1) disables set operations entirely, the
+    # same convention `max_window_specs` uses.
+    #
+    # Default 3 is a judgement, not a measurement, and the honest reason it can be
+    # this low is that it is NOT the query's cost bound: every other cap
+    # (max_joins, max_select_columns, max_where_predicates, max_expression_nodes)
+    # is already summed across the arms, so N arms SHARE one budget rather than
+    # each getting their own. What this cap alone bounds is the number of
+    # independent scans plus the dedup sort a non-ALL set op adds on top of them.
+    # Two arms is the canonical segment-union shape; three leaves room without
+    # inviting an eight-way union under a default policy.
+    max_set_op_arms: int = pyd.Field(default=3, ge=0)
+    # How many named WITH blocks one query may declare (item 105). 0 disables ctes
+    # entirely, the same convention `max_set_op_arms`/`max_window_specs` use.
+    #
+    # NOT summed tree-wide, and that is a property of the shape rather than an
+    # exemption: only the ROOT query may declare ctes, so there is no second place
+    # for a count to hide and nothing for a sum to add. Every cap that IS summable
+    # (max_joins, max_select_columns, max_where_predicates, max_expression_nodes …)
+    # already counts cte bodies, because `iter_query_scopes` yields them — so N
+    # blocks SHARE one budget rather than each getting a fresh one. What this cap
+    # alone bounds is the number of independent materialization stages.
+    #
+    # Default 3 is a judgement: two blocks is the canonical aggregate-then-join
+    # shape and three covers dedup-then-aggregate-then-join, without a default
+    # policy inviting a ten-stage pipeline. Note what does NOT bound a block —
+    # `max_rows` is deliberately not applied to one (truncating intermediate work
+    # is a silently wrong total), so a cte's cost is bounded by `timeout_seconds`,
+    # `max_response_bytes` and the concurrency limiter, exactly as item 103's
+    # cross-join entry had to state plainly rather than claim a row cap it lacks.
+    max_cte_count: int = pyd.Field(default=3, ge=0)
+    # How many outer columns a query tree's subqueries may DECLARE as correlated
+    # (item 106), summed tree-wide. 0 disables correlation entirely — the same
+    # convention max_set_op_arms/max_cte_count use, and the setting that keeps a
+    # connection on the pre-106 uncorrelated model.
+    #
+    # This caps the correlation SURFACE, not its cost, and the distinction is the
+    # honest one: a correlated subquery is re-evaluated per candidate outer row, so
+    # its cost is driven by the outer scan, which no count here bounds. What bounds
+    # it is timeout_seconds, the concurrency limiter, and item 26's cost gate where
+    # enabled. What this bounds is how many outer columns a caller can pull into a
+    # nested scope's namespace — the policy/masking surface, which is the part that
+    # must not grow silently. Default 2 covers the shapes correlation exists for (a
+    # single-key EXISTS, a two-column composite key).
+    max_correlated_refs: int = pyd.Field(default=2, ge=0)
     max_limit: int = pyd.Field(default=100)
     max_limit_aggregate: int = pyd.Field(default=1000)
     default_limit: int = pyd.Field(default=50)
@@ -361,6 +415,13 @@ class Policy(pyd.BaseModel):
     # None (the default) disables it; the floor is 2, since k=1 is no protection.
     # It bounds single-query singling-out, not multi-query differencing — see
     # docs/INFERENCE_RISKS.md (R3).
+    #
+    # The floor counts JOINED rows, so a join that matches many right-hand rows per
+    # left-hand row would inflate the count and lift a singleton group above k
+    # (TODO.md item 118). Such a join is therefore REFUSED on an aggregate query
+    # while this is set — precisely: joining onto the target's primary key or a
+    # unique column matches at most one row, cannot inflate a count, and is
+    # allowed.
     min_group_size: Optional[int] = pyd.Field(default=None, ge=2)
 
     # `max_limit`/`max_limit_aggregate` cap row *count*; this caps response
@@ -407,16 +468,19 @@ class Policy(pyd.BaseModel):
     quota_window_seconds: int = pyd.Field(default=60, ge=1)
 
     # Pre-execution cost estimation (execution/cost_estimation.py, TODO.md
-    # item 26 phase 1). Unset (None, the default for both) means disabled —
-    # existing deployments behave identically. When set, `execute()` asks
-    # Postgres to plan (never run) the compiled query via
-    # `EXPLAIN (FORMAT JSON)` before it actually executes, and rejects the
-    # query if the planner's row-count/cost estimate exceeds the configured
-    # threshold. Postgres only for this first pass — MSSQL's estimated-plan
-    # equivalent needs its own connection lifecycle (see
-    # execution/cost_estimation.py's module docstring) and silently has no
-    # effect here, so an MSSQL connection with these set behaves the same as
-    # one without them. `max_estimated_cost` is in Postgres's own arbitrary
+    # item 26). Unset (None, the default for both) means disabled —
+    # existing deployments behave identically, and **this is the default**: with
+    # neither threshold set, `cost_estimation_enabled` is False and no plan is
+    # ever requested. When set, `execute()` asks the database to plan (never run)
+    # the compiled query before it actually executes, and rejects the query if the
+    # planner's row-count/cost estimate exceeds the configured threshold.
+    # **Both dialects are supported since item 26 phase 2** — Postgres via inline
+    # `EXPLAIN (FORMAT JSON)`, MSSQL via `SET SHOWPLAN_XML ON` on a dedicated
+    # connection, dispatched by `StructuredQueryService._estimate_cost`. (An
+    # earlier version of this comment said MSSQL "silently has no effect here";
+    # that has been false since phase 2 shipped.) A dialect with no estimator
+    # returns None and proceeds under the reactive guardrails.
+    # `max_estimated_cost` is in Postgres's own arbitrary
     # planner-cost units (not seconds or bytes) — treat it as a relative
     # complexity signal to tune per deployment/hardware, not a portable
     # absolute number. `cost_estimation_mode` decides whether an over-threshold
@@ -623,6 +687,10 @@ _DIRECTION_REVIEWED_GUARDRAILS = frozenset(
         "min_group_size",  # INVERTED: a larger k-anonymity floor hides more
         "cost_estimation_mode",  # OBSERVE never blocks; ENFORCE can
         "log_query_literals",  # logging raw literals is the looser posture
+        # Permitting the one join whose cost is a cartesian product is looser —
+        # the normal direction, but "allow_*" does not read as a ceiling, so it
+        # is stated rather than guessed (item 103).
+        "allow_cross_join",
         # Approval thresholds, not caps: a HIGHER threshold means fewer queries
         # are stopped for a human, so higher is looser — the normal direction,
         # but stated because "approval_max_*" does not read like a ceiling on
