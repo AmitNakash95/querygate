@@ -172,12 +172,48 @@ from querygate.mcp.server import create_mcp_server
 # automatically with every new `Policy` cap via GUARDRAIL_FIELDS) — not another
 # pass over the query AST.
 #
+# Bumped 2026-07-27 (item 125: a window function as an `Expression` operand) —
+# 116,000 -> 123,000. Measured against base commit 7721368 in a worktree, not
+# derived:
+#
+#                                  base 7721368   working tree     delta
+#   instructions                         10,263         10,263         0
+#   tool schemas                        104,508        106,876    +2,368
+#   TOTAL                               114,771        117,139    +2,368
+#     run_structured_queries             44,159         46,527    +2,368
+#
+# The whole delta is in one tool's params, and instructions are untouched — item
+# 125 added no agent-facing prose, only AST surface. It decomposes as a 1,766-char
+# `WindowExpr` `$def` plus ~600 for the 18 `$ref` entries it adds wherever the
+# `Expression` union appears.
+#
+# The prescribed trim ran FIRST and was worth 534 chars: `WindowCall` (the shared
+# base split out so the projection and operand spellings cannot drift) was given no
+# docstring at all, and `WindowExpr`'s was cut to the five lines a caller actually
+# needs, with the maintainer rationale moved to `#` comments above each class. The
+# figures above are post-trim; pre-trim the total was 117,673.
+#
+# Checked for the duplicated-definition case this note warns about, and it is NOT
+# that: no `WindowCall` `$def` is emitted (0 references in the schema — Pydantic
+# emits definitions for the concrete models only), and `WindowExpr` is a real
+# second node with different legality from `WindowSelectItem`, not a copy. Worth
+# recording one NEW lever it creates, though: every field description on
+# `WindowCall` is now paid TWICE, once per subclass, so those five descriptions
+# (~400 chars) cost ~800. They were left alone because they are agent-facing arity
+# guidance, which this note's own rule says not to cut — but they are the first
+# place to look if a future window change needs to claw chars back.
+#
+# Process note for the next maintainer: this breach was caught by CI, NOT by the
+# local `pytest -m unit` run, because this file carries no `unit` marker and is
+# deselected by that tier. That is TODO.md item 124 (~60% of tests/unit/ is invisible
+# to the pre-commit gate), and this is a concrete instance of the cost.
+#
 # The budget keeps ~5% headroom. Before raising it again: check whether the
 # growth is real new capability or another duplicated definition, and move
 # maintainer rationale out of model docstrings into `#` comments first (a
 # Pydantic docstring becomes the agent-facing schema description and costs
 # tokens on every session; a `#` comment costs nothing).
-_MAX_TOTAL_CHARS = 116_000
+_MAX_TOTAL_CHARS = 123_000
 
 
 def _tool_schema_chars(tool: object) -> int:

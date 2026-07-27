@@ -16,8 +16,10 @@ from querygate.query_ast.models import (
     Predicate,
     StructuredQuery,
     WhereNode,
+    WindowExpr,
     WindowSelectItem,
     interval_magnitude_days,
+    _AGGREGATE_SELECT_ITEM_TYPES,
 )
 from querygate.validation.schema_validation import (
     RefPosition,
@@ -33,6 +35,7 @@ from querygate.validation.schema_validation import (
     iter_query_scopes,
     iter_scope_case_conditions,
     iter_scope_expressions,
+    iter_scope_expressions_by_position,
     iter_where_predicates,
     parse_column_ref,
     select_item_column_refs,
@@ -129,6 +132,65 @@ def _scope_case_condition_predicate_count(query: StructuredQuery) -> int:
 def _scope_windows(query: StructuredQuery) -> List[WindowSelectItem]:
     """Every window projection in one scope (item 101)."""
     return [item for item in query.select if isinstance(item, WindowSelectItem)]
+
+
+def _reject_windows_outside_projections(query: StructuredQuery) -> None:
+    """THE item-125 rule: a `WindowExpr` is legal in a projection and nowhere else.
+
+    `WindowExpr` is the one `Expression` member that is not legal everywhere a
+    scalar is expected, which is the property the rest of the item-100 substrate
+    relies on. That exception is deliberate and recorded in
+    `docs/PRODUCT_GUIDE.md`'s Decision Log (2026-07-27); this function is the
+    single place it is enforced, so the substrate stays reviewable in ONE site
+    even though the type no longer encodes the restriction.
+
+    Three things are rejected, and all three are queries SQL itself refuses — so
+    this converts a database error (or, worse, a dialect-dependent acceptance)
+    into one typed rejection with no DB touch:
+
+    1. a window anywhere other than a projection — WHERE/HAVING, a join
+       condition, or an aggregate's argument (`SUM(SUM(x) OVER ())`);
+    2. a window nested inside another window's `arg`;
+    3. a window combined with `group_by` or an aggregate select item — the same
+       incompatibility the AST layer already enforces for `WindowSelectItem`,
+       carried over because a window is evaluated AFTER grouping, over columns
+       that no longer exist per row.
+
+    Matching on `position == "projection"` rather than on a denylist of the
+    illegal positions is what makes it fail CLOSED: a position added to
+    `iter_scope_expressions_by_position` later rejects windows by default instead
+    of silently becoming a place one is allowed.
+    """
+    has_window = False
+    for position, expr in iter_scope_expressions_by_position(query):
+        windows = [node for node in iter_expression_nodes(expr) if isinstance(node, WindowExpr)]
+        if not windows:
+            continue
+        has_window = True
+        if position != "projection":
+            raise PolicyViolationError(
+                f"a window function is not allowed in a {position.replace('_', ' ')} — "
+                "a window is evaluated after WHERE/GROUP BY, so SQL permits one only "
+                "in a projection; filter on it by projecting it in one query and "
+                "filtering that result in a second"
+            )
+        for window in windows:
+            if window.arg is None:
+                continue
+            if any(isinstance(node, WindowExpr) for node in iter_expression_nodes(window.arg)):
+                raise PolicyViolationError(
+                    "a window function cannot be nested inside another window's "
+                    "argument — no dialect allows it; project the inner window in "
+                    "one query and window over that result in a second"
+                )
+    if has_window and (
+        query.group_by or any(isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in query.select)
+    ):
+        raise PolicyViolationError(
+            "a window function cannot be combined with group_by or aggregate "
+            "select items — a window projects a value per row, so aggregate in "
+            "one query and window over that result in a second query"
+        )
 
 
 def _scope_expression_node_count(query: StructuredQuery) -> int:
@@ -307,6 +369,7 @@ def _validate_scope(query: StructuredQuery, policy: Policy, cte_names: Set[str])
     # anything walks it: depth per tree, and WHEN-branch breadth on every
     # CaseExpr wherever it sits. The tree-wide node budget is enforced in
     # `_enforce_tree_wide_caps`; these two are per-scope structural checks.
+    _reject_windows_outside_projections(query)
     for expr in iter_scope_expressions(query):
         depth = expression_depth(expr)
         if depth > policy.max_expression_depth:

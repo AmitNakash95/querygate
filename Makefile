@@ -165,6 +165,22 @@ lint: format-check ## Alias for format-check (extend with ruff/mypy when added)
 
 SCAN_IMAGE ?= querygate:security-scan
 
+# The tag floats because CI installs the current release (`pipx install semgrep`),
+# so pinning locally would report different findings than the gate it reproduces.
+# `--pull always` below is load-bearing, not belt-and-braces: Docker never
+# re-resolves a tag it has already cached, so without it the local gate silently
+# freezes at whatever release was current the first time it ran, while CI keeps
+# floating. Measured 2026-07-27: a cached `latest` sat at 1.169.0 while PyPI
+# served 1.171.0 — and `--disable-version-check` (kept for byte-parity with CI)
+# suppresses the upgrade notice that would have revealed it. Override to pin.
+SEMGREP_IMAGE ?= semgrep/semgrep:latest
+# One definition of the rulesets + flags so the installed-binary and container
+# paths agree. .github/workflows/ci.yml's Semgrep step still keeps its own copy of
+# the same list, so a change here must be mirrored there —
+# tests/unit/test_security_posture_commands.py fails if the two ever drift.
+SEMGREP_ARGS ?= --error --disable-version-check \
+	--config p/python --config p/security-audit --config p/owasp-top-ten src/
+
 .PHONY: scan-image
 scan-image: ## Trivy: scan the built container image for OS+library CVEs, secrets, misconfig (deny-by-default via .trivyignore)
 	docker build -t $(SCAN_IMAGE) .
@@ -188,16 +204,27 @@ scan-secrets: ## gitleaks: scan the working tree and full git history for commit
 	fi
 
 .PHONY: sast
-sast: ## Bandit static security analysis over src/ (config in pyproject.toml [tool.bandit])
+sast: ## Bandit static security analysis over src/ (config in pyproject.toml [tool.bandit]). Semgrep is the separate `semgrep` target — run both, or `security-scan`, to reproduce the whole CI SAST job.
 	poetry run bandit -c pyproject.toml -r src/
+
+.PHONY: semgrep
+semgrep: ## Semgrep OSS rulesets (p/python, p/security-audit, p/owasp-top-ten) over src/ — the other half of the CI SAST job. Scans git-TRACKED files only, so `git add` new sources first. No login/token; needs network, and Docker unless semgrep is installed.
+	@if command -v semgrep >/dev/null 2>&1; then \
+		semgrep $(SEMGREP_ARGS); \
+	else \
+		echo "semgrep not installed; using official $(SEMGREP_IMAGE) image"; \
+		docker run --rm --pull always -v "$(CURDIR):/src:ro" -w /src $(SEMGREP_IMAGE) \
+			semgrep $(SEMGREP_ARGS); \
+	fi
 
 .PHONY: test-dast
 test-dast: ## Schemathesis: fuzz the OpenAPI surface to prove only the validated AST is accepted (no raw-SQL path)
 	poetry run python scripts/run_dast.py
 
 .PHONY: security-scan
-security-scan: ## Run every locally-runnable security gate (SAST + secrets + dependency audit + DAST)
+security-scan: ## Run the batchable local security gates (Bandit + Semgrep SAST, secrets, dependency audit, DAST) — `scan-image` and `test-security` run separately
 	$(MAKE) sast
+	$(MAKE) semgrep
 	$(MAKE) scan-secrets
 	$(MAKE) sbom
 	$(MAKE) test-dast

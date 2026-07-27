@@ -81,7 +81,7 @@ certification effort starts from a mapped baseline rather than a blank page.
 
 | Criterion | QueryGate control | Evidence | Status |
 |---|---|---|---|
-| CC7.1 Vulnerability detection | SAST (bandit), dependency audit (deny-by-default allowlist), container image scan, secret scanning, DAST — all CI gates. | `docs/SECURITY_POSTURE.md`, `make sast`/dep-audit (item 30) | Product-provided |
+| CC7.1 Vulnerability detection | SAST (Bandit + Semgrep OSS), dependency audit (deny-by-default allowlist), container image scan, secret scanning, DAST — all CI gates. | `docs/SECURITY_POSTURE.md`, `make sast` + `make semgrep`/dep-audit (item 30) | Product-provided |
 | CC7.2 Monitoring for anomalies | Read-only behavioral anomaly surfacing on the audit stream. | `admin/anomaly.py` (item 59) | Product-provided |
 | CC7.3/7.4 Incident response | Tamper-evident, hash-chained audit ledger + per-query receipts give the forensic record; the IR *process* is the org's. | `audit/ledger.py`, `querygate-audit verify` (item 91) | Product + Org |
 | CC7.5 Recovery | HA/DR reference deployment + backup/restore runbook with RTO/RPO. | `deploy/HA_DR.md` (item 56) | Product + Shared |
