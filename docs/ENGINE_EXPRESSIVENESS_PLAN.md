@@ -484,7 +484,7 @@ report becomes a new row here first, then an item.
 | 9 | Median order value per region | ✅ PG / ⛔ MSSQL | `percentile_cont` |
 | 10 | Customers with no orders (anti-join) | ✅ | LEFT JOIN + `is_null` |
 | 11 | Customers spending > overall average | ❌ (two round-trips) | 106 (or compose) |
-| 12 | Orders in last 7 days | 🟡 (literal today) | 102 |
+| 12 | Orders in last 7 days | ✅ **102** | 102 |
 | 13 | Case-insensitive name search | ✅ | `lower(col) like …` |
 | 14 | Rank products with ties (WITH TIES) | ✅ | `top_n fn=rank` |
 | 15 | Each order's % of total (`amount / SUM(amount) OVER ()`) | 🟡 both halves exist; not in one expression | a window-as-`Expression` item (see below) |
@@ -496,9 +496,20 @@ items 99 + 100: **8/16** — rows 1, 2 and 7 went green, each covered end-to-end
 `tests/integration/test_postgres_expression_substrate.py`. After item 101:
 **9/16** — row 5 (running cumulative total) went green, covered in
 `tests/integration/test_window_end_to_end.py` and on real Postgres *and* real
-MSSQL in `tests/integration/test_cross_dialect_differential.py`. The remaining ❌
-set is 3, 6, 8, 11, 16 — derived-table/set-ops/correlated/non-equi, which Phases
-3b–5 finish.
+MSSQL in `tests/integration/test_cross_dialect_differential.py`. After item 102:
+**10/16** — row 12 (orders in the last N days) went green, covered in
+`tests/integration/test_date_primitives_end_to_end.py` and on both real backends
+in the differential suite. The remaining ❌ set is 3, 6, 8, 11, 16 —
+derived-table/set-ops/correlated/non-equi, which Phases 3b–5 finish.
+
+**Be precise about what row 12 was worth**, since this table's honesty is the
+point of it: row 12 was 🟡, not ❌ — an agent could always compute the cutoff and
+pass a literal, and the plan said so. Item 102 is native convenience, and the
+real gain turned out to be **correctness, not reach**: building it surfaced that
+Postgres resolved `EXTRACT` and the already-shipped `date_bucket` against the
+session `TimeZone` QueryGate never set, so those answers depended on server
+configuration. Fixing that (the UTC pin, §8 entry 4) is the larger outcome of
+this item than the row that turned green.
 
 **Two corrections item 101's build forced on this table, recorded per this
 section's own rule rather than left as an aspiration:**
@@ -616,7 +627,30 @@ open **before** implementation, not discovered after:
    bounds ride along: no window with `group_by`/aggregates, no aggregate window
    under `min_group_size`, and a numeric `RANGE` offset rejected on MSSQL. See the
    `docs/PRODUCT_GUIDE.md` Decision Log entry dated 2026-07-26.*
-4. **Interval/relative-date cap and timezone semantics** (UTC vs server-local).
+4. ✅ **RECORDED 2026-07-26** — **Interval/relative-date cap and timezone
+   semantics** (UTC vs server-local). *Outcome: **UTC everywhere, pinned rather
+   than assumed.** The finding that decided it: Postgres resolves `EXTRACT`,
+   `date_trunc` and every `timestamp`↔`timestamptz` conversion against the
+   **session `TimeZone`**, which QueryGate never set — so the already-shipped
+   `date_bucket` was silently server-config-dependent too (measured scope:
+   `timestamptz` columns and every `now()`-vs-naive-column comparison; naive
+   `timestamp` columns were never affected).
+   `PostgresSessionAdapter.apply_session_guardrails` now issues `SET LOCAL TIME
+   ZONE 'UTC'`; MSSQL has no session zone so its adapter uses `SYSUTCDATETIME()`
+   over `GETDATE()`; SQLite's `'now'` is already UTC. A live proof sets the
+   server zone to UTC−09:30 and asserts the extracted hour is still UTC. The cap
+   is `max_interval_days` (default 3,660 = 10 x 366), computed with **upper-bound** unit
+   lengths so a larger unit cannot launder a bigger reach; it is explicitly not a
+   row-count guardrail but a bound on caller-triggerable overflow
+   (`DATEADD(year, 10000, …)`) and on unbounded lookback. Two parts get a
+   QueryGate-defined value rather than a passed-through keyword — `dayofweek` is
+   0=Sunday..6=Saturday and `week` is ISO-8601 — because T-SQL's native spellings
+   disagree with Postgres on both. Two further bounds were added after the item's
+   audit, each measured on a live SQL Server: `amount` is capped at signed 32-bit
+   (T-SQL's `DATEADD` overflows past it, reachable once `max_interval_days` exceeds
+   24,855), and a date primitive over a **non-temporal column** is rejected —
+   Postgres errors there while MSSQL silently returns a 1900-epoch value. See the `docs/PRODUCT_GUIDE.md` Decision Log
+   entry dated 2026-07-26.*
 5. **CROSS JOIN gating** (policy flag default-off + row-cap rationale).
 6. **Recursive CTE exclusion** — record that it is deliberately out of scope pending
    a hard iteration cap.

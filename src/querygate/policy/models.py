@@ -316,6 +316,42 @@ class Policy(pyd.BaseModel):
     max_window_specs: int = pyd.Field(default=5, ge=0)
     max_window_frame_offset: int = pyd.Field(default=1000, ge=1)
 
+    # The one unbounded magnitude item 102's date primitives introduce: how far
+    # a single `date_add` may shift a timestamp. Checked per node against the
+    # node's magnitude converted to whole days with UPPER-bound unit lengths
+    # (`interval_magnitude_days`), so "31 months" cannot slip past a cap that
+    # "944 days" would not.
+    #
+    # Be precise about what this cap is and is not. It is NOT a row-count
+    # guardrail — a caller who wants to read everything simply omits the filter,
+    # which `max_limit`/`clamp_limit` and the mandatory row filters bound, not
+    # this. What it bounds is the magnitude reaching the database, and the
+    # failure it prevents is a real one, and the direction matters: a
+    # 10,000-year *lookback* (`DATEADD(year, -10000, …)`) overflows T-SQL's
+    # datetime range and makes Postgres raise "timestamp out of range" — a
+    # caller-triggerable server-side error rather than a typed rejection.
+    # (Measured: forward 10,000 years is fine on Postgres, landing in 12026; it
+    # only errors forward at ~292,000 years. MSSQL's datetime2 tops out at 9999,
+    # so it errors in both directions.) It also keeps a relative-date filter an
+    # honestly-bounded lookback instead of one that silently matches everything
+    # ever recorded.
+    #
+    # Default 3,660 = 10 x 366, i.e. ten years measured the same way the cap
+    # itself measures a year. That equality is the point, not a rounding: at
+    # 3,653 (10 x 365.3) the cap REJECTED the most natural spelling of a ten-year
+    # lookback, `{"unit": "year", "amount": -10}`, which converts to 3,660 days
+    # under the upper-bound rule — while the docs described the default as
+    # "~10 years". Caught in review; the fix is to make the default agree with
+    # the arithmetic rather than to soften the prose.
+    #
+    # It sits above every realistic analytic window and well below either
+    # dialect's overflow point, including when nested date_adds compound it
+    # (`max_expression_depth` of 5 admits 4 nested shifts = 40 years).
+    #
+    # 0 permits only a zero-magnitude (no-op) shift, which is the closest thing
+    # to disabling relative-date arithmetic for a connection.
+    max_interval_days: int = pyd.Field(default=3660, ge=0)
+
     # k-anonymity guardrail (TODO.md item 88): the minimum number of underlying
     # rows any aggregate result group must be backed by. When set, the compiler
     # injects `HAVING count(*) >= min_group_size` into every aggregate query

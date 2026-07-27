@@ -166,6 +166,10 @@ jobs:
         env:
           ACCEPT_EULA: "Y"
           MSSQL_SA_PASSWORD: "QueryGate_Test_Pw1!" # dev-only, matches setup_mssql_test_db.py's default
+          # Non-UTC on purpose (TODO.md item 102): MSSQL's UTC guarantee is the
+          # choice of SYSUTCDATETIME() over GETDATE(), which a UTC-clocked server
+          # cannot distinguish. Without this the clock assertion passes vacuously.
+          TZ: "Pacific/Marquesas"
           MSSQL_PID: Developer
         ports:
           - 1433:1433
@@ -251,6 +255,10 @@ jobs:
         env:
           ACCEPT_EULA: "Y"
           MSSQL_SA_PASSWORD: "QueryGate_Test_Pw1!" # dev-only, matches setup_mssql_test_db.py's default
+          # Non-UTC on purpose (TODO.md item 102): MSSQL's UTC guarantee is the
+          # choice of SYSUTCDATETIME() over GETDATE(), which a UTC-clocked server
+          # cannot distinguish. Without this the clock assertion passes vacuously.
+          TZ: "Pacific/Marquesas"
           MSSQL_PID: Developer
         ports:
           - 1433:1433

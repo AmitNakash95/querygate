@@ -422,6 +422,123 @@ class CastExpr(pyd.BaseModel):
     model_config = pyd.ConfigDict(extra="forbid")
 
 
+# --------------------------------------------------------------------------
+# Date/time primitives (TODO.md item 102). Three nodes, each its own union
+# member for the SAME reason CastExpr is one: their non-expression field is a
+# KEYWORD (a date part, a unit, a clock kind), not a scalar. Folding any of
+# them into `FunctionExpr.args` would have required an `Any`-shaped or
+# free-string argument — the escape hatch this substrate forbids.
+#
+# What deliberately does NOT exist here is an `interval` union member. An
+# interval is not a scalar (you cannot project it on MSSQL, compare it to a
+# number, or group by it), so admitting one would break the substrate's
+# defining property — every `Expression` is legal everywhere a scalar is
+# expected — which is exactly the trade the plan's §5 row-15 note refuses for
+# windows. `DateAddExpr` carries the magnitude as a capped keyword+integer
+# pair instead and yields a timestamp, so the union stays all-scalar.
+#
+# TIMEZONE (2026-07-26 Decision Log): every clock reading is UTC on every
+# dialect, and the Postgres session is pinned to UTC in
+# `connections/dialects.py` so `EXTRACT`/`date_trunc` over a `timestamptz`
+# resolve there too — without that pin those are server-config dependent.
+# --------------------------------------------------------------------------
+
+# Every part returns an INTEGER on every dialect, with one definition each —
+# the adapter renders that definition in its own idiom, the `date_bucket`
+# category of variance. Two need stating because dialects disagree natively:
+#   * `dayofweek` is 0=Sunday..6=Saturday (Postgres/SQLite numbering). T-SQL's
+#     DATEPART(weekday) is 1-based AND shifts with `SET DATEFIRST`, so the
+#     adapter renders the DATEFIRST-independent idiom rather than inheriting a
+#     number that depends on the server's language setting.
+#   * `week` is the ISO-8601 week number (Postgres `week`, T-SQL `iso_week`).
+#     T-SQL's plain `week` is a different, DATEFIRST-dependent count.
+DatePart = Literal[
+    "year",
+    "quarter",
+    "month",
+    "week",
+    "day",
+    "dayofweek",
+    "dayofyear",
+    "hour",
+    "minute",
+    "second",
+]
+
+# No sub-second unit: the cap is expressed in days, and a microsecond offset is
+# not a relative-date filter — it is a rounding artifact.
+IntervalUnit = Literal["year", "month", "week", "day", "hour", "minute", "second"]
+
+
+class ExtractExpr(pyd.BaseModel):
+    """EXTRACT one integer field from a date/timestamp expression, e.g. the hour
+    of Order.CreatedAt. Evaluated in UTC. `dayofweek` is 0=Sunday..6=Saturday
+    and `week` is the ISO-8601 week number, on every dialect."""
+
+    extract: "Expression"
+    part: DatePart
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class NowExpr(pyd.BaseModel):
+    """The current UTC time — "timestamp" for the full clock reading, "date" for
+    midnight UTC today. Use it with date_add to filter relative to now instead of
+    computing a timestamp literal caller-side."""
+
+    now: Literal["timestamp", "date"]
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+# `amount` is signed rather than there being a separate subtract node: one node
+# means one cap check, one adapter method, and one place the magnitude rule can
+# be got wrong.
+class DateAddExpr(pyd.BaseModel):
+    """Shift a date/timestamp by a whole number of units — negative goes back in
+    time, so {"date_add": {"now": "timestamp"}, "unit": "day", "amount": -7} is
+    "7 days ago". The magnitude is bounded by the policy's max_interval_days."""
+
+    date_add: "Expression"
+    unit: IntervalUnit
+    # Bounded to signed 32-bit independently of `max_interval_days`, because the
+    # two bound DIFFERENT things and only one of them tracks the dialect's own
+    # limit. `max_interval_days` bounds calendar REACH in days; this bounds the
+    # NUMBER handed to the dialect. T-SQL's `DATEADD` takes an `int`, and going
+    # one past it is a live server error, not a typed rejection — measured on
+    # SQL Server 2022: `DATEADD(second, 2147483647, …)` succeeds, `…, 2147483648`
+    # raises "Arithmetic overflow error converting expression to data type int".
+    # The two only diverge once a deployment raises `max_interval_days` above
+    # 24,855 (at which point a `second`-unit amount within the day-cap can still
+    # exceed int32), so without this a deployment could tune itself into a driver
+    # error. Deny-by-default at the narrowest limit across supported dialects.
+    amount: int = pyd.Field(ge=-2_147_483_648, le=2_147_483_647)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+# Upper bounds, not averages: a cap must never be *under*-counted by a unit
+# whose real length varies (a year can be 366 days, a month 31), or "31 months"
+# would slip past a cap that "944 days" would not.
+_UNIT_MAX_SECONDS: Dict[str, int] = {
+    "year": 366 * 86_400,
+    "month": 31 * 86_400,
+    "week": 7 * 86_400,
+    "day": 86_400,
+    "hour": 3_600,
+    "minute": 60,
+    "second": 1,
+}
+
+
+def interval_magnitude_days(node: DateAddExpr) -> int:
+    """`node`'s absolute shift in whole days, rounded UP — the quantity
+    `Policy.max_interval_days` bounds. Rounding up keeps the cap from being a
+    fraction under-counted (23 hours is not "0 days" of reach)."""
+    seconds = abs(node.amount) * _UNIT_MAX_SECONDS[node.unit]
+    return -(-seconds // 86_400)  # ceil division, integer-exact
+
+
 class CaseWhen(pyd.BaseModel):
     """One CASE WHEN branch: a `when` condition and the value to project when
     it's true. `when` is a full `WhereNode` (a single Predicate OR a boolean
@@ -457,9 +574,9 @@ class CaseExpr(pyd.BaseModel):
 
 # The union is CLOSED: adding a member is a deliberate code change, reviewed
 # against the five boundaries above. Members are structurally distinguishable
-# by their required field names (col / literal / op / fn / cast / when) and
-# every one forbids extras, so Pydantic resolves the union unambiguously —
-# the same approach `ScalarFunctionArg` already uses.
+# by their required field names (col / literal / op / fn / cast / when /
+# extract / now / date_add) and every one forbids extras, so Pydantic resolves
+# the union unambiguously — the same approach `ScalarFunctionArg` already uses.
 Expression = Union[
     ColumnExpr,
     LiteralExpr,
@@ -467,6 +584,9 @@ Expression = Union[
     FunctionExpr,
     CastExpr,
     CaseExpr,
+    ExtractExpr,
+    NowExpr,
+    DateAddExpr,
 ]
 
 
@@ -1195,6 +1315,8 @@ class StructuredQuery(pyd.BaseModel):
 BinaryOpExpr.model_rebuild()
 FunctionExpr.model_rebuild()
 CastExpr.model_rebuild()
+ExtractExpr.model_rebuild()
+DateAddExpr.model_rebuild()
 CaseExpr.model_rebuild()
 AggregateSelectItem.model_rebuild()
 ExpressionSelectItem.model_rebuild()

@@ -6,6 +6,8 @@ validation/policy_validation.py, before this module ever reflects anything.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import enum
 from typing import Callable, Dict, Iterator, NamedTuple, Optional, Set, Tuple
 
@@ -26,11 +28,14 @@ from querygate.query_ast.models import (
     CastExpr,
     ColArg,
     ColumnExpr,
+    DateAddExpr,
     DateBucketSelectItem,
     Expression,
     ExpressionSelectItem,
+    ExtractExpr,
     FunctionExpr,
     LiteralExpr,
+    NowExpr,
     PercentileContSelectItem,
     Predicate,
     ScalarFunctionSelectItem,
@@ -117,7 +122,9 @@ def iter_expression_parts(expr: Expression, _depth: int = 1) -> Iterator[Express
     trigger this; only a code change can, and the tests below catch it.
     """
     yield ExpressionPart(_depth, expr, False)
-    if isinstance(expr, (ColumnExpr, LiteralExpr)):
+    # `NowExpr` is a leaf like the other two: a clock reading has no operand and
+    # carries no column ref, so there is nothing below it to visit.
+    if isinstance(expr, (ColumnExpr, LiteralExpr, NowExpr)):
         return  # leaves
     if isinstance(expr, BinaryOpExpr):
         yield from iter_expression_parts(expr.left, _depth + 1)
@@ -129,6 +136,12 @@ def iter_expression_parts(expr: Expression, _depth: int = 1) -> Iterator[Express
         return
     if isinstance(expr, CastExpr):
         yield from iter_expression_parts(expr.cast, _depth + 1)
+        return
+    if isinstance(expr, ExtractExpr):
+        yield from iter_expression_parts(expr.extract, _depth + 1)
+        return
+    if isinstance(expr, DateAddExpr):
+        yield from iter_expression_parts(expr.date_add, _depth + 1)
         return
     if isinstance(expr, CaseExpr):
         for branch in expr.when:
@@ -731,6 +744,7 @@ async def _reflect_and_validate_scope(
     _validate_select_columns(query, tables)
     _validate_join_columns(query, tables)
     _validate_group_by(query, tables)
+    _validate_date_operands(query, tables)
     # Every searched-CASE condition in this scope, wherever the CASE sits (a
     # CaseSelectItem, an aggregate's CaseExpr argument, one nested in a WHERE
     # predicate's arithmetic), is held to the same strictness as a top-level
@@ -822,6 +836,108 @@ def _validate_top_n(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None
         _check(ref)
     for order in spec.order_by:
         _check(order.col)
+
+
+def _iter_date_operands(query: StructuredQuery) -> Iterator[Tuple[str, str]]:
+    """Every (column ref, human label) a date primitive applies to in one scope.
+
+    All THREE date primitives, deliberately — `extract` and `date_add` from the
+    `Expression` union (item 102) and the older `date_bucket` select item
+    (item 117). Enumerating them in one place is the point: item 102 shipped the
+    rule over two of the three, and its own documentation then described the
+    general property, which is how the third stayed broken while reading as
+    covered.
+
+    Yields only **bare column** operands, since a reflected type is the only
+    thing this can check.
+    """
+    for expr in iter_scope_expressions(query):
+        for node in iter_expression_nodes(expr):
+            if isinstance(node, ExtractExpr):
+                operand, label = node.extract, f"extract part {node.part!r}"
+            elif isinstance(node, DateAddExpr):
+                operand, label = node.date_add, f"date_add by {node.unit!r}"
+            else:
+                continue
+            if isinstance(operand, ColumnExpr):
+                yield operand.col, label
+    for item in query.select:
+        # `date_bucket`'s `col` is a bare Table.Column by construction, so it is
+        # always checkable — there is no computed-operand escape here.
+        if isinstance(item, DateBucketSelectItem):
+            yield item.col, f"date_bucket by {item.granularity!r}"
+
+
+def _validate_date_operands(query: StructuredQuery, tables: Dict[str, sa.Table]) -> None:
+    """Reject a date primitive over a column that is not a date/time type
+    (TODO.md items 102 and 117).
+
+    This closes a measured cross-dialect divergence, not a hypothetical one.
+    Against a live server, with an INTEGER column as the operand:
+
+    * `EXTRACT(hour FROM id)` — Postgres **errors**; MSSQL's `DATEPART(hour, id)`
+      silently returns **0**, because T-SQL implicitly converts an int to a
+      datetime counted from 1900-01-01.
+    * a day shift — Postgres **errors**; MSSQL returns **1900-01-03**.
+    * `date_bucket` day-truncation — Postgres **errors**; MSSQL returns
+      **1900-01-02**; the internal SQLite path returns **-4712-01-05**. Three
+      backends, three different wrong answers, none of them usable — which is why
+      extending the rule here (item 117) is a bug fix rather than a behavior
+      change: no caller has correct behavior to lose.
+
+    So the identical AST is a hard failure on one backend and a plausible-looking
+    wrong answer on the other — precisely the items 75/82 class this project
+    treats as a defect rather than a quirk. Catching it here makes it one typed
+    pre-database rejection on every dialect.
+
+    Deliberately narrow: only a **bare column** operand is checked, because that
+    is the only case where a reflected type is known. A computed operand (a CAST
+    to date, a CASE, a function) is left to the database, and a column whose type
+    the driver does not map to a Python date/time class is allowed through rather
+    than guessed at — this rejects what is known-wrong, never what is merely
+    unrecognized.
+    """
+    for column_ref, label in _iter_date_operands(query):
+        table_name, column_name = parse_column_ref(column_ref)
+        # No alias fallback and no None guard: `tables` is keyed by exactly the
+        # strings `iter_column_refs` produced, and every ref yielded above is one
+        # of them, so the lookup always hits. An earlier draft carried a
+        # `name_to_physical` fallback that review proved unreachable.
+        table = tables[table_name]
+        column = resolve_column(table, column_name)
+        try:
+            # A property, and it RAISES for types with no Python mapping —
+            # so it must be read inside the guard, not fetched beforehand.
+            resolved = column.type.python_type
+        except (NotImplementedError, AttributeError):
+            continue  # unknown mapping: allow through rather than guess
+        if not isinstance(resolved, type):
+            continue
+        # `timedelta` is included deliberately: Postgres's `interval` maps to
+        # it, and `EXTRACT(hour FROM interval_col)` / `interval_col + interval`
+        # are both real Postgres (measured: `EXTRACT(hour FROM INTERVAL
+        # '26 hours')` = 26). Rejecting it would be this engine refusing a
+        # capability the dialect genuinely has — the inversion CLAUDE.md's
+        # philosophy forbids. MSSQL has no interval column type, so allowing
+        # it creates no cross-dialect divergence.
+        if issubclass(resolved, (dt.date, dt.time, dt.timedelta)):
+            continue
+        # The remedy is deliberately NOT suggested for every type. Casting a
+        # STRING that holds a timestamp is correct and works. Casting an
+        # INTEGER reproduces the very divergence this rule just closed —
+        # Postgres errors on `CAST(int AS TIMESTAMP)` while MSSQL yields a
+        # 1900-epoch datetime — so pointing an integer operand at a cast
+        # would hand the caller back the bug.
+        hint = (
+            f' Cast it first ({{"cast": {{"col": "{column_ref}"}}, '
+            '"to": "timestamp"}) if it really holds a timestamp.'
+            if issubclass(resolved, str)
+            else ""
+        )
+        raise QueryValidationError(
+            f"{label} requires a date/time column, but {column_ref!r} is "
+            f"{resolved.__name__}.{hint}"
+        )
 
 
 def _validate_where_columns(

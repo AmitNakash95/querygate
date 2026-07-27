@@ -208,8 +208,17 @@ gate is the *first step of the item*, not a reason to defer it.
   **9/16**.) *Second expressiveness pillar — running totals and rank-in-place;
   §5 rows 3 and 15 were corrected to point at item 105 and a possible
   window-as-expression item rather than this one.*
-- [ ] **102** — `EXTRACT`/date_part + relative-date/interval helpers. *High
-  everyday agent value. Depends on 100; **Decision Log entry (interval cap + TZ).***
+- [x] **102** — `EXTRACT`/date_part + relative-date/interval helpers. ✅ **Shipped**
+  (`extract`/`now`/`date_add` as three closed `Expression` members — each its own
+  member because their non-scalar field is a keyword, and deliberately no
+  `interval` member so the union stays all-scalar; `max_interval_days` computed
+  with upper-bound unit lengths; `dayofweek`/`week` given one cross-dialect
+  definition; every part and unit executed on live Postgres **and** live MSSQL).
+  *Its larger outcome was correctness, not reach: building it surfaced that
+  Postgres resolved `EXTRACT` **and the already-shipped `date_bucket`** against a
+  session `TimeZone` QueryGate never set, so those answers followed server config.
+  Sessions are now pinned to UTC — a deliberate behavior change, recorded in the
+  Decision Log. Regression bar 9/16 → **10/16**.*
 - [ ] **103** — Non-equi/range joins + FULL OUTER / CROSS. *Range/temporal joins.
   Depends on 96, 99; **Decision Log entry (CROSS gating).***
 - [ ] **104** — Set operations (UNION / INTERSECT / EXCEPT). *New scope container;
@@ -359,15 +368,27 @@ the live frontier: `roadmap-next` should walk Phase 4 in order (100 → 106),
 drafting each item's Decision Log entry for approval as step 1 of that item.
 Adoption/breadth (Phase 5) and catalog/UI (Phase 6) wait behind it.
 
-**Engine progress (updated 2026-07-26):** **99, 100 and 101 have shipped.** The
-`Expression` substrate every remaining engine item depends on is real, and item
-101's `WindowSelectItem.arg` is the worked example of reusing it. **102
-(`EXTRACT`/date_part + relative-date helpers) is the next roadmap item** — it
-extends item 100's `FunctionExpr`, and its Decision Log entry (interval cap +
-timezone semantics, plan §8 entry 4) is that item's own first step. The canonical
-regression bar is 9/16 (`docs/ENGINE_EXPRESSIVENESS_PLAN.md` §5); item 101's build
-corrected two of that table's claims (row 3 needs item 105's derived table, row 15
-needs a window to be an `Expression` operand — recorded there as a wall, not built).
+**Engine progress (updated 2026-07-26):** **99, 100, 101 and 102 have shipped.**
+The `Expression` substrate every remaining engine item depends on is real; item
+101's `WindowSelectItem.arg` and item 102's three date nodes are the worked
+examples of extending it. **103 (non-equi/range joins + FULL OUTER / CROSS) is the
+next roadmap item** — it generalizes `JoinSpec` to an optional `condition:
+WhereNode`, reusing item 99's machinery, and its Decision Log entry (CROSS gating,
+plan §8 entry 5) is that item's own first step. The canonical regression bar is
+**10/16** (`docs/ENGINE_EXPRESSIVENESS_PLAN.md` §5); 103 takes row 16.
+
+Two lessons from item 102 worth carrying into 103. **(1) Extending the union has a
+fourth touchpoint that had no guard:** `audit/events.py`'s shape normalizer is a
+third un-foldable recursion over `Expression` (beside the walk and the compiler),
+and it had no exhaustiveness test — so three new members passed the whole unit
+suite while every query using one raised at execution. Guards now exist for all
+three; a new member still means checking each. **(2) Measure the dialect, don't
+read it:** five defects in that item (a Postgres operator that only exists for
+`double precision`, an `sa.Date` that renders `DATETIME` unconnected, a SQLite
+true-division, a SQLite modifier that returns NULL instead of erroring, and the
+audit gap) all survived a careful reading of the diff and a green suite. Item 101's
+two corrections to §5's table (row 3 needs item 105's derived table, row 15 needs a
+window to be an `Expression` operand) still stand as recorded walls.
 
 ### Fourth pass (2026-07-23), retained for history
 
@@ -494,6 +515,15 @@ already-planned initiatives.
 
 ### Review Phase 3 — Architecture and maintainability
 
+- [x] **117** — `date_bucket` over a non-temporal column diverges across dialects.
+  ✅ **Shipped** (all three date primitives now share one operand walk, guarded by
+  a coverage test that fails if a fourth is added without being wired in).
+  *Measurement is what settled it: over an INTEGER column Postgres errors, MSSQL
+  returns 1900-01-02 and SQLite returns -4712-01-05 — three different wrong
+  answers, so no caller had correct behavior and the change is a bug fix rather
+  than the breaking one it looked like. Surfaced by item 102's confirmation
+  review.* **Depends on 102.**
+
 - [x] **116** — A write's WHERE was exempt from `max_where_depth`,
   `max_where_predicates` and `max_in_list_size`. ✅ **Shipped** (each rule is now a
   single function both paths reach, verified by spying rather than by name identity;
@@ -572,9 +602,9 @@ currently triggers it — flagged for awareness, matches the documented
 3. The **next item** is the first one that is *not* fully `✅ DONE`, is *not* in
    the Decision-gated list, is *not* in the Coordination-gated / externally-blocked
    list, and whose TODO.md dependencies are satisfied. Skip (and report) any gated
-   item reached before it. **As of 2026-07-26 this resolves to item 102** — the
+   item reached before it. **As of 2026-07-26 this resolves to item 103** — the
    walk skips 58 ph2 and 30·89 ph2 (externally blocked), 53 (external vendor),
-   and lands on Phase 4's engine pillar (99, 100 and 101 have shipped).
+   and lands on Phase 4's engine pillar (99, 100, 101 and 102 have shipped).
    **A required Decision Log entry is not a skip condition.** Items 100–106 each
    need one recorded in `docs/PRODUCT_GUIDE.md` before code — that is the item's
    own first step (draft it, get maintainer ratification, then build), not a
