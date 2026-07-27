@@ -137,7 +137,10 @@ The supported model includes:
   a general condition, so range and temporal joins are expressible;
 - grouping, aggregate filters, sorting, limits, and offsets;
 - day, week, month, quarter, and year date buckets;
-- overall or per-partition top-N ranking; and
+- overall or per-partition top-N ranking;
+- combining several result sets in one statement with `UNION`, `INTERSECT` or
+  `EXCEPT`, where every arm is independently policy-checked and independently
+  row-filtered; and
 - bounded batches of independent structured queries.
 
 The `intent` field is optional context for operational diagnostics. It does not

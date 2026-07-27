@@ -167,3 +167,12 @@ singling-out is closed by the opt-in `Policy.min_group_size` guardrail (item 88)
 including across joins since item 118 — with multi-query differencing left an
 honest residual, and R2/R4 are accepted
 residuals mitigated in depth by mandatory filters, masking, quotas, and audit.
+
+*Wording note (item 104, 2026-07-27).* "Multi-query differencing" is now slightly
+imprecise: a set operation lets a caller express `A EXCEPT B` in a **single**
+statement, so the differencing is one request, one audit event and one quota unit
+rather than several. The **guarantee is unchanged** — every arm is independently
+policy-checked and independently floored by `min_group_size`, so a set operation
+reveals nothing two separate round-trips did not already reveal, which is why it
+was not treated as a new risk class. What changed is only that this residual is
+now cheaper to exercise and *more* visible in the audit trail, not less.

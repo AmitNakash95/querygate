@@ -242,6 +242,21 @@ class Policy(pyd.BaseModel):
     # additionally enforced SUMMED across the whole query tree, so nesting can
     # never multiply the effective cap.
     max_subquery_depth: int = pyd.Field(default=1, ge=0)
+    # How many SELECTs one set operation (item 104) may combine, counting the
+    # query that carries `set_op` as arm 1, and SUMMED tree-wide like every other
+    # count cap — so putting a second set operation inside an `IN (subquery)`
+    # cannot multiply the budget. 0 (or 1) disables set operations entirely, the
+    # same convention `max_window_specs` uses.
+    #
+    # Default 3 is a judgement, not a measurement, and the honest reason it can be
+    # this low is that it is NOT the query's cost bound: every other cap
+    # (max_joins, max_select_columns, max_where_predicates, max_expression_nodes)
+    # is already summed across the arms, so N arms SHARE one budget rather than
+    # each getting their own. What this cap alone bounds is the number of
+    # independent scans plus the dedup sort a non-ALL set op adds on top of them.
+    # Two arms is the canonical segment-union shape; three leaves room without
+    # inviting an eight-way union under a default policy.
+    max_set_op_arms: int = pyd.Field(default=3, ge=0)
     max_limit: int = pyd.Field(default=100)
     max_limit_aggregate: int = pyd.Field(default=1000)
     default_limit: int = pyd.Field(default=50)

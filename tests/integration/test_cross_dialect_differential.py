@@ -28,7 +28,8 @@ from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.execution.service import StructuredQueryService
 from querygate.policy.loader import PolicyStore, set_policy_store
-from querygate.policy.models import Policy
+from querygate.core.exceptions import QueryValidationError
+from querygate.policy.models import MandatoryRowFilter, Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
     OrderBySpec,
@@ -1086,3 +1087,277 @@ async def test_outer_join_null_ordering_diverges_and_predates_item_103():
     assert pg != ms, "the divergence disappeared — re-check item 74's NULLS posture"
     assert pg[-1]["id_1"] is None, "Postgres is expected to sort NULLs LAST on ASC"
     assert ms[0]["id_1"] is None, "SQL Server is expected to sort NULLs FIRST on ASC"
+
+
+# --------------------------------------------------------------------------- #
+# Set operations (TODO.md item 104)                                            #
+# --------------------------------------------------------------------------- #
+
+_ARM_ONE = {
+    "from": "orders",
+    "select": ["orders.customer_id"],
+    "where": {"col": "orders.status", "op": "eq", "value": "completed"},
+}
+_ARM_TWO = {
+    "from": "orders",
+    "select": ["orders.customer_id"],
+    "where": {"col": "orders.total_amount", "op": "gt", "value": 100},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["union", "intersect", "except"])
+async def test_set_operation_matches_on_both_dialects(op):
+    """Every operator's DISTINCT form exists on both servers with the same
+    keyword, so the identical AST must return the identical rows. Ordered by the
+    single projected column so the comparison is not order-dependent."""
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                **_ARM_ONE,
+                "set_op": {"op": op, "arms": [_ARM_TWO]},
+                "order_by": [{"col": "customer_id"}],
+                "limit": 100,
+            }
+        )
+    )
+    assert rows, f"{op} returned no rows — the comparison would be vacuous"
+
+
+@pytest.mark.asyncio
+async def test_union_all_keeps_duplicates_identically_on_both_dialects():
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                **_ARM_ONE,
+                "set_op": {"op": "union", "all": True, "arms": [_ARM_ONE]},
+                "order_by": [{"col": "customer_id"}],
+                "limit": 100,
+            }
+        )
+    )
+    assert len(rows) > len({r["customer_id"] for r in rows}), "UNION ALL kept no duplicates"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["intersect", "except"])
+async def test_intersect_all_and_except_all_are_rejected_on_mssql_and_run_on_postgres(op):
+    """The one genuine capability gap this item has: Postgres has `INTERSECT ALL`
+    and `EXCEPT ALL`; T-SQL has neither. Proven by EXECUTION on both servers —
+    Postgres returns rows, MSSQL raises a typed rejection before any SQL is sent.
+    A rendering-only assertion could not tell these apart, because SQLAlchemy
+    emits `INTERSECT ALL` for the mssql dialect just as happily."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            **_ARM_ONE,
+            "set_op": {"op": op, "all": True, "arms": [_ARM_TWO]},
+            "order_by": [{"col": "customer_id"}],
+            "limit": 100,
+        }
+    )
+    pg = await StructuredQueryService(connection_id="pg").execute(query)
+    assert pg.row_count > 0
+
+    from querygate.core.exceptions import QueryValidationError
+
+    with pytest.raises(QueryValidationError, match=f"{op.upper()} ALL is not supported on MSSQL"):
+        await StructuredQueryService(connection_id="ms").execute(query)
+
+
+@pytest.mark.asyncio
+async def test_the_compound_limit_is_enforced_on_both_dialects():
+    """SQLAlchemy's MSSQL dialect silently DROPS `.limit()` on a CompoundSelect,
+    so this is the test that would catch `clamp_limit` — a policy guardrail —
+    becoming a no-op on one dialect only. Executed, not rendered: a returned row
+    count is the only proof the limit reached the server."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "set_op": {"op": "union", "arms": [{"from": "products", "select": ["products.id"]}]},
+            "order_by": [{"col": "id"}],
+            "limit": 3,
+        }
+    )
+    for connection in ("pg", "ms"):
+        result = await StructuredQueryService(connection_id=connection).execute(query)
+        assert result.row_count == 3, f"{connection} returned {result.row_count} rows, not 3"
+
+
+@pytest.mark.asyncio
+async def test_each_arm_carries_its_own_aggregation_on_both_dialects():
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.status", {"fn": "count", "col": "*", "as": "n"}],
+                "group_by": ["orders.status"],
+                "set_op": {
+                    "op": "union",
+                    "arms": [
+                        {
+                            "from": "customers",
+                            "select": [
+                                "customers.country",
+                                {"fn": "count", "col": "*", "as": "n"},
+                            ],
+                            "group_by": ["customers.country"],
+                        }
+                    ],
+                },
+                "order_by": [{"col": "status"}],
+                "limit": 100,
+            }
+        )
+    )
+    labels = {r["status"] for r in rows}
+    assert "completed" in labels and "US" in labels, labels
+
+
+@pytest.mark.asyncio
+async def test_arm_type_mismatch_diverges_and_is_deliberately_left_to_the_database():
+    """A recorded divergence, not a regression — and deliberately NOT fixed here.
+
+    The plan asked for arms with matching select arity **and types**; item 104
+    shipped the arity half. This is what the type half would have caught, measured
+    on both live servers: arm 1 projecting an integer column against arm 2
+    projecting a text CAST of it is a hard error on Postgres and **succeeds on SQL
+    Server**, which applies data-type precedence and converts the varchar side back
+    to int.
+
+    Left standing rather than papered over, for a reason worth stating precisely:
+    unlike item 117's date-operand case — where all three backends returned three
+    DIFFERENT WRONG answers — neither backend here returns wrong data. Postgres
+    refuses; SQL Server returns the correct values under a converted type. The
+    genuinely dangerous shape (an integer unioned with NON-numeric text) is refused
+    by BOTH, which this test also pins. A complete fix needs static type inference
+    over every select-item kind, not the reflected-column check the narrow cases
+    would allow, so it is a recorded wall rather than a silent omission (see
+    docs/PRODUCT_GUIDE.md's 2026-07-27 Decision Log entry).
+    """
+    _setup()
+    numeric_text = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "set_op": {
+                "op": "union",
+                "arms": [
+                    {
+                        "from": "orders",
+                        "select": [
+                            {"expr": {"cast": {"col": "orders.id"}, "to": "text"}, "as": "id"}
+                        ],
+                    }
+                ],
+            },
+            "limit": 100,
+        }
+    )
+    with pytest.raises(QueryValidationError):
+        await StructuredQueryService(connection_id="pg").execute(numeric_text)
+    mssql_result = await StructuredQueryService(connection_id="ms").execute(numeric_text)
+    assert mssql_result.row_count > 0, "the divergence disappeared — re-check the type posture"
+
+    # The genuinely-wrong shape is refused by BOTH, which is what bounds the risk.
+    non_numeric_text = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "set_op": {
+                "op": "union",
+                "arms": [{"from": "orders", "select": ["orders.status"]}],
+            },
+            "limit": 100,
+        }
+    )
+    for connection in ("pg", "ms"):
+        with pytest.raises(QueryValidationError):
+            await StructuredQueryService(connection_id=connection).execute(non_numeric_text)
+
+
+@pytest.mark.asyncio
+async def test_a_set_operation_inside_an_in_subquery_executes_on_both_dialects():
+    """Set operations and subqueries compose, and the composition is advertised in
+    the product guide — but until now only `validate_policy` was exercised, never
+    the compile or execution path through `_compile_in_subquery` ->
+    `_compile_set_operation`."""
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "where": {
+                    "col": "orders.customer_id",
+                    "op": "in",
+                    "value_subquery": {
+                        "from": "customers",
+                        "select": ["customers.id"],
+                        "where": {"col": "customers.country", "op": "eq", "value": "US"},
+                        "set_op": {
+                            "op": "union",
+                            "arms": [
+                                {
+                                    "from": "customers",
+                                    "select": ["customers.id"],
+                                    "where": {
+                                        "col": "customers.country",
+                                        "op": "eq",
+                                        "value": "GB",
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                },
+                "order_by": [{"col": "id"}],
+                "limit": 100,
+            }
+        )
+    )
+    assert rows, "the nested set operation matched nothing — the check would be vacuous"
+
+
+@pytest.mark.asyncio
+async def test_a_mandatory_row_filter_reaches_every_arm_on_both_dialects():
+    """The item's headline safety rule, proven by EXECUTION rather than by counting
+    occurrences in rendered SQL: with a filter pinned to one country, neither arm
+    may return a row from another."""
+    _setup()
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                max_select_columns=50,
+                mandatory_row_filters=[
+                    MandatoryRowFilter(table="customers", column="country", value="US")
+                ],
+            ),
+            overrides={},
+        )
+    )
+    try:
+        query = StructuredQuery.model_validate(
+            {
+                "from": "customers",
+                "select": ["customers.country"],
+                "where": {"col": "customers.id", "op": "gt", "value": 0},
+                "set_op": {
+                    "op": "union",
+                    "all": True,
+                    "arms": [{"from": "customers", "select": ["customers.country"]}],
+                },
+                "limit": 100,
+            }
+        )
+        for connection in ("pg", "ms"):
+            result = await StructuredQueryService(connection_id=connection).execute(query)
+            countries = {row["country"] for row in result.rows}
+            assert countries == {"US"}, f"{connection} leaked {countries - {'US'}} past the filter"
+    finally:
+        set_policy_store(PolicyStore(default=Policy(max_select_columns=50), overrides={}))

@@ -76,6 +76,8 @@ from querygate.query_ast.models import (
     ScalarFunctionCall,
     ScalarFunctionSelectItem,
     SelectItem,
+    SetOpKind,
+    SetOpSpec,
     StringAggSelectItem,
     StructuredQuery,
     TopNSpec,
@@ -783,6 +785,7 @@ class Query:
         self._limit: Optional[int] = None
         self._offset = 0
         self._top_n: Optional[TopNSpec] = None
+        self._set_op: Optional[SetOpSpec] = None
         self._intent: Optional[str] = None
 
     @classmethod
@@ -887,6 +890,29 @@ class Query:
         )
         return self
 
+    def union(self, *arms: "Query", all: bool = False) -> "Query":
+        """Combine this query's rows with further queries (``UNION``; pass
+        ``all=True`` to keep duplicates). This query is the first arm, so its
+        ``order_by``/``limit``/``offset`` apply to the combined result and the
+        arms may not set their own."""
+        return self._set_operation("union", all, arms)
+
+    def intersect(self, *arms: "Query") -> "Query":
+        """Rows present in this query AND in every arm."""
+        return self._set_operation("intersect", False, arms)
+
+    def except_(self, *arms: "Query") -> "Query":
+        """Rows present in this query but not in any arm. Trailing underscore
+        because ``except`` is a Python keyword."""
+        return self._set_operation("except", False, arms)
+
+    def _set_operation(self, op: SetOpKind, all_rows: bool, arms: Sequence["Query"]) -> "Query":
+        # `.build()` on each arm, so an arm's own structural rules are checked
+        # where the caller wrote it rather than surfacing later as an error
+        # about "an arm".
+        self._set_op = SetOpSpec(op=op, all_=all_rows, arms=[arm.build() for arm in arms])
+        return self
+
     def intent(self, text: str) -> "Query":
         """Attach a natural-language intent (logged with the compiled SQL for
         audit/debugging; never returned to the caller)."""
@@ -921,6 +947,7 @@ class Query:
             limit=self._limit,
             offset=self._offset,
             top_n=self._top_n,
+            set_op=self._set_op,
             intent=self._intent,
         )
 

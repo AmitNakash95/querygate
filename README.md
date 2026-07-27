@@ -205,6 +205,7 @@ aggregates (`agg.*`), `date_bucket`, `string_agg`/`array_agg`,
 `percentile_cont`, scalar functions (`fn`/`fn_select`), `case`/`when`,
 computed expressions (`expr`/`expr_fn`/`cast` and Python `+ - * /` over
 columns; item 100), window functions (`window`/`frame`; item 101), `top_n`,
+set operations (`.union()`/`.intersect()`/`.except_()`; item 104),
 and a bounded `IN (subquery)` (a predicate's `value_subquery` — a
 nested `StructuredQuery`, not raw SQL; uncorrelated, single-connection,
 depth-capped, with all caps summed tree-wide; item 97) cover the AST.
@@ -1223,8 +1224,11 @@ joins within a policy `join_group`), nested and/or `where`, `group_by` /
 items, `top_n` per-partition ranking (top-N-per-group), computed **expressions**
 anywhere a scalar belongs — arithmetic, nested functions, casts, `CASE`,
 including inside an aggregate, so `SUM(quantity * unit_price)` and conditional
-aggregation are expressible (item 100) — and **window functions** for running
-totals, moving averages, rank-in-place and lag/lead (item 101). Every one of
+aggregation are expressible (item 100), **window functions** for running
+totals, moving averages, rank-in-place and lag/lead (item 101), and **set
+operations** — `UNION`/`INTERSECT`/`EXCEPT` combining several queries into one
+statement, each arm independently policy-checked and independently filtered
+(item 104). Every one of
 those is a typed AST node checked against the policy and the live schema; none
 of them is a SQL string.
 

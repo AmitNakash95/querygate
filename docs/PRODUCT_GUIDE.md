@@ -736,6 +736,64 @@ cross join's cartesian count all execute against a live Postgres *and* a live SQ
 Server in `tests/integration/test_cross_dialect_differential.py`, and a test makes
 a live both-dialects case mandatory for any future join type.
 
+### Set operations: UNION, INTERSECT and EXCEPT in one statement
+
+**Shipped by TODO.md item 104.** Combining result sets server-side — "customers
+who are high-value **or** dormant", "IDs in both lists", "in this list but not
+that one" — is a `set_op` on the query:
+
+```json
+{"from": "customers", "select": ["customers.name"],
+ "where": {"col": "customers.lifetime_value", "op": "gt", "value": 10000},
+ "set_op": {"op": "union", "arms": [
+     {"from": "customers", "select": ["customers.name"],
+      "where": {"col": "customers.last_order_at", "op": "lt", "value": "2025-01-01"}}]},
+ "order_by": [{"col": "name"}], "limit": 100}
+```
+
+**The query that carries `set_op` is the first arm.** Its `from`/`joins`/`where`/
+`group_by`/`having` describe arm 1; its `order_by`/`limit`/`offset` apply to the
+*combined* result. That mirrors SQL exactly — `SELECT … WHERE … UNION SELECT …
+ORDER BY … LIMIT …` binds the `WHERE` to one arm and the `ORDER BY`/`LIMIT` to the
+statement — so an arm may not set `order_by`, `limit`, `offset` or `top_n`, and a
+`top_n` cannot be combined with a set operation at all. Every arm must project the
+same number of columns, and arms don't nest: a set operation is one flat `arms`
+list.
+
+`op` is `union`, `intersect` or `except`; `all: true` keeps duplicates. `UNION ALL`
+works everywhere, but **`INTERSECT ALL` and `EXCEPT ALL` are Postgres-only** —
+T-SQL has neither, so QueryGate rejects them there with a typed error rather than
+silently dropping the flag and returning fewer rows than you asked for.
+
+**Every arm is a full, independently governed scope.** This is the part that
+matters for safety rather than reach: each arm is validated on its own — its own
+table/column allow-deny, its own masked-column rule, its own schema resolution
+against its own tables — and each arm is *compiled* on its own, so it carries its
+own mandatory row filters and its own `min_group_size` floor. **A set operation is
+not a channel to dodge a per-table filter.** An arm also cannot reference another
+arm's table: arms are siblings, not a correlated scope.
+
+**Bounds:** `max_set_op_arms` (default 3, counting arm 1, summed across the query
+and its subqueries; `0` turns the feature off per connection). Every *other* cap —
+`max_joins`, `max_select_columns`, `max_where_predicates`, `max_expression_nodes` —
+is summed across the arms, so arms share one budget rather than each getting their
+own. The higher `max_limit_aggregate` ceiling applies only when **every** arm
+aggregates; one raw-row arm means the response contains raw rows and gets
+`max_limit`.
+
+**Proven on both real backends:** all three operators, `UNION ALL`'s duplicate
+retention, per-arm aggregation, the enforced row limit, and a mandatory row filter
+reaching *every* arm all execute against a live Postgres *and* a live SQL Server in
+`tests/integration/test_cross_dialect_differential.py`. (The `INTERSECT ALL` /
+`EXCEPT ALL` split is proven there too, but asymmetrically and deliberately: the
+Postgres half executes, while the MSSQL half is a client-side rejection raised
+before any SQL is sent — the `array_agg` posture, where the dialect gap is a
+documented fact rather than something we make a server prove.) That last one is
+there for a specific reason: SQLAlchemy's MSSQL dialect **silently drops** a
+`LIMIT` applied to a compound `SELECT`, which would have made a policy guardrail a
+no-op on one dialect only, so QueryGate wraps the compound in a derived table
+before limiting it.
+
 **What bounds a write's `WHERE`.** Two things beyond the write policy itself, both
 easy to miss because they live on the *read* side of `Policy`: the filter's columns
 are checked against read allow/deny **and** the masked-column rule (a masked column
@@ -1739,6 +1797,9 @@ expression substrate (item 100; see
 `allow_cross_join` for the one join type whose cost is the product of its inputs
 (item 103, default off; see
 [Joins](#joins-equality-sugar-a-general-on-condition-and-the-four-join-types)),
+`max_set_op_arms` for how many SELECTs one `UNION`/`INTERSECT`/`EXCEPT` may
+combine (item 104, default 3, `0` disables; see
+[Set operations](#set-operations-union-intersect-and-except-in-one-statement)),
 `max_limit`/`max_limit_aggregate`
 for row counts, `max_response_bytes` for response size), execution
 guardrails (`timeout_seconds`, `max_concurrency`, queue-depth caps),
@@ -3085,6 +3146,61 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-07-27 — set operations attach to the query as `set_op`, with the
+  carrying query as arm 1, rather than becoming a second top-level query type
+  (TODO.md item 104).** The plan called for "a new top-level shape wrapping N
+  `StructuredQuery` arms." It did not ship that way, and the reason is the one
+  this repo keeps relearning: a second top-level type would have made every
+  signature in the pipeline a `Union[StructuredQuery, SetOperationQuery]` — every
+  REST route, MCP tool, template, audit call, approval call, cost estimate — or
+  made `from`/`select` optional on every query in the codebase. The failure mode
+  of that change is a consumer that quietly handles only one member, which is
+  precisely the class of bug the item-103 audit found and the item-102 build hit
+  five times. Hanging an optional `set_op` off `StructuredQuery` keeps one
+  top-level type, so every existing consumer keeps working and the ones that must
+  now see *every arm* are found by one question — "does this walk
+  `iter_query_scopes`?" — instead of by a type checker that Python does not run.
+  Four things follow from that choice, each decided rather than inherited:
+  1. **The carrying query is arm 1, and its `order_by`/`limit`/`offset` bound the
+     whole statement while its `where`/`group_by`/`having` bound arm 1.** That
+     reads asymmetric, and it is — but it is SQL's own asymmetry, not one invented
+     here: `SELECT … WHERE … UNION SELECT … ORDER BY … LIMIT …` distributes exactly
+     that way. An arm that sets any of the four is rejected at the AST layer, with
+     one typed message, instead of producing three different dialect errors (MSSQL
+     refuses `ORDER BY` in a compound arm outright).
+  2. **An arm is a scope at the SAME depth as its carrier, not one deeper.**
+     `max_subquery_depth` bounds caller-authored *nesting*; an arm is a sibling
+     SELECT. Making arms depth+1 would have charged a two-arm union against a
+     budget it has nothing to do with — and, worse, would have made an arm look
+     like an `IN (subquery)` to the two rules that branch on `depth > 0`.
+  3. **The compound is wrapped in a derived table before `LIMIT` is applied.**
+     Measured, not assumed: SQLAlchemy's MSSQL dialect **silently drops**
+     `.limit()` on a `CompoundSelect` — no `TOP`, no `FETCH`, no error — while
+     Postgres renders `LIMIT` normally. `clamp_limit` is a policy guardrail, so
+     that is an unbounded response on one dialect only. Wrapping makes the limit a
+     limit on a plain `SELECT`, which both dialects render correctly, and gives
+     `ORDER BY` real derived-table columns instead of a bare output name. This is
+     the engine enforcing *its own* cap, not synthesizing structure the caller
+     didn't ask for, so it is not the item-74 line.
+  4. **`INTERSECT ALL` / `EXCEPT ALL` are rejected on MSSQL and SQLite rather than
+     silently de-duplicated.** T-SQL has no `ALL` form of either. Dropping the flag
+     would return *fewer* rows than asked for with no error anywhere; SQLAlchemy
+     renders the invalid keyword for every dialect with no guard of its own
+     (verified by execution — it is a live syntax error, not a compile error). So
+     it is a `DialectAdapter` method that raises, the array_agg posture.
+
+  One pre-existing hole was closed on the way, and it is worth naming because it
+  was not an item-104 regression: `sensitivity_approval_reasons` — the item-92
+  approval trigger — walked only the outer query, so a catalog-labelled sensitive
+  column reached from inside an `IN (subquery)` never tripped the human-approval
+  gate. That has been true since item 97. It now walks `iter_query_scopes`, which
+  fixes subqueries and set-op arms together. The catalog usage signals (32C) had
+  the same single-scope assumption, with fidelity rather than safety consequences,
+  and were fixed the same way. Note the scope precisely: the **audit shape** was
+  taught about set-op arms only — a nested `value_subquery` still contributes
+  nothing to `normalize_query_shape`, which is tracked separately as TODO.md item
+  120 rather than folded in here.
 
 - **2026-07-27 — the k-anonymity floor now refuses a join it cannot correctly
   bound, instead of answering as if it had (TODO.md item 118).** `min_group_size`

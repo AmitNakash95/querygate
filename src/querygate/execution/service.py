@@ -90,7 +90,7 @@ from querygate.policy.models import CostEstimationMode, Policy
 from querygate.query_ast.models import JoinSpec, Predicate, StructuredQuery
 from querygate.schema.reflection import get_table_schema, list_live_tables, sanitize_table_name
 from querygate.validation.policy_validation import validate_policy
-from querygate.validation.schema_validation import validate_schema
+from querygate.validation.schema_validation import iter_query_scopes, validate_schema
 
 
 def _join_relationship_pair(join: JoinSpec) -> Optional[Tuple[str, str]]:
@@ -467,63 +467,68 @@ class StructuredQueryService:
         ordering the AST author already committed to, not a new inference.
         Cross-connection joins (``join.connection`` set) are skipped: their
         target table lives in a different connection's catalog.
+
+        Walks every scope (``iter_query_scopes``), so a set-operation arm
+        (item 104) or a nested ``IN (subquery)`` (item 97) teaches the catalog the
+        tables and relationships it actually used. Reading only the outer scope
+        made the second arm of a union invisible to 32C — a fidelity gap, not a
+        safety one, but the same "a consumer assumed one scope" class the audit
+        shape and the approval gate had.
         """
 
-        targets: List[Tuple[CatalogUsageSignalKind, CatalogDraftTarget]] = [
-            (
-                CatalogUsageSignalKind.TABLE_USED,
-                CatalogDraftTarget(
-                    connection_id=self._connection_id,
-                    object_type=CatalogDraftObjectType.TABLE,
-                    table=query.from_table,
-                ),
-            )
-        ]
-        tables_seen = {query.from_table}
-        for join in query.joins:
-            if join.connection is not None:
-                continue
-            if join.table not in tables_seen:
-                targets.append(
-                    (
-                        CatalogUsageSignalKind.TABLE_USED,
-                        CatalogDraftTarget(
-                            connection_id=self._connection_id,
-                            object_type=CatalogDraftObjectType.TABLE,
-                            table=join.table,
-                        ),
-                    )
-                )
-                tables_seen.add(join.table)
-            pair = _join_relationship_pair(join)
-            if pair is None:
-                # A cross join, or a condition that expresses something other than
-                # one column-equals-column relationship (a range/temporal join,
-                # or a multi-predicate tree) — there is no single
-                # [Left.Col, Right.Col] pair for a RELATIONSHIP_USED signal to
-                # carry. Skip it; the TABLE_USED signals above still stand.
-                # `continue`, never an unpack: this list is built eagerly, so
-                # raising here would discard the whole batch, including the table
-                # signals already collected.
-                continue
-            left, right = pair
-            if "." not in left or "." not in right:
-                continue
-            left_table, left_column = left.split(".", 1)
-            right_table, right_column = right.split(".", 1)
+        targets: List[Tuple[CatalogUsageSignalKind, CatalogDraftTarget]] = []
+        tables_seen: set = set()
+
+        def _add_table(name: str) -> None:
+            if name in tables_seen:
+                return
+            tables_seen.add(name)
             targets.append(
                 (
-                    CatalogUsageSignalKind.RELATIONSHIP_USED,
+                    CatalogUsageSignalKind.TABLE_USED,
                     CatalogDraftTarget(
                         connection_id=self._connection_id,
-                        object_type=CatalogDraftObjectType.RELATIONSHIP,
-                        table=left_table,
-                        column=left_column,
-                        to_table=right_table,
-                        to_column=right_column,
+                        object_type=CatalogDraftObjectType.TABLE,
+                        table=name,
                     ),
                 )
             )
+
+        for _depth, scope in iter_query_scopes(query):
+            _add_table(scope.from_table)
+            for join in scope.joins:
+                if join.connection is not None:
+                    continue
+                _add_table(join.table)
+                pair = _join_relationship_pair(join)
+                if pair is None:
+                    # A cross join, or a condition that expresses something other
+                    # than one column-equals-column relationship (a range/temporal
+                    # join, or a multi-predicate tree) — there is no single
+                    # [Left.Col, Right.Col] pair for a RELATIONSHIP_USED signal to
+                    # carry. Skip it; the TABLE_USED signals above still stand.
+                    # `continue`, never an unpack: this list is built eagerly, so
+                    # raising here would discard the whole batch, including the
+                    # table signals already collected.
+                    continue
+                left, right = pair
+                if "." not in left or "." not in right:
+                    continue
+                left_table, left_column = left.split(".", 1)
+                right_table, right_column = right.split(".", 1)
+                targets.append(
+                    (
+                        CatalogUsageSignalKind.RELATIONSHIP_USED,
+                        CatalogDraftTarget(
+                            connection_id=self._connection_id,
+                            object_type=CatalogDraftObjectType.RELATIONSHIP,
+                            table=left_table,
+                            column=left_column,
+                            to_table=right_table,
+                            to_column=right_column,
+                        ),
+                    )
+                )
         return targets
 
     def _emit_usage_signals(self, query: StructuredQuery, *, admission_id: str) -> None:

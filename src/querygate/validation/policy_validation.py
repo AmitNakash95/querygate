@@ -165,6 +165,23 @@ def _enforce_tree_wide_caps(scopes: List[StructuredQuery], policy: Policy) -> No
         raise PolicyViolationError(
             f"top_n.n exceeds max of {policy.max_top_n}{_suffix(total, nested)}"
         )
+    # Set-operation arms (item 104), counting the carrying query as arm 1. Summed
+    # across scopes like every other count cap, so a second set operation inside an
+    # `IN (subquery)` shares the one budget rather than getting its own. An arm is
+    # itself a scope with `set_op is None`, so it contributes 0 and is never
+    # double-counted; a query with no set operation contributes 0 too, which is why
+    # this cannot reject anything that was legal before.
+    total = sum(1 + len(q.set_op.arms) for q in scopes if q.set_op is not None)
+    if total > policy.max_set_op_arms:
+        raise PolicyViolationError(
+            f"set operation combines {total} arms, exceeding max_set_op_arms of "
+            f"{policy.max_set_op_arms}"
+            + (
+                " (set operations are disabled for this connection)"
+                if policy.max_set_op_arms < 2
+                else _suffix(total, nested)
+            )
+        )
 
 
 def _check_where_depth(node: Optional[WhereNode], policy: Policy, label: str) -> None:

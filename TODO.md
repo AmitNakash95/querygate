@@ -134,7 +134,7 @@ order-of-magnitude, not commitments.
 | 101 | ✅ ★ General window functions (`WindowSelectItem`: OVER, LAG/LEAD, frames) | L | 96, 100 (windowed exprs) |
 | 102 | ✅ ★ `EXTRACT`/date_part + relative-date/interval helpers | M | 100 |
 | 103 | ✅ ★ Non-equi/range joins + FULL OUTER / CROSS | M | 96, 99 |
-| 104 | ★ Set operations (UNION / INTERSECT / EXCEPT) | L | 96, 97 |
+| 104 | ✅ ★ Set operations (UNION / INTERSECT / EXCEPT) | L | 96, 97 |
 | 105 | ★ CTE / derived table in FROM (non-recursive) | XL | 96, 97, 104 |
 | 106 | ★ Correlated / EXISTS / scalar subqueries | XL | 96, 97, 105 |
 | 107 | ✅ Batch query execution double-reserves quota on an approval retry | S | — |
@@ -149,6 +149,9 @@ order-of-magnitude, not commitments.
 | 116 | ✅  A write's WHERE is exempt from every shape cap the read path enforces | S | — |
 | 117 | ✅  `date_bucket` over a non-temporal column diverges across dialects | S | 102 |
 | 118 | ✅ `min_group_size` was defeated by any fan-out join | M | — |
+| 119 | `top_n` mis-resolves and DROPS a column on a duplicate output name | S | — |
+| 120 | Audit shape records nothing for a nested `IN (subquery)` | S | — |
+| 121 | Report-only surfaces still assume a query has one scope | S | 104 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2096,17 +2099,13 @@ Shipped `JoinSpec.condition` (a full `WhereNode`, so range/temporal joins) plus
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 103).
 
-### 104. Query engine: set operations (UNION / INTERSECT / EXCEPT)
+### 104. Query engine: set operations (UNION / INTERSECT / EXCEPT) ✅ DONE
 
-A new top-level shape wrapping N `StructuredQuery` arms + op + `all: bool`, with
-matching select arity. A new **scope container**: extend `iter_query_scopes` so each
-arm is validated as its own scope (mirror item 97 exactly), all caps summed across
-arms, and mandatory row filters + k-anon min-group applied to every arm (a set op
-must not be a channel to dodge a per-table filter). New cap `max_set_op_arms`.
+Shipped `StructuredQuery.set_op` (UNION/INTERSECT/EXCEPT, with `all`), the first
+top-level scope container — every arm independently validated, compiled, filtered
+and k-anon-floored, capped by a tree-wide `max_set_op_arms`.
 
-**Effort: L. Priority: medium (flagship pillar). Depends on: items 96, 97. Requires
-a recorded Decision Log entry before build.** Full spec + acceptance:
-**ENGINE_EXPRESSIVENESS_PLAN.md Phase 4a.**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 104).
 
 ### 105. Query engine: CTE / derived table in FROM (non-recursive)
 
@@ -2143,7 +2142,7 @@ comparison is often achievable today via two round-trips — document that recip
 
 **Effort: XL. Priority: medium-low (flagship pillar; do last — largest safety
 surface). Depends on: items 96, 97, 105. Requires a recorded Decision Log entry in
-`docs/PRODUCT_GUIDE.md` before build** (correlation scope model; plan §8 entry 7).
+`docs/PRODUCT_GUIDE.md` before build** (correlation scope model; plan §8 entry 8).
 Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 5.**
 
 ---
@@ -2265,3 +2264,68 @@ precisely: a join onto the target's primary key or a unique column cannot inflat
 a count and still runs.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 118).
+
+
+### 119. `top_n` mis-resolves and DROPS a column when two projections share a base name
+
+- Why: `_apply_top_n` builds its outer projection by **output name**
+  (`output_names = [c.name for c in stmt.selected_columns]`, then
+  `ranked.c[name]`). When two select items produce the same base name — e.g.
+  `select: ["customers.id", "orders.id"]` — SQLAlchemy disambiguates the derived
+  table's keys but `.name` still collides, so the outer SELECT projects the FIRST
+  column twice and the second projected column never reaches the response at all.
+  Measured 2026-07-27: `SELECT anon_1.id, anon_1.id AS id__1 …` — the caller asked
+  for two different columns and got one of them, twice, with no error. The
+  `top_n` ORDER BY/PARTITION BY refs mis-resolve the same way.
+- Item 104 hit the identical root cause on its new set-operation path and fixed it
+  there by binding **positionally** (`zip(query.select, output_columns)`), which is
+  sound because the derived table's columns are arm 1's select list in order. The
+  same fix shape applies here; this was left as its own item because it is a
+  pre-existing wrong-answer bug on a shipped feature, not an item-104 regression.
+- Scope: `compiler/sqlalchemy_compiler.py::_apply_top_n`.
+- Acceptance criteria:
+  - A `top_n` query projecting two same-named columns returns BOTH, and its
+    ordering resolves to the column the caller named; regression test added.
+  - Consider whether duplicate output names deserve a typed rejection instead —
+    the response `dict(row)` collapses them regardless (a separate, older issue).
+
+**Effort: S. Priority: medium (silent wrong answer on a shipped feature).**
+
+### 120. The audit shape records nothing for a nested `IN (subquery)`
+
+- Why: `normalize_query_shape`'s `_predicate_shape` emits operator/column/
+  value_column/value_expression but has no `value_subquery` branch, so an audit
+  event for `WHERE x IN (SELECT … FROM employees)` never names `employees`. The
+  audit trail therefore claims a query read one table when it read two — the exact
+  reasoning item 104 used to justify recursing into set-op arms, applied to the
+  other scope container. True since item 97.
+- Scope: `audit/events.py`.
+- Acceptance criteria:
+  - A `value_subquery`'s shape (its `from`, joins and redaction-safe predicate
+    structure) appears in the persisted event, with a test asserting no literal
+    leaks from the nested scope.
+
+**Effort: S. Priority: medium (audit fidelity — a Proof-pillar surface).**
+
+### 121. Report-only surfaces still assume a query has one scope
+
+- Why: enforcement is scope-correct everywhere (items 97 + 104), but three
+  *reporting* surfaces still read only the outer query, so they under-report a
+  set-op arm or a nested subquery:
+  - `ExplainResult.tables` (`execution/service.py`) — a three-arm union reports
+    one arm's tables while the returned `sql` names them all;
+  - `referenced_tables` (`validation/policy_validation.py`), consumed by
+    `admin/service.py`'s candidate simulator — a mandatory filter whose table
+    appears only in an arm is invisible to `simulate`, so an operator can be told
+    a principal is `allow` when execution will refuse on a missing claim;
+  - the same simulator's `resolve_query_table_connections` call, which simulates
+    only the outer scope's join group.
+  None is a bypass — enforcement is strictly stricter than the simulation — but a
+  tool whose whole value is predicting enforcement should not be wrong about it.
+- Scope: `execution/service.py`, `validation/policy_validation.py`,
+  `admin/service.py`.
+- Acceptance criteria:
+  - Each surface reports every scope (derive from the populated `scope_tables`
+    map / `iter_query_scopes`); tests cover an arm and a subquery.
+
+**Effort: S. Priority: low-medium (operator-facing accuracy, not enforcement).**

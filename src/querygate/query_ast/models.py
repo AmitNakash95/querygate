@@ -32,6 +32,7 @@ JoinType = Literal["inner", "left", "full", "cross"]
 SortDir = Literal["asc", "desc"]
 RankFn = Literal["row_number", "rank", "dense_rank"]
 DateGranularity = Literal["day", "week", "month", "quarter", "year"]
+SetOpKind = Literal["union", "intersect", "except"]
 
 
 class AggregateSelectItem(pyd.BaseModel):
@@ -1230,6 +1231,57 @@ class TopNSpec(pyd.BaseModel):
     model_config = pyd.ConfigDict(extra="forbid")
 
 
+# Why the carrying query is arm 1 rather than a dedicated wrapper type with an
+# `arms` list of its own (item 104):
+#   * SQL itself works this way. `SELECT a FROM t WHERE x UNION SELECT b FROM u
+#     ORDER BY 1 LIMIT 10` binds the WHERE to the first arm and the ORDER BY/LIMIT
+#     to the whole statement. The apparent asymmetry here is that asymmetry,
+#     not one this AST invented.
+#   * A separate top-level type would make `from`/`select` optional on every
+#     query in the codebase, or force `Union[StructuredQuery, SetOperationQuery]`
+#     through every REST route, MCP tool, template, audit and approval call site
+#     — an enormous blast radius whose failure mode is a consumer that silently
+#     handles only one member. Keeping one top-level type means every existing
+#     consumer keeps compiling, and the ones that must now see every arm are
+#     found by walking `iter_query_scopes`, which is already the authority.
+#   * MCP context cost stays small because `arms` is a `$ref` back to the
+#     StructuredQuery already in `$defs`: a measured 1,485 chars of tool schema
+#     (see tests/unit/test_mcp_token_budget.py for the full base-vs-tree table).
+#     Stated as the measurement it is: this was NOT the deciding argument, the
+#     blast radius above was.
+class SetOpSpec(pyd.BaseModel):
+    """Combine this query's rows with further queries: UNION / INTERSECT / EXCEPT.
+
+    The query carrying `set_op` is the FIRST arm — its from/joins/where/group_by/
+    having describe arm 1, while its order_by/limit/offset apply to the combined
+    result (exactly as in SQL, where they are written once after the last arm).
+    Every arm must project the same number of select items, and an arm may not
+    carry its own order_by/limit/offset/top_n/set_op.
+    """
+
+    op: SetOpKind = pyd.Field(
+        description=(
+            "union = rows in either side; intersect = rows in both; "
+            "except = rows in this query but not in the arms."
+        )
+    )
+    all_: bool = pyd.Field(
+        default=False,
+        validation_alias=pyd.AliasChoices("all", "all_"),
+        serialization_alias="all",
+        description=(
+            "Keep duplicate rows (UNION ALL). Default false de-duplicates. "
+            "Only valid with 'union' outside Postgres."
+        ),
+    )
+    arms: List["StructuredQuery"] = pyd.Field(
+        min_length=1,
+        description="The further queries to combine with this one, in order.",
+    )
+
+    model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
+
+
 class StructuredQuery(pyd.BaseModel):
     """Read-only structured query. No raw SQL — every field is a validated,
     schema-checked identifier or literal. Every column reference anywhere in
@@ -1296,6 +1348,13 @@ class StructuredQuery(pyd.BaseModel):
         default=None,
         description="Top/bottom N rows per partition — see TopNSpec's own fields.",
     )
+    set_op: Optional[SetOpSpec] = pyd.Field(
+        default=None,
+        description=(
+            "Combine this query with further queries via UNION/INTERSECT/EXCEPT. "
+            "This query is the first arm — see SetOpSpec's own fields."
+        ),
+    )
     intent: Optional[str] = pyd.Field(
         default=None,
         description=(
@@ -1360,6 +1419,62 @@ class StructuredQuery(pyd.BaseModel):
             )
         return self
 
+    @pyd.model_validator(mode="after")
+    def _validate_set_op(self) -> "StructuredQuery":
+        """The structural rules of a set operation (item 104), all of them
+        dialect-independent and checkable with no DB touch — the same class as the
+        alias and window rules above.
+
+        Every rule here exists because SQL puts the clause on the *statement*, not
+        on an arm: a per-arm `order_by` has no meaning once the rows are combined
+        (and MSSQL rejects it outright), a per-arm `limit` would silently return an
+        arbitrary subset of each side, and mismatched arity is an error every
+        backend reports differently. Rejecting them here means one typed message
+        instead of three dialect-specific ones.
+        """
+        spec = self.set_op
+        if spec is None:
+            return self
+        if self.top_n is not None:
+            # `top_n` materializes the query as a ranked derived table, which has
+            # no meaning over a compound: its partition_by/order_by refs resolve
+            # against table columns the combined result no longer has. Reject
+            # rather than grow a second materialization path (the posture item 101
+            # took for group_by + window).
+            raise ValueError(
+                "top_n cannot be combined with set_op — rank within each arm, or "
+                "order the combined result with order_by + limit"
+            )
+        for arm in spec.arms:
+            if arm.set_op is not None:
+                raise ValueError(
+                    "a set_op arm may not carry its own set_op — list every arm in "
+                    "one `arms` list instead of nesting them"
+                )
+            disallowed = [
+                name
+                for name, unset in (
+                    ("order_by", not arm.order_by),
+                    ("limit", arm.limit is None),
+                    ("offset", not arm.offset),
+                    ("top_n", arm.top_n is None),
+                )
+                if not unset
+            ]
+            if disallowed:
+                raise ValueError(
+                    f"a set_op arm may not set {disallowed} — order_by/limit/offset/"
+                    "top_n apply to the combined result and belong on the query that "
+                    "carries set_op"
+                )
+            if len(arm.select) != len(self.select):
+                raise ValueError(
+                    f"every set_op arm must project the same number of columns: this "
+                    f"query projects {len(self.select)}, an arm projects "
+                    f"{len(arm.select)}"
+                )
+        return self
+
 
 # StructuredQuery references Predicate (via WhereNode) and Predicate now references
 # StructuredQuery (value_subquery) — a recursive cycle (TODO.md item 97). CaseWhen
@@ -1385,4 +1500,7 @@ CaseSelectItem.model_rebuild()
 # it is declared before Predicate/WhereGroup and would otherwise keep an
 # unresolved forward ref, making every `condition` fail to validate at request time.
 JoinSpec.model_rebuild()
+# SetOpSpec.arms is a forward ref to StructuredQuery, which is declared after it
+# (item 104) — a third cycle into the same knot, resolved the same way.
+SetOpSpec.model_rebuild()
 StructuredQuery.model_rebuild()

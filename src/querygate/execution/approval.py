@@ -48,6 +48,7 @@ from querygate.query_ast.models import StructuredQuery
 from querygate.validation.schema_validation import (
     effective_name_map,
     iter_column_refs,
+    iter_query_scopes,
     parse_column_ref,
 )
 
@@ -101,31 +102,39 @@ def sensitivity_approval_reasons(
 
     A column's own label wins; otherwise its table's table-level label applies,
     so labelling a whole table sensitive covers columns without their own label.
+
+    Walks EVERY scope (`iter_query_scopes`) — the outer query, every set-operation
+    arm (item 104) and every nested `value_subquery` (item 97) — each against its
+    own alias map, since an alias only means anything inside the scope that
+    declares it. Reading the outer scope alone would have let a labelled column be
+    reached from an arm or a subquery with the approval gate never firing; that
+    hole was live for `value_subquery` from item 97 until item 104 closed it.
     """
     triggers = set(policy.approval_sensitivities)
     if not triggers:
         return []
     store = get_catalog_store()
-    name_to_physical = effective_name_map(query)
     hits: List[str] = []
     seen: set = set()
-    for column_ref in iter_column_refs(query):
-        table, column = parse_column_ref(column_ref.ref)
-        physical = name_to_physical.get(table.lower(), table)
-        entry = store.get_table(connection_id, physical)
-        if entry is None:
-            continue
-        col_entry = entry.column(column)
-        label = (
-            col_entry.sensitivity
-            if col_entry is not None and col_entry.sensitivity != SensitivityClass.NONE
-            else entry.sensitivity
-        )
-        if label in triggers:
-            key = f"{physical}.{column}"
-            if key not in seen:
-                seen.add(key)
-                hits.append(f"references {label}-labelled column {key}")
+    for _depth, scope in iter_query_scopes(query):
+        name_to_physical = effective_name_map(scope)
+        for column_ref in iter_column_refs(scope):
+            table, column = parse_column_ref(column_ref.ref)
+            physical = name_to_physical.get(table.lower(), table)
+            entry = store.get_table(connection_id, physical)
+            if entry is None:
+                continue
+            col_entry = entry.column(column)
+            label = (
+                col_entry.sensitivity
+                if col_entry is not None and col_entry.sensitivity != SensitivityClass.NONE
+                else entry.sensitivity
+            )
+            if label in triggers:
+                key = f"{physical}.{column}"
+                if key not in seen:
+                    seen.add(key)
+                    hits.append(f"references {label}-labelled column {key}")
     return hits
 
 
