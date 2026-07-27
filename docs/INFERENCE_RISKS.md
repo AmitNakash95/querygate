@@ -99,7 +99,8 @@ aggregates with and without a condition can isolate one individual's
 contribution (multi-query differencing).
 
 - **Single-query singling-out: closed by `Policy.min_group_size` (TODO.md item
-  88).** When set, the compiler injects `HAVING count(*) >= k` into every
+  88) — for un-joined queries; see the fan-out-join gap below.** When set, the
+  compiler injects `HAVING count(*) >= k` into every
   aggregate query, so any result group backed by fewer than *k* underlying rows
   is suppressed — `count(*) WHERE id = X` returns nothing rather than revealing
   a single individual. It is the aggregate analog of a mandatory row filter:
@@ -162,5 +163,7 @@ unharvested reference. Class B (semantic correlation, derived columns,
 aggregate differencing, existence probing) is **not closable by identifier
 allow/deny**; R1 is closed by policy configuration, R3's single-query
 singling-out is closed by the opt-in `Policy.min_group_size` guardrail (item 88)
-with multi-query differencing left an honest residual, and R2/R4 are accepted
+for un-joined aggregate queries — a fan-out join still defeats the floor, an open
+gap tracked as TODO.md item 118 — with multi-query differencing left an honest
+residual, and R2/R4 are accepted
 residuals mitigated in depth by mandatory filters, masking, quotas, and audit.

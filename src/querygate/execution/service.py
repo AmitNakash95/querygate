@@ -87,10 +87,36 @@ from querygate.metrics import (
     classify_rejection,
 )
 from querygate.policy.models import CostEstimationMode, Policy
-from querygate.query_ast.models import StructuredQuery
+from querygate.query_ast.models import JoinSpec, Predicate, StructuredQuery
 from querygate.schema.reflection import get_table_schema, list_live_tables, sanitize_table_name
 from querygate.validation.policy_validation import validate_policy
 from querygate.validation.schema_validation import validate_schema
+
+
+def _join_relationship_pair(join: JoinSpec) -> Optional[Tuple[str, str]]:
+    """The `[LeftTable.Col, RightTable.Col]` pair a join asserts, or None.
+
+    Item 32C's `RELATIONSHIP_USED` signal records one column-to-column
+    relationship, so this answers "does this join assert exactly one, and which?"
+
+    Both spellings of an equality join return the same pair, deliberately. Item
+    103 made `condition` a second way to write `ON a.x = b.y`, and reading only
+    `on` would have meant the newer spelling silently taught the catalog nothing
+    — the same spelling asymmetry `audit/events.py`'s `value_column` exists to
+    prevent, one layer over. A range/temporal join, a multi-predicate condition
+    and a cross join genuinely assert no single pair, and return None.
+    """
+    if join.on is not None:
+        return join.on[0], join.on[1]
+    condition = join.condition
+    if (
+        isinstance(condition, Predicate)
+        and condition.op == "eq"
+        and condition.col is not None
+        and condition.value_col is not None
+    ):
+        return condition.col, condition.value_col
+    return None
 
 
 class TableCatalogInfo(pyd.BaseModel):
@@ -435,7 +461,7 @@ class StructuredQueryService:
     def _usage_signal_targets(
         self, query: StructuredQuery
     ) -> List[Tuple[CatalogUsageSignalKind, CatalogDraftTarget]]:
-        """Relationship targets use JoinSpec.on's own documented convention
+        """Relationship targets use the join's own documented convention
         (``[LeftTable.Col, RightTable.Col]``) to decide which side is
         ``table``/``column`` vs. ``to_table``/``to_column`` — the same
         ordering the AST author already committed to, not a new inference.
@@ -469,15 +495,18 @@ class StructuredQueryService:
                     )
                 )
                 tables_seen.add(join.table)
-            if join.on is None:
-                # A range or cross join (item 103) asserts no single
-                # [Left.Col, Right.Col] relationship, which is the only thing a
-                # RELATIONSHIP_USED signal can carry. Skip it — the TABLE_USED
-                # signals above still stand. `continue`, never an unpack: this
-                # list is built eagerly, so raising here would discard the whole
-                # batch, including the table signals already collected.
+            pair = _join_relationship_pair(join)
+            if pair is None:
+                # A cross join, or a condition that expresses something other than
+                # one column-equals-column relationship (a range/temporal join,
+                # or a multi-predicate tree) — there is no single
+                # [Left.Col, Right.Col] pair for a RELATIONSHIP_USED signal to
+                # carry. Skip it; the TABLE_USED signals above still stand.
+                # `continue`, never an unpack: this list is built eagerly, so
+                # raising here would discard the whole batch, including the table
+                # signals already collected.
                 continue
-            left, right = join.on
+            left, right = pair
             if "." not in left or "." not in right:
                 continue
             left_table, left_column = left.split(".", 1)

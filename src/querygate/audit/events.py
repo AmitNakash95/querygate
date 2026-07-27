@@ -385,6 +385,18 @@ def _predicate_shape(predicate: Predicate) -> Dict[str, Any]:
             predicate.expr is not None
         )  # nosec B101 — the AST guarantees exactly one of col/col_fn/expr
         shape["expression"] = _expression_shape(predicate.expr)
+    if predicate.value_col is not None:
+        # The OTHER side of a column-to-column comparison. A column identifier,
+        # never a value — the same class of content the join `on` pair has always
+        # recorded, so non-negotiable 3 is untouched.
+        #
+        # Added with item 103, because that item made the omission consequential:
+        # a join condition is now a predicate tree, so `JOIN c ON o.cid = c.id`
+        # written as a `condition` audited as `{"operator": "eq", "column":
+        # "o.cid"}` — dropping the join TARGET — while the identical join written
+        # as `on` recorded both sides. Two spellings of one join must not produce
+        # materially different audit detail.
+        shape["value_column"] = predicate.value_col
     if predicate.value_expr is not None:
         shape["value_expression"] = _expression_shape(predicate.value_expr)
     return shape

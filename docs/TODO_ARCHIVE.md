@@ -6122,13 +6122,45 @@ gate placed there would only fire in the one CI job that has both servers. That
 placement is item 102's recorded precedent, and the item-103 audit caught this
 file's first draft getting it wrong.
 
-**Mutation-verified.** All 16 enforcement points this item adds were each broken
-deliberately and confirmed to fail a test *for that reason*. The first pass caught
-13/16; the three misses were real and are why the technique is mandatory — nothing
-pinned the **audit shape** (the item-102 lesson repeating: the normalizer is a
-third un-foldable recursion), nothing pinned **join-condition column resolution**
-at the schema layer, and one mutation string missed. Tests were added for all
-three before landing.
+**Mutation-verified — and the claim is written to be re-checkable rather than
+taken on trust.** Each enforcement point below was broken deliberately and
+confirmed to fail its guarding test *for that reason*. To re-verify any row:
+break the named line, run the named test, expect a failure, revert.
+
+| # | Enforcement point | Guarding test |
+| --- | --- | --- |
+| 1 | `allow_cross_join` gate (`policy_validation`) | `test_cross_join_is_denied_by_default` |
+| 2 | join-condition predicate count, per scope | `test_join_condition_predicates_are_bounded_by_max_where_predicates` |
+| 3 | ...summed **across** subquery scopes | `test_join_condition_predicate_budget_is_summed_across_subquery_scopes` |
+| 4 | join-condition depth cap | `test_join_condition_depth_is_bounded_by_max_where_depth` |
+| 5 | join-condition `max_in_list_size` | `test_join_condition_in_list_is_bounded_by_max_in_list_size` |
+| 6 | `value_subquery` rejected in a join condition | `test_subquery_in_a_join_condition_is_rejected` |
+| 7 | `JOIN_CONDITION` refs yielded by the item-96 visitor | `test_visitor_covers_every_position_with_expected_refs` + the adversarial denied/masked matrix |
+| 8 | join-condition expressions in `iter_scope_expressions` | `test_expression_in_a_join_condition_is_bounded_by_max_expression_nodes` |
+| 9 | ...carrying the `max_interval_days` cap | `test_date_add_inside_a_join_condition_is_bounded_by_max_interval_days` |
+| 10 | ...carrying the `max_case_branches` cap | `test_case_branches_inside_a_join_condition_are_bounded` |
+| 11 | forward-reference rejection in the join graph | `test_condition_cannot_forward_reference_a_later_join` |
+| 12 | condition must reference the joined table | `test_condition_must_reference_the_table_being_joined` |
+| 13 | join-condition columns resolved at schema validation | `test_join_condition_unknown_column_rejected` |
+| 14 | compiler `full=` flag | `test_full_outer_join_renders_as_full_outer` |
+| 15 | compiler `isouter`/`full` not swapped | `test_left_join_renders_left_outer_not_full_outer`, `test_left_join_is_not_silently_promoted_to_full` |
+| 16 | AST: `on`/`condition` mutually exclusive | `test_condition_and_on_together_are_rejected` |
+| 17 | AST: `cross` takes no condition | `test_cross_join_takes_no_condition` |
+| 18 | audit shape records the join condition | `test_join_condition_appears_in_the_normalized_audit_shape` |
+| 19 | audit shape records the join type | `test_join_shape_records_the_type_and_omits_the_form_not_used` |
+| 20 | `_usage_signal_targets` survives `on is None` | `test_usage_signals_survive_a_range_join_that_carries_no_on_pair` |
+| 21 | cross-joined table still reaches table policy | `test_cross_join_to_a_denied_table_is_rejected` |
+
+**What the first pass missed, recorded because it is the useful part.** The
+initial mutation run covered rows 1–2, 4–8, 11–12, 14, 16–17 and caught 13 of the
+16 points it probed. Three misses were real: nothing pinned the **audit shape**
+(the item-102 lesson repeating — the normalizer is a third un-foldable recursion),
+nothing pinned **join-condition column resolution** at the schema layer, and one
+mutation string failed to match. Rows 3, 9, 10, 13, 15, 18–21 were added
+afterwards, most of them in response to the completion audit rather than the
+mutation pass — which is the honest lesson: mutation-testing the rules an item
+*adds* does not probe the existing consumers of a field whose **type** the item
+changed. Row 20 is exactly that class, and it was a live bug.
 
 **Regression bar 10/16 → 11/16** (row 16). Unlike row 12, this row was a genuine
 ❌ with no composition escape: a range join is not two queries plus a client

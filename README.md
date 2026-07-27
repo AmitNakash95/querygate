@@ -319,6 +319,10 @@ razor-thin filter — a `count(*)` over a group backed by fewer than *k* rows is
 suppressed rather than returned. It is the aggregate analog of a mandatory row
 filter (policy-driven, injected, non-removable) and applies only to aggregate
 queries; it closes single-query singling-out, not multi-query differencing.
+**Known gap:** the floor counts *joined* rows, so a fan-out join multiplies a
+singleton group past *k*. Measured with a plain equality join and tracked as
+TODO.md item 118 — if you rely on this guardrail, pair it with `max_joins: 0` or
+table denies until that item lands.
 
 ### Column-value masking (not just allow/deny)
 
