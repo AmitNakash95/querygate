@@ -12,8 +12,8 @@ categorically different posture from filtering or trusting a model-generated
 SQL string.
 
 > TL;DR of the current corpus (`security_boundary_v1`): QueryGate blocks
-> **14/14 (100%)** of the structural boundary attacks; the modeled raw-SQL
-> passthrough baseline blocks **0/14 (0%)**; **2** documented inference
+> **16/16 (100%)** of the structural boundary attacks; the modeled raw-SQL
+> passthrough baseline blocks **0/16 (0%)**; **2** documented inference
 > residuals are disclosed (not counted as catches); guardrail overhead is
 > **sub-millisecond per query, before any database round-trip.** Regenerate the
 > exact current numbers with the command below — never quote these from memory.

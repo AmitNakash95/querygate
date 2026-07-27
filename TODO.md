@@ -132,7 +132,7 @@ order-of-magnitude, not commitments.
 | 99 | ✅ ★ `HAVING` as `WhereNode` + searched `CASE` condition | S | 96 |
 | 100 | ✅ ★ Bounded scalar `Expression` substrate (arithmetic, conditional aggregation, nested fns, expression-CASE) | XL | 96, 99 |
 | 101 | ✅ ★ General window functions (`WindowSelectItem`: OVER, LAG/LEAD, frames) | L | 96, 100 (windowed exprs) |
-| 102 | ★ `EXTRACT`/date_part + relative-date/interval helpers | M | 100 |
+| 102 | ✅ ★ `EXTRACT`/date_part + relative-date/interval helpers | M | 100 |
 | 103 | ★ Non-equi/range joins + FULL OUTER / CROSS | M | 96, 99 |
 | 104 | ★ Set operations (UNION / INTERSECT / EXCEPT) | L | 96, 97 |
 | 105 | ★ CTE / derived table in FROM (non-recursive) | XL | 96, 97, 104 |
@@ -147,6 +147,7 @@ order-of-magnitude, not commitments.
 | 114 | ✅  Write tool MCP schema advertises read-only predicate fields it rejects | M | 93 |
 | 115 | ✅  Guardrail-field lists in admin/help have drifted from `Policy`'s caps | S | — |
 | 116 | ✅  A write's WHERE is exempt from every shape cap the read path enforces | S | — |
+| 117 | ✅  `date_bucket` over a non-temporal column diverges across dialects | S | 102 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2078,19 +2079,13 @@ and frame executes against live Postgres AND live MSSQL with rows compared.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 101).
 
-### 102. Query engine: `EXTRACT`/date_part + relative-date/interval helpers
+### 102. Query engine: `EXTRACT`/date_part + relative-date/interval helpers ✅ DONE
 
-`EXTRACT(dow/hour/year …)` and native relative-date filtering
-(`created_at > now() - interval '7 days'`) so an agent needn't hand-compute a
-timestamp literal. Extends item 100's `FunctionExpr`; interval magnitude is a
-**capped** literal (`max_interval_days`), not free. Per-dialect `DialectAdapter`
-methods (`EXTRACT` vs `DATEPART`, `now()` vs `SYSUTCDATETIME`, `- interval` vs
-`DATEADD`). Note in docs that relative-date filtering is already composable today
-via a computed literal — this is native convenience, prioritized accordingly.
+Shipped `extract`/`now`/`date_add` as three new members of item 100's
+`Expression` union, bounded by `max_interval_days`, plus the UTC session pin that
+makes "every date answer is UTC" true rather than server-config dependent.
 
-**Effort: M. Priority: medium (flagship pillar; high everyday value). Depends on:
-item 100. Requires a Decision Log entry (interval cap + timezone semantics; plan §8
-entry 4).** Full spec + acceptance: **ENGINE_EXPRESSIVENESS_PLAN.md Phase 3a.**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 102).
 
 ### 103. Query engine: non-equi/range joins + FULL OUTER / CROSS
 
@@ -2256,3 +2251,11 @@ applies them — to every statement of a batch up front — before any DML compi
 proven by observing that no statement reaches the database.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 116).
+
+
+### 117. `date_bucket` over a non-temporal column diverges across dialects ✅ DONE
+
+Extended item 102's operand rule to the third date primitive, so all three go
+through one shared walk with a coverage test guarding a future fourth.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 117).
