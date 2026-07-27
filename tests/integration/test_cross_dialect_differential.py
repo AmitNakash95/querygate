@@ -482,6 +482,49 @@ async def test_window_over_a_computed_expression_matches():
 
 
 @pytest.mark.asyncio
+async def test_regression_bar_row_15_window_as_an_expression_operand_matches():
+    """Row 15 of the regression bar (item 125) on both live backends: a window
+    used as an OPERAND of arithmetic, not as the projection itself.
+
+    This is the leg that a rendering assertion cannot supply. Both dialects spell
+    `SUM(...) OVER (...)` identically, but the operand position puts the window
+    inside item 100's GUARDED division — which compiles to a `NULLIF` plus a
+    `CAST(... AS NUMERIC)` — and that composition is exactly the kind of thing
+    that renders plausibly on both and evaluates differently (T-SQL's integer
+    division and NUMERIC scale rules are not Postgres's). Asserting equal rows is
+    the only way to know.
+    """
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "order_items",
+                "select": [
+                    "order_items.id",
+                    {
+                        "expr": {
+                            "op": "/",
+                            "left": {"col": "order_items.quantity"},
+                            "right": {
+                                "fn": "sum",
+                                "over": {"partition_by": ["order_items.order_id"]},
+                                "arg": {"col": "order_items.quantity"},
+                            },
+                        },
+                        "as": "share_of_order_qty",
+                    },
+                ],
+                "order_by": [{"col": "order_items.id"}],
+            }
+        )
+    )
+    # Two empty result sets would be trivially equal, and an all-NULL column would
+    # be equal too while proving the window computed nothing.
+    assert rows, "no rows — the differential comparison would be vacuous"
+    assert any(row["share_of_order_qty"] is not None for row in rows)
+
+
+@pytest.mark.asyncio
 async def test_real_mssql_rejects_a_numeric_range_offset():
     """The live fact `MSSQLDialectAdapter.window_frame`'s rejection exists for.
 

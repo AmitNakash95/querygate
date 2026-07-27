@@ -4,8 +4,8 @@
 Phase 2 (item 101), Phase 3a (item 102), Phase 3b (item 103), Phase 4a (item 104)
 Phase 4b (item 105, which ABSORBED item 97 phase 2) and Phase 5 (item 106) have
 ALL shipped, and item 125 closed the last red row — the regression bar is at
-**16/16** (see §5 for what row 15 cost, and for the real-backend legs still owed
-on it). **The `Expression`
+**16/16**, every row proven on real Postgres and real MSSQL (see §5 for what row 15
+cost). **The `Expression`
 substrate items 105–106 build on is real** (`query_ast/models.py`'s `Expression`
 union + `_compile_expression`); reuse it rather than adding a parallel scalar
 shape — item 101's `WindowSelectItem.arg`, item 102's three date nodes and item
@@ -580,13 +580,14 @@ by `tests/integration/test_window_operand_end_to_end.py` (executed, asserting th
 computed answer — not the rendered SQL) and `tests/security/test_window_operand_boundary.py`
 (every position SQL forbids one in). 4/4 enforcement points mutation-verified.
 
-*Honest scope note:* row 15's end-to-end coverage runs against SQLite through the
-REST pipeline. Unlike rows 3/6/8/12/16, it has **not** yet been executed against
-live Postgres and live MSSQL in the differential suite — no live servers were
-available when it landed. The rendering is dialect-agnostic Core and the frame
-grammar already routes through `DialectAdapter.window_frame`, but per this repo's
-own rule that a rendering assertion cannot distinguish a correct rendering from one
-that merely looks correct, **the real-backend legs of row 15 remain owed.**
+Row 15 is covered on **real Postgres and real MSSQL** in the differential suite
+(`test_cross_dialect_differential.py::test_regression_bar_row_15_window_as_an_expression_operand_matches`),
+asserting both backends return identical rows — so it carries the same grade of
+evidence as rows 3/6/8/12/16, not a rendering assertion. That leg is load-bearing
+rather than ceremonial here: the operand position puts the window inside item 100's
+guarded division (`NULLIF` + `CAST(... AS NUMERIC)`), and T-SQL's integer-division
+and NUMERIC scale rules are not Postgres's — precisely the composition that renders
+plausibly on both and could evaluate differently.
 
 **What item 104 was worth, stated precisely** — and row 8 needs the same honesty
 row 12 got, including a correction to the first draft of this paragraph. A
