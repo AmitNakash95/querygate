@@ -244,16 +244,26 @@ gate is the *first step of the item*, not a reason to defer it.
   have been a no-op on one dialect only — the compound is now wrapped in a derived
   table before limiting. It also closed a pre-existing item-97 hole where the
   item-92 approval gate never saw a sensitive column inside an `IN (subquery)`.*
-- [ ] **97 (phase 2)** — `FROM (subquery)` derived table. *Moved here 2026-07-25
-  from its old standalone slot: **its remaining phase 2 is the same capability as
-  item 105** (105's own text says it "generalizes item 97's `subquery_tables`
-  plumbing and `effective_name_map`"). Build them together or fold 97 ph2 into
-  105 — do not implement the derived table twice.* **Phase 1 shipped**
-  (`IN (subquery)`/`NOT IN`, tree-wide caps, full adversarial + e2e coverage,
-  Decision Log recorded); box stays `[ ]` for phase 2. **Depends on 96.**
-- [ ] **105** — CTE / derived table in FROM (non-recursive; recursive OUT of
-  scope). *Multi-stage single-statement analysis. Depends on 96, 97, 104;
-  **Decision Log entry before build.***
+- [x] **97 (phase 2)** — `FROM (subquery)` derived table. ✅ **ABSORBED BY 105**
+  (2026-07-27), which was the recorded intent of moving it here: 105 spells the
+  derived table as a named `WITH` block, so it is implemented once rather than
+  twice. Item 97 is now fully `✅ DONE`.
+- [x] **105** — CTE / derived table in FROM (non-recursive; recursive OUT of
+  scope). ✅ **Shipped** (an additive `StructuredQuery.ctes` list of named `WITH`
+  blocks — deliberately NOT the union on `from`/`JoinSpec.table` the plan
+  specified, because a union re-types two `str` fields read by ~a dozen consumers
+  whose failure mode is silent, while an unrecognized block NAME reflects as a
+  table and is rejected: the unaware consumer fails closed. Only the root declares
+  blocks; a block may reference only an EARLIER one, which makes **recursive cte
+  structurally inexpressible** rather than merely forbidden; new `max_cte_count`
+  with `max_subquery_depth` charged along the reference chain; a block carries no
+  `max_rows` clamp, since truncating intermediate work is a silently wrong total.
+  23/23 enforcement points mutation-verified; live Postgres **and** live MSSQL.
+  Regression bar 12/16 -> **14/16**.)
+  *Its side finding was a crash on a shipped guardrail, not a feature gap: item
+  118's k-anon fan-out check reached for `.primary_key.columns`, which only a
+  `Table` has — so `min_group_size` plus any **aliased** join raised
+  `AttributeError` rather than deciding. Reproducible with no cte at all (item 122).*
 - [ ] **106** — Correlated / EXISTS / scalar subqueries. *Do last — largest safety
   surface (breaks the uncorrelated assumption). Depends on 96, 97, 105; **Decision
   Log entry (correlation scope model) before build.***
@@ -623,6 +633,18 @@ already-planned initiatives.
   equality join that had shipped for months, which is precisely why a fix scoped to
   non-equi conditions would have been theater. Surfaced by the item-103 completion
   audit.*
+
+### Review Phase 7 — Findings from the 2026-07-27 item-105 build
+
+- [x] **122** — `_unique_column_sets` crashed on any FROM element that is not a
+  `Table`, so item 118's k-anonymity floor raised `AttributeError` on **any
+  aliased join** instead of making a policy decision. ✅ **Shipped** (an alias
+  looks through to its element; a cte/subquery reports no uniqueness and is
+  treated as able to fan out — the fail-closed direction the floor requires).
+  *Pre-existing and live since item 118. It is the blind spot this file's frontier
+  note already named: mutation testing probes the rules an item ADDS, not the
+  existing consumers of a value whose TYPE widened — here `sa.Table` -> any FROM
+  element. Found by measuring, not by reading the diff.*
 
 ### Review Phase 6 — Findings from the 2026-07-27 item-104 audit
 

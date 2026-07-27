@@ -463,4 +463,15 @@ def normalize_query_shape(query: StructuredQuery) -> Dict[str, Any]:
             "all": query.set_op.all_,
             "arms": [normalize_query_shape(arm) for arm in query.set_op.arms],
         }
+    if query.ctes:
+        # Every named block's own shape, recursively (item 105) — for the identical
+        # reason the arms above are recorded, and against the identical failure: the
+        # outer query's `from` names a cte, so an event without this would record
+        # that the query read a table called `totals` and nothing else, when the
+        # tables it actually read are all inside the blocks. Recursion terminates
+        # because only the root may declare `ctes`, and each body goes through this
+        # same redaction-safe walk, so no literal escapes a block either.
+        shape["ctes"] = [
+            {"name": spec.name, "query": normalize_query_shape(spec.query)} for spec in query.ctes
+        ]
     return shape
