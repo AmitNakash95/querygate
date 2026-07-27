@@ -3340,6 +3340,32 @@ reasoning behind them, newest first. Added to incrementally as work happens
   `is_null` operators that already take no value: the op carries the meaning and
   `exists_subquery` carries the operand.
 
+  **4. A scalar subquery in a SELECT projection is deliberately NOT built** — the
+  one part of this item's original write-up that did not ship, recorded here rather
+  than left as a silent omission. It is the position with the worst cost profile
+  (evaluated once per output row) and the widest blast radius (a new `SelectItem`
+  member touching output naming, the ref-position taxonomy, set-op arity and
+  `top_n`), and — decisively — it is the one shape an agent can already compose
+  from primitives QueryGate exposes. "Each customer with their order count" is a
+  cte that aggregates plus a LEFT JOIN:
+
+  ```json
+  {"ctes": [{"name": "counts", "query": {
+       "from": "orders", "select": ["orders.customer_id",
+                                    {"fn": "count", "col": "*", "as": "n"}],
+       "group_by": ["orders.customer_id"]}}],
+   "from": "customers",
+   "joins": [{"table": "counts", "type": "left",
+              "on": ["customers.id", "counts.customer_id"]}],
+   "select": ["customers.name", "counts.n"]}
+  ```
+
+  That is the item-74 posture applied to a position rather than a dialect: expose
+  the primitives and point at the composition, rather than grow a second way to
+  express the same result. Item 105 is what makes it a real recipe — before ctes
+  it would have been two round-trips, and this deferral would not have been
+  honest. Revisit only if a caller reports a shape the cte+join form cannot reach.
+
   **The new ops go on a READ-only operator type.** `CompareOp` is shared with the
   write AST (`write_ast/models.py`), so widening it would advertise `exists` in
   the write tool's MCP schema while the write path rejects it — precisely the

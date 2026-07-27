@@ -6583,14 +6583,43 @@ subquery is re-evaluated per candidate outer row, and what bounds that is
 see is the most security-relevant fact about a correlated query, and it is column
 identifiers only, never values.
 
-**Verification.** 13/13 enforcement points mutation-verified. One survivor on the
+**One listed capability deliberately did NOT ship: a scalar subquery in a SELECT
+projection.** It is the position with the worst cost profile (once per output row)
+and the widest blast radius (a new `SelectItem` member reaching output naming, the
+ref-position taxonomy, set-op arity and `top_n`), and it is the one shape already
+composable from exposed primitives — an aggregating cte plus a LEFT JOIN, which is
+only a real recipe *because* item 105 shipped. Recorded in the Decision Log rather
+than left as a silent gap between the item's write-up and its code.
+
+**Verification.** **18/18 enforcement points mutation-verified**, across the
+validators, the compiler, the audit shape and the scope walk. One survivor on the
 first pass was informative rather than a gap: the masked-correlated-ref check is
 already covered by the generic per-scope mask rule, so it is defence in depth — the
 test now matches its specific message, which pins the layer instead of pinning
-neither. 19 adversarial-boundary + 4 end-to-end tests; the end-to-end EXISTS cases
-filter on `status='cancelled'` deliberately, because every customer in the demo seed
-has orders and an unfiltered EXISTS/NOT EXISTS partition would be reproduced exactly
-by an implementation that ignored the correlated row.
+neither. 12 unit + 23 adversarial-boundary + 4 end-to-end tests, and **5 cross-dialect
+differential cases executed against live Postgres AND live SQL Server** with rows
+compared equal: the EXISTS/NOT EXISTS partition, the row-11 scalar comparison, a
+correlated per-outer-row scalar subquery, the HAVING position, and `NOT EXISTS` over
+a nullable correlated column (the classic `NOT IN`-vs-`NOT EXISTS` divergence,
+recorded by execution rather than assumed).
+
+Two test-design choices are load-bearing rather than incidental. The EXISTS cases
+filter on `status='cancelled'` because every customer in the demo seed has orders —
+an unfiltered EXISTS/NOT EXISTS partition is all-vs-none, which an implementation
+IGNORING the correlated row reproduces exactly. And the correlated scalar case
+asserts its answer DIFFERS from the same query using the global average, so a
+dropped correlation cannot pass.
+
+**Consumers of the new scope are tested, not assumed.** The audit shape (which
+records the nested scope AND its `correlate` list), the 32C usage signals, the
+item-92 approval gate and `referenced_tables_tree_wide` each get an explicit test
+against an EXISTS scope — the group the plan's frontier note calls the recurring
+miss. Composition with the other two containers is covered too: an EXISTS inside a
+cte body and inside a set-operation arm, each correlating to the right parent.
+
+**MCP cost, measured rather than assumed** (the discipline item 104 set): the two
+new fields add ~67 characters to `StructuredQuery`'s JSON Schema, which sits at
+37,073 against a 116,000-character total MCP budget.
 
 ### 107. Batch query execution double-reserves quota on an approval retry ✅ DONE
 
