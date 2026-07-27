@@ -257,6 +257,25 @@ class Policy(pyd.BaseModel):
     # Two arms is the canonical segment-union shape; three leaves room without
     # inviting an eight-way union under a default policy.
     max_set_op_arms: int = pyd.Field(default=3, ge=0)
+    # How many named WITH blocks one query may declare (item 105). 0 disables ctes
+    # entirely, the same convention `max_set_op_arms`/`max_window_specs` use.
+    #
+    # NOT summed tree-wide, and that is a property of the shape rather than an
+    # exemption: only the ROOT query may declare ctes, so there is no second place
+    # for a count to hide and nothing for a sum to add. Every cap that IS summable
+    # (max_joins, max_select_columns, max_where_predicates, max_expression_nodes …)
+    # already counts cte bodies, because `iter_query_scopes` yields them — so N
+    # blocks SHARE one budget rather than each getting a fresh one. What this cap
+    # alone bounds is the number of independent materialization stages.
+    #
+    # Default 3 is a judgement: two blocks is the canonical aggregate-then-join
+    # shape and three covers dedup-then-aggregate-then-join, without a default
+    # policy inviting a ten-stage pipeline. Note what does NOT bound a block —
+    # `max_rows` is deliberately not applied to one (truncating intermediate work
+    # is a silently wrong total), so a cte's cost is bounded by `timeout_seconds`,
+    # `max_response_bytes` and the concurrency limiter, exactly as item 103's
+    # cross-join entry had to state plainly rather than claim a row cap it lacks.
+    max_cte_count: int = pyd.Field(default=3, ge=0)
     max_limit: int = pyd.Field(default=100)
     max_limit_aggregate: int = pyd.Field(default=1000)
     default_limit: int = pyd.Field(default=50)

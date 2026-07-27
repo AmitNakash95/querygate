@@ -21,6 +21,8 @@ from querygate.query_ast.models import (
 )
 from querygate.validation.schema_validation import (
     RefPosition,
+    cte_source_names,
+    declared_cte_names,
     effective_name_map,
     expression_depth,
     iter_column_refs,
@@ -37,7 +39,7 @@ from querygate.validation.schema_validation import (
 )
 
 
-def referenced_tables(query: StructuredQuery) -> Set[str]:
+def referenced_tables(query: StructuredQuery, cte_names: Set[str] = frozenset()) -> Set[str]:
     """Return every PHYSICAL table touched by a query: the structural from/join
     tables, plus the physical table behind every column reference the canonical
     visitor (`iter_column_refs`) finds. Each ref's effective/alias name is
@@ -47,13 +49,21 @@ def referenced_tables(query: StructuredQuery) -> Set[str]:
     Candidate simulation uses this to scope mandatory-filter readiness to the
     same query graph that policy validation sees, without inspecting predicate
     values or compiling SQL.
+
+    ``cte_names`` (item 105) are excluded, because a cte is not a table: there is
+    nothing to allow, deny or filter at that name. Its *body* is a scope of its
+    own, so the physical tables it reads are checked there, at the source, with the
+    full treatment — which is why omitting the name here removes no enforcement.
+    Passing them matters in both directions: an allow-list policy would otherwise
+    reject every cte reference as an unknown table, and a report of "tables read"
+    would name something that does not exist in the database.
     """
     name_to_physical = effective_name_map(query)
     tables = {query.from_table, *(join.table for join in query.joins)}
     for column_ref in iter_column_refs(query):
         table, _column = parse_column_ref(column_ref.ref)
         tables.add(name_to_physical.get(table.lower(), table))
-    return tables
+    return {table for table in tables if table.lower() not in cte_names}
 
 
 def referenced_tables_tree_wide(query: StructuredQuery) -> Set[str]:
@@ -68,9 +78,10 @@ def referenced_tables_tree_wide(query: StructuredQuery) -> Set[str]:
     where answering for the outer scope alone under-reports what will actually be
     read (TODO.md item 121).
     """
+    cte_names = declared_cte_names(query)
     tables: Set[str] = set()
     for _depth, scope in iter_query_scopes(query):
-        tables |= referenced_tables(scope)
+        tables |= referenced_tables(scope, cte_names)
     return tables
 
 
@@ -271,12 +282,17 @@ def enforce_predicate_shape_caps(node: WhereNode, policy: Policy, *, label: str)
         _check_in_list_size(pred, policy)
 
 
-def _validate_scope(query: StructuredQuery, policy: Policy) -> None:
+def _validate_scope(
+    query: StructuredQuery, policy: Policy, cte_names: Set[str] = frozenset()
+) -> None:
     """Per-scope checks (applied to the outer query AND each subquery
     independently): the non-summable caps and the column allow/deny + masked-
     column rule against THIS scope's own tables (item 97 — a subquery's base
     columns get the full treatment, resolved against the subquery's own name map,
-    never the outer's)."""
+    never the outer's).
+
+    ``cte_names`` (item 105) are the statement's cte names, lowercased — the names
+    in this scope that denote a computed block rather than a table."""
     # Bound every scalar Expression tree this scope carries (item 100) before
     # anything walks it: depth per tree, and WHEN-branch breadth on every
     # CaseExpr wherever it sits. The tree-wide node budget is enforced in
@@ -387,7 +403,7 @@ def _validate_scope(query: StructuredQuery, policy: Policy) -> None:
     # into value_subquery) feeds both the table/column allow-deny checks and the
     # masked-column rule — no second parallel enumeration.
     all_refs = list(iter_column_refs(query))
-    tables = referenced_tables(query)
+    tables = referenced_tables(query, cte_names)
     name_to_physical = effective_name_map(query)
 
     for table in tables:
@@ -400,6 +416,16 @@ def _validate_scope(query: StructuredQuery, policy: Policy) -> None:
         # — always resolve to the PHYSICAL table before checking column
         # policy, so an alias can never be used to dodge a denied column.
         physical_t = name_to_physical.get(t.lower(), t)
+        # A ref into a cte names one of that block's OUTPUT columns, not a column
+        # of any table, so there is no physical (table, column) pair to check here
+        # (item 105). Enforcement is not skipped, only relocated to where the name
+        # means something: the block's own scope, where the real column it came
+        # from is subject to the identical allow/deny and mask rules below. A
+        # masked column additionally may not be projected by a cte at all —
+        # `_validate_cte_constraints` — because a block's projection is an input to
+        # another scope rather than a result handed to the caller.
+        if physical_t.lower() in cte_names:
+            continue
         if not policy.column_allowed(physical_t, c):
             raise PolicyViolationError(
                 f"Column {column_ref.ref!r} is not accessible under the active policy"
@@ -415,6 +441,8 @@ def _validate_scope(query: StructuredQuery, policy: Policy) -> None:
             continue
         t, c = parse_column_ref(column_ref.ref)
         physical_t = name_to_physical.get(t.lower(), t)
+        if physical_t.lower() in cte_names:
+            continue  # a cte output name, not a physical column — see above
         if policy.column_mask(physical_t, c) is not None:
             raise PolicyViolationError(
                 f"Column {column_ref.ref!r} is masked by policy and can only appear in the select "
@@ -473,13 +501,141 @@ def _validate_subquery_constraints(scoped: List, policy: Policy) -> None:
                     )
 
 
+def _validate_cte_constraints(
+    query: StructuredQuery, scoped: List, policy: Policy, cte_names: Set[str]
+) -> None:
+    """Every cte rule that needs to see the query's SCOPE TREE rather than one
+    query object (item 105). Kept here, beside the `value_subquery` constraints it
+    mirrors, so both scope-container rule sets read against the one
+    `iter_query_scopes` authority instead of a second traversal in the AST layer.
+
+    Ordered deliberately, and the order was CORRECTED during this item's own audit:
+    `max_cte_count` is checked FIRST because it is the only O(1) rule here, while
+    rule 2 walks every block's scope tree. Checking it last — the original order,
+    chosen so a malformed block got a message naming its real problem — meant a
+    caller could make the validator do O(N x tree) work with N far above the cap
+    before being told the cap existed. Cheap bound first is the right shape for a
+    guardrail, and it costs nothing in message quality: when a query IS over the
+    cap, the cap message is the accurate one.
+    """
+    if len(query.ctes) > policy.max_cte_count:
+        raise PolicyViolationError(f"ctes exceeds max of {policy.max_cte_count}")
+
+    # 1. One declaration site. A cte declared on an arm, inside an IN (subquery) or
+    #    inside another cte's body would be a second namespace that
+    #    `declared_cte_names(root)` — which every consumer trusts as complete —
+    #    does not contain, so those references would resolve against nothing.
+    #    Written as "any scope that is not the root" rather than by enumerating the
+    #    three containers, so a fourth container added later is covered by default.
+    for scope in (q for _depth, q in scoped if q is not query):
+        if scope.ctes:
+            raise PolicyViolationError(
+                "only the top-level query may declare `ctes` — a set_op arm, an "
+                "IN (subquery) and another cte's query may not. Declare every block "
+                "once at the top level; each is visible to the whole statement."
+            )
+
+    if not cte_names:
+        return
+
+    # 2. No forward or self reference. Declaration order is therefore dependency
+    #    order, which `cte_chain_depths` relies on to charge max_subquery_depth,
+    #    and which makes a RECURSIVE cte structurally inexpressible rather than
+    #    merely forbidden — deliberately, since unbounded recursion is a real DoS
+    #    and re-admitting it needs a hard iteration cap recorded separately.
+    declared_so_far: Set[str] = set()
+    for spec in query.ctes:
+        name = spec.name.lower()
+        for source in sorted(cte_source_names(spec.query) & cte_names):
+            if source not in declared_so_far:
+                raise PolicyViolationError(
+                    f"cte {spec.name!r} references {source!r}, which is declared later "
+                    f"or is itself — a cte may only read an EARLIER one, so a recursive "
+                    "cte is not expressible."
+                )
+        declared_so_far.add(name)
+
+    # 3. No shadowing a physical table. SQL would let the cte win. That is not a
+    #    policy bypass — a block's body is a full scope, so its tables are checked
+    #    at the source. What it DOES break is the operator's ability to reason
+    #    about their own policy: a cte name always wins name resolution, so a block
+    #    called `orders` makes every rule the operator wrote about the table
+    #    `orders` unreachable in this query, silently.
+    #
+    #    Measured while writing this rule's test: the concrete damage is not
+    #    theoretical. `_apply_mandatory_row_filters` matches a filter by physical
+    #    name, so a block named after a filtered table would have had that filter
+    #    applied to the BLOCK'S OUTPUT — filtering the wrong rows if the block
+    #    happens to project a column of that name, and raising a
+    #    compiler-internal error if it does not.
+    #
+    #    So the rule is scoped to names the policy has an opinion about rather than
+    #    to "any real table": that is the set where shadowing changes enforcement,
+    #    it needs no reflection to check, and it cannot be written as "collides
+    #    with a table used in this query" — the reference to the block IS such a
+    #    use, which makes that phrasing circular (it silently never fires).
+    #    `_apply_mandatory_row_filters` skips cte names too, as defence in depth.
+    governed: Set[str] = {
+        *(row_filter.table.lower() for row_filter in policy.mandatory_row_filters),
+        *(table.lower() for table in policy.column_masks),
+        *(table.lower() for table in policy.denied_tables),
+        *(table.lower() for table in policy.allowed_tables),
+        *(table.lower() for table in policy.denied_columns),
+        *(table.lower() for table in policy.allowed_columns),
+    }
+    for spec in query.ctes:
+        if spec.name.lower() in governed:
+            raise PolicyViolationError(
+                f"cte name {spec.name!r} is also the name of a table this connection's "
+                "policy has a rule for — a cte shadows that name, which would make the "
+                "rule unverifiable here. Rename the cte."
+            )
+
+    # 4. No dead blocks. An unreferenced cte costs a scope against every tree-wide
+    #    cap while contributing nothing, and SQLAlchemy would not render it — so
+    #    accepting one means the caps count structure the SQL does not contain.
+    referenced: Set[str] = set()
+    for _depth, scope in scoped:
+        referenced |= {
+            scope.from_table.lower(),
+            *(join.table.lower() for join in scope.joins),
+        }
+    for spec in query.ctes:
+        if spec.name.lower() not in referenced:
+            raise PolicyViolationError(
+                f"cte {spec.name!r} is declared but never referenced — reference it in "
+                "`from` or a join's `table`, or remove it."
+            )
+
+    # 5. A masked column may not be a cte's output. Same rule and same reason as
+    #    item 97's IN (subquery) output check directly above: within the block this
+    #    is a bare projection, but the block's rows are an INPUT to another scope,
+    #    where the value could be filtered, joined or ordered on — every position
+    #    item 49 exists to keep an unmasked value out of.
+    for spec in query.ctes:
+        name_to_physical = effective_name_map(spec.query)
+        for item in spec.query.select:
+            for ref in select_item_column_refs(item):
+                t, c = parse_column_ref(ref)
+                physical_t = name_to_physical.get(t.lower(), t)
+                if policy.column_mask(physical_t, c) is not None:
+                    raise PolicyViolationError(
+                        f"Column {ref!r} is masked by policy and cannot be projected by "
+                        f"cte {spec.name!r} — a cte's rows feed the rest of the query, "
+                        "where a masked value could be filtered or joined on."
+                    )
+
+
 def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) -> None:
     if not policy.enabled:
         raise PolicyViolationError(f"Connection {connection_id!r} is disabled by policy")
 
-    # Enumerate the query and every nested value_subquery (item 97) as independent
-    # scopes. For a non-nested query this is just [query].
+    # Enumerate the query, every cte body (item 105) and every nested
+    # value_subquery (item 97) as independent scopes. For a plain query this is
+    # just [query].
+    cte_names = declared_cte_names(query)
     scoped = list(iter_query_scopes(query))
+    _validate_cte_constraints(query, scoped, policy, cte_names)
     max_depth = max(depth for depth, _ in scoped)
     if max_depth > policy.max_subquery_depth:
         raise PolicyViolationError(
@@ -492,7 +648,7 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
     # Count caps summed tree-wide, then per-scope semantics for each scope.
     _enforce_tree_wide_caps(scopes, policy)
     for scope in scopes:
-        _validate_scope(scope, policy)
+        _validate_scope(scope, policy, cte_names)
 
 
 def validate_batch_size(count: int, policy: Policy) -> None:

@@ -5440,6 +5440,112 @@ what makes item 97's bounded nested subqueries safe to add by construction.
 **Hard boundaries honored.** Not a rewrite of policy semantics, not a change to
 any cap or allow/deny rule, not a new AST field.
 
+### 97. Bounded nested subqueries (uncorrelated, single-connection, depth-capped) ✅ DONE
+
+**Phase 1 shipped — `IN (subquery)` / `NOT IN (subquery)`:** `Predicate.value_subquery`
+is a nested `StructuredQuery` (recursive AST via `model_rebuild`), valid only for
+`in`/`not_in`, mutually exclusive with value/value_col, must select exactly one
+column. `Policy.max_subquery_depth` (default 1) bounds nesting. The single
+canonical scope-walker `schema_validation.iter_query_scopes` enumerates the outer
+query + every subquery as **independent scopes**; policy validation enforces the
+count caps (select/joins/group_by/where-predicates/top_n) **summed tree-wide**
+(so nesting can't multiply a cap — the core threat), plus per-scope column
+allow/deny + masking (a denied/masked column can't hide one level down), and
+rejects: over-depth, a masked column as the subquery's IN-output, and
+`value_subquery` outside a WHERE clause (HAVING/CASE rejected). Schema validation
+validates each subquery scope independently (a correlated reference to an outer
+table fails as undeclared-in-scope) and rejects cross-connection subqueries. The
+compiler renders `col.in_(subselect)` via the same compile path (so the subquery
+gets mandatory row filters + min-group guardrail), stripping the subquery LIMIT
+so IN membership is complete. Covered by `tests/security/test_subquery_boundary.py`
+(13 adversarial: cap-evasion-via-nesting per cap, denied/masked-in-subquery,
+correlated, cross-connection, over-depth, HAVING/CASE) + `tests/integration/
+test_subquery_end_to_end.py` (real-SQLite IN/NOT-IN match an equivalent join).
+Renders as standard SQL IN(subquery) on Postgres+MSSQL (no dialect-specific
+code); MSSQL execution parity is CI-validated. Decision Log entry recorded.
+
+**Phase 2 (not started):** `FROM (subquery)` — a derived table the outer query
+selects *from*. Additionally needs the outer query to resolve against the inner
+query's OUTPUT aliases (a virtual relation) without reaching past them into inner
+base tables; deferred as a distinct, harder slice. HAVING/CASE `IN (subquery)`
+also deferred.
+
+> **Overlap with item 105 (noted 2026-07-25).** Item 105 (CTE / derived table in
+> FROM) is the same capability generalized — its own text says it "generalizes
+> item 97's `subquery_tables` plumbing and `effective_name_map`". ROADMAP.md
+> Phase 4 now sequences 97 phase 2 immediately before 105 for that reason. Build
+> them as one slice, or fold 97 phase 2 into 105 and stub it — do **not**
+> implement the derived table twice. Which way to resolve it is a call to make
+> when 105 is scoped, not now.
+
+**Effort: L. Priority: medium (capability extension). Depends on: item 96.
+Requires a recorded Decision Log entry in `docs/PRODUCT_GUIDE.md` before build.**
+
+**Why it matters.** Callers naturally compose queries that scope an initial set
+and filter from it (`FROM (subquery)` / `IN (subquery)`). Today the AST is
+single-level: `from_table` is a table-name string and predicate `value`/
+`value_col`/`in`-list are literals/columns — there is no caller-authored nested
+query. Much of the real demand is already served by joins + `group_by`/`having`
+(semi-joins, aggregate-filters) and by the two-round-trip pattern (query 1
+returns IDs → query 2 filters with `in: [...]`), so this item must clear a
+genuine-marginal-value bar, not be added reflexively. It does **not** cross any
+North Star non-goal: a nested `StructuredQuery` is still a fully validated AST,
+never a raw-SQL string.
+
+**Scope — the minimal safe subset only (reject the rest, per the item-74
+"reject, don't emulate" precedent):**
+- ✅ **Uncorrelated** derived table (`FROM (subquery)`) and/or `IN (subquery)`.
+- ❌ **Correlated** subqueries (inner references an outer row) — this is the
+  sharp cliff that defeats "each query is independently bounded"; reject
+  explicitly with a `QueryValidationError` pointing at joins as the primitive.
+- ❌ **Cross-connection** nesting (a subquery carrying its own `connection`) —
+  can't push to one DB; reject.
+- New cap `max_subquery_depth` (default 1). **All existing caps (max_joins,
+  max_where_depth, max_group_by, top_n, in-list size) apply summed tree-wide**,
+  never per-level — otherwise nesting becomes a cap-multiplier bypass.
+
+**What to do (once item 96 lands, this is small).**
+1. Make the model recursive (e.g. `from_table: str | StructuredQuery`, and/or an
+   `in`-subquery predicate variant). Pydantic recurses for free.
+2. Teach the **one** canonical visitor (item 96) to descend nested queries, so
+   policy + schema enforcement follow automatically. Base-table column refs
+   inside a subquery get the full allow/deny + cap treatment; the outer query
+   resolves against the inner query's *output aliases* (a virtual relation),
+   which must NOT let the outer reach past them into inner base tables.
+3. Schema validation computes the inner query's output column set and threads it
+   through as a virtual relation.
+4. Compiler renders via SQLAlchemy Core `.subquery()` (already used for `top_n`
+   at `compiler/sqlalchemy_compiler.py`); nested scopes need their own column
+   resolution frame.
+5. Full `adversarial-probe` pass — every new node is a new bypass surface;
+   codify each vector as a regression test (esp. cap-evasion-via-nesting and
+   masked/denied column hidden in a subquery).
+
+**Acceptance.** Bounded subset above works end-to-end on Postgres + MSSQL;
+correlated/cross-connection/over-depth all rejected with clear errors; caps
+proven to apply tree-wide by adversarial tests; Decision Log entry recorded.
+No raw-SQL surface, no non-goal crossed.
+
+---
+
+## Flagship pillar — Expressive Query Engine (items 99–106)
+
+Items 99–106 are one coordinated initiative: take the READ structured query
+engine to 10/10 expressiveness for a fluent SQL author **without weakening any
+safety invariant** — the deepening of the North Star **Structural** pillar (the
+"no raw SQL, ever" bet only wins if the AST rarely walls off a real SQL author).
+The deep, authoritative design/test/validation spec lives in
+**[docs/ENGINE_EXPRESSIVENESS_PLAN.md](docs/ENGINE_EXPRESSIVENESS_PLAN.md)** — each
+item below is scoped there (§4) with its AST shape, compiler seam, validation
+wiring, caps, dialect handling, adversarial cases, and per-item Definition of
+Done. Build them in the order 99 → 106; the plan's §3 checklist and §5 canonical
+regression bar are mandatory acceptance gates for every item.
+
+The unifying safety rule (plan §1, §3): **every new node must be wired into the
+canonical reference visitor (item 96) or its column refs bypass policy allow/deny
++ masking**, and **every new cost-bearing count must be capped summed tree-wide
+(item 97)**. Reject-don't-emulate (item 74) governs all per-dialect gaps.
+
 ### 99. Query engine: `HAVING` as `WhereNode` + searched `CASE` condition ✅ DONE
 
 **Effort: S. Priority: high (flagship pillar; cheap first step). Depends on:
@@ -6311,6 +6417,82 @@ any model docstring to move out. A first draft of this figure said 1,576 and was
 wrong — it double-counted the `SetOpSpec` docstring, which is already inside the
 1,145-char `$def`; the correction is recorded in the budget test's own comment.
 
+### 105. Query engine: CTE / derived table in FROM (non-recursive) ✅ DONE
+
+**Shape — a named `WITH` block, not a union on `from`/`JoinSpec.table`.**
+`StructuredQuery.ctes` is a new ADDITIVE list of `CteSpec{name, query}`; `from_table`
+and `JoinSpec.table` stay `str` and resolve to a block when one of that name is
+declared. `ENGINE_EXPRESSIVENESS_PLAN.md` §4 Phase 4b had specified the union; that
+is the same shape item 104 rejected one day earlier and it lost again here, so the
+plan text was corrected rather than left contradicting the code. The deciding
+argument is the **unaware consumer**: with a union, every site reading
+`query.from_table` receives a model where it expected a string — `referenced_tables`
+putting a non-string into a set of table names, `normalize_query_shape` recording it
+as the table read, `policy.table_allowed` handed a model — and Pydantic cannot flag
+any of it, because the field is legitimately both. With a name, a consumer that has
+never heard of a cte treats `"daily"` as a table and reflection REJECTS it. The
+unaware consumer fails closed. Efficiency (one block compiled once, referenced N
+times) and expressiveness (a block is reusable across `from` and several joins,
+which an inlined derived table is not) agreed but did not decide it.
+
+**Absorbs item 97 phase 2.** An inline derived table is written as a named block, so
+the derived table is implemented once, and item 97 is now fully `✅ DONE`.
+
+**Structural rules** (`_validate_cte_constraints`, beside item 97's subquery rules so
+both scope-container rule sets read against the one `iter_query_scopes` authority):
+only the ROOT query may declare `ctes` (written as "any scope that is not the root",
+so a fourth container is covered by default); a block may reference only an EARLIER
+block, which makes declaration order dependency order **and makes a recursive cte
+structurally inexpressible** rather than merely forbidden; a block name may not
+collide with a table the policy has a rule for; a declared block must be referenced;
+names are unique case-insensitively (the one purely local rule, in the AST layer).
+
+**Caps.** New `Policy.max_cte_count` (default 3) — not summed tree-wide, and that is
+a property of the shape rather than an exemption: only the root declares blocks, so
+there is no second place for a count to hide. `max_subquery_depth` is charged along
+the REFERENCE CHAIN (`cte_chain_depths`), so two independent blocks each cost 1 while
+a block reading a block costs 2 and the default cap of 1 denies it. Every summable
+cap already counts block bodies, because `iter_query_scopes` yields them.
+
+**A block carries no `max_rows` clamp**, following item 97's `_compile_in_subquery`
+for the same reason: `max_rows` bounds the RESPONSE, and a block's rows are input to
+a join or an aggregate, so clamping would silently truncate the population a total is
+computed over — the wrong-answer class items 102/117 established is worse than a
+rejection. An explicit `limit` is honoured and clamped. What actually bounds a block:
+`timeout_seconds`, `max_response_bytes`, the concurrency limiter, `max_cte_count`.
+
+**Enforcement is per-scope, not skipped.** Every body compiles through the same
+`_compile_scope_body`, inheriting mandatory row filters, column masks, the
+`min_group_size` floor and item 118's fan-out refusal. A masked column may **not** be
+projected by a block (its rows feed another scope, where the value could be filtered
+or joined on) — the same rule and reason as item 97's `IN (subquery)` output check.
+
+**`select_item_output_name` is now the single authority** on what a select item is
+named in the result. It previously existed in two hand-maintained copies (the
+`_*_alias` helpers and the compiler's inlined `alias = item.alias or ...` lines); a
+cte makes it load-bearing, because the validator resolves outer `block.column` refs
+against PREDICTED names while the compiler labels real ones. A test asserts the
+predicted names equal the compiled `CTE.c.keys()` for every select-item shape —
+agreeing with itself is not the same as agreeing with SQLAlchemy.
+
+**Single-scope consumers** (the recurring miss the frontier notes name): the audit
+shape now recurses into each body, the 32C usage signals and the sensitivity approval
+gate skip the block NAME (teaching 32C a phantom table would be unreconcilable by any
+refresh), and `referenced_tables` excludes block names in both directions — an
+allow-list would otherwise reject every reference, and a "tables read" report would
+name something that does not exist.
+
+**Verification.** 23/23 enforcement points mutation-verified; the first pass killed
+18/23 and the four survivors were each a real coverage gap (a wildcard column rule is
+what makes the "a cte output is not a physical column" skips observable). 53 unit +
+20 adversarial-boundary + 6 end-to-end tests, and 4 cross-dialect differential cases
+executed against **live Postgres and live SQL Server** with rows compared equal.
+Regression bar 12/16 -> **14/16** (rows 3 and 6).
+
+**Side finding — item 122**, pre-existing and unrelated to ctes: `_unique_column_sets`
+crashed on any non-`Table` FROM element, so item 118's floor raised `AttributeError`
+on any aliased join. See its own entry.
+
 ### 107. Batch query execution double-reserves quota on an approval retry ✅ DONE
 
 **Effort: S. Priority: medium (real throughput bug, narrow blast radius).
@@ -7000,3 +7182,25 @@ wrong about it. Surfaced by the item-104 completion audit.
 **Coverage.** `tests/integration/test_set_operation_end_to_end.py` asserts explain
 reports every arm's tables and a nested subquery's table, in both cases checking
 the `tables` field against the `sql` field of the same response.
+
+### 122. `_unique_column_sets` crashed on any FROM element that is not a `Table` ✅ DONE
+
+- Why: it was annotated `sa.Table` and reached straight for `.primary_key.columns`.
+  Only a `Table` has that — `Alias`, `Subquery` and `CTE` expose `.primary_key` as a
+  bare `ColumnSet` with no `.columns`. Item 118's k-anonymity fan-out check runs on
+  the JOINED table, so **`min_group_size` plus any join carrying an `alias` raised
+  `AttributeError`** — a 500 where a policy answer belonged. Measured 2026-07-27,
+  reproducible with no cte involved; live since item 118 shipped, and never
+  exercised because every item-118 test joined an unaliased table.
+- Fixed: an alias looks through to its element (same rows, new name, so uniqueness
+  is preserved); a cte or subquery has no declared uniqueness and returns empty,
+  which makes `_join_can_fan_out` answer "can fan out" — the fail-closed direction
+  the floor requires, since a computed stage may hold several rows per join key.
+- Surfaced by the item-105 build, which joins onto a `CTE` and hit the same line
+  from a new direction. It is the blind spot ROADMAP.md's frontier note names:
+  mutation testing probes the rules an item *adds*, not the existing consumers of a
+  value whose *type* widened.
+- Regression test: `tests/unit/test_cte.py::test_unique_column_sets_handles_every_from_element_shape`
+  and `::test_min_group_size_with_an_aliased_join_decides_instead_of_crashing`.
+
+**Effort: S. Priority: high (a crash on a shipped guardrail).**

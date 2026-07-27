@@ -1348,3 +1348,164 @@ async def test_a_mandatory_row_filter_reaches_every_arm_on_both_dialects():
             assert countries == {"US"}, f"{connection} leaked {countries - {'US'}} past the filter"
     finally:
         set_policy_store(PolicyStore(default=Policy(max_select_columns=50), overrides={}))
+
+
+# --------------------------------------------------------------------------- #
+# Named WITH blocks — ctes (TODO.md item 105)                                  #
+# --------------------------------------------------------------------------- #
+#
+# A `WITH` clause is standard on both backends, so the risk here is not syntax —
+# it is the same class item 104 hit, where SQLAlchemy's MSSQL dialect silently
+# dropped `.limit()` on a compound SELECT and turned a guardrail into a no-op on
+# one backend only. Rendering assertions cannot tell a correct rendering from one
+# that merely looks correct, so these EXECUTE and compare rows.
+
+
+@pytest.mark.asyncio
+async def test_cte_aggregate_then_join_matches():
+    """The canonical shape: aggregate in a block, join the result to a table."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "ctes": [
+                {
+                    "name": "totals",
+                    "query": {
+                        "from": "orders",
+                        "select": [
+                            "orders.customer_id",
+                            {"fn": "sum", "col": "orders.total_amount", "as": "total"},
+                        ],
+                        "group_by": ["orders.customer_id"],
+                    },
+                }
+            ],
+            "from": "customers",
+            "joins": [{"table": "totals", "on": ["customers.id", "totals.customer_id"]}],
+            "select": ["customers.name", "totals.total"],
+            "order_by": [{"col": "customers.name"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(query)
+    assert rows, "vacuous - no customer had orders"
+
+
+@pytest.mark.asyncio
+async def test_cte_body_is_not_row_capped_on_either_dialect():
+    """The item-104 lesson applied to item 105: a guardrail (or its deliberate
+    ABSENCE) has to hold identically on both backends. A grand total computed
+    through a block, under a row cap far below the number of orders, must equal
+    the total computed directly — on Postgres AND on SQL Server."""
+    _setup()
+    via_cte = StructuredQuery.model_validate(
+        {
+            "ctes": [
+                {
+                    "name": "all_orders",
+                    "query": {"from": "orders", "select": ["orders.total_amount"]},
+                }
+            ],
+            "from": "all_orders",
+            "select": [{"fn": "sum", "col": "all_orders.total_amount", "as": "grand"}],
+            "limit": 1,
+        }
+    )
+    direct = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": [{"fn": "sum", "col": "orders.total_amount", "as": "grand"}],
+        }
+    )
+    through_block = await _assert_same(via_cte)
+    straight = await _assert_same(direct)
+    assert through_block[0]["grand"] == straight[0]["grand"]
+    assert through_block[0]["grand"], "vacuous - the total was zero/None"
+
+
+@pytest.mark.asyncio
+async def test_chained_ctes_match():
+    """A block reading an earlier block — two materialization stages in one
+    statement, which each planner is free to handle differently."""
+    _setup_with_tables(_TABLES)
+    set_policy_store(
+        PolicyStore(default=Policy(max_select_columns=50, max_subquery_depth=3), overrides={})
+    )
+    query = StructuredQuery.model_validate(
+        {
+            "ctes": [
+                {
+                    "name": "totals",
+                    "query": {
+                        "from": "orders",
+                        "select": [
+                            "orders.customer_id",
+                            {"fn": "sum", "col": "orders.total_amount", "as": "total"},
+                        ],
+                        "group_by": ["orders.customer_id"],
+                    },
+                },
+                {
+                    "name": "big",
+                    "query": {
+                        "from": "totals",
+                        "select": ["totals.customer_id", "totals.total"],
+                        "where": {"col": "totals.total", "op": "gt", "value": 1},
+                    },
+                },
+            ],
+            "from": "big",
+            "select": ["big.customer_id", "big.total"],
+            "order_by": [{"col": "big.customer_id"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(query)
+    assert rows, "vacuous - no customer cleared the threshold"
+
+
+@pytest.mark.asyncio
+async def test_cte_regression_bar_row_3_moving_average_matches():
+    """§5 row 3 on both real backends: a window over an AGGREGATED result, which
+    needs the aggregate materialized as a block first. This is the query the plan
+    recorded as impossible before item 105."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "ctes": [
+                {
+                    "name": "daily",
+                    "query": {
+                        "from": "orders",
+                        "select": [
+                            {"col": "orders.created_at", "granularity": "day", "as": "day"},
+                            {"fn": "count", "col": "*", "as": "n"},
+                        ],
+                        "group_by": ["day"],
+                    },
+                }
+            ],
+            "from": "daily",
+            "select": [
+                "daily.day",
+                "daily.n",
+                {
+                    "fn": "avg",
+                    "arg": {"col": "daily.n"},
+                    "over": {
+                        "order_by": [{"col": "daily.day"}],
+                        "frame": {
+                            "mode": "rows",
+                            "start": {"bound": "preceding", "offset": 6},
+                            "end": {"bound": "current_row"},
+                        },
+                    },
+                    "as": "moving_avg_7d",
+                },
+            ],
+            "order_by": [{"col": "daily.day"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(query)
+    assert len(rows) > 1, "vacuous - a moving average over one bucket proves nothing"
