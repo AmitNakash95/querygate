@@ -569,3 +569,59 @@ def test_join_with_both_on_and_condition_raises_the_servers_own_error():
             )
             .build()
         )
+
+
+# --------------------------------------------------------------------------- #
+# Set operations (item 104)                                                    #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "method,op,kwargs",
+    [
+        ("union", "union", {}),
+        ("union", "union", {"all": True}),
+        ("intersect", "intersect", {}),
+        ("except_", "except", {}),
+    ],
+)
+def test_every_set_operator_is_expressible(method, op, kwargs):
+    q = getattr(
+        Query.from_("customers").select("customers.id"),
+        method,
+    )(Query.from_("leads").select("leads.id"), **kwargs)
+    spec = q.to_dict()["set_op"]
+    assert spec["op"] == op
+    assert spec.get("all", False) is kwargs.get("all", False)
+    assert spec["arms"] == [{"from": "leads", "select": ["leads.id"]}]
+
+
+def test_set_operation_order_by_and_limit_belong_to_the_carrying_query():
+    """The builder must place them on the combined statement, not on an arm —
+    the server rejects an arm that carries either."""
+    wire = (
+        Query.from_("customers")
+        .select("customers.id")
+        .union(Query.from_("leads").select("leads.id"))
+        .order_by("id", desc=True)
+        .limit(5)
+        .to_dict()
+    )
+    assert wire["order_by"] == [{"col": "id", "dir": "desc"}]
+    assert wire["limit"] == 5
+    assert "order_by" not in wire["set_op"]["arms"][0]
+
+
+def test_an_arm_shape_the_server_rejects_raises_the_servers_own_error():
+    """The builder adds no validation of its own and hides none: an arity
+    mismatch surfaces as the same `pydantic.ValidationError` the server would
+    return. (It cannot pin *where* in the chain the error is raised — the arity
+    rule belongs to the carrier and fires at `.build()` — so this asserts the
+    error contract, not the call site.)"""
+    with pytest.raises(pydantic.ValidationError, match="same number of columns"):
+        (
+            Query.from_("customers")
+            .select("customers.id")
+            .union(Query.from_("leads").select("leads.id", "leads.name"))
+            .build()
+        )

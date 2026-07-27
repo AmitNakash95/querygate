@@ -231,8 +231,19 @@ gate is the *first step of the item*, not a reason to defer it.
   *Its side finding: outer joins made the pre-existing PG-vs-MSSQL NULLS-ordering
   divergence reachable from a second join type — measured, recorded, and left
   standing, because the only fix is the `nulls` handling item 74 rejects.*
-- [ ] **104** — Set operations (UNION / INTERSECT / EXCEPT). *New scope container;
-  caps summed across arms. Depends on 96, 97; **Decision Log entry before build.***
+- [x] **104** — Set operations (UNION / INTERSECT / EXCEPT). ✅ **Shipped**
+  (`StructuredQuery.set_op` with the carrying query as arm 1 — deliberately not
+  the second top-level query type the plan sketched, because that would have made
+  every pipeline signature a union whose failure mode is a consumer handling one
+  member; every arm is a scope at the SAME depth, independently validated AND
+  independently compiled so it carries its own mandatory filters and k-anon floor;
+  new tree-wide `max_set_op_arms`; `INTERSECT ALL`/`EXCEPT ALL` rejected on MSSQL;
+  17/17 enforcement points mutation-verified. Regression bar 11/16 -> **12/16**.)
+  *Its side finding was a guardrail failure, not a feature gap: SQLAlchemy's MSSQL
+  dialect silently DROPS `.limit()` on a compound SELECT, so `clamp_limit` would
+  have been a no-op on one dialect only — the compound is now wrapped in a derived
+  table before limiting. It also closed a pre-existing item-97 hole where the
+  item-92 approval gate never saw a sensitive column inside an `IN (subquery)`.*
 - [ ] **97 (phase 2)** — `FROM (subquery)` derived table. *Moved here 2026-07-25
   from its old standalone slot: **its remaining phase 2 is the same capability as
   item 105** (105's own text says it "generalizes item 97's `subquery_tables`
@@ -378,40 +389,42 @@ the live frontier: `roadmap-next` should walk Phase 4 in order (100 → 106),
 drafting each item's Decision Log entry for approval as step 1 of that item.
 Adoption/breadth (Phase 5) and catalog/UI (Phase 6) wait behind it.
 
-**Engine progress (updated 2026-07-27):** **99, 100, 101, 102 and 103 have
+**Engine progress (updated 2026-07-27):** **99, 100, 101, 102, 103 and 104 have
 shipped.** The `Expression` substrate every remaining engine item depends on is
 real; item 101's `WindowSelectItem.arg`, item 102's three date nodes and item
-103's `JoinSpec.condition` are the worked examples of extending it. **104 (set
-operations — UNION / INTERSECT / EXCEPT) is the next roadmap item**, and it is a
-step up in kind from everything before it: 99–103 all extended existing scopes,
-while 104 introduces a **new scope container** — the first since item 97 phase 1's
-`value_subquery`, and the first at the *top level* — each arm validated as its
-own scope through `iter_query_scopes`, all caps summed across arms, and mandatory
-row filters + k-anon applied to *every* arm (a set op must not be a channel to
-dodge a per-table filter). Its Decision Log entry is that item's own first step.
-The canonical regression bar is **11/16** (`docs/ENGINE_EXPRESSIVENESS_PLAN.md`
-§5); 104 takes row 8.
+103's `JoinSpec.condition` are the worked examples of extending it. **The
+scope-container substrate is now real too** — `iter_query_scopes` +
+`iter_set_op_arms` + the per-scope `subquery_tables` map — and item 104 is its
+worked example. **105 (CTE / derived table in FROM, with item 97 phase 2 folded
+in) is the next roadmap item**; it should extend that substrate rather than
+introduce a third scope enumeration. Its Decision Log entry is that item's own
+first step. The canonical regression bar is **12/16**
+(`docs/ENGINE_EXPRESSIVENESS_PLAN.md` §5); 105 takes rows 3 and 6.
 
-Three lessons to carry into 104. **(1) The audit normalizer is a third
-un-foldable recursion** (beside the visitor and the compiler) and it keeps being
-the touchpoint that gets missed: item 102 shipped three `Expression` members that
-passed the whole unit suite while every query using one raised at execution, and
-item 103's mutation pass found the *same* gap again — nothing pinned a join
-condition in the normalized shape. A new scope container means checking it a third
-time. **(2) Measure, don't read.** Item 102 had five defects survive a careful diff
-read and a green suite; item 103's `ON true`-vs-`ON 1 = 1` rendering and its
-FULL-OUTER behavior were both settled by executing against live PG and MSSQL, and
-the NULLS-ordering divergence it surfaced was only correctly attributed as
-*pre-existing* by measuring a plain LEFT JOIN rather than assuming. **(3) Mutation
-verification is not optional polish, and it has a blind spot worth naming** —
-item 103's first pass caught 13 of the 16 points it probed, and all three misses
-were real. But the technique probes the rules an item *adds*; it does not probe
-the **existing consumers of a field whose type the item changed**. Item 103 made
-`JoinSpec.on` Optional and every enforcement point passed, while
-`_usage_signal_targets` still unpacked it — a live bug behind a swallowed
-`TypeError`, found by the completion audit rather than by mutation. When an item
-widens or nullifies an existing field, grep every consumer as a separate step
-(the discipline CLAUDE.md already documents for `async def` conversions).
+Four lessons to carry into 105. **(1) The audit normalizer is a third un-foldable
+recursion** (beside the visitor and the compiler) and it keeps being the touchpoint
+that gets missed: item 102 shipped three `Expression` members that passed the whole
+unit suite while every query using one raised at execution, and item 103's mutation
+pass found the *same* gap again. Item 104 checked it deliberately and it held — a
+new scope container means checking it every time. **(2) Measure, don't read.**
+Item 102 had five defects survive a careful diff read and a green suite; item 103's
+`ON true`-vs-`ON 1 = 1` rendering was settled by executing against live PG and
+MSSQL; and item 104's single most important finding was invisible to any rendering
+assertion — SQLAlchemy's MSSQL dialect **silently drops `.limit()` on a compound
+SELECT**, which would have turned `clamp_limit` into a no-op on one dialect only.
+**(3) Mutation verification is not optional polish, and it has a blind spot worth
+naming** — item 103's first pass caught 13 of 16; item 104's caught 15 of 17, and
+in both cases every miss was a real defect. The technique probes the rules an item
+*adds*; it does not probe the **existing consumers of a field whose type the item
+changed**. When an item widens or nullifies an existing field, grep every consumer
+as a separate step (the discipline CLAUDE.md already documents for `async def`
+conversions). **(4) New for 105: enumerate the single-scope consumers explicitly.**
+Item 104's real work was not the compiler — it was finding every place that assumed
+a query has exactly one SELECT: the audit shape, `applied_column_masks`, the
+item-92 sensitivity approval gate, and the 32C usage signals. Two of those had been
+silently wrong for `value_subquery` **since item 97**, which is how long a
+single-scope assumption can survive unnoticed. A CTE is another scope container;
+walk that same list first, not last.
 Item 101's two corrections to §5's table (row 3 needs item 105's derived table, row
 15 needs a window to be an `Expression` operand) still stand as recorded walls.
 
@@ -611,6 +624,21 @@ already-planned initiatives.
   non-equi conditions would have been theater. Surfaced by the item-103 completion
   audit.*
 
+### Review Phase 6 — Findings from the 2026-07-27 item-104 audit
+
+All three are **pre-existing**, surfaced by the item-104 completion audit rather
+than caused by it. None is a policy bypass — enforcement is scope-correct — but
+119 is a silent wrong answer on a shipped feature and should lead.
+
+- [ ] **119** — `top_n` mis-resolves and DROPS a column when two projections share
+  a base name. *Item 104 hit the identical root cause on its own new path and
+  fixed it positionally; the same fix shape applies here.*
+- [ ] **120** — The audit shape records nothing for a nested `IN (subquery)`.
+  *The Proof-pillar half of the gap item 104 closed for set-op arms.*
+- [ ] **121** — Report-only surfaces (`ExplainResult.tables`, the candidate
+  simulator's `referenced_tables`) still assume one scope. *Operator-facing
+  accuracy, not enforcement.*
+
 ### Review Phase 4 — Performance, observability, and developer experience
 
 - [x] **Stale security-posture numbers** — `docs/SECURITY_POSTURE.md` claimed
@@ -640,9 +668,10 @@ currently triggers it — flagged for awareness, matches the documented
 3. The **next item** is the first one that is *not* fully `✅ DONE`, is *not* in
    the Decision-gated list, is *not* in the Coordination-gated / externally-blocked
    list, and whose TODO.md dependencies are satisfied. Skip (and report) any gated
-   item reached before it. **As of 2026-07-27 this resolves to item 104** — the
-   walk skips 58 ph2 and 30·89 ph2 (externally blocked), 53 (external vendor),
-   and lands on Phase 4's engine pillar (99, 100, 101, 102 and 103 have shipped).
+   item reached before it. **As of 2026-07-27 this resolves to item 97 phase 2 /
+   105** (the same capability — build them as one slice, see Phase 4's note) — the
+   walk skips 58 ph2 and 30·89 ph2 (externally blocked), 53 (external vendor), and
+   lands on Phase 4's engine pillar (99–104 have shipped).
    **A required Decision Log entry is not a skip condition.** Items 100–106 each
    need one recorded in `docs/PRODUCT_GUIDE.md` before code — that is the item's
    own first step (draft it, get maintainer ratification, then build), not a

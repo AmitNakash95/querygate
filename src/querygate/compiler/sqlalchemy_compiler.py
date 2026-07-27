@@ -46,6 +46,7 @@ from querygate.query_ast.models import (
 )
 from querygate.validation.schema_validation import (
     effective_name_map,
+    iter_set_op_arms,
     parse_column_ref,
     resolve_column,
 )
@@ -725,16 +726,45 @@ def applied_column_masks(query: StructuredQuery, policy: Policy) -> List[str]:
     Used by the audit trail to distinguish "masked" from "denied" access
     (never the pre-mask value). Names, not `table.column` refs, so it matches
     the response column names a masked caller actually sees.
+
+    Every set-operation arm contributes (item 104), because every arm contributes
+    rows to the one response — reading only the carrying query would under-report
+    a mask applied to arm 2 and make the audit trail say less than the compiler
+    actually did. A nested `value_subquery` deliberately does NOT contribute: its
+    columns feed an `IN` comparison rather than the response, and a masked column
+    is rejected there outright.
+
+    A later arm's mask is reported under **arm 1's** output name at the same
+    position, because that is the name the response actually carries: a compound
+    SELECT takes its column names from its first arm. Reporting the masked arm's
+    own column name would name a key the caller never receives — which is exactly
+    what this function's "matches the response column names" contract forbids.
     """
-    name_to_physical = effective_name_map(query)
+    arms = list(iter_set_op_arms(query))
+    output_names = [_projection_output_name(item) for item in arms[0].select]
     masked: List[str] = []
-    for item in query.select:
-        if not isinstance(item, str):
-            continue
-        if _mask_for_select_ref(item, policy, name_to_physical) is not None:
-            _table, column = parse_column_ref(item)
-            masked.append(column)
+    for arm in arms:
+        name_to_physical = effective_name_map(arm)
+        for index, item in enumerate(arm.select):
+            if not isinstance(item, str):
+                continue
+            if _mask_for_select_ref(item, policy, name_to_physical) is None:
+                continue
+            # Falls back to this arm's own name only when arm 1 projects something
+            # with no statically-known output name at that position (an unaliased
+            # aggregate); every other shape resolves exactly.
+            column = output_names[index] or parse_column_ref(item)[1]
+            if column not in masked:
+                masked.append(column)
     return masked
+
+
+def _projection_output_name(item: Any) -> Optional[str]:
+    """The response key a select item produces, where that is knowable without
+    reflected tables: a bare `Table.Column`'s column name, or an explicit alias."""
+    if isinstance(item, str):
+        return parse_column_ref(item)[1]
+    return getattr(item, "alias", None)
 
 
 def clamp_limit(requested: Optional[int], policy: Policy, *, is_aggregate: bool = False) -> int:
@@ -822,9 +852,153 @@ def compile_structured_query(
 ) -> Tuple[sa.Select, int]:
     """Compile AST + reflected tables + policy into a Select.
 
-    Returns (statement, effective_limit). `subquery_tables` (item 97) maps each
-    nested value_subquery node's id to its own reflected tables, so an
-    `IN (subquery)` in the WHERE clause compiles through this same path recursively.
+    Returns (statement, effective_limit). `subquery_tables` (items 97 and 104) maps
+    each nested value_subquery node's id — and each set-operation arm's — to its own
+    reflected tables, so an `IN (subquery)` in the WHERE clause and every set-op arm
+    compile through this same path recursively.
+    """
+    if query.set_op is not None:
+        return _compile_set_operation(query, tables, policy, dialect, principal, subquery_tables)
+    stmt, alias_map, is_aggregate = _compile_scope_body(
+        query, tables, policy, dialect, principal, subquery_tables
+    )
+
+    allow_table_fallback = True
+    if query.top_n is not None:
+        stmt, alias_map = _apply_top_n(stmt, query, tables, alias_map, is_aggregate, dialect)
+        allow_table_fallback = False
+
+    adapter = get_dialect_adapter(dialect)
+    for order in query.order_by:
+        col = _resolve_output_ref(order.col, tables, alias_map, allow_table_fallback)
+        stmt = stmt.order_by(*adapter.order_by_terms(col, order.dir, order.nulls))
+
+    limit = clamp_limit(query.limit, policy, is_aggregate=is_aggregate)
+    stmt = stmt.limit(limit)
+    if query.offset:
+        stmt = stmt.offset(query.offset)
+
+    return stmt, limit
+
+
+def _arm_tables(
+    arm: StructuredQuery, subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]]
+) -> Dict[str, sa.Table]:
+    """One set-operation arm's own reflected tables, from the map schema
+    validation populated. Fails closed with a typed error rather than compiling an
+    arm against the wrong scope's tables — the same guard `_compile_in_subquery`
+    applies to a nested subquery, for the same reason."""
+    scoped = (subquery_tables or {}).get(id(arm))
+    if scoped is None:
+        raise QueryValidationError("Set-operation arm was not schema-validated")
+    return scoped
+
+
+def _compile_set_operation(
+    query: StructuredQuery,
+    tables: Dict[str, sa.Table],
+    policy: Policy,
+    dialect: str,
+    principal: Optional[Principal],
+    subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]],
+) -> Tuple[sa.Select, int]:
+    """Compile one item-104 set operation: every arm through the SAME
+    `_compile_scope_body` any single query uses, combined by the dialect adapter,
+    then wrapped in a plain SELECT that carries the shared ORDER BY / LIMIT / OFFSET.
+
+    Two things here are load-bearing rather than stylistic.
+
+    **Every arm goes through `_compile_scope_body`, not a reduced path.** That is
+    what makes each arm inherit its own mandatory row filters, its own column
+    masks, and its own `min_group_size` floor — including item 118's refusal of a
+    fan-out join under that floor. A set operation must not be a channel to dodge a
+    per-table filter, and the way to guarantee that is to have no second compile
+    path where one could be forgotten.
+
+    **The compound is wrapped in a derived table before LIMIT is applied, and that
+    is not cosmetic.** SQLAlchemy's MSSQL dialect SILENTLY DROPS `.limit()` on a
+    `CompoundSelect` (measured: `SELECT ... UNION SELECT ...` renders with no TOP
+    and no FETCH, while Postgres renders `LIMIT`). `clamp_limit` is a policy
+    guardrail, so a dropped LIMIT is an unbounded response on one dialect only.
+    Wrapping makes the limit a limit on a plain SELECT, which both dialects render
+    correctly (`TOP n` / `LIMIT n`), and gives ORDER BY real derived-table columns
+    to resolve against instead of a bare output name.
+    """
+    spec = query.set_op
+    assert spec is not None  # nosec B101 — only reached from the branch above
+    adapter = get_dialect_adapter(dialect)
+
+    arm_statements: List[sa.Select] = []
+    arm_aggregates: List[bool] = []
+    for arm in iter_set_op_arms(query):
+        arm_stmt, _arm_alias_map, arm_is_aggregate = _compile_scope_body(
+            arm,
+            # Identity, not a list index — the same rule `validate_schema` uses to
+            # pick the outer scope's tables, so the two cannot disagree about which
+            # query is the carrier if `iter_set_op_arms`'s ordering ever changes.
+            tables if arm is query else _arm_tables(arm, subquery_tables),
+            policy,
+            dialect,
+            principal,
+            subquery_tables,
+        )
+        arm_aggregates.append(arm_is_aggregate)
+        arm_statements.append(arm_stmt)
+
+    derived = adapter.set_operation(spec.op, spec.all_, arm_statements).subquery()
+    output_columns = list(derived.c)
+    stmt = sa.select(*output_columns).select_from(derived)
+
+    # ORDER BY on a set operation resolves against the OUTPUT of the combined
+    # result, never a table column — `ORDER BY Customer.id` after a UNION is not
+    # valid SQL on any backend. So `allow_table_fallback=False`, and the alias map
+    # is built from the derived table.
+    #
+    # The written-ref half of that map is POSITIONAL, and that is load-bearing
+    # rather than stylistic. `output_columns` is arm 1's select list in order, so
+    # index i is the column item i produced. Keying it by *name* instead — via the
+    # arm's own alias map — silently misbinds whenever two projections share a base
+    # name: SQLAlchemy disambiguates the derived table's keys (`id`, `id_1`) but
+    # both refs still report `.name == "id"`, so `ORDER BY orders.id` bound to
+    # `customers.id`. Measured before the fix: the caller's requested ordering was
+    # replaced by a different column's, and because ORDER BY feeds LIMIT that
+    # returns a different ROW SET, silently, on every dialect. (`_apply_top_n` has
+    # the same name-keyed shape and a worse version of the bug — TODO.md item 119.)
+    alias_map: Dict[str, Any] = {column.name: column for column in output_columns}
+    for item, column in zip(query.select, output_columns):
+        if isinstance(item, str):
+            alias_map.setdefault(item, column)
+
+    for order in query.order_by:
+        col = _resolve_output_ref(order.col, tables, alias_map, allow_table_fallback=False)
+        stmt = stmt.order_by(*adapter.order_by_terms(col, order.dir, order.nulls))
+
+    # The higher aggregate ceiling applies only when EVERY arm is aggregated. One
+    # raw-row arm means the response contains raw rows, which is what
+    # `max_limit` (not `max_limit_aggregate`) is sized for.
+    limit = clamp_limit(query.limit, policy, is_aggregate=all(arm_aggregates))
+    stmt = stmt.limit(limit)
+    if query.offset:
+        stmt = stmt.offset(query.offset)
+    return stmt, limit
+
+
+def _compile_scope_body(
+    query: StructuredQuery,
+    tables: Dict[str, sa.Table],
+    policy: Policy,
+    dialect: str,
+    principal: Optional[Principal],
+    subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]],
+) -> Tuple[sa.Select, Dict[str, Any], bool]:
+    """Everything a single SELECT is made of — projection, FROM, joins, mandatory
+    row filters, WHERE, GROUP BY, HAVING and the k-anonymity floor — with no
+    ORDER BY / LIMIT / OFFSET / top_n.
+
+    Split out because those trailing clauses belong to the STATEMENT while
+    everything above belongs to the SELECT: a set-operation arm (item 104) needs
+    exactly this much and no more. Returns the statement, its alias map, and
+    whether it aggregates.
     """
     where_ctx = _WhereCtx(
         policy=policy, dialect=dialect, principal=principal, subquery_tables=subquery_tables
@@ -925,19 +1099,4 @@ def compile_structured_query(
             )
         stmt = stmt.having(sa.func.count() >= policy.min_group_size)
 
-    allow_table_fallback = True
-    if query.top_n is not None:
-        stmt, alias_map = _apply_top_n(stmt, query, tables, alias_map, is_aggregate, dialect)
-        allow_table_fallback = False
-
-    adapter = get_dialect_adapter(dialect)
-    for order in query.order_by:
-        col = _resolve_output_ref(order.col, tables, alias_map, allow_table_fallback)
-        stmt = stmt.order_by(*adapter.order_by_terms(col, order.dir, order.nulls))
-
-    limit = clamp_limit(query.limit, policy, is_aggregate=is_aggregate)
-    stmt = stmt.limit(limit)
-    if query.offset:
-        stmt = stmt.offset(query.offset)
-
-    return stmt, limit
+    return stmt, alias_map, is_aggregate
