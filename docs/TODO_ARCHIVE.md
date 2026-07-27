@@ -7253,6 +7253,76 @@ closing summary), `README.md`, `examples/policy.example.yaml`,
 `Policy.min_group_size`'s docstring and `landing/security.html` — was replaced with
 the accurate statement of what now holds.
 
+### 119. `top_n` mis-resolves and DROPS a column when two projections share a base name ✅ DONE
+
+**The defect.** `_apply_top_n` materializes a query in a derived table, but it
+rebuilt both the outer projection and the aggregate rank targets by output
+**name**. Two projections can legitimately share a base name — for example
+`customers.id` and `orders.id`. SQLAlchemy disambiguates the derived table's keys,
+but both columns still report `.name == "id"`, so name lookup selected
+`customers.id` twice and silently dropped `orders.id`. In the grouped path the
+same collision also made `ORDER BY orders.id` rank by `customers.id`, returning a
+different row set without an error.
+
+**What shipped.** `_apply_top_n` now binds all three derived-table relationships
+by position, which is unambiguous because a derived table preserves its SELECT
+list order:
+
+- the grouped/aggregate materialization maps each written select reference to the
+  derived column at the same position, so partition and ordering references resolve
+  to the column the caller named;
+- the ranked query carries every materialized column positionally; and
+- the outer projection and its alias map carry those same positions, so both
+  same-named columns reach the response (`id` and SQLAlchemy's stable
+  disambiguated `id_1` key).
+
+Duplicate output names were not rejected globally: ordinary non-`top_n` queries
+already preserve both under disambiguated response keys, and the existing AST
+lets a caller alias a computed projection when a semantic name matters. The fix
+makes `top_n` behave like the ordinary path instead of turning a valid request
+into a wrong answer. The obsolete name-only `_ref_output_name` helper was removed.
+
+**Coverage.** A compiler regression test asserts grouped `top_n` orders by the
+second derived `id` column and projects both columns. A real SQLite integration
+test runs through the REST request pipeline and proves that, for every customer,
+the response contains both the customer id and the maximum order id the caller
+ranked by. The rank-reference mapping and outer-projection mapping were
+mutation-verified independently: deliberately rebinding either to the first
+column failed both tests for the expected wrong-answer reason.
+
+### 120. The audit shape records nothing for a nested `IN (subquery)` ✅ DONE
+
+**The defect.** `normalize_query_shape` already recursed into set-operation arms
+and CTE bodies, but `_predicate_shape` had no `value_subquery` branch. An event
+for `WHERE customer_id IN (SELECT … FROM employees)` therefore named only the
+outer table even though the attempted query read another governed scope. This
+was an audit-fidelity gap on the Proof pillar, present since item 97.
+
+**What shipped.** A predicate carrying `value_subquery` now records that nested
+scope through the same recursive `normalize_query_shape` authority used for the
+root query, set-operation arms, and CTE bodies. Because the branch lives in
+`_predicate_shape`, it applies everywhere a read predicate can appear — WHERE,
+HAVING, join conditions, and searched-CASE conditions — including attempts that
+policy or schema validation later rejects. The persisted structure includes the
+nested `from`, joins, select shape, boolean predicate structure, and any deeper
+subquery/set-operation scopes.
+
+The redaction contract is unchanged: nested predicates and expressions use the
+same shape walkers as the root, which record operators and column identifiers but
+omit predicate values, CASE results, and other expression literals. Query-shape
+normalization runs before validation so rejected attempts remain auditable; the
+AST parser's recursion guard bounds malformed input, and the policy depth cap
+bounds accepted subqueries.
+
+**Coverage.** Unit tests assert the exact nested table/join/boolean shape, recurse
+through a second subquery plus CASE and set-operation positions, and prove none
+of their sentinel literals appears. A JSONL test exercises
+`StructuredQueryService.execute` through a rejected attempt and inspects the
+persisted event itself. A security-marked test pins the same no-leak property for
+a policy-rejected subquery. Removing the branch, replacing the recursive walk
+with a raw model dump, and breaking the persisted-event path were
+mutation-verified to fail for the intended fidelity/redaction reasons.
+
 ### 121. Report-only surfaces still assume a query has one scope ✅ DONE
 
 **Shipped.** Enforcement was always scope-correct (items 97 + 104); three

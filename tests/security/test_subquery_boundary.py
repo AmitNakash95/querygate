@@ -9,11 +9,13 @@ connections, or exceeding the depth cap. The positive end-to-end case (a valid
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
 import sqlalchemy as sa
 
+from querygate.audit.events import normalize_query_shape
 from querygate.core.exceptions import PolicyViolationError, QueryValidationError
 from querygate.policy.models import ColumnMask, ColumnMaskKind, Policy
 from querygate.query_ast.models import (
@@ -247,3 +249,32 @@ async def test_cross_connection_subquery_is_rejected():
     with patch.object(sv, "_load_table", AsyncMock(side_effect=_fake_load)):
         with pytest.raises(QueryValidationError, match="cross-connection subquery"):
             await sv.validate_schema(outer, _CONN)
+
+
+# --------------------------------------------------------------------------- #
+# The persisted audit event (TODO.md item 120)                                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_rejected_subquery_still_audits_its_scope_without_leaking_its_literals():
+    """`normalize_query_shape` runs at the top of `execute`, BEFORE validation — so
+    a subquery that policy is about to reject is shaped anyway, and the persisted
+    event is a write surface a caller reaches even when the query never runs. Item
+    120 made that shape recurse into the nested scope, so this pins both halves:
+    the nested table is named (audit fidelity, the whole point of the item) and no
+    nested literal rides along into the event (the exfiltration channel it must not
+    become)."""
+    sub = StructuredQuery(
+        from_table="customers",
+        select=["customers.id"],
+        where=Predicate(col="customers.email", op="eq", value="exfiltrate@example.com"),
+    )
+    outer = _in_subquery(sub)
+    policy = Policy(max_subquery_depth=0)
+
+    with pytest.raises(PolicyViolationError, match="subquery nesting depth"):
+        validate_policy(outer, policy, _CONN)
+
+    shape = json.dumps(normalize_query_shape(outer))
+    assert "customers.email" in shape  # the scope IS recorded
+    assert "exfiltrate@example.com" not in shape

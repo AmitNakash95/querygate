@@ -225,6 +225,130 @@ def test_searched_having_and_case_shapes_carry_structure_but_no_literals():
     assert "4242" not in serialized
 
 
+def test_the_audit_shape_records_a_nested_in_subquery_and_leaks_no_literal():
+    """item 120: a `value_subquery` had no branch in `_predicate_shape`, so
+    `WHERE customer_id IN (SELECT ... FROM employees JOIN departments)` audited as a
+    bare `{"operator": "in", "column": ...}` — an event naming `orders` alone, for a
+    query that read three tables. The nested scope's own from/joins/filter structure
+    is now recorded on the same terms a set-op arm's (item 104) and a cte body's
+    (item 105) are, and its literals are redacted exactly as the outer query's."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "where": {
+                "col": "orders.customer_id",
+                "op": "in",
+                "value_subquery": {
+                    "from": "employees",
+                    "select": ["employees.customer_id"],
+                    "joins": [
+                        {"table": "departments", "on": ["employees.dept_id", "departments.id"]}
+                    ],
+                    "where": {
+                        "and": [
+                            {"col": "employees.ssn", "op": "eq", "value": "SUBQUERY-SECRET-SSN"},
+                            {"col": "departments.name", "op": "like", "value": "SUBQUERY-SECRET-%"},
+                        ]
+                    },
+                },
+            },
+        }
+    )
+    shape = normalize_query_shape(query)
+    serialized = json.dumps(shape)
+
+    nested = shape["where"]["value_subquery"]
+    assert shape["where"]["operator"] == "in"
+    assert nested["from"] == "employees"
+    assert [join["table"] for join in nested["joins"]] == ["departments"]
+    assert nested["select"] == [{"kind": "column", "column": "employees.customer_id"}]
+    # The nested boolean structure, not just its tables.
+    assert nested["where"] == {
+        "and": [
+            {"operator": "eq", "column": "employees.ssn"},
+            {"operator": "like", "column": "departments.name"},
+        ]
+    }
+    assert "SUBQUERY-SECRET" not in serialized
+
+
+def test_no_literal_escapes_a_nested_subquery_at_any_depth_or_position():
+    """The redaction guarantee has to hold for every scope the new recursion
+    reaches, not just the first one: a literal two levels down, one inside a nested
+    CASE, and one in a nested set-op arm all travel the same walk now."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "where": {
+                "col": "orders.customer_id",
+                "op": "in",
+                "value_subquery": {
+                    "from": "customers",
+                    "select": ["customers.id"],
+                    "where": {
+                        "not": {
+                            "col": "customers.region_id",
+                            "op": "not_in",
+                            "value_subquery": {
+                                "from": "regions",
+                                "select": [
+                                    {
+                                        "when": [
+                                            {
+                                                "when": {
+                                                    "col": "regions.code",
+                                                    "op": "eq",
+                                                    "value": "DEPTH-2-CASE-SECRET",
+                                                },
+                                                "then": {"literal": "DEPTH-2-THEN-SECRET"},
+                                            }
+                                        ],
+                                        "as": "id",
+                                    }
+                                ],
+                                "where": {
+                                    "col": "regions.name",
+                                    "op": "eq",
+                                    "value": "DEPTH-2-WHERE-SECRET",
+                                },
+                                "set_op": {
+                                    "op": "union",
+                                    "arms": [
+                                        {
+                                            "from": "archived_regions",
+                                            "select": ["archived_regions.id"],
+                                            "where": {
+                                                "col": "archived_regions.name",
+                                                "op": "eq",
+                                                "value": "DEPTH-2-ARM-SECRET",
+                                            },
+                                        }
+                                    ],
+                                },
+                            },
+                        }
+                    },
+                },
+            },
+        }
+    )
+    serialized = json.dumps(normalize_query_shape(query))
+
+    for needle in (
+        "DEPTH-2-CASE-SECRET",
+        "DEPTH-2-THEN-SECRET",
+        "DEPTH-2-WHERE-SECRET",
+        "DEPTH-2-ARM-SECRET",
+    ):
+        assert needle not in serialized, f"{needle} leaked into the audited query shape"
+    # Withholding the values must not degrade into withholding the fact that those
+    # scopes existed: every table the query reads is still named.
+    for table in ("orders", "customers", "regions", "archived_regions"):
+        assert f'"{table}"' in serialized, f"{table} is missing from the audited query shape"
+
+
 def test_where_shape_records_a_not_group_rather_than_an_empty_or():
     """Regression: `_where_shape` used to fall through a `not` group to
     `{"or": []}`, silently misreporting the predicate shape."""
@@ -469,6 +593,41 @@ async def test_rejected_event_has_category_without_exception_or_literals(tmp_pat
     assert event["error_category"] == "schema"
     assert "secret@example.com" not in raw
     assert "secret failure" not in raw
+
+
+@pytest.mark.asyncio
+async def test_persisted_event_names_the_subquerys_tables_without_its_literals(tmp_path):
+    """The item-120 criterion is about the PERSISTED event, not just the
+    normalizer: the JSONL line an investigator actually reads must name every
+    table the attempt would have read — `orders` alone was the bug — while
+    carrying no literal from the nested scope."""
+    path = tmp_path / "subquery.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "where": {
+                "col": "orders.customer_id",
+                "op": "in",
+                "value_subquery": {
+                    "from": "employees",
+                    "select": ["employees.customer_id"],
+                    "where": {"col": "employees.ssn", "op": "eq", "value": "PERSISTED-SECRET"},
+                },
+            },
+        }
+    )
+    with patch.object(svc, "validate_schema", AsyncMock(side_effect=ValueError("stop here"))):
+        service = StructuredQueryService(connection_id="demo")
+        with pytest.raises(ValueError, match="stop here"):
+            await service.execute(query)
+
+    raw = path.read_text()
+    event = json.loads(raw)
+    assert event["query_shape"]["where"]["value_subquery"]["from"] == "employees"
+    assert "employees.ssn" in raw
+    assert "PERSISTED-SECRET" not in raw
 
 
 @pytest.mark.asyncio

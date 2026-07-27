@@ -677,10 +677,10 @@ All three are **pre-existing**, surfaced by the item-104 completion audit rather
 than caused by it. None is a policy bypass — enforcement is scope-correct — but
 119 is a silent wrong answer on a shipped feature and should lead.
 
-- [ ] **119** — `top_n` mis-resolves and DROPS a column when two projections share a base name.
-  *Item 104 hit the identical root cause on its own new path and
+- [x] **119** — `top_n` mis-resolves and DROPS a column when two projections share
+  a base name. *Item 104 hit the identical root cause on its own new path and
   fixed it positionally; the same fix shape applies here.*
-- [ ] **120** — The audit shape records nothing for a nested `IN (subquery)`.
+- [x] **120** — The audit shape records nothing for a nested `IN (subquery)`.
   *The Proof-pillar half of the gap item 104 closed for set-op arms.*
 - [x] **121** — Report-only surfaces (`ExplainResult.tables`, the candidate
   simulator's `referenced_tables`) still assume one scope. *Operator-facing

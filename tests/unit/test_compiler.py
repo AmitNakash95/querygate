@@ -201,6 +201,29 @@ class TestCompiler:
         assert "OVER" in compiled.upper()
         assert limit == 50
 
+    def test_grouped_top_n_binds_same_named_projections_positionally(self):
+        """A derived table disambiguates its keys, while both columns keep the
+        name ``id``. Name-based lookup selected ``customers.id`` twice and also
+        ranked by it when the caller named ``orders.id``."""
+        tables = _make_tables()
+        query = StructuredQuery(
+            from_table="orders",
+            select=["customers.id", "orders.id"],
+            joins=[JoinSpec(table="customers", on=["orders.customer_id", "customers.id"])],
+            group_by=["customers.id", "orders.id"],
+            top_n=TopNSpec(
+                partition_by=["customers.id"],
+                order_by=[OrderBySpec(col="orders.id", dir="desc")],
+                n=1,
+            ),
+            limit=50,
+        )
+        stmt, _ = compile_structured_query(query, tables, Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+
+        assert "ORDER BY anon_2.id_1 DESC" in compiled, compiled
+        assert "SELECT anon_1.id, anon_1.id_1" in compiled, compiled
+
     def test_mandatory_row_filter_applied_when_table_in_graph(self):
         tables = _make_tables()
         policy = Policy(
