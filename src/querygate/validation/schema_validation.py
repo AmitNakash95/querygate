@@ -10,7 +10,17 @@ import datetime as dt
 import decimal
 
 import enum
-from typing import Callable, Dict, FrozenSet, Iterator, NamedTuple, Optional, Set, Tuple
+from typing import (
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterator,
+    Literal,
+    NamedTuple,
+    Optional,
+    Set,
+    Tuple,
+)
 
 import sqlalchemy as sa
 
@@ -46,6 +56,7 @@ from querygate.query_ast.models import (
     StringAggSelectItem,
     StructuredQuery,
     WhereNode,
+    WindowExpr,
     WindowSelectItem,
     _AGGREGATE_SELECT_ITEM_TYPES,
 )
@@ -146,6 +157,16 @@ def iter_expression_parts(expr: Expression, _depth: int = 1) -> Iterator[Express
     if isinstance(expr, DateAddExpr):
         yield from iter_expression_parts(expr.date_add, _depth + 1)
         return
+    if isinstance(expr, WindowExpr):
+        # Item 125. Only `arg` is an Expression; `over.partition_by`/`order_by`
+        # are plain Table.Column strings, so they are picked up by
+        # `expression_column_refs` on this node rather than descended into here —
+        # the same three-place split `select_item_column_refs` makes for the
+        # projection spelling. Counting the window itself as a node (the yield at
+        # the top) is what charges it against max_expression_nodes/depth.
+        if expr.arg is not None:
+            yield from iter_expression_parts(expr.arg, _depth + 1)
+        return
     if isinstance(expr, CaseExpr):
         for branch in expr.when:
             yield ExpressionPart(_depth, branch.when, True)
@@ -192,6 +213,16 @@ def expression_column_refs(expr: Expression) -> Iterator[str]:
                 yield from predicate_direct_column_refs(pred)
         elif isinstance(part.node, ColumnExpr):
             yield part.node.col
+        elif isinstance(part.node, WindowExpr):
+            # The OVER clause's own refs (item 125). `arg` is descended into by
+            # the walk, but partition_by/order_by are plain strings hanging off
+            # the node, so they surface here or not at all — and "not at all"
+            # would let a denied or masked column ride into the query inside an
+            # OVER clause, the exact hole `select_item_column_refs` calls out for
+            # the projection spelling.
+            yield from part.node.over.partition_by
+            for order in part.node.over.order_by:
+                yield order.col
 
 
 def expression_depth(expr: Expression) -> int:
@@ -261,12 +292,42 @@ def iter_scope_expressions(query: StructuredQuery) -> Iterator[Expression]:
     source is what stops "a range join whose bound is a 200-node arithmetic tree"
     from being the position that escaped every one of them.
     """
+    for _position, expr in iter_scope_expressions_by_position(query):
+        yield expr
+
+
+# The positions an `Expression` can occupy in one scope. Only `projection` may
+# contain a window (item 125); every other value is a place SQL itself forbids
+# one. `aggregate_arg` is called out separately from `projection` precisely
+# because it IS inside the select list yet still illegal — `SUM(SUM(x) OVER ())`
+# is not a query any dialect accepts.
+ExpressionPosition = Literal["projection", "aggregate_arg", "where_or_having", "join_condition"]
+
+
+def iter_scope_expressions_by_position(
+    query: StructuredQuery,
+) -> Iterator[Tuple[ExpressionPosition, Expression]]:
+    """`iter_scope_expressions`, but tagged with WHERE each tree sits.
+
+    Split out for item 125's rule that a window function is legal in a projection
+    and nowhere else. Keeping this as the ONE source that both the tagged and the
+    untagged walk read means a position added later shows up here — and, because
+    the rule matches on `projection` rather than excluding a denylist, an
+    untagged-by-mistake position fails CLOSED (its windows are rejected) instead
+    of silently becoming a place a window is allowed.
+    """
     for item in query.select:
-        yield from select_item_expressions(item)
+        position: ExpressionPosition = (
+            "aggregate_arg" if isinstance(item, _AGGREGATE_SELECT_ITEM_TYPES) else "projection"
+        )
+        for expr in select_item_expressions(item):
+            yield position, expr
     for pred in iter_where_and_having_predicates(query):
-        yield from predicate_expressions(pred)
+        for expr in predicate_expressions(pred):
+            yield "where_or_having", expr
     for pred in iter_join_condition_predicates(query):
-        yield from predicate_expressions(pred)
+        for expr in predicate_expressions(pred):
+            yield "join_condition", expr
 
 
 def iter_scope_case_conditions(query: StructuredQuery) -> Iterator[WhereNode]:

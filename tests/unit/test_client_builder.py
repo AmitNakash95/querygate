@@ -48,6 +48,7 @@ from querygate.client import (
     string_agg,
     when,
     window,
+    window_expr,
 )
 from querygate.client.builder import _to_expression
 from querygate.query_ast import models as m
@@ -440,6 +441,7 @@ def test_every_expression_union_member_is_constructible():
         type(extract("hour", col("t.c")).node),
         type(now().node),
         type(date_add(now(), "day", -7).node),
+        type(window_expr("sum", col("t.c")).node),
     }
     assert produced == set(typing.get_args(m.Expression))
 

@@ -59,6 +59,7 @@ from querygate.client.builder import (
     string_agg,
     when,
     window,
+    window_expr,
 )
 
 __all__ = [
@@ -89,6 +90,7 @@ __all__ = [
     "now",
     "date_add",
     "window",
+    "window_expr",
     "frame",
     "Column",
     "FnColumn",
