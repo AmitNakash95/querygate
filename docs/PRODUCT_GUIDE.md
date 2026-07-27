@@ -3290,6 +3290,46 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-07-27 — a window function becomes a legal `Expression` operand in
+  PROJECTIONS ONLY, enforced by one positional rule rather than by a parallel
+  expression union (TODO.md item 125).** Item 101 shipped `OVER` and item 100
+  shipped arithmetic, but a window was a select-item *projection*, never an
+  operand — so `amount / SUM(amount) OVER ()` was two projected columns plus
+  client-side division, and row 15 of the canonical regression bar
+  (`docs/ENGINE_EXPRESSIVENESS_PLAN.md` §5) stayed red at **15/16**. Item 101
+  deliberately recorded this as a *wall awaiting a maintainer call* rather than
+  adding it silently, because the fix has a genuine cost. **The maintainer
+  approved it on 2026-07-27**; this entry records the shape and the rejected
+  alternative.
+
+  The cost is real: the item-100 substrate's reviewability rests on "any
+  `Expression` is legal wherever a scalar is expected", and a window is legal in
+  a projection but never in `WHERE`, never inside an aggregate, never as a group
+  key, never inside another window. Adding `WindowExpr` to the closed union
+  therefore breaks that property *in the type*.
+
+  Two ways to restore it. A **parallel projection-only expression union** makes
+  misuse structurally inexpressible rather than merely forbidden — the posture
+  item 105 chose for recursive CTEs, and the stronger guarantee. It was
+  **rejected** because it buys that guarantee by duplicating the entire recursive
+  tree across every walker, cap, compiler path and audit shape; the failure mode
+  of a duplicated walk is one copy silently missing a rule, which is the exact
+  class of bug items 96, 103 and 104 each had to fix. Trading one reviewable rule
+  for two divergent trees is a worse maintainability position than the wall it
+  removes.
+
+  So the decision is the **single fail-closed positional rule**, sited at the one
+  position-aware expression walk: a window may appear only inside a select-item
+  expression tree, never nested in another window's `arg`, never inside an
+  aggregate argument, with item 101's existing `group_by`/aggregate
+  incompatibility carrying over. This keeps the substrate's *review* in one place
+  even though the *type* no longer encodes it — which was item 101's actual
+  stated concern. Precedent exists: `EXISTS` is likewise legal in exactly one
+  position and rejected elsewhere with a typed error. The rule is fail-closed —
+  a position that does not explicitly permit a window rejects it — so a future
+  expression position added without thinking about windows refuses them rather
+  than admitting them.
+
 - **2026-07-27 — correlation is DECLARED and capped, never implicit; a scalar
   subquery must be a single-group aggregate; and `EXISTS` rides on `Predicate`
   rather than becoming a third `WhereNode` member (TODO.md item 106).** This is

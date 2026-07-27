@@ -7413,3 +7413,64 @@ the `tables` field against the `sql` field of the same response.
   and `::test_min_group_size_with_an_aliased_join_decides_instead_of_crashing`.
 
 **Effort: S. Priority: high (a crash on a shipped guardrail).**
+
+---
+
+### 125. Query engine: a window function as an `Expression` operand ★ ✅ DONE
+
+The last red row of the canonical regression bar (`docs/ENGINE_EXPRESSIVENESS_PLAN.md`
+§5 row 15) and the only thing between the engine and **16/16**. Both halves have
+existed since item 101 — arithmetic from 100, `OVER` from 101 — but a window is a
+select-item **projection**, never an `Expression` operand, so
+`amount / SUM(amount) OVER ()` (each row against an aggregate over its partition,
+in one statement) is two projected columns plus client-side division.
+
+**Recorded as a wall, not a gap**, by item 101 and left for a maintainer decision
+because the obvious fix has a real cost: adding a union member that is legal in
+some positions and illegal in others breaks the "legal everywhere a scalar is
+expected" property that keeps the item-100 substrate reviewable in one place.
+**Maintainer approved it on 2026-07-27** — see the Decision Log entry in
+`docs/PRODUCT_GUIDE.md` for the shape and why the alternative was rejected.
+
+**What shipped.** A `WindowExpr` — `WindowSelectItem` minus `alias`, both now sharing
+a `WindowCall` base so their arity/frame rules cannot drift — as a member of the
+closed `Expression` union, with the positional rule enforced in ONE place
+(`_reject_windows_outside_projections`) over a new position-aware walk
+(`iter_scope_expressions_by_position`):
+
+- a window may appear **only inside a select-item (projection) expression tree**;
+- never inside another window's `arg` (SQL forbids nested windows);
+- never inside an aggregate's argument;
+- the existing `group_by`/aggregate incompatibility carries over unchanged.
+
+Rejected alternative: a parallel projection-only expression union. It makes misuse
+structurally impossible rather than merely forbidden — the posture item 105 chose
+for recursive CTEs — but only by duplicating the whole recursive tree across every
+walker, cap, compiler path and audit shape. That duplication is a worse
+maintainability trade than the wall it removes, and the fail-closed single rule
+gets the same safety with one reviewable site.
+
+**Coverage.** `tests/security/test_window_operand_boundary.py` (9 cases) covers every
+position SQL forbids a window in — WHERE, HAVING, a join condition, an aggregate
+argument, nested in another window, combined with `group_by`, buried inside a CASE
+inside arithmetic, and inside a nested subquery scope — plus the motivating query,
+so the rejections cannot pass vacuously. `tests/integration/test_window_operand_end_to_end.py`
+EXECUTES row 15 through the REST pipeline and asserts the computed answer, both
+unpartitioned and partitioned; it uses subtraction rather than the plan's "share of
+total" division because `NUMERIC(10,2)` rounds a quotient to 2 decimals, which would
+have made the assertion a test of rounding rather than of the window.
+
+All 4 enforcement points were mutation-verified independently: removing the rule
+fails 8 cases; replacing the projection ALLOWLIST with a denylist of illegal
+positions (the fail-open spelling) fails exactly the aggregate-argument case;
+removing the nested-window check fails only that case; removing the `group_by`
+carry-over fails only that one.
+
+**Left owed.** Row 15's end-to-end coverage runs against SQLite. It has **not** been
+executed against live Postgres and live MSSQL in the differential suite — no live
+servers were available when it landed — so unlike bar rows 3/6/8/12/16 its
+real-backend legs are still outstanding, recorded here and in the plan's §5 rather
+than quietly omitted.
+
+**Effort: XL. Priority: high** (closes the ★ flagship pillar's success criterion).
+Depends on: items 100, 101.
