@@ -478,16 +478,6 @@ def _resolve_output_ref(
     raise QueryValidationError(f"Unknown column or alias {ref!r}")
 
 
-def _ref_output_name(ref: str, alias_map: Dict[str, Any]) -> str:
-    """Map a select/group_by ref to the output column name it will have in a subquery."""
-    if ref in alias_map:
-        return alias_map[ref].name
-    if "." in ref:
-        _, col_name = parse_column_ref(ref)
-        return col_name
-    return ref
-
-
 def _compile_where(
     node: WhereNode,
     tables: Dict[str, sa.Table],
@@ -904,7 +894,7 @@ def _apply_top_n(
 ) -> Tuple[sa.Select, Dict[str, Any]]:
     """Wrap stmt with a rank-per-partition subquery, keeping only the top n rows."""
     spec = query.top_n
-    output_names = [c.name for c in stmt.selected_columns]
+    output_count = len(stmt.selected_columns)
     rank_fn = _RANK_FNS[spec.fn]
     adapter = get_dialect_adapter(dialect)
 
@@ -915,9 +905,14 @@ def _apply_top_n(
         # the same statement, so materialize the aggregation as a subquery
         # first and rank over its real derived-table columns instead.
         agg = stmt.subquery()
+        agg_columns = list(agg.c)
+        agg_alias_map: Dict[str, Any] = {column.name: column for column in agg_columns}
+        for item, column in zip(query.select, agg_columns):
+            if isinstance(item, str):
+                agg_alias_map.setdefault(item, column)
 
         def _agg_col(ref: str) -> Any:
-            return agg.c[_ref_output_name(ref, alias_map)]
+            return _resolve_output_ref(ref, tables, agg_alias_map, allow_table_fallback=False)
 
         partition_cols = [_agg_col(ref) for ref in spec.partition_by] or None
         order_cols = [
@@ -926,7 +921,7 @@ def _apply_top_n(
             for term in adapter.order_by_terms(_agg_col(o.col), o.dir, o.nulls)
         ]
         rank_expr = rank_fn().over(partition_by=partition_cols, order_by=order_cols).label("__rank")
-        ranked = sa.select(*[agg.c[name] for name in output_names], rank_expr).subquery()
+        ranked = sa.select(*agg_columns, rank_expr).subquery()
     else:
         partition_cols = [
             _resolve_output_ref(ref, tables, alias_map, allow_table_fallback=True)
@@ -944,13 +939,19 @@ def _apply_top_n(
         rank_expr = rank_fn().over(partition_by=partition_cols, order_by=order_cols).label("__rank")
         ranked = stmt.add_columns(rank_expr).subquery()
 
-    outer_cols = [ranked.c[name] for name in output_names]
+    # Positional binding is load-bearing here. Two projections can share a base
+    # name (`customers.id`, `orders.id`): SQLAlchemy disambiguates the derived
+    # table's keys, but both columns retain `.name == "id"`. Looking them up by
+    # name therefore selects the first column twice and silently drops the
+    # second. The derived table preserves the SELECT-list order, so position is
+    # the one unambiguous mapping back to `query.select`.
+    outer_cols = list(ranked.c)[:output_count]
     outer_stmt = sa.select(*outer_cols).where(ranked.c["__rank"] <= spec.n)
 
-    outer_alias_map: Dict[str, Any] = dict(zip(output_names, outer_cols))
-    for item in query.select:
-        if isinstance(item, str) and item in alias_map:
-            outer_alias_map.setdefault(item, ranked.c[alias_map[item].name])
+    outer_alias_map: Dict[str, Any] = {column.name: column for column in outer_cols}
+    for item, column in zip(query.select, outer_cols):
+        if isinstance(item, str):
+            outer_alias_map.setdefault(item, column)
 
     return outer_stmt, outer_alias_map
 
