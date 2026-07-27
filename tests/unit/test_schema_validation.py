@@ -183,6 +183,54 @@ class TestValidateSchema:
         loaded = await sv.validate_schema(query, connection_id="demo")
         assert set(loaded) == {"orders", "customers"}
 
+    async def test_join_condition_columns_are_resolved_against_the_schema(self, monkeypatch):
+        """A general join `condition` (item 103) is a WhereNode, so its columns
+        must be resolved here like any other ref — not left to fail deeper in the
+        compiler with a compiler-internal error."""
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            joins=[
+                JoinSpec(
+                    table="customers",
+                    condition=Predicate(
+                        col="orders.customer_id", op="gte", value_col="customers.id"
+                    ),
+                )
+            ],
+            limit=5,
+        )
+        loaded = await sv.validate_schema(query, connection_id="demo")
+        assert set(loaded) == {"orders", "customers"}
+
+    async def test_join_condition_unknown_column_rejected(self, monkeypatch):
+        """The negative half — and the one that pins the check itself, since a
+        condition over only real columns passes either way."""
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            joins=[
+                JoinSpec(
+                    table="customers",
+                    condition=WhereGroup(
+                        and_terms=[
+                            Predicate(col="orders.customer_id", op="eq", value_col="customers.id"),
+                            Predicate(
+                                col="orders.customer_id", op="gte", value_col="customers.missing"
+                            ),
+                        ]
+                    ),
+                )
+            ],
+            limit=5,
+        )
+        with pytest.raises(ValueError, match="not found"):
+            await sv.validate_schema(query, connection_id="demo")
+
     async def test_composite_join_extra_on_unknown_column_rejected(self, monkeypatch):
         tables = _make_tables()
         _patch_load_table(monkeypatch, tables)

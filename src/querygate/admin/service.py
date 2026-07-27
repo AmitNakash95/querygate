@@ -62,7 +62,10 @@ from querygate.secrets.resolvers import build_secret_resolver_registry
 from querygate.templates.binding import dummy_bound_query
 from querygate.templates.loader import TemplateStore
 from querygate.templates.models import QueryTemplate
-from querygate.validation.policy_validation import referenced_tables, validate_policy
+from querygate.validation.policy_validation import (
+    referenced_tables_tree_wide,
+    validate_policy,
+)
 from querygate.validation.schema_validation import (
     resolve_query_table_connections,
     validate_schema,
@@ -289,7 +292,10 @@ def simulate_candidate_policy(
     query_allowed: Optional[bool] = None
     requested_tables = {request.table} if request.table is not None else set()
     if request.query is not None:
-        requested_tables.update(referenced_tables(request.query))
+        # Tree-wide (item 121): a mandatory filter whose table appears only in a
+        # set-op arm or a subquery must still show up in the readiness report,
+        # or an operator is told `allow` for a request execution will refuse.
+        requested_tables.update(referenced_tables_tree_wide(request.query))
         query_allowed = True
         try:
             validate_policy(request.query, policy, connection_id=request.connection)

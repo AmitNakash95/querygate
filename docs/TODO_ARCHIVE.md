@@ -5440,6 +5440,112 @@ what makes item 97's bounded nested subqueries safe to add by construction.
 **Hard boundaries honored.** Not a rewrite of policy semantics, not a change to
 any cap or allow/deny rule, not a new AST field.
 
+### 97. Bounded nested subqueries (uncorrelated, single-connection, depth-capped) ✅ DONE
+
+**Phase 1 shipped — `IN (subquery)` / `NOT IN (subquery)`:** `Predicate.value_subquery`
+is a nested `StructuredQuery` (recursive AST via `model_rebuild`), valid only for
+`in`/`not_in`, mutually exclusive with value/value_col, must select exactly one
+column. `Policy.max_subquery_depth` (default 1) bounds nesting. The single
+canonical scope-walker `schema_validation.iter_query_scopes` enumerates the outer
+query + every subquery as **independent scopes**; policy validation enforces the
+count caps (select/joins/group_by/where-predicates/top_n) **summed tree-wide**
+(so nesting can't multiply a cap — the core threat), plus per-scope column
+allow/deny + masking (a denied/masked column can't hide one level down), and
+rejects: over-depth, a masked column as the subquery's IN-output, and
+`value_subquery` outside a WHERE clause (HAVING/CASE rejected). Schema validation
+validates each subquery scope independently (a correlated reference to an outer
+table fails as undeclared-in-scope) and rejects cross-connection subqueries. The
+compiler renders `col.in_(subselect)` via the same compile path (so the subquery
+gets mandatory row filters + min-group guardrail), stripping the subquery LIMIT
+so IN membership is complete. Covered by `tests/security/test_subquery_boundary.py`
+(13 adversarial: cap-evasion-via-nesting per cap, denied/masked-in-subquery,
+correlated, cross-connection, over-depth, HAVING/CASE) + `tests/integration/
+test_subquery_end_to_end.py` (real-SQLite IN/NOT-IN match an equivalent join).
+Renders as standard SQL IN(subquery) on Postgres+MSSQL (no dialect-specific
+code); MSSQL execution parity is CI-validated. Decision Log entry recorded.
+
+**Phase 2 (not started):** `FROM (subquery)` — a derived table the outer query
+selects *from*. Additionally needs the outer query to resolve against the inner
+query's OUTPUT aliases (a virtual relation) without reaching past them into inner
+base tables; deferred as a distinct, harder slice. HAVING/CASE `IN (subquery)`
+also deferred.
+
+> **Overlap with item 105 (noted 2026-07-25).** Item 105 (CTE / derived table in
+> FROM) is the same capability generalized — its own text says it "generalizes
+> item 97's `subquery_tables` plumbing and `effective_name_map`". ROADMAP.md
+> Phase 4 now sequences 97 phase 2 immediately before 105 for that reason. Build
+> them as one slice, or fold 97 phase 2 into 105 and stub it — do **not**
+> implement the derived table twice. Which way to resolve it is a call to make
+> when 105 is scoped, not now.
+
+**Effort: L. Priority: medium (capability extension). Depends on: item 96.
+Requires a recorded Decision Log entry in `docs/PRODUCT_GUIDE.md` before build.**
+
+**Why it matters.** Callers naturally compose queries that scope an initial set
+and filter from it (`FROM (subquery)` / `IN (subquery)`). Today the AST is
+single-level: `from_table` is a table-name string and predicate `value`/
+`value_col`/`in`-list are literals/columns — there is no caller-authored nested
+query. Much of the real demand is already served by joins + `group_by`/`having`
+(semi-joins, aggregate-filters) and by the two-round-trip pattern (query 1
+returns IDs → query 2 filters with `in: [...]`), so this item must clear a
+genuine-marginal-value bar, not be added reflexively. It does **not** cross any
+North Star non-goal: a nested `StructuredQuery` is still a fully validated AST,
+never a raw-SQL string.
+
+**Scope — the minimal safe subset only (reject the rest, per the item-74
+"reject, don't emulate" precedent):**
+- ✅ **Uncorrelated** derived table (`FROM (subquery)`) and/or `IN (subquery)`.
+- ❌ **Correlated** subqueries (inner references an outer row) — this is the
+  sharp cliff that defeats "each query is independently bounded"; reject
+  explicitly with a `QueryValidationError` pointing at joins as the primitive.
+- ❌ **Cross-connection** nesting (a subquery carrying its own `connection`) —
+  can't push to one DB; reject.
+- New cap `max_subquery_depth` (default 1). **All existing caps (max_joins,
+  max_where_depth, max_group_by, top_n, in-list size) apply summed tree-wide**,
+  never per-level — otherwise nesting becomes a cap-multiplier bypass.
+
+**What to do (once item 96 lands, this is small).**
+1. Make the model recursive (e.g. `from_table: str | StructuredQuery`, and/or an
+   `in`-subquery predicate variant). Pydantic recurses for free.
+2. Teach the **one** canonical visitor (item 96) to descend nested queries, so
+   policy + schema enforcement follow automatically. Base-table column refs
+   inside a subquery get the full allow/deny + cap treatment; the outer query
+   resolves against the inner query's *output aliases* (a virtual relation),
+   which must NOT let the outer reach past them into inner base tables.
+3. Schema validation computes the inner query's output column set and threads it
+   through as a virtual relation.
+4. Compiler renders via SQLAlchemy Core `.subquery()` (already used for `top_n`
+   at `compiler/sqlalchemy_compiler.py`); nested scopes need their own column
+   resolution frame.
+5. Full `adversarial-probe` pass — every new node is a new bypass surface;
+   codify each vector as a regression test (esp. cap-evasion-via-nesting and
+   masked/denied column hidden in a subquery).
+
+**Acceptance.** Bounded subset above works end-to-end on Postgres + MSSQL;
+correlated/cross-connection/over-depth all rejected with clear errors; caps
+proven to apply tree-wide by adversarial tests; Decision Log entry recorded.
+No raw-SQL surface, no non-goal crossed.
+
+---
+
+## Flagship pillar — Expressive Query Engine (items 99–106)
+
+Items 99–106 are one coordinated initiative: take the READ structured query
+engine to 10/10 expressiveness for a fluent SQL author **without weakening any
+safety invariant** — the deepening of the North Star **Structural** pillar (the
+"no raw SQL, ever" bet only wins if the AST rarely walls off a real SQL author).
+The deep, authoritative design/test/validation spec lives in
+**[docs/ENGINE_EXPRESSIVENESS_PLAN.md](docs/ENGINE_EXPRESSIVENESS_PLAN.md)** — each
+item below is scoped there (§4) with its AST shape, compiler seam, validation
+wiring, caps, dialect handling, adversarial cases, and per-item Definition of
+Done. Build them in the order 99 → 106; the plan's §3 checklist and §5 canonical
+regression bar are mandatory acceptance gates for every item.
+
+The unifying safety rule (plan §1, §3): **every new node must be wired into the
+canonical reference visitor (item 96) or its column refs bypass policy allow/deny
++ masking**, and **every new cost-bearing count must be capped summed tree-wide
+(item 97)**. Reject-don't-emulate (item 74) governs all per-dialect gaps.
+
 ### 99. Query engine: `HAVING` as `WhereNode` + searched `CASE` condition ✅ DONE
 
 **Effort: S. Priority: high (flagship pillar; cheap first step). Depends on:
@@ -6060,6 +6166,461 @@ relative-date filtering was always composable with a caller-computed literal, an
 this is native convenience. The larger outcome of the item is the timezone pin,
 which fixed a correctness gap in a capability that had already shipped.
 
+### 103. Query engine: non-equi/range joins + FULL OUTER / CROSS ✅ DONE
+
+Generalized `JoinSpec` from equality-pairs to a full predicate tree and added the
+two missing join types, taking regression-bar row 16 (a price-band join) from
+inexpressible to executed on both real backends.
+
+**What shipped.**
+
+- **`JoinSpec.condition: Optional[WhereNode]`** — the *same* node type `where`
+  uses, so a join can be a range/temporal/inequality join
+  (`ON Sale.Price BETWEEN Band.Lo AND Band.Hi`, `ON Event.At >= Window.Start`).
+  The equality `on` form stays as the common-case sugar and its rendering is
+  byte-identical to before. `on` and `condition` are mutually exclusive at the AST
+  layer; `extra_on` stays tied to `on`.
+- **`JoinType` gains `"full"` and `"cross"`.** `full` compiles to
+  `stmt.join(..., full=True)`; `cross` to `stmt.join(right, sa.true())` —
+  `ON true` on Postgres, `ON 1 = 1` on MSSQL/SQLite, the same cartesian product
+  to every planner. A `cross` join takes no condition and is rejected (not
+  silently stripped) if given one.
+- **`Policy.allow_cross_join`, default off.** Deny-by-default for the one join
+  type whose cost is the product of its inputs and the only one exempt from the
+  graph-connectivity rule. Cross joins still count against `max_joins`.
+  Registered in `_DIRECTION_REVIEWED_GUARDRAILS` (item 115), since `allow_*`
+  does not read as a ceiling.
+- **The ON clause inherits every WHERE cap**, wired in at the two shared walks
+  rather than as parallel checks: `iter_column_refs` gains a `JOIN_CONDITION`
+  position (so the denied-column and item-49 masked-column rules apply by
+  construction) and `iter_scope_expressions` gains join-condition expressions (so
+  `max_expression_depth`/`max_expression_nodes`, the `max_case_branches` budget,
+  the `date_add` interval cap and the item-117 date-operand type check all reach
+  it). Depth, tree-wide predicate count and `max_in_list_size` are enforced
+  through the same shared rules WHERE/HAVING/CASE use.
+- **`IN (subquery)` is rejected in a join condition**, matching HAVING and CASE:
+  `iter_query_scopes` descends WHERE/HAVING only, so a subquery there would never
+  be validated as its own scope. Rejected with a typed error rather than left to
+  fail on a compiler-internal `ctx=None`.
+- **The join-graph rule generalized rather than special-cased.** A `condition` may
+  name any table *already* in the graph (`JOIN c ON c.x = a.x AND c.y = b.y` is
+  ordinary SQL, and `extra_on`'s same-two-tables restriction is a property of that
+  sugar), must reference the table being joined, and must **not**
+  forward-reference a table joined later — which SQLAlchemy would render as a
+  broken or implicitly-cartesian FROM. The `on` path can only reach the original
+  check, so its message is unchanged.
+- **Audit shape** records the join type plus whichever form was used, with a
+  condition normalized through the same `_where_shape` as WHERE — operators and
+  column names, never a literal.
+
+**Coverage.** `tests/unit/test_nonequi_joins.py` (38 tests across AST form, graph
+rules, caps, per-dialect rendering and the audit shape),
+`tests/integration/test_nonequi_join_end_to_end.py` (9 tests executing every form
+through the REST pipeline, including bar row 16), new `JOIN_CONDITION` cases in
+the visitor contract and the adversarial suite's denied/masked expression-position
+matrix, and 8 new live cases in `tests/integration/test_cross_dialect_differential.py`
+run against real Postgres **and** real SQL Server. Two client-builder tests and
+two `test_service.py` usage-signal tests round it out.
+`test_every_join_type_has_a_live_both_dialects_case` makes a live case mandatory
+for any future `JoinType` and lives in the **unit** tier, not beside the cases it
+guards — the differential module is marked `postgres_live and mssql_live`, so a
+gate placed there would only fire in the one CI job that has both servers. That
+placement is item 102's recorded precedent, and the item-103 audit caught this
+file's first draft getting it wrong.
+
+**Mutation-verified — and the claim is written to be re-checkable rather than
+taken on trust.** Each enforcement point below was broken deliberately and
+confirmed to fail its guarding test *for that reason*. To re-verify any row:
+break the named line, run the named test, expect a failure, revert.
+
+| # | Enforcement point | Guarding test |
+| --- | --- | --- |
+| 1 | `allow_cross_join` gate (`policy_validation`) | `test_cross_join_is_denied_by_default` |
+| 2 | join-condition predicate count, per scope | `test_join_condition_predicates_are_bounded_by_max_where_predicates` |
+| 3 | ...summed **across** subquery scopes | `test_join_condition_predicate_budget_is_summed_across_subquery_scopes` |
+| 4 | join-condition depth cap | `test_join_condition_depth_is_bounded_by_max_where_depth` |
+| 5 | join-condition `max_in_list_size` | `test_join_condition_in_list_is_bounded_by_max_in_list_size` |
+| 6 | `value_subquery` rejected in a join condition | `test_subquery_in_a_join_condition_is_rejected` |
+| 7 | `JOIN_CONDITION` refs yielded by the item-96 visitor | `test_visitor_covers_every_position_with_expected_refs` + the adversarial denied/masked matrix |
+| 8 | join-condition expressions in `iter_scope_expressions` | `test_expression_in_a_join_condition_is_bounded_by_max_expression_nodes` |
+| 9 | ...carrying the `max_interval_days` cap | `test_date_add_inside_a_join_condition_is_bounded_by_max_interval_days` |
+| 10 | ...carrying the `max_case_branches` cap | `test_case_branches_inside_a_join_condition_are_bounded` |
+| 11 | forward-reference rejection in the join graph | `test_condition_cannot_forward_reference_a_later_join` |
+| 12 | condition must reference the joined table | `test_condition_must_reference_the_table_being_joined` |
+| 13 | join-condition columns resolved at schema validation | `test_join_condition_unknown_column_rejected` |
+| 14 | compiler `full=` flag | `test_full_outer_join_renders_as_full_outer` |
+| 15 | compiler `isouter`/`full` not swapped | `test_left_join_renders_left_outer_not_full_outer`, `test_left_join_is_not_silently_promoted_to_full` |
+| 16 | AST: `on`/`condition` mutually exclusive | `test_condition_and_on_together_are_rejected` |
+| 17 | AST: `cross` takes no condition | `test_cross_join_takes_no_condition` |
+| 18 | audit shape records the join condition | `test_join_condition_appears_in_the_normalized_audit_shape` |
+| 19 | audit shape records the join type | `test_join_shape_records_the_type_and_omits_the_form_not_used` |
+| 20 | `_usage_signal_targets` survives `on is None` | `test_usage_signals_survive_a_range_join_that_carries_no_on_pair` |
+| 21 | cross-joined table still reaches table policy | `test_cross_join_to_a_denied_table_is_rejected` |
+
+**What the first pass missed, recorded because it is the useful part.** The
+initial mutation run covered rows 1–2, 4–8, 11–12, 14, 16–17 and caught 13 of the
+16 points it probed. Three misses were real: nothing pinned the **audit shape**
+(the item-102 lesson repeating — the normalizer is a third un-foldable recursion),
+nothing pinned **join-condition column resolution** at the schema layer, and one
+mutation string failed to match. Rows 3, 9, 10, 13, 15, 18–21 were added
+afterwards, most of them in response to the completion audit rather than the
+mutation pass — which is the honest lesson: mutation-testing the rules an item
+*adds* does not probe the existing consumers of a field whose **type** the item
+changed. Row 20 is exactly that class, and it was a live bug.
+
+**Regression bar 10/16 → 11/16** (row 16). Unlike row 12, this row was a genuine
+❌ with no composition escape: a range join is not two queries plus a client
+merge, it is a join the AST could not describe.
+
+**A pre-existing divergence surfaced and deliberately left standing.** An outer
+join can NULL out the column a query orders by, and Postgres sorts those NULLs
+last on ASC while SQL Server sorts them first — the same AST, the same row set, a
+different order. Measured on both live servers, this **predates item 103**: a
+plain LEFT JOIN diverges identically, and item 103 only makes it reachable from a
+second join type. Not fixed here, because the only in-engine fix is
+`OrderBySpec.nulls`, which item 74 deliberately rejects on MSSQL rather than
+emulating with a synthesized CASE sort column — changing that posture is a
+maintainer decision, not a side effect of this item. Pinned by
+`test_outer_join_null_ordering_diverges_and_predates_item_103` so it is recorded
+rather than rediscovered.
+
+### 104. Query engine: set operations (UNION / INTERSECT / EXCEPT) ✅ DONE
+
+**Shipped.** `StructuredQuery.set_op` combines this query's rows with further
+queries via `UNION` / `INTERSECT` / `EXCEPT` (`all: true` keeps duplicates), the
+first **new scope container at the top level** and the first since item 97
+phase 1's `value_subquery`. Regression bar 11/16 -> **12/16** (row 8).
+
+**The AST shape, and why it is not the one the plan sketched.** The plan called
+for "a new top-level shape wrapping N `StructuredQuery` arms". What shipped is an
+optional `set_op` on `StructuredQuery` whose **carrying query is arm 1**. A second
+top-level type would have turned every signature in the pipeline into a
+`Union[StructuredQuery, SetOperationQuery]` — REST routes, MCP tools, templates,
+audit, approval, cost estimation — or made `from`/`select` optional on every
+query. The failure mode of that change is a consumer that quietly handles one
+member, which is the exact class the item-103 audit found and item 102 hit five
+times. One top-level type means every existing consumer keeps working, and the
+ones that must now see *every arm* are found by a single question: does this walk
+`iter_query_scopes`? Full reasoning in `docs/PRODUCT_GUIDE.md`'s Decision Log
+entry for 2026-07-27.
+
+Four consequences of that shape, each decided rather than inherited:
+
+1. **Clause placement mirrors SQL.** The carrying query's `where`/`joins`/
+   `group_by`/`having` describe arm 1; its `order_by`/`limit`/`offset` bound the
+   combined result — exactly how `SELECT … WHERE … UNION SELECT … ORDER BY …
+   LIMIT …` distributes. An arm setting any of the four is rejected at the AST
+   layer with one typed message rather than producing three dialect-specific
+   errors. `top_n` cannot be combined with `set_op` at all (its refs resolve
+   against table columns the combined result no longer has) — the same
+   reject-rather-than-grow-a-second-materialization-path posture item 101 took
+   for `group_by` + window. Arity is checked at the AST layer; arms do not nest.
+2. **An arm is a scope at the SAME depth as its carrier.** `max_subquery_depth`
+   bounds caller-authored *nesting*, and an arm is a sibling SELECT. Depth+1
+   would have charged a two-arm union against an unrelated budget and — worse —
+   made an arm look like an `IN (subquery)` to the two rules that branch on
+   `depth > 0`. A set operation *inside* a subquery correctly inherits that
+   subquery's depth and does get them.
+3. **The compound is wrapped in a derived table before `LIMIT`.** Measured, not
+   assumed: SQLAlchemy's MSSQL dialect **silently drops** `.limit()` on a
+   `CompoundSelect` — no `TOP`, no `FETCH`, no error — while Postgres renders
+   `LIMIT` normally. `clamp_limit` is a policy guardrail, so the naive form is an
+   unbounded response on one dialect only. Wrapping makes it a limit on a plain
+   SELECT (both dialects render it correctly) and gives `ORDER BY` real
+   derived-table columns instead of a bare output name. This is the engine
+   enforcing its *own* cap, not synthesizing caller structure, so it is not the
+   item-74 line.
+4. **`INTERSECT ALL` / `EXCEPT ALL` are rejected on MSSQL and SQLite.** T-SQL has
+   no `ALL` form of either, and dropping the flag would return *fewer* rows than
+   asked with no error anywhere. SQLAlchemy renders the invalid keyword for every
+   dialect with no guard of its own — verified by execution, where it is a live
+   syntax error rather than a compile error. So it is a `DialectAdapter.set_operation`
+   method that raises and names the primitive to use instead (the `array_agg`
+   posture).
+
+**Every arm is independently governed.** Each arm is validated as its own scope
+(table/column allow-deny, the masked-column rule, schema resolution against its
+own tables) and *compiled* through the same `_compile_scope_body` a single query
+uses — so it carries its own mandatory row filters and its own `min_group_size`
+floor, including item 118's fan-out refusal. There is deliberately no second
+compile path where one could be forgotten. An arm cannot reference another arm's
+table (arms are siblings, not a correlated scope), and cross-connection joins in
+an arm get the outer query's `join_group` rule rather than the stricter
+single-connection rule an `IN (subquery)` gets.
+
+**Cap.** New `Policy.max_set_op_arms` (default 3, counting arm 1, summed
+tree-wide; `0` disables set operations per connection). The default is a
+judgement, and the honest reason it can be low is that it is not the query's cost
+bound: every other count cap is already summed across the arms, so N arms share
+one budget. This bounds only the extra scans plus the dedup sort.
+
+**Two pre-existing single-scope holes closed on the way**, both named rather than
+folded in silently:
+
+- `sensitivity_approval_reasons` (the item-92 human-approval trigger) walked only
+  the outer query, so a catalog-labelled sensitive column reached from inside an
+  `IN (subquery)` never tripped the gate. **True since item 97**, not an item-104
+  regression. It now walks `iter_query_scopes`, fixing subqueries and arms
+  together.
+- The 32C catalog usage signals had the same assumption, with fidelity rather
+  than safety consequences, and were fixed the same way.
+
+**Coverage.** `tests/unit/test_set_operations.py` (33 cases: AST rules, scope
+enumeration, per-dialect availability, and one test per consumer that used to
+assume a single SELECT — audit shape, applied masks, approval gate, fingerprint,
+usage signals); `tests/security/test_set_operation_boundary.py` (20 adversarial
+cases: denied table/column/mask hidden in a later arm, caps summed across arms,
+the arm-count cap and its tree-wide sum, filters and the k-anon floor reaching
+every compiled arm, the MSSQL limit survival, the ORDER BY table-column
+fallback, an unvalidated arm failing closed); `tests/integration/
+test_set_operation_end_to_end.py` (8 executed cases including regression-bar row
+8); and 8 live differential cases in `tests/integration/
+test_cross_dialect_differential.py` run against **real Postgres and real
+MSSQL**. `tests/unit/test_client_builder.py` gains `.union()/.intersect()/
+.except_()` coverage.
+
+**Mutation-verified.** All **17** enforcement points this item adds were broken
+one at a time against the suite; the first pass caught 15 and the two genuine
+misses were real — the aggregate-limit ceiling using `any()` instead of `all()`
+(one raw-row arm would have got the 1000-row aggregate ceiling instead of 100),
+and the set-op `ORDER BY` allowing a raw table-column fallback (which SQLAlchemy
+resolves by adding the table to the FROM clause — an unasked-for cartesian
+product). Both got tests; the second pass caught 17/17.
+
+**Follow-up round (same day, after the completion audit's rating review).** Three
+residual gaps the audit left open were closed rather than carried:
+
+1. **Arm select TYPES are now checked**, closing the measured divergence above —
+   an integer column against a text cast of it errored on Postgres and *succeeded*
+   on SQL Server. `_validate_set_op_arm_types` compares coarse type families
+   (numeric / text / boolean / temporal) at each position, only where two or more
+   arms have a statically-knowable one, so integer-vs-numeric and
+   date-vs-timestamp stay legal and anything unknowable (arithmetic, functions,
+   CASE) is left to the database. The differential test that recorded the
+   divergence as an accepted residual was **inverted, not deleted** — the item-118
+   precedent.
+2. **`ExplainResult.tables` and the candidate simulator** now report every scope
+   (item 121, closed in the same pass).
+3. **The masked-column list's set-op semantics are stated rather than assumed**: it
+   is a UNION across arms, so a column masked in one arm reads as masked for the
+   whole output column. That over-states protection, never under-states it, which
+   is the safe direction for a field distinguishing masked from denied; a per-arm
+   breakdown would need an audit-event shape change. Pinned by a test.
+
+**MCP context budget** rose a measured **1,485 chars** of tool schema plus 778 of
+instructions (2,263 total; 109,252 -> 111,515, measured against base commit
+e735735 in a worktree), against item 103's prediction that a new top-level shape
+would breach the ceiling badly. `SetOpSpec.arms` is a `$ref` to the
+`StructuredQuery` already in `$defs`, so nothing was duplicated. The ceiling was
+raised 110,000 -> 116,000 after a trim pass found no maintainer rationale left in
+any model docstring to move out. A first draft of this figure said 1,576 and was
+wrong — it double-counted the `SetOpSpec` docstring, which is already inside the
+1,145-char `$def`; the correction is recorded in the budget test's own comment.
+
+### 105. Query engine: CTE / derived table in FROM (non-recursive) ✅ DONE
+
+**Shape — a named `WITH` block, not a union on `from`/`JoinSpec.table`.**
+`StructuredQuery.ctes` is a new ADDITIVE list of `CteSpec{name, query}`; `from_table`
+and `JoinSpec.table` stay `str` and resolve to a block when one of that name is
+declared. `ENGINE_EXPRESSIVENESS_PLAN.md` §4 Phase 4b had specified the union; that
+is the same shape item 104 rejected one day earlier and it lost again here, so the
+plan text was corrected rather than left contradicting the code. The deciding
+argument is the **unaware consumer**: with a union, every site reading
+`query.from_table` receives a model where it expected a string — `referenced_tables`
+putting a non-string into a set of table names, `normalize_query_shape` recording it
+as the table read, `policy.table_allowed` handed a model — and Pydantic cannot flag
+any of it, because the field is legitimately both. With a name, a consumer that has
+never heard of a cte treats `"daily"` as a table and reflection REJECTS it. The
+unaware consumer fails closed. Efficiency (one block compiled once, referenced N
+times) and expressiveness (a block is reusable across `from` and several joins,
+which an inlined derived table is not) agreed but did not decide it.
+
+**Absorbs item 97 phase 2.** An inline derived table is written as a named block, so
+the derived table is implemented once, and item 97 is now fully `✅ DONE`.
+
+**Structural rules** (`_validate_cte_constraints`, beside item 97's subquery rules so
+both scope-container rule sets read against the one `iter_query_scopes` authority):
+only the ROOT query may declare `ctes` (written as "any scope that is not the root",
+so a fourth container is covered by default); a block may reference only an EARLIER
+block, which makes declaration order dependency order **and makes a recursive cte
+structurally inexpressible** rather than merely forbidden; a block name may not
+collide with a table the policy has a rule for; a declared block must be referenced;
+names are unique case-insensitively (the one purely local rule, in the AST layer).
+
+**Caps.** New `Policy.max_cte_count` (default 3) — not summed tree-wide, and that is
+a property of the shape rather than an exemption: only the root declares blocks, so
+there is no second place for a count to hide. `max_subquery_depth` is charged along
+the REFERENCE CHAIN (`cte_chain_depths`), so two independent blocks each cost 1 while
+a block reading a block costs 2 and the default cap of 1 denies it. Every summable
+cap already counts block bodies, because `iter_query_scopes` yields them.
+
+**A block carries no `max_rows` clamp**, following item 97's `_compile_in_subquery`
+for the same reason: `max_rows` bounds the RESPONSE, and a block's rows are input to
+a join or an aggregate, so clamping would silently truncate the population a total is
+computed over — the wrong-answer class items 102/117 established is worse than a
+rejection. An explicit `limit` is honoured and clamped. What actually bounds a block:
+`timeout_seconds`, `max_response_bytes`, the concurrency limiter, `max_cte_count`.
+
+**Enforcement is per-scope, not skipped.** Every body compiles through the same
+`_compile_scope_body`, inheriting mandatory row filters, column masks, the
+`min_group_size` floor and item 118's fan-out refusal. A masked column may **not** be
+projected by a block (its rows feed another scope, where the value could be filtered
+or joined on) — the same rule and reason as item 97's `IN (subquery)` output check.
+
+**`select_item_output_name` is now the single authority** on what a select item is
+named in the result. It previously existed in two hand-maintained copies (the
+`_*_alias` helpers and the compiler's inlined `alias = item.alias or ...` lines); a
+cte makes it load-bearing, because the validator resolves outer `block.column` refs
+against PREDICTED names while the compiler labels real ones. A test asserts the
+predicted names equal the compiled `CTE.c.keys()` for every select-item shape —
+agreeing with itself is not the same as agreeing with SQLAlchemy.
+
+**Single-scope consumers** (the recurring miss the frontier notes name): the audit
+shape now recurses into each body, the 32C usage signals and the sensitivity approval
+gate skip the block NAME (teaching 32C a phantom table would be unreconcilable by any
+refresh), and `referenced_tables` excludes block names in both directions — an
+allow-list would otherwise reject every reference, and a "tables read" report would
+name something that does not exist.
+
+**Verification.** **29/29 enforcement points mutation-verified.** The first pass
+killed 18/23 and each of the four survivors was a real coverage gap — a WILDCARD
+column rule (`{"*": [...]}`) is what makes the "a cte output name is not a physical
+column" skips observable, which is why a table-scoped rule proved nothing there. 63
+unit + 20 adversarial-boundary + 6 end-to-end tests, and 4 cross-dialect differential
+cases executed against **live Postgres and live SQL Server** with rows compared
+equal. Regression bar 12/16 -> **14/16** (rows 3 and 6).
+
+One test in that count is worth naming because it initially proved nothing: the
+"a nested scope can READ a block" case first joined the block in the outer query
+too, which rendered identically whether or not `_WhereCtx` carried `cte_objects`.
+The mutation survived it. It now references the block ONLY from inside the
+subquery, so nothing else can put the `WITH` clause into the statement.
+
+**Found by this item's own completion audit and fixed before it shipped**, listed
+because each is the kind of defect a green suite tolerates:
+1. A block projecting two same-base-named columns escaped a raw
+   `sqlalchemy.exc.DuplicateColumnError` from inside validation — a 500 where a
+   typed 4xx belonged, and item 119's failure class (one column silently
+   unreachable under the name the caller used). Now a typed rejection pointing at
+   the `as` alias that resolves it.
+2. `max_cte_count` ran AFTER the O(N x tree) structural walks it exists to bound,
+   so a caller could drive that work with N far above the cap. It is now first.
+3. **A cte body could join to a second connection while the identical
+   `IN (subquery)` could not** — cte bodies are validated in their own
+   dependency-ordered loop, which ran before the `depth > 0` branch the item-97
+   check lived in. Not a bypass (the `join_group` rule still applied), but a
+   guardrail that depended on which container the caller picked. The check is now
+   a shared helper both containers call, and it names the real container, since
+   the old message reported a set-operation arm nested in a block as an
+   `IN (subquery)` the caller never wrote.
+4. `referenced_tables`'s `cte_names` defaulted to `frozenset()` — fail-OPEN, since
+   a caller who forgot it would report a block's name as a table that was read. It
+   now derives the names from the query, so the forgetful call is correct.
+
+**Side finding — item 122**, pre-existing and unrelated to ctes: `_unique_column_sets`
+crashed on any non-`Table` FROM element, so item 118's floor raised `AttributeError`
+on any aliased join. See its own entry.
+
+### 106. Query engine: correlated / EXISTS / scalar subqueries ✅ DONE
+
+The last item of the flagship engine pillar, and the only one that deliberately
+REMOVES an invariant the rest of the engine rests on: that every scope resolves
+against its own tables and nothing else.
+
+**Correlation is declared, not ambient.** `StructuredQuery.correlate` lists the
+outer columns a nested subquery may read. SQL makes every enclosing column
+implicitly visible; QueryGate does not, because the enforcement chokepoint is the
+canonical visitor, and a ref resolving against a scope the visitor was not looking
+at is exactly the silent policy-and-mask bypass the plan's invariant 2 names as its
+most important rule. Each declared ref is checked against the **enclosing** scope's
+name map for table allow-deny, column allow-deny and the mask rule. An UNdeclared
+outer ref is rejected exactly as it was before this item, so the pre-106 behavior is
+the default and correlation is opt-in per subquery.
+
+**Reach is one level, and that had to be enforced rather than assumed.** The first
+implementation resolved a child's declared refs against the parent's already-
+reflected tables — which include the tables the PARENT had correlated to. That made
+correlation transitively reach a grandparent, so "one level" held in name only. Found
+by the grandparent case in `test_correlation_boundary.py`; the fix resolves against
+the parent's OWN from/join/cte names.
+
+**Scalar subqueries return exactly one row by construction.** A `value_subquery` on
+a scalar comparison op must be an aggregate with no `group_by`. `LIMIT 1` was
+rejected because it picks an arbitrary row — a wrong answer with no error, the class
+items 102/117 established is worse than a rejection — and letting the backend raise
+was rejected as dialect-dependent and post-execution. The required shape is also
+what the use case actually is: "> the overall average", "> this customer's own
+average". A `set_op` inside a scalar subquery is refused for the same arity reason.
+
+**`EXISTS` is an operator on `Predicate`, not a third `WhereNode` member.** A new
+union member would force `iter_where_predicates`, `_compile_where`,
+`predicate_column_refs`, `where_depth` and both write validators to learn a shape
+whose failure mode is a consumer silently handling only what it knows — the argument
+items 104 and 105 already turned on, now settled precedent. It behaves like the
+`is_null` operators that take no value. The new ops live on a read-only
+`ReadCompareOp`: `CompareOp` is shared with the write AST, so widening it would have
+advertised `exists` in the write tool's MCP schema while the write path rejects it,
+which is precisely item 114's defect. A new test pins the operator-set relationship,
+because the pre-existing field-level narrowing guard cannot see an operator change.
+
+**Placement.** WHERE takes EXISTS and both subquery shapes. HAVING takes a SCALAR
+subquery (comparing an aggregate to an aggregate is what HAVING is for) but not
+EXISTS (a per-row test has no meaning after grouping) and still not `IN (subquery)`
+— item 97's rule, deliberately not widened. HAVING previously compiled with
+`ctx=None`, which WAS the compiler-side backstop for that rule; since it now needs a
+ctx, the backstop is preserved explicitly as `_WhereCtx.allow_value_set_subquery`
+rather than quietly lost.
+
+**Caps.** `max_correlated_refs` (default 2) summed tree-wide; `max_subquery_depth`
+charges an EXISTS scope like any other nesting; every count cap already sums across
+the new scopes because `iter_query_scopes` yields them. Stated honestly in the
+field's own comment: this caps the correlation SURFACE, not its cost — a correlated
+subquery is re-evaluated per candidate outer row, and what bounds that is
+`timeout_seconds`, the concurrency limiter and item 26's cost gate where enabled.
+
+**Audit.** An EXISTS scope's full shape is recorded, and so is each subquery's
+`correlate` list — the exact set of outer columns a nested scope was permitted to
+see is the most security-relevant fact about a correlated query, and it is column
+identifiers only, never values.
+
+**One listed capability deliberately did NOT ship: a scalar subquery in a SELECT
+projection.** It is the position with the worst cost profile (once per output row)
+and the widest blast radius (a new `SelectItem` member reaching output naming, the
+ref-position taxonomy, set-op arity and `top_n`), and it is the one shape already
+composable from exposed primitives — an aggregating cte plus a LEFT JOIN, which is
+only a real recipe *because* item 105 shipped. Recorded in the Decision Log rather
+than left as a silent gap between the item's write-up and its code.
+
+**Verification.** **18/18 enforcement points mutation-verified**, across the
+validators, the compiler, the audit shape and the scope walk. One survivor on the
+first pass was informative rather than a gap: the masked-correlated-ref check is
+already covered by the generic per-scope mask rule, so it is defence in depth — the
+test now matches its specific message, which pins the layer instead of pinning
+neither. 12 unit + 23 adversarial-boundary + 4 end-to-end tests, and **5 cross-dialect
+differential cases executed against live Postgres AND live SQL Server** with rows
+compared equal: the EXISTS/NOT EXISTS partition, the row-11 scalar comparison, a
+correlated per-outer-row scalar subquery, the HAVING position, and `NOT EXISTS` over
+a nullable correlated column (the classic `NOT IN`-vs-`NOT EXISTS` divergence,
+recorded by execution rather than assumed).
+
+Two test-design choices are load-bearing rather than incidental. The EXISTS cases
+filter on `status='cancelled'` because every customer in the demo seed has orders —
+an unfiltered EXISTS/NOT EXISTS partition is all-vs-none, which an implementation
+IGNORING the correlated row reproduces exactly. And the correlated scalar case
+asserts its answer DIFFERS from the same query using the global average, so a
+dropped correlation cannot pass.
+
+**Consumers of the new scope are tested, not assumed.** The audit shape (which
+records the nested scope AND its `correlate` list), the 32C usage signals, the
+item-92 approval gate and `referenced_tables_tree_wide` each get an explicit test
+against an EXISTS scope — the group the plan's frontier note calls the recurring
+miss. Composition with the other two containers is covered too: an EXISTS inside a
+cte body and inside a set-operation arm, each correlating to the right parent.
+
+**MCP cost, measured rather than assumed** (the discipline item 104 set): the two
+new fields add ~67 characters to `StructuredQuery`'s JSON Schema, which sits at
+37,073 against a 116,000-character total MCP budget.
+
 ### 107. Batch query execution double-reserves quota on an approval retry ✅ DONE
 
 **Effort: S. Priority: medium (real throughput bug, narrow blast radius).
@@ -6652,3 +7213,203 @@ bucketing a real timestamp still works, and a live PG+MSSQL pair asserting both
 servers now give the *same* typed rejection — a divergence is closed by making the
 two agree, not by picking a winner. Mutation-verified: reverting the `date_bucket`
 branch fails 4 tests, including the coverage gate.
+
+### 118. `min_group_size` was defeated by any fan-out join ✅ DONE
+
+The item-88 k-anonymity floor is compiled as `HAVING count(*) >= k`, which counts
+**joined** rows rather than distinct underlying rows. Any join matching more than
+one right-hand row per left-hand row multiplied a group's count and lifted a
+single-row group above the floor, so the group was returned.
+
+**Measured before the fix.** With `k=5`, one person at `salary=100`, five at
+`salary=200`, and a 10-row table sharing a `tenant` value:
+
+| query | result |
+| --- | --- |
+| no join (control) | `[200]` — floor works |
+| `JOIN big ON person.tenant = big.tenant` (**equality**) | `[100, 200]` — floor defeated |
+| `JOIN big ON person.id != big.id` (non-equi) | `[100, 200]` — floor defeated |
+
+The equality row uses only the `on` form, which shipped long before item 103's
+`condition` — so this was a **pre-existing** gap surfaced by item 103's audit, not
+a non-equi-join regression, and a fix rejecting only inequality conditions would
+have been theater.
+
+**What shipped.** When `min_group_size` is set on an aggregate query, a join that
+**can** fan out is refused with a typed `PolicyViolationError` rather than answered.
+This is the posture item 101 already established for aggregate windows under this
+floor: when the floor cannot be enforced correctly, fail closed instead of returning
+an answer the policy believes is protected.
+
+**The rejection is scoped, not a blanket ban** — which is the whole design, since a
+deployment that sets the floor is exactly the one that still needs joins. A join
+cannot fan out iff it pins a set of the joined table's columns by equality and that
+set covers one of the table's unique keys, read from reflected metadata (primary
+key, plus unique constraints and unique indexes — backends surface these
+differently, so all three are read). Verdicts:
+
+| join shape | verdict |
+| --- | --- |
+| onto the target's PRIMARY KEY (the ordinary dimension join) | allowed |
+| onto a UNIQUE non-PK column | allowed |
+| an equality `condition` onto the PK (item 103's spelling) | allowed |
+| composite key via `extra_on` covering a composite unique key | allowed |
+| onto a NON-unique column | refused |
+| a range/non-equi condition | refused |
+| a cross join | refused |
+| an OR/NOT condition tree (pins nothing) | refused |
+
+Both spellings of an equality join are read, so item 103's `condition` form is not
+penalised for expressing the same thing a different way. The direction is
+fail-closed: an unreflected uniqueness constraint costs a rejection, whereas a
+missed fan-out would cost the guarantee.
+
+**Unchanged for everyone else.** The rule only fires when `min_group_size` is set
+(opt-in, off by default) and only on aggregate queries — a plain row read with a
+fan-out join is governed by mandatory row filters, not group size. Both are
+asserted.
+
+**Coverage.** `tests/security/test_adversarial_security.py::test_k_anonymity_floor_cannot_be_defeated_by_a_fan_out_join`
+executes against a real database and was *inverted from the test that pinned the
+leak* — its earlier revision carried the instruction to do exactly that, and it
+failed with that message the moment the fix landed. Eight parametrized unit cases
+in `tests/unit/test_nonequi_joins.py` cover every row of the table above plus the
+two "rule does not apply" cases.
+
+**Doc reconciliation.** The disclosure added while the gap was open — in
+`docs/THREAT_MODEL.md` QG-29, `docs/INFERENCE_RISKS.md` R3 (headline, gap bullet,
+closing summary), `README.md`, `examples/policy.example.yaml`,
+`Policy.min_group_size`'s docstring and `landing/security.html` — was replaced with
+the accurate statement of what now holds.
+
+### 119. `top_n` mis-resolves and DROPS a column when two projections share a base name ✅ DONE
+
+**The defect.** `_apply_top_n` materializes a query in a derived table, but it
+rebuilt both the outer projection and the aggregate rank targets by output
+**name**. Two projections can legitimately share a base name — for example
+`customers.id` and `orders.id`. SQLAlchemy disambiguates the derived table's keys,
+but both columns still report `.name == "id"`, so name lookup selected
+`customers.id` twice and silently dropped `orders.id`. In the grouped path the
+same collision also made `ORDER BY orders.id` rank by `customers.id`, returning a
+different row set without an error.
+
+**What shipped.** `_apply_top_n` now binds all three derived-table relationships
+by position, which is unambiguous because a derived table preserves its SELECT
+list order:
+
+- the grouped/aggregate materialization maps each written select reference to the
+  derived column at the same position, so partition and ordering references resolve
+  to the column the caller named;
+- the ranked query carries every materialized column positionally; and
+- the outer projection and its alias map carry those same positions, so both
+  same-named columns reach the response (`id` and SQLAlchemy's stable
+  disambiguated `id_1` key).
+
+Duplicate output names were not rejected globally: ordinary non-`top_n` queries
+already preserve both under disambiguated response keys, and the existing AST
+lets a caller alias a computed projection when a semantic name matters. The fix
+makes `top_n` behave like the ordinary path instead of turning a valid request
+into a wrong answer. The obsolete name-only `_ref_output_name` helper was removed.
+
+**Coverage.** A compiler regression test asserts grouped `top_n` orders by the
+second derived `id` column, projects both columns, and resolves an outer
+`ORDER BY` through the rebuilt alias map. A real SQLite integration test runs
+through the REST request pipeline and proves that, for every customer that has an
+order, the response contains both the customer id and the maximum order id the
+caller ranked by. All three derived-table mappings were mutation-verified
+independently: rebinding the rank reference, the outer projection, or the outer
+alias map to the first column each fails a distinct assertion for the expected
+wrong-answer reason. (The alias-map leg was added on 2026-07-27 during the
+completion audit, which found that binding untested — it is only reachable when
+the query carries an outer `order_by`.)
+
+### 120. The audit shape records nothing for a nested `IN (subquery)` ✅ DONE
+
+**The defect.** `normalize_query_shape` already recursed into set-operation arms
+and CTE bodies, but `_predicate_shape` had no `value_subquery` branch. An event
+for `WHERE customer_id IN (SELECT … FROM employees)` therefore named only the
+outer table even though the attempted query read another governed scope. This
+was an audit-fidelity gap on the Proof pillar, present since item 97.
+
+**What shipped.** A predicate carrying `value_subquery` now records that nested
+scope through the same recursive `normalize_query_shape` authority used for the
+root query, set-operation arms, and CTE bodies. Because the branch lives in
+`_predicate_shape`, it applies everywhere that function is reached — WHERE,
+HAVING, join conditions, and a searched CASE written as an *expression*
+(`CaseExpr`) — including attempts that policy or schema validation later reject.
+The persisted structure includes the nested `from`, joins, select shape, boolean
+predicate structure, and any deeper subquery/set-operation scopes.
+
+One position is deliberately **not** covered: a searched CASE written as a
+select-item (`CaseSelectItem`) records `branch_count` and its column refs but not
+its condition subtree, so `_predicate_shape` is never reached there. That is a
+pre-existing gap in `_select_shape`, not one this item introduced, and it is
+tracked as item 123 rather than folded in here.
+
+The redaction contract is unchanged: nested predicates and expressions use the
+same shape walkers as the root, which record operators and column identifiers but
+omit predicate values, CASE results, and other expression literals. Query-shape
+normalization runs before validation so rejected attempts remain auditable;
+pydantic's own recursion detection rejects a `value_subquery` chain past ~127
+levels as a 422 before any walker runs, and the policy depth cap
+(`max_subquery_depth`) bounds accepted subqueries.
+
+**Coverage.** Unit tests assert the exact nested table/join/boolean shape, recurse
+through a second subquery plus CASE and set-operation positions, and prove none
+of their sentinel literals appears. A JSONL test exercises
+`StructuredQueryService.execute` through a rejected attempt and inspects the
+persisted event itself. A security-marked test pins the same no-leak property for
+a policy-rejected subquery. Removing the branch, replacing the recursive walk
+with a raw model dump, and breaking the persisted-event path were
+mutation-verified to fail for the intended fidelity/redaction reasons.
+
+### 121. Report-only surfaces still assume a query has one scope ✅ DONE
+
+**Shipped.** Enforcement was always scope-correct (items 97 + 104); three
+*reporting* surfaces were not, and both containers were affected.
+
+* `ExplainResult.tables` (`execution/service.py`) reported only the outer scope's
+  tables while the same response's `sql` named every arm's and every subquery's —
+  two fields of one response contradicting each other. It now derives from the
+  populated `scope_tables` map, so it describes the statement it returns.
+* The candidate policy simulator (`admin/service.py`) built its
+  mandatory-filter-readiness set from the scope-local `referenced_tables`, so a
+  filter whose table appeared only in an arm or a subquery was invisible: an
+  operator could be told a principal was `allow` for a request execution would
+  then refuse on a missing claim. It now uses a new
+  `referenced_tables_tree_wide`.
+
+`referenced_tables` itself was deliberately **left scope-local**: `_validate_scope`
+calls it per scope and must, because a scope's aliases mean nothing outside it.
+The tree-wide version is a separate function for the reporting callers, not a
+change to the enforcement path.
+
+Neither was a bypass — the simulation was strictly *less* permissive than
+enforcement — but a tool whose whole value is predicting enforcement should not be
+wrong about it. Surfaced by the item-104 completion audit.
+
+**Coverage.** `tests/integration/test_set_operation_end_to_end.py` asserts explain
+reports every arm's tables and a nested subquery's table, in both cases checking
+the `tables` field against the `sql` field of the same response.
+
+### 122. `_unique_column_sets` crashed on any FROM element that is not a `Table` ✅ DONE
+
+- Why: it was annotated `sa.Table` and reached straight for `.primary_key.columns`.
+  Only a `Table` has that — `Alias`, `Subquery` and `CTE` expose `.primary_key` as a
+  bare `ColumnSet` with no `.columns`. Item 118's k-anonymity fan-out check runs on
+  the JOINED table, so **`min_group_size` plus any join carrying an `alias` raised
+  `AttributeError`** — a 500 where a policy answer belonged. Measured 2026-07-27,
+  reproducible with no cte involved; live since item 118 shipped, and never
+  exercised because every item-118 test joined an unaliased table.
+- Fixed: an alias looks through to its element (same rows, new name, so uniqueness
+  is preserved); a cte or subquery has no declared uniqueness and returns empty,
+  which makes `_join_can_fan_out` answer "can fan out" — the fail-closed direction
+  the floor requires, since a computed stage may hold several rows per join key.
+- Surfaced by the item-105 build, which joins onto a `CTE` and hit the same line
+  from a new direction. It is the blind spot ROADMAP.md's frontier note names:
+  mutation testing probes the rules an item *adds*, not the existing consumers of a
+  value whose *type* widened.
+- Regression test: `tests/unit/test_cte.py::test_unique_column_sets_handles_every_from_element_shape`
+  and `::test_min_group_size_with_an_aliased_join_decides_instead_of_crashing`.
+
+**Effort: S. Priority: high (a crash on a shipped guardrail).**

@@ -87,10 +87,40 @@ from querygate.metrics import (
     classify_rejection,
 )
 from querygate.policy.models import CostEstimationMode, Policy
-from querygate.query_ast.models import StructuredQuery
+from querygate.query_ast.models import JoinSpec, Predicate, StructuredQuery
 from querygate.schema.reflection import get_table_schema, list_live_tables, sanitize_table_name
 from querygate.validation.policy_validation import validate_policy
-from querygate.validation.schema_validation import validate_schema
+from querygate.validation.schema_validation import (
+    declared_cte_names,
+    iter_query_scopes,
+    validate_schema,
+)
+
+
+def _join_relationship_pair(join: JoinSpec) -> Optional[Tuple[str, str]]:
+    """The `[LeftTable.Col, RightTable.Col]` pair a join asserts, or None.
+
+    Item 32C's `RELATIONSHIP_USED` signal records one column-to-column
+    relationship, so this answers "does this join assert exactly one, and which?"
+
+    Both spellings of an equality join return the same pair, deliberately. Item
+    103 made `condition` a second way to write `ON a.x = b.y`, and reading only
+    `on` would have meant the newer spelling silently taught the catalog nothing
+    — the same spelling asymmetry `audit/events.py`'s `value_column` exists to
+    prevent, one layer over. A range/temporal join, a multi-predicate condition
+    and a cross join genuinely assert no single pair, and return None.
+    """
+    if join.on is not None:
+        return join.on[0], join.on[1]
+    condition = join.condition
+    if (
+        isinstance(condition, Predicate)
+        and condition.op == "eq"
+        and condition.col is not None
+        and condition.value_col is not None
+    ):
+        return condition.col, condition.value_col
+    return None
 
 
 class TableCatalogInfo(pyd.BaseModel):
@@ -345,7 +375,13 @@ class StructuredQueryService:
             principal=self._principal,
             subquery_tables=scope_tables,
         )
-        return stmt, limit, tables, dialect
+        # Every scope's effective table names, not just the outer scope's — the
+        # explain response reports what the statement will READ, and since item 104
+        # a set operation's other arms (and, since item 97, a nested subquery) are
+        # named in the returned SQL but were missing from `tables`, so two fields of
+        # one response contradicted each other (TODO.md item 121).
+        touched = {name for scoped in scope_tables.values() for name in scoped}
+        return stmt, limit, touched or set(tables), dialect
 
     async def _estimate_cost(
         self, dialect: DatabaseDialect, session, stmt: sa.Select
@@ -435,58 +471,81 @@ class StructuredQueryService:
     def _usage_signal_targets(
         self, query: StructuredQuery
     ) -> List[Tuple[CatalogUsageSignalKind, CatalogDraftTarget]]:
-        """Relationship targets use JoinSpec.on's own documented convention
+        """Relationship targets use the join's own documented convention
         (``[LeftTable.Col, RightTable.Col]``) to decide which side is
         ``table``/``column`` vs. ``to_table``/``to_column`` — the same
         ordering the AST author already committed to, not a new inference.
         Cross-connection joins (``join.connection`` set) are skipped: their
         target table lives in a different connection's catalog.
+
+        Walks every scope (``iter_query_scopes``), so a set-operation arm
+        (item 104) or a nested ``IN (subquery)`` (item 97) teaches the catalog the
+        tables and relationships it actually used. Reading only the outer scope
+        made the second arm of a union invisible to 32C — a fidelity gap, not a
+        safety one, but the same "a consumer assumed one scope" class the audit
+        shape and the approval gate had.
         """
 
-        targets: List[Tuple[CatalogUsageSignalKind, CatalogDraftTarget]] = [
-            (
-                CatalogUsageSignalKind.TABLE_USED,
-                CatalogDraftTarget(
-                    connection_id=self._connection_id,
-                    object_type=CatalogDraftObjectType.TABLE,
-                    table=query.from_table,
-                ),
-            )
-        ]
-        tables_seen = {query.from_table}
-        for join in query.joins:
-            if join.connection is not None:
-                continue
-            if join.table not in tables_seen:
-                targets.append(
-                    (
-                        CatalogUsageSignalKind.TABLE_USED,
-                        CatalogDraftTarget(
-                            connection_id=self._connection_id,
-                            object_type=CatalogDraftObjectType.TABLE,
-                            table=join.table,
-                        ),
-                    )
-                )
-                tables_seen.add(join.table)
-            left, right = join.on
-            if "." not in left or "." not in right:
-                continue
-            left_table, left_column = left.split(".", 1)
-            right_table, right_column = right.split(".", 1)
+        targets: List[Tuple[CatalogUsageSignalKind, CatalogDraftTarget]] = []
+        tables_seen: set = set()
+
+        def _add_table(name: str) -> None:
+            if name in tables_seen:
+                return
+            tables_seen.add(name)
             targets.append(
                 (
-                    CatalogUsageSignalKind.RELATIONSHIP_USED,
+                    CatalogUsageSignalKind.TABLE_USED,
                     CatalogDraftTarget(
                         connection_id=self._connection_id,
-                        object_type=CatalogDraftObjectType.RELATIONSHIP,
-                        table=left_table,
-                        column=left_column,
-                        to_table=right_table,
-                        to_column=right_column,
+                        object_type=CatalogDraftObjectType.TABLE,
+                        table=name,
                     ),
                 )
             )
+
+        # A cte name (item 105) is a stage this statement computes, not an object in
+        # the database — teaching 32C that a table by that name exists would put a
+        # phantom into the catalog that no refresh could ever reconcile. The real
+        # tables are still learned: each block's body is its own scope in this walk.
+        cte_names = declared_cte_names(query)
+
+        for _depth, scope in iter_query_scopes(query):
+            if scope.from_table.lower() not in cte_names:
+                _add_table(scope.from_table)
+            for join in scope.joins:
+                if join.connection is not None or join.table.lower() in cte_names:
+                    continue
+                _add_table(join.table)
+                pair = _join_relationship_pair(join)
+                if pair is None:
+                    # A cross join, or a condition that expresses something other
+                    # than one column-equals-column relationship (a range/temporal
+                    # join, or a multi-predicate tree) — there is no single
+                    # [Left.Col, Right.Col] pair for a RELATIONSHIP_USED signal to
+                    # carry. Skip it; the TABLE_USED signals above still stand.
+                    # `continue`, never an unpack: this list is built eagerly, so
+                    # raising here would discard the whole batch, including the
+                    # table signals already collected.
+                    continue
+                left, right = pair
+                if "." not in left or "." not in right:
+                    continue
+                left_table, left_column = left.split(".", 1)
+                right_table, right_column = right.split(".", 1)
+                targets.append(
+                    (
+                        CatalogUsageSignalKind.RELATIONSHIP_USED,
+                        CatalogDraftTarget(
+                            connection_id=self._connection_id,
+                            object_type=CatalogDraftObjectType.RELATIONSHIP,
+                            table=left_table,
+                            column=left_column,
+                            to_table=right_table,
+                            to_column=right_column,
+                        ),
+                    )
+                )
         return targets
 
     def _emit_usage_signals(self, query: StructuredQuery, *, admission_id: str) -> None:

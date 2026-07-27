@@ -205,6 +205,7 @@ aggregates (`agg.*`), `date_bucket`, `string_agg`/`array_agg`,
 `percentile_cont`, scalar functions (`fn`/`fn_select`), `case`/`when`,
 computed expressions (`expr`/`expr_fn`/`cast` and Python `+ - * /` over
 columns; item 100), window functions (`window`/`frame`; item 101), `top_n`,
+set operations (`.union()`/`.intersect()`/`.except_()`; item 104),
 and a bounded `IN (subquery)` (a predicate's `value_subquery` — a
 nested `StructuredQuery`, not raw SQL; uncorrelated, single-connection,
 depth-capped, with all caps summed tree-wide; item 97) cover the AST.
@@ -319,6 +320,11 @@ razor-thin filter — a `count(*)` over a group backed by fewer than *k* rows is
 suppressed rather than returned. It is the aggregate analog of a mandatory row
 filter (policy-driven, injected, non-removable) and applies only to aggregate
 queries; it closes single-query singling-out, not multi-query differencing.
+Because the floor counts *joined* rows, a join that can match many rows per row
+would inflate the count — so while `min_group_size` is set, such a join is refused
+on an aggregate query rather than silently answered (item 118). Joining onto the
+target table's primary key or a unique column matches at most one row and is
+unaffected.
 
 ### Column-value masking (not just allow/deny)
 
@@ -1210,14 +1216,19 @@ bounded to 2000 entries per catalog file.
 
 `POST /api/v1/demo/query` with that body — or `run_structured_queries` over
 MCP with `connection: "demo"` and `queries: [<that object>]` — runs it.
-Supported: multi-column select, inner/left joins (including cross-connection
+Supported: multi-column select, inner/left/full/cross joins with either an
+equality `on` pair or a general `condition` predicate tree for range/temporal
+joins (including cross-connection
 joins within a policy `join_group`), nested and/or `where`, `group_by` /
 `having`, `order_by`, `limit`/`offset`, aggregate and date-bucket select
 items, `top_n` per-partition ranking (top-N-per-group), computed **expressions**
 anywhere a scalar belongs — arithmetic, nested functions, casts, `CASE`,
 including inside an aggregate, so `SUM(quantity * unit_price)` and conditional
-aggregation are expressible (item 100) — and **window functions** for running
-totals, moving averages, rank-in-place and lag/lead (item 101). Every one of
+aggregation are expressible (item 100), **window functions** for running
+totals, moving averages, rank-in-place and lag/lead (item 101), and **set
+operations** — `UNION`/`INTERSECT`/`EXCEPT` combining several queries into one
+statement, each arm independently policy-checked and independently filtered
+(item 104). Every one of
 those is a typed AST node checked against the policy and the live schema; none
 of them is a SQL string.
 

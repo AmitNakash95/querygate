@@ -1,13 +1,20 @@
 # Expressive Query Engine — Path to 10/10 (Flagship Pillar Plan)
 
-**Status (2026-07-26):** in progress — **Phase 0 (item 99), Phase 1 (item 100) and
-Phase 2 (item 101) have shipped.** Phase 3a (item 102, `EXTRACT`/date_part +
-relative-date helpers) is next; its Decision Log entry (§8 entry 4 — interval cap
-+ timezone semantics) is the first step of that item. Phases 3b–5 (items 103–106)
-are unstarted. **The `Expression` substrate items 102–106 all build on is real**
-(`query_ast/models.py`'s `Expression` union + `_compile_expression`); reuse it
-rather than adding a parallel scalar shape — item 101's `WindowSelectItem.arg`
-is the worked example. **Owner:** engine. **Audience:** the
+**Status (2026-07-27):** in progress — **Phase 0 (item 99), Phase 1 (item 100),
+Phase 2 (item 101), Phase 3a (item 102), Phase 3b (item 103), Phase 4a (item 104)
+Phase 4b (item 105, which ABSORBED item 97 phase 2) and Phase 5 (item 106) have
+ALL shipped — this plan's item list is complete at **15/16** on the regression bar,
+the one gap being a window-as-`Expression` operand that has no item yet. **The `Expression`
+substrate items 105–106 build on is real** (`query_ast/models.py`'s `Expression`
+union + `_compile_expression`); reuse it rather than adding a parallel scalar
+shape — item 101's `WindowSelectItem.arg`, item 102's three date nodes and item
+103's `JoinSpec.condition` are the worked examples. **The scope-container
+substrate is real** (`iter_query_scopes` + `iter_set_op_arms` + the per-scope
+`subquery_tables` map): items 104 and 105 are the two worked examples of adding a
+scope container, and item 106 should extend those rather than introduce a fourth
+scope enumeration. Item 105 also left `select_item_output_name` as the single
+authority on what a select item is named in the result — item 106's scalar
+subquery will need it. **Owner:** engine. **Audience:** the
 implementing agent (Claude) + reviewers.
 **Authority:** this is the *deep spec* the read-engine expressiveness items point
 to. Item **content** and `✅ DONE` status live in `TODO.md`; execution **order**
@@ -16,8 +23,11 @@ re-sequence). This document is the reference those items cite — it does not
 replace them.
 
 > **Item numbering.** Items 99–106 are already allocated to this plan's phases and
-> exist in `TODO.md`. The highest allocated item file-wide is **113**, so a genuinely
-> new item takes **114** — never reuse a number in this range. (This line previously
+> exist in `TODO.md`. The highest allocated item file-wide is **121**, so a genuinely
+> new item takes **123** (122 was allocated by the item-105 build).
+> Never reuse a number in this range. (Check the highest
+> `### N` heading in `TODO.md` rather than trusting this line; it has gone stale
+> twice.) (This line previously
 > read "next free number is **99**", which was true only before item 99 was created;
 > it is a trap now, since item numbers are permanent and file-global per CLAUDE.md.)
 
@@ -393,10 +403,50 @@ gated by policy; join cap still summed tree-wide.
 
 **Goal.** Server-side `UNION [ALL]`, `INTERSECT`, `EXCEPT`.
 
-**AST.** New top-level shape wrapping N `StructuredQuery` arms + op + `all: bool`.
-Arms must have matching select arity/types. This is a new **scope container** —
-extend `iter_query_scopes` so each arm is validated as its own scope (mirror item
-97's scoping exactly).
+**AST.** *(Amended 2026-07-27 to what actually shipped — the two paragraphs this
+replaces were still specifying a design the build deliberately rejected, and item
+105 reads the Phase 4b section directly below them.)*
+
+`StructuredQuery.set_op: Optional[SetOpSpec]`, where `SetOpSpec` is `{op, all,
+arms: List[StructuredQuery]}` and **the query carrying `set_op` is arm 1**. This is
+*not* the "new top-level shape wrapping N arms" originally sketched here: a second
+top-level type would have made every pipeline signature a
+`Union[StructuredQuery, SetOperationQuery]` (REST, MCP, templates, audit,
+approval, cost estimation) or made `from`/`select` optional on every query, and the
+failure mode of that change is a consumer silently handling one member. Recorded
+in `docs/PRODUCT_GUIDE.md`'s Decision Log, 2026-07-27, with the full reasoning.
+
+Consequences worth carrying into Phase 4b: the carrier's `order_by`/`limit`/
+`offset` bound the **statement** while its `where`/`joins`/`group_by`/`having`
+bound arm 1 (SQL's own split), an arm may not set those four or nest its own
+`set_op`, and `top_n` is rejected alongside `set_op`.
+
+Arms must have matching select **arity** and compatible select **types** — both
+halves of the original spec shipped.
+
+This is a new **scope container**: `iter_query_scopes` yields each arm as its own
+scope, but at the **same depth** as the carrier, *not* one deeper — an arm is a
+sibling SELECT, so charging it against `max_subquery_depth` would be wrong, and
+depth+1 would additionally make an arm look like an `IN (subquery)` to the two
+rules that branch on `depth > 0`. So this **does not** "mirror item 97's scoping
+exactly", as this section originally said.
+
+**Arm select types — a measured divergence, closed.** Measured on both live
+servers: an integer column in arm 1 against a text CAST of it in arm 2 is a hard
+error on Postgres and **succeeds on SQL Server** (data-type precedence converts
+the varchar side back to int and returns rows). The identical AST was therefore a
+failure on one backend and an answer on the other — the items 75/82 class.
+`_validate_set_op_arm_types` now refuses it pre-database on every dialect.
+
+The check is **narrow by construction**, the same posture `_validate_date_operands`
+takes: it compares coarse type FAMILIES (numeric / text / boolean / temporal) and
+only at positions where two or more arms have a statically-knowable one. Integer
+and numeric are the same family, as are date and timestamp, because both backends
+union them happily — over-rejecting a valid query would be the worse failure.
+Arithmetic, function calls and CASE return "unknown" and are left to the database
+rather than reproducing each backend's promotion rules. Knowable shapes today:
+a bare column (reflected type), a `CastExpr` target, a literal, `count`,
+`date_bucket` and `string_agg`.
 
 **Caps.** `Policy.max_set_op_arms`; all existing caps summed across arms via the
 tree-wide enforcer. Each arm gets full policy/schema validation and its own
@@ -418,13 +468,19 @@ client merge; server-side dedup/`INTERSECT`/`EXCEPT` are the real unblock.
 **Goal.** A subquery as a FROM/JOIN source and named `WITH` blocks, enabling
 multi-stage single-statement analysis (aggregate-then-join, dedup-then-rank).
 
-**AST.** Allow `from`/`JoinSpec.table` to be a named subquery (a `StructuredQuery`
-+ alias) in addition to a physical table name. New scope container → extend
-`iter_query_scopes`, `effective_name_map`, and the reflected-tables plumbing
+**AST.** *(Corrected 2026-07-27 during the build — this paragraph originally
+specified a union on `from`/`JoinSpec.table`; see the `docs/PRODUCT_GUIDE.md`
+Decision Log entry of that date for why it lost, and note it is the same shape
+item 104 rejected the day before.)* A new additive `StructuredQuery.ctes` list of
+named `WITH` blocks. `from`/`JoinSpec.table` **stay `str`** and resolve to a CTE
+when one of that name is declared — so no existing field changes type, and a
+consumer that has never heard of a CTE fails closed (the name reflects as a table
+and is rejected) instead of silently mishandling a new union member. New scope
+container → extend `iter_query_scopes` and the reflected-tables plumbing
 (`subquery_tables` map already exists for item 97 — generalize it).
 
-**Caps.** `Policy.max_cte_count` + reuse `max_subquery_depth` for nesting. Summed
-tree-wide.
+**Caps.** `Policy.max_cte_count` + reuse `max_subquery_depth`, charged along the
+CTE *reference chain* (a CTE reading a CTE costs 2). Summed tree-wide.
 
 **Adversarial / tests.** A CTE must not become a channel to reference a denied
 table, dodge a mandatory row filter, or surface a masked column as a non-projection
@@ -475,20 +531,20 @@ report becomes a new row here first, then an item.
 | --- | --- | --- | --- |
 | 1 | `SUM(quantity*unit_price)` where paid | ✅ **100** | 100 |
 | 2 | Per-region `SUM(CASE WHEN status='paid' THEN amount ELSE 0 END)` | ✅ **100** | 100 |
-| 3 | 7-day moving average of daily orders | ❌ (2 queries) | 105 (**not** 101 — see below) |
+| 3 | 7-day moving average of daily orders | ✅ **105** | 105 (**not** 101 — see below) |
 | 4 | Each customer's most-recent order | ✅ | `top_n` (n=1) |
 | 5 | Running cumulative total | ✅ **101** | 101 |
-| 6 | Cohort retention via CTE | ❌ (multi-query) | 105 |
+| 6 | Cohort retention via CTE | ✅ **105** | 105 |
 | 7 | Top category per region **by revenue** | ✅ **100** | 100 |
-| 8 | UNION of high-value + dormant segments | ❌ (client merge) | 104 |
+| 8 | UNION of high-value + dormant segments | ✅ **104** | 104 |
 | 9 | Median order value per region | ✅ PG / ⛔ MSSQL | `percentile_cont` |
 | 10 | Customers with no orders (anti-join) | ✅ | LEFT JOIN + `is_null` |
-| 11 | Customers spending > overall average | ❌ (two round-trips) | 106 (or compose) |
+| 11 | Customers spending > overall average | ✅ **106** | 106 |
 | 12 | Orders in last 7 days | ✅ **102** | 102 |
 | 13 | Case-insensitive name search | ✅ | `lower(col) like …` |
 | 14 | Rank products with ties (WITH TIES) | ✅ | `top_n fn=rank` |
 | 15 | Each order's % of total (`amount / SUM(amount) OVER ()`) | 🟡 both halves exist; not in one expression | a window-as-`Expression` item (see below) |
-| 16 | Price-band join (`ON price BETWEEN lo AND hi`) | ❌ | 103 |
+| 16 | Price-band join (`ON price BETWEEN lo AND hi`) | ✅ **103** | 103 |
 
 Baseline at plan time: **5/16 fully expressible, 2 cleanly composable.** After
 items 99 + 100: **8/16** — rows 1, 2 and 7 went green, each covered end-to-end in
@@ -499,8 +555,62 @@ items 99 + 100: **8/16** — rows 1, 2 and 7 went green, each covered end-to-end
 MSSQL in `tests/integration/test_cross_dialect_differential.py`. After item 102:
 **10/16** — row 12 (orders in the last N days) went green, covered in
 `tests/integration/test_date_primitives_end_to_end.py` and on both real backends
-in the differential suite. The remaining ❌ set is 3, 6, 8, 11, 16 —
-derived-table/set-ops/correlated/non-equi, which Phases 3b–5 finish.
+in the differential suite. After item 103: **11/16** — row 16 (a price-band
+join) went green, covered in `tests/integration/test_nonequi_join_end_to_end.py`
+and on real Postgres *and* real MSSQL in the differential suite. After item 104:
+**12/16** — row 8 (a UNION of two customer segments) went green, covered in
+`tests/integration/test_set_operation_end_to_end.py` and on both real backends in
+the differential suite. After item 105: **14/16** — rows 3 (a 7-day moving average
+over daily order counts) and 6 (cohort retention) went green, covered in
+`tests/integration/test_cte_end_to_end.py` and on real Postgres *and* real MSSQL
+in the differential suite. After item 106: **15/16** — row 11 (each row compared
+against an aggregate over the whole table, in one statement) went green, covered in
+`tests/integration/test_correlated_end_to_end.py`. The ONLY remaining gap is **15**
+(a window function as an `Expression` operand), which is explicitly NOT item 106 and
+has no item yet — see item 101's correction below. **Phase 5 is complete and this
+plan's item list is finished.**
+
+**What item 104 was worth, stated precisely** — and row 8 needs the same honesty
+row 12 got, including a correction to the first draft of this paragraph. A
+`UNION ALL` was already composable client-side (run both arms, concatenate). And
+the categorical claim that "dedup/intersect/except became *possible*" was **too
+strong**: since item 97, a single-column INTERSECT was expressible server-side as
+`WHERE c IN (SELECT c FROM b)` and a single-column EXCEPT as `not_in`;
+`StructuredQuery.distinct` already gave server-side de-duplication; and a
+two-segment union over ONE table is `WHERE (A) OR (B)` plus `distinct` — which is
+literally the high-value-or-dormant framing the product guide opens its section
+with.
+
+What genuinely had no expression before this item: arms with **different shapes** —
+a different `from` table, different joins, a different `group_by` per arm —
+multi-column set semantics, and one `ORDER BY`/`LIMIT` applied over the combined
+result. That is the real gain, and it is narrower than "intersect became
+possible."
+
+As with item 102, the larger outcome was not the row that turned green — it was a
+**measured guardrail failure the build surfaced**: SQLAlchemy's MSSQL dialect
+silently drops `.limit()` on a `CompoundSelect` (no `TOP`, no `FETCH`, no error),
+so the obvious implementation would have made `clamp_limit` — a policy guardrail —
+a no-op on one dialect only. That is why the compound is wrapped in a derived
+table before limiting, and why the differential suite asserts a returned row
+*count* rather than rendered SQL. Note the precise lesson: **reading** the code
+would not have caught this, but a rendering assertion does — the naive form emits
+neither `TOP` nor `FETCH`, which
+`tests/security/test_set_operation_boundary.py::test_the_compound_limit_survives_on_every_dialect`
+detects without a database. What was required was *measuring the emitted SQL*
+rather than reasoning about it; the live execution test is the belt to that
+braces.
+
+**What item 103 was worth, stated precisely.** Row 16 was a genuine ❌, not a
+🟡: an equality-only `JoinSpec` had no composition escape — a range join is not
+two queries plus a client merge, it is a join the AST could not describe at all.
+So unlike row 12, the reach gain is the real gain here. The correctness finding
+it surfaced is smaller but recorded: an outer join can NULL out the ordered
+column, and PG/MSSQL place those NULLs on opposite ends. That divergence
+**predates this item** (measured: a plain LEFT JOIN diverges identically) and is
+deliberately left standing, because the only in-engine fix is the `nulls`
+handling item 74 decided to reject rather than emulate. See the §8 entry 5
+outcome and `test_outer_join_null_ordering_diverges_and_predates_item_103`.
 
 **Be precise about what row 12 was worth**, since this table's honesty is the
 point of it: row 12 was 🟡, not ❌ — an agent could always compute the cutoff and
@@ -651,11 +761,79 @@ open **before** implementation, not discovered after:
    24,855), and a date primitive over a **non-temporal column** is rejected —
    Postgres errors there while MSSQL silently returns a 1900-epoch value. See the `docs/PRODUCT_GUIDE.md` Decision Log
    entry dated 2026-07-26.*
-5. **CROSS JOIN gating** (policy flag default-off + row-cap rationale).
-6. **Recursive CTE exclusion** — record that it is deliberately out of scope pending
-   a hard iteration cap.
-7. **Correlated-subquery scope model** — the declared, capped correlation-ref rule
-   and how policy/masking is enforced against the outer scope.
+5. ✅ **RECORDED 2026-07-27** — **CROSS JOIN gating** (policy flag default-off +
+   row-cap rationale). *Outcome: **`Policy.allow_cross_join`, default off — and
+   the gate is a flag, not a bespoke row cap.** A cross join is the only join
+   whose cost is the *product* of its inputs rather than bounded by a key, and
+   the only one the join-graph connectivity rule exempts; before item 103 an
+   accidental cartesian product was structurally inexpressible, so `cross` is the
+   first way to ask for one and must be asked for. Cross joins count against
+   `max_joins`. **What bounds one, measured rather than assumed:** `timeout_seconds`
+   (default 30) on both dialects, plus `max_response_bytes` and the concurrency
+   limiter. `LIMIT` bounds rows *returned*, not work — a `count(*)` over a cross
+   join carries the LIMIT and still materializes the whole product. Item 26's cost
+   gate is the right pre-execution bound but is **opt-in and off by default**
+   (both thresholds default `None` → `cost_estimation_enabled` is `False`), and is
+   fail-open. An earlier draft of this entry cited LIMIT + the cost gate as the
+   two bounds; both were checked and neither carries that weight, which is exactly
+   why the flag is deny-by-default rather than a cap. Three further calls ride along: `on`/`condition` are
+   mutually exclusive (and `cross` takes neither, rejected rather than dropped);
+   a `condition` may reference any **already-joined** table but not
+   forward-reference a later one; and the ON clause is held to every WHERE cap,
+   with `IN (subquery)` rejected there as it is in HAVING/CASE. See the
+   `docs/PRODUCT_GUIDE.md` Decision Log entry dated 2026-07-27.*
+6. ✅ **RECORDED 2026-07-27** — **Set-operation AST shape and arm scoping.**
+   *Outcome: **`StructuredQuery.set_op` with the carrying query as arm 1**, not the
+   second top-level query type §4 Phase 4a originally specified — a union type
+   through every pipeline signature has a failure mode (a consumer silently
+   handling one member) that this repo has hit repeatedly. Arms are scopes at the
+   **same depth** as the carrier, so `max_subquery_depth` is not charged and the
+   two `depth > 0` rules do not misfire; `max_set_op_arms` (default 3) is summed
+   tree-wide while every other count cap is shared across arms. `INTERSECT ALL`/
+   `EXCEPT ALL` are **rejected** on MSSQL/SQLite (no equivalent construct exists,
+   so the message says so rather than naming a wrong one). The compound is wrapped
+   in a derived table before `LIMIT`, because SQLAlchemy's MSSQL dialect silently
+   drops `.limit()` on a `CompoundSelect` — the engine enforcing its own guardrail,
+   not an item-74 emulation. Arm select **types** are left to the database, a
+   measured wall recorded in §4. See the `docs/PRODUCT_GUIDE.md` Decision Log entry
+   dated 2026-07-27.*
+7. ✅ **RECORDED 2026-07-27** — **CTE/derived-table AST shape and recursive-CTE
+   exclusion.** *Outcome: **a named `WITH` block via an additive
+   `StructuredQuery.ctes` list**, not the union on `from`/`JoinSpec.table` §4
+   Phase 4b specified — the plan text above is corrected. The deciding argument is
+   the unaware consumer: a union re-types two `str` fields read by
+   `referenced_tables`, the audit shape, the approval gate, the 32C usage signals
+   and the admin surfaces, and its failure mode is a silent wrong answer, whereas
+   an unrecognized CTE **name** reflects as a table and is rejected. **Recursive
+   CTE stays out of scope** and needs no separate check to stay there: a CTE may
+   reference only an EARLIER CTE, so self- and mutual reference are structurally
+   inexpressible rather than merely forbidden. Three further calls: one declaration
+   site (arms, `value_subquery`s and CTE bodies may not declare their own),
+   `max_subquery_depth` charged along the reference chain, a CTE name may not
+   collide with any physical table in the tree (shadowing is audit-ambiguous, not a
+   bypass), and a CTE is NOT clamped to `max_rows` — item 97's precedent, since
+   truncating intermediate work is a silent wrong answer. See the
+   `docs/PRODUCT_GUIDE.md` Decision Log entry dated 2026-07-27.*
+8. ✅ **RECORDED 2026-07-27** — **Correlated-subquery scope model.** *Outcome:
+   **correlation is a DECLARED, capped list (`StructuredQuery.correlate`), never
+   ambient scope.** SQL makes every enclosing column implicitly visible; QueryGate
+   does not, because a ref resolving against a scope the canonical visitor was not
+   looking at is the silent policy-and-mask bypass §1 invariant 2 calls the single
+   most important rule here. Each declared ref is checked against the **enclosing**
+   scope's name map for table/column allow-deny and the mask rule; an UNdeclared
+   outer ref keeps failing exactly as before, so pre-106 behavior is the default and
+   correlation is opt-in per subquery. Reach is **one level**, to the immediately
+   enclosing scope — and the build proved that has to be enforced explicitly: the
+   first implementation resolved against the parent's already-correlated table set,
+   making correlation transitively reach a grandparent. Capped by
+   `max_correlated_refs` (default 2), summed tree-wide. A **scalar** subquery must
+   be an aggregate with no `group_by`, so exactly-one-row holds by construction
+   rather than by `LIMIT 1` (an arbitrary row — a wrong answer with no error) or by
+   letting the backend raise (dialect-dependent). `EXISTS`/`NOT EXISTS` is an
+   operator on `Predicate`, not a third `WhereNode` member — the same union
+   argument items 104 and 105 turned on — and the new ops live on a read-only
+   `ReadCompareOp` so the write AST's shared `CompareOp` is not widened (item 114's
+   defect). See the `docs/PRODUCT_GUIDE.md` Decision Log entry dated 2026-07-27.*
 
 Each phase's PR updates the relevant Decision Log entry and the matching
 `PRODUCT_GUIDE.md` capability section, and refreshes the §5 regression table.

@@ -28,7 +28,8 @@ from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.execution.service import StructuredQueryService
 from querygate.policy.loader import PolicyStore, set_policy_store
-from querygate.policy.models import Policy
+from querygate.core.exceptions import QueryValidationError
+from querygate.policy.models import MandatoryRowFilter, Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
     OrderBySpec,
@@ -892,3 +893,793 @@ async def test_date_bucket_over_a_real_timestamp_still_matches_on_both_dialects(
     )
     assert len(rows) == len(_PROBE_ROWS)
     assert all(row["bucket"] is not None for row in rows)
+
+
+# --- item 103: non-equi/range joins + FULL OUTER / CROSS --------------------
+#
+# FULL OUTER and non-equi joins are universal on PG and MSSQL, so item 103 is
+# mechanical translation with no adapter method and no rejection. That claim is
+# exactly the kind item 102 proved you cannot make by reading a dialect manual,
+# so each form is executed on BOTH live servers and the rows compared.
+
+# One executable join per JoinType. `cross` takes no condition by construction;
+# the rest join customers to products on a deliberately mismatched key (customers
+# are ids 1-8, products 1-10) so the outer types have unmatched rows to keep.
+_JOIN_TYPE_CASES = {
+    "inner": {"table": "products", "on": ["customers.id", "products.id"]},
+    "left": {"table": "products", "type": "left", "on": ["customers.id", "products.id"]},
+    "full": {"table": "products", "type": "full", "on": ["customers.id", "products.id"]},
+    "cross": {"table": "products", "type": "cross"},
+}
+
+
+def _setup_allowing_cross() -> None:
+    """`_setup()` with the one policy field item 103 adds turned on."""
+    _setup()
+    set_policy_store(
+        PolicyStore(default=Policy(max_select_columns=50, allow_cross_join=True), overrides={})
+    )
+
+
+# The exhaustiveness gate over `_JOIN_TYPE_CASES` deliberately lives in the UNIT
+# tier (`tests/unit/test_nonequi_joins.py`), not here — this module is marked
+# `postgres_live` AND `mssql_live`, so a gate placed beside the cases it guards
+# would only fire in the one CI job that has both servers. That is the same
+# reasoning item 102 recorded for its DatePart gate.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("join_type", sorted(_JOIN_TYPE_CASES))
+async def test_join_type_matches_on_both_dialects(join_type):
+    _setup_allowing_cross()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "customers",
+                "select": ["customers.id", "products.id"],
+                "joins": [_JOIN_TYPE_CASES[join_type]],
+                # Ordered by the side that is never NULL here (products 9-10 are
+                # the unmatched rows), NOT by customers.id — see
+                # `test_outer_join_null_ordering_diverges_and_predates_item_103`.
+                "order_by": [{"col": "products.id"}],
+                "limit": 200,
+            }
+        )
+    )
+    assert rows, f"{join_type} join returned nothing — the comparison is vacuous"
+
+
+@pytest.mark.asyncio
+async def test_full_outer_keeps_the_same_unmatched_rows_on_both_dialects():
+    """The rows that distinguish FULL from INNER are the whole point of the type,
+    so assert they exist and are identical, not just that the two agree."""
+    _setup()
+    query = {
+        "from": "customers",
+        "select": ["customers.id", "products.id"],
+        # Ordered by the side that is never NULL here — see
+        # `test_outer_join_null_ordering_diverges_and_predates_item_103`.
+        "order_by": [{"col": "products.id"}],
+        "limit": 200,
+    }
+    inner = await _assert_same(
+        StructuredQuery.model_validate(
+            {**query, "joins": [{"table": "products", "on": ["customers.id", "products.id"]}]}
+        )
+    )
+    full = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                **query,
+                "joins": [
+                    {"table": "products", "type": "full", "on": ["customers.id", "products.id"]}
+                ],
+            }
+        )
+    )
+    assert len(full) > len(inner), "FULL OUTER kept nothing extra — nothing is proven"
+    assert all(row["id"] is None for row in full if row not in inner)
+
+
+@pytest.mark.asyncio
+async def test_range_join_matches_on_both_dialects():
+    """Bar row 16's shape on both real backends: a price-band self-join whose ON
+    clause is two inequalities plus item 100 arithmetic."""
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "products",
+                "from_alias": "p",
+                "select": ["p.id", "band.id"],
+                "joins": [
+                    {
+                        "table": "products",
+                        "alias": "band",
+                        "condition": {
+                            "and": [
+                                {"col": "p.price", "op": "gte", "value_col": "band.price"},
+                                {
+                                    "col": "p.price",
+                                    "op": "lte",
+                                    "value_expr": {
+                                        "left": {"col": "band.price"},
+                                        "op": "*",
+                                        "right": {"literal": 2},
+                                    },
+                                },
+                            ]
+                        },
+                    }
+                ],
+                "order_by": [{"col": "p.id"}, {"col": "band.id"}],
+                "limit": 200,
+            }
+        )
+    )
+    assert len(rows) > len({row["id"] for row in rows}), "no product matched >1 band"
+
+
+@pytest.mark.asyncio
+async def test_cross_join_is_a_real_cartesian_product_on_both_dialects():
+    """`ON true` on Postgres and `ON 1 = 1` on MSSQL must be the same product."""
+    _setup_allowing_cross()
+    counted = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "customers",
+                "select": [{"fn": "count", "col": "*", "as": "n"}],
+                "joins": [{"table": "products", "type": "cross"}],
+            }
+        )
+    )
+    customers = await _assert_same(
+        StructuredQuery.model_validate(
+            {"from": "customers", "select": [{"fn": "count", "col": "*", "as": "n"}]}
+        )
+    )
+    products = await _assert_same(
+        StructuredQuery.model_validate(
+            {"from": "products", "select": [{"fn": "count", "col": "*", "as": "n"}]}
+        )
+    )
+    assert counted[0]["n"] == customers[0]["n"] * products[0]["n"]
+
+
+@pytest.mark.asyncio
+async def test_outer_join_null_ordering_diverges_and_predates_item_103():
+    """A recorded divergence, not a regression — and deliberately NOT fixed here.
+
+    An outer join can NULL out the very column the query orders by, and the two
+    servers place those NULLs differently: Postgres sorts them LAST on ASC,
+    SQL Server sorts them FIRST. So the same AST returns the same row SET in a
+    different ORDER on the two backends.
+
+    Item 103 did not introduce this. Measured on both live servers: a plain LEFT
+    JOIN — shipped long before item 103 — diverges identically, which is what
+    this test asserts. What item 103 changed is only that FULL OUTER makes it
+    reachable from a second join type.
+
+    It is left standing rather than papered over because the only in-engine fix
+    is `OrderBySpec.nulls`, which item 74 deliberately REJECTS on MSSQL (T-SQL
+    has no `NULLS FIRST/LAST`, and synthesizing a CASE-based sort column is the
+    exact "don't spoon-feed the agent" line). Changing that is a maintainer
+    decision, not a side effect of this item. A caller who needs a deterministic
+    order across both backends orders by a non-nullable column — which is what
+    the item-103 tests above do.
+    """
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "from": "products",
+            "select": ["products.id", "customers.id"],
+            "joins": [
+                {"table": "customers", "type": "left", "on": ["products.id", "customers.id"]}
+            ],
+            "order_by": [{"col": "customers.id"}],
+            "limit": 200,
+        }
+    )
+    pg = _rows(await StructuredQueryService(connection_id="pg").execute(query))
+    ms = _rows(await StructuredQueryService(connection_id="ms").execute(query))
+
+    assert sorted(r["id"] for r in pg) == sorted(r["id"] for r in ms), "row SETS must match"
+    assert pg != ms, "the divergence disappeared — re-check item 74's NULLS posture"
+    assert pg[-1]["id_1"] is None, "Postgres is expected to sort NULLs LAST on ASC"
+    assert ms[0]["id_1"] is None, "SQL Server is expected to sort NULLs FIRST on ASC"
+
+
+# --------------------------------------------------------------------------- #
+# Set operations (TODO.md item 104)                                            #
+# --------------------------------------------------------------------------- #
+
+_ARM_ONE = {
+    "from": "orders",
+    "select": ["orders.customer_id"],
+    "where": {"col": "orders.status", "op": "eq", "value": "completed"},
+}
+_ARM_TWO = {
+    "from": "orders",
+    "select": ["orders.customer_id"],
+    "where": {"col": "orders.total_amount", "op": "gt", "value": 100},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["union", "intersect", "except"])
+async def test_set_operation_matches_on_both_dialects(op):
+    """Every operator's DISTINCT form exists on both servers with the same
+    keyword, so the identical AST must return the identical rows. Ordered by the
+    single projected column so the comparison is not order-dependent."""
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                **_ARM_ONE,
+                "set_op": {"op": op, "arms": [_ARM_TWO]},
+                "order_by": [{"col": "customer_id"}],
+                "limit": 100,
+            }
+        )
+    )
+    assert rows, f"{op} returned no rows — the comparison would be vacuous"
+
+
+@pytest.mark.asyncio
+async def test_union_all_keeps_duplicates_identically_on_both_dialects():
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                **_ARM_ONE,
+                "set_op": {"op": "union", "all": True, "arms": [_ARM_ONE]},
+                "order_by": [{"col": "customer_id"}],
+                "limit": 100,
+            }
+        )
+    )
+    assert len(rows) > len({r["customer_id"] for r in rows}), "UNION ALL kept no duplicates"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["intersect", "except"])
+async def test_intersect_all_and_except_all_are_rejected_on_mssql_and_run_on_postgres(op):
+    """The one genuine capability gap this item has: Postgres has `INTERSECT ALL`
+    and `EXCEPT ALL`; T-SQL has neither. Proven by EXECUTION on both servers —
+    Postgres returns rows, MSSQL raises a typed rejection before any SQL is sent.
+    A rendering-only assertion could not tell these apart, because SQLAlchemy
+    emits `INTERSECT ALL` for the mssql dialect just as happily."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            **_ARM_ONE,
+            "set_op": {"op": op, "all": True, "arms": [_ARM_TWO]},
+            "order_by": [{"col": "customer_id"}],
+            "limit": 100,
+        }
+    )
+    pg = await StructuredQueryService(connection_id="pg").execute(query)
+    assert pg.row_count > 0
+
+    from querygate.core.exceptions import QueryValidationError
+
+    with pytest.raises(QueryValidationError, match=f"{op.upper()} ALL is not supported on MSSQL"):
+        await StructuredQueryService(connection_id="ms").execute(query)
+
+
+@pytest.mark.asyncio
+async def test_the_compound_limit_is_enforced_on_both_dialects():
+    """SQLAlchemy's MSSQL dialect silently DROPS `.limit()` on a CompoundSelect,
+    so this is the test that would catch `clamp_limit` — a policy guardrail —
+    becoming a no-op on one dialect only. Executed, not rendered: a returned row
+    count is the only proof the limit reached the server."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "set_op": {"op": "union", "arms": [{"from": "products", "select": ["products.id"]}]},
+            "order_by": [{"col": "id"}],
+            "limit": 3,
+        }
+    )
+    for connection in ("pg", "ms"):
+        result = await StructuredQueryService(connection_id=connection).execute(query)
+        assert result.row_count == 3, f"{connection} returned {result.row_count} rows, not 3"
+
+
+@pytest.mark.asyncio
+async def test_each_arm_carries_its_own_aggregation_on_both_dialects():
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.status", {"fn": "count", "col": "*", "as": "n"}],
+                "group_by": ["orders.status"],
+                "set_op": {
+                    "op": "union",
+                    "arms": [
+                        {
+                            "from": "customers",
+                            "select": [
+                                "customers.country",
+                                {"fn": "count", "col": "*", "as": "n"},
+                            ],
+                            "group_by": ["customers.country"],
+                        }
+                    ],
+                },
+                "order_by": [{"col": "status"}],
+                "limit": 100,
+            }
+        )
+    )
+    labels = {r["status"] for r in rows}
+    assert "completed" in labels and "US" in labels, labels
+
+
+@pytest.mark.asyncio
+async def test_mismatched_arm_types_are_refused_pre_database_on_both_dialects():
+    """The divergence this closes, measured on both live servers BEFORE the fix:
+
+    * arm 1 projecting an integer column against arm 2 projecting a text CAST of
+      it — Postgres **errors**; SQL Server **succeeds**, applying data-type
+      precedence to convert the varchar side back to int and returning 20 rows;
+    * an integer column against a genuine text column — **both** error.
+
+    So the identical AST was a hard failure on one backend and an answer on the
+    other, the items 75/82 class this project treats as a defect. Both shapes are
+    now one typed pre-database rejection on every dialect, which is what this
+    asserts. It is deliberately an INVERSION of the test that previously recorded
+    the divergence as an accepted residual, not a deletion of it — the same
+    posture item 118 took when it closed the k-anonymity fan-out leak.
+    """
+    _setup()
+    numeric_text = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "set_op": {
+                "op": "union",
+                "arms": [
+                    {
+                        "from": "orders",
+                        "select": [
+                            {"expr": {"cast": {"col": "orders.id"}, "to": "text"}, "as": "id"}
+                        ],
+                    }
+                ],
+            },
+            "limit": 100,
+        }
+    )
+    non_numeric_text = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "set_op": {"op": "union", "arms": [{"from": "orders", "select": ["orders.status"]}]},
+            "limit": 100,
+        }
+    )
+    for query in (numeric_text, non_numeric_text):
+        for connection in ("pg", "ms"):
+            with pytest.raises(QueryValidationError, match="disagree on the type"):
+                await StructuredQueryService(connection_id=connection).execute(query)
+
+
+@pytest.mark.asyncio
+async def test_a_set_operation_inside_an_in_subquery_executes_on_both_dialects():
+    """Set operations and subqueries compose, and the composition is advertised in
+    the product guide — but until now only `validate_policy` was exercised, never
+    the compile or execution path through `_compile_in_subquery` ->
+    `_compile_set_operation`."""
+    _setup()
+    rows = await _assert_same(
+        StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "where": {
+                    "col": "orders.customer_id",
+                    "op": "in",
+                    "value_subquery": {
+                        "from": "customers",
+                        "select": ["customers.id"],
+                        "where": {"col": "customers.country", "op": "eq", "value": "US"},
+                        "set_op": {
+                            "op": "union",
+                            "arms": [
+                                {
+                                    "from": "customers",
+                                    "select": ["customers.id"],
+                                    "where": {
+                                        "col": "customers.country",
+                                        "op": "eq",
+                                        "value": "GB",
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                },
+                "order_by": [{"col": "id"}],
+                "limit": 100,
+            }
+        )
+    )
+    assert rows, "the nested set operation matched nothing — the check would be vacuous"
+
+
+@pytest.mark.asyncio
+async def test_a_mandatory_row_filter_reaches_every_arm_on_both_dialects():
+    """The item's headline safety rule, proven by EXECUTION rather than by counting
+    occurrences in rendered SQL: with a filter pinned to one country, neither arm
+    may return a row from another."""
+    _setup()
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                max_select_columns=50,
+                mandatory_row_filters=[
+                    MandatoryRowFilter(table="customers", column="country", value="US")
+                ],
+            ),
+            overrides={},
+        )
+    )
+    try:
+        query = StructuredQuery.model_validate(
+            {
+                "from": "customers",
+                "select": ["customers.country"],
+                "where": {"col": "customers.id", "op": "gt", "value": 0},
+                "set_op": {
+                    "op": "union",
+                    "all": True,
+                    "arms": [{"from": "customers", "select": ["customers.country"]}],
+                },
+                "limit": 100,
+            }
+        )
+        for connection in ("pg", "ms"):
+            result = await StructuredQueryService(connection_id=connection).execute(query)
+            countries = {row["country"] for row in result.rows}
+            assert countries == {"US"}, f"{connection} leaked {countries - {'US'}} past the filter"
+    finally:
+        set_policy_store(PolicyStore(default=Policy(max_select_columns=50), overrides={}))
+
+
+# --------------------------------------------------------------------------- #
+# Named WITH blocks — ctes (TODO.md item 105)                                  #
+# --------------------------------------------------------------------------- #
+#
+# A `WITH` clause is standard on both backends, so the risk here is not syntax —
+# it is the same class item 104 hit, where SQLAlchemy's MSSQL dialect silently
+# dropped `.limit()` on a compound SELECT and turned a guardrail into a no-op on
+# one backend only. Rendering assertions cannot tell a correct rendering from one
+# that merely looks correct, so these EXECUTE and compare rows.
+
+
+@pytest.mark.asyncio
+async def test_cte_aggregate_then_join_matches():
+    """The canonical shape: aggregate in a block, join the result to a table."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "ctes": [
+                {
+                    "name": "totals",
+                    "query": {
+                        "from": "orders",
+                        "select": [
+                            "orders.customer_id",
+                            {"fn": "sum", "col": "orders.total_amount", "as": "total"},
+                        ],
+                        "group_by": ["orders.customer_id"],
+                    },
+                }
+            ],
+            "from": "customers",
+            "joins": [{"table": "totals", "on": ["customers.id", "totals.customer_id"]}],
+            "select": ["customers.name", "totals.total"],
+            "order_by": [{"col": "customers.name"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(query)
+    assert rows, "vacuous - no customer had orders"
+
+
+@pytest.mark.asyncio
+async def test_cte_body_is_not_row_capped_on_either_dialect():
+    """The item-104 lesson applied to item 105: a guardrail (or its deliberate
+    ABSENCE) has to hold identically on both backends. A grand total computed
+    through a block, under a row cap far below the number of orders, must equal
+    the total computed directly — on Postgres AND on SQL Server."""
+    _setup()
+    via_cte = StructuredQuery.model_validate(
+        {
+            "ctes": [
+                {
+                    "name": "all_orders",
+                    "query": {"from": "orders", "select": ["orders.total_amount"]},
+                }
+            ],
+            "from": "all_orders",
+            "select": [{"fn": "sum", "col": "all_orders.total_amount", "as": "grand"}],
+            "limit": 1,
+        }
+    )
+    direct = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": [{"fn": "sum", "col": "orders.total_amount", "as": "grand"}],
+        }
+    )
+    through_block = await _assert_same(via_cte)
+    straight = await _assert_same(direct)
+    assert through_block[0]["grand"] == straight[0]["grand"]
+    assert through_block[0]["grand"], "vacuous - the total was zero/None"
+
+
+@pytest.mark.asyncio
+async def test_chained_ctes_match():
+    """A block reading an earlier block — two materialization stages in one
+    statement, which each planner is free to handle differently."""
+    _setup_with_tables(_TABLES)
+    set_policy_store(
+        PolicyStore(default=Policy(max_select_columns=50, max_subquery_depth=3), overrides={})
+    )
+    query = StructuredQuery.model_validate(
+        {
+            "ctes": [
+                {
+                    "name": "totals",
+                    "query": {
+                        "from": "orders",
+                        "select": [
+                            "orders.customer_id",
+                            {"fn": "sum", "col": "orders.total_amount", "as": "total"},
+                        ],
+                        "group_by": ["orders.customer_id"],
+                    },
+                },
+                {
+                    "name": "big",
+                    "query": {
+                        "from": "totals",
+                        "select": ["totals.customer_id", "totals.total"],
+                        "where": {"col": "totals.total", "op": "gt", "value": 1},
+                    },
+                },
+            ],
+            "from": "big",
+            "select": ["big.customer_id", "big.total"],
+            "order_by": [{"col": "big.customer_id"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(query)
+    assert rows, "vacuous - no customer cleared the threshold"
+
+
+@pytest.mark.asyncio
+async def test_cte_regression_bar_row_3_moving_average_matches():
+    """§5 row 3 on both real backends: a window over an AGGREGATED result, which
+    needs the aggregate materialized as a block first. This is the query the plan
+    recorded as impossible before item 105."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "ctes": [
+                {
+                    "name": "daily",
+                    "query": {
+                        "from": "orders",
+                        "select": [
+                            {"col": "orders.created_at", "granularity": "day", "as": "day"},
+                            {"fn": "count", "col": "*", "as": "n"},
+                        ],
+                        "group_by": ["day"],
+                    },
+                }
+            ],
+            "from": "daily",
+            "select": [
+                "daily.day",
+                "daily.n",
+                {
+                    "fn": "avg",
+                    "arg": {"col": "daily.n"},
+                    "over": {
+                        "order_by": [{"col": "daily.day"}],
+                        "frame": {
+                            "mode": "rows",
+                            "start": {"bound": "preceding", "offset": 6},
+                            "end": {"bound": "current_row"},
+                        },
+                    },
+                    "as": "moving_avg_7d",
+                },
+            ],
+            "order_by": [{"col": "daily.day"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(query)
+    assert len(rows) > 1, "vacuous - a moving average over one bucket proves nothing"
+
+
+# --------------------------------------------------------------------------- #
+# Correlated / EXISTS / scalar subqueries (TODO.md item 106)                   #
+# --------------------------------------------------------------------------- #
+#
+# The item with the largest safety surface in the plan, and the one whose
+# semantics most plausibly diverge: correlated-subquery planning, EXISTS
+# short-circuiting, and NOT EXISTS over a NULL-bearing correlated column are all
+# places backends historically differ. Rendered SQL cannot tell a correct
+# correlation from one that quietly ignores the outer row — both render fine —
+# so these execute and compare rows.
+
+
+@pytest.mark.asyncio
+async def test_correlated_exists_and_not_exists_match():
+    """EXISTS and NOT EXISTS must partition the outer table identically on both
+    backends. Filtered to `cancelled` deliberately: every customer in the seed has
+    orders, so an unfiltered partition would be all-vs-none — a split that an
+    implementation IGNORING the correlated row would reproduce exactly."""
+    _setup()
+    seen = []
+    for op in ("exists", "not_exists"):
+        query = StructuredQuery.model_validate(
+            {
+                "from": "customers",
+                "select": ["customers.id"],
+                "where": {
+                    "op": op,
+                    "exists_subquery": {
+                        "from": "orders",
+                        "select": ["orders.id"],
+                        "correlate": ["customers.id"],
+                        "where": {
+                            "and": [
+                                {
+                                    "col": "orders.customer_id",
+                                    "op": "eq",
+                                    "value_col": "customers.id",
+                                },
+                                {"col": "orders.status", "op": "eq", "value": "cancelled"},
+                            ]
+                        },
+                    },
+                },
+                "order_by": [{"col": "customers.id"}],
+                "limit": 50,
+            }
+        )
+        seen.append({row["id"] for row in await _assert_same(query)})
+    have, lack = seen
+    assert have and lack, "vacuous - the partition must be non-trivial on both sides"
+    assert have & lack == set()
+
+
+@pytest.mark.asyncio
+async def test_scalar_subquery_comparison_matches():
+    """Regression bar row 11 on both real backends: each row compared against an
+    aggregate over the whole table, in one statement."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id", "orders.total_amount"],
+            "where": {
+                "col": "orders.total_amount",
+                "op": "gt",
+                "value_subquery": {
+                    "from": "orders",
+                    "select": [{"fn": "avg", "col": "orders.total_amount", "as": "a"}],
+                },
+            },
+            "order_by": [{"col": "orders.id"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(query)
+    assert rows, "vacuous - nothing was above average"
+
+
+@pytest.mark.asyncio
+async def test_correlated_scalar_subquery_matches_per_outer_row():
+    """The strongest correlation check: each order against ITS OWN customer's
+    average, not the global one. A backend (or a compiler) that dropped the
+    correlation would silently use the global average — a different, plausible,
+    entirely wrong answer."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "where": {
+                "col": "orders.total_amount",
+                "op": "gt",
+                "value_subquery": {
+                    "from": "orders",
+                    "from_alias": "peer",
+                    "select": [{"fn": "avg", "col": "peer.total_amount", "as": "a"}],
+                    "correlate": ["orders.customer_id"],
+                    "where": {
+                        "col": "peer.customer_id",
+                        "op": "eq",
+                        "value_col": "orders.customer_id",
+                    },
+                },
+            },
+            "order_by": [{"col": "orders.id"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(query)
+    assert rows, "vacuous - no order beat its own customer's average"
+
+
+@pytest.mark.asyncio
+async def test_scalar_subquery_in_having_matches():
+    """The HAVING position, which needed its own compiler context — comparing one
+    aggregate against another."""
+    _setup()
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": [
+                "orders.customer_id",
+                {"fn": "sum", "col": "orders.total_amount", "as": "t"},
+            ],
+            "group_by": ["orders.customer_id"],
+            "having": {
+                "col": "t",
+                "op": "gt",
+                "value_subquery": {
+                    "from": "orders",
+                    "select": [{"fn": "avg", "col": "orders.total_amount", "as": "a"}],
+                },
+            },
+            "order_by": [{"col": "orders.customer_id"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(query)
+    assert rows, "vacuous - no customer's total beat the average order"
+
+
+@pytest.mark.asyncio
+async def test_not_exists_over_a_nullable_correlated_column_matches():
+    """The classic NOT EXISTS / NOT IN divergence. `NOT IN` over a set containing
+    NULL returns no rows on a standards-following backend, while `NOT EXISTS` is
+    NULL-safe. Executing both here records which semantics QueryGate actually has,
+    identically on Postgres and SQL Server, rather than assuming."""
+    _setup()
+    not_exists = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "select": ["customers.id"],
+            "where": {
+                "op": "not_exists",
+                "exists_subquery": {
+                    "from": "orders",
+                    "select": ["orders.id"],
+                    "correlate": ["customers.id"],
+                    "where": {
+                        "and": [
+                            {"col": "orders.customer_id", "op": "eq", "value_col": "customers.id"},
+                            {"col": "orders.status", "op": "eq", "value": "refunded"},
+                        ]
+                    },
+                },
+            },
+            "order_by": [{"col": "customers.id"}],
+            "limit": 50,
+        }
+    )
+    rows = await _assert_same(not_exists)
+    assert rows, "vacuous - every customer had a refunded order"

@@ -133,10 +133,14 @@ The supported model includes:
 - column selection and aliases;
 - `count`, `sum`, `avg`, `min`, and `max` aggregates;
 - nested `and` / `or` filters with a fixed operator set;
-- inner and left equality joins;
+- inner, left, full-outer and (policy-gated) cross joins — on an equality pair or
+  a general condition, so range and temporal joins are expressible;
 - grouping, aggregate filters, sorting, limits, and offsets;
 - day, week, month, quarter, and year date buckets;
-- overall or per-partition top-N ranking; and
+- overall or per-partition top-N ranking;
+- combining several result sets in one statement with `UNION`, `INTERSECT` or
+  `EXCEPT`, where every arm is independently policy-checked and independently
+  row-filtered; and
 - bounded batches of independent structured queries.
 
 The `intent` field is optional context for operational diagnostics. It does not
