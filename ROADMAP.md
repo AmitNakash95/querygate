@@ -635,7 +635,7 @@ than caused by it. None is a policy bypass — enforcement is scope-correct — 
   fixed it positionally; the same fix shape applies here.*
 - [ ] **120** — The audit shape records nothing for a nested `IN (subquery)`.
   *The Proof-pillar half of the gap item 104 closed for set-op arms.*
-- [ ] **121** — Report-only surfaces (`ExplainResult.tables`, the candidate
+- [x] **121** — Report-only surfaces (`ExplainResult.tables`, the candidate
   simulator's `referenced_tables`) still assume one scope. *Operator-facing
   accuracy, not enforcement.*
 

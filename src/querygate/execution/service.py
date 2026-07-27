@@ -371,7 +371,13 @@ class StructuredQueryService:
             principal=self._principal,
             subquery_tables=scope_tables,
         )
-        return stmt, limit, tables, dialect
+        # Every scope's effective table names, not just the outer scope's — the
+        # explain response reports what the statement will READ, and since item 104
+        # a set operation's other arms (and, since item 97, a nested subquery) are
+        # named in the returned SQL but were missing from `tables`, so two fields of
+        # one response contradicted each other (TODO.md item 121).
+        touched = {name for scoped in scope_tables.values() for name in scoped}
+        return stmt, limit, touched or set(tables), dialect
 
     async def _estimate_cost(
         self, dialect: DatabaseDialect, session, stmt: sa.Select

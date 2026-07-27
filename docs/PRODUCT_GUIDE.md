@@ -757,8 +757,15 @@ that one" — is a `set_op` on the query:
 ORDER BY … LIMIT …` binds the `WHERE` to one arm and the `ORDER BY`/`LIMIT` to the
 statement — so an arm may not set `order_by`, `limit`, `offset` or `top_n`, and a
 `top_n` cannot be combined with a set operation at all. Every arm must project the
-same number of columns, and arms don't nest: a set operation is one flat `arms`
-list.
+same number of columns with **compatible types** at each position, and arms don't
+nest: a set operation is one flat `arms` list.
+
+The type rule exists because the backends disagree: an integer column unioned with
+a text cast of it is a hard error on Postgres and *succeeds* on SQL Server, which
+converts one side and returns rows. QueryGate refuses it on both. The check is
+deliberately coarse — integer and numeric are compatible, so are date and
+timestamp — and a value whose type isn't statically knowable (arithmetic, a
+function call, a `CASE`) is left to the database rather than guessed at.
 
 `op` is `union`, `intersect` or `except`; `all: true` keeps duplicates. `UNION ALL`
 works everywhere, but **`INTERSECT ALL` and `EXCEPT ALL` are Postgres-only** —

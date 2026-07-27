@@ -1220,25 +1220,20 @@ async def test_each_arm_carries_its_own_aggregation_on_both_dialects():
 
 
 @pytest.mark.asyncio
-async def test_arm_type_mismatch_diverges_and_is_deliberately_left_to_the_database():
-    """A recorded divergence, not a regression — and deliberately NOT fixed here.
+async def test_mismatched_arm_types_are_refused_pre_database_on_both_dialects():
+    """The divergence this closes, measured on both live servers BEFORE the fix:
 
-    The plan asked for arms with matching select arity **and types**; item 104
-    shipped the arity half. This is what the type half would have caught, measured
-    on both live servers: arm 1 projecting an integer column against arm 2
-    projecting a text CAST of it is a hard error on Postgres and **succeeds on SQL
-    Server**, which applies data-type precedence and converts the varchar side back
-    to int.
+    * arm 1 projecting an integer column against arm 2 projecting a text CAST of
+      it — Postgres **errors**; SQL Server **succeeds**, applying data-type
+      precedence to convert the varchar side back to int and returning 20 rows;
+    * an integer column against a genuine text column — **both** error.
 
-    Left standing rather than papered over, for a reason worth stating precisely:
-    unlike item 117's date-operand case — where all three backends returned three
-    DIFFERENT WRONG answers — neither backend here returns wrong data. Postgres
-    refuses; SQL Server returns the correct values under a converted type. The
-    genuinely dangerous shape (an integer unioned with NON-numeric text) is refused
-    by BOTH, which this test also pins. A complete fix needs static type inference
-    over every select-item kind, not the reflected-column check the narrow cases
-    would allow, so it is a recorded wall rather than a silent omission (see
-    docs/PRODUCT_GUIDE.md's 2026-07-27 Decision Log entry).
+    So the identical AST was a hard failure on one backend and an answer on the
+    other, the items 75/82 class this project treats as a defect. Both shapes are
+    now one typed pre-database rejection on every dialect, which is what this
+    asserts. It is deliberately an INVERSION of the test that previously recorded
+    the divergence as an accepted residual, not a deletion of it — the same
+    posture item 118 took when it closed the k-anonymity fan-out leak.
     """
     _setup()
     numeric_text = StructuredQuery.model_validate(
@@ -1259,26 +1254,18 @@ async def test_arm_type_mismatch_diverges_and_is_deliberately_left_to_the_databa
             "limit": 100,
         }
     )
-    with pytest.raises(QueryValidationError):
-        await StructuredQueryService(connection_id="pg").execute(numeric_text)
-    mssql_result = await StructuredQueryService(connection_id="ms").execute(numeric_text)
-    assert mssql_result.row_count > 0, "the divergence disappeared — re-check the type posture"
-
-    # The genuinely-wrong shape is refused by BOTH, which is what bounds the risk.
     non_numeric_text = StructuredQuery.model_validate(
         {
             "from": "orders",
             "select": ["orders.id"],
-            "set_op": {
-                "op": "union",
-                "arms": [{"from": "orders", "select": ["orders.status"]}],
-            },
+            "set_op": {"op": "union", "arms": [{"from": "orders", "select": ["orders.status"]}]},
             "limit": 100,
         }
     )
-    for connection in ("pg", "ms"):
-        with pytest.raises(QueryValidationError):
-            await StructuredQueryService(connection_id=connection).execute(non_numeric_text)
+    for query in (numeric_text, non_numeric_text):
+        for connection in ("pg", "ms"):
+            with pytest.raises(QueryValidationError, match="disagree on the type"):
+                await StructuredQueryService(connection_id=connection).execute(query)
 
 
 @pytest.mark.asyncio

@@ -151,7 +151,7 @@ order-of-magnitude, not commitments.
 | 118 | ✅ `min_group_size` was defeated by any fan-out join | M | — |
 | 119 | `top_n` mis-resolves and DROPS a column on a duplicate output name | S | — |
 | 120 | Audit shape records nothing for a nested `IN (subquery)` | S | — |
-| 121 | Report-only surfaces still assume a query has one scope | S | 104 |
+| 121 | ✅ Report-only surfaces still assume a query has one scope | S | 104 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2307,25 +2307,11 @@ a count and still runs.
 
 **Effort: S. Priority: medium (audit fidelity — a Proof-pillar surface).**
 
-### 121. Report-only surfaces still assume a query has one scope
+### 121. Report-only surfaces still assume a query has one scope ✅ DONE
 
-- Why: enforcement is scope-correct everywhere (items 97 + 104), but three
-  *reporting* surfaces still read only the outer query, so they under-report a
-  set-op arm or a nested subquery:
-  - `ExplainResult.tables` (`execution/service.py`) — a three-arm union reports
-    one arm's tables while the returned `sql` names them all;
-  - `referenced_tables` (`validation/policy_validation.py`), consumed by
-    `admin/service.py`'s candidate simulator — a mandatory filter whose table
-    appears only in an arm is invisible to `simulate`, so an operator can be told
-    a principal is `allow` when execution will refuse on a missing claim;
-  - the same simulator's `resolve_query_table_connections` call, which simulates
-    only the outer scope's join group.
-  None is a bypass — enforcement is strictly stricter than the simulation — but a
-  tool whose whole value is predicting enforcement should not be wrong about it.
-- Scope: `execution/service.py`, `validation/policy_validation.py`,
-  `admin/service.py`.
-- Acceptance criteria:
-  - Each surface reports every scope (derive from the populated `scope_tables`
-    map / `iter_query_scopes`); tests cover an arm and a subquery.
+`ExplainResult.tables` and the candidate simulator's table set now derive from
+every scope (`referenced_tables_tree_wide` / the populated `scope_tables` map), so
+a set-op arm's or subquery's tables no longer go unreported while the same
+response's `sql` names them.
 
-**Effort: S. Priority: low-medium (operator-facing accuracy, not enforcement).**
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 121).

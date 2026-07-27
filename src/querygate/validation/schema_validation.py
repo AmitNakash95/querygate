@@ -7,6 +7,7 @@ validation/policy_validation.py, before this module ever reflects anything.
 from __future__ import annotations
 
 import datetime as dt
+import decimal
 
 import enum
 from typing import Callable, Dict, Iterator, NamedTuple, Optional, Set, Tuple
@@ -783,6 +784,10 @@ async def validate_schema(
     and a subquery is required to stay single-connection (cross-connection nesting
     is rejected, per item 97's minimal-safe subset)."""
     outer_tables: Optional[Dict[str, sa.Table]] = None
+    # Always collected, even when the caller passes no `scope_tables`: the
+    # cross-arm type check below compares scopes against EACH OTHER, so it needs
+    # every scope's reflection regardless of whether a compiler wanted them.
+    reflected: Dict[int, Dict[str, sa.Table]] = {}
     for depth, scope in iter_query_scopes(query):
         if depth > 0:
             for join in scope.joins:
@@ -793,6 +798,7 @@ async def validate_schema(
                         "connection and combine results instead (item 97)."
                     )
         scoped_tables = await _reflect_and_validate_scope(scope, connection_id, principal)
+        reflected[id(scope)] = scoped_tables
         if scope_tables is not None:
             scope_tables[id(scope)] = scoped_tables
         # Identity, not `depth == 0`: since item 104 a set-operation arm is also a
@@ -802,7 +808,139 @@ async def validate_schema(
             outer_tables = scoped_tables
     if outer_tables is None:  # unreachable: iter_query_scopes always yields depth 0
         raise QueryValidationError("internal error: query had no top-level scope to validate")
+    _validate_set_op_arm_types(query, reflected)
     return outer_tables
+
+
+# The type FAMILY each `CastExpr.to` target produces. Kept beside the families
+# below rather than derived from the compiler's `_CAST_TYPES`, because the two
+# answer different questions (which SQLAlchemy type to emit vs. what a caller can
+# union it with) — `test_set_operations.py` asserts the two keysets stay equal, so
+# a new cast target cannot be added to one without the other.
+_CAST_TARGET_FAMILIES: Dict[str, str] = {
+    "text": "text",
+    "integer": "numeric",
+    "numeric": "numeric",
+    "boolean": "boolean",
+    "date": "temporal",
+    "timestamp": "temporal",
+}
+
+
+def _python_type_family(resolved: type) -> Optional[str]:
+    """Group a driver-reported Python type into the coarse family that decides
+    whether two columns can be combined by a set operation.
+
+    Coarse deliberately: `integer` vs `numeric` and `date` vs `timestamp` union
+    fine on both backends, so splitting them would reject valid queries. `bool` is
+    tested FIRST because it is a subclass of `int` in Python, and a boolean column
+    unioned with an integer one is an error on Postgres.
+    """
+    if issubclass(resolved, bool):
+        return "boolean"
+    if issubclass(resolved, (int, float, decimal.Decimal)):
+        return "numeric"
+    if issubclass(resolved, str):
+        return "text"
+    if issubclass(resolved, (dt.date, dt.time)):
+        return "temporal"
+    return None
+
+
+def _column_ref_type_family(ref: str, tables: Dict[str, sa.Table]) -> Optional[str]:
+    table_name, column_name = parse_column_ref(ref)
+    table = tables.get(table_name)
+    if table is None:
+        return None
+    try:
+        resolved = resolve_column(table, column_name).type.python_type
+    except (NotImplementedError, AttributeError, QueryValidationError):
+        return None  # unknown mapping: allow through rather than guess
+    return _python_type_family(resolved) if isinstance(resolved, type) else None
+
+
+def _expression_type_family(expr: Expression, tables: Dict[str, sa.Table]) -> Optional[str]:
+    """Only the three expression shapes whose result type is knowable without
+    reproducing each backend's type-promotion rules. Arithmetic, functions and
+    CASE return None (unknown) and are left to the database — the same
+    reject-only-what-is-known-wrong posture `_validate_date_operands` takes."""
+    if isinstance(expr, CastExpr):
+        return _CAST_TARGET_FAMILIES.get(expr.to)
+    if isinstance(expr, LiteralExpr):
+        if expr.literal is None:
+            return None
+        return _python_type_family(type(expr.literal))
+    if isinstance(expr, ColumnExpr):
+        return _column_ref_type_family(expr.col, tables)
+    return None
+
+
+def select_item_type_family(item: SelectItem, tables: Dict[str, sa.Table]) -> Optional[str]:
+    """The coarse type family one select item projects, or None when it is not
+    statically knowable. `None` always means "allow" — this rejects what is
+    known-wrong, never what is merely unrecognized."""
+    if isinstance(item, str):
+        return _column_ref_type_family(item, tables)
+    if isinstance(item, AggregateSelectItem) and item.fn == "count":
+        return "numeric"
+    if isinstance(item, DateBucketSelectItem):
+        return "temporal"
+    if isinstance(item, StringAggSelectItem):
+        return "text"
+    if isinstance(item, ExpressionSelectItem):
+        return _expression_type_family(item.expr, tables)
+    return None
+
+
+def _validate_set_op_arm_types(
+    query: StructuredQuery, reflected: Dict[int, Dict[str, sa.Table]]
+) -> None:
+    """Reject a set operation whose arms project incompatible types at the same
+    position (TODO.md item 104).
+
+    This closes a MEASURED cross-dialect divergence, not a hypothetical one. With
+    arm 1 projecting an integer column and arm 2 a text CAST of it:
+
+    * Postgres **errors** (`UNION types integer and text cannot be matched`);
+    * SQL Server **succeeds**, applying data-type precedence to convert the
+      varchar side back to int and returning rows.
+
+    So the identical AST is a hard failure on one backend and an answer on the
+    other — the items 75/82 class this project treats as a defect rather than a
+    quirk. Catching it here makes it one typed pre-database rejection everywhere.
+
+    Deliberately narrow, exactly like `_validate_date_operands`: only positions
+    where **two or more arms** have a statically-knowable family are compared, and
+    the families are coarse (integer/numeric agree; date/timestamp agree), so a
+    valid query is never rejected for a difference the backends accept.
+    """
+    for scope in (q for _depth, q in iter_query_scopes(query) if q.set_op is not None):
+        arms = list(iter_set_op_arms(scope))
+        arm_tables = [reflected.get(id(arm), {}) for arm in arms]
+        for position in range(len(arms[0].select)):
+            seen: Dict[str, str] = {}  # family -> the ref/description that produced it
+            for arm, tables in zip(arms, arm_tables):
+                family = select_item_type_family(arm.select[position], tables)
+                if family is None:
+                    continue
+                seen.setdefault(family, arm.from_table)
+                if len(seen) > 1:
+                    families = sorted(seen)
+                    # Worded to avoid the SQL keywords `select`/`from`: bandit's
+                    # B608 pattern-matches an f-string carrying both and flags this
+                    # prose as a possible injection vector. Suppressing the rule
+                    # would blunt it repo-wide for a real finding later, so the
+                    # message says "projection"/"arm over" instead. No caller value
+                    # reaches SQL from here — this string is an error, not a query.
+                    raise QueryValidationError(
+                        f"set operation arms disagree on the type of projection "
+                        f"{position + 1}: {families[0]} (arm over "
+                        f"{seen[families[0]]!r}) vs {families[1]} (arm over "
+                        f"{seen[families[1]]!r}). Postgres rejects a mismatched union "
+                        "outright while SQL Server may silently convert one side, so "
+                        "this is refused on every dialect. Cast both sides to the same "
+                        "type if the combination is intended."
+                    )
 
 
 async def _reflect_and_validate_scope(

@@ -56,6 +56,24 @@ def referenced_tables(query: StructuredQuery) -> Set[str]:
     return tables
 
 
+def referenced_tables_tree_wide(query: StructuredQuery) -> Set[str]:
+    """Every physical table the query touches across EVERY scope — the outer
+    query, each set-operation arm (item 104) and each nested `value_subquery`
+    (item 97).
+
+    Deliberately a separate function rather than a change to `referenced_tables`:
+    that one is called PER SCOPE by `_validate_scope`, where scope-local is the
+    correct and load-bearing behavior (a scope's aliases mean nothing outside it).
+    This one exists for the *reporting* surfaces that describe a whole request —
+    where answering for the outer scope alone under-reports what will actually be
+    read (TODO.md item 121).
+    """
+    tables: Set[str] = set()
+    for _depth, scope in iter_query_scopes(query):
+        tables |= referenced_tables(scope)
+    return tables
+
+
 def _scope_where_predicate_count(query: StructuredQuery) -> int:
     return sum(1 for _ in iter_where_predicates(query.where)) if query.where is not None else 0
 

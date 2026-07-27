@@ -739,6 +739,16 @@ def applied_column_masks(query: StructuredQuery, policy: Policy) -> List[str]:
     SELECT takes its column names from its first arm. Reporting the masked arm's
     own column name would name a key the caller never receives — which is exactly
     what this function's "matches the response column names" contract forbids.
+
+    **The set-op semantics are a UNION across arms, and that is deliberate.** An
+    output column is listed when *at least one* arm masks it, so for a set
+    operation this reads "this response column carries masked values for some of
+    its rows", not "for all of them" — a column masked in arm 2 but not arm 1
+    genuinely contains both. Union is the right direction for an audit field whose
+    job is to distinguish masked from denied: it over-states protection rather than
+    under-stating it, so it can never claim a raw value was masked when the
+    opposite is what happened. Reporting per-arm instead would need a shape change
+    to the persisted event, which is not worth it for this distinction.
     """
     arms = list(iter_set_op_arms(query))
     output_names = [_projection_output_name(item) for item in arms[0].select]
