@@ -276,6 +276,20 @@ class Policy(pyd.BaseModel):
     # `max_response_bytes` and the concurrency limiter, exactly as item 103's
     # cross-join entry had to state plainly rather than claim a row cap it lacks.
     max_cte_count: int = pyd.Field(default=3, ge=0)
+    # How many outer columns a query tree's subqueries may DECLARE as correlated
+    # (item 106), summed tree-wide. 0 disables correlation entirely — the same
+    # convention max_set_op_arms/max_cte_count use, and the setting that keeps a
+    # connection on the pre-106 uncorrelated model.
+    #
+    # This caps the correlation SURFACE, not its cost, and the distinction is the
+    # honest one: a correlated subquery is re-evaluated per candidate outer row, so
+    # its cost is driven by the outer scan, which no count here bounds. What bounds
+    # it is timeout_seconds, the concurrency limiter, and item 26's cost gate where
+    # enabled. What this bounds is how many outer columns a caller can pull into a
+    # nested scope's namespace — the policy/masking surface, which is the part that
+    # must not grow silently. Default 2 covers the shapes correlation exists for (a
+    # single-key EXISTS, a two-column composite key).
+    max_correlated_refs: int = pyd.Field(default=2, ge=0)
     max_limit: int = pyd.Field(default=100)
     max_limit_aggregate: int = pyd.Field(default=1000)
     default_limit: int = pyd.Field(default=50)
