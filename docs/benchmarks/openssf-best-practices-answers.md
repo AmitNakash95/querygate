@@ -67,7 +67,7 @@
 
 | Criterion | Status | Evidence / justification |
 |---|---|---|
-| Static analysis applied | Met | Bandit + Semgrep OSS (`make sast`) |
+| Static analysis applied | Met | Bandit + Semgrep OSS (`make sast` + `make semgrep`) |
 | Static analysis run on every change | Met | `sast` CI job |
 | Dynamic analysis applied | Met | Schemathesis OpenAPI fuzzing (`make test-dast`) + adversarial suite |
 | Fuzzing / property testing | Met | Schemathesis + Hypothesis-based malformed-input fuzzer (item 36) |
@@ -89,4 +89,4 @@ is operational, not a capability gap: a maintainer cutting the *first* signed
 release (a deliberate tag push) and choosing a Python package-index — tracked in
 TODO.md item 30/89 phase 2.
 
-*Last reviewed: 2026-07-23.*
+*Last reviewed: 2026-07-27.*
