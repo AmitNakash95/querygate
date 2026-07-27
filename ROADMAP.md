@@ -600,14 +600,16 @@ already-planned initiatives.
 
 ### Review Phase 5 — Findings from the 2026-07-27 item-103 audit
 
-- [ ] **118** — `min_group_size` is defeated by any fan-out join. *A claimed
-  security guarantee (QG-29 / INFERENCE_RISKS R3) does not hold in the presence of
-  a join: the floor counts joined rows, so a fan-out multiplies a singleton group
-  past k. **Pre-existing, not an item-103 regression** — measured against an
-  equality join that has shipped for months — but item 103 makes the vector
-  always-available rather than schema-dependent. Placed here rather than in Phase 4
-  because it is a live guarantee gap, not engine breadth; needs a maintainer
-  decision between three recorded options before build (see TODO.md item 118).*
+- [x] **118** — `min_group_size` was defeated by any fan-out join. ✅ **Shipped**
+  (the floor counts JOINED rows, so a fan-out lifted a singleton group above *k* —
+  a claimed guarantee, QG-29 / INFERENCE_RISKS R3, that did not hold across a join.
+  Such a join is now **refused** on an aggregate query while the floor is set,
+  scoped by reflected uniqueness metadata so the ordinary join-onto-a-primary-key
+  shape still runs. The security test that pinned the leak was **inverted**, not
+  deleted.) *Pre-existing, not an item-103 regression — measured against an
+  equality join that had shipped for months, which is precisely why a fix scoped to
+  non-equi conditions would have been theater. Surfaced by the item-103 completion
+  audit.*
 
 ### Review Phase 4 — Performance, observability, and developer experience
 

@@ -6770,3 +6770,71 @@ bucketing a real timestamp still works, and a live PG+MSSQL pair asserting both
 servers now give the *same* typed rejection — a divergence is closed by making the
 two agree, not by picking a winner. Mutation-verified: reverting the `date_bucket`
 branch fails 4 tests, including the coverage gate.
+
+### 118. `min_group_size` was defeated by any fan-out join ✅ DONE
+
+The item-88 k-anonymity floor is compiled as `HAVING count(*) >= k`, which counts
+**joined** rows rather than distinct underlying rows. Any join matching more than
+one right-hand row per left-hand row multiplied a group's count and lifted a
+single-row group above the floor, so the group was returned.
+
+**Measured before the fix.** With `k=5`, one person at `salary=100`, five at
+`salary=200`, and a 10-row table sharing a `tenant` value:
+
+| query | result |
+| --- | --- |
+| no join (control) | `[200]` — floor works |
+| `JOIN big ON person.tenant = big.tenant` (**equality**) | `[100, 200]` — floor defeated |
+| `JOIN big ON person.id != big.id` (non-equi) | `[100, 200]` — floor defeated |
+
+The equality row uses only the `on` form, which shipped long before item 103's
+`condition` — so this was a **pre-existing** gap surfaced by item 103's audit, not
+a non-equi-join regression, and a fix rejecting only inequality conditions would
+have been theater.
+
+**What shipped.** When `min_group_size` is set on an aggregate query, a join that
+**can** fan out is refused with a typed `PolicyViolationError` rather than answered.
+This is the posture item 101 already established for aggregate windows under this
+floor: when the floor cannot be enforced correctly, fail closed instead of returning
+an answer the policy believes is protected.
+
+**The rejection is scoped, not a blanket ban** — which is the whole design, since a
+deployment that sets the floor is exactly the one that still needs joins. A join
+cannot fan out iff it pins a set of the joined table's columns by equality and that
+set covers one of the table's unique keys, read from reflected metadata (primary
+key, plus unique constraints and unique indexes — backends surface these
+differently, so all three are read). Verdicts:
+
+| join shape | verdict |
+| --- | --- |
+| onto the target's PRIMARY KEY (the ordinary dimension join) | allowed |
+| onto a UNIQUE non-PK column | allowed |
+| an equality `condition` onto the PK (item 103's spelling) | allowed |
+| composite key via `extra_on` covering a composite unique key | allowed |
+| onto a NON-unique column | refused |
+| a range/non-equi condition | refused |
+| a cross join | refused |
+| an OR/NOT condition tree (pins nothing) | refused |
+
+Both spellings of an equality join are read, so item 103's `condition` form is not
+penalised for expressing the same thing a different way. The direction is
+fail-closed: an unreflected uniqueness constraint costs a rejection, whereas a
+missed fan-out would cost the guarantee.
+
+**Unchanged for everyone else.** The rule only fires when `min_group_size` is set
+(opt-in, off by default) and only on aggregate queries — a plain row read with a
+fan-out join is governed by mandatory row filters, not group size. Both are
+asserted.
+
+**Coverage.** `tests/security/test_adversarial_security.py::test_k_anonymity_floor_cannot_be_defeated_by_a_fan_out_join`
+executes against a real database and was *inverted from the test that pinned the
+leak* — its earlier revision carried the instruction to do exactly that, and it
+failed with that message the moment the fix landed. Eight parametrized unit cases
+in `tests/unit/test_nonequi_joins.py` cover every row of the table above plus the
+two "rule does not apply" cases.
+
+**Doc reconciliation.** The disclosure added while the gap was open — in
+`docs/THREAT_MODEL.md` QG-29, `docs/INFERENCE_RISKS.md` R3 (headline, gap bullet,
+closing summary), `README.md`, `examples/policy.example.yaml`,
+`Policy.min_group_size`'s docstring and `landing/security.html` — was replaced with
+the accurate statement of what now holds.

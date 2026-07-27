@@ -184,9 +184,9 @@ connections:
     # filter — a group backed by fewer than k rows is suppressed, not returned.
     # Applies only to aggregate queries; closes single-query singling-out, not
     # multi-query differencing. See docs/INFERENCE_RISKS.md (R3).
-    # KNOWN GAP (TODO.md item 118): the floor counts JOINED rows, so a fan-out
-    # join multiplies a singleton group past k. Pair this with `max_joins: 0` or
-    # table denies if you are relying on it.
+    # The floor counts JOINED rows, so a join that can match many rows per row
+    # would inflate it — such a join is refused on an aggregate query while this
+    # is set (item 118). Joining onto a primary key or unique column is fine.
     # min_group_size: 5
 
   # ── retail: the broad operational view of the large demo domain ──────────
