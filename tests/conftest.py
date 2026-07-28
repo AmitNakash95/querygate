@@ -9,7 +9,40 @@ state between each other.
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
+
+_TESTS_ROOT = pathlib.Path(__file__).parent
+_TIER_DIRS = {"unit", "integration", "security"}
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Tag every collected test with its directory tier (unit/integration/
+    security), regardless of whether the file opted in with an explicit
+    `pytestmark`/`@pytest.mark.<tier>`.
+
+    `pytest -m unit` (and the `git commit` pre-commit gate that runs it) only
+    ever saw whichever files someone remembered to mark — TODO.md item 124
+    measured 52 of 78 `tests/unit/` files with no marker at all, invisible to
+    that gate. Deriving the marker from the directory removes the failure mode
+    for new files too, instead of just backfilling the missing 52. This must
+    run before pytest's own `-m` deselection hook (also registered as
+    `pytest_collection_modifyitems`) reads the markers, or the additions
+    arrive too late to affect selection; `tryfirst` pins that ordering rather
+    than leaving it to conftest-hook registration order, which already
+    happens to run first by default but isn't a documented guarantee. A test
+    that already carries the tier marker explicitly is untouched.
+    """
+    for item in items:
+        try:
+            tier = item.path.relative_to(_TESTS_ROOT).parts[0]
+        except ValueError:
+            continue
+        if tier in _TIER_DIRS and tier not in {m.name for m in item.iter_markers()}:
+            item.add_marker(getattr(pytest.mark, tier))
+
 
 # `AppConfig` reads the repo's ".env" by default (see core/config.py's
 # `class Config: env_file = ".env"`), so `make run`/`make run-dev` work with

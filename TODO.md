@@ -154,7 +154,7 @@ order-of-magnitude, not commitments.
 | 121 | ✅ Report-only surfaces still assume a query has one scope | S | 104 |
 | 122 | ✅ `_unique_column_sets` crashed on a non-`Table` FROM element | S | 118 |
 | 123 | A select-item `CASE`'s conditions are absent from the audit shape | S | 120 |
-| 124 | Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
+| 124 | ✅ Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
 | 125 | ✅ ★ A window function as an `Expression` operand (bar row 15 → 16/16) | XL | 100, 101 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
@@ -2207,34 +2207,13 @@ for CASE select items, which is why it is its own item rather than folded into 1
 
 **Effort: S. Priority: low** (fidelity on a position that is always rejected).
 
-### 124. Most of `tests/unit/` is not selected by `pytest -m unit`
+### 124. Most of `tests/unit/` is not selected by `pytest -m unit` ✅ DONE
 
-Markers are explicit — there is no auto-marking by directory — and only 26 of the
-78 files in `tests/unit/` carry one. Measured on 2026-07-27: `pytest tests/unit`
-collects **1703** tests, `pytest -m "unit and not real_db"` collects **678** of
-them. So ~60% of the unit directory is invisible to the tier `CLAUDE.md` names as
-the minimum bar ("`pytest -m unit` at minimum") and to the `git commit` pre-commit
-hook, which runs exactly that selection.
-
-**Why it matters.** The gap is silent in both directions: a green pre-commit gate
-does not mean the unit directory passed, and a new test added to an unmarked file
-is never run by the gate that is supposed to protect it. `test_audit.py` — which
-covers the redaction contract, non-negotiable 3 — was one of the unmarked files
-until the item-119/120 audit marked it on 2026-07-27. The full-suite run
-(`poetry run pytest`) does execute everything, so this has hidden a coverage
-illusion rather than a regression.
-
-**Proposed fix.** Either add `pytestmark = pytest.mark.unit` to the remaining 52
-files, or drop the per-file marker convention entirely and derive the tier from
-the directory in `tests/conftest.py` (a `pytest_collection_modifyitems` hook that
-marks by path), which removes the failure mode permanently rather than fixing 52
-instances of it. The second is preferable; it also makes `tests/integration/` and
-`tests/security/` self-consistent.
-
-**Found by** the item-119/120 completion audit, when two newly added regression
-tests passed the file-scoped run but were silently deselected by the gate.
-
-**Effort: S. Priority: medium** (it weakens every gate the repo relies on).
+A directory-derived `pytest_collection_modifyitems` hook now tags every test
+under `tests/{unit,integration,security}/` with its tier automatically, so a
+file can never again be silently invisible to `pytest -m unit` or the
+pre-commit gate. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md)
+(item 124).
 
 ### 125. Query engine: a window function as an `Expression` operand ★ ✅ DONE
 
