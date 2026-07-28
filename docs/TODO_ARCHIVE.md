@@ -7495,6 +7495,47 @@ the `tables` field against the `sql` field of the same response.
 
 **Effort: S. Priority: high (a crash on a shipped guardrail).**
 
+### 123. A select-item `CASE`'s condition subtree was absent from the audit shape ✅ DONE
+
+`_select_shape`'s `CaseSelectItem` branch recorded `{kind, alias, branch_count,
+columns}` and never walked `item.when[*].when` through `_where_shape`. Every other
+walker reaches its predicates via `as_expression()` — which `query_ast/models.py`
+documents as "the single conversion every walker, cap, and compile path goes
+through" — and `_select_shape` was the one that did not. The identical CASE written
+as an `ExpressionSelectItem` (`CaseExpr`) recorded its conditions in full, so two
+spellings of one query produced materially different audit detail — the exact
+asymmetry `_predicate_shape` calls out and fixed for joins in item 103.
+
+**Consequence (fixed).** A nested `value_subquery` sitting in a select-item CASE
+condition was invisible to the event: the attempt audited as reading only the outer
+table. Policy always rejects such a query (`policy_validation.py` refuses a
+subquery in that position), so this was never a policy bypass — but item 120's
+whole rationale is that *rejected attempts stay auditable*, and in this one
+position they did not. Proof-pillar fidelity, not enforcement.
+
+**Found by** the item-119/120 completion audit on 2026-07-27, which also found
+that the redaction test covering this position asserted only the ABSENCE of
+sentinel literals — vacuously true, since the subtree was discarded rather than
+redacted.
+
+**Fixed** (`src/querygate/audit/events.py`'s `_select_shape`): the `CaseSelectItem`
+branch now additively records `"conditions": [_where_shape(branch.when) for branch
+in item.when]`, mirroring the `CaseExpr` branch in `_expression_shape`. Additive —
+existing consumers of the shape's other keys are unaffected.
+
+**Tests:** `tests/unit/test_audit.py::test_normalized_query_shape_handles_case_select_item`
+and `::test_searched_having_and_case_shapes_carry_structure_but_no_literals` now
+assert the `conditions` structure directly (previously only asserted literal
+absence). A new
+`::test_the_audit_shape_records_a_nested_subquery_inside_a_case_select_item_condition`
+pins the consequence directly: a `value_subquery` nested in a `CaseSelectItem`
+WHEN now shows up in the audit event with its own table/filter shape and no
+leaked literal — mirroring item 120's WHERE-clause coverage for this position.
+Mutation-verified: reverting the `conditions` line makes all three fail with
+`KeyError: 'conditions'`, not a silent pass.
+
+**Effort: S. Priority: low** (fidelity on a position that is always rejected).
+
 ### 124. Most of `tests/unit/` is not selected by `pytest -m unit` ✅ DONE
 
 Markers were explicit with no auto-marking by directory, and only 26 of the 78
