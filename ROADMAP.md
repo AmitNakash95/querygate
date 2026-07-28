@@ -328,7 +328,10 @@ wrong; it is all downstream of having a surface worth integrating against.*
   config change needed; regression-pinned in
   `tests/integration/test_prepared_statement_reuse.py`).
 - [ ] **18** — Stored-procedure catalog. *Extends read coverage where customers
-  already encapsulate logic in procs.*
+  already encapsulate logic in procs.* **Moved to Decision-gated (2026-07-28):**
+  conflicts with the NORTH_STAR permanent non-goal "no stored-procedure /
+  arbitrary-procedural-SQL path" — see that section below. Left `[ ]` and in
+  its original phase position for history; the automated walk skips it there.
 - [x] **57** — Pluggable dialect-adapter architecture. *The enabler that turns
   each new store into an adapter (not a project) — do before 19.* ✅ **Shipped**
   (sync compiler `DialectAdapter` [item 73] + new async `SessionDialectAdapter`;
@@ -398,6 +401,16 @@ surface them for a human, never auto-start them.
   must be an isolated opt-in subsystem, never wired into the catalog/32C.
 - **P2 · Open the StructuredQuery AST as a standard.** A standards-governance
   commitment, not just engineering.
+- **18 · Stored-procedure catalog.** Added 2026-07-28 (`roadmap-next` walk):
+  `docs/business/NORTH_STAR.md` lists "No stored-procedure /
+  arbitrary-procedural-SQL path" as a permanent non-goal — product identity,
+  not a gap — and CLAUDE.md's non-negotiable #8 requires an explicit recorded
+  NORTH_STAR decision before adding anything the non-goals list forbids.
+  TODO.md item 18's own body ("when prioritized... a real security review
+  given procedures can have side effects") was written before that non-goal
+  was reconciled against it. Needs a maintainer decision — reverse the
+  non-goal with a recorded rationale, or close item 18 as will-not-build —
+  before any implementation.
 
 ## Coordination-gated (partly non-code — an agent can prep, not finish)
 

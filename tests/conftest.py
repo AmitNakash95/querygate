@@ -13,6 +13,13 @@ import pathlib
 
 import pytest
 
+# `pytester` is a first-party pytest plugin bundled with pytest itself (no new
+# dependency) but disabled unless a top-level conftest opts in — it's what
+# lets test_conftest_tier_markers.py run a real nested pytest process to pin
+# this file's `tryfirst` hook-ordering guarantee end-to-end, not just the
+# marker-assignment logic.
+pytest_plugins = ["pytester"]
+
 _TESTS_ROOT = pathlib.Path(__file__).parent
 _TIER_DIRS = {"unit", "integration", "security"}
 

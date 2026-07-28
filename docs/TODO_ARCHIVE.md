@@ -7532,15 +7532,24 @@ their counts (489 and 410 respectively) were unchanged by this fix; the hook
 makes that coverage structural for both instead of a coincidence of current
 file authorship.
 
-The hook itself is pinned by
-`tests/unit/test_conftest_tier_markers.py`, which calls it directly against
-fake, filesystem-free items and asserts the marker-assignment and
-already-marked-is-left-alone behavior — both mutations (emptying the tier set;
-dropping the idempotency guard) were confirmed to fail the new tests before
-being reverted. It does not re-exercise the `tryfirst` ordering property,
-which is a property of how pytest calls multiple registered hookimpls rather
-than of the function body, and was covered by the interactive mutation test
-above instead.
+The hook itself is pinned by `tests/unit/test_conftest_tier_markers.py`, in
+two parts matching its two independent properties. The marker-assignment
+logic is pinned by calling the hook directly against fake, filesystem-free
+items and asserting the marker-assignment and already-marked-is-left-alone
+behavior — both mutations (emptying the tier set; dropping the idempotency
+guard) were confirmed to fail the new tests before being reverted. The
+`tryfirst` ordering guarantee — untestable by a direct function call, since
+it's a property of how pytest calls *multiple* registered hookimpls against
+each other, not of the function body — is pinned separately with a `pytester`
+end-to-end test: a nested pytest process runs a marker-adding
+`pytest_collection_modifyitems` hook against pytest's own `-m` deselection,
+parametrized over `tryfirst=True` (the real hook's setting; asserted to win
+the ordering race and get the mark selected) and `trylast=True` (asserted to
+lose it and get deselected) — the same pair this session verified manually
+when the fix landed, now automated instead of one-off. Flipping the two
+assertions against each other was confirmed to fail both parametrized cases
+before being reverted, so the test genuinely discriminates the two orderings
+rather than passing vacuously.
 
 Deliberately additive, not a mass edit: the existing 82 file-level
 `pytestmark` lines (64 single-mark `pytestmark = pytest.mark.<tier>`
