@@ -125,7 +125,7 @@ order-of-magnitude, not commitments.
 | 91 | ✅ Tamper-evident hash-chained audit ledger + per-query compliance receipts | M | 23 |
 | 92 | ✅ In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) | L | 26, 90, 91 |
 | 93 | ✅ Governed Writes — structured, bounded, previewable, governed agent mutations (governance tier shipped: preview/diff, gated execution, approval, batch, upserts; reversibility/undo REMOVED 2026-07-23; `release-smoke` write round-trip open) | XL | 25, 48, 90, 91 |
-| 94 | Verify/enable prepared-statement plan reuse for template execution | S | 48 |
+| 94 | ✅ Verify/enable prepared-statement plan reuse for template execution | S | 48 |
 | 95 | ✅ Discoverable scope catalog + recommended role bundles for IdP integration | S | 10, 90 |
 | 96 | ✅ Unify the AST reference-walk into a single canonical visitor | M | — |
 | 97 | ✅ Bounded nested subqueries (phase 1: `IN (subquery)`/`NOT IN`, tree-wide caps; phase 2: `FROM (subquery)` derived table not started) | L | 96 |
@@ -1895,45 +1895,16 @@ audit (counts/shapes/hashes, never values/rows). Reuses, does not duplicate, the
 policy/validation/compile/execute/audit spine. Uses `DialectAdapter` for all
 dialect variance (reject-not-emulate where a dialect lacks a capability).
 
-### 94. Verify (and, if warranted, enable) prepared-statement plan reuse for template execution
+### 94. Verify (and, if warranted, enable) prepared-statement plan reuse for template execution ✅ DONE
 
-**Effort: S. Priority: opportunistic optimization — measure first; may close as
-"no change needed." Depends on: nothing. Explicitly NOT a pivot.**
+Verified live against real Postgres and MSSQL: both already get full
+server-side prepared-statement/plan reuse today (asyncpg's default
+`prepared_statement_cache_size=100`; SQL Server's own plan cache), because
+QueryGate already compiles every query with bound, never-inlined parameters.
+No config change was warranted; regression-pinned in
+`tests/integration/test_prepared_statement_reuse.py`.
 
-**Origin.** Fielding the "stored procedures run more efficiently — why don't we
-do that?" question (see `docs/business/COMPETITOR_CUBE.md`, analytics-performance
-note). Executing stored procedures is a permanent non-goal — it reopens the
-raw-SQL/arbitrary-code path the whole product exists to remove. But the *durable*
-SP performance benefit that isn't SP-exclusive — **cached execution plans**
-(skip re-parse/re-optimize on repeated calls) — is capturable via
-prepared/parameterized statements, and query templates (items 48/87) are the
-ideal shape for it: fixed structure, only parameter values vary, so the DB sees
-the same parameterized statement every call.
-
-**What to do — measure before touching anything.**
-1. Determine whether repeated template (and ad-hoc) reads already get
-   server-side prepared-statement plan reuse *today*. This depends on the driver
-   and pooling: asyncpg prepares/caches statements per connection automatically;
-   psycopg3 only prepares above `prepare_threshold`. We compile with bound
-   parameters already (`execution/service.py`; predicate values are never
-   inlined) and use a pooled `create_async_engine` (`connections/engine.py`) with
-   no explicit prepared-statement config.
-2. If the measurement shows we already benefit → close the item as verified, no
-   change (document the finding, done).
-3. If we're leaving plan reuse on the table → enable/tune it explicitly for the
-   fixed-shape template path only (e.g. driver `prepare_threshold`/prepared-stmt
-   settings), guarding against known pitfalls: parameter sniffing (a cached plan
-   from an unrepresentative first call), and interaction with our per-request
-   session guardrails (`SET LOCAL statement_timeout`/`lock_timeout` in
-   `connections/dialects.py`) and pool recycling.
-
-**Hard boundaries.** This is NOT: a plan cache we build ourselves, a query-result
-cache, pre-aggregation caching, or any SP execution path. It is turning on a
-capability the DB driver already has, for queries we already compile with bound
-parameters. No new caller surface, no AST change, no invariant impact. The big
-analytics "pre-compute the heavy work" win lives in the customer's DB
-(materialized views/indexes), which QueryGate already reads as ordinary tables —
-that is documentation (the analytics-performance note), not this item.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 94).
 
 ### 96. Unify the AST reference-walk into a single canonical visitor (enforcement hardening) ✅ DONE
 

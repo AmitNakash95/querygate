@@ -5346,6 +5346,87 @@ item 42 (four-eyes for *config* changes) and item 35 (capacity waiting) —
 neither gates *query execution* on sensitivity/cost. **Invariant:** read-only
 posture and AST-only input unchanged; this only adds a pre-execution gate.
 
+### 94. Verify (and, if warranted, enable) prepared-statement plan reuse for template execution ✅ DONE
+
+**Effort: S. Priority: opportunistic optimization — measure first; may close as
+"no change needed." Depends on: nothing. Explicitly NOT a pivot.**
+
+**Origin.** Fielding the "stored procedures run more efficiently — why don't we
+do that?" question (see `docs/business/COMPETITOR_CUBE.md`, analytics-performance
+note). Executing stored procedures is a permanent non-goal — it reopens the
+raw-SQL/arbitrary-code path the whole product exists to remove. But the *durable*
+SP performance benefit that isn't SP-exclusive — **cached execution plans**
+(skip re-parse/re-optimize on repeated calls) — is capturable via
+prepared/parameterized statements, and query templates (items 48/87) are the
+ideal shape for it: fixed structure, only parameter values vary, so the DB sees
+the same parameterized statement every call.
+
+**What to do — measure before touching anything.**
+1. Determine whether repeated template (and ad-hoc) reads already get
+   server-side prepared-statement plan reuse *today*. This depends on the driver
+   and pooling: asyncpg prepares/caches statements per connection automatically;
+   psycopg3 only prepares above `prepare_threshold`. We compile with bound
+   parameters already (`execution/service.py`; predicate values are never
+   inlined) and use a pooled `create_async_engine` (`connections/engine.py`) with
+   no explicit prepared-statement config.
+2. If the measurement shows we already benefit → close the item as verified, no
+   change (document the finding, done).
+3. If we're leaving plan reuse on the table → enable/tune it explicitly for the
+   fixed-shape template path only (e.g. driver `prepare_threshold`/prepared-stmt
+   settings), guarding against known pitfalls: parameter sniffing (a cached plan
+   from an unrepresentative first call), and interaction with our per-request
+   session guardrails (`SET LOCAL statement_timeout`/`lock_timeout` in
+   `connections/dialects.py`) and pool recycling.
+
+**Hard boundaries.** This is NOT: a plan cache we build ourselves, a query-result
+cache, pre-aggregation caching, or any SP execution path. It is turning on a
+capability the DB driver already has, for queries we already compile with bound
+parameters. No new caller surface, no AST change, no invariant impact. The big
+analytics "pre-compute the heavy work" win lives in the customer's DB
+(materialized views/indexes), which QueryGate already reads as ordinary tables —
+that is documentation (the analytics-performance note), not this item.
+
+**Verified 2026-07-28: already benefiting on both dialects, no change
+needed.** Measured live against real Postgres and MSSQL (not reasoned from
+docs alone):
+
+- **Postgres (asyncpg).** SQLAlchemy 2.0's asyncpg dialect defaults
+  `prepared_statement_cache_size=100` and keys its own
+  `_prepared_statement_cache` (an LRU on the DBAPI connection wrapper) by exact
+  SQL text (`AsyncAdapt_asyncpg_connection._prepare`,
+  `sqlalchemy/dialects/postgresql/asyncpg.py`) — a repeat of the same compiled
+  text with different bound values reuses the cached `PreparedStatement`
+  (server round-trip skipped) rather than re-preparing. Confirmed live by
+  identity, not just size: the cached `(prepared_stmt, attributes, timestamp)`
+  tuple for the repeated SQL text is the *same object* after a second
+  identical-shape execute (a hit returns early without touching the cache),
+  and a genuinely different shape adds a new key.
+- **MSSQL (pyodbc/aioodbc).** SQL Server's own plan cache reuses a single
+  compiled plan across repeated executions of the same parameterized text sent
+  via ODBC, independent of any client-side setting. Confirmed live via
+  `sys.dm_exec_cached_plans`: three executions of the same shape with
+  different bound values produced exactly one cached plan with `usecounts=3`;
+  a different shape produced a second, separate plan.
+- Both hold *because* QueryGate already compiles every query with bound
+  parameters and never inlines predicate values — the exact precondition the
+  Postgres cache keys on. **The two dialects are not symmetric evidence,
+  measured not assumed:** SQL Server's own "simple parameterization"
+  auto-parameterizes even a literal-inlined version of this query shape, so
+  the MSSQL test pins the shape-vs-reuse contract (repeat shape -> one reused
+  plan) but — unlike the Postgres test — can't by itself catch a regression
+  that stopped binding parameters specifically on MSSQL. No driver/pool
+  config change was warranted on either dialect.
+- Regression-pinned in `tests/integration/test_prepared_statement_reuse.py`
+  (`postgres_live` + `mssql_live`) so a future SQLAlchemy/driver upgrade that
+  silently disables reuse fails a test instead of only showing up in
+  production profiling. Mutation-verified: forcing
+  `prepared_statement_cache_size=0` on the Postgres URL breaks the test as
+  expected, and a same-key-overwrite mutation (simulating a disguised
+  re-prepare hidden behind an unchanged cache size) was caught only after the
+  assertion was strengthened from a size check to an identity check — the
+  size-only version of this test would have stayed green through a real
+  re-prepare-every-call regression.
+
 ### 95. Discoverable scope catalog + recommended role bundles for IdP integration ✅ DONE
 
 **Effort: S. Priority: enterprise-SSO adoption enabler for the shipped JWT/OAuth
