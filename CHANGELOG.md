@@ -6,6 +6,21 @@ All notable changes to QueryGate are documented here.
 
 ### Changed
 
+- **Capacity/queue rejections now return `429 Too Many Requests` with a
+  `Retry-After` header, not `422`** (TODO.md item 35 phase 3). Applies to a
+  concurrency-limit timeout, a full admission queue, and the bare
+  `ConcurrencyLimitError` case; MCP's equivalent error code moved from
+  `VALIDATION` to `RATE_LIMITED`, matching the code quota rejections already
+  use. **Upgrade impact:** a client that pattern-matches on HTTP `422` for
+  "too many concurrent queries" (or on MCP's `VALIDATION` code for the same
+  condition) must switch to `429`/`RATE_LIMITED`. The response BODY's string
+  contract (`"too many concurrent..."`, `docs/LOAD_TESTING.md`) and the
+  existing `X-QueryGate-Admission-*` headers are unchanged — only the status
+  code, error code, and the added `Retry-After` header. No compatibility flag
+  is provided; this is a deliberate, one-time migration, matching item 50's
+  quota-rejection precedent. Rationale in `docs/PRODUCT_GUIDE.md`'s Decision
+  Log (2026-07-28).
+
 - **Postgres sessions are now pinned to UTC** (TODO.md item 102). QueryGate
   issues `SET LOCAL TIME ZONE 'UTC'` alongside the existing per-session lock and
   statement timeouts. Postgres resolves `EXTRACT`, `date_trunc` and every
@@ -41,6 +56,42 @@ All notable changes to QueryGate are documented here.
   so. Postgres `interval` columns are unaffected — they remain valid operands.
 
 ### Added
+
+- Agent-visible progress, an asynchronous REST execution lifecycle, and real
+  query cancellation (TODO.md item 35 phase 3). MCP's `run_structured_queries`
+  now reports two progress notifications per query when the calling client
+  supports them (MCP's standard `notifications/progress`, via
+  `Context.report_progress`) — "waiting for a concurrency slot" and "admitted,
+  executing." A new `queue_mode=async` on `POST .../query` returns `202`
+  immediately with an `admission_id`/`status_url` instead of blocking;
+  `GET .../query/{admission_id}` polls the execution's state
+  (`queued`/`running`/`completed`/`failed`/`cancelled`), and
+  `POST .../query/{admission_id}/cancel` requests cancellation — free while
+  still queued, and, for a running query, real dialect-level cancellation
+  (Postgres `pg_cancel_backend`, MSSQL `KILL`) gated on a new deny-by-default
+  `Policy.allow_query_cancellation` flag the operator sets only after
+  granting the required DB-level permission (Postgres: `pg_signal_backend`
+  role membership; MSSQL: `ALTER ANY CONNECTION`). Cancelling your own query
+  needs no scope; cancelling another principal's needs the new
+  `query:cancel` scope. In-process only for this pass (a Redis-backed
+  cross-replica async-execution store is a documented follow-up, mirroring
+  admission/quota's own phasing).
+
+- Admin UI catalog-governance workspace (TODO.md item 38). A new Catalog
+  domain in the `/admin/` control plane exposes item 32B's proposal
+  review→approve/reject→publish→rollback loop as a browser workflow: a
+  filtered proposal queue, side-by-side proposed-versus-published
+  comparison, edit/approve/reject/publish actions gated per their existing
+  least-privilege scopes, a publish-conflict preview, and connection-scoped
+  catalog version history with rollback. Phase 2 adds bulk approve/reject/
+  delete (checkbox selection across the queue), one-click export/import
+  (backup/restore) of a connection's governed catalog history, browser
+  triggers for `generate-drafts`/`learn`, a per-proposal review-history
+  trail (a new `review_history` field on the single-proposal REST fetch
+  only, never the bulk list), and a usage-signals browsing tab over the
+  32C evidence the learner draws on. Every action is a thin wrapper over
+  the existing governance REST routes — no new mutation path, no relaxed
+  scope.
 
 - Date and relative-time query primitives (TODO.md item 102). Three new members
   of the structured-query expression substrate — `{"extract": <expr>, "part":

@@ -158,11 +158,18 @@ async def test_query_success_includes_admission_headers(app):
 
 
 @pytest.mark.asyncio
-async def test_query_capacity_timeout_is_422_with_admission_headers(app):
+async def test_query_capacity_timeout_is_429_with_admission_headers(app):
+    """TODO.md item 35 phase 3 (2026-07-28): capacity/queue rejections
+    migrated from 422 to 429 + Retry-After, matching item 50's quota
+    precedent — a deliberate, documented breaking change (CHANGELOG.md), not
+    an accident. The response BODY string contract (docs/LOAD_TESTING.md)
+    still holds; only the status code and the added Retry-After header
+    changed."""
     exc = CapacityTimeoutError(
         "too many concurrent 'demo' queries in flight, try again shortly",
         admission_id="admission-456",
         queue_wait_ms=42,
+        retry_after_seconds=10,
     )
     with patch(f"{_SERVICE}.execute", new_callable=AsyncMock, side_effect=exc):
         async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
@@ -171,19 +178,21 @@ async def test_query_capacity_timeout_is_422_with_admission_headers(app):
                 json={"from": "customers", "select": ["customers.id"], "limit": 50},
                 params={"queue_mode": "fail_fast"},
             )
-    assert resp.status_code == 422
+    assert resp.status_code == 429
     # Existing body contract (docs/LOAD_TESTING.md) must not change.
     assert "too many concurrent" in resp.json()["detail"]
     assert resp.headers["X-QueryGate-Admission-Id"] == "admission-456"
     assert resp.headers["X-QueryGate-Admission-State"] == "capacity_timeout"
     assert resp.headers["X-QueryGate-Queue-Wait-Ms"] == "42"
+    assert resp.headers["Retry-After"] == "10"
 
 
 @pytest.mark.asyncio
-async def test_query_queue_full_is_422_with_queue_full_admission_state(app):
+async def test_query_queue_full_is_429_with_queue_full_admission_state(app):
     exc = QueueFullError(
         "connection 'demo' queue is already at its configured depth, try again shortly",
         admission_id="admission-789",
+        retry_after_seconds=10,
     )
     with patch(f"{_SERVICE}.execute", new_callable=AsyncMock, side_effect=exc):
         async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
@@ -191,10 +200,11 @@ async def test_query_queue_full_is_422_with_queue_full_admission_state(app):
                 "/api/v1/demo/query",
                 json={"from": "customers", "select": ["customers.id"], "limit": 50},
             )
-    assert resp.status_code == 422
+    assert resp.status_code == 429
     # Existing body contract (docs/LOAD_TESTING.md) must not change.
     assert "queue" in resp.json()["detail"]
     assert resp.headers["X-QueryGate-Admission-Id"] == "admission-789"
+    assert resp.headers["Retry-After"] == "10"
     assert resp.headers["X-QueryGate-Admission-State"] == "queue_full"
     assert resp.headers["X-QueryGate-Queue-Wait-Ms"] == "0"
 
@@ -411,6 +421,26 @@ async def test_batch_query_passes_queue_mode_and_wait_timeout_to_service(app):
     _queries_arg, kwargs = mock_execute_many.call_args
     assert kwargs["queue_mode"] == "fail_fast"
     assert kwargs["wait_timeout_seconds"] is None
+
+
+@pytest.mark.asyncio
+async def test_batch_query_rejects_async_queue_mode(app):
+    """Audit fix (item 35 phase 3 re-audit): only POST .../query implements the
+    202/poll/cancel async admission lifecycle. Without this rejection,
+    queue_mode=async silently downgrades to synchronous execution here — no
+    202, no admission_id, no signal the caller's requested mode wasn't
+    honored (resolve_wait_seconds treats async identically to wait for the
+    wait-ceiling calculation, so nothing else would have caught this)."""
+    with patch(f"{_SERVICE}.execute_many", new_callable=AsyncMock) as mock_execute_many:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                "/api/v1/demo/query/batch",
+                json={"queries": [{"from": "customers", "select": ["customers.id"], "limit": 5}]},
+                params={"queue_mode": "async"},
+            )
+    assert resp.status_code == 422
+    assert "only supported on POST /{connection}/query" in resp.json()["detail"]
+    mock_execute_many.assert_not_called()
 
 
 @pytest.mark.asyncio

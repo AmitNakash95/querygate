@@ -14,12 +14,24 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, 
 from querygate.api._errors import admission_headers, mask_unexpected, require_scope
 from querygate.config_reload import ReloadResult, reload_config
 from querygate.catalog.retrieval import CatalogSearchResponse
+from querygate.connections.engine import get_engine
 from querygate.connections.models import PublicConnectionInfo
 from querygate.connections.visibility import list_visible_connections, resolve_visible_connection
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig, config as app_config
-from querygate.core.exceptions import NotFoundError
-from querygate.execution.admission import QueueMode
+from querygate.core.exceptions import (
+    NotFoundError,
+    QueryCancellationNotEnabledError,
+    QueryCancellationNotReadyError,
+    QueryValidationError,
+)
+from querygate.execution.admission import QueueMode, reject_unsupported_async_queue_mode
+from querygate.execution.async_execution import (
+    AsyncExecutionRecord,
+    async_execution_store,
+    request_cancel,
+    start_async_execution,
+)
 from querygate.execution.approval import (
     issue_approval_token,
     query_fingerprint,
@@ -42,7 +54,7 @@ from querygate.execution.service import (
 )
 from querygate.policy.loader import get_policy
 from querygate.query_ast.models import StructuredQuery
-from querygate.core.scopes import ADMIN_RELOAD_CONFIG_SCOPE, QUERY_APPROVE_SCOPE
+from querygate.core.scopes import ADMIN_RELOAD_CONFIG_SCOPE, QUERY_APPROVE_SCOPE, QUERY_CANCEL_SCOPE
 from querygate.secrets.resolvers import build_secret_resolver_registry
 from querygate.templates.binding import bind_template
 from querygate.templates.loader import get_template_store
@@ -67,6 +79,31 @@ class ApprovalGrant(pyd.BaseModel):
 
     fingerprint: str
     approval_token: str
+
+
+class AsyncQueryAdmission(pyd.BaseModel):
+    """`202` body for `queue_mode=async` (TODO.md item 35 phase 3): the
+    `admission_id` to poll/cancel, and the URL to do so at."""
+
+    admission_id: str
+    status_url: str
+
+
+class AsyncQueryStatus(pyd.BaseModel):
+    """`GET .../query/{admission_id}` response. `result`/`error` are set only
+    once `state` reaches a terminal value (`completed`/`failed`/`cancelled`)."""
+
+    admission_id: str
+    state: str
+    queue_wait_ms: Optional[int] = None
+    result: Optional[StructuredQueryResult] = None
+    error: Optional[str] = None
+    admission_state: Optional[str] = None
+
+
+class AsyncQueryCancelResult(pyd.BaseModel):
+    admission_id: str
+    state: str
 
 
 def _visible_template(connection_id: str, principal: Principal) -> None:
@@ -110,12 +147,38 @@ def _service(connection_id: str, principal: Principal) -> StructuredQueryService
     return StructuredQueryService(connection_id=connection_id, principal=principal, surface="rest")
 
 
+def _require_async_record(
+    connection_id: str, admission_id: str, principal: Principal
+) -> AsyncExecutionRecord:
+    """Look up an async execution record, 404-ing uniformly whether the id is
+    unknown, belongs to a different connection, or (see the scope check at
+    each call site) belongs to a different principal — never an enumeration
+    oracle, the same posture `_require_connection` already uses."""
+    _require_connection(connection_id, principal)
+    record = async_execution_store().get(admission_id)
+    if record is None or record.connection_id != connection_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown async query admission: {admission_id!r}",
+        )
+    if record.principal_subject != principal.subject and QUERY_CANCEL_SCOPE not in principal.scopes:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown async query admission: {admission_id!r}",
+        )
+    return record
+
+
 _QUEUE_MODE_QUERY = Query(
     default=None,
     description=(
         "fail_fast: don't wait for a concurrency slot at all, reject immediately if the "
         "connection is at capacity. wait (default): wait up to wait_timeout_seconds, or the "
-        "policy's own concurrency_wait_seconds ceiling if wait_timeout_seconds is omitted."
+        "policy's own concurrency_wait_seconds ceiling if wait_timeout_seconds is omitted. "
+        "async: return 202 immediately with an admission_id instead of blocking, polled via "
+        "GET .../query/{admission_id} — only honored by POST /{connection}/query "
+        "(single-query execution); rejected as a validation error on every other endpoint "
+        "that accepts this parameter."
     ),
 )
 _WAIT_TIMEOUT_QUERY = Query(
@@ -192,7 +255,9 @@ def build_router(
         with mask_unexpected():
             return await service.explain(query)
 
-    @router.post("/{connection}/query", response_model=StructuredQueryResult)
+    @router.post(
+        "/{connection}/query", response_model=Union[StructuredQueryResult, AsyncQueryAdmission]
+    )
     async def execute_query(
         connection: str,
         query: StructuredQuery,
@@ -203,6 +268,27 @@ def build_router(
         approval_token: Optional[str] = Header(default=None, alias="X-QueryGate-Approval"),
     ):
         service = _service(connection, principal)
+        if queue_mode == QueueMode.ASYNC:
+            # The background task always waits/executes exactly like `wait`
+            # would — `async` only changes whether THIS caller blocks on the
+            # HTTP response, never the wait-ceiling semantics `resolve_wait_seconds`
+            # already enforces identically for both (see admission.py).
+            async def _execute_coro(admission_id, on_admitted, on_session_identifier):
+                return await service.execute(
+                    query,
+                    wait_timeout_seconds=wait_timeout_seconds,
+                    approval_token=approval_token,
+                    _admission_id=admission_id,
+                    on_admitted=on_admitted,
+                    on_session_identifier=on_session_identifier,
+                )
+
+            record = start_async_execution(connection, principal.subject, _execute_coro)
+            response.status_code = status.HTTP_202_ACCEPTED
+            return AsyncQueryAdmission(
+                admission_id=record.admission_id,
+                status_url=f"/api/v1/{connection}/query/{record.admission_id}",
+            )
         with mask_unexpected():
             # An ApprovalRequiredError propagates to the 428 handler in _errors.py
             # carrying the fingerprint + reasons; the caller gets a token from
@@ -221,6 +307,63 @@ def build_router(
             )
         )
         return result
+
+    @router.get("/{connection}/query/{admission_id}", response_model=AsyncQueryStatus)
+    async def get_query_status(
+        connection: str,
+        admission_id: str,
+        principal: Principal = Depends(get_principal),
+    ):
+        """Poll a `queue_mode=async` execution (TODO.md item 35 phase 3). Only
+        the submitting principal or a caller holding `query:cancel` may view
+        it — a `404`, not a `403`, for anyone else, so the admission_id space
+        can't be used to probe which ids exist."""
+        record = _require_async_record(connection, admission_id, principal)
+        return AsyncQueryStatus(
+            admission_id=record.admission_id,
+            state=record.state,
+            queue_wait_ms=record.queue_wait_ms,
+            result=record.result,
+            error=record.error_message,
+            admission_state=record.error_admission_state,
+        )
+
+    @router.post("/{connection}/query/{admission_id}/cancel", response_model=AsyncQueryCancelResult)
+    async def cancel_query(
+        connection: str,
+        admission_id: str,
+        principal: Principal = Depends(get_principal),
+    ):
+        """Request cancellation of a `queue_mode=async` execution (TODO.md
+        item 35 phase 3). Cancelling your own query needs no scope; cancelling
+        another principal's needs `query:cancel`. Idempotent — cancelling an
+        already-terminal execution is a no-op that returns its current state.
+        A RUNNING query can only be cancelled for real if the connection's
+        policy has `allow_query_cancellation` set (`403` otherwise) — rejected
+        before any DB call, never a permission error discovered mid-cancellation.
+        """
+        record = _require_async_record(connection, admission_id, principal)
+        if record.principal_subject != principal.subject:
+            require_scope(principal, QUERY_CANCEL_SCOPE)
+        profile, policy = resolve_visible_connection(connection, principal=principal)
+        with mask_unexpected():
+            # An unexpected failure from cancel_session itself (e.g. a real
+            # Postgres/MSSQL permission error if an operator enabled
+            # allow_query_cancellation without actually granting the DB-level
+            # permission yet) must not leak driver text past this boundary,
+            # same as every other DB-touching route in this file.
+            try:
+                state = await request_cancel(
+                    record,
+                    allow_query_cancellation=policy.allow_query_cancellation,
+                    engine=get_engine(connection),
+                    dialect=profile.dialect,
+                )
+            except QueryCancellationNotEnabledError as exc:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+            except QueryCancellationNotReadyError as exc:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+        return AsyncQueryCancelResult(admission_id=record.admission_id, state=state)
 
     @router.post("/{connection}/query/approve", response_model=ApprovalGrant)
     async def approve_query(
@@ -369,6 +512,7 @@ def build_router(
         queue_mode: Optional[QueueMode] = _QUEUE_MODE_QUERY,
         wait_timeout_seconds: Optional[float] = _WAIT_TIMEOUT_QUERY,
     ):
+        reject_unsupported_async_queue_mode(queue_mode)
         template: Optional[QueryTemplate] = get_template_store().get(template_id)
         # Uniform not-found whether the template is unknown or its connection is
         # hidden from this principal — never an enumeration oracle.
@@ -393,9 +537,10 @@ def build_router(
         )
         # Bind + execute exactly like execute_query: parameter binding and the
         # pipeline raise the same actionable domain exceptions, which the
-        # centralized app-level handlers map (CapacityTimeoutError -> 422 with
-        # admission headers, PolicyViolationError/QueryValidationError/
-        # ConcurrencyLimitError -> 422); mask_unexpected masks everything else.
+        # centralized app-level handlers map (CapacityTimeoutError/
+        # ConcurrencyLimitError -> 429 with admission headers/Retry-After,
+        # PolicyViolationError/QueryValidationError -> 422); mask_unexpected
+        # masks everything else.
         with mask_unexpected():
             query = bind_template(template, request.parameters)
             result = await service.execute(
@@ -418,6 +563,7 @@ def build_router(
         queue_mode: Optional[QueueMode] = _QUEUE_MODE_QUERY,
         wait_timeout_seconds: Optional[float] = _WAIT_TIMEOUT_QUERY,
     ):
+        reject_unsupported_async_queue_mode(queue_mode)
         service = _service(connection, principal)
         validate_batch_size(len(payload.queries), get_policy(connection, principal=principal))
         results = await service.execute_many(

@@ -318,6 +318,47 @@ async def test_import_requires_matching_connection_id_via_rest(sources):
 
 
 @pytest.mark.asyncio
+async def test_single_proposal_fetch_includes_review_history_but_list_does_not(sources):
+    """TODO.md item 38 phase 2: the admin UI's detail panel needs the durable
+    review trail (who edited/rejected/approved and when); the bulk list
+    endpoint deliberately stays lean without it (an unbounded per-proposal
+    history on every row of a proposal-queue scan is payload nobody needs)."""
+    connections_file, policy_file, catalog_file, snapshot = sources
+    app = create_app(
+        _settings(connections_file, policy_file, catalog_file, scopes=_ALL_CATALOG_SCOPES)
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        gen_resp = await client.post(
+            "/api/v1/admin/catalog/demo/generate-drafts",
+            json={"batch": _batch(snapshot, generation_id="gen-history")},
+            headers=_auth(),
+        )
+        assert gen_resp.status_code == 201
+        proposal_id = (
+            await client.get("/api/v1/admin/catalog/demo/proposals", headers=_auth())
+        ).json()[0]["proposal_id"]
+
+        await client.post(
+            f"/api/v1/admin/catalog/demo/proposals/{proposal_id}/reject",
+            json={"reason": "needs more evidence"},
+            headers=_auth(),
+        )
+
+        detail_resp = await client.get(
+            f"/api/v1/admin/catalog/demo/proposals/{proposal_id}", headers=_auth()
+        )
+        assert detail_resp.status_code == 200
+        history = detail_resp.json()["review_history"]
+        assert len(history) == 1
+        assert history[0]["action"] == "rejected"
+        assert history[0]["reason"] == "needs more evidence"
+        assert history[0]["actor"]
+
+        list_resp = await client.get("/api/v1/admin/catalog/demo/proposals", headers=_auth())
+        assert "review_history" not in list_resp.json()[0]
+
+
+@pytest.mark.asyncio
 async def test_delete_and_bulk_delete_via_rest(sources):
     connections_file, policy_file, catalog_file, snapshot = sources
     app = create_app(

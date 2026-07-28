@@ -308,6 +308,15 @@
         <div class="catalog-connection-bar">
           <label><span>Connection</span><select id="catalog-connection"></select></label>
         </div>
+        <div class="button-row">
+          <button id="generate-drafts" class="button secondary" type="button">Generate drafts…</button>
+          <input id="generate-drafts-file" type="file" accept="application/json" hidden>
+          <button id="run-learn" class="button secondary" type="button">Run learning</button>
+          <button id="export-catalog" class="button secondary" type="button">Export catalog</button>
+          <button id="import-catalog" class="button secondary" type="button">Import catalog…</button>
+          <input id="import-catalog-file" type="file" accept="application/json" hidden>
+        </div>
+        <div id="catalog-toolbar-result" class="validation-result"></div>
 
         <div data-catalog-panel="review">
         <form id="catalog-filters" class="filter-bar">
@@ -338,8 +347,22 @@
           </label>
         </form>
 
+        <div id="proposal-bulk-toolbar" class="button-row" hidden>
+          <span id="proposal-bulk-count"></span>
+          <button id="bulk-approve" class="button secondary" type="button">Approve selected</button>
+          <button id="bulk-reject" class="button danger-button" type="button">Reject selected</button>
+          <button id="bulk-delete" class="button danger-button" type="button">Delete selected</button>
+          <button id="bulk-clear-selection" class="button secondary" type="button">Clear selection</button>
+        </div>
+        <div id="bulk-reject-row" class="reject-row" hidden>
+          <input id="bulk-reject-reason" type="text" placeholder="Reason for rejection" maxlength="500">
+          <button id="bulk-confirm-reject" class="button danger-button" type="button">Confirm reject</button>
+          <button id="bulk-cancel-reject" class="button secondary" type="button">Cancel</button>
+        </div>
+
         <div class="catalog-layout">
           <aside class="proposal-rail" aria-label="Proposal queue">
+            <label class="checkbox-row"><input id="proposal-select-all" type="checkbox"><span>Select all</span></label>
             <div id="proposal-list" class="proposal-list"><p class="empty-state">Connect with catalog:review to load proposals.</p></div>
           </aside>
           <div class="proposal-workbench">
@@ -366,6 +389,11 @@
                     <dl id="published-fields" class="compare-fields"></dl>
                   </article>
                 </div>
+
+                <article class="panel" id="review-history-panel">
+                  <div class="panel-head"><p class="eyebrow">Review history</p></div>
+                  <div class="table-wrap"><table class="history-table"><thead><tr><th>Action</th><th>Actor</th><th>When</th><th>Reason</th></tr></thead><tbody id="review-history-body"><tr><td colspan="4" class="empty-cell">No review actions yet.</td></tr></tbody></table></div>
+                </article>
 
                 <article class="panel" id="edit-panel">
                   <div class="panel-head"><div><p class="eyebrow">Edit before deciding</p><h3>Adjust proposed content</h3></div></div>
@@ -407,6 +435,11 @@
         <div data-catalog-panel="versions" hidden>
         <div class="section-intro catalog-history-head"><div><p class="eyebrow">Catalog version history</p><h2>Every publish and rollback, connection-scoped.</h2></div><button id="refresh-catalog-versions" class="button secondary" type="button">Refresh versions</button></div>
         <div class="table-wrap"><table class="history-table"><thead><tr><th>Version</th><th>Action</th><th>Target</th><th>Fields changed</th><th>Actor</th><th>When</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="catalog-history-body"><tr><td colspan="7" class="empty-cell">Select a connection to load catalog version history.</td></tr></tbody></table></div>
+        </div>
+
+        <div data-catalog-panel="usage" hidden>
+        <div class="section-intro catalog-history-head"><div><p class="eyebrow">Usage signals</p><h2>Aggregated evidence the learner draws on, connection-scoped.</h2><p>A bounded, aggregated-by-target projection — never a raw per-signal dump. Only <code>relationship_used</code> currently feeds "Run learning"; the other kinds are recorded for visibility.</p></div><button id="refresh-usage-signals" class="button secondary" type="button">Refresh usage signals</button></div>
+        <div class="table-wrap"><table class="history-table"><thead><tr><th>Kind</th><th>Object</th><th>Target</th><th>Support</th><th>Signal count</th><th>First observed</th><th>Last observed</th></tr></thead><tbody id="usage-signals-body"><tr><td colspan="7" class="empty-cell">Select a connection to load usage signals.</td></tr></tbody></table></div>
         </div>
       </section>
 

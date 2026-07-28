@@ -305,20 +305,23 @@ gate is the *first step of the item*, not a reason to defer it.
 wrong; it is all downstream of having a surface worth integrating against.*
 
 - [ ] **51** — Typed client-side query-builder SDK (Python + TypeScript).
-  *Lowers integration friction for the next wave of adopters.* **Phase 1 shipped**
-  (in-tree Python builder); box stays `[ ]` for phase 2 — the TypeScript sibling
-  (needs a Node toolchain this repo doesn't have) and the standalone
-  dependency-light distribution (**coupled to 30 phase 2's registry choice**).
-  *Note: every engine item above widens the AST this SDK must mirror — building
-  the TS builder before the engine settles buys rework.*
-- [ ] **35** — Agent-visible capacity waiting, progress, and cancellation.
-  *Developer-experience polish for real agent workloads.* **Phase 1 + Phase 2
-  shipped** (admission info + queue modes; Redis cross-replica admission state +
-  queue-depth caps). Box stays `[ ]` for **Phase 3, which is design-gated** by
-  the item's own text — MCP progress-notification wire format, a REST async
-  lifecycle (`202` + status/cancel), cancellation semantics (queue-only vs.
-  dialect DB-cancel), and a `429`/`Retry-After` breaking-change evaluation each
-  need a protocol/product decision before build.
+  *Lowers integration friction for the next wave of adopters.* **Phase 1
+  shipped** (in-tree Python builder); **phase 2a shipped** (in-tree TypeScript
+  builder, `clients/typescript/`, a structural/behavioral mirror (camelCase
+  naming, not name-for-name) + cross-language kitchen-sink parity fixture,
+  both wired into CI — verified end-to-end during development against a real
+  running server and real Postgres). Box stays `[ ]` for phase 2b — the standalone
+  dependency-light distribution for either language (**coupled to 30 phase
+  2's registry choice**).
+- [x] **35** — Agent-visible capacity waiting, progress, and cancellation.
+  *Developer-experience polish for real agent workloads.* ✅ **Shipped in full
+  (phases 1–3, 2026-07-28)** — admission info + queue modes + Redis cross-replica
+  admission state and queue-depth caps (phases 1–2); MCP progress via FastMCP's
+  built-in `report_progress`, a REST `202`+poll+cancel async lifecycle, real
+  dialect-level cancellation (Postgres `pg_cancel_backend`, MSSQL `KILL`) gated
+  on a deny-by-default `Policy.allow_query_cancellation` flag, and a full
+  migration of capacity/queue rejections from `422` to `429`+`Retry-After`
+  (phase 3, Decision Log in docs/PRODUCT_GUIDE.md).
 - [x] **94** — Verify (and, if warranted, enable) prepared-statement plan reuse
   for template execution. *Cheap, bounded perf/observability check on the
   already-shipped template path (item 48); adoption polish, not a moat or safety
@@ -346,7 +349,10 @@ wrong; it is all downstream of having a surface worth integrating against.*
 - [x] **37** — Automated end-to-end proof of adaptive semantic learning. ✅
   **Shipped** (`catalog/adaptive_learning_benchmark.py` drives the real 32C
   learning lifecycle e2e; reconciled from a shipped-but-unmarked state).
-- [ ] **38 (phase 2)** — Admin UI catalog-governance workspace.
+- [x] **38** — Admin UI catalog-governance workspace. ✅ **Shipped** (phase 1
+  review→approve/reject→publish→rollback workflow, plus phase 2 bulk
+  actions, export/import, generate-drafts/learn triggers, review_history
+  view, and usage-signal browsing).
 - [ ] **44 (phase 2)** — Admin observability / rejection-trend dashboard.
 - [ ] **45 (phase 2)** — Non-admin "My access" portal.
 - [ ] **47 (phase 2)** — Safe draft recovery + config export/import UX.
@@ -513,10 +519,10 @@ frontier's buildable threads:
   before build**. *(Superseded 2026-07-25: that Decision Log requirement is the
   first step of each item, not a gate that defers it — see the fifth-pass note
   above. The engine is now Phase 4 and is the active frontier.)*
-- **Admin UI (low ROI):** **38 ph2** — bulk approve/reject/delete + export/import
-  + browser-triggered generate/learn + `review_history`, all over item 32B's
-  existing scoped routes (no new mutation path). Frontend-only; Phase 6
-  lowest-marginal-ROI.
+- ~~**Admin UI (low ROI): 38 ph2**~~ — shipped in full 2026-07-28 (bulk
+  approve/reject/delete, export/import, browser-triggered generate/learn,
+  `review_history`, usage-signal browsing — all over item 32B's existing
+  scoped routes, no new mutation path); no longer gated.
 
 Everything else stays gated as before:
 
@@ -530,12 +536,13 @@ Everything else stays gated as before:
   fully `✅ DONE` in TODO.md.)
 - **30·89 ph2** — the *maintainer's signed-release tag push* (+ package-index
   choice); the mechanism is shipped.
-- **35 ph3** — *design-gated* (agent-visible progress/cancellation posture);
-  phases 1+2 shipped.
-- **18 / 51 ph2 / 19** — *large standalone*: stored-proc subsystem (needs a real
-  security review — procedures have side effects); the TypeScript SDK +
-  standalone distribution (coupled to 30 ph2, not locally validatable); new
-  dialects (need live DBs, now unblocked *architecturally* by 57).
+- ~~**35 ph3**~~ — shipped in full 2026-07-28 (progress notifications, REST
+  async+cancel, dialect-level cancellation, 429 migration); no longer gated.
+- **18 / 51 ph2b / 19** — *large standalone*: stored-proc subsystem (needs a
+  real security review — procedures have side effects); the standalone
+  dependency-light distribution for the (now-shipped, both-language) client
+  SDK (coupled to 30 ph2, not locally validatable); new dialects (need live
+  DBs, now unblocked *architecturally* by 57).
 - **44·45·47 ph2** — *admin-UI / durable-infra phase-2s* needing external metrics
   history (44), more UI (45), or an encrypted-at-rest draft store (47).
 - **F4 / P2** — *decision-gated*: NL→StructuredQuery (model-provider/posture
@@ -543,8 +550,9 @@ Everything else stays gated as before:
 
 *(The fourth pass closed by telling `roadmap-next` to surface two live threads —
 38 ph2's UI slice and a decision on 92's elicitation SoD posture. Both are
-superseded: 92 shipped fully, and the 2026-07-25 re-prioritization puts the
-engine ahead of the UI slice. Trim this note as the frontier moves.)*
+superseded: 92 shipped fully, the 2026-07-25 re-prioritization put the engine
+ahead of the UI slice, and 38 ph2 itself has since shipped in full
+(2026-07-28). Trim this note as the frontier moves.)*
 
 ---
 
