@@ -82,10 +82,37 @@ curl -X POST "http://localhost:8000/api/v1/demo/query?queue_mode=wait&wait_timeo
   -d '{"from": "orders", "select": ["orders.id"], "limit": 10}'
 ```
 
-Every response — success or a `422` capacity rejection — carries
-`X-QueryGate-Admission-Id`, `X-QueryGate-Admission-State`
-(`completed`/`capacity_timeout`), and `X-QueryGate-Queue-Wait-Ms` headers. A
-successful body also carries `admission_id`/`queue_wait_ms` fields directly.
+Every response — success or a `429` capacity rejection (migrated from `422`
+2026-07-28, TODO.md item 35 phase 3) — carries `X-QueryGate-Admission-Id`,
+`X-QueryGate-Admission-State` (`completed`/`capacity_timeout`/`queue_full`),
+and `X-QueryGate-Queue-Wait-Ms` headers; a capacity rejection also carries
+`Retry-After`. A successful body also carries `admission_id`/`queue_wait_ms`
+fields directly.
+
+## Asynchronous execution + cancellation (queue_mode=async)
+
+`queue_mode=async` returns `202` immediately instead of blocking for a result
+— the query runs in the background, polled via the returned `status_url`:
+
+```bash
+# Submit — returns 202 with an admission_id and status_url right away.
+curl -X POST "http://localhost:8000/api/v1/demo/query?queue_mode=async" \
+  -H "Content-Type: application/json" \
+  -d '{"from": "orders", "select": ["orders.id"], "limit": 10}'
+# -> 202 {"admission_id": "...", "status_url": "/api/v1/demo/query/<id>"}
+
+# Poll — state is one of queued/running/completed/failed/cancel_requested/cancelled.
+curl http://localhost:8000/api/v1/demo/query/<admission_id>
+
+# Cancel — cancelling your own query needs no scope; cancelling another
+# principal's needs the query:cancel scope. Cancelling a still-queued query
+# is always free (never touches the database). Cancelling a RUNNING query
+# needs the connection's policy to set allow_query_cancellation (deny by
+# default — see policy.example.yaml) after the operator has granted the
+# required DB-level permission (Postgres: pg_signal_backend; MSSQL:
+# ALTER ANY CONNECTION) — otherwise this returns 403.
+curl -X POST http://localhost:8000/api/v1/demo/query/<admission_id>/cancel
+```
 
 ## Batch queries
 

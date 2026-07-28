@@ -2169,6 +2169,282 @@ see how one policy/configuration change alters the outcome. Every showcased
 configuration, decision, and error is traceable to a tested QueryGate behavior,
 and the page is explicitly labeled as an illustrative mocked experience.
 
+### 35. Agent-visible capacity waiting, progress, and cancellation ✅ DONE
+
+**Phase 1 shipped:** `concurrency_slot()` already waited for up to the
+policy's `concurrency_wait_seconds` and raised `ConcurrencyLimitError`
+(REST `429`) when that window expired — proven under real load by item 15's
+harness. Phase 1 makes that existing wait-then-fail-fast path agent-visible
+and caller-tunable, without yet building the asynchronous/cross-replica
+machinery below:
+
+- `execution/admission.py` — `QueueMode` (`fail_fast`/`wait`) and
+  `resolve_wait_seconds()`, the single clamp that lets a caller shorten the
+  operator's `concurrency_wait_seconds` ceiling (or skip waiting entirely via
+  `fail_fast`) but never lengthen it. `queue_mode`/`wait_timeout_seconds` are
+  request-level options outside the `StructuredQuery` AST — REST query
+  params on `POST .../query` and `.../query/batch`, extra MCP tool
+  arguments on `execute_structured_query`/`execute_structured_queries`.
+  Omitting both preserves the exact pre-item-35 default.
+- Every `execute()` call gets a stable `admission_id` (UUID) and
+  `queue_wait_ms`, added as optional fields on `StructuredQueryResult`/
+  `BatchQueryItemResult` (REST/MCP) and surfaced as REST response headers
+  (`X-QueryGate-Admission-Id`, `X-QueryGate-Admission-State`,
+  `X-QueryGate-Queue-Wait-Ms`) rather than folded into the existing (then-`422`,
+  now-`429` — see phase 3) `{"detail": "too many concurrent..."}` body, so
+  that documented string contract (`docs/LOAD_TESTING.md`) never changes.
+  MCP's `MCPErrorResult` gains the same three fields for a capacity rejection.
+  `core/exceptions.CapacityTimeoutError` (subclasses `ConcurrencyLimitError`)
+  carries the id/elapsed-wait without touching any existing
+  `isinstance`/`except ConcurrencyLimitError` call site.
+  Terminal states this phase: `completed` and `capacity_timeout` — `queued`/
+  `running`/`cancelled` need the asynchronous contract phase 3 adds.
+- New metrics: `querygate_queue_depth` (callers currently waiting for a slot,
+  single-process visibility) and `querygate_queue_wait_seconds` (histogram,
+  labeled by outcome). `AuditEvent` gained matching `admission_id`/
+  `queue_wait_ms`/`admission_state` fields (schema_version unchanged, same as
+  every prior additive field).
+- Proven under real Postgres load
+  (`tests/integration/test_postgres_load_guardrails.py`): `fail_fast` never
+  waits even though capacity frees up moments later; a caller-selected wait
+  shorter than the policy ceiling is honored; a caller-selected wait that
+  outlasts the occupiers still queues and succeeds; successful responses
+  carry the documented admission headers. Security regression
+  (`test_caller_cannot_extend_the_operators_concurrency_wait_ceiling`) proves
+  a caller cannot use `wait_timeout_seconds` to wait longer than the operator
+  configured.
+
+**Phase 2 shipped:** Redis-backed cross-replica admission state, plus the
+queue-depth pressure controls phase 1 deliberately left out —
+`Policy.max_queue_depth` (whole-connection) and
+`max_queue_depth_per_principal` (one caller's share), both optional and
+unset/unlimited by default. `execution/concurrency.py`'s `concurrency_slot()`
+now takes `principal_subject`/`max_queue_depth`/`max_queue_depth_per_principal`
+and enforces them *before* a caller starts waiting at all — a caller past
+either cap is rejected immediately (`queue_wait_ms: 0`), never queued.
+`core/exceptions.QueueDepthExceededError` (raised by `concurrency.py`, plain,
+mirroring how a bare `ConcurrencyLimitError` signals a wait-timeout) is
+enriched into `QueueFullError` (subclasses `CapacityTimeoutError`, adds
+`admission_state="queue_full"`, distinct from `"capacity_timeout"`) at the
+`StructuredQueryService` boundary — the same low-level/enriched split
+`CapacityTimeoutError` already established. `CapacityTimeoutError` itself
+gained an `admission_state` field (default `"capacity_timeout"`) so REST/MCP
+read it off the exception instead of hardcoding the string, which is what
+let `QueueFullError` reuse the exact same REST rejection-plus-headers and MCP
+`MCPErrorResult` mapping with no new branch at either boundary.
+`querygate_queue_wait_seconds`'s `outcome` label and
+`querygate_queries_rejected_total`'s `reason` label both gained a `queue_full`
+bucket, broken out from `capacity_timeout`/`concurrency` so operators can
+tell "the queue's own pressure control tripped" apart from "waited and ran
+out of time."
+
+Cross-replica admission state: `execution/redis_concurrency.py`'s
+`RedisConcurrencyLimiter` gained `enter_queue`/`leave_queue`, mirroring
+`acquire`/`release`'s existing sorted-set-plus-lease design with a second
+pair of per-connection (and, when a principal is given, per-connection-
+per-principal) sorted sets. When `concurrency_backend: redis` is selected,
+`max_queue_depth`/`max_queue_depth_per_principal` are enforced against the
+true cross-replica count (one atomic Lua script checks both caps and admits
+or rejects the waiter), and `querygate_queue_depth` is set from that same
+count rather than one process's own local increments — closing the exact
+gap phase 1 flagged ("single-process visibility only, like
+querygate_concurrency_in_use"). The in-process (non-Redis) fallback keeps
+its pre-existing single-process-only gauge semantics, now paired with a
+plain-dict depth count purely for cap enforcement (Prometheus gauges have
+no public "current value for these labels" read). Both paths fail open on a
+Redis error the same way `acquire()` already does, for the same
+availability-over-strict-enforcement reason.
+
+Tested against fakeredis (`tests/unit/test_redis_concurrency.py`'s
+`enter_queue`/`leave_queue` tests, including cross-limiter-instance
+enforcement standing in for cross-replica), `tests/unit/test_concurrency.py`
+(local-path caps, per-principal isolation, Redis-path cap enforcement and
+gauge accuracy across two separate limiter instances sharing one Redis),
+`tests/unit/test_service.py` (`QueueFullError` wiring, `admission_state`
+audit field), `tests/unit/test_metrics.py` (`queue_full` classification),
+REST/MCP integration tests proving the rejection/`MCPErrorResult` mapping, and
+two adversarial security regressions
+(`test_unbounded_waiting_queue_is_capped_not_a_dos_vector`,
+`test_max_queue_depth_per_principal_prevents_one_caller_starving_another`)
+proving the actual security property: a caller happy to wait indefinitely
+cannot pile up an unbounded number of waiters, and one noisy principal
+cannot exhaust another principal's share of the queue.
+
+**Phase 3 shipped (2026-07-28):** the four remaining pieces, each resolved as
+its own protocol/product decision recorded in `docs/PRODUCT_GUIDE.md`'s
+Decision Log before build, per the maintainer's explicit sign-off:
+
+- **MCP progress notifications** reuse FastMCP's built-in
+  `Context.report_progress` — a real MCP standard message
+  (`notifications/progress`) keyed on a client-supplied `progressToken`, not a
+  bespoke QueryGate wire format. `run_structured_queries` (`mcp/tools/query.py`)
+  builds `on_wait_start`/`on_admitted` callbacks only when `ctx is not None`
+  (report_progress itself already no-ops with no token, so this stays
+  unconditional and purely additive) and threads them through
+  `execute_many`/`_execute_batch_item`/`execute()` — a two-point signal
+  ("waiting up to Ns" then "admitted after Nms, executing"), not a continuous
+  mid-wait tick: ticking would mean slicing `concurrency_slot`'s wait into
+  shorter repeated attempts, risking a regression in the "a caller cannot
+  extend its wait past the operator's ceiling" guarantee item 35 phase 1's own
+  security regression test protects, for a DX-only feature.
+- **A REST asynchronous contract**: `queue_mode=async` on `POST .../query`
+  returns `202` immediately with `{admission_id, status_url}` — the
+  `admission_id` is generated up front (a new `_admission_id` param on
+  `StructuredQueryService.execute()`) and the real execution runs as a
+  background `asyncio.Task`, so the caller never blocks on it.
+  `GET .../query/{admission_id}` polls `execution/async_execution.py`'s new
+  `InProcessAsyncExecutionStore` (state machine: `queued` → `running` →
+  `completed`/`failed`/`cancel_requested` → `cancelled`) for the current
+  state/result; `POST .../query/{admission_id}/cancel` requests cancellation.
+  Both new endpoints 404 uniformly for an unknown id, a different
+  connection's id, or (unless the caller holds the new `query:cancel` scope)
+  a different principal's id — never an enumeration oracle, proven by a
+  genuine cross-principal integration test using two JWTs with distinct `sub`
+  claims (a same-anonymous-principal test would pass even with the ownership
+  check deleted, confirmed by mutation-testing it during development).
+  **In-process only for this pass** — like admission (phase 1) and quota
+  (item 50), which both shipped in-process first; a Redis-backed cross-replica
+  store is a natural, separately-scoped follow-up, documented as a real
+  limitation (a caller polling a different replica than the one that started
+  the query gets a `404`) rather than silently assumed away.
+- **Real dialect-level cancellation**, gated on a new deny-by-default
+  `Policy.allow_query_cancellation` flag (the same posture as
+  `allow_cross_join`, item 103) — not queue-only cancellation, and not a
+  silently-attempted best-effort call. `connections/dialects.py`'s
+  `SessionDialectAdapter` gained `capture_session_identifier`/`cancel_session`:
+  Postgres captures `pg_backend_pid()` and cancels via `pg_cancel_backend`
+  (interrupts just the query, the pooled connection stays alive — chosen over
+  `pg_terminate_backend`, which would force the pool to detect and recycle a
+  dead connection for one query's cancellation); MSSQL captures `@@SPID` and
+  cancels via `KILL <spid>` (T-SQL's only out-of-band primitive for this,
+  which terminates the whole session — a real cross-dialect asymmetry
+  recorded rather than papered over with a synthesized "graceful cancel" MSSQL
+  doesn't offer). Both permission requirements (Postgres: superuser or
+  `pg_signal_backend` role membership; MSSQL: `ALTER ANY CONNECTION` server
+  permission or sysadmin) were discovered during design, not assumed — a
+  cancel request for a RUNNING query is rejected outright, before any DB call,
+  unless the policy flag is explicitly set; the operator sets it only after
+  granting the permission themselves. `connections/engine.py`'s
+  `session_scope()` gained an optional `session_identifier_sink` parameter
+  (skipped by default — no extra round-trip on the ordinary synchronous path;
+  only the async lifecycle passes it) that captures the identifier right
+  after guardrails, before the caller's query runs. Cancelling a still-`queued`
+  execution is cheaper: `record.task.cancel()` interrupts the wait cleanly
+  (asyncio's single-threaded cooperative scheduling makes the state check and
+  the cancel call atomic, so no lock is needed), no DB call needed. A query
+  that completes despite a cancel request (the DB-level cancel lost the race)
+  reports `completed` with the real result, not a forced `cancelled`.
+- **Capacity/queue rejections migrated fully from REST `422` to `429` +
+  `Retry-After`**, matching item 50's quota-rejection precedent, with no
+  compatibility flag to keep emitting `422` — `CapacityTimeoutError`/
+  `QueueFullError` gained a `retry_after_seconds` field (the connection's own
+  `concurrency_wait_seconds` ceiling, the same conservative-hint approach
+  quota uses) and MCP's error-code classification moved `ConcurrencyLimitError`
+  from `VALIDATION` into the `RATE_LIMITED` bucket alongside
+  `QuotaExceededError` — "at capacity, retry later" is the same semantic as
+  quota exhaustion, not a structural validation error. Recorded as a
+  deliberate breaking change (`CHANGELOG.md`); `docs/LOAD_TESTING.md`'s
+  documented response-body string contract is unchanged, only the status code
+  and the added header.
+
+Covered by `tests/unit/test_admission.py` (async treated identically to wait
+for the ceiling calculation — pinned against a literal expected value, not
+just cross-checked against `wait`'s own result, so a future `async`
+special-case that happened to coincidentally match `wait` for one input pair
+can't hide behind it), `tests/unit/test_async_execution.py` (11 tests:
+success/failure/cancellation state transitions, masking of a non-actionable
+background-execution error versus an actionable one passing through
+unmasked, the queued-vs-running cancel paths — the policy-gate test asserts
+`cancel_session` is never invoked, not just that some exception was raised —
+the not-yet-connected retry case, the completes-despite-cancel and
+fails-after-cancel races, and idempotency for both a completed record and one
+already `cancel_requested`), `tests/unit/test_dialects.py` (5 new tests:
+Postgres/MSSQL session-identifier capture and cancellation, including a
+defensive non-integer-SPID rejection test for MSSQL's un-parameterizable
+`KILL`), `tests/unit/test_mcp_progress.py` (4 tests: hooks built only when
+`ctx` is present, the two progress messages, and `queue_mode=async` rejected
+as a validation error), `tests/unit/test_service.py` (2 new tests:
+`on_wait_start`/`on_admitted` fire with the right values, `on_session_identifier`
+forwards to `session_scope`), `tests/unit/test_capacity_rate_limit_mapping.py`
+(5 tests: REST 429 + MCP RATE_LIMITED mapping for both the bare and enriched
+exception), and `tests/integration/test_async_query_lifecycle.py` (7 tests
+against a real SQLite-backed REST app: `202` → poll → `completed` with real
+rows, unknown/wrong-connection admission-id 404s, idempotent
+cancel-of-completed, a real driver-failure masking test, and both directions
+of the genuine two-JWT cross-principal test — denied without `query:cancel`,
+allowed with it). Every new enforcement point was mutation-verified: the
+cross-principal ownership check, the `allow_query_cancellation` policy gate,
+the window/session-identifier wiring — each was deliberately broken, confirmed
+to fail for that exact reason, then
+reverted.
+
+**Deliberately out of scope for phase 3** (real, separately-scoped follow-ups,
+not silently dropped): a Redis-backed cross-replica async-execution store
+(single-process only, documented above); deeper Prometheus/audit-event tagging
+for the async lifecycle specifically (a cancelled-while-queued execution never
+reaches `classify_rejection` or increments a metric today — it's caught
+entirely inside `async_execution.py`; a cancelled-while-running execution IS
+audited via the normal failure path, with the real DB-driven error text, just
+without a dedicated `admission_state="cancelled"` tag); and MCP-side
+cancellation (scoped to REST only — an MCP tool call has no separate
+"cancel a previous call" concept the way REST's dedicated cancel endpoint
+does).
+
+**Why it matters:** Before phase 3, a caller saw either a slow pending tool
+call, a final result, or a final capacity error. It could not ask to fail
+fast or wait for a caller-selected period (phase 1), could not distinguish
+"queued behind two queries" from "the database is slow" across replicas
+(phase 2), and could not present a supported cancel action while it waits or
+tell a waiting agent anything mid-flight. Phase 3 closes that: an interactive
+agent gets a progress signal while queued, a REST caller gets a poll-and-cancel
+contract instead of a blocking call, and a genuinely stuck query can be
+stopped at the database itself — deliberately, only where an operator has
+opted in and granted the permission.
+
+**Two real bugs found and fixed by an independent re-audit (2026-07-28),
+not silently left broken:**
+
+1. **Unmasked internal error text leaked via the async status poll.** The
+   background execution task (`async_execution.py`'s `_run()`) stored a
+   failing query's raw `str(exc)` and `GET .../query/{admission_id}` served
+   it verbatim — the synchronous REST path's `mask_unexpected()` never wraps
+   this background task, so a non-actionable exception (potentially driver
+   details, SQL, bind values, or a filesystem path) could reach whichever
+   principal owns the admission_id, breaking redaction parity with every
+   other route. Fixed by routing the stored message through the same
+   `public_error_message()` classifier the synchronous path uses (actionable
+   exceptions like `QueryValidationError` still pass through with their real
+   text; everything else reduces to the generic message), plus a
+   server-side `log.exception` so the real detail isn't lost, just not
+   handed to the client. Regression-tested in both directions
+   (`test_a_failing_execution_transitions_to_failed_with_a_masked_error`,
+   `test_a_failing_execution_with_an_actionable_error_is_not_masked`).
+2. **`queue_mode=async` silently downgraded to synchronous execution on
+   every endpoint except the one that implements it.** Only `POST
+   .../query` builds the real `202`/poll/cancel admission lifecycle;
+   `POST .../query-templates/{id}/run`, `POST .../query/batch`, and the MCP
+   `run_structured_queries` tool all accepted `async` as a valid
+   `queue_mode` value (their field descriptions never said otherwise) and
+   simply executed synchronously with no signal that the requested mode
+   wasn't honored — `resolve_wait_seconds` treats `async` identically to
+   `wait` for the wait-ceiling calculation, so nothing else would have
+   caught the silent fallback. Fixed with a shared
+   `reject_unsupported_async_queue_mode()` helper
+   (`execution/admission.py`) raising `QueryValidationError` (422/VALIDATION)
+   on all three surfaces, plus updated field descriptions stating the
+   restriction explicitly. Regression-tested on all three
+   (`test_batch_query_rejects_async_queue_mode`,
+   `test_run_rejects_async_queue_mode`,
+   `test_run_structured_queries_rejects_async_queue_mode`).
+
+Both fixes, plus three lower-severity test-hardening items from the same
+re-audit (a policy-gate test that now asserts `cancel_session` is never
+invoked rather than only catching *some* exception; a new idempotency test
+for re-cancelling an already-`cancel_requested` record; and the positive
+half of the cross-principal test — a caller *with* `query:cancel` succeeding
+where one without it is denied), were each mutation-verified: deliberately
+broken, confirmed to fail for the reported reason, then reverted.
+
 ### 36. Extensive production-grade QA project / edge-case test suite ✅ DONE
 
 **Phase 1 (policy-cap boundary tests + property-based compiler fuzzing) ✅
@@ -2416,6 +2692,161 @@ row access; fail on any learned-content auto-publication or policy disclosure;
 and report baseline-versus-learned correctness, discovery-call reduction,
 stale detection, duplicate proposals, and security violations. Do not make a
 "self-learning" product claim until this test and the adversarial suite pass.
+
+### 38. Admin UI catalog-governance workspace ✅ DONE
+
+**Shipped (phase 1):** A new "Catalog review" section in the existing admin
+UI (`admin_ui/index.html`/`app.js`/`app.css`), calling only item 32B's
+existing REST routes — no new mutation path. Covers the core
+review-→-approve/reject-→-publish-→-rollback loop the item's own "why it
+matters" identifies as the actual gap:
+
+- Connection, status, source (`inferred`/`learned`), and object-type
+  (table/column/relationship) filters over a bounded proposal queue.
+- A detail panel with side-by-side proposed-versus-currently-published
+  fields — the published side is read live via the same policy-filtered
+  `describe_table` call the schema-review tab already uses (table
+  `catalog`, per-column `catalog`, and matched-by-identity relationship
+  entries), not a new comparison endpoint.
+- Provenance/confidence/schema-freshness chips, sourced from three new
+  fields (`source_class`, `confidence`, `created_at`) added to the existing
+  `ProposalListItem` REST response — the only backend change this phase
+  needed.
+- Edit/approve/reject(reason)/publish actions, each independently gated on
+  its own least-privilege scope (`catalog:edit`/`approve`/`reject`/
+  `publish`) and only shown when the proposal's `review_status` makes that
+  action legal, mirroring `catalog/governance.py`'s state machine exactly
+  (edit/approve only from `pending`, reject from `pending` or `approved`,
+  publish only from `approved`) rather than showing a button the backend
+  would 409 on.
+- A publish-conflict preview (`GET .../proposals/{id}/preview`) surfaced
+  before publish, and a typed-confirmation dialog (reusing the same
+  `confirmAction()` pattern as item 31's version activate/rollback) for the
+  agent-visible mutations: publish and catalog-version rollback.
+- Connection-scoped catalog version history with rollback, reusing the same
+  table/history UI pattern as item 25's config version history.
+
+Verified end-to-end against a real running server and real Postgres (not
+just the ASGI test client): generated table/column/relationship proposals,
+edited one, approved/published/rolled-back one, rejected another, and
+confirmed the "currently published" comparison panel's logic against
+`describe_table`'s actual response shape for all three target kinds. No
+browser-automation tool was available in this environment, so this was
+exercised as the exact sequence of REST calls the JS makes rather than
+pixel-verified in a rendered page; the JS itself was syntax-checked
+(`node --check`) and its static markup/script content is asserted in
+`tests/integration/test_admin_ui.py`.
+
+**Shipped (phase 2):** the five features deliberately deferred out of phase 1,
+all still thin wrappers over item 32B's existing governance routes — no new
+mutation path, no new scope:
+
+- **Bulk approve/reject(reason)/delete.** Checkboxes per proposal row (a
+  `state.selectedProposalIds` `Set`, pruned to whatever survives the active
+  filters on every re-render so a hidden proposal can't stay silently
+  selected) plus a toolbar calling the existing `bulk-approve`/`bulk-reject`/
+  `bulk-delete` REST endpoints, gated on the same `catalog:approve`/`reject`/
+  `delete` scopes as the single-proposal actions.
+- **Export/import (backup/restore)** for a connection's catalog, calling the
+  existing `GET .../export` / `POST .../import` routes — download-a-file /
+  upload-a-file, the same pattern `exportChangeSet`/`importChangeSet` already
+  use for the shared config change-set, gated on `catalog:export`.
+- **`generate-drafts`/`learn` triggers from the browser.** "Run learning" is
+  a one-click POST with no body. "Generate drafts…" uploads a JSON file
+  that's posted through unmodified — the exact `GenerateDraftsRequest` body
+  (`batch`/`purpose`/`max_proposals`) the endpoint already accepts, since a
+  real `ManualDraftBatch` needs a schema fingerprint and suggestions no
+  browser form can conjure. Both gated on `catalog:generate`.
+- **Per-proposal `review_history` detail view.** The one backend addition
+  this phase needed: `ProposalDetail(ProposalListItem)` adds a
+  `review_history: List[ProposalReviewEvent]` field, returned only by
+  `GET .../proposals/{id}` (`get_proposal_endpoint`) — never by the bulk
+  `GET .../proposals` list, which stays on the lean `ProposalListItem` shape.
+  A list of every proposal's full actor-attributed history is unbounded
+  payload no queue-scanning reviewer needs; the single-fetch this backs is
+  exactly the request `selectProposal()` and `refreshSelectedProposalAfterMutation()`
+  already (re-)issue. `selectProposal()` was changed to always fetch this
+  single-proposal endpoint directly (rather than reusing the cached list
+  item) so the history renders immediately, not only after the first
+  mutation. Regression-tested directly against the model boundary in both
+  directions: `test_single_proposal_fetch_includes_review_history_but_list_does_not`
+  asserts the field is present after a reject action on the detail fetch and
+  absent on the list fetch.
+- **Usage-signal browsing.** A new "Usage signals" tab in the Catalog domain
+  (`GET .../usage-signals`, already existed, `catalog:review`-scoped) renders
+  the bounded, aggregated-by-target `UsageSignalSummaryItem` projection from
+  item 32C — kind, object, target, support, signal count, first/last
+  observed — the same "metadata projection, never a raw per-signal dump"
+  posture as `CatalogVersionSummary`.
+
+Verified during development: `node --check` on the served `app.js`, a
+custom HTML tag-balance check on `index.html`, the full unit suite (1763
+passed) and non-`real_db` integration suite (295 passed) green, and a new
+`tests/integration/test_admin_ui.py` static-shell assertion test
+(`test_catalog_governance_phase2_ui_is_wired_and_scope_gated`) confirming the
+new markup, endpoints, and scope gates are actually wired into the served
+page/script. Unlike phase 1's manual live-server REST exercise, this pass
+relied entirely on static checks and the automated suites — no browser tool
+was available in this environment to drive the new bulk/export/import/
+generate/learn/usage-signal features through a real page the way phase 1's
+review/publish/rollback loop was exercised.
+
+**Two real bugs found and fixed as follow-ups, not silently left broken:**
+
+1. **UI panel closing on approve/reject/publish.** `selectProposal()` looked
+   the open proposal up in the currently *filtered* proposal list. Approving
+   a proposal moves it out of the default "pending" filter, so the
+   post-action refresh (which reloads that filtered list) could no longer
+   find it — the panel silently reset to its empty state and the
+   newly-available Publish button never appeared, breaking the very
+   review-→-approve-→-publish flow this workspace exists for. Fixed by
+   decoupling the open detail panel from the filtered queue: it now renders
+   from a proposal fetched directly (`GET .../proposals/{id}`) after every
+   mutation, regardless of whether that proposal still matches the active
+   filter. Verified with a headless jsdom harness driving the real served
+   `admin_ui` against a live server (still no browser tool available in this
+   environment) through the full approve → preview → publish sequence.
+2. **`list_live_tables()` leaked Postgres system catalog tables**
+   (`schema/reflection.py`) — found via the background schema-refresh
+   scanner (`SEMANTIC_MEMORY_REFRESH_ENABLED=true`,
+   `catalog/refresh.py`'s `scan_connection_schema`) raising `NoSuchTableError`
+   against a real live demo Postgres for tables confirmed to exist via
+   `psql`. Root cause: Postgres's own `information_schema.tables` lists
+   `pg_catalog`/`information_schema` system tables (`pg_type`,
+   `pg_aggregate`, ...) alongside real ones when queried without a schema
+   filter, unlike MSSQL's INFORMATION_SCHEMA. This is shared, foundational
+   code — the same bug also leaked system table names into agent-facing
+   `list_tables()`/MCP discovery for any Postgres connection without a
+   `known_tables` seed, not just the catalog scanner. Fixed with a
+   `TABLE_SCHEMA NOT IN ('pg_catalog', 'information_schema', 'sys')` filter;
+   regression-tested against real Postgres in
+   `tests/integration/test_postgres_schema_discovery.py`
+   (`make test-postgres-live`).
+
+**Original scope (for reference — see above for what actually shipped):**
+
+**Effort: L (3–5 days).** The governed backend, scopes, proposal state
+machine, version history, and REST routes already exist from item 32B, so
+this is primarily a substantial UI workflow rather than a new persistence
+subsystem. The effort is in presenting conflicts, provenance, and state
+transitions accurately and covering every authorization boundary.
+
+**Why it matters:** Item 31's UI can edit the published catalog YAML as part
+of a config snapshot, but it does not expose item 32B's safer proposal-based
+workflow. An administrator currently has to use REST or
+`querygate-semantic-memory` to review generated/learned drafts, compare them
+with verified content, approve or reject them, publish them, and roll them
+back. That leaves one of QueryGate's most differentiated governance features
+outside its primary human interface.
+
+**What to do:** Add a catalog workspace with connection/status/source filters,
+a bounded proposal queue, side-by-side proposed-versus-published fields,
+provenance and schema-freshness indicators, edit/reject/approve actions,
+publish conflict explanations, bulk operations, and catalog version rollback.
+Call only the existing item-32B routes and honor their least-privilege scopes;
+the UI must never collapse review, approval, and publication into an automatic
+transition or reveal proposal content to callers with only agent-facing
+catalog access.
 
 ### 39. Draft-aware policy simulation before staging ✅ DONE
 

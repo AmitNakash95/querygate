@@ -16,19 +16,47 @@ import uuid
 from enum import StrEnum
 from typing import Optional
 
+from querygate.core.exceptions import QueryValidationError
+
 
 class QueueMode(StrEnum):
     """`fail_fast`: reject immediately if a concurrency slot isn't free, no
     waiting at all. `wait` (default — matches pre-item-35 behavior): wait up
-    to the resolved wait-seconds ceiling before giving up.
+    to the resolved wait-seconds ceiling before giving up. `async` (REST
+    only, TODO.md item 35 phase 3): return `202` immediately with an
+    `admission_id` instead of blocking the HTTP response; the query runs in
+    the background exactly as `wait` would, and `GET .../query/{admission_id}`
+    polls it. Only a REST-transport concept — `resolve_wait_seconds` below
+    treats it identically to `wait` for the wait-ceiling calculation itself
+    (the *waiting* semantics are unchanged; only whether the caller blocks on
+    it is different), so `async` needs no special case there.
     """
 
     FAIL_FAST = "fail_fast"
     WAIT = "wait"
+    ASYNC = "async"
 
 
 def new_admission_id() -> str:
     return str(uuid.uuid4())
+
+
+def reject_unsupported_async_queue_mode(queue_mode: Optional[QueueMode]) -> None:
+    """`async` is a REST-transport concept implemented only by the single-query
+    `POST .../query` route's own `202`/poll/cancel admission dance — nothing
+    else builds that lifecycle. Without this check, `queue_mode="async"`
+    reaching `execute()`/`execute_many()` through `run_query_template`,
+    `execute_query_batch`, or the MCP `run_structured_queries` tool would
+    silently execute synchronously and block instead (`resolve_wait_seconds`
+    treats `async` identically to `wait` for the wait-ceiling calculation),
+    with no signal to the caller that the mode they asked for wasn't
+    actually honored. Reject, don't silently downgrade."""
+    if queue_mode == QueueMode.ASYNC:
+        raise QueryValidationError(
+            "queue_mode='async' is only supported on POST /{connection}/query "
+            "(single-query REST execution); query templates, batch queries, and "
+            "the MCP run_structured_queries tool always execute synchronously."
+        )
 
 
 def resolve_wait_seconds(

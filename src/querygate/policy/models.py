@@ -450,6 +450,19 @@ class Policy(pyd.BaseModel):
     # when max_queue_depth still has headroom.
     max_queue_depth_per_principal: Optional[int] = pyd.Field(default=None, ge=0)
 
+    # Real dialect-level cancellation of a running query (TODO.md item 35
+    # phase 3) — deny by default, the same posture as `allow_cross_join`.
+    # Cancelling an in-flight query needs a permission grant beyond what a
+    # typical reporting connection has: Postgres requires the connection's
+    # role to be a superuser or a member of `pg_signal_backend`
+    # (`GRANT pg_signal_backend TO <role>;`); MSSQL requires the server-level
+    # `ALTER ANY CONNECTION` permission or sysadmin. A cancel request is
+    # rejected outright, before any DB call, unless this is explicitly set —
+    # the operator sets it only AFTER granting the permission themselves, so a
+    # missing grant is a deployment decision made in the open, never a runtime
+    # permission error discovered mid-cancellation (2026-07-28 Decision Log).
+    allow_query_cancellation: bool = pyd.Field(default=False)
+
     # Per-principal request/byte quota over a rolling window (TODO.md item 50).
     # max_concurrency bounds *in-flight* queries; these bound the *rate* over
     # time, so a caller that never exceeds its concurrency limit still can't
@@ -691,6 +704,9 @@ _DIRECTION_REVIEWED_GUARDRAILS = frozenset(
         # the normal direction, but "allow_*" does not read as a ceiling, so it
         # is stated rather than guessed (item 103).
         "allow_cross_join",
+        # Same "allow_* does not read as a ceiling" reasoning as allow_cross_join
+        # — permitting cancellation is the looser posture (item 35 phase 3).
+        "allow_query_cancellation",
         # Approval thresholds, not caps: a HIGHER threshold means fewer queries
         # are stopped for a human, so higher is looser — the normal direction,
         # but stated because "approval_max_*" does not read like a ceiling on

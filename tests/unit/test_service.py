@@ -1012,6 +1012,85 @@ async def test_execute_two_calls_get_different_admission_ids():
 
 
 @pytest.mark.asyncio
+async def test_execute_calls_on_wait_start_and_on_admitted_hooks():
+    """TODO.md item 35 phase 3: the two-point progress signal MCP's
+    Context.report_progress and the async execution lifecycle both build on.
+    Ordinary synchronous callers pass neither hook (see the many tests above
+    with no on_wait_start/on_admitted) — this pins the opt-in shape."""
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = []
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    wait_start_calls = []
+    admitted_calls = []
+
+    async def on_wait_start(wait_seconds: float) -> None:
+        wait_start_calls.append(wait_seconds)
+
+    async def on_admitted(queue_wait_ms: int) -> None:
+        admitted_calls.append(queue_wait_ms)
+
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query, on_wait_start=on_wait_start, on_admitted=on_admitted)
+
+    assert len(wait_start_calls) == 1
+    assert len(admitted_calls) == 1
+    assert admitted_calls[0] >= 0
+
+
+@pytest.mark.asyncio
+async def test_execute_calls_on_session_identifier_hook_via_session_scope():
+    """The hook is forwarded to `session_scope` as `session_identifier_sink`
+    unchanged — proven here against the real `session_scope` contract rather
+    than a bespoke test double, since `connections/engine.py`'s own tests
+    cover the capture logic itself."""
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = []
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    captured_kwargs = {}
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        sink = kwargs.get("session_identifier_sink")
+        if sink is not None:
+            sink("4242")
+        yield mock_session
+
+    identifiers = []
+
+    def on_session_identifier(identifier: str) -> None:
+        identifiers.append(identifier)
+
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query, on_session_identifier=on_session_identifier)
+
+    assert identifiers == ["4242"]
+    assert captured_kwargs["session_identifier_sink"] is on_session_identifier
+
+
+@pytest.mark.asyncio
 async def test_execute_fail_fast_raises_capacity_timeout_without_waiting():
     query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
     set_policy_store(

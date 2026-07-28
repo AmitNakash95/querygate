@@ -181,22 +181,27 @@ def install_exception_handlers(app: FastAPI) -> None:
 
     # Registered separately from (and more specifically than)
     # ConcurrencyLimitError: a capacity timeout / queue-full additionally
-    # carries admission headers.
+    # carries admission headers. `429` + `Retry-After`, not `422` (TODO.md
+    # item 35 phase 3, migrated 2026-07-28 — a full migration, no `422`
+    # compatibility flag, per the Decision Log; `docs/LOAD_TESTING.md`'s
+    # documented string-contract commitment is superseded for this rejection
+    # class specifically, not for policy/schema validation errors).
     @app.exception_handler(CapacityTimeoutError)
     async def _capacity_timeout(_request: Request, exc: CapacityTimeoutError) -> JSONResponse:
-        return _response(
-            exc,
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            headers=admission_headers(
-                admission_id=exc.admission_id,
-                state=exc.admission_state,
-                queue_wait_ms=exc.queue_wait_ms,
-            ),
+        headers = admission_headers(
+            admission_id=exc.admission_id,
+            state=exc.admission_state,
+            queue_wait_ms=exc.queue_wait_ms,
         )
+        headers["Retry-After"] = str(exc.retry_after_seconds)
+        return _response(exc, status.HTTP_429_TOO_MANY_REQUESTS, headers=headers)
 
+    # The plain (non-enriched) base only reaches here from a path with no
+    # admission-id plumbing (e.g. `explain()`'s own concurrency_slot) — same
+    # rejection family, same status code, no Retry-After hint to attach.
     @app.exception_handler(ConcurrencyLimitError)
     async def _concurrency(_request: Request, exc: ConcurrencyLimitError) -> JSONResponse:
-        return _response(exc, status.HTTP_422_UNPROCESSABLE_CONTENT)
+        return _response(exc, status.HTTP_429_TOO_MANY_REQUESTS)
 
     # Registered separately from (and more specifically than)
     # PolicyViolationError: a per-principal quota rejection (TODO.md item 50) is

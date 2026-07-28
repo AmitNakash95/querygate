@@ -9,7 +9,7 @@ connection only fails when something actually queries it.
 from __future__ import annotations
 
 import contextlib
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Callable, Optional
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import (
@@ -23,6 +23,7 @@ from querygate.connections.dialects import (
     apply_session_guardrails,
     build_connect_args,
     build_engine_url,
+    capture_session_identifier,
     register_query_timeout,
 )
 from querygate.connections.models import ConnectionProfile
@@ -90,8 +91,18 @@ def get_metadata(connection_id: str) -> sa.MetaData:
 
 @contextlib.asynccontextmanager
 async def session_scope(
-    connection_id: str, policy: Optional[Policy] = None
+    connection_id: str,
+    policy: Optional[Policy] = None,
+    *,
+    session_identifier_sink: Optional[Callable[[str], None]] = None,
 ) -> AsyncGenerator[AsyncSession, None]:
+    """`session_identifier_sink`, when given, is called once with this
+    session's dialect-captured backend/process identifier (TODO.md item 35
+    phase 3) — right after guardrails, before the caller's query ever runs —
+    so a later, separate cancellation call can target it. Skipped by default
+    (an extra round-trip on every query otherwise): only the async execution
+    lifecycle that can actually be cancelled passes this.
+    """
     profile = _profile(connection_id)
     if policy is None:
         from querygate.policy.loader import get_policy
@@ -106,6 +117,9 @@ async def session_scope(
                 lock_timeout_seconds=min(policy.timeout_seconds, 30),
                 statement_timeout_seconds=policy.timeout_seconds,
             )
+            if session_identifier_sink is not None:
+                identifier = await capture_session_identifier(session, profile.dialect)
+                session_identifier_sink(identifier)
             yield session
         except Exception:
             await session.rollback()

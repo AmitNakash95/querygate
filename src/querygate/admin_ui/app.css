@@ -356,6 +356,8 @@ input:hover, select:hover, textarea:hover { border-color: var(--line-strong); }
 .catalog-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 12px; min-height: 620px; margin-top: 18px; }
 .proposal-rail { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .proposal-list { display: flex; max-height: 620px; flex-direction: column; gap: 5px; padding: 12px; overflow: auto; }
+.proposal-item-row { display: flex; align-items: flex-start; gap: 4px; }
+.proposal-item-row .checkbox-row { flex: 0 0 auto; padding: 12px 0 0 4px; }
 .proposal-item { display: flex; width: 100%; flex-direction: column; gap: 6px; padding: 12px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); text-align: left; }
 .proposal-item:hover, .proposal-item.active { border-color: var(--line); background: var(--surface-2); color: var(--ink); }
 .proposal-item-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

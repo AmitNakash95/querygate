@@ -69,6 +69,12 @@ scope, only a valid identity.
 |---|---|
 | `query:approve` | Grant an approval token for a query that tripped the human-in-the-loop gate |
 
+### Query cancellation
+
+| Scope | Gates |
+|---|---|
+| `query:cancel` | Cancel another principal's in-flight async query (self-cancellation needs no scope) |
+
 ## Recommended role bundles
 
 Advisory groupings — QueryGate enforces individual scopes, not roles. Register each as a role in your IdP and grant it the listed scopes; provisioning a user is then a role assignment.
@@ -133,3 +139,9 @@ Backup/restore and retention of catalog content.
 Reviews and approves individual queries that trip the in-query human-in-the-loop gate (sensitive/expensive reads). Kept separate from the querying role so an agent cannot approve its own read.
 
 - `query:approve`
+
+### Query Operator
+
+Steps in to cancel another principal's stuck or runaway async query. A caller can always cancel their own query without this scope.
+
+- `query:cancel`

@@ -74,6 +74,14 @@ CATALOG_DELETE_SCOPE = "catalog:delete"
 # this.
 QUERY_APPROVE_SCOPE = "query:approve"
 
+# Cancel another principal's in-flight async query (TODO.md item 35 phase 3).
+# Cancelling YOUR OWN query needs no scope at all — the same posture as
+# submitting one in the first place, which this resource never scopes either
+# (data access is governed by policy.yaml keyed by `sub`, not a scope). This
+# scope only gates the cross-principal case: an operator stepping in to stop
+# someone else's stuck query.
+QUERY_CANCEL_SCOPE = "query:cancel"
+
 
 class ScopeInfo(NamedTuple):
     """One authorization scope: the wire string, the action it gates, and the
@@ -164,6 +172,11 @@ SCOPE_CATALOG: Tuple[ScopeInfo, ...] = (
         "Query approval",
         "Grant an approval token for a query that tripped the human-in-the-loop gate",
     ),
+    ScopeInfo(
+        QUERY_CANCEL_SCOPE,
+        "Query cancellation",
+        "Cancel another principal's in-flight async query (self-cancellation needs no scope)",
+    ),
 )
 
 # Every scope string this resource understands, derived from SCOPE_CATALOG so it
@@ -232,5 +245,11 @@ ROLE_BUNDLES: Tuple[RoleBundle, ...] = (
         "human-in-the-loop gate (sensitive/expensive reads). Kept separate from "
         "the querying role so an agent cannot approve its own read.",
         (QUERY_APPROVE_SCOPE,),
+    ),
+    RoleBundle(
+        "Query Operator",
+        "Steps in to cancel another principal's stuck or runaway async query. "
+        "A caller can always cancel their own query without this scope.",
+        (QUERY_CANCEL_SCOPE,),
     ),
 )

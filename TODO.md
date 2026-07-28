@@ -66,10 +66,10 @@ order-of-magnitude, not commitments.
 | 32 | ✅ Governed adaptive semantic memory for agents (32A ✅; 32B ✅; 32C ✅) | XL | 23, 25, 27, 28 |
 | 33 | ✅ Permission-aware QueryGate product guide and configuration assistant | M–L | 8, 10, 21, 22, 25 |
 | 34 | ✅ Interactive mocked HTML product sandbox | M | — |
-| 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phases 1–2: caller-tunable queue_mode/wait_timeout_seconds, admission id, metrics/audit, queue-depth caps + Redis-backed cross-replica admission state; phase 3: progress notifications, REST 202+cancel, mid-queue cancellation, 429 evaluation not started) | L | 9, 12, 15, 20 |
+| 35 | ✅ Agent-visible capacity waiting, progress, and cancellation (phases 1–3: caller-tunable queue_mode/wait_timeout_seconds/async, admission id, metrics/audit, queue-depth caps + Redis-backed cross-replica admission state, MCP progress notifications, REST 202+poll+cancel, dialect-level cancellation, 429+Retry-After) | L | 9, 12, 15, 20 |
 | 36 | ✅ Extensive production-grade QA project / edge-case test suite (all phases: policy-cap boundary tests + Hypothesis property-based compiler fuzzing, REST/MCP malformed-input fuzzing, cross-dialect differential execution tests) | L | 15, 28 |
 | 37 | ✅ Automated end-to-end proof of adaptive semantic learning | M–L | 23, 25, 27, 28, 32B, 32C |
-| 38 | ✅ Admin UI catalog-governance workspace (phase 1: core review/approve/reject/publish/rollback loop; phase 2: bulk ops, export/import UI, generation triggers not started) | L | 27, 31, 32B |
+| 38 | ✅ Admin UI catalog-governance workspace (phase 1: core review/approve/reject/publish/rollback loop; phase 2: bulk ops, export/import UI, generation triggers, review_history, usage-signal browsing) | L | 27, 31, 32B |
 | 39 | ✅ Draft-aware policy simulation before staging | M–L | 6, 17, 25, 31 |
 | 40 | ✅ Semantic access diff for config changes (phase 1: connection-baseline diff + REST; phase 2 per-principal resolution covered by item 41) | L | 6, 25, 31, 39 |
 | 41 | ✅ Policy-change blast-radius analysis (phase 1: bounded synchronous aggregation + ranking; phase 2: stateless paginated evaluation) | M–L | 22, 25, 31, 40 |
@@ -82,7 +82,7 @@ order-of-magnitude, not commitments.
 | 48 | ✅ Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) (phase 1: file-configured invocable templates + REST/MCP; phase 2: governed authoring via the config-versioning plane) | L | 6, 22, 25, 32B |
 | 49 | ✅ Column-value masking/tokenization (not just allow/deny) | L | 6, 27 |
 | 50 | ✅ Per-principal rate limits / query quotas over time (phase 1: in-process rolling-window request/byte quota; phase 2: Redis-backed cross-replica quota) | M | 9, 25 |
-| 51 | ✅ Typed client-side query-builder SDK (phase 1: Python builder; phase 2: TypeScript + standalone dependency-light distribution not started) | M (per language) | 20 |
+| 51 | ✅ Typed client-side query-builder SDK (phase 1: Python builder; phase 2a: TypeScript builder; phase 2b: standalone dependency-light distribution not started) | M (per language) | 20 |
 | 52 | ✅ Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI) | S (per framework) | 20 |
 | 53 | Independent third-party security audit + published report | S* | 28 |
 | 54 | ✅ Compliance control mapping (SOC 2 / ISO 27001 readiness) | L | 23, 25, 28 |
@@ -441,133 +441,9 @@ a new `querygate/help/` product-knowledge boundary with ten canonical Markdown t
 
 `landing/sandbox.html` — a single self-contained, static HTML page (fonts via Google Fonts CDN, everything else inline, no build step, no network calls after load) linked from… **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 34).
 
-### 35. Agent-visible capacity waiting, progress, and cancellation ✅ DONE (phases 1–2); phase 3 (progress notifications, REST 202 + cancel, mid-queue cancellation) deferred
+### 35. Agent-visible capacity waiting, progress, and cancellation ✅ DONE
 
-**Phase 1 shipped:** `concurrency_slot()` already waited for up to the
-policy's `concurrency_wait_seconds` and raised `ConcurrencyLimitError`
-(REST `422`) when that window expired — proven under real load by item 15's
-harness. Phase 1 makes that existing wait-then-fail-fast path agent-visible
-and caller-tunable, without yet building the asynchronous/cross-replica
-machinery below:
-
-- `execution/admission.py` — `QueueMode` (`fail_fast`/`wait`) and
-  `resolve_wait_seconds()`, the single clamp that lets a caller shorten the
-  operator's `concurrency_wait_seconds` ceiling (or skip waiting entirely via
-  `fail_fast`) but never lengthen it. `queue_mode`/`wait_timeout_seconds` are
-  request-level options outside the `StructuredQuery` AST — REST query
-  params on `POST .../query` and `.../query/batch`, extra MCP tool
-  arguments on `execute_structured_query`/`execute_structured_queries`.
-  Omitting both preserves the exact pre-item-35 default.
-- Every `execute()` call gets a stable `admission_id` (UUID) and
-  `queue_wait_ms`, added as optional fields on `StructuredQueryResult`/
-  `BatchQueryItemResult` (REST/MCP) and surfaced as REST response headers
-  (`X-QueryGate-Admission-Id`, `X-QueryGate-Admission-State`,
-  `X-QueryGate-Queue-Wait-Ms`) rather than folded into the existing `422`
-  `{"detail": "too many concurrent..."}` body, so that documented string
-  contract (`docs/LOAD_TESTING.md`) never changes. MCP's `MCPErrorResult`
-  gains the same three fields for a capacity rejection.
-  `core/exceptions.CapacityTimeoutError` (subclasses `ConcurrencyLimitError`)
-  carries the id/elapsed-wait without touching any existing
-  `isinstance`/`except ConcurrencyLimitError` call site.
-  Terminal states this phase: `completed` and `capacity_timeout` — `queued`/
-  `running`/`cancelled` need the asynchronous contract below.
-- New metrics: `querygate_queue_depth` (callers currently waiting for a slot,
-  single-process visibility) and `querygate_queue_wait_seconds` (histogram,
-  labeled by outcome). `AuditEvent` gained matching `admission_id`/
-  `queue_wait_ms`/`admission_state` fields (schema_version unchanged, same as
-  every prior additive field).
-- Proven under real Postgres load
-  (`tests/integration/test_postgres_load_guardrails.py`): `fail_fast` never
-  waits even though capacity frees up moments later; a caller-selected wait
-  shorter than the policy ceiling is honored; a caller-selected wait that
-  outlasts the occupiers still queues and succeeds; successful responses
-  carry the documented admission headers. Security regression
-  (`test_caller_cannot_extend_the_operators_concurrency_wait_ceiling`) proves
-  a caller cannot use `wait_timeout_seconds` to wait longer than the operator
-  configured.
-
-**Phase 2 shipped:** Redis-backed cross-replica admission state, plus the
-queue-depth pressure controls phase 1 deliberately left out —
-`Policy.max_queue_depth` (whole-connection) and
-`max_queue_depth_per_principal` (one caller's share), both optional and
-unset/unlimited by default. `execution/concurrency.py`'s `concurrency_slot()`
-now takes `principal_subject`/`max_queue_depth`/`max_queue_depth_per_principal`
-and enforces them *before* a caller starts waiting at all — a caller past
-either cap is rejected immediately (`queue_wait_ms: 0`), never queued.
-`core/exceptions.QueueDepthExceededError` (raised by `concurrency.py`, plain,
-mirroring how a bare `ConcurrencyLimitError` signals a wait-timeout) is
-enriched into `QueueFullError` (subclasses `CapacityTimeoutError`, adds
-`admission_state="queue_full"`, distinct from `"capacity_timeout"`) at the
-`StructuredQueryService` boundary — the same low-level/enriched split
-`CapacityTimeoutError` already established. `CapacityTimeoutError` itself
-gained an `admission_state` field (default `"capacity_timeout"`) so REST/MCP
-read it off the exception instead of hardcoding the string, which is what
-let `QueueFullError` reuse the exact same REST `422`-plus-headers and MCP
-`MCPErrorResult` mapping with no new branch at either boundary.
-`querygate_queue_wait_seconds`'s `outcome` label and
-`querygate_queries_rejected_total`'s `reason` label both gained a `queue_full`
-bucket, broken out from `capacity_timeout`/`concurrency` so operators can
-tell "the queue's own pressure control tripped" apart from "waited and ran
-out of time."
-
-Cross-replica admission state: `execution/redis_concurrency.py`'s
-`RedisConcurrencyLimiter` gained `enter_queue`/`leave_queue`, mirroring
-`acquire`/`release`'s existing sorted-set-plus-lease design with a second
-pair of per-connection (and, when a principal is given, per-connection-
-per-principal) sorted sets. When `concurrency_backend: redis` is selected,
-`max_queue_depth`/`max_queue_depth_per_principal` are enforced against the
-true cross-replica count (one atomic Lua script checks both caps and admits
-or rejects the waiter), and `querygate_queue_depth` is set from that same
-count rather than one process's own local increments — closing the exact
-gap phase 1 flagged ("single-process visibility only, like
-querygate_concurrency_in_use"). The in-process (non-Redis) fallback keeps
-its pre-existing single-process-only gauge semantics, now paired with a
-plain-dict depth count purely for cap enforcement (Prometheus gauges have
-no public "current value for these labels" read). Both paths fail open on a
-Redis error the same way `acquire()` already does, for the same
-availability-over-strict-enforcement reason.
-
-Tested against fakeredis (`tests/unit/test_redis_concurrency.py`'s
-`enter_queue`/`leave_queue` tests, including cross-limiter-instance
-enforcement standing in for cross-replica), `tests/unit/test_concurrency.py`
-(local-path caps, per-principal isolation, Redis-path cap enforcement and
-gauge accuracy across two separate limiter instances sharing one Redis),
-`tests/unit/test_service.py` (`QueueFullError` wiring, `admission_state`
-audit field), `tests/unit/test_metrics.py` (`queue_full` classification),
-REST/MCP integration tests proving the `422`/`MCPErrorResult` mapping, and
-two adversarial security regressions
-(`test_unbounded_waiting_queue_is_capped_not_a_dos_vector`,
-`test_max_queue_depth_per_principal_prevents_one_caller_starving_another`)
-proving the actual security property: a caller happy to wait indefinitely
-cannot pile up an unbounded number of waiters, and one noisy principal
-cannot exhaust another principal's share of the queue.
-
-**Explicitly deferred to phase 3** (each remaining piece needs its own
-protocol/design decision — a wire format for MCP progress notifications, a
-new REST resource lifecycle for asynchronous execution plus its cancellation
-semantics, and a breaking-change evaluation for HTTP status codes — that are
-independent of phase 2's storage/admission-control work above and are each
-easier to scope correctly on their own than bundled together):
-
-- MCP progress notifications for a client that advertises support.
-- A REST asynchronous contract (`202` + status/cancel endpoints, or a
-  documented streaming endpoint) — a normal pending HTTP response can't
-  notify a caller mid-wait.
-- Idempotent mid-queue cancellation, including whether cancellation is
-  queue-only or must invoke and verify dialect-specific database
-  cancellation before reporting `cancelled`.
-- Evaluate `429` + `Retry-After` for REST capacity responses without
-  breaking clients that currently handle `422`.
-
-**Why it matters:** Today a caller sees either a slow pending tool call, a
-final result, or a final capacity error. It cannot ask to fail fast or wait for
-a caller-selected period, cannot distinguish "queued behind two queries" from
-"the database is slow," and cannot present a supported cancel action while it
-waits. An interactive agent should be able to say that QueryGate is at
-capacity, keep waiting within an operator-approved bound, and let the user
-cancel rather than appearing hung or retrying blindly. Phase 1 answers the
-first two; phase 2 makes the waiting itself bounded and cross-replica-safe;
-phase 3 answers the rest.
+Agent-visible admission (caller-tunable wait/fail-fast/async, `admission_id`/`queue_wait_ms`, Redis cross-replica queue-depth caps), MCP progress notifications via FastMCP's `report_progress`, a REST `202`+poll+cancel async lifecycle, real dialect-level cancellation (Postgres `pg_cancel_backend`/MSSQL `KILL`) gated on a deny-by-default `Policy.allow_query_cancellation` flag, and a full migration of capacity/queue rejections from REST `422` to `429`+`Retry-After`. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 35).
 
 ### 32. Governed adaptive semantic memory for agents ✅ DONE
 
@@ -581,115 +457,13 @@ Phase 1 (policy-cap boundary + property-based compiler fuzzing), phase 2a (REST/
 
 `catalog/adaptive_learning_benchmark.py` + a packaged fixture drive the real persisted 32C learning lifecycle (usage signals → learned proposal → governed review/publish/rollback → agent-visible retrieval) end-to-end, with every control (below-threshold, conflict, single-principal, cross-connection, denied-object, unreviewed-guidance) and determinism/idempotency/two-worker proofs; run by `tests/integration/test_adaptive_learning_benchmark.py`. Reconciled from a shipped-but-unmarked state. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 37).
 
-### 38. Admin UI catalog-governance workspace (phase 1 ✅; phase 2 not started)
+### 38. Admin UI catalog-governance workspace ✅ DONE
 
-**Shipped (phase 1):** A new "Catalog review" section in the existing admin
-UI (`admin_ui/index.html`/`app.js`/`app.css`), calling only item 32B's
-existing REST routes — no new mutation path. Covers the core
-review-→-approve/reject-→-publish-→-rollback loop the item's own "why it
-matters" identifies as the actual gap:
-
-- Connection, status, source (`inferred`/`learned`), and object-type
-  (table/column/relationship) filters over a bounded proposal queue.
-- A detail panel with side-by-side proposed-versus-currently-published
-  fields — the published side is read live via the same policy-filtered
-  `describe_table` call the schema-review tab already uses (table
-  `catalog`, per-column `catalog`, and matched-by-identity relationship
-  entries), not a new comparison endpoint.
-- Provenance/confidence/schema-freshness chips, sourced from three new
-  fields (`source_class`, `confidence`, `created_at`) added to the existing
-  `ProposalListItem` REST response — the only backend change this phase
-  needed.
-- Edit/approve/reject(reason)/publish actions, each independently gated on
-  its own least-privilege scope (`catalog:edit`/`approve`/`reject`/
-  `publish`) and only shown when the proposal's `review_status` makes that
-  action legal, mirroring `catalog/governance.py`'s state machine exactly
-  (edit/approve only from `pending`, reject from `pending` or `approved`,
-  publish only from `approved`) rather than showing a button the backend
-  would 409 on.
-- A publish-conflict preview (`GET .../proposals/{id}/preview`) surfaced
-  before publish, and a typed-confirmation dialog (reusing the same
-  `confirmAction()` pattern as item 31's version activate/rollback) for the
-  agent-visible mutations: publish and catalog-version rollback.
-- Connection-scoped catalog version history with rollback, reusing the same
-  table/history UI pattern as item 25's config version history.
-
-Verified end-to-end against a real running server and real Postgres (not
-just the ASGI test client): generated table/column/relationship proposals,
-edited one, approved/published/rolled-back one, rejected another, and
-confirmed the "currently published" comparison panel's logic against
-`describe_table`'s actual response shape for all three target kinds. No
-browser-automation tool was available in this environment, so this was
-exercised as the exact sequence of REST calls the JS makes rather than
-pixel-verified in a rendered page; the JS itself was syntax-checked
-(`node --check`) and its static markup/script content is asserted in
-`tests/integration/test_admin_ui.py`.
-
-**Not done in this pass — explicit phase 2, not silently dropped:** bulk
-approve/reject/delete UI, export/import UI (backup/restore), triggering
-`generate-drafts`/`learn` from the browser (still CLI/REST-only), a
-per-proposal `review_history` detail view, and usage-signal browsing. None
-of these are required for the core review/publish/rollback loop; each is a
-real but separable value-add matching this item's own "bulk operations"
-callout, deferred rather than rushed into the same slice as the core
-workflow.
-
-**Two real bugs found and fixed as follow-ups, not silently left broken:**
-
-1. **UI panel closing on approve/reject/publish.** `selectProposal()` looked
-   the open proposal up in the currently *filtered* proposal list. Approving
-   a proposal moves it out of the default "pending" filter, so the
-   post-action refresh (which reloads that filtered list) could no longer
-   find it — the panel silently reset to its empty state and the
-   newly-available Publish button never appeared, breaking the very
-   review-→-approve-→-publish flow this workspace exists for. Fixed by
-   decoupling the open detail panel from the filtered queue: it now renders
-   from a proposal fetched directly (`GET .../proposals/{id}`) after every
-   mutation, regardless of whether that proposal still matches the active
-   filter. Verified with a headless jsdom harness driving the real served
-   `admin_ui` against a live server (still no browser tool available in this
-   environment) through the full approve → preview → publish sequence.
-2. **`list_live_tables()` leaked Postgres system catalog tables**
-   (`schema/reflection.py`) — found via the background schema-refresh
-   scanner (`SEMANTIC_MEMORY_REFRESH_ENABLED=true`,
-   `catalog/refresh.py`'s `scan_connection_schema`) raising `NoSuchTableError`
-   against a real live demo Postgres for tables confirmed to exist via
-   `psql`. Root cause: Postgres's own `information_schema.tables` lists
-   `pg_catalog`/`information_schema` system tables (`pg_type`,
-   `pg_aggregate`, ...) alongside real ones when queried without a schema
-   filter, unlike MSSQL's INFORMATION_SCHEMA. This is shared, foundational
-   code — the same bug also leaked system table names into agent-facing
-   `list_tables()`/MCP discovery for any Postgres connection without a
-   `known_tables` seed, not just the catalog scanner. Fixed with a
-   `TABLE_SCHEMA NOT IN ('pg_catalog', 'information_schema', 'sys')` filter;
-   regression-tested against real Postgres in
-   `tests/integration/test_postgres_schema_discovery.py`
-   (`make test-postgres-live`).
-
-**Original scope (for reference — see above for what actually shipped):**
-
-**Effort: L (3–5 days).** The governed backend, scopes, proposal state
-machine, version history, and REST routes already exist from item 32B, so
-this is primarily a substantial UI workflow rather than a new persistence
-subsystem. The effort is in presenting conflicts, provenance, and state
-transitions accurately and covering every authorization boundary.
-
-**Why it matters:** Item 31's UI can edit the published catalog YAML as part
-of a config snapshot, but it does not expose item 32B's safer proposal-based
-workflow. An administrator currently has to use REST or
-`querygate-semantic-memory` to review generated/learned drafts, compare them
-with verified content, approve or reject them, publish them, and roll them
-back. That leaves one of QueryGate's most differentiated governance features
-outside its primary human interface.
-
-**What to do:** Add a catalog workspace with connection/status/source filters,
-a bounded proposal queue, side-by-side proposed-versus-published fields,
-provenance and schema-freshness indicators, edit/reject/approve actions,
-publish conflict explanations, bulk operations, and catalog version rollback.
-Call only the existing item-32B routes and honor their least-privilege scopes;
-the UI must never collapse review, approval, and publication into an automatic
-transition or reveal proposal content to callers with only agent-facing
-catalog access.
+Full review→approve/reject→publish→rollback catalog workspace (phase 1), plus
+bulk approve/reject/delete, export/import, generate-drafts/learn browser
+triggers, a per-proposal review_history view, and usage-signal browsing
+(phase 2) — all thin wrappers over item 32B's existing governance routes.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 38).
 
 ### 39. Draft-aware policy simulation before staging ✅ DONE
 
@@ -975,13 +749,11 @@ a `column_mask` policy primitive (`policy/models.py`: `ColumnMask`/`ColumnMaskKi
 
 Three `Policy` fields (`max_requests_per_window`, `max_response_bytes_per_window`, `quota_window_seconds`, resolved per principal through the existing `PolicyStore` merge) enforced by `execution/quota.py`'s narrow `QuotaLimiter` Protocol *before* the service queues or opens a DB session; a refused caller gets REST **429 + `Retry-After`** / MCP **`RATE_LIMITED`**. Phase 2 added `execution/redis_quota.py`'s `RedisQuotaLimiter` (one atomic Lua script, sorted set + bytes hash) so the window is a single shared budget across replicas. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 50).
 
-### 51. Typed client-side query-builder SDK (Python + TypeScript) ✅ DONE (phase 1 — Python builder); phase 2 (TypeScript + standalone distribution) not started
+### 51. Typed client-side query-builder SDK (Python + TypeScript) ✅ DONE (phase 1 — Python builder; phase 2a — TypeScript builder); phase 2b (standalone distribution) not started
 
-**Phase 1 (Python builder) ✅ DONE.** **Phase 2 (TypeScript sibling +
-standalone dependency-light distribution) not started — split out below
-because the standalone-distribution half is coupled to item 30 phase 2's
-still-unresolved registry decision, and TypeScript is a genuinely separate
-language implementation, not more of the Python work.**
+**Phase 1 (Python builder) ✅ DONE. Phase 2a (TypeScript builder) ✅ DONE.**
+**Phase 2b (standalone dependency-light distribution, either language) not
+started — coupled to item 30 phase 2's still-unresolved registry decision.**
 
 **Phase 1 shipped:** `querygate/client/` — a fluent, typed builder that
 constructs the *same* `query_ast` Pydantic models the server validates, then
@@ -1030,19 +802,81 @@ installed wheel (`from querygate.client import Query`), and since
 `query_ast/models.py` and `querygate/__init__.py` are pydantic-only the
 import stays light. It is not yet a *separate* dependency-light distribution.
 
-**Explicitly deferred to phase 2:**
+**Phase 2a shipped:** `clients/typescript/` — a TypeScript mirror of the
+Python fluent surface's *structure and behavior* (`Query.from(...)`, `col`/
+`lit`/`fn`/`colFn`, `agg.*`, `dateBucket`/`stringAgg`/`arrayAgg`/
+`percentileCont`/`fnSelect`, `caseSelect`/`when`, `and_`/`or_`/`not_`, `asc`/
+`desc`, the item-100 scalar-expression helpers (`expr`/`exprFn`/`cast`/
+`extract`/`now`/`dateAdd`/`caseExpr`/`exprSelect`), and the item-101/125
+window helpers (`window`/`windowExpr`/`frame`)), producing byte-identical wire
+JSON — but *not* name-for-name: every multi-word Python name is renamed
+snake_case→camelCase per TS convention (`group_by`→`groupBy`, `order_by`→
+`orderBy`, `top_n`→`topN`, `col_fn`→`colFn`, `date_bucket`→`dateBucket`,
+`string_agg`→`stringAgg`, and so on), on top of the handful of renames
+JavaScript's own grammar forces (`case`/`in` are reserved words); see
+`clients/typescript/README.md`'s naming table. In-tree only
+(`clients/typescript/`, not published — same registry gate as the Python
+standalone distribution); build with `npm install && npm run build` inside
+that directory, or `make test-ts-client`.
 
-- **TypeScript builder.** The same contract in TS with a compile-time-typed
-  `StructuredQuery` — a separate language implementation with its own
-  sync-test strategy (it can't reuse the Python Pydantic models), not more of
-  the Python work.
+Since TypeScript can't import the Python Pydantic models, it can't reuse
+`build()`'s "raises the server's own error" trick verbatim, so the port does
+two things instead: (1) TypeScript's own type system rejects a class of
+mistake the Python builder can only catch at runtime (an un-wrapped bare
+scalar-function argument, a `Predicate` passed to `.select()`) at *compile*
+time; (2) the handful of genuine cross-field business rules Pydantic's
+`model_validator`s enforce — self-join aliasing, aggregate `distinct`
+combinations, window function arity/frame/order-by rules, set-operation arm
+shape, percentile range, scalar/expression-function arity — are reproduced as
+explicit runtime checks with the same rejection message, in
+`clients/typescript/src/builder.ts`.
+
+`build()`/`toDict()`/`toJSON()` emit the **complete** `StructuredQuery` shape
+(every field present; `null` for an unset optional, the Python-declared
+default for a defaulted one) rather than mimicking Pydantic's
+`exclude_none`/`exclude_defaults` trimming — see the 2026-07-28 Decision Log
+entry for why a generic "strip defaults" pass was tried and rejected (it
+cannot tell "never set" from "the real value is that default", concretely
+`WindowFn` legitimately includes `"row_number"`). This stays fully
+wire-compatible: the server's Pydantic models parse an explicit default/null
+identically to an omitted field.
+
+Covered by `clients/typescript/test/builder.test.ts` (a hand-maintained
+coverage suite — TypeScript unions are erased at compile time, so there is no
+`typing.get_args`-equivalent automatic "AST grew a member" trip wire) and the
+cross-language parity guard: both builders must reproduce
+`tests/fixtures/client_builder_kitchen_sink.json` for three representative
+queries (a wide join/aggregate/CASE query, a window-function query, a
+set-operation query), pinned on the Python side by
+`tests/unit/test_client_builder_ts_parity.py` (using a full, unexcluded
+`model_dump`) and on the TypeScript side by
+`clients/typescript/test/kitchenSink.test.ts` (both wired into CI — a
+`typescript-client` GitHub Actions job runs `npm ci && npm test`, alongside
+the existing `pytest` job that already picks up the Python-side parity test).
+Verified end-to-end against a real running server and real Postgres during
+development (not an automated/CI-enforced check, matching the same posture
+already recorded for phase 1's `examples/client_sdk_python.py`):
+`examples/client_sdk_typescript.ts` (mirrors `examples/client_sdk_python.py`)'s
+join/aggregate query and its window running-total query both returned real
+rows over HTTP 200.
+
+**No CTE/subquery builder support** (items 105/106) on either language's
+builder — a real, previously-undocumented gap in the Python builder (items
+105/106 shipped after item 51 phase 1, which was never revisited), now
+recorded rather than silently carried forward; `StructuredQuery.correlate`/
+`.ctes` are typed on the TS side and always serialize as `[]`. A real
+follow-up, not in scope for this phase.
+
+**Explicitly deferred to phase 2b:**
+
 - **Standalone, dependency-light distribution** (a `querygate-client` package
-  on PyPI / an npm package) so an adopter can install the builder without the
-  full server dependency closure (`pyodbc`/`asyncpg`/`fastapi`/`redis`/…).
+  on PyPI / an npm package) so an adopter can install either builder without
+  the full server dependency closure (`pyodbc`/`asyncpg`/`fastapi`/`redis`/…).
   This is coupled to **item 30 phase 2**: no package/registry has been chosen
   or configured, and publishing needs explicit maintainer approval — building
   a standalone dist with nowhere to publish it is premature. Until then the
-  in-tree `querygate.client` is the shipped, importable, tested surface.
+  in-tree `querygate.client` / `clients/typescript/` are the shipped, tested
+  surfaces for each language.
 
 **Effort: M per language.** A thin typed wrapper around the existing
 `StructuredQuery` schema — no server-side change; it mirrors a contract that
@@ -1055,12 +889,11 @@ typed SDKs in multiple languages with autocomplete and client-side
 validation. This is the single largest lever on integration friction and
 the most concrete ecosystem gap identified against Google's Toolbox.
 
-**What to do (phase 2):** Add the TypeScript builder mirroring phase 1's
-Python surface with its own schema-sync test, and — once item 30 phase 2
-chooses a registry — extract the Python builder into a standalone
-dependency-light `querygate-client` distribution, keeping the in-tree
-`querygate.client` importable for existing users. Keep it a pure client-side
-convenience: it must not bypass or duplicate any server-side validation.
+**What to do (phase 2b):** Once item 30 phase 2 chooses a registry, extract
+both the Python and TypeScript builders into standalone dependency-light
+distributions, keeping the in-tree modules importable for existing users.
+Keep both pure client-side conveniences: neither may bypass or duplicate any
+server-side validation.
 
 ### 52. Multi-framework agent integration examples (LangChain, LlamaIndex, OpenAI function-calling) ✅ DONE
 
