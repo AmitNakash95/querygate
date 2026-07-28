@@ -286,6 +286,10 @@ docker compose up -d                    # starts querygate-demo-db on localhost:
 make release-check                      # source, package, formatting, tests, config
 make release-smoke                      # image + real structured Postgres query
 poetry run querygate-semantic-memory evaluate  # fixed offline 32A benchmark
+
+# TypeScript client builder (item 51 phase 2, in clients/typescript/ — not a published package)
+cd clients/typescript && npm install     # once
+make test-ts-client                      # or: cd clients/typescript && npm test
 ```
 
 The default suite excludes tests marked `real_db`; CI also runs dedicated

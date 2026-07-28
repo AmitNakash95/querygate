@@ -69,6 +69,29 @@ class SessionDialectAdapter(ABC):
         statement_timeout_seconds: int,
     ) -> None: ...
 
+    @abstractmethod
+    async def capture_session_identifier(self, session: AsyncSession) -> str:
+        """A value identifying this live session's server-side process/backend
+        (Postgres backend PID, MSSQL `@@SPID`), captured once right after
+        connect so a LATER, separate connection can target it for real
+        dialect-level cancellation (TODO.md item 35 phase 3). Not a security
+        boundary itself — `cancel_session` below is gated by
+        `Policy.allow_query_cancellation`, not by this method existing."""
+        ...
+
+    @abstractmethod
+    async def cancel_session(self, engine: AsyncEngine, identifier: str) -> None:
+        """Cancel the query running on the session `identifier` names, from a
+        NEW connection on `engine` — never the session being cancelled itself
+        (it's presumably blocked executing the query this call is meant to
+        stop). Each dialect gets the primitive it actually has, mechanically
+        translated, not a synthesized "graceful cancel" a dialect doesn't
+        offer out-of-band (2026-07-28 Decision Log): Postgres's
+        `pg_cancel_backend` interrupts just the query and leaves the pooled
+        connection alive; MSSQL's `KILL` is the only out-of-band primitive
+        T-SQL exposes for this and terminates the whole session."""
+        ...
+
 
 class PostgresSessionAdapter(SessionDialectAdapter):
     def build_engine_url(self, profile: ConnectionProfile) -> str:
@@ -109,6 +132,18 @@ class PostgresSessionAdapter(SessionDialectAdapter):
         # SYSUTCDATETIME instead) and SQLite's 'now' is already UTC, so this is
         # what makes all three dialects agree. Fixed literal, no interpolation.
         await session.execute(sa.text("SET LOCAL TIME ZONE 'UTC'"))
+
+    async def capture_session_identifier(self, session: AsyncSession) -> str:
+        result = await session.execute(sa.text("SELECT pg_backend_pid()"))
+        return str(result.scalar_one())
+
+    async def cancel_session(self, engine: AsyncEngine, identifier: str) -> None:
+        # A bind parameter, unlike apply_session_guardrails's SET LOCAL
+        # (which takes none) — pg_cancel_backend is an ordinary function call.
+        # A NEW connection: `identifier`'s own session is presumably blocked
+        # executing the query this call means to interrupt.
+        async with engine.connect() as conn:
+            await conn.execute(sa.text("SELECT pg_cancel_backend(:pid)"), {"pid": int(identifier)})
 
 
 class MSSQLSessionAdapter(SessionDialectAdapter):
@@ -157,6 +192,23 @@ class MSSQLSessionAdapter(SessionDialectAdapter):
         await session.execute(sa.text("SET DEADLOCK_PRIORITY LOW"))
         # fmt: on
 
+    async def capture_session_identifier(self, session: AsyncSession) -> str:
+        result = await session.execute(sa.text("SELECT @@SPID"))
+        return str(result.scalar_one())
+
+    async def cancel_session(self, engine: AsyncEngine, identifier: str) -> None:
+        # KILL takes a literal SPID, not a bind parameter — T-SQL has no
+        # parameterized form. `identifier` is a driver-returned integer this
+        # adapter captured itself (never caller input), and `int(...)` below
+        # both validates that and is what makes the subsequent interpolation
+        # safe — the same "not a SQL injection vector" justification
+        # apply_session_guardrails's SET LOCK_TIMEOUT already documents.
+        spid = int(identifier)
+        async with engine.connect() as conn:
+            # fmt: off
+            await conn.execute(sa.text(f"KILL {spid}"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+            # fmt: on
+
 
 _SESSION_ADAPTERS: Dict[DatabaseDialect, SessionDialectAdapter] = {
     DatabaseDialect.POSTGRESQL: PostgresSessionAdapter(),
@@ -200,3 +252,11 @@ async def apply_session_guardrails(
         lock_timeout_seconds=lock_timeout_seconds,
         statement_timeout_seconds=statement_timeout_seconds,
     )
+
+
+async def capture_session_identifier(session: AsyncSession, dialect: DatabaseDialect) -> str:
+    return await get_session_adapter(dialect).capture_session_identifier(session)
+
+
+async def cancel_session(engine: AsyncEngine, dialect: DatabaseDialect, identifier: str) -> None:
+    await get_session_adapter(dialect).cancel_session(engine, identifier)

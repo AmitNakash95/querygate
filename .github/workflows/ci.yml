@@ -313,6 +313,29 @@ jobs:
       - name: pytest -m "postgres_live and mssql_live"
         run: poetry run pytest -m "postgres_live and mssql_live"
 
+  typescript-client:
+    name: TypeScript client builder (item 51 phase 2a)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: clients/typescript/package-lock.json
+
+      - name: npm ci
+        working-directory: clients/typescript
+        run: npm ci
+
+      # Includes the cross-language kitchen-sink parity fixture shared with
+      # tests/unit/test_client_builder_ts_parity.py (the Python-side pytest job
+      # above runs that half automatically; this job is the TS-side half).
+      - name: Build + test (tsc + node --test)
+        working-directory: clients/typescript
+        run: npm test
+
   docker:
     name: Docker + real-Postgres release smoke
     runs-on: ubuntu-latest

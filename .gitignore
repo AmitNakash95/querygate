@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Node (clients/typescript)
+node_modules/
+
 # C extensions
 *.so
 

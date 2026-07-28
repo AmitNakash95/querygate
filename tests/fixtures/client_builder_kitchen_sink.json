@@ -1,0 +1,511 @@
+{
+  "core": {
+    "correlate": [],
+    "ctes": [],
+    "distinct": true,
+    "from": "employees",
+    "from_alias": "e",
+    "group_by": [
+      "e.name",
+      "e.dept"
+    ],
+    "having": {
+      "and": null,
+      "not": null,
+      "or": [
+        {
+          "col": "n",
+          "col_fn": null,
+          "exists_subquery": null,
+          "expr": null,
+          "op": "gt",
+          "value": 1,
+          "value_col": null,
+          "value_expr": null,
+          "value_subquery": null
+        },
+        {
+          "col": "n",
+          "col_fn": null,
+          "exists_subquery": null,
+          "expr": null,
+          "op": "eq",
+          "value": 0,
+          "value_col": null,
+          "value_expr": null,
+          "value_subquery": null
+        }
+      ]
+    },
+    "intent": "kitchen sink parity fixture \u2014 item 51 phase 2",
+    "joins": [
+      {
+        "alias": "m",
+        "condition": null,
+        "connection": null,
+        "extra_on": [],
+        "on": [
+          "e.manager_id",
+          "m.id"
+        ],
+        "table": "employees",
+        "type": "inner"
+      },
+      {
+        "alias": "d",
+        "condition": {
+          "and": [
+            {
+              "col": "d.min_headcount",
+              "col_fn": null,
+              "exists_subquery": null,
+              "expr": null,
+              "op": "lte",
+              "value": null,
+              "value_col": "e.dept_size",
+              "value_expr": null,
+              "value_subquery": null
+            },
+            {
+              "col": "d.max_headcount",
+              "col_fn": null,
+              "exists_subquery": null,
+              "expr": null,
+              "op": "gte",
+              "value": null,
+              "value_col": "e.dept_size",
+              "value_expr": null,
+              "value_subquery": null
+            }
+          ],
+          "not": null,
+          "or": null
+        },
+        "connection": null,
+        "extra_on": [],
+        "on": null,
+        "table": "departments",
+        "type": "inner"
+      },
+      {
+        "alias": "al",
+        "condition": null,
+        "connection": null,
+        "extra_on": [],
+        "on": null,
+        "table": "audit_log",
+        "type": "cross"
+      }
+    ],
+    "limit": 25,
+    "offset": 5,
+    "order_by": [
+      {
+        "col": "n",
+        "dir": "desc",
+        "nulls": "last"
+      },
+      {
+        "col": "e.name",
+        "dir": "asc",
+        "nulls": null
+      }
+    ],
+    "select": [
+      "e.name",
+      {
+        "arg": null,
+        "as": "n",
+        "col": "*",
+        "distinct": false,
+        "fn": "count"
+      },
+      {
+        "as": "bucket",
+        "else": {
+          "literal": "other"
+        },
+        "when": [
+          {
+            "then": {
+              "literal": "core"
+            },
+            "when": {
+              "and": [
+                {
+                  "col": "e.active",
+                  "col_fn": null,
+                  "exists_subquery": null,
+                  "expr": null,
+                  "op": "eq",
+                  "value": true,
+                  "value_col": null,
+                  "value_expr": null,
+                  "value_subquery": null
+                },
+                {
+                  "and": null,
+                  "not": null,
+                  "or": [
+                    {
+                      "col": "e.dept",
+                      "col_fn": null,
+                      "exists_subquery": null,
+                      "expr": null,
+                      "op": "eq",
+                      "value": "eng",
+                      "value_col": null,
+                      "value_expr": null,
+                      "value_subquery": null
+                    },
+                    {
+                      "col": "e.dept",
+                      "col_fn": null,
+                      "exists_subquery": null,
+                      "expr": null,
+                      "op": "eq",
+                      "value": "ops",
+                      "value_col": null,
+                      "value_expr": null,
+                      "value_subquery": null
+                    }
+                  ]
+                }
+              ],
+              "not": null,
+              "or": null
+            }
+          },
+          {
+            "then": {
+              "literal": "inactive"
+            },
+            "when": {
+              "and": null,
+              "not": {
+                "col": "e.active",
+                "col_fn": null,
+                "exists_subquery": null,
+                "expr": null,
+                "op": "eq",
+                "value": true,
+                "value_col": null,
+                "value_expr": null,
+                "value_subquery": null
+              },
+              "or": null
+            }
+          }
+        ]
+      },
+      {
+        "as": "salary_with_bonus",
+        "expr": {
+          "left": {
+            "col": "e.salary"
+          },
+          "op": "*",
+          "right": {
+            "literal": 1.1
+          }
+        }
+      },
+      {
+        "as": "hired_month",
+        "col": "e.hired_at",
+        "granularity": "month"
+      },
+      {
+        "args": [
+          {
+            "col": "e.nickname"
+          },
+          {
+            "literal": "n/a"
+          }
+        ],
+        "as": "display_name",
+        "fn": "coalesce"
+      }
+    ],
+    "set_op": null,
+    "top_n": {
+      "fn": "row_number",
+      "n": 3,
+      "order_by": [
+        {
+          "col": "n",
+          "dir": "desc",
+          "nulls": null
+        }
+      ],
+      "partition_by": [
+        "e.dept"
+      ]
+    },
+    "where": {
+      "and": [
+        {
+          "col": "e.name",
+          "col_fn": null,
+          "exists_subquery": null,
+          "expr": null,
+          "op": "like",
+          "value": "A%",
+          "value_col": null,
+          "value_expr": null,
+          "value_subquery": null
+        },
+        {
+          "col": "e.salary",
+          "col_fn": null,
+          "exists_subquery": null,
+          "expr": null,
+          "op": "between",
+          "value": [
+            50000,
+            200000
+          ],
+          "value_col": null,
+          "value_expr": null,
+          "value_subquery": null
+        },
+        {
+          "col": "e.dept",
+          "col_fn": null,
+          "exists_subquery": null,
+          "expr": null,
+          "op": "in",
+          "value": [
+            "eng",
+            "ops",
+            "sales"
+          ],
+          "value_col": null,
+          "value_expr": null,
+          "value_subquery": null
+        },
+        {
+          "col": "e.terminated_at",
+          "col_fn": null,
+          "exists_subquery": null,
+          "expr": null,
+          "op": "is_null",
+          "value": null,
+          "value_col": null,
+          "value_expr": null,
+          "value_subquery": null
+        }
+      ],
+      "not": null,
+      "or": null
+    }
+  },
+  "set_op": {
+    "correlate": [],
+    "ctes": [],
+    "distinct": false,
+    "from": "orders_2024",
+    "from_alias": null,
+    "group_by": [],
+    "having": null,
+    "intent": null,
+    "joins": [],
+    "limit": 100,
+    "offset": 0,
+    "order_by": [
+      {
+        "col": "customer_id",
+        "dir": "asc",
+        "nulls": null
+      }
+    ],
+    "select": [
+      "orders_2024.customer_id",
+      "orders_2024.amount"
+    ],
+    "set_op": {
+      "all": true,
+      "arms": [
+        {
+          "correlate": [],
+          "ctes": [],
+          "distinct": false,
+          "from": "orders_2025",
+          "from_alias": null,
+          "group_by": [],
+          "having": null,
+          "intent": null,
+          "joins": [],
+          "limit": null,
+          "offset": 0,
+          "order_by": [],
+          "select": [
+            "orders_2025.customer_id",
+            "orders_2025.amount"
+          ],
+          "set_op": null,
+          "top_n": null,
+          "where": null
+        }
+      ],
+      "op": "union"
+    },
+    "top_n": null,
+    "where": {
+      "col": "orders_2024.amount",
+      "col_fn": null,
+      "exists_subquery": null,
+      "expr": null,
+      "op": "gt",
+      "value": 0,
+      "value_col": null,
+      "value_expr": null,
+      "value_subquery": null
+    }
+  },
+  "window": {
+    "correlate": [],
+    "ctes": [],
+    "distinct": false,
+    "from": "orders",
+    "from_alias": null,
+    "group_by": [],
+    "having": null,
+    "intent": null,
+    "joins": [],
+    "limit": null,
+    "offset": 0,
+    "order_by": [],
+    "select": [
+      "orders.id",
+      {
+        "arg": {
+          "col": "orders.amount"
+        },
+        "as": "running_total",
+        "buckets": null,
+        "fn": "sum",
+        "offset": null,
+        "over": {
+          "frame": {
+            "end": {
+              "bound": "current_row",
+              "offset": null
+            },
+            "mode": "rows",
+            "start": {
+              "bound": "unbounded_preceding",
+              "offset": null
+            }
+          },
+          "order_by": [
+            {
+              "col": "orders.created_at",
+              "dir": "asc",
+              "nulls": null
+            }
+          ],
+          "partition_by": [
+            "orders.customer_id"
+          ]
+        }
+      },
+      {
+        "arg": null,
+        "as": "rn",
+        "buckets": null,
+        "fn": "row_number",
+        "offset": null,
+        "over": {
+          "frame": null,
+          "order_by": [
+            {
+              "col": "orders.created_at",
+              "dir": "asc",
+              "nulls": null
+            }
+          ],
+          "partition_by": [
+            "orders.customer_id"
+          ]
+        }
+      },
+      {
+        "arg": null,
+        "as": "quartile",
+        "buckets": 4,
+        "fn": "ntile",
+        "offset": null,
+        "over": {
+          "frame": null,
+          "order_by": [
+            {
+              "col": "orders.amount",
+              "dir": "asc",
+              "nulls": null
+            }
+          ],
+          "partition_by": []
+        }
+      },
+      {
+        "arg": {
+          "col": "orders.amount"
+        },
+        "as": "prev_amount",
+        "buckets": null,
+        "fn": "lag",
+        "offset": 1,
+        "over": {
+          "frame": null,
+          "order_by": [
+            {
+              "col": "orders.created_at",
+              "dir": "asc",
+              "nulls": null
+            }
+          ],
+          "partition_by": []
+        }
+      },
+      {
+        "as": "share_of_customer_total",
+        "expr": {
+          "left": {
+            "col": "orders.amount"
+          },
+          "op": "/",
+          "right": {
+            "arg": {
+              "col": "orders.amount"
+            },
+            "buckets": null,
+            "fn": "sum",
+            "offset": null,
+            "over": {
+              "frame": null,
+              "order_by": [],
+              "partition_by": [
+                "orders.customer_id"
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "set_op": null,
+    "top_n": null,
+    "where": {
+      "col": "orders.status",
+      "col_fn": null,
+      "exists_subquery": null,
+      "expr": null,
+      "op": "eq",
+      "value": "paid",
+      "value_col": null,
+      "value_expr": null,
+      "value_subquery": null
+    }
+  }
+}

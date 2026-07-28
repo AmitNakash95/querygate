@@ -2236,6 +2236,18 @@ proposals can't also silently approve or publish them. Every action emits
 a redaction-safe `catalog.governance` audit event: who, what action, which
 proposal/version, outcome — never the draft text itself.
 
+**All of this is also a browser workflow, not just REST/CLI (item 38).** The
+admin UI's Catalog domain gives a reviewer the full loop without touching the
+API directly: a filtered proposal queue with side-by-side proposed-versus-
+published comparison, edit/approve/reject/publish with a publish-conflict
+preview, connection-scoped version history with rollback, bulk approve/
+reject/delete for working through a queue at once, one-click export/import
+(backup/restore) of a connection's governed history, browser-triggered
+`generate-drafts`/`learn` runs, a per-proposal review-history trail, and a
+usage-signals browsing tab over the 32C evidence the learner draws on. It is
+a thin client over the same nine governance routes above — no separate
+mutation path, no relaxed scope.
+
 ### Human-authored catalog entries (item 84)
 
 Generated and usage-learned proposals aren't the only way curated content
@@ -2549,7 +2561,17 @@ below:
 - `POST /{connection}/query/explain` — compile a `StructuredQuery` to SQL
   without running it.
 - `POST /{connection}/query` — validate, compile, and execute one
-  `StructuredQuery`.
+  `StructuredQuery`. `queue_mode=async` (TODO.md item 35 phase 3) returns
+  `202` with an `admission_id`/`status_url` instead of blocking.
+- `GET /{connection}/query/{admission_id}` — poll a `queue_mode=async`
+  execution's state/result. 404s uniformly for an unknown id, a different
+  connection's id, or (absent the `query:cancel` scope) a different
+  principal's id.
+- `POST /{connection}/query/{admission_id}/cancel` — request cancellation of
+  a `queue_mode=async` execution; free while still queued, gated on
+  `Policy.allow_query_cancellation` for a running query (see
+  [Agent-visible capacity waiting](../README.md#agent-visible-capacity-waiting)
+  in the README for the full contract).
 - `POST /{connection}/query/batch` — the same, for a list of queries against
   one connection in a single call.
 - `POST /admin/reload-config` — hot-reload connections/policy/catalog from
@@ -2619,9 +2641,35 @@ consequences fall out of that for free:
 Because it front-ends the real AST, it can't drift: `tests/unit/test_client_builder.py`
 includes drift guards that fail if the `StructuredQuery` AST grows a field, a
 `SelectItem` variant, or a comparison/aggregate/scalar function the builder
-can't express. It ships inside the `querygate` package for now; a TypeScript
-sibling and a standalone dependency-light distribution are planned (TODO item
-51 phase 2, and see the [Decision Log](#decision-log)).
+can't express. It ships inside the `querygate` package for now; a standalone
+dependency-light distribution is still planned (TODO item 51 phase 2's other
+half, coupled to item 30 phase 2's registry choice).
+
+**The TypeScript sibling has shipped** (item 51 phase 2a, `clients/typescript/`):
+a structural/behavioral mirror of the same fluent surface (`Query.from(...)
+.select(...).where(col("a").eq(1))...build()`), producing the identical wire
+JSON — but not name-for-name: every multi-word Python name is renamed
+snake_case→camelCase per TS convention, beyond the handful JavaScript's own
+grammar forces (no operator overloading, `case`/`in` are reserved words); see
+`clients/typescript/README.md`'s naming table for the full picture. It is
+in-tree only — not published to npm, for the same registry-choice reason the
+Python side isn't standalone yet — and has its own two-part sync-test strategy
+since it cannot import the Python Pydantic models: a hand-maintained coverage
+suite (`clients/typescript/test/builder.test.ts`, the closest TS analogue of
+Python's introspective drift guards, which have no runtime equivalent once
+TypeScript's unions are erased at compile time) and a cross-language kitchen-sink
+fixture (`tests/fixtures/client_builder_kitchen_sink.json`) that both builders
+must reproduce for the same three representative queries, pinned on the Python
+side by `tests/unit/test_client_builder_ts_parity.py` and on the TypeScript side
+by `clients/typescript/test/kitchenSink.test.ts` — both wired into CI (a
+`typescript-client` GitHub Actions job runs `npm ci && npm test`; the existing
+`pytest` job already picks up the Python-side parity test with no changes
+needed). Verified end-to-end against a real running server and real Postgres
+during development (`docker compose up -d` + `uvicorn querygate.api.app:app`;
+a manual check, not an automated/CI-enforced one — the same posture already
+recorded for phase 1's `examples/client_sdk_python.py`): both a join/aggregate
+query and a window-function running-total query built by the TS SDK returned
+real rows over HTTP 200.
 
 ### MCP transport
 
@@ -2673,6 +2721,11 @@ all. Individual tool functions then call `get_mcp_caller()` /
 `get_mcp_config()` to read that context — this is how a tool like
 `run_structured_queries` knows *who* is calling without the caller having
 to pass identity as a tool argument (which an agent could tamper with).
+`run_structured_queries` also reports MCP's standard progress notifications
+(`Context.report_progress`, TODO.md item 35 phase 3) to a client that
+advertises support — "waiting for a concurrency slot" then "admitted,
+executing" per query — a no-op for a client that doesn't, so this is purely
+additive.
 
 A second, outer ASGI layer sits *around* the auth wrapper:
 `transport_guard.py`'s `MCPRequestGuardMiddleware` (TODO item 86). The
@@ -3289,6 +3342,143 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-07-28 — item 35 phase 3's four design-gated questions are resolved,
+  maintainer-approved before build (TODO.md item 35).** Phases 1-2 shipped
+  agent-visible admission (caller-tunable wait/fail-fast, `admission_id`/
+  `queue_wait_ms`, Redis cross-replica queue-depth caps); phase 3 was left
+  `[ ]` in ROADMAP.md specifically because its remaining pieces each needed a
+  protocol/product decision independent of phase 1-2's storage/admission-control
+  work. Four decisions, each with a rejected alternative:
+
+  **(1) MCP progress notifications reuse FastMCP's built-in
+  `report_progress`**, not a bespoke QueryGate wire format. MCP's standard
+  `notifications/progress` message is keyed on a client-supplied
+  `progressToken`; `Context.report_progress()` already no-ops when no token is
+  present, so calling it periodically during `concurrency_slot()`'s wait is
+  purely additive and opt-in — no new protocol surface, no schema to keep in
+  sync with a client SDK.
+
+  **(2) The REST async lifecycle is `202` + `GET .../query/{admission_id}` +
+  `POST .../query/{admission_id}/cancel`**, not a streaming (SSE) endpoint. A
+  polling lifecycle reuses the `admission_id` phase 1 already returns on every
+  response, needs no long-lived connection handling in the ASGI server, and
+  matches the REST-idiomatic "long-running job" shape (a resource with a
+  status) rather than introducing a second response protocol (`text/event-stream`)
+  alongside JSON. Opt-in via a new `queue_mode=async`; the default synchronous
+  path is unchanged.
+
+  **(3) Cancellation is real dialect-level cancellation (Postgres
+  `pg_cancel_backend`, MSSQL `KILL <spid>`), gated on a new deny-by-default
+  `Policy.allow_query_cancellation` flag** — not queue-only cancellation, and
+  not a silently-attempted best-effort call. Both dialects' out-of-band
+  cancellation primitives need a real permission grant beyond what a typical
+  reporting connection has (Postgres: superuser or `pg_signal_backend` role
+  membership; MSSQL: `ALTER ANY CONNECTION` server permission or sysadmin) —
+  discovered during design, not assumed. Rather than attempt the cancel and
+  degrade gracefully on a permission error (which would let an operator believe
+  cancellation "mostly works" until the one time it silently doesn't), a cancel
+  request is rejected outright, before any DB call, unless the connection's
+  policy explicitly sets `allow_query_cancellation: true` — the same
+  deny-by-default posture as `allow_cross_join` (item 103). The operator sets
+  the flag only after granting the DB-level permission themselves; the
+  required grant is documented at the flag's own definition and in deploy docs,
+  not discovered by a runtime error. Postgres uses `pg_cancel_backend` (interrupts
+  the running query, the pooled connection stays alive and is reused normally)
+  over `pg_terminate_backend` (kills the whole backend) — QueryGate pools
+  connections, so terminating one would force the pool to detect and recycle a
+  dead connection for what should be a single query's cancellation. MSSQL has
+  no equivalent gentler primitive at the T-SQL level (unlike a driver's own
+  `Command.Cancel()`, there is no out-of-band "cancel just the query" statement
+  a second connection can issue) — `KILL <spid>` terminates the whole session,
+  a real cross-dialect asymmetry recorded here rather than papered over: each
+  dialect gets the primitive it actually has, mechanically translated, not a
+  synthesized "graceful cancel" MSSQL doesn't offer out-of-band.
+
+  **(4) Capacity/queue rejections migrate fully from REST `422` to `429` +
+  `Retry-After`**, matching item 50's quota-rejection precedent, with no
+  compatibility flag to keep emitting `422`. `docs/LOAD_TESTING.md`'s existing
+  `422` string-contract commitment is superseded for this rejection class (not
+  for policy/schema validation errors, which stay `422`); recorded as a
+  breaking change in `CHANGELOG.md`, not silently changed.
+
+- **2026-07-28 — the TypeScript client builder emits the complete
+  `StructuredQuery` shape rather than eliding defaults, and its cross-language
+  parity guard is a checked-in fixture rather than shared introspection
+  (TODO.md item 51 phase 2a).** `clients/typescript/` mirrors the Python
+  builder's fluent surface structurally and behaviorally (not name-for-name —
+  every multi-word name is renamed snake_case→camelCase per TS convention, on
+  top of the handful JavaScript's grammar forces), in-tree only (same registry
+  gate as the Python standalone distribution). Two deliberate choices:
+
+  **(1) `build()`/`toDict()` always emit every declared field** (`null` for an
+  unset optional, the Python-declared default for a defaulted one) instead of
+  reproducing Pydantic's `exclude_none`/`exclude_defaults` trimming. A generic
+  "strip falsy/default values" pass was tried first and rejected: it cannot
+  distinguish "field never set" from "the value genuinely IS that default" —
+  concretely, `WindowFn` includes `"row_number"`, so a global key→default table
+  keyed on `fn` would have silently stripped a legitimate
+  `ROW_NUMBER() OVER (...)` window's `fn` field the same way it strips
+  `TopNSpec.fn`'s default. Per-node-type-aware trimming would avoid that, but
+  the effort bought nothing: the server's Pydantic models parse an explicit
+  default/null identically to an omitted field (`extra="forbid"` only rejects
+  UNDECLARED keys), verified live end-to-end (a join/aggregate query and a
+  window running-total query built by the TS SDK both returned real rows over
+  HTTP 200 against a real demo Postgres). The untrimmed payload is marginally
+  larger, never wrong — and it is what makes choice (2) below tractable.
+
+  **(2) The cross-language sync-test strategy is a checked-in JSON fixture**
+  (`tests/fixtures/client_builder_kitchen_sink.json`), not shared runtime
+  introspection. Python's own drift guards (`test_client_builder.py`) walk
+  `typing.get_args(m.SelectItem)` etc. at test time — a real "the AST grew a
+  member with no builder support" trip wire — but TypeScript unions are erased
+  at compile time, so there is no equivalent to call from Node. Instead, both
+  builders construct three representative queries (a wide join/aggregate/CASE
+  query, a window-function query, a set-operation query) and must reproduce
+  the identical fixture: pinned on the Python side by
+  `tests/unit/test_client_builder_ts_parity.py` (using a FULL, unexcluded
+  `model_dump` — the one that agrees with choice (1) above) and on the
+  TypeScript side by `clients/typescript/test/kitchenSink.test.ts`. This is
+  weaker than Python's automatic new-member detection (a human must still
+  remember to extend the fixture and both builders when the AST grows), but it
+  is a real, automatic drift guard for every shape the fixture already covers,
+  and `clients/typescript/test/builder.test.ts` is the explicit,
+  hand-maintained coverage list for everything else — its module doc states
+  this asymmetry rather than implying a guarantee TypeScript cannot give.
+
+  Also decided in the same pass: the TS builder has **no CTE/subquery support**
+  (items 105/106), matching a pre-existing, previously-undocumented gap in the
+  Python builder itself (items 105/106 shipped after item 51 phase 1, and phase
+  1 was never revisited) — `correlate`/`ctes` are typed on `StructuredQuery` and
+  always serialize as `[]`. Left as a real follow-up on both languages, not
+  silently dropped on just the new one.
+
+  **Two real bugs found and fixed before this landed, not silently left
+  broken** (a 4-reviewer `auditors` pass — security/architecture/test-contract/
+  claim — run before commit, per CLAUDE.md's completion gate): **(1)**
+  `validateWindowScope()`'s window/aggregate-exclusivity check duck-typed the
+  wire shape (`"fn" in item && ("distinct" in item || "delimiter" in item ||
+  "fraction" in item)`) to detect an aggregate sibling — but only
+  `AggregateSelectItem` carries an `fn` key at all, so `stringAgg`/`arrayAgg`/
+  `percentileCont` siblings silently passed the exclusivity check the server
+  still correctly rejects. Fixed with a non-enumerable `Symbol`-keyed marker
+  (`AGGREGATE_FAMILY`) tagged onto all four aggregate-family return values —
+  invisible to `JSON.stringify`, so it never reaches the wire — rather than
+  more wire-shape guessing. **(2)** `agg.count(col("*"), {distinct: true})`
+  bypassed the "no DISTINCT with count(*)" check `agg.count("*", {distinct:
+  true})` correctly rejected, because `isStar` was computed from the
+  argument's *syntactic* form (a bare string literally `"*"`) before
+  resolution, while the final `col` value was still resolved via `colName()`
+  to the same illegal `"*"` — fixed by resolving the column name once, before
+  the check, matching the pattern `stringAgg`/`arrayAgg`/`percentileCont`
+  already used correctly. Neither was a security defect (`StructuredQueryService`
+  remains the sole enforcement authority and rejected both shapes correctly on
+  arrival) but both broke the module's own "same rejection message,
+  client-side" promise for those specific inputs — each is now pinned by a
+  regression test, mutation-verified by reverting the fix and confirming the
+  new test fails for that exact reason. The audit's other actionable finding —
+  the TypeScript test suite had no CI enforcement — is closed by a new
+  `typescript-client` job in `.github/workflows/ci.yml`.
 
 - **2026-07-27 — a window function becomes a legal `Expression` operand in
   PROJECTIONS ONLY, enforced by one positional rule rather than by a parallel
@@ -4888,9 +5078,11 @@ reasoning behind them, newest first. Added to incrementally as work happens
   requires explicit maintainer approval. Building a standalone dist with
   nowhere to publish it — and a second copy of the models to keep in sync —
   would be premature; the in-tree module is the shipped, importable, tested
-  surface until a registry exists. TypeScript is likewise phase 2: a genuine
-  second-language implementation with its own sync-test strategy, not more of
-  the Python work.
+  surface until a registry exists. TypeScript was deferred as phase 2 at the
+  time of this entry — a genuine second-language implementation with its own
+  sync-test strategy, not more of the Python work — and has since shipped
+  in-tree the same way (see the 2026-07-28 entry above); only the standalone
+  distribution for either language still waits on item 30 phase 2.
 - **2026-07-21 — Per-principal quota is enforced before queuing, counts every
   admitted attempt, skips anonymous callers, and ships in-process first
   (TODO.md item 50 phase 1).** A rolling-window cap on request count and

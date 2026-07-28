@@ -254,7 +254,9 @@ def _status_counts(run: LoadRun) -> Counter:
 
 
 def _assert_concurrency_rejections(run: LoadRun, expected: int) -> None:
-    rejected = [response for response in run.responses if response.status_code == 422]
+    # TODO.md item 35 phase 3 (2026-07-28): capacity/queue rejections migrated
+    # from 422 to 429 + Retry-After.
+    rejected = [response for response in run.responses if response.status_code == 429]
     assert len(rejected) == expected, [response.text for response in run.responses]
     assert all("too many concurrent" in response.json()["detail"] for response in rejected)
 
@@ -273,7 +275,7 @@ async def test_concurrency_and_timeout_guardrails_under_load(postgres_load_app):
     async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
         for _ in range(rounds):
             # A short wait means only the first CAP requests may run; every
-            # excess request must get QueryGate's documented 422 rejection.
+            # excess request must get QueryGate's documented 429 rejection.
             _set_load_policy(wait_seconds=0.1, timeout_seconds=5)
             overflow = await _run_load(
                 client,
@@ -281,7 +283,7 @@ async def test_concurrency_and_timeout_guardrails_under_load(postgres_load_app):
                 probe=_SHORT_PROBE,
                 request_count=_OVERFLOW_REQUESTS,
             )
-            assert _status_counts(overflow) == Counter({200: _CAP, 422: _OVERFLOW_REQUESTS - _CAP})
+            assert _status_counts(overflow) == Counter({200: _CAP, 429: _OVERFLOW_REQUESTS - _CAP})
             _assert_concurrency_rejections(overflow, _OVERFLOW_REQUESTS - _CAP)
             assert overflow.peak_database_queries == _CAP
 
@@ -309,7 +311,7 @@ async def test_concurrency_and_timeout_guardrails_under_load(postgres_load_app):
             probe=_TIMEOUT_PROBE,
             request_count=_CAP * 2,
         )
-        assert _status_counts(timed_out) == Counter({500: _CAP, 422: _CAP})
+        assert _status_counts(timed_out) == Counter({500: _CAP, 429: _CAP})
         _assert_concurrency_rejections(timed_out, _CAP)
         assert timed_out.peak_database_queries == _CAP
         assert 0.8 <= timed_out.elapsed_seconds < (_TIMEOUT_DELAY_SECONDS - 1)
@@ -360,7 +362,7 @@ async def test_fail_fast_never_waits_even_though_capacity_frees_up_shortly(postg
         occupier_responses = await asyncio.gather(*occupiers)
 
     assert all(r.status_code == 200 for r in occupier_responses)
-    assert resp.status_code == 422
+    assert resp.status_code == 429
     assert "too many concurrent" in resp.json()["detail"]
     assert resp.headers["X-QueryGate-Admission-State"] == "capacity_timeout"
     assert resp.headers.get("X-QueryGate-Admission-Id")
@@ -396,7 +398,7 @@ async def test_wait_timeout_seconds_is_honored_when_shorter_than_policy_ceiling(
 
         await asyncio.gather(*occupiers)
 
-    assert resp.status_code == 422
+    assert resp.status_code == 429
     assert resp.headers["X-QueryGate-Admission-State"] == "capacity_timeout"
     # Honored the caller's shorter 0.1s wait, not the operator's 3s ceiling.
     assert 0.05 <= elapsed < 0.3

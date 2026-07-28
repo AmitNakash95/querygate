@@ -32,7 +32,7 @@ def test_classify_queue_full_error_as_its_own_reason():
     ConcurrencyLimitError) but must report its own `queue_full` reason, not
     fall into the coarser `concurrency` bucket — see TODO.md item 35 phase 2.
     """
-    exc = QueueFullError("queue is full", admission_id="admission-1")
+    exc = QueueFullError("queue is full", admission_id="admission-1", retry_after_seconds=10)
     assert classify_rejection(exc) == "queue_full"
 
 
