@@ -153,7 +153,7 @@ order-of-magnitude, not commitments.
 | 120 | ✅ Audit shape records nothing for a nested `IN (subquery)` | S | — |
 | 121 | ✅ Report-only surfaces still assume a query has one scope | S | 104 |
 | 122 | ✅ `_unique_column_sets` crashed on a non-`Table` FROM element | S | 118 |
-| 123 | A select-item `CASE`'s conditions are absent from the audit shape | S | 120 |
+| 123 | ✅ A select-item `CASE`'s conditions are absent from the audit shape | S | 120 |
 | 124 | ✅ Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
 | 125 | ✅ ★ A window function as an `Expression` operand (bar row 15 → 16/16) | XL | 100, 101 |
 
@@ -2174,38 +2174,13 @@ as able to fan out (fail-closed).
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 122).
 
-### 123. A select-item `CASE`'s condition subtree is absent from the audit shape
+### 123. A select-item `CASE`'s condition subtree is absent from the audit shape ✅ DONE
 
-`_select_shape`'s `CaseSelectItem` branch records `{kind, alias, branch_count,
-columns}` and never walks `item.when[*].when` through `_where_shape`. Every other
-walker reaches its predicates via `as_expression()` — which `query_ast/models.py`
-documents as "the single conversion every walker, cap, and compile path goes
-through" — and `_select_shape` is the one that does not. The identical CASE
-written as an `ExpressionSelectItem` (`CaseExpr`) *does* record its conditions in
-full, so two spellings of one query produce materially different audit detail —
-the exact asymmetry `_predicate_shape` calls out and fixed for joins in item 103.
-
-**Consequence.** A nested `value_subquery` sitting in a select-item CASE condition
-is invisible to the event: the attempt audits as reading only the outer table.
-Policy always rejects such a query (`policy_validation.py` refuses a subquery in
-that position), so nothing executes and this is not a policy bypass — but item
-120's whole rationale is that *rejected attempts stay auditable*, and in this one
-position they do not. Proof-pillar fidelity, not enforcement.
-
-**Found by** the item-119/120 completion audit on 2026-07-27, which also found
-that the redaction test covering this position asserted only the ABSENCE of
-sentinel literals — vacuously true, since the subtree is discarded rather than
-redacted. That test was moved to the expression spelling (where it genuinely
-exercises the walk) and now pins that the condition was actually recorded, so the
-gap is no longer masked. Item 120's write-up was narrowed to match reality.
-
-**Proposed fix.** Have the `CaseSelectItem` branch delegate to
-`_expression_shape(item.as_expression())`, or additively record
-`"conditions": [_where_shape(w.when) for w in item.when]`, mirroring `CaseExpr` in
-`_expression_shape`. Additive either way; it changes the persisted event's shape
-for CASE select items, which is why it is its own item rather than folded into 120.
-
-**Effort: S. Priority: low** (fidelity on a position that is always rejected).
+`_select_shape`'s `CaseSelectItem` branch now additively records `"conditions":
+[_where_shape(branch.when) for branch in item.when]`, mirroring `CaseExpr` in
+`_expression_shape`, so a nested `value_subquery` in a select-item CASE condition
+is no longer invisible to the audit event. **Full write-up:**
+[docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 123).
 
 ### 124. Most of `tests/unit/` is not selected by `pytest -m unit` ✅ DONE
 

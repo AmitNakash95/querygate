@@ -158,6 +158,8 @@ def test_normalized_query_shape_handles_case_select_item():
     assert '"kind": "case"' in serialized
     assert "secret@x.com" not in serialized
     assert "redacted" not in serialized
+    # item 123: the WHEN condition tree itself must be walked, not just counted.
+    assert shape["select"][0]["conditions"] == [{"operator": "eq", "column": "customers.email"}]
 
 
 def test_normalized_query_shape_handles_predicate_col_fn_in_having():
@@ -215,7 +217,8 @@ def test_searched_having_and_case_shapes_carry_structure_but_no_literals():
         },
         limit=10,
     )
-    serialized = json.dumps(normalize_query_shape(query))
+    shape = normalize_query_shape(query)
+    serialized = json.dumps(shape)
 
     # Structure is preserved: the OR group and its operators are recorded.
     assert '"or"' in serialized
@@ -224,6 +227,11 @@ def test_searched_having_and_case_shapes_carry_structure_but_no_literals():
     assert "having-secret-literal" not in serialized
     assert "case-secret-literal" not in serialized
     assert "4242" not in serialized
+    # item 123: the CASE select item's own WHEN condition is walked, not just
+    # counted — a `not` group wrapping the redacted equality predicate.
+    assert shape["select"][2]["conditions"] == [
+        {"not": {"operator": "eq", "column": "orders.status"}}
+    ]
 
 
 # These cover the redaction contract (non-negotiable 3), so they belong in the
@@ -287,6 +295,54 @@ def test_the_audit_shape_records_a_nested_in_subquery_and_leaks_no_literal():
     assert "SUBQUERY-SECRET" not in serialized
 
 
+def test_the_audit_shape_records_a_nested_subquery_inside_a_case_select_item_condition():
+    """item 123: `_select_shape`'s `CaseSelectItem` branch never walked `when[*].when`
+    through `_where_shape`, so a `value_subquery` sitting in a select-item CASE
+    condition was invisible to the event — a policy-rejected attempt (subqueries are
+    never allowed in that position) audited as reading `orders` alone, though item 120's
+    whole point is that a rejected attempt should stay auditable. Confirms the nested
+    scope's tables/filters now show up here exactly as they do for a WHERE-clause
+    `value_subquery` (the test above)."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": [
+                {
+                    "when": [
+                        {
+                            "when": {
+                                "col": "orders.customer_id",
+                                "op": "in",
+                                "value_subquery": _SCALAR_EMPLOYEE_SUBQUERY
+                                | {
+                                    "where": {
+                                        "col": "employees.ssn",
+                                        "op": "eq",
+                                        "value": "CASE-SUBQUERY-SECRET-SSN",
+                                    }
+                                },
+                            },
+                            "then": {"literal": "flagged"},
+                        }
+                    ],
+                    "else": {"literal": "ok"},
+                    "as": "status_label",
+                }
+            ],
+        }
+    )
+    shape = normalize_query_shape(query)
+    serialized = json.dumps(shape)
+
+    case_shape = shape["select"][0]
+    assert case_shape["kind"] == "case"
+    nested = case_shape["conditions"][0]["value_subquery"]
+    assert case_shape["conditions"][0]["operator"] == "in"
+    assert nested["from"] == "employees"
+    assert nested["where"] == {"operator": "eq", "column": "employees.ssn"}
+    assert "CASE-SUBQUERY-SECRET-SSN" not in serialized
+
+
 def test_no_literal_escapes_a_nested_subquery_at_any_depth_or_position():
     """The redaction guarantee has to hold for every scope the new recursion
     reaches, not just the first one: a literal two levels down, one inside a nested
@@ -309,14 +365,15 @@ def test_no_literal_escapes_a_nested_subquery_at_any_depth_or_position():
                                 "from": "regions",
                                 "select": [
                                     {
-                                        # Deliberately the EXPRESSION spelling of a
-                                        # searched CASE, not `CaseSelectItem`. Only this
-                                        # one routes its conditions through
-                                        # `_expression_shape`; the select-item spelling
-                                        # records `branch_count` alone, so a redaction
-                                        # assertion written against it passes because the
-                                        # subtree is discarded rather than redacted —
-                                        # a vacuous test. See TODO.md item 123.
+                                        # The EXPRESSION spelling of a searched CASE,
+                                        # not `CaseSelectItem` — kept as-is for coverage
+                                        # of that path specifically. Item 123 fixed the
+                                        # select-item spelling to route its conditions
+                                        # through `_where_shape` too (see
+                                        # test_normalized_query_shape_handles_case_select_item
+                                        # and test_searched_having_and_case_shapes_carry_structure_but_no_literals
+                                        # above), so this is no longer the only spelling
+                                        # that avoids a vacuous redaction assertion.
                                         "expr": {
                                             "when": [
                                                 {
