@@ -343,6 +343,49 @@ def test_the_audit_shape_records_a_nested_subquery_inside_a_case_select_item_con
     assert "CASE-SUBQUERY-SECRET-SSN" not in serialized
 
 
+def test_the_audit_shape_records_an_exists_subquery_inside_a_case_select_item_condition():
+    """Companion to the test above for the OTHER subquery predicate shape: `exists_subquery`
+    has no left-hand `col` (the subquery IS the predicate, item 106), so it takes a
+    different early-return branch in `_predicate_shape` than `value_subquery` does. Both
+    must reach a `CaseSelectItem` condition through the same item-123 fix."""
+    query = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": [
+                {
+                    "when": [
+                        {
+                            "when": {
+                                "op": "exists",
+                                "exists_subquery": _SCALAR_EMPLOYEE_SUBQUERY
+                                | {
+                                    "where": {
+                                        "col": "employees.ssn",
+                                        "op": "eq",
+                                        "value": "CASE-EXISTS-SECRET-SSN",
+                                    }
+                                },
+                            },
+                            "then": {"literal": "flagged"},
+                        }
+                    ],
+                    "else": {"literal": "ok"},
+                    "as": "status_label",
+                }
+            ],
+        }
+    )
+    shape = normalize_query_shape(query)
+    serialized = json.dumps(shape)
+
+    case_shape = shape["select"][0]
+    condition = case_shape["conditions"][0]
+    assert condition["operator"] == "exists"
+    assert condition["exists_subquery"]["from"] == "employees"
+    assert condition["exists_subquery"]["where"] == {"operator": "eq", "column": "employees.ssn"}
+    assert "CASE-EXISTS-SECRET-SSN" not in serialized
+
+
 def test_no_literal_escapes_a_nested_subquery_at_any_depth_or_position():
     """The redaction guarantee has to hold for every scope the new recursion
     reaches, not just the first one: a literal two levels down, one inside a nested
