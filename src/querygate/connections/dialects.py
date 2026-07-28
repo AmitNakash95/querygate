@@ -205,9 +205,9 @@ class MSSQLSessionAdapter(SessionDialectAdapter):
         # apply_session_guardrails's SET LOCK_TIMEOUT already documents.
         spid = int(identifier)
         async with engine.connect() as conn:
-            await conn.execute(
-                sa.text(f"KILL {spid}")
-            )  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+            # fmt: off
+            await conn.execute(sa.text(f"KILL {spid}"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+            # fmt: on
 
 
 _SESSION_ADAPTERS: Dict[DatabaseDialect, SessionDialectAdapter] = {
