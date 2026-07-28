@@ -84,6 +84,10 @@ test-unit: ## Run only unit tests
 test-integration: ## Run only integration tests
 	poetry run pytest -m integration
 
+.PHONY: test-ts-client
+test-ts-client: ## Build + test the TypeScript client builder (item 51 phase 2; requires npm install once in clients/typescript)
+	cd clients/typescript && npm test
+
 .PHONY: test-verify
 test-verify: ## Run only the core-guarantee verification/regression suite (real DB, no mocks)
 	poetry run pytest -m verification

@@ -57,11 +57,17 @@ class CapacityTimeoutError(ConcurrencyLimitError):
         *,
         admission_id: str,
         queue_wait_ms: int,
+        retry_after_seconds: int,
         admission_state: str = "capacity_timeout",
     ) -> None:
         super().__init__(message)
         self.admission_id = admission_id
         self.queue_wait_ms = queue_wait_ms
+        # A conservative hint (the connection's own concurrency_wait_seconds
+        # ceiling), surfaced as REST's Retry-After (TODO.md item 35 phase 3,
+        # migrated from 422 to 429 — same mechanism QuotaExceededError
+        # already uses, 2026-07-28 Decision Log).
+        self.retry_after_seconds = retry_after_seconds
         self.admission_state = admission_state
 
 
@@ -78,10 +84,33 @@ class QueueFullError(CapacityTimeoutError):
     handles it identically without a new branch.
     """
 
-    def __init__(self, message: str, *, admission_id: str) -> None:
+    def __init__(self, message: str, *, admission_id: str, retry_after_seconds: int) -> None:
         super().__init__(
-            message, admission_id=admission_id, queue_wait_ms=0, admission_state="queue_full"
+            message,
+            admission_id=admission_id,
+            queue_wait_ms=0,
+            retry_after_seconds=retry_after_seconds,
+            admission_state="queue_full",
         )
+
+
+class QueryCancellationNotEnabledError(PolicyViolationError):
+    """A cancel request for a RUNNING async query (TODO.md item 35 phase 3),
+    rejected because the connection's `Policy.allow_query_cancellation` is not
+    set. Its own type (rather than a bare `PolicyViolationError`) so the REST
+    edge can map it to `403` specifically — the operator has deliberately not
+    enabled this capability, distinct from every other `422` policy rejection.
+    """
+
+
+class QueryCancellationNotReadyError(ValueError):
+    """A cancel request for a query that is RUNNING but hasn't yet opened its
+    database session (a narrow timing window right after admission, before
+    `session_scope` captures the dialect session identifier) — there is
+    nothing to cancel yet. Retry-able: the caller should poll status and
+    cancel again shortly. Maps to REST `409`, distinct from the `403` of
+    `QueryCancellationNotEnabledError` (a policy decision, not a timing one).
+    """
 
 
 class CostEstimateExceededError(PolicyViolationError):

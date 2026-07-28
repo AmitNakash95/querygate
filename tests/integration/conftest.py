@@ -37,7 +37,7 @@ async def sqlite_app(monkeypatch):
     import querygate.validation.schema_validation as sv_module
 
     @asynccontextmanager
-    async def _session_scope(connection_id, policy=None):
+    async def _session_scope(connection_id, policy=None, *, session_identifier_sink=None):
         async with AsyncSession(engine, expire_on_commit=False) as session:
             yield session
 

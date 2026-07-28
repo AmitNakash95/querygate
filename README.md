@@ -1359,20 +1359,21 @@ curl -X POST "http://localhost:8000/api/v1/demo/query?queue_mode=fail_fast" \
 Every call — successful or capacity-rejected — gets a stable `admission_id`
 and how long it waited (`queue_wait_ms`). REST returns these as response
 headers (`X-QueryGate-Admission-Id`, `X-QueryGate-Admission-State` —
-`completed` or `capacity_timeout` — and `X-QueryGate-Queue-Wait-Ms`) so the
-existing `422 {"detail": "too many concurrent ..."}` rejection body never
-changes shape; a successful `StructuredQueryResult`/`BatchQueryItemResult`
-also carries `admission_id`/`queue_wait_ms` fields directly. MCP's
-`MCPErrorResult` gains the same `admission_id`/`admission_state`/
-`queue_wait_ms` fields for a capacity rejection. `querygate_queue_depth`
+`completed`, `capacity_timeout`, or `queue_full` — and
+`X-QueryGate-Queue-Wait-Ms`) so the `{"detail": "too many concurrent ..."}`
+rejection body never changes shape; a capacity rejection is `429` with a
+`Retry-After` header (migrated from `422`, TODO.md item 35 phase 3). A
+successful `StructuredQueryResult`/`BatchQueryItemResult` also carries
+`admission_id`/`queue_wait_ms` fields directly. MCP's `MCPErrorResult` gains
+the same `admission_id`/`admission_state`/`queue_wait_ms` fields for a
+capacity rejection (`RATE_LIMITED` error code). `querygate_queue_depth`
 (current waiters, single-process visibility) and
 `querygate_queue_wait_seconds` (histogram, by outcome) are exported
 alongside the existing concurrency metrics.
 
-This is phase 1 of TODO.md item 35 — a synchronous, caller-tunable version of
-the wait that already existed. MCP progress notifications, a REST
-`202`-plus-cancel contract, mid-queue cancellation, and a `429`+`Retry-After`
-evaluation are phase 3.
+This started as phase 1 of TODO.md item 35 — a synchronous, caller-tunable
+version of the wait that already existed; phase 3 below adds progress,
+asynchronous execution, and cancellation.
 
 ### Queue-depth pressure controls and cross-replica visibility
 
@@ -1399,6 +1400,68 @@ When `concurrency_backend: redis` is selected, both the cap and the
 every replica shares — the same sorted-set-plus-lease design
 `max_concurrency`'s own Redis limiter already uses — so the depth is the
 true cross-replica count, not one process's own local tally.
+
+### Progress, asynchronous execution, and cancellation
+
+TODO.md item 35 phase 3 closes out the rest of the contract: a progress
+signal while queued, a non-blocking REST lifecycle, and real cancellation.
+
+**MCP progress.** `run_structured_queries` reports two progress notifications
+per query to any client that supports MCP's standard
+`notifications/progress` (via `Context.report_progress` — silently a no-op
+otherwise, so this is purely additive): once when the wait for a
+concurrency slot begins, once when the slot is acquired and execution
+starts. Not a continuous mid-wait tick — that would mean slicing the
+underlying wait into shorter repeated attempts, risking the "a caller
+cannot extend its wait past the operator's ceiling" guarantee for a
+DX-only feature.
+
+**REST asynchronous execution.** `queue_mode=async` on `POST .../query`
+returns `202` immediately instead of blocking:
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/demo/query?queue_mode=async" \
+  -H "Content-Type: application/json" \
+  -d '{"from": "orders", "select": ["orders.id"], "limit": 10}'
+# -> 202 {"admission_id": "...", "status_url": "/api/v1/demo/query/<id>"}
+
+curl http://localhost:8000/api/v1/demo/query/<admission_id>
+# -> {"state": "completed", "result": {...}, ...}
+```
+
+`state` is one of `queued`/`running`/`completed`/`failed`/
+`cancel_requested`/`cancelled`. In-process only for this pass — a caller
+polling a different replica than the one that started the query gets a
+`404`; a Redis-backed cross-replica store is a natural follow-up, mirroring
+how admission (phase 1) and quota both shipped in-process before growing a
+cross-replica variant.
+
+**Cancellation.** `POST .../query/<admission_id>/cancel` requests
+cancellation. Cancelling your own query needs no scope; cancelling another
+principal's needs the new `query:cancel` scope. Cancelling a still-`queued`
+query is always free — it never touches the database. Cancelling a
+`running` query invokes real dialect-level cancellation (Postgres
+`pg_cancel_backend`, which interrupts just the query and leaves the pooled
+connection alive; MSSQL `KILL <spid>`, T-SQL's only out-of-band primitive
+for this, which terminates the whole session) — but only if the
+connection's policy sets `allow_query_cancellation: true`, deny-by-default
+like `allow_cross_join`:
+
+```yaml
+connections:
+  demo:
+    allow_query_cancellation: true  # only after granting the DB-level permission below
+```
+
+Both dialects' out-of-band cancellation needs a real permission grant
+beyond a typical reporting connection: Postgres requires this connection's
+role to be a superuser or a member of `pg_signal_backend`
+(`GRANT pg_signal_backend TO <role>;`); MSSQL requires the server-level
+`ALTER ANY CONNECTION` permission or sysadmin. A cancel request for a
+running query is rejected outright (`403`), before any DB call, unless the
+flag is set — the operator sets it only after granting the permission
+themselves, so a missing grant is a deployment decision made in the open,
+never a runtime permission error discovered mid-cancellation.
 
 ## Production deployment
 
@@ -1662,13 +1725,12 @@ Being upfront about what's not done yet:
 - **Distributed concurrency enforcement (Redis-backed) is opt-in** — the
   default is an in-process semaphore, correct for a single instance only;
   set `concurrency_backend: redis` for multi-instance deployments.
-- **Agent-visible capacity waiting still has no cancellation or async
-  contract** — a caller can choose `queue_mode=fail_fast`/a shorter
-  `wait_timeout_seconds`, gets a stable `admission_id` back, and (with
-  `concurrency_backend: redis`) a queue-depth cap and gauge that are
-  accurate across replicas (above), but there's still no MCP progress
-  notification, REST `202`-plus-cancel contract, mid-queue cancellation, or
-  `429`+`Retry-After` evaluation (TODO item 35 phase 3). The in-process
+- **The `queue_mode=async` execution store is in-process only** — a caller
+  polling `GET .../query/{admission_id}` must reach the same replica that
+  started the query, or gets a `404` (TODO item 35 phase 3); a Redis-backed
+  cross-replica variant is a documented follow-up, mirroring how
+  distributed concurrency enforcement above and per-principal quota both
+  shipped in-process before growing a Redis-backed variant. The in-process
   (non-Redis) `querygate_queue_depth` gauge remains single-process
   visibility only, like `querygate_concurrency_in_use`.
 - **Semantic memory enrichment is opt-in and relationship-learning only** —
