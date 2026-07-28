@@ -65,3 +65,20 @@ def test_resolve_wait_seconds_clamps_a_negative_caller_request_to_zero():
         )
         == 0.0
     )
+
+
+def test_resolve_wait_seconds_treats_async_identically_to_wait():
+    """`async` (item 35 phase 3) only changes whether the REST caller blocks
+    on the HTTP response — the wait-ceiling calculation itself is identical
+    to `wait`, so it needs no special case here."""
+    async_result = resolve_wait_seconds(
+        queue_mode=QueueMode.ASYNC, requested_wait_seconds=2.0, policy_ceiling_seconds=10.0
+    )
+    wait_result = resolve_wait_seconds(
+        queue_mode=QueueMode.WAIT, requested_wait_seconds=2.0, policy_ceiling_seconds=10.0
+    )
+    # Audit fix: pin the actual expected value too, not just "these two calls
+    # currently agree" — a future special-case for ASYNC that happened to
+    # also equal WAIT's result for this one input pair would otherwise pass
+    # this test while still being wrong for other inputs.
+    assert async_result == wait_result == 2.0

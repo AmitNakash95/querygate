@@ -37,6 +37,11 @@ class MCPErrorResult(BaseModel):
     admission_id: Optional[str] = None
     admission_state: Optional[str] = None
     queue_wait_ms: Optional[int] = None
+    # Mirrors REST's Retry-After header (TODO.md item 35 phase 3, migrated
+    # 2026-07-28 alongside REST's 422->429 move) — set only for a
+    # CapacityTimeoutError/QueueFullError, which is the one exception in this
+    # family that actually carries the value today.
+    retry_after_seconds: Optional[int] = None
 
 
 def _error_code_from_exception(exc: Exception) -> tuple[str, str]:
@@ -51,10 +56,14 @@ def _error_code_from_exception(exc: Exception) -> tuple[str, str]:
     # Checked before PolicyViolationError (its superclass): a per-principal
     # quota rejection (TODO.md item 50) gets its own code so an agent can tell
     # "slow down / budget exhausted, retry later" apart from a structural
-    # validation error it should not retry unchanged.
-    if isinstance(exc, QuotaExceededError):
+    # validation error it should not retry unchanged. ConcurrencyLimitError
+    # (and its CapacityTimeoutError/QueueFullError enrichments) joined this
+    # bucket 2026-07-28, matching the REST 422->429 migration — "at capacity,
+    # retry later" is the same semantic as quota exhaustion, not a structural
+    # validation error.
+    if isinstance(exc, (QuotaExceededError, ConcurrencyLimitError)):
         return "RATE_LIMITED", public_error_message(exc)
-    if isinstance(exc, (PolicyViolationError, QueryValidationError, ConcurrencyLimitError)):
+    if isinstance(exc, (PolicyViolationError, QueryValidationError)):
         return "VALIDATION", public_error_message(exc)
     return "INTERNAL", public_error_message(exc)
 
@@ -66,6 +75,7 @@ def _admission_fields_from_exception(exc: Exception) -> dict:
         "admission_id": exc.admission_id,
         "admission_state": exc.admission_state,
         "queue_wait_ms": exc.queue_wait_ms,
+        "retry_after_seconds": exc.retry_after_seconds,
     }
 
 

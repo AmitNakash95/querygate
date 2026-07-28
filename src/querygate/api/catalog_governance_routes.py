@@ -38,6 +38,7 @@ from querygate.catalog.models import (
     CatalogDraftTarget,
     CatalogExportBundle,
     CatalogVersionRecord,
+    ProposalReviewEvent,
     ProposalReviewStatus,
 )
 from querygate.catalog.providers import (
@@ -137,6 +138,29 @@ class ProposalListItem(pyd.BaseModel):
             published_entry_id=proposal.published_entry_id,
             published_version_id=proposal.published_version_id,
         )
+
+
+class ProposalDetail(ProposalListItem):
+    """The single-proposal fetch (TODO.md item 38 phase 2) additionally
+    carries `review_history` — every durable, actor-attributed review
+    transition (edit/approve/reject/publish) — for the admin UI's detail
+    panel. Kept off the bulk list response (`ProposalListItem` itself,
+    still used by `GET .../proposals`) since a list of every proposal's full
+    history is unbounded payload a reviewer scanning the queue never needs;
+    the single-fetch this backs is exactly the request the admin UI already
+    re-issues after every mutation (item 38 phase 1's `selectProposal()`
+    fix). Reviewer identities here are appropriate for this privileged,
+    `catalog:review`-scoped surface — distinct from the "never actor
+    identities" restriction on `ProposalListItem` above, which is about the
+    proposal's own generation provenance, not the human governance trail.
+    """
+
+    review_history: List[ProposalReviewEvent] = pyd.Field(default_factory=list)
+
+    @classmethod
+    def from_proposal(cls, proposal: CatalogDraftProposal) -> "ProposalDetail":
+        base = ProposalListItem.from_proposal(proposal)
+        return cls(**base.model_dump(), review_history=proposal.review_history)
 
 
 class EditProposalRequest(pyd.BaseModel):
@@ -537,7 +561,7 @@ def build_catalog_governance_router(
             proposals = [p for p in proposals if p.review_status == review_status]
         return [ProposalListItem.from_proposal(p) for p in proposals]
 
-    @router.get("/{connection}/proposals/{proposal_id}", response_model=ProposalListItem)
+    @router.get("/{connection}/proposals/{proposal_id}", response_model=ProposalDetail)
     async def get_proposal_endpoint(
         connection: str, proposal_id: str, principal: Principal = Depends(get_principal)
     ):
@@ -550,7 +574,7 @@ def build_catalog_governance_router(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Unknown catalog proposal: {proposal_id!r}",
             )
-        return ProposalListItem.from_proposal(proposal)
+        return ProposalDetail.from_proposal(proposal)
 
     @router.get(
         "/{connection}/proposals/{proposal_id}/preview",

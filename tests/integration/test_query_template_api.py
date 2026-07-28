@@ -97,6 +97,24 @@ async def test_run_executes_through_the_real_pipeline(sqlite_app):
 
 
 @pytest.mark.asyncio
+async def test_run_rejects_async_queue_mode(sqlite_app):
+    """Audit fix (item 35 phase 3 re-audit): the 202/poll/cancel async
+    admission lifecycle is implemented only by POST .../query. Without this
+    rejection, queue_mode=async here would silently execute synchronously
+    instead — no 202, no admission_id, no signal the requested mode wasn't
+    honored."""
+    _install_templates()
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/query-templates/orders_by_status/run",
+            json={"parameters": {"status": "completed"}},
+            params={"queue_mode": "async"},
+        )
+    assert resp.status_code == 422
+    assert "only supported on POST /{connection}/query" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_missing_required_parameter_is_422(sqlite_app):
     _install_templates()
     async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:

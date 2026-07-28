@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
 import pydantic as pyd
 import sqlalchemy as sa
@@ -588,9 +588,32 @@ class StructuredQueryService:
         wait_timeout_seconds: Optional[float] = None,
         approval_token: Optional[str] = None,
         _reserved_quota: Optional[QuotaReservation] = None,
+        _admission_id: Optional[str] = None,
+        on_wait_start: Optional[Callable[[float], Awaitable[None]]] = None,
+        on_admitted: Optional[Callable[[int], Awaitable[None]]] = None,
+        on_session_identifier: Optional[Callable[[str], None]] = None,
     ) -> StructuredQueryResult:
+        """`_admission_id`/`on_wait_start`/`on_admitted`/`on_session_identifier`
+        are used only by the async execution lifecycle (TODO.md item 35 phase
+        3, `execution/async_execution.py`) and MCP progress notifications
+        (`mcp/tools/query.py`): `_admission_id` lets the async lifecycle
+        generate and return the id in its `202` response BEFORE this method
+        (running in a background task) has even started, rather than
+        discovering the id only after the fact; `on_wait_start`/`on_admitted`
+        observe "about to wait up to N seconds for a concurrency slot" and
+        "the slot was acquired after N ms, execution is now running" — the
+        two-point signal MCP's `Context.report_progress` uses (item 35 phase
+        3 deliberately doesn't slice the wait into periodic ticks: that would
+        mean retrying `concurrency_slot`'s acquire in shorter increments,
+        risking a regression in the "a caller cannot extend its wait past the
+        operator's ceiling" guarantee for a DX-only feature); `on_session_identifier`
+        is "here is the dialect-captured session identifier a later cancel
+        call can target". The ordinary synchronous callers (REST/MCP's
+        `mode='explain'` path, or a caller passing none of these) see
+        unchanged behavior.
+        """
         start = time.monotonic()
-        admission_id = new_admission_id()
+        admission_id = _admission_id if _admission_id is not None else new_admission_id()
         query_shape = normalize_query_shape(query)
         sql = ""
         params: Optional[str] = None
@@ -621,6 +644,8 @@ class StructuredQueryService:
                 requested_wait_seconds=wait_timeout_seconds,
                 policy_ceiling_seconds=policy.concurrency_wait_seconds,
             )
+            if on_wait_start is not None:
+                await on_wait_start(wait_seconds)
             queue_start = time.monotonic()
             try:
                 async with concurrency_slot(
@@ -632,11 +657,17 @@ class StructuredQueryService:
                     max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
                 ):
                     queue_wait_ms = int((time.monotonic() - queue_start) * 1000)
+                    if on_admitted is not None:
+                        await on_admitted(queue_wait_ms)
                     stmt, limit, _tables, dialect = await self._validate_and_compile(query)
                     policy_validated = True
                     sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
 
-                    async with session_scope(self._connection_id, policy=policy) as session:
+                    async with session_scope(
+                        self._connection_id,
+                        policy=policy,
+                        session_identifier_sink=on_session_identifier,
+                    ) as session:
                         estimate: Optional[QueryCostEstimate] = None
                         if policy.estimate_needed:
                             estimate = await self._estimate_cost(dialect, session, stmt)
@@ -730,16 +761,29 @@ class StructuredQueryService:
                     )
             except ConcurrencyLimitError as exc:
                 queue_wait_ms = int((time.monotonic() - queue_start) * 1000)
+                # A conservative Retry-After hint (REST 429, item 35 phase 3):
+                # the connection's own configured wait ceiling, not a made-up
+                # constant — the operator's own guidance for how long a slot
+                # might take to free up. max(1, ...) so a ceiling under 1s
+                # (or 0, if an operator ever configures that) never yields a
+                # 0-second Retry-After, which some HTTP clients treat as
+                # "retry immediately" rather than "retry very soon".
+                retry_after_seconds = max(1, int(policy.concurrency_wait_seconds))
                 if isinstance(exc, QueueDepthExceededError):
                     QUEUE_WAIT_SECONDS.labels(
                         connection=self._connection_id, outcome="queue_full"
                     ).observe(queue_wait_ms / 1000)
-                    raise QueueFullError(str(exc), admission_id=admission_id) from exc
+                    raise QueueFullError(
+                        str(exc), admission_id=admission_id, retry_after_seconds=retry_after_seconds
+                    ) from exc
                 QUEUE_WAIT_SECONDS.labels(
                     connection=self._connection_id, outcome="capacity_timeout"
                 ).observe(queue_wait_ms / 1000)
                 raise CapacityTimeoutError(
-                    str(exc), admission_id=admission_id, queue_wait_ms=queue_wait_ms
+                    str(exc),
+                    admission_id=admission_id,
+                    queue_wait_ms=queue_wait_ms,
+                    retry_after_seconds=retry_after_seconds,
                 ) from exc
         except Exception as exc:
             error_category = (
@@ -800,6 +844,8 @@ class StructuredQueryService:
         wait_timeout_seconds: Optional[float] = None,
         approval_tokens: Optional[Dict[str, str]] = None,
         approval_resolver: Optional[ApprovalResolver] = None,
+        on_wait_start: Optional[Callable[[float], Awaitable[None]]] = None,
+        on_admitted: Optional[Callable[[int], Awaitable[None]]] = None,
     ) -> List[BatchQueryItemResult]:
         """Run each query independently; one failure doesn't drop the rest of the batch.
 
@@ -827,6 +873,8 @@ class StructuredQueryService:
                     wait_timeout_seconds=wait_timeout_seconds,
                     approval_tokens=approval_tokens,
                     approval_resolver=approval_resolver,
+                    on_wait_start=on_wait_start,
+                    on_admitted=on_admitted,
                 )
             )
         return results
@@ -839,6 +887,8 @@ class StructuredQueryService:
         wait_timeout_seconds: Optional[float],
         approval_tokens: Optional[Dict[str, str]],
         approval_resolver: Optional[ApprovalResolver],
+        on_wait_start: Optional[Callable[[float], Awaitable[None]]] = None,
+        on_admitted: Optional[Callable[[int], Awaitable[None]]] = None,
     ) -> BatchQueryItemResult:
         token = approval_tokens.get(query_fingerprint(query)) if approval_tokens else None
         try:
@@ -847,6 +897,8 @@ class StructuredQueryService:
                 queue_mode=queue_mode,
                 wait_timeout_seconds=wait_timeout_seconds,
                 approval_token=token,
+                on_wait_start=on_wait_start,
+                on_admitted=on_admitted,
             )
             return BatchQueryItemResult(**result.model_dump())
         except ApprovalRequiredError as exc:

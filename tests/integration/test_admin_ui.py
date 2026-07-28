@@ -489,6 +489,72 @@ async def test_query_templates_endpoint_is_reachable_and_needs_no_config_scope(
 
 
 @pytest.mark.asyncio
+async def test_catalog_governance_phase2_ui_is_wired_and_scope_gated(tmp_path, monkeypatch):
+    """Item 38 phase 2: the catalog workspace surfaces bulk approve/reject/
+    delete, export/import (backup/restore), generate-drafts/learn triggers,
+    a per-proposal review_history detail view, and a usage-signals browsing
+    tab — all thin wrappers over the existing 32B governance routes, which
+    already shipped in phase 1 (this phase is frontend-only)."""
+    app = create_app(_settings(tmp_path, monkeypatch))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        page = await client.get("/admin/")
+        script = (await client.get("/admin/app.js")).text
+
+    # New "Usage signals" nav tab, in the same catalog domain as the existing
+    # Review proposals / Versions & rollback tabs.
+    assert "Usage signals" in script
+    assert '"catalog-usage"' in script
+    assert "/usage-signals" in script
+    assert 'data-catalog-panel="usage"' in page.text
+
+    # Bulk approve/reject/delete: checkboxes wired to a selection Set and a
+    # toolbar calling the existing bulk-* endpoints.
+    assert "data-proposal-checkbox" in script
+    assert "bulk-approve" in script and "bulk-reject" in script and "bulk-delete" in script
+    assert "/proposals/bulk-approve" in script
+    assert "/proposals/bulk-reject" in script
+    assert "/proposals/bulk-delete" in script
+    assert 'id="proposal-bulk-toolbar"' in page.text
+
+    # Export/import (backup/restore) for the catalog itself.
+    assert 'id="export-catalog"' in page.text
+    assert 'id="import-catalog"' in page.text
+    assert "exportCatalog" in script and "importCatalog" in script
+    assert "/export" in script and "/import" in script
+
+    # Generate-drafts / learn triggers callable from the browser.
+    assert 'id="generate-drafts"' in page.text
+    assert 'id="run-learn"' in page.text
+    assert "/generate-drafts" in script
+    assert "runLearn" in script
+
+    # Per-proposal review_history detail view, populated from the
+    # single-proposal fetch (ProposalDetail), never the bulk list.
+    assert 'id="review-history-body"' in page.text
+    assert "renderReviewHistory" in script
+    assert "review_history" in script
+
+    # Scope gating: bulk actions disabled without the matching scope, the same
+    # posture as the existing single-proposal approve/reject/publish buttons.
+    assert '"#bulk-approve").disabled = !hasScope("catalog:approve")' in script
+    assert '"#bulk-reject").disabled = !hasScope("catalog:reject")' in script
+    assert '"#bulk-delete").disabled = !hasScope("catalog:delete")' in script
+    assert '"#generate-drafts").disabled = !hasScope("catalog:generate")' in script
+    assert '"#export-catalog").disabled = !hasScope("catalog:export")' in script
+
+    # Audit fix: each proposal-row checkbox's accessible name distinguishes it
+    # from every other row (not a generic "Select proposal" repeated for every
+    # row in the queue).
+    assert 'aria-label="Select ${escapeHtml(proposalTargetLabel(proposal.target))}"' in script
+    assert 'aria-label="Select proposal"' not in script
+
+    # Audit fix: selectProposal() discards a stale response instead of letting
+    # a slower, earlier-clicked row's fetch overwrite a faster, later one.
+    assert "latestProposalSelectionId" in script
+    assert "if (latestProposalSelectionId !== proposalId) return;" in script
+
+
+@pytest.mark.asyncio
 async def test_four_eyes_review_ui_is_wired_and_scope_gated(tmp_path, monkeypatch):
     """Item 42 phase 2: the versions view surfaces four-eyes review — approval
     status per staged version, Approve/Reject buttons gated on the

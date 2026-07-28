@@ -10,6 +10,7 @@
     curate: ["Control plane / Catalog / Curate", "Author curated entries through the governance queue"],
     catalog: ["Control plane / Catalog / Review proposals", "Review, approve, and publish schema-catalog proposals"],
     "catalog-versions": ["Control plane / Catalog / Versions & rollback", "Every publish and rollback, connection-scoped"],
+    "catalog-usage": ["Control plane / Catalog / Usage signals", "Aggregated evidence the learner draws on"],
     templates: ["Control plane / Templates / Query templates", "Named, parameterized queries"],
     changes: ["Control plane / Releases / Change set", "Validate before activation"],
     history: ["Control plane / Releases / Versions", "Immutable configuration history"],
@@ -38,6 +39,7 @@
       { view: "curate", label: "Curate", scope: "catalog:author" },
       { view: "catalog", label: "Review proposals", section: "catalog", panel: "review" },
       { view: "catalog-versions", label: "Versions & rollback", section: "catalog", panel: "versions" },
+      { view: "catalog-usage", label: "Usage signals", section: "catalog", panel: "usage", scope: "catalog:review" },
     ] },
     { id: "templates", label: "Templates", glyph: "05", release: "shared", tabs: [
       { view: "templates", label: "Query templates" },
@@ -116,6 +118,8 @@
     selectedProposalId: null,
     currentProposal: null,
     publishedComparison: null,
+    selectedProposalIds: new Set(),
+    usageSignals: [],
     connectionHealth: [],
     templates: [],
     templatePreview: null,
@@ -249,6 +253,7 @@
       loadCatalogVersions();
     }
     if (name === "catalog-versions" && state.access && $("#catalog-connection").value && !state.catalogVersions.length) loadCatalogVersions();
+    if (name === "catalog-usage" && state.access && $("#catalog-connection").value && !state.usageSignals.length) loadUsageSignals();
     if (name === "curate" && state.access) initCurateView();
     if (name === "health" && state.access && !$("#health-body [data-health-row]")) loadConnectionHealth();
     if (name === "templates" && state.access) {
@@ -1110,12 +1115,136 @@
     $("#publish-proposal").disabled = !hasScope("catalog:publish");
   }
 
+  function applyCatalogToolbarGating() {
+    $("#generate-drafts").disabled = !hasScope("catalog:generate");
+    $("#run-learn").disabled = !hasScope("catalog:generate");
+    $("#export-catalog").disabled = !hasScope("catalog:export");
+    $("#import-catalog").disabled = !hasScope("catalog:export");
+  }
+
   function resetProposalSelection() {
     state.selectedProposalId = null;
     state.currentProposal = null;
     state.publishedComparison = null;
     $("#proposal-empty").hidden = false;
     $("#proposal-content").hidden = true;
+    state.selectedProposalIds.clear();
+    hideBulkRejectRow();
+    updateBulkToolbar();
+    latestProposalSelectionId = null;
+  }
+
+  function updateBulkToolbar() {
+    const count = state.selectedProposalIds.size;
+    $("#proposal-bulk-toolbar").hidden = count === 0;
+    $("#proposal-bulk-count").textContent = `${count} selected`;
+    $("#bulk-approve").disabled = !hasScope("catalog:approve");
+    $("#bulk-reject").disabled = !hasScope("catalog:reject");
+    $("#bulk-delete").disabled = !hasScope("catalog:delete");
+    const allChecked = state.catalogProposals.length > 0 &&
+      $$("[data-proposal-checkbox]").every((box) => box.checked);
+    $("#proposal-select-all").checked = allChecked && $$("[data-proposal-checkbox]").length > 0;
+  }
+
+  function toggleProposalSelection(proposalId, checked) {
+    if (checked) state.selectedProposalIds.add(proposalId);
+    else state.selectedProposalIds.delete(proposalId);
+    updateBulkToolbar();
+  }
+
+  function selectAllVisibleProposals(checked) {
+    $$("[data-proposal-checkbox]").forEach((box) => {
+      box.checked = checked;
+      if (checked) state.selectedProposalIds.add(box.dataset.proposalCheckbox);
+      else state.selectedProposalIds.delete(box.dataset.proposalCheckbox);
+    });
+    updateBulkToolbar();
+  }
+
+  function showBulkRejectRow() {
+    $("#bulk-reject-row").hidden = false;
+    $("#bulk-reject-reason").value = "";
+    $("#bulk-reject-reason").focus();
+  }
+
+  function hideBulkRejectRow() {
+    $("#bulk-reject-row").hidden = true;
+  }
+
+  async function bulkApproveSelected() {
+    const connection = $("#catalog-connection").value;
+    const proposalIds = [...state.selectedProposalIds];
+    if (!proposalIds.length) return;
+    const button = $("#bulk-approve");
+    setBusy(button, true, "Approving…");
+    try {
+      await api(`/admin/catalog/${encodeURIComponent(connection)}/proposals/bulk-approve`, {
+        method: "POST",
+        body: JSON.stringify({ proposal_ids: proposalIds }),
+      });
+      toast(`Approved ${proposalIds.length} proposal${proposalIds.length === 1 ? "" : "s"}.`);
+      state.selectedProposalIds.clear();
+      await loadCatalogProposals();
+      if (state.selectedProposalId) await refreshSelectedProposalAfterMutation();
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function confirmBulkReject() {
+    const connection = $("#catalog-connection").value;
+    const proposalIds = [...state.selectedProposalIds];
+    const reason = $("#bulk-reject-reason").value.trim();
+    if (!proposalIds.length) return;
+    if (!reason) { toast("A rejection reason is required.", "bad"); return; }
+    const button = $("#bulk-confirm-reject");
+    setBusy(button, true, "Rejecting…");
+    try {
+      await api(`/admin/catalog/${encodeURIComponent(connection)}/proposals/bulk-reject`, {
+        method: "POST",
+        body: JSON.stringify({ proposal_ids: proposalIds, reason }),
+      });
+      toast(`Rejected ${proposalIds.length} proposal${proposalIds.length === 1 ? "" : "s"}.`);
+      state.selectedProposalIds.clear();
+      hideBulkRejectRow();
+      await loadCatalogProposals();
+      if (state.selectedProposalId) await refreshSelectedProposalAfterMutation();
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function bulkDeleteSelected() {
+    const connection = $("#catalog-connection").value;
+    const proposalIds = [...state.selectedProposalIds];
+    if (!proposalIds.length) return;
+    const phrase = `DELETE ${proposalIds.length}`;
+    const confirmed = await confirmAction({
+      title: `Delete ${proposalIds.length} proposal${proposalIds.length === 1 ? "" : "s"}?`,
+      message: `This permanently removes the selected quarantined proposals — it never touches anything already published. Type ${phrase} to continue.`,
+      phrase,
+    });
+    if (!confirmed) { toast(`Confirmation cancelled. Enter “${phrase}” exactly to proceed.`); return; }
+    const button = $("#bulk-delete");
+    setBusy(button, true, "Deleting…");
+    try {
+      await api(`/admin/catalog/${encodeURIComponent(connection)}/proposals/bulk-delete`, {
+        method: "POST",
+        body: JSON.stringify({ proposal_ids: proposalIds }),
+      });
+      toast(`Deleted ${proposalIds.length} proposal${proposalIds.length === 1 ? "" : "s"}.`);
+      state.selectedProposalIds.clear();
+      if (state.selectedProposalId && proposalIds.includes(state.selectedProposalId)) resetProposalSelection();
+      await loadCatalogProposals();
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
   }
 
   async function loadCatalogProposals() {
@@ -1156,11 +1285,22 @@
       (!objectType || proposal.target.object_type === objectType)
     );
     $("#catalog-pending-dot").hidden = !state.catalogProposals.some((p) => p.review_status === "pending");
+    // Bulk selection (item 38 phase 2) is pruned to whatever is currently
+    // visible under the active filters — a proposal hidden by a filter
+    // change stays selectable only once it's back in view, so the bulk
+    // toolbar's count never silently includes something the reviewer can't
+    // see right now.
+    const visibleIds = new Set(items.map((p) => p.proposal_id));
+    for (const id of state.selectedProposalIds) if (!visibleIds.has(id)) state.selectedProposalIds.delete(id);
     $("#proposal-list").innerHTML = items.length ? items.map((proposal) => `
-      <button class="proposal-item ${state.selectedProposalId === proposal.proposal_id ? "active" : ""}" type="button" data-proposal-id="${escapeHtml(proposal.proposal_id)}">
-        <div class="proposal-item-head"><strong title="${escapeHtml(proposalTargetLabel(proposal.target))}">${escapeHtml(proposalTargetLabel(proposal.target))}</strong><span class="status-chip ${proposal.review_status === "published" ? "good" : proposal.review_status === "rejected" ? "bad" : "neutral"}">${escapeHtml(proposal.review_status)}</span></div>
-        <div class="proposal-item-meta"><span>${escapeHtml(proposal.target.object_type)}</span><span>${escapeHtml(proposal.source_class)}</span><span>${escapeHtml(proposal.schema_status)}</span></div>
-      </button>`).join("") : '<p class="empty-state">No matching proposals.</p>';
+      <div class="proposal-item-row">
+        <label class="checkbox-row"><input type="checkbox" data-proposal-checkbox="${escapeHtml(proposal.proposal_id)}" aria-label="Select ${escapeHtml(proposalTargetLabel(proposal.target))}" ${state.selectedProposalIds.has(proposal.proposal_id) ? "checked" : ""}></label>
+        <button class="proposal-item ${state.selectedProposalId === proposal.proposal_id ? "active" : ""}" type="button" data-proposal-id="${escapeHtml(proposal.proposal_id)}">
+          <div class="proposal-item-head"><strong title="${escapeHtml(proposalTargetLabel(proposal.target))}">${escapeHtml(proposalTargetLabel(proposal.target))}</strong><span class="status-chip ${proposal.review_status === "published" ? "good" : proposal.review_status === "rejected" ? "bad" : "neutral"}">${escapeHtml(proposal.review_status)}</span></div>
+          <div class="proposal-item-meta"><span>${escapeHtml(proposal.target.object_type)}</span><span>${escapeHtml(proposal.source_class)}</span><span>${escapeHtml(proposal.schema_status)}</span></div>
+        </button>
+      </div>`).join("") : '<p class="empty-state">No matching proposals.</p>';
+    updateBulkToolbar();
   }
 
   function fieldsMarkup(content) {
@@ -1242,14 +1382,46 @@
     $("#publish-proposal").hidden = status !== "approved";
     $("#publish-preview-panel").hidden = status !== "approved";
     $("#proposal-action-buttons").hidden = !(status === "pending" || status === "approved");
+    renderReviewHistory(proposal.review_history || []);
     loadPublishedComparison(proposal);
   }
 
-  function selectProposal(proposalId) {
-    const proposal = state.catalogProposals.find((item) => item.proposal_id === proposalId);
-    if (!proposal) return;
-    renderProposalDetail(proposal);
-    renderProposalList();
+  function renderReviewHistory(events) {
+    const ACTION_LABELS = { edited: "Edited", approved: "Approved", rejected: "Rejected", published: "Published", rolled_back: "Rolled back" };
+    $("#review-history-body").innerHTML = events.length ? [...events].reverse().map((event) => `
+      <tr>
+        <td><span class="status-chip ${event.action === "rejected" ? "bad" : event.action === "published" || event.action === "approved" ? "good" : "neutral"}">${escapeHtml(ACTION_LABELS[event.action] || event.action)}</span></td>
+        <td>${escapeHtml(event.actor)}</td>
+        <td title="${escapeHtml(formatDate(event.occurred_at))}">${escapeHtml(relativeDate(event.occurred_at))}</td>
+        <td>${event.reason ? escapeHtml(event.reason) : "—"}</td>
+      </tr>`).join("") : '<tr><td colspan="4" class="empty-cell">No review actions yet.</td></tr>';
+  }
+
+  let latestProposalSelectionId = null;
+
+  async function selectProposal(proposalId) {
+    // Fetches the single-proposal detail endpoint (ProposalDetail, item 38
+    // phase 2) rather than reusing the cached list item — the bulk `GET
+    // .../proposals` list deliberately omits `review_history` (unbounded
+    // payload no queue-scanning reviewer needs), so only the single fetch
+    // carries it.
+    const connection = $("#catalog-connection").value;
+    if (!connection) return;
+    latestProposalSelectionId = proposalId;
+    try {
+      const proposal = await api(
+        `/admin/catalog/${encodeURIComponent(connection)}/proposals/${encodeURIComponent(proposalId)}`
+      );
+      // A faster, later-clicked row (or a reset, e.g. from a connection
+      // change) can resolve before this fetch does — discard a response
+      // that's no longer the most recently requested selection instead of
+      // letting it silently overwrite a newer one.
+      if (latestProposalSelectionId !== proposalId) return;
+      renderProposalDetail(proposal);
+      renderProposalList();
+    } catch (error) {
+      if (latestProposalSelectionId === proposalId) toast(error.message, "bad");
+    }
   }
 
   async function refreshSelectedProposalAfterMutation() {
@@ -1459,6 +1631,152 @@
       await refreshSelectedProposalAfterMutation();
     } catch (error) {
       toast(error.message, "bad");
+    }
+  }
+
+  // --- Catalog generate/learn/export/import (TODO item 38 phase 2) -------
+
+  function renderCatalogToolbarResult(html) {
+    $("#catalog-toolbar-result").innerHTML = html;
+  }
+
+  async function triggerGenerateDrafts(file) {
+    if (!hasScope("catalog:generate")) { toast("catalog:generate scope is required to generate drafts.", "bad"); return; }
+    const connection = $("#catalog-connection").value;
+    if (!connection) { toast("Select a connection first.", "bad"); return; }
+    let request;
+    try {
+      request = JSON.parse(await file.text());
+    } catch {
+      renderCatalogToolbarResult('<ul><li>The selected file is not valid JSON.</li></ul>');
+      return;
+    }
+    const button = $("#generate-drafts");
+    setBusy(button, true, "Generating…");
+    try {
+      // The uploaded file is the exact GenerateDraftsRequest body
+      // ({batch, purpose, max_proposals}) — posted through as-is, the same
+      // "upload what the API accepts, unmodified" pattern exportChangeSet /
+      // importChangeSet use for the shared config change-set bundle.
+      const result = await api(`/admin/catalog/${encodeURIComponent(connection)}/generate-drafts`, {
+        method: "POST",
+        body: JSON.stringify(request),
+      });
+      renderCatalogToolbarResult(`<div class="validation-ok"><span class="status-chip good">Generated</span><p>${result.added_proposal_count} proposal(s) added (generation ${escapeHtml(result.generation_id)}).</p></div>`);
+      toast(`Generated ${result.added_proposal_count} draft proposal(s).`);
+      await loadCatalogProposals();
+    } catch (error) {
+      renderCatalogToolbarResult(`<ul><li>${escapeHtml(error.message)}</li></ul>`);
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function runLearn() {
+    if (!hasScope("catalog:generate")) { toast("catalog:generate scope is required to run learning.", "bad"); return; }
+    const connection = $("#catalog-connection").value;
+    if (!connection) { toast("Select a connection first.", "bad"); return; }
+    const button = $("#run-learn");
+    setBusy(button, true, "Learning…");
+    try {
+      const result = await api(`/admin/catalog/${encodeURIComponent(connection)}/learn`, { method: "POST" });
+      renderCatalogToolbarResult(`<div class="validation-ok"><span class="status-chip good">Learned</span><p>${result.added_proposal_count} proposal(s) added from usage evidence (generation ${escapeHtml(result.generation_id)}).</p></div>`);
+      toast(`Learning added ${result.added_proposal_count} draft proposal(s).`);
+      await loadCatalogProposals();
+    } catch (error) {
+      renderCatalogToolbarResult(`<ul><li>${escapeHtml(error.message)}</li></ul>`);
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function exportCatalog() {
+    if (!hasScope("catalog:export")) { toast("catalog:export scope is required to export the catalog.", "bad"); return; }
+    const connection = $("#catalog-connection").value;
+    if (!connection) { toast("Select a connection first.", "bad"); return; }
+    const button = $("#export-catalog");
+    setBusy(button, true, "Exporting…");
+    try {
+      const bundle = await api(`/admin/catalog/${encodeURIComponent(connection)}/export`);
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      downloadJson(`querygate-catalog-${connection}-${stamp}.json`, bundle);
+      renderCatalogToolbarResult(`<div class="validation-ok"><span class="status-chip good">Exported</span><p>Catalog for ${escapeHtml(connection)} downloaded.</p></div>`);
+      toast("Catalog exported.");
+    } catch (error) {
+      renderCatalogToolbarResult(`<ul><li>${escapeHtml(error.message)}</li></ul>`);
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function importCatalog(file) {
+    if (!hasScope("catalog:export")) { toast("catalog:export scope is required to import a catalog bundle.", "bad"); return; }
+    const connection = $("#catalog-connection").value;
+    if (!connection) { toast("Select a connection first.", "bad"); return; }
+    let bundle;
+    try {
+      bundle = JSON.parse(await file.text());
+    } catch {
+      renderCatalogToolbarResult('<ul><li>The selected file is not valid JSON.</li></ul>');
+      return;
+    }
+    const button = $("#import-catalog");
+    setBusy(button, true, "Importing…");
+    try {
+      await api(`/admin/catalog/${encodeURIComponent(connection)}/import`, {
+        method: "POST",
+        body: JSON.stringify(bundle),
+      });
+      renderCatalogToolbarResult(`<div class="validation-ok"><span class="status-chip good">Imported</span><p>Catalog bundle applied to ${escapeHtml(connection)}.</p></div>`);
+      toast("Catalog bundle imported.");
+      await loadCatalogProposals();
+      await loadCatalogVersions();
+    } catch (error) {
+      renderCatalogToolbarResult(`<ul><li>${escapeHtml(error.message)}</li></ul>`);
+      toast(error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  // --- Usage signals (TODO item 32C evidence, item 38 phase 2 UI) --------
+
+  function usageSignalTargetLabel(signal) {
+    const label = signal.column ? `${signal.table}.${signal.column}` : signal.table;
+    return signal.to_table ? `${label} → ${signal.to_table}.${signal.to_column}` : label;
+  }
+
+  const USAGE_KIND_LABELS = { table_used: "Table used", column_used: "Column used", relationship_used: "Relationship used" };
+
+  function renderUsageSignals() {
+    $("#usage-signals-body").innerHTML = state.usageSignals.length ? state.usageSignals.map((signal) => `
+      <tr>
+        <td><span class="status-chip ${signal.kind === "relationship_used" ? "good" : "neutral"}">${escapeHtml(USAGE_KIND_LABELS[signal.kind] || signal.kind)}</span></td>
+        <td>${escapeHtml(signal.object_type)}</td>
+        <td>${escapeHtml(usageSignalTargetLabel(signal))}</td>
+        <td>${signal.support}</td>
+        <td>${signal.signal_count}</td>
+        <td title="${escapeHtml(formatDate(signal.first_observed_at))}">${escapeHtml(relativeDate(signal.first_observed_at))}</td>
+        <td title="${escapeHtml(formatDate(signal.last_observed_at))}">${escapeHtml(relativeDate(signal.last_observed_at))}</td>
+      </tr>`).join("") : '<tr><td colspan="7" class="empty-cell">No usage signals recorded yet for this connection.</td></tr>';
+  }
+
+  async function loadUsageSignals() {
+    const connection = $("#catalog-connection").value;
+    if (!connection || !hasScope("catalog:review")) {
+      state.usageSignals = [];
+      $("#usage-signals-body").innerHTML = '<tr><td colspan="7" class="empty-cell">Select a connection to load usage signals.</td></tr>';
+      return;
+    }
+    try {
+      state.usageSignals = await api(`/admin/catalog/${encodeURIComponent(connection)}/usage-signals`);
+      renderUsageSignals();
+    } catch (error) {
+      state.usageSignals = [];
+      $("#usage-signals-body").innerHTML = `<tr><td colspan="7" class="empty-cell">${escapeHtml(error.message)}</td></tr>`;
     }
   }
 
@@ -2203,6 +2521,7 @@
     renderConnectionList();
     populateConnectionSelects();
     populateCatalogConnectionOptions();
+    applyCatalogToolbarGating();
     curateInitialized = false;
     templateAuthorInitialized = false;
     // Set the template-authoring entry point (button vs. gate) as soon as scopes
@@ -2336,17 +2655,36 @@
     $("#audit-filters").addEventListener("submit", (event) => { event.preventDefault(); loadAudit(false); });
     $("#refresh-audit").addEventListener("click", () => loadAudit(false));
     $("#audit-more").addEventListener("click", () => loadAudit(true));
-    $("#catalog-connection").addEventListener("change", () => { resetProposalSelection(); loadCatalogProposals(); loadCatalogVersions(); });
+    $("#catalog-connection").addEventListener("change", () => {
+      resetProposalSelection();
+      loadCatalogProposals();
+      loadCatalogVersions();
+      state.usageSignals = [];
+      $("#usage-signals-body").innerHTML = '<tr><td colspan="7" class="empty-cell">Select a connection to load usage signals.</td></tr>';
+      renderCatalogToolbarResult("");
+    });
     $("#catalog-status-filter").addEventListener("change", () => { resetProposalSelection(); loadCatalogProposals(); });
     $("#catalog-source-filter").addEventListener("change", renderProposalList);
     $("#catalog-object-filter").addEventListener("change", renderProposalList);
     $("#catalog-filters").addEventListener("submit", (event) => event.preventDefault());
     $("#refresh-catalog").addEventListener("click", () => loadCatalogProposals().then(() => toast("Proposal queue refreshed.")).catch((error) => toast(error.message, "bad")));
     $("#refresh-catalog-versions").addEventListener("click", () => loadCatalogVersions().then(() => toast("Catalog version history refreshed.")).catch((error) => toast(error.message, "bad")));
+    $("#refresh-usage-signals").addEventListener("click", () => loadUsageSignals().then(() => toast("Usage signals refreshed.")).catch((error) => toast(error.message, "bad")));
     $("#proposal-list").addEventListener("click", (event) => {
       const button = event.target.closest("[data-proposal-id]");
       if (button) selectProposal(button.dataset.proposalId);
     });
+    $("#proposal-list").addEventListener("change", (event) => {
+      const box = event.target.closest("[data-proposal-checkbox]");
+      if (box) toggleProposalSelection(box.dataset.proposalCheckbox, box.checked);
+    });
+    $("#proposal-select-all").addEventListener("change", (event) => selectAllVisibleProposals(event.target.checked));
+    $("#bulk-approve").addEventListener("click", bulkApproveSelected);
+    $("#bulk-reject").addEventListener("click", showBulkRejectRow);
+    $("#bulk-cancel-reject").addEventListener("click", hideBulkRejectRow);
+    $("#bulk-confirm-reject").addEventListener("click", confirmBulkReject);
+    $("#bulk-delete").addEventListener("click", bulkDeleteSelected);
+    $("#bulk-clear-selection").addEventListener("click", () => { state.selectedProposalIds.clear(); hideBulkRejectRow(); renderProposalList(); });
     $("#save-proposal-edit").addEventListener("click", saveProposalEdit);
     $("#run-preview").addEventListener("click", runPublishPreview);
     $("#approve-proposal").addEventListener("click", approveSelectedProposal);
@@ -2357,6 +2695,20 @@
     $("#catalog-history-body").addEventListener("click", (event) => {
       const button = event.target.closest("[data-rollback-version]");
       if (button) rollbackCatalogVersion(button.dataset.rollbackVersion);
+    });
+    $("#generate-drafts").addEventListener("click", () => $("#generate-drafts-file").click());
+    $("#generate-drafts-file").addEventListener("change", (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (file) triggerGenerateDrafts(file).catch((error) => toast(error.message, "bad"));
+      event.target.value = "";
+    });
+    $("#run-learn").addEventListener("click", runLearn);
+    $("#export-catalog").addEventListener("click", exportCatalog);
+    $("#import-catalog").addEventListener("click", () => $("#import-catalog-file").click());
+    $("#import-catalog-file").addEventListener("change", (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (file) importCatalog(file).catch((error) => toast(error.message, "bad"));
+      event.target.value = "";
     });
     $("#curate-connection").addEventListener("change", loadCurateTables);
     $("#curate-object-type").addEventListener("change", () => { applyCurateFieldVisibility(); loadCurateToColumns(); loadCuratePublished(); });
