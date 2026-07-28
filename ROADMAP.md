@@ -319,10 +319,14 @@ wrong; it is all downstream of having a surface worth integrating against.*
   lifecycle (`202` + status/cancel), cancellation semantics (queue-only vs.
   dialect DB-cancel), and a `429`/`Retry-After` breaking-change evaluation each
   need a protocol/product decision before build.
-- [ ] **94** — Verify (and, if warranted, enable) prepared-statement plan reuse
+- [x] **94** — Verify (and, if warranted, enable) prepared-statement plan reuse
   for template execution. *Cheap, bounded perf/observability check on the
   already-shipped template path (item 48); adoption polish, not a moat or safety
   item. May close as "verified, no change warranted".* **Depends on 48.**
+  ✅ **Shipped** (verified live on both Postgres and MSSQL: both already get
+  full server-side plan reuse today via existing driver/pool defaults, no
+  config change needed; regression-pinned in
+  `tests/integration/test_prepared_statement_reuse.py`).
 - [ ] **18** — Stored-procedure catalog. *Extends read coverage where customers
   already encapsulate logic in procs.*
 - [x] **57** — Pluggable dialect-adapter architecture. *The enabler that turns
