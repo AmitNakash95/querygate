@@ -720,10 +720,16 @@ than caused by it. None is a policy bypass — enforcement is scope-correct — 
   new file can never again be silently invisible to the gate; verified live
   that `pytest -m unit` now collects the full 1725-test `tests/unit/` tree
   with zero live-DB leakage).
-- [ ] **123** — A select-item `CASE`'s condition subtree is absent from the audit
+- [x] **123** — A select-item `CASE`'s condition subtree is absent from the audit
   shape, so two spellings of one query audit differently. *Proof-pillar fidelity
   on a position policy always rejects; the last walker not reaching its predicates
-  through `as_expression()`. Low priority, small fix.*
+  through `as_expression()`. Low priority, small fix.* *Picked ahead of Phase 5's
+  item 19 on 2026-07-28 (maintainer decision via `roadmap-next`): 19 is XL/multi-day
+  (new dialect adapter + live-DB infra + re-proving every Phase-4 primitive) and
+  doesn't fit a session, while 123 is small, unblocked, and closes a real
+  Proof-pillar gap now.* ✅ **Shipped** (`CaseSelectItem` branch now records
+  `conditions` via `_where_shape`, mirroring `CaseExpr`; regression tests
+  mutation-verified).
 
 ### Review Phase 4 — Performance, observability, and developer experience
 

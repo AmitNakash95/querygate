@@ -300,6 +300,7 @@ def _select_shape(item: object) -> Dict[str, Any]:
             "alias": item.alias,
             "branch_count": len(item.when),
             "columns": list(select_item_column_refs(item)),
+            "conditions": [_where_shape(branch.when) for branch in item.when],
         }
     if isinstance(item, WindowSelectItem):
         # Structure only (item 101): which window function ran, over which
