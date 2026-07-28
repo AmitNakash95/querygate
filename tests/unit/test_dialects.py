@@ -218,3 +218,100 @@ async def test_mssql_session_guardrails_set_no_timezone():
         "SET DEADLOCK_PRIORITY LOW",
     ]
     assert not any("TIME ZONE" in s for s in session.statements)
+
+
+# --------------------------------------------------------------------------- #
+# Session-identifier capture / cancellation (TODO.md item 35 phase 3).
+# --------------------------------------------------------------------------- #
+class _ScalarSession(_RecordingSession):
+    """`_RecordingSession` plus a configurable scalar result, for
+    `capture_session_identifier`'s `result.scalar_one()` read."""
+
+    def __init__(self, scalar_value) -> None:
+        super().__init__()
+        self._scalar_value = scalar_value
+
+    async def execute(self, statement):
+        await super().execute(statement)
+        return _ScalarResult(self._scalar_value)
+
+
+class _ScalarResult:
+    def __init__(self, value) -> None:
+        self._value = value
+
+    def scalar_one(self):
+        return self._value
+
+
+class _RecordingConnection:
+    def __init__(self) -> None:
+        self.statements: list[tuple[str, object]] = []
+
+    async def execute(self, statement, params=None):
+        self.statements.append((str(statement), params))
+        return None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return None
+
+
+class _RecordingEngine:
+    def __init__(self) -> None:
+        self.connection = _RecordingConnection()
+
+    def connect(self):
+        return self.connection
+
+
+@pytest.mark.asyncio
+async def test_postgres_captures_the_backend_pid():
+    session = _ScalarSession(4242)
+    identifier = await PostgresSessionAdapter().capture_session_identifier(session)
+    assert identifier == "4242"
+    assert session.statements == ["SELECT pg_backend_pid()"]
+
+
+@pytest.mark.asyncio
+async def test_postgres_cancel_session_uses_a_new_connection_and_a_bind_parameter():
+    engine = _RecordingEngine()
+    await PostgresSessionAdapter().cancel_session(engine, "4242")
+    [(statement, params)] = engine.connection.statements
+    assert statement == "SELECT pg_cancel_backend(:pid)"
+    assert params == {"pid": 4242}
+
+
+@pytest.mark.asyncio
+async def test_mssql_captures_the_spid():
+    session = _ScalarSession(55)
+    identifier = await MSSQLSessionAdapter().capture_session_identifier(session)
+    assert identifier == "55"
+    assert session.statements == ["SELECT @@SPID"]
+
+
+@pytest.mark.asyncio
+async def test_mssql_cancel_session_issues_kill_with_the_literal_spid():
+    engine = _RecordingEngine()
+    await MSSQLSessionAdapter().cancel_session(engine, "55")
+    [(statement, params)] = engine.connection.statements
+    assert statement == "KILL 55"
+    assert params is None
+
+
+@pytest.mark.asyncio
+async def test_mssql_cancel_session_rejects_a_non_integer_identifier():
+    """`identifier` is always this adapter's own driver-returned SPID in
+    practice, but KILL takes a literal — a non-integer value must never reach
+    the interpolated statement, so this is enforced defensively rather than
+    trusted."""
+    engine = _RecordingEngine()
+    with pytest.raises(ValueError):
+        await MSSQLSessionAdapter().cancel_session(engine, "55; DROP TABLE x")
+    # Proves ORDER, not just outcome: int(identifier) must reject before any
+    # statement is built/executed — a test that only checked the raise could
+    # still pass even if the malformed value reached the interpolated KILL
+    # statement first and the rejection came too late to matter.
+    assert engine.connection.statements == []

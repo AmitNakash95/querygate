@@ -138,6 +138,19 @@ default:
   # max_queue_depth: 50
   # max_queue_depth_per_principal: 5
 
+  # Real dialect-level cancellation of a RUNNING async query (TODO.md item 35
+  # phase 3) — deny by default, the same posture as allow_cross_join above.
+  # Cancelling an in-flight query needs a permission grant beyond what a
+  # typical reporting connection has: Postgres requires this connection's
+  # role to be a superuser or a member of pg_signal_backend
+  # (GRANT pg_signal_backend TO <role>;); MSSQL requires the server-level
+  # ALTER ANY CONNECTION permission or sysadmin. Only set this to true AFTER
+  # granting the permission yourself — a cancel request for a running query
+  # is rejected outright (403), before any DB call, while this is false.
+  # Cancelling a still-QUEUED query is always free regardless of this flag
+  # (it never touches the database).
+  allow_query_cancellation: false
+
   # Per-principal rate/byte quota over a rolling window (TODO.md item 50).
   # Unset by default: no rate limiting. max_concurrency bounds queries
   # *in flight at once*; these bound how many (and how large a total

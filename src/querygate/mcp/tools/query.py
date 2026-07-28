@@ -9,7 +9,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from mcp.server.fastmcp import Context
 from pydantic import BaseModel, Field
 
-from querygate.execution.admission import QueueMode
+from querygate.execution.admission import QueueMode, reject_unsupported_async_queue_mode
 from querygate.execution.service import StructuredQueryService
 from querygate.mcp.auth import get_mcp_caller, get_mcp_config
 from querygate.mcp.elicitation import build_elicitation_resolver
@@ -25,7 +25,9 @@ _QUEUE_MODE_FIELD = Field(
     description=(
         "fail_fast: don't wait for a concurrency slot at all, reject immediately if the "
         "connection is at capacity. wait (default): wait up to wait_timeout_seconds, or the "
-        "policy's own concurrency_wait_seconds ceiling if wait_timeout_seconds is omitted."
+        "policy's own concurrency_wait_seconds ceiling if wait_timeout_seconds is omitted. "
+        "async is REST-only (the single-query POST .../query endpoint's 202/poll/cancel "
+        "lifecycle) and is rejected here as a validation error."
     ),
 )
 _WAIT_TIMEOUT_FIELD = Field(
@@ -125,6 +127,7 @@ async def run_structured_queries(
     wait_timeout_seconds: Annotated[Optional[float], _WAIT_TIMEOUT_FIELD] = None,
     ctx: Context = None,
 ) -> Union[BatchQueryToolResult, BatchExplainToolResult, MCPErrorResult]:
+    reject_unsupported_async_queue_mode(queue_mode)
     caller = get_mcp_caller()
     validate_batch_size(len(queries), get_policy(connection, principal=caller))
     service = _service(connection)
@@ -141,11 +144,34 @@ async def run_structured_queries(
     resolver = (
         build_elicitation_resolver(ctx, caller, get_mcp_config()) if ctx is not None else None
     )
+    # Progress notifications (TODO.md item 35 phase 3): MCP's standard
+    # notifications/progress message, via FastMCP's Context.report_progress —
+    # a no-op when the client sent no progressToken, so this is unconditional
+    # and purely additive. Two points per query (wait start, admitted), not a
+    # continuous tick during the wait — see execute()'s own docstring for why.
+    on_wait_start = on_admitted = None
+    if ctx is not None:
+
+        async def on_wait_start(wait_seconds: float) -> None:
+            message = (
+                f"waiting up to {wait_seconds:.0f}s for a concurrency slot"
+                if wait_seconds > 0
+                else "submitting query"
+            )
+            await ctx.report_progress(0, max(wait_seconds, 1), message)
+
+        async def on_admitted(queue_wait_ms: int) -> None:
+            await ctx.report_progress(
+                queue_wait_ms / 1000, max(queue_wait_ms / 1000, 1), "admitted, executing"
+            )
+
     results = await service.execute_many(
         queries,
         queue_mode=queue_mode,
         wait_timeout_seconds=wait_timeout_seconds,
         approval_resolver=resolver,
+        on_wait_start=on_wait_start,
+        on_admitted=on_admitted,
     )
     return BatchQueryToolResult(
         results=[BatchQueryItemToolResult(**r.model_dump()) for r in results]

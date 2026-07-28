@@ -19,7 +19,9 @@ The default three rounds take a few seconds. Each round sends an eight-request b
 policy cap of two in two modes:
 
 - a short concurrency wait, where exactly two requests succeed and six receive the REST
-  concurrency rejection (`422`, `too many concurrent ...`); and
+  concurrency rejection (`429` + `Retry-After`, `too many concurrent ...` — migrated from
+  `422` 2026-07-28, TODO.md item 35 phase 3; the response body's string contract is
+  unchanged, only the status code and the added header); and
 - a long concurrency wait, where six requests queue and all succeed in waves.
 
 In both cases PostgreSQL must report a peak of exactly two active probe queries. A final
@@ -71,7 +73,7 @@ limiter tests; production multi-replica deployments must continue to select
 - A PostgreSQL peak above `max_concurrency` is a guardrail correctness failure.
 - A peak below the cap usually indicates that the database or runner could not start work
   quickly enough; rerun once, then inspect pool saturation and host load.
-- Unexpected `422` responses in queued mode mean `concurrency_wait_seconds` was exhausted.
+- Unexpected `429` responses in queued mode mean `concurrency_wait_seconds` was exhausted.
 - A timeout scenario near four seconds means the server-side statement timeout did not
   cancel the query. A failure much faster than one second is likely setup, reflection, or
   connection failure rather than successful timeout enforcement.
