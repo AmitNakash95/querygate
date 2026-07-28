@@ -698,9 +698,15 @@ than caused by it. None is a policy bypass — enforcement is scope-correct — 
 
 ### Review Phase 8 — Findings from the 2026-07-27 item-119/120 audit
 
-- [ ] **124** — Most of `tests/unit/` is not selected by `pytest -m unit`, so the
+- [x] **124** — Most of `tests/unit/` is not selected by `pytest -m unit`, so the
   pre-commit gate silently skips ~60% of it. *Lead this phase: it weakens every
-  other gate, and the fix is a collection hook rather than 52 edits.*
+  other gate, and the fix is a collection hook rather than 52 edits.* ✅
+  **Shipped** (a `tryfirst` `pytest_collection_modifyitems` hook in
+  `tests/conftest.py` tags every collected test with its directory tier —
+  unit/integration/security — before pytest's own `-m` filter reads it, so a
+  new file can never again be silently invisible to the gate; verified live
+  that `pytest -m unit` now collects the full 1725-test `tests/unit/` tree
+  with zero live-DB leakage).
 - [ ] **123** — A select-item `CASE`'s condition subtree is absent from the audit
   shape, so two spellings of one query audit differently. *Proof-pillar fidelity
   on a position policy always rejects; the last walker not reaching its predicates

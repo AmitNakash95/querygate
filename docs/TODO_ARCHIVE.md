@@ -7495,6 +7495,66 @@ the `tables` field against the `sql` field of the same response.
 
 **Effort: S. Priority: high (a crash on a shipped guardrail).**
 
+### 124. Most of `tests/unit/` is not selected by `pytest -m unit` ✅ DONE
+
+Markers were explicit with no auto-marking by directory, and only 26 of the 78
+files in `tests/unit/` carried one. Measured 2026-07-27: `pytest tests/unit`
+collected **1703** tests, `pytest -m "unit and not real_db"` collected only
+**678** of them — ~60% of the unit directory was invisible to the tier
+`CLAUDE.md` names as the minimum bar and to the `git commit` pre-commit hook,
+which runs exactly that selection. Found by the item-119/120 completion audit,
+when two newly added regression tests passed the file-scoped run but were
+silently deselected by the gate.
+
+**Fixed 2026-07-28** with the preferred option from this item's own write-up —
+derive the tier from the directory instead of backfilling 52 files. A
+`@pytest.hookimpl(tryfirst=True)` `pytest_collection_modifyitems` hook in
+`tests/conftest.py` walks every collected item's path relative to `tests/`,
+and adds the matching `unit`/`integration`/`security` marker whenever the item
+doesn't already carry one. This must run before pytest's own `-m` deselection
+— also implemented as a `pytest_collection_modifyitems` hook — or the added
+markers arrive too late to affect selection. Mutation-verified, not assumed:
+forcing `trylast=True` reproducibly broke `-m unit` back down to 726
+collected; removing the decorator entirely (default ordering) still collected
+the full 1725, meaning conftest-hook registration already happens to run
+before pytest's own mark-deselection hook on this pytest version (9.1.1) —
+`tryfirst` pins that ordering explicitly rather than relying on an
+undocumented default. Immediately before the fix landed (726, not the 678
+measured a day earlier — the unit directory grew by ~20 tests from
+intervening commits, most visibly item 122's regression tests), `pytest -m
+unit --collect-only` collected 726; after, it collects the full **1725**,
+matching the plain `pytest tests/unit --collect-only` count exactly, with
+zero live-DB leakage (`pytest -m unit` and `pytest -m "unit and not real_db"`
+now collect the identical 1725, because no test under `tests/unit/` carries a
+`real_db` marker — verified by grep, not assumed). `tests/integration/` and
+`tests/security/` were already fully marked file-by-file (or per-test), so
+their counts (489 and 410 respectively) were unchanged by this fix; the hook
+makes that coverage structural for both instead of a coincidence of current
+file authorship.
+
+The hook itself is pinned by
+`tests/unit/test_conftest_tier_markers.py`, which calls it directly against
+fake, filesystem-free items and asserts the marker-assignment and
+already-marked-is-left-alone behavior — both mutations (emptying the tier set;
+dropping the idempotency guard) were confirmed to fail the new tests before
+being reverted. It does not re-exercise the `tryfirst` ordering property,
+which is a property of how pytest calls multiple registered hookimpls rather
+than of the function body, and was covered by the interactive mutation test
+above instead.
+
+Deliberately additive, not a mass edit: the existing 82 file-level
+`pytestmark` lines (64 single-mark `pytestmark = pytest.mark.<tier>`
+declarations plus 18 multi-mark `pytestmark = [...]` lists such as
+`pytest.mark.integration, pytest.mark.real_db`) and 38 per-test
+`@pytest.mark.<tier>` decorators were left in place rather than stripped,
+since the hook already skips any item that
+carries the marker explicitly — removing them was optional cleanup this item
+didn't need for the acceptance criterion (every test under the three tier
+directories is now selectable by its tier marker, permanently, with no
+future file able to fall through the gap again).
+
+**Effort: S. Priority: medium** (it weakened every gate the repo relies on).
+
 ---
 
 ### 125. Query engine: a window function as an `Expression` operand ★ ✅ DONE
