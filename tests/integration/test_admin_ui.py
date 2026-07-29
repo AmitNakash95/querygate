@@ -118,6 +118,11 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     assert 'id="anomaly-table-wrap"' in response.text
     assert "Behavioral anomalies" in response.text
     assert "/admin/observability/anomalies" in script.text
+    # TODO.md item 44 phase 2 slice: config/catalog change-velocity trend card,
+    # over the persisted audit stream rather than the metrics registry.
+    assert 'id="change-trend-table-wrap"' in response.text
+    assert "Change velocity" in response.text
+    assert "/admin/observability/config-changes" in script.text
     # TODO.md item 47: portable change-set export/import + policy-only local recovery.
     assert 'id="export-change-set"' in response.text
     assert 'id="import-change-set"' in response.text
