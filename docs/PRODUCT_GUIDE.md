@@ -4932,6 +4932,31 @@ reasoning behind them, newest first. Added to incrementally as work happens
   Observability view (one row per principal-signal, with a color-coded kind
   badge and a plain-language detail), rendered from the same scoped fetch as
   the overview.
+- **2026-07-29 — The config/catalog-change trend card reads the durable audit
+  stream, not the process-snapshot metrics registry (TODO.md item 44, phase 2
+  slice).** `GET /api/v1/admin/observability/config-changes`
+  (`admin:observability:read`) answers the trend question item 44 phase 1
+  deliberately deferred: "is config-governance or catalog-governance change
+  *volume* rising, and by which action?" **Why a different read path than
+  phase 1:** those events (`ConfigChangeEvent`/`CatalogGovernanceEvent`) live in
+  the persisted audit stream, not the Prometheus registry, so `admin/
+  config_trends.py` follows item 59's `AuditEventSource`-protocol shape
+  (`ChangeEventSource`/`JsonlChangeEventSource`) instead of extending
+  `admin/observability.py`'s registry aggregation. **Why a real trend, not
+  another honest snapshot:** phase 1's metrics-registry counters reset on
+  process restart, which is why that surface had to label itself
+  `process_snapshot`/`durable=false`; the audit JSONL file is already durable
+  history, so a genuine recent-vs-baseline rate comparison (the same two-window
+  shape item 59 uses per-principal, applied fleet-wide to change-event volume)
+  is honest here without any new persistence subsystem. Bounded by a
+  configurable scan cap, honestly reports `source="disabled"` without the JSONL
+  sink enabled, and carries only action names/outcomes/counts — never version
+  content, proposal text, or raw YAML (QG-28). Rendered as a "Change velocity"
+  subsection under the same `/admin/` Observability view, reusing the existing
+  `admin:observability:read` scope rather than adding a new one. Time-window
+  trend *charts* and querying an operator-configured external metrics backend
+  remain deferred — those still need a store QueryGate does not own; this slice
+  needed none.
 - **2026-07-21 — Structured template authoring feeds the shared release, and
   keeps the query skeleton as validated JSON rather than a visual AST builder
   (TODO.md item 87).** Three choices. **(1) It composes into the change-set

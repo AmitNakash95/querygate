@@ -266,6 +266,16 @@ class AppConfig(BaseSettings):
     anomaly_max_events_scanned: int = pyd.Field(default=200_000, ge=1)
     anomaly_max_principals_reported: int = pyd.Field(default=100, ge=1)
 
+    # Config/catalog-change trend surfacing over the persisted audit stream
+    # (TODO.md item 44, phase 2 slice). Same recent-vs-baseline shape as the
+    # anomaly windows above, applied to config.governance/catalog.governance
+    # events fleet-wide rather than query.execution events per-principal.
+    # Requires audit_sink_backend=jsonl; with backend=none the endpoint
+    # honestly reports source="disabled".
+    change_trend_recent_window_seconds: float = pyd.Field(default=3600.0, gt=0)
+    change_trend_baseline_window_seconds: float = pyd.Field(default=86400.0, gt=0)
+    change_trend_max_events_scanned: int = pyd.Field(default=200_000, ge=1)
+
     # Config-governance version history (querygate/admin/) — staged/applied/
     # rolled-back snapshots of connections.yaml/policy.yaml/catalog.yaml,
     # separate from the files AppConfig itself points at (which the existing

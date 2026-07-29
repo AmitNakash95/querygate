@@ -126,6 +126,7 @@
     templateList: [],
     observability: null,
     anomalies: null,
+    changeTrend: null,
     templateSources: {},
   };
 
@@ -2219,15 +2220,86 @@
     $("#anomaly-body").innerHTML = rows.join("");
   }
 
+  function changeTrendRatioText(ratio) {
+    return ratio == null ? "—" : `${ratio.toFixed(1)}× baseline rate`;
+  }
+
+  function changeTrendActionRows(kindLabel, recent, baseline) {
+    const actions = new Set([
+      ...(recent.by_action || []).map((a) => a.action),
+      ...(baseline.by_action || []).map((a) => a.action),
+    ]);
+    const recentByAction = Object.fromEntries((recent.by_action || []).map((a) => [a.action, a]));
+    const baselineByAction = Object.fromEntries((baseline.by_action || []).map((a) => [a.action, a]));
+    return [...actions].sort().map((action) => {
+      const r = recentByAction[action] || { success: 0, rejected: 0 };
+      const b = baselineByAction[action] || { success: 0, rejected: 0 };
+      return `<tr>
+        <td>${escapeHtml(kindLabel)}</td>
+        <td>${escapeHtml(action)}</td>
+        <td>${r.success} ok · ${r.rejected} rejected</td>
+        <td>${b.success} ok · ${b.rejected} rejected</td>
+      </tr>`;
+    });
+  }
+
+  function renderChangeTrend() {
+    const report = state.changeTrend;
+    const note = $("#change-trend-note");
+    const cards = $("#change-trend-cards");
+    const wrap = $("#change-trend-table-wrap");
+    const empty = $("#change-trend-empty");
+    if (!report) {
+      note.hidden = true;
+      cards.hidden = true;
+      wrap.hidden = true;
+      empty.hidden = true;
+      return;
+    }
+    if (report.source === "disabled") {
+      note.hidden = true;
+      cards.hidden = true;
+      wrap.hidden = true;
+      empty.hidden = false;
+      empty.textContent =
+        "Change-trend surfacing is disabled — enable the JSONL audit sink (AUDIT_SINK_BACKEND=jsonl) to compute config/catalog change volume.";
+      return;
+    }
+    const windowLabel = `recent ${obsDuration(report.recent_window_seconds)} vs baseline ${obsDuration(report.baseline_window_seconds)}`;
+    note.hidden = false;
+    note.textContent = `${report.note} (${windowLabel}; ${report.events_scanned} events scanned${report.truncated ? ", truncated" : ""}${report.malformed ? `, ${report.malformed} malformed` : ""})`;
+
+    cards.hidden = false;
+    cards.innerHTML = [
+      obsCard("Config changes (recent)", String(report.config_recent.total), `${report.config_recent.rejected} rejected`),
+      obsCard("Config change velocity", changeTrendRatioText(report.config_volume_ratio), `vs ${report.config_baseline.total} in baseline`),
+      obsCard("Catalog changes (recent)", String(report.catalog_recent.total), `${report.catalog_recent.rejected} rejected`),
+      obsCard("Catalog change velocity", changeTrendRatioText(report.catalog_volume_ratio), `vs ${report.catalog_baseline.total} in baseline`),
+    ].join("");
+
+    const rows = [
+      ...changeTrendActionRows("Config", report.config_recent, report.config_baseline),
+      ...changeTrendActionRows("Catalog", report.catalog_recent, report.catalog_baseline),
+    ];
+    wrap.hidden = rows.length === 0;
+    empty.hidden = rows.length !== 0;
+    if (!rows.length) {
+      empty.textContent = "No config or catalog governance actions in either window.";
+    }
+    $("#change-trend-body").innerHTML = rows.join("");
+  }
+
   async function loadObservability() {
     if (!hasScope("admin:observability:read")) {
       state.observability = null;
       state.anomalies = null;
+      state.changeTrend = null;
       $("#observability-snapshot").hidden = true;
       $("#observability-table-wrap").hidden = true;
       $("#observability-cards").innerHTML =
         '<p class="empty-state">Connect with admin:observability:read to load observability.</p>';
       renderAnomalies();
+      renderChangeTrend();
       return;
     }
     const button = $("#refresh-observability");
@@ -2250,6 +2322,17 @@
       $("#anomaly-table-wrap").hidden = true;
       $("#anomaly-empty").hidden = false;
       $("#anomaly-empty").textContent = error.message;
+    }
+    try {
+      state.changeTrend = await api("/admin/observability/config-changes");
+      renderChangeTrend();
+    } catch (error) {
+      state.changeTrend = null;
+      $("#change-trend-note").hidden = true;
+      $("#change-trend-cards").hidden = true;
+      $("#change-trend-table-wrap").hidden = true;
+      $("#change-trend-empty").hidden = false;
+      $("#change-trend-empty").textContent = error.message;
     }
     setBusy(button, false);
   }

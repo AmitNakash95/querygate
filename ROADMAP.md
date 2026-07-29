@@ -304,6 +304,16 @@ gate is the *first step of the item*, not a reason to defer it.
 *Demoted below the engine on 2026-07-25 — see the Phase 4 note. Nothing here is
 wrong; it is all downstream of having a surface worth integrating against.*
 
+**2026-07-29 maintainer decision (via `roadmap-next`):** item 19 (additional
+dialects) is deliberately deprioritized to the very end of the automated
+order, alongside item 18 (stored-procedure catalog, already decision-gated).
+Reason: 19 is M–XL and needs new infrastructure decisions (a new driver
+dependency, a docker-compose live-DB service, CI wiring) that shouldn't be
+made silently mid-walk; the maintainer chose to clear the smaller,
+locally-buildable Phase 6 phase-2 slices (44/45/47) first. The walk should
+treat 19 as coming after every other eligible item, not in its listed
+position.
+
 - [ ] **51** — Typed client-side query-builder SDK (Python + TypeScript).
   *Lowers integration friction for the next wave of adopters.* **Phase 1
   shipped** (in-tree Python builder); **phase 2a shipped** (in-tree TypeScript
@@ -354,6 +364,11 @@ wrong; it is all downstream of having a surface worth integrating against.*
   actions, export/import, generate-drafts/learn triggers, review_history
   view, and usage-signal browsing).
 - [ ] **44 (phase 2)** — Admin observability / rejection-trend dashboard.
+  **One phase-2 slice shipped 2026-07-29:** the config/catalog-change
+  trend card (`GET /admin/observability/config-changes`, real recent-vs-
+  baseline rates over the durable audit stream, no external infra). Box
+  stays `[ ]` — time-window trend *charts* and the external metrics-backend
+  read are still open.
 - [ ] **45 (phase 2)** — Non-admin "My access" portal.
 - [ ] **47 (phase 2)** — Safe draft recovery + config export/import UX.
 - [x] **50 (phase 2)** — Per-principal rate limits / query quotas over time. ✅

@@ -522,16 +522,26 @@ gates the whole overview, including the per-connection breakdown; output is
 built only from already-public, low-cardinality metric labels (never a query,
 value, principal, table, or column).
 
-**Deliberately deferred (phase 2, not a gap in this pass):**
+**Phase 2 slice shipped (2026-07-29) — config/catalog-change trend card:** a
+third read on the same router, `GET /api/v1/admin/observability/config-changes`
+(`admin/config_trends.py`), following item 59's `AuditEventSource`-protocol
+shape (`ChangeEventSource`/`JsonlChangeEventSource`) rather than item 44 phase
+1's Prometheus-registry read. Unlike phase 1's process snapshot, the audit
+JSONL stream is durable, so this is a real recent-vs-baseline rate comparison
+(same two-window shape as item 59's per-principal anomaly detection, applied
+fleet-wide to `ConfigChangeEvent`/`CatalogGovernanceEvent` volume and
+by-action/outcome breakdown) rather than a since-process-start counter. Bounded
+by a configurable scan cap, honestly reports `source="disabled"` without the
+JSONL sink, and carries only action names/outcomes/counts — never version
+content, proposal text, or raw YAML. Rendered as a "Change velocity"
+subsection in the admin UI's Observability panel.
+
+**Still deliberately deferred (phase 2, not a gap in this pass):**
 - **Time-window trend charts.** Phase 1's endpoint is a point-in-time
   snapshot, not time-series — there is no stored history to plot, so the panel
   renders honest current-value cards rather than faking a trend line over a
   window it cannot reconstruct. Real charts depend on the external
   metrics-backend below.
-- A **config/catalog-change trend card** ("which connection changed after the
-  last rollout?"). Those events live in the audit stream, not the metrics
-  registry — surfacing them safely needs an audit-read aggregation path, not a
-  metrics read, so it's its own slice.
 - **Querying an operator-configured external metrics backend** (e.g. Prometheus
   HTTP API) for real time-windowed history and cross-replica aggregation,
   replacing the honest single-process snapshot where such a backend exists.
