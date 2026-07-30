@@ -5032,6 +5032,46 @@ reasoning behind them, newest first. Added to incrementally as work happens
   — deterministic behavior an admin can reason about, with no background
   sweeper to operate. Surfaced as a "Saved drafts" panel beside the existing
   export/import buttons in the admin UI.
+- **2026-07-30 — Real trend charts read an operator-configured external
+  metrics backend instead of QueryGate building a time-series store of its own
+  (TODO.md item 44, phase 2 remainder — now fully `✅ DONE`).** `GET
+  /api/v1/admin/observability/history` (`admin/metrics_history.py`) closes the
+  two gaps the 2026-07-29 change-velocity slice explicitly deferred: real
+  time-window trend charts, and querying an external metrics backend. **Why an
+  external backend, not QueryGate's own store:** the North Star's non-goals
+  rule out QueryGate owning a warehouse/time-series store of its own, and
+  standing one up just to chart five gauges would be a disproportionate,
+  hard-to-operate addition for a read-only convenience panel — an operator
+  already running Prometheus against this deployment's `/metrics` is a much
+  smaller lift, and it's the same shape as this repo's other "reuse what the
+  operator already has" calls (the JSONL audit sink, `docs/RELEASING.md`'s
+  registry choice). **Why a Protocol, not a hardcoded Prometheus client:**
+  `MetricsHistorySource` is a narrow read-only seam with one concrete
+  implementation today (`PrometheusMetricsHistorySource`) registered by a
+  `MetricsHistoryBackend` config enum — the same composable-interface
+  doctrine as `SecretResolver`/`DialectAdapter`/`AuditSink` — so a future
+  backend (e.g. a hosted TSDB) is one more class, never a branch at the route.
+  **Why five fixed named series, not an arbitrary-PromQL passthrough:** the
+  dashboard answers a small, known set of operational questions (query rate,
+  rejection rate, avg duration, queue depth, concurrency utilization); letting
+  a caller submit its own PromQL would be a second uncontrolled query surface
+  in a codebase whose entire premise is that the *only* surface is a validated
+  AST — so every query sent to the backend is one of five fixed templates
+  QueryGate composes itself, parameterized only by the admin-configured
+  window/step, never by request input. **Why honest degradation, not a 5xx:**
+  an unreachable or misconfigured backend is caught and surfaced as
+  `backend_error` on a 200 response (`source="prometheus"`, empty series)
+  rather than failing the whole dashboard request — the same "report the gap
+  honestly, don't crash" posture phase 1's `process_snapshot` labeling and
+  phase 2's `source="disabled"` already established. **Why the step is
+  widened, never the window:** `metrics_history_max_points_per_series` bounds
+  the request by construction the same way `config_trends.py`'s scan cap
+  does — an operator misconfiguring a wide window with a tiny step gets a
+  coarser chart, never an unbounded backend query or a silently truncated
+  time range. Rendered as a "Trend charts" subsection with one dependency-free
+  inline-SVG sparkline per series (no charting library, consistent with the
+  rest of the vanilla-JS control plane) under the same
+  `admin:observability:read` scope as every other Observability read.
 - **2026-07-21 — Structured template authoring feeds the shared release, and
   keeps the query skeleton as validated JSON rather than a visual AST builder
   (TODO.md item 87).** Three choices. **(1) It composes into the change-set

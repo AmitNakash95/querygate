@@ -954,10 +954,9 @@ value, principal, table, or column — and `admin:observability:read` gates the
 whole overview, including the per-connection breakdown. The browser control
 plane renders this as a read-only "Observability" section (overview cards + a
 per-connection table + a banner echoing the snapshot's honesty note).
-Time-window trend charts (the endpoint is a point-in-time snapshot with no
-stored history), a config/catalog-change trend card (those events live in the
-audit stream, not the metrics registry), and querying an operator-configured
-external metrics backend for durable cross-replica history are follow-ups.
+A config/catalog-change trend card, real time-window trend charts, and
+querying an operator-configured external metrics backend for durable
+cross-replica history have since shipped — see below.
 
 ### Per-principal behavioral anomaly surfacing
 
@@ -982,6 +981,37 @@ never a query, value, table, or column). It is strictly a read-only *surfacing*
 of the existing stream, within item 32C's read-only boundary — it never blocks,
 throttles, or edits policy. The browser control plane renders it as a
 "Behavioral anomalies" panel in the Observability view.
+
+### Config/catalog change-velocity trend
+
+`GET /api/v1/admin/observability/config-changes` (same
+`admin:observability:read` scope) answers a question the overview above
+can't: is config-governance or catalog-governance change *volume* rising, and
+by which action? Unlike the process-snapshot overview, this reads the durable
+persisted audit stream, so it's a real recent-vs-baseline rate comparison (the
+same two-window shape the anomaly detector uses per-principal, applied
+fleet-wide to change-event volume) rather than a since-process-start counter.
+Bounded by a configurable scan cap, it honestly reports `source="disabled"`
+without the JSONL audit sink enabled, and carries only action names/outcomes/
+counts — never version content, proposal text, or raw YAML. Rendered as a
+"Change velocity" subsection in the same Observability view.
+
+### Real time-window trend charts (external metrics backend)
+
+`GET /api/v1/admin/observability/history` (same `admin:observability:read`
+scope) closes the one gap the process-snapshot overview can't: a real trend
+*line*, not just a current-value card. Since QueryGate doesn't own a
+time-series store of its own, it reads an **operator-configured**
+Prometheus-compatible HTTP API — one already scraping this deployment's own
+`/metrics` — for five fixed named series (successful/rejected query rate, avg
+duration, queue depth, concurrency utilization). QueryGate only ever queries
+this backend, never writes to it, and every query sent is one of five fixed
+PromQL templates the admin dashboard composes itself — never anything a
+caller can shape. With no backend configured (the default) it honestly
+reports `source="disabled"`; an unreachable or erroring backend is reported as
+a stable `backend_error` category rather than failing the whole request.
+Rendered as a "Trend charts" subsection with a dependency-free inline-SVG
+sparkline per series — no charting library.
 
 ## Example schema catalog (optional)
 

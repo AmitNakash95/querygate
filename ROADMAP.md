@@ -363,12 +363,11 @@ position.
   review→approve/reject→publish→rollback workflow, plus phase 2 bulk
   actions, export/import, generate-drafts/learn triggers, review_history
   view, and usage-signal browsing).
-- [ ] **44 (phase 2)** — Admin observability / rejection-trend dashboard.
-  **One phase-2 slice shipped 2026-07-29:** the config/catalog-change
-  trend card (`GET /admin/observability/config-changes`, real recent-vs-
-  baseline rates over the durable audit stream, no external infra). Box
-  stays `[ ]` — time-window trend *charts* and the external metrics-backend
-  read are still open.
+- [x] **44** — Admin observability / rejection-trend dashboard. ✅ **Shipped**
+  (phase 1: process-snapshot overview + panel; phase 2 slice, 2026-07-29:
+  config/catalog change-velocity trend card over the durable audit stream;
+  phase 2 remainder, 2026-07-30: real time-window trend charts from an
+  operator-configured external Prometheus-compatible metrics backend).
 - [x] **45** — Non-admin "My access" portal. ✅ **Shipped** (phase 1: identity/
   connections/guardrails/schema; phase 2, 2026-07-30: safe explanations of the
   caller's own recent denials via `GET /help/my-recent-denials`, reusing item
