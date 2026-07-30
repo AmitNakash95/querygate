@@ -3293,6 +3293,85 @@ rate-limited “test now” action that uses the same engine/timeout/TLS setting
 normal operation, never returns connection strings or raw driver text, and
 audits manual probes without turning them into query access.
 
+### 44. Admin observability and rejection-trend dashboard ✅ DONE
+
+**Shipped (phase 1 — the aggregation API plus a read-only browser panel):** A
+new `admin:observability:read`-scoped `GET
+/api/v1/admin/observability/overview` (`api/admin_observability_routes.py`)
+returning a typed, redaction-safe `ObservabilityOverview`
+(`admin/observability.py`) aggregated from the *existing* in-process Prometheus
+registry (`metrics.py`) — query volume, success/rejection categories, average
+duration, queue depth + wait-by-outcome, concurrency in-use/max/utilization,
+per-principal quota rejections by kind, and cost-estimation attempts/
+unavailable/would-reject with a derived `fail_open_rate` — both as a global
+rollup and a per-connection breakdown.
+
+The `/admin/` control plane renders it as an "Observability" section:
+overview cards (queries, top reject reason, avg duration, concurrency
+utilization, queue depth, cost-estimate fail-open rate), a per-connection
+table, and a banner echoing the snapshot's `note`/`since` so the honesty
+about durability is visible in the UI, not just the JSON. The panel calls the
+same scoped endpoint and shows an explicit "connect with
+admin:observability:read" empty state without it.
+
+The aggregator (`build_overview(registry)`) is pure over the registry it reads,
+so it's unit-tested against a fresh `CollectorRegistry`; the endpoint is
+integration-tested for scope enforcement (403 without the scope), honest
+snapshot labeling, real-activity reflection, and low-cardinality-only output;
+the panel is asserted in the admin-UI static-shell test.
+
+**Honesty about durability (item 44's explicit requirement):** the response is
+labeled `source="process_snapshot"`, `durable=false`, `since=<process start>`,
+with a `note` stating counters are cumulative-since-start, gauges are
+instantaneous, and — under the default in-process backends — everything is
+per-replica. It never implies a durable time-series store QueryGate does not
+own. Its own least-privilege scope (distinct from config/connection scopes)
+gates the whole overview, including the per-connection breakdown; output is
+built only from already-public, low-cardinality metric labels (never a query,
+value, principal, table, or column).
+
+**Phase 2 slice shipped (2026-07-29) — config/catalog-change trend card:** a
+third read on the same router, `GET /api/v1/admin/observability/config-changes`
+(`admin/config_trends.py`), following item 59's `AuditEventSource`-protocol
+shape (`ChangeEventSource`/`JsonlChangeEventSource`) rather than item 44 phase
+1's Prometheus-registry read. Unlike phase 1's process snapshot, the audit
+JSONL stream is durable, so this is a real recent-vs-baseline rate comparison
+(same two-window shape as item 59's per-principal anomaly detection, applied
+fleet-wide to `ConfigChangeEvent`/`CatalogGovernanceEvent` volume and
+by-action/outcome breakdown) rather than a since-process-start counter. Bounded
+by a configurable scan cap, honestly reports `source="disabled"` without the
+JSONL sink, and carries only action names/outcomes/counts — never version
+content, proposal text, or raw YAML. Rendered as a "Change velocity"
+subsection in the admin UI's Observability panel.
+
+**Phase 2 remainder shipped (2026-07-30) — external metrics backend + real
+trend charts:** a fourth read, `GET /api/v1/admin/observability/history`
+(`admin/metrics_history.py`), closes both items the phase-2 slice above
+deliberately deferred. `MetricsHistorySource` is a narrow read-only Protocol
+(the same composable-interface shape as `SecretResolver`/`DialectAdapter`/
+`AuditSink`) with one concrete backend today, `PrometheusMetricsHistorySource`
+— it queries an **operator-configured** Prometheus-compatible HTTP API (one
+already scraping this deployment's own `/metrics`) for five fixed named
+series (successful/rejected query rate, avg duration, queue depth,
+concurrency utilization), each a fleet-wide PromQL aggregate over QueryGate's
+own already-public metric labels — QueryGate only ever reads from this
+backend, never writes to it, and no caller-influenced query ever reaches it.
+With no backend configured (the default, `METRICS_HISTORY_BACKEND=none`) the
+endpoint honestly reports `source="disabled"`; an unreachable/erroring backend
+is likewise reported as `backend_error` rather than 5xx-ing the dashboard.
+Points-per-series are bounded by construction (a too-fine step for the
+configured window is widened, never the window truncated), mirroring
+`config_trends.py`'s scan cap. Rendered as a "Trend charts" subsection in the
+admin UI's Observability panel — a dependency-free inline-SVG sparkline per
+series (no charting library), consistent with the rest of the control plane.
+
+**Why it matters:** Item 31 can browse individual audit events, but it cannot
+answer operational questions such as “Which policies reject the most
+requests?”, “Is queue pressure rising?”, or “Did cost-estimation availability
+regress?” Those trends are what let an administrator tune policy and capacity
+proactively — and phase 1 answers them now over the API, honestly scoped to
+what a single process can truthfully report.
+
 ### 45. Dedicated non-admin "My access" portal ✅ DONE
 
 **Shipped:** A separate, dependency-free `/access/` static page

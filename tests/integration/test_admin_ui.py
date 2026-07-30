@@ -123,6 +123,11 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     assert 'id="change-trend-table-wrap"' in response.text
     assert "Change velocity" in response.text
     assert "/admin/observability/config-changes" in script.text
+    # TODO.md item 44 phase 2 remainder: real time-window trend charts from an
+    # operator-configured external metrics backend.
+    assert 'id="history-charts"' in response.text
+    assert "Trend charts" in response.text
+    assert "/admin/observability/history" in script.text
     # TODO.md item 47: portable change-set export/import + policy-only local recovery.
     assert 'id="export-change-set"' in response.text
     assert 'id="import-change-set"' in response.text
