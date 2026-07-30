@@ -570,6 +570,13 @@
           </table>
         </div>
         <p id="change-trend-empty" class="empty-state" hidden></p>
+
+        <div class="observability-subsection">
+          <div><p class="eyebrow">Trend charts</p><h3>Real time-windowed history from an external metrics backend.</h3><p>Item 44 phase 1's cards above are a current-process snapshot with no stored history to plot. This reads an <em>operator-configured</em> Prometheus-compatible HTTP API — already scraping this deployment's own metrics — for a real trend line over the configured window. Requires <code>admin:observability:read</code>. With no backend configured, this section reports as disabled rather than faking a chart.</p></div>
+        </div>
+        <p id="history-note" class="observability-snapshot" hidden></p>
+        <div id="history-charts" class="observability-cards" hidden></div>
+        <p id="history-empty" class="empty-state" hidden></p>
       </section>
     </main>
   </div>

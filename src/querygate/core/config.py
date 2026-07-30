@@ -42,6 +42,18 @@ class AuditSinkBackend(str, Enum):
     JSONL_CHAINED = "jsonl_chained"
 
 
+class MetricsHistoryBackend(str, Enum):
+    """Time-windowed metrics history source for the observability dashboard
+    (TODO.md item 44, phase 2). NONE (default) means QueryGate's own
+    in-process snapshot (admin/observability.py) is the only trend surface;
+    PROMETHEUS queries an operator-configured Prometheus-compatible HTTP API
+    for real history and cross-replica aggregation, since QueryGate owns no
+    time-series store of its own."""
+
+    NONE = "none"
+    PROMETHEUS = "prometheus"
+
+
 def _parse_str_list(value: Any) -> Any:
     """Accept a JSON array, a comma-separated string, or a list as-is."""
     if isinstance(value, list):
@@ -275,6 +287,24 @@ class AppConfig(BaseSettings):
     change_trend_recent_window_seconds: float = pyd.Field(default=3600.0, gt=0)
     change_trend_baseline_window_seconds: float = pyd.Field(default=86400.0, gt=0)
     change_trend_max_events_scanned: int = pyd.Field(default=200_000, ge=1)
+
+    # Time-windowed metrics history for the observability dashboard (TODO.md
+    # item 44, phase 2 remainder) — queries an *operator-configured* external
+    # metrics backend for real trend charts, since item 44 phase 1's
+    # process-snapshot registry has no stored history to plot. Default backend
+    # "none" keeps the endpoint honest (source="disabled"); set backend to
+    # "prometheus" and prometheus_url to a reachable Prometheus HTTP API (one
+    # already scraping this deployment's /metrics) to enable it. QueryGate only
+    # ever reads from this backend — it never writes to it.
+    metrics_history_backend: MetricsHistoryBackend = pyd.Field(default=MetricsHistoryBackend.NONE)
+    metrics_history_prometheus_url: str = pyd.Field(default="")
+    metrics_history_window_seconds: float = pyd.Field(default=6 * 3600.0, gt=0)
+    metrics_history_step_seconds: float = pyd.Field(default=60.0, gt=0)
+    # Upper bound on points returned per series — bounds the request even if
+    # an operator configures a wide window with a tiny step, by widening the
+    # effective step rather than ever returning an unbounded series.
+    metrics_history_max_points_per_series: int = pyd.Field(default=500, ge=1)
+    metrics_history_request_timeout_seconds: float = pyd.Field(default=5.0, gt=0)
 
     # Safe explanations of the caller's own recent denials (TODO.md item 45,
     # phase 2) — a principal-scoped, self-service read of the persisted audit

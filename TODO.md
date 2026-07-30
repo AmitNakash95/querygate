@@ -486,73 +486,13 @@ Server-side separation of duties on the config plane: durable per-version `Confi
 
 `GET /api/v1/admin/connections` (`api/admin_connections_routes.py`) returns a credential-free, per-connection operational status built from the same `HealthMonitor` snapshot… **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 43).
 
-### 44. Admin observability and rejection-trend dashboard ✅ DONE (phase 1)
+### 44. Admin observability and rejection-trend dashboard ✅ DONE
 
-**Shipped (phase 1 — the aggregation API plus a read-only browser panel):** A
-new `admin:observability:read`-scoped `GET
-/api/v1/admin/observability/overview` (`api/admin_observability_routes.py`)
-returning a typed, redaction-safe `ObservabilityOverview`
-(`admin/observability.py`) aggregated from the *existing* in-process Prometheus
-registry (`metrics.py`) — query volume, success/rejection categories, average
-duration, queue depth + wait-by-outcome, concurrency in-use/max/utilization,
-per-principal quota rejections by kind, and cost-estimation attempts/
-unavailable/would-reject with a derived `fail_open_rate` — both as a global
-rollup and a per-connection breakdown.
-
-The `/admin/` control plane renders it as an "Observability" section:
-overview cards (queries, top reject reason, avg duration, concurrency
-utilization, queue depth, cost-estimate fail-open rate), a per-connection
-table, and a banner echoing the snapshot's `note`/`since` so the honesty
-about durability is visible in the UI, not just the JSON. The panel calls the
-same scoped endpoint and shows an explicit "connect with
-admin:observability:read" empty state without it.
-
-The aggregator (`build_overview(registry)`) is pure over the registry it reads,
-so it's unit-tested against a fresh `CollectorRegistry`; the endpoint is
-integration-tested for scope enforcement (403 without the scope), honest
-snapshot labeling, real-activity reflection, and low-cardinality-only output;
-the panel is asserted in the admin-UI static-shell test.
-
-**Honesty about durability (item 44's explicit requirement):** the response is
-labeled `source="process_snapshot"`, `durable=false`, `since=<process start>`,
-with a `note` stating counters are cumulative-since-start, gauges are
-instantaneous, and — under the default in-process backends — everything is
-per-replica. It never implies a durable time-series store QueryGate does not
-own. Its own least-privilege scope (distinct from config/connection scopes)
-gates the whole overview, including the per-connection breakdown; output is
-built only from already-public, low-cardinality metric labels (never a query,
-value, principal, table, or column).
-
-**Phase 2 slice shipped (2026-07-29) — config/catalog-change trend card:** a
-third read on the same router, `GET /api/v1/admin/observability/config-changes`
-(`admin/config_trends.py`), following item 59's `AuditEventSource`-protocol
-shape (`ChangeEventSource`/`JsonlChangeEventSource`) rather than item 44 phase
-1's Prometheus-registry read. Unlike phase 1's process snapshot, the audit
-JSONL stream is durable, so this is a real recent-vs-baseline rate comparison
-(same two-window shape as item 59's per-principal anomaly detection, applied
-fleet-wide to `ConfigChangeEvent`/`CatalogGovernanceEvent` volume and
-by-action/outcome breakdown) rather than a since-process-start counter. Bounded
-by a configurable scan cap, honestly reports `source="disabled"` without the
-JSONL sink, and carries only action names/outcomes/counts — never version
-content, proposal text, or raw YAML. Rendered as a "Change velocity"
-subsection in the admin UI's Observability panel.
-
-**Still deliberately deferred (phase 2, not a gap in this pass):**
-- **Time-window trend charts.** Phase 1's endpoint is a point-in-time
-  snapshot, not time-series — there is no stored history to plot, so the panel
-  renders honest current-value cards rather than faking a trend line over a
-  window it cannot reconstruct. Real charts depend on the external
-  metrics-backend below.
-- **Querying an operator-configured external metrics backend** (e.g. Prometheus
-  HTTP API) for real time-windowed history and cross-replica aggregation,
-  replacing the honest single-process snapshot where such a backend exists.
-
-**Why it matters:** Item 31 can browse individual audit events, but it cannot
-answer operational questions such as “Which policies reject the most
-requests?”, “Is queue pressure rising?”, or “Did cost-estimation availability
-regress?” Those trends are what let an administrator tune policy and capacity
-proactively — and phase 1 answers them now over the API, honestly scoped to
-what a single process can truthfully report.
+Aggregated operational-trend API + admin-UI panel over the in-process metrics
+registry (phase 1), a durable config/catalog change-velocity trend card over
+the persisted audit stream (phase 2 slice), and real time-window trend charts
+from an operator-configured external metrics backend (Prometheus HTTP API,
+phase 2 remainder). **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 44).
 
 ### 45. Dedicated non-admin "My access" portal ✅ DONE
 

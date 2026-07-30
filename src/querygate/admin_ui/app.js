@@ -127,6 +127,7 @@
     observability: null,
     anomalies: null,
     changeTrend: null,
+    metricsHistory: null,
     serverDrafts: null,
     templateSources: {},
   };
@@ -2388,17 +2389,109 @@
     $("#change-trend-body").innerHTML = rows.join("");
   }
 
+  function buildSparklinePath(points) {
+    const known = points.map((p) => p.value).filter((v) => v != null);
+    if (!known.length) return null;
+    const min = Math.min(...known, 0);
+    const max = Math.max(...known);
+    const range = max - min || 1;
+    const n = points.length;
+    const width = 300;
+    const height = 56;
+    const pad = 3;
+    let d = "";
+    let started = false;
+    points.forEach((p, i) => {
+      const x = n > 1 ? (i / (n - 1)) * width : width / 2;
+      if (p.value == null) {
+        started = false;
+        return;
+      }
+      const y = height - pad - ((p.value - min) / range) * (height - pad * 2);
+      d += `${started ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)} `;
+      started = true;
+    });
+    return d.trim() || null;
+  }
+
+  function formatSeriesValue(unit, value) {
+    if (unit === "ratio") return `${(value * 100).toFixed(0)}%`;
+    if (unit === "seconds") return `${(value * 1000).toFixed(0)} ms`;
+    if (unit === "per second") return `${value.toFixed(2)}/s`;
+    return value.toFixed(1);
+  }
+
+  function trendChartCard(series) {
+    const points = series.points || [];
+    const known = points.map((p) => p.value).filter((v) => v != null);
+    const latestPoint = [...points].reverse().find((p) => p.value != null);
+    const latestText = latestPoint ? formatSeriesValue(series.unit, latestPoint.value) : "—";
+    const path = buildSparklinePath(points);
+    // The SVG line shape carries no text equivalent on its own — a
+    // screen-reader user gets only "role=img" — so fold the range into the
+    // aria-label rather than leaving that user with just a label and the
+    // latest value (a real information gap vs. a sighted user's view of the
+    // shape/trend).
+    const rangeLabel =
+      path && known.length
+        ? `, range ${formatSeriesValue(series.unit, Math.min(...known))} to ${formatSeriesValue(series.unit, Math.max(...known))}`
+        : "";
+    const body = path
+      ? `<svg class="trend-chart-svg" viewBox="0 0 300 56" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(series.label)} trend: latest ${escapeHtml(latestText)}${escapeHtml(rangeLabel)}"><path class="trend-line" d="${path}"></path></svg>`
+      : `<p class="trend-chart-empty">No data points in this window.</p>`;
+    return `<div class="trend-chart-card">
+      <div class="trend-chart-head"><span class="trend-chart-title">${escapeHtml(series.label)}</span><strong class="trend-chart-latest">${escapeHtml(latestText)}</strong></div>
+      ${body}
+    </div>`;
+  }
+
+  function renderMetricsHistory() {
+    const report = state.metricsHistory;
+    const note = $("#history-note");
+    const charts = $("#history-charts");
+    const empty = $("#history-empty");
+    if (!report) {
+      note.hidden = true;
+      charts.hidden = true;
+      empty.hidden = true;
+      return;
+    }
+    if (report.source === "disabled") {
+      note.hidden = true;
+      charts.hidden = true;
+      empty.hidden = false;
+      empty.textContent =
+        "Trend-chart surfacing is disabled — configure METRICS_HISTORY_BACKEND=prometheus and METRICS_HISTORY_PROMETHEUS_URL to enable real time-windowed history from an external metrics backend.";
+      return;
+    }
+    const windowLabel = `${obsDuration(report.window_seconds)} window, ${obsDuration(report.step_seconds)} step`;
+    note.hidden = false;
+    note.textContent = report.backend_error
+      ? `${report.note} (${windowLabel}) — ${report.backend_error}`
+      : `${report.note} (${windowLabel})`;
+
+    const series = report.series || [];
+    charts.hidden = series.length === 0;
+    empty.hidden = series.length !== 0;
+    if (!series.length) {
+      empty.textContent = "No series returned by the configured backend.";
+    }
+    charts.innerHTML = series.map(trendChartCard).join("");
+  }
+
   async function loadObservability() {
     if (!hasScope("admin:observability:read")) {
       state.observability = null;
       state.anomalies = null;
       state.changeTrend = null;
+      state.metricsHistory = null;
       $("#observability-snapshot").hidden = true;
       $("#observability-table-wrap").hidden = true;
       $("#observability-cards").innerHTML =
         '<p class="empty-state">Connect with admin:observability:read to load observability.</p>';
       renderAnomalies();
       renderChangeTrend();
+      renderMetricsHistory();
       return;
     }
     const button = $("#refresh-observability");
@@ -2432,6 +2525,16 @@
       $("#change-trend-table-wrap").hidden = true;
       $("#change-trend-empty").hidden = false;
       $("#change-trend-empty").textContent = error.message;
+    }
+    try {
+      state.metricsHistory = await api("/admin/observability/history");
+      renderMetricsHistory();
+    } catch (error) {
+      state.metricsHistory = null;
+      $("#history-note").hidden = true;
+      $("#history-charts").hidden = true;
+      $("#history-empty").hidden = false;
+      $("#history-empty").textContent = error.message;
     }
     setBusy(button, false);
   }
