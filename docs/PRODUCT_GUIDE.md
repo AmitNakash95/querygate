@@ -4993,6 +4993,45 @@ reasoning behind them, newest first. Added to incrementally as work happens
   caller; fixed before commit, with a regression test proving the count never
   reflects other principals' activity. Surfaced as a "Recent denials" panel on
   the existing `/access/` portal.
+- **2026-07-30 — The server-side draft store persists the exact same bundle
+  phase 1 downloads, encrypted at rest, rather than inventing a second
+  document shape (TODO.md item 47, phase 2).** `admin/draft_store.py`'s
+  `DraftStore` (behind `POST/GET/GET-by-id/DELETE /admin/config/drafts[/{id}]`)
+  answers what phase 1 explicitly deferred: recovery that survives a lost
+  download and works across devices, without the browser ever holding the
+  file. **Why the same `ConfigChangeSetBundle`, not a new model:** a stored
+  draft and a downloaded one are the same artifact under two delivery
+  mechanisms — keeping one shape means loading a draft still hands the caller
+  back through the unchanged validate/stage/apply flow, exactly like
+  importing a downloaded bundle, with no second config-mutation path to keep
+  in sync. **Why encryption, not just access control:** a bundle can
+  legitimately carry a `connections` document with a literal credential —
+  the same reason phase 1 never writes it to browser `localStorage` — so the
+  server-side store encrypts the bundle at rest (Fernet, keyed by a SHA-256
+  derivation of `AppConfig.draft_store_encryption_key`, matching the plain-
+  string-secret ergonomics `audit_ledger_hmac_key`/`approval_token_hmac_key`
+  already established rather than demanding a pre-formatted key from the
+  operator) instead of relying on scope checks alone. An empty key disables
+  the subsystem outright (a clean `503`), never a silent plaintext fallback.
+  **Why ownership is enforced at the storage layer, not just the route:**
+  `DraftStore.load`/`.delete` raise the identical `NotFoundError` for "doesn't
+  exist," "expired," and "exists but belongs to someone else" — proven
+  end-to-end with two JWT principals, not just asserted — so the endpoint
+  structurally cannot become a draft-id enumeration oracle even if a future
+  route-layer check were ever loosened. **A residual `auditors` review
+  surfaced and this pass documents rather than leaving silently untested:**
+  isolation is only as fine-grained as the deployment's identity model — this
+  codebase's static `api_keys` all share one `api_key_subject`, so two admins
+  each holding their own key are NOT isolated from each other's drafts (the
+  same limitation item 45's `/help/my-recent-denials` already carries); real
+  per-admin isolation needs JWT auth, proven by a dedicated regression test
+  rather than left as an implicit assumption. **Why per-principal retention
+  bounds, not a cron job:** every save/list call opportunistically prunes
+  expired drafts first, and `draft_store_max_drafts_per_principal` (default
+  20) rejects an over-cap save rather than silently evicting an older draft
+  — deterministic behavior an admin can reason about, with no background
+  sweeper to operate. Surfaced as a "Saved drafts" panel beside the existing
+  export/import buttons in the admin UI.
 - **2026-07-21 — Structured template authoring feeds the shared release, and
   keeps the query skeleton as validated JSON rather than a visual AST builder
   (TODO.md item 87).** Three choices. **(1) It composes into the change-set

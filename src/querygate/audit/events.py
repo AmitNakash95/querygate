@@ -52,6 +52,11 @@ ConfigChangeAction = Literal[
     "rollback",
     "export",
     "import",
+    # Server-side encrypted draft store (item 47 phase 2) — a fourth pair
+    # alongside export/import for the alternative recovery path.
+    "save_draft",
+    "load_draft",
+    "delete_draft",
 ]
 CatalogGovernanceAction = Literal[
     "generate",
@@ -156,6 +161,9 @@ class ConfigChangeEvent(pyd.BaseModel):
     outcome: Literal["success", "rejected"]
     error_category: Optional[str] = None
     duration_ms: int = pyd.Field(default=0, ge=0)
+    # Server-side draft store (item 47 phase 2) — the draft's opaque id for
+    # save_draft/load_draft/delete_draft actions. Never the draft's content.
+    draft_id: Optional[str] = None
 
     model_config = pyd.ConfigDict(extra="forbid")
 
