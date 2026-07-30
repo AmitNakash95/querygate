@@ -120,13 +120,17 @@ class ConfigChangeSetBundle(pyd.BaseModel):
     detect on re-import that the target's active version has drifted from the
     base.
 
-    It is a plain downloadable/uploadable artifact, not a stored server-side
-    draft: importing one validates it and hands the deltas back through the
-    existing validate/stage flow — it never becomes an ungoverned shadow
-    config store. A bundle can legitimately contain a `connections` document
-    with a literal credential (that is the caller's own submitted content, on
-    an explicit download), which is exactly why `contains_connections` is
-    surfaced and why the browser never writes this document to localStorage.
+    This exact model is also the payload the phase-2 encrypted server-side
+    draft store (`admin/draft_store.py`) persists — saving/loading a draft
+    there is not a second document shape, just an alternative to downloading/
+    uploading the same bundle. Either way, importing/loading one validates it
+    and hands the deltas back through the existing validate/stage flow — it
+    never becomes an ungoverned shadow config store. A bundle can legitimately
+    contain a `connections` document with a literal credential (that is the
+    caller's own submitted content), which is exactly why `contains_connections`
+    is surfaced — and why the phase-1 browser flow never writes this document
+    to `localStorage`, and why the phase-2 server-side store encrypts it at
+    rest rather than persisting it as plain YAML.
     """
 
     bundle_format: Literal["querygate.config-change-set/1"] = CONFIG_CHANGE_SET_FORMAT
@@ -145,6 +149,23 @@ class ConfigChangeSetBundle(pyd.BaseModel):
     @property
     def contains_connections(self) -> bool:
         return "connections" in self.documents
+
+
+class DraftSummary(pyd.BaseModel):
+    """Metadata for one server-side stored draft (item 47 phase 2) —
+    everything the "my drafts" list needs, and nothing from the bundle's
+    actual document content. `contains_connections` mirrors
+    `ConfigChangeSetBundle.contains_connections` without requiring the
+    caller's own encrypted content to be decrypted just to list it.
+    """
+
+    id: str
+    description: Optional[str] = None
+    created_at: datetime
+    expires_at: datetime
+    contains_connections: bool = False
+
+    model_config = pyd.ConfigDict(extra="forbid")
 
 
 class ConfigChangeSetImportCheck(pyd.BaseModel):

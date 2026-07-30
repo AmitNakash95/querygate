@@ -35,6 +35,10 @@ async def test_access_ui_is_served_with_browser_security_headers_and_no_admin_co
 
     assert response.status_code == 200
     assert "QueryGate My Access" in response.text
+    # TODO.md item 45 phase 2: safe explanations of the caller's own recent
+    # denials, over the same self-service (no admin scope) surface.
+    assert "Recent denials" in response.text
+    assert "/help/my-recent-denials" in script.text
     assert "default-src 'self'" in response.headers["content-security-policy"]
     assert response.headers["referrer-policy"] == "no-referrer"
     assert response.headers["cache-control"] == "no-store"

@@ -23,6 +23,11 @@ Item 44 phase 2 adds a third read on this router: fleet-wide config/catalog
 governance change-volume trend, also over the persisted audit stream. The
 aggregation lives in `querygate/admin/config_trends.py`, following the same
 `*EventSource` protocol shape `admin/anomaly.py` established.
+
+Item 44 phase 2's remainder adds a fourth read: time-windowed metrics
+*history* (real trend charts, not point-in-time cards) from an
+operator-configured external metrics backend. The aggregation and its
+honest-disabled-by-default posture live in `querygate/admin/metrics_history.py`.
 """
 
 from __future__ import annotations
@@ -45,10 +50,17 @@ from querygate.admin.config_trends import (
     JsonlChangeEventSource,
     build_change_trend_report,
 )
+from querygate.admin.metrics_history import (
+    MetricsHistoryReport,
+    MetricsHistorySource,
+    MetricsHistoryThresholds,
+    PrometheusMetricsHistorySource,
+    build_metrics_history_report,
+)
 from querygate.admin.observability import ObservabilityOverview, build_overview
 from querygate.api._errors import require_scope
 from querygate.core.auth import Principal
-from querygate.core.config import AppConfig, AuditSinkBackend
+from querygate.core.config import AppConfig, AuditSinkBackend, MetricsHistoryBackend
 from querygate.core.scopes import ADMIN_OBSERVABILITY_READ_SCOPE
 
 
@@ -67,6 +79,28 @@ def _change_trend_source(cfg: AppConfig) -> Optional[ChangeEventSource]:
     if cfg.audit_sink_backend != AuditSinkBackend.JSONL:
         return None
     return JsonlChangeEventSource(cfg.audit_jsonl_path)
+
+
+def _metrics_history_thresholds(cfg: AppConfig) -> MetricsHistoryThresholds:
+    return MetricsHistoryThresholds(
+        window_seconds=cfg.metrics_history_window_seconds,
+        step_seconds=cfg.metrics_history_step_seconds,
+        max_points_per_series=cfg.metrics_history_max_points_per_series,
+    )
+
+
+def _metrics_history_source(cfg: AppConfig) -> Optional[MetricsHistorySource]:
+    # No backend configured (or configured without a URL) -> nothing to query;
+    # reported honestly as source="disabled" rather than attempting a request
+    # against an empty base URL.
+    if cfg.metrics_history_backend != MetricsHistoryBackend.PROMETHEUS:
+        return None
+    if not cfg.metrics_history_prometheus_url:
+        return None
+    return PrometheusMetricsHistorySource(
+        cfg.metrics_history_prometheus_url,
+        timeout_seconds=cfg.metrics_history_request_timeout_seconds,
+    )
 
 
 def _anomaly_thresholds(cfg: AppConfig) -> AnomalyThresholds:
@@ -110,6 +144,13 @@ def build_admin_observability_router(
         require_scope(principal, ADMIN_OBSERVABILITY_READ_SCOPE)
         return build_change_trend_report(
             _change_trend_source(cfg), thresholds=_change_trend_thresholds(cfg)
+        )
+
+    @router.get("/history", response_model=MetricsHistoryReport)
+    async def observability_history(principal: Principal = Depends(get_principal)):
+        require_scope(principal, ADMIN_OBSERVABILITY_READ_SCOPE)
+        return await build_metrics_history_report(
+            _metrics_history_source(cfg), thresholds=_metrics_history_thresholds(cfg)
         )
 
     return router

@@ -156,6 +156,7 @@ order-of-magnitude, not commitments.
 | 123 | ✅ A select-item `CASE`'s conditions are absent from the audit shape | S | 120 |
 | 124 | ✅ Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
 | 125 | ✅ ★ A window function as an `Expression` operand (bar row 15 → 16/16) | XL | 100, 101 |
+| 126 | No per-caller rate limit on `GET /help/my-recent-denials` | S | 45 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -485,204 +486,25 @@ Server-side separation of duties on the config plane: durable per-version `Confi
 
 `GET /api/v1/admin/connections` (`api/admin_connections_routes.py`) returns a credential-free, per-connection operational status built from the same `HealthMonitor` snapshot… **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 43).
 
-### 44. Admin observability and rejection-trend dashboard ✅ DONE (phase 1)
+### 44. Admin observability and rejection-trend dashboard ✅ DONE
 
-**Shipped (phase 1 — the aggregation API plus a read-only browser panel):** A
-new `admin:observability:read`-scoped `GET
-/api/v1/admin/observability/overview` (`api/admin_observability_routes.py`)
-returning a typed, redaction-safe `ObservabilityOverview`
-(`admin/observability.py`) aggregated from the *existing* in-process Prometheus
-registry (`metrics.py`) — query volume, success/rejection categories, average
-duration, queue depth + wait-by-outcome, concurrency in-use/max/utilization,
-per-principal quota rejections by kind, and cost-estimation attempts/
-unavailable/would-reject with a derived `fail_open_rate` — both as a global
-rollup and a per-connection breakdown.
+Aggregated operational-trend API + admin-UI panel over the in-process metrics
+registry (phase 1), a durable config/catalog change-velocity trend card over
+the persisted audit stream (phase 2 slice), and real time-window trend charts
+from an operator-configured external metrics backend (Prometheus HTTP API,
+phase 2 remainder). **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 44).
 
-The `/admin/` control plane renders it as an "Observability" section:
-overview cards (queries, top reject reason, avg duration, concurrency
-utilization, queue depth, cost-estimate fail-open rate), a per-connection
-table, and a banner echoing the snapshot's `note`/`since` so the honesty
-about durability is visible in the UI, not just the JSON. The panel calls the
-same scoped endpoint and shows an explicit "connect with
-admin:observability:read" empty state without it.
+### 45. Dedicated non-admin "My access" portal ✅ DONE
 
-The aggregator (`build_overview(registry)`) is pure over the registry it reads,
-so it's unit-tested against a fresh `CollectorRegistry`; the endpoint is
-integration-tested for scope enforcement (403 without the scope), honest
-snapshot labeling, real-activity reflection, and low-cardinality-only output;
-the panel is asserted in the admin-UI static-shell test.
-
-**Honesty about durability (item 44's explicit requirement):** the response is
-labeled `source="process_snapshot"`, `durable=false`, `since=<process start>`,
-with a `note` stating counters are cumulative-since-start, gauges are
-instantaneous, and — under the default in-process backends — everything is
-per-replica. It never implies a durable time-series store QueryGate does not
-own. Its own least-privilege scope (distinct from config/connection scopes)
-gates the whole overview, including the per-connection breakdown; output is
-built only from already-public, low-cardinality metric labels (never a query,
-value, principal, table, or column).
-
-**Phase 2 slice shipped (2026-07-29) — config/catalog-change trend card:** a
-third read on the same router, `GET /api/v1/admin/observability/config-changes`
-(`admin/config_trends.py`), following item 59's `AuditEventSource`-protocol
-shape (`ChangeEventSource`/`JsonlChangeEventSource`) rather than item 44 phase
-1's Prometheus-registry read. Unlike phase 1's process snapshot, the audit
-JSONL stream is durable, so this is a real recent-vs-baseline rate comparison
-(same two-window shape as item 59's per-principal anomaly detection, applied
-fleet-wide to `ConfigChangeEvent`/`CatalogGovernanceEvent` volume and
-by-action/outcome breakdown) rather than a since-process-start counter. Bounded
-by a configurable scan cap, honestly reports `source="disabled"` without the
-JSONL sink, and carries only action names/outcomes/counts — never version
-content, proposal text, or raw YAML. Rendered as a "Change velocity"
-subsection in the admin UI's Observability panel.
-
-**Still deliberately deferred (phase 2, not a gap in this pass):**
-- **Time-window trend charts.** Phase 1's endpoint is a point-in-time
-  snapshot, not time-series — there is no stored history to plot, so the panel
-  renders honest current-value cards rather than faking a trend line over a
-  window it cannot reconstruct. Real charts depend on the external
-  metrics-backend below.
-- **Querying an operator-configured external metrics backend** (e.g. Prometheus
-  HTTP API) for real time-windowed history and cross-replica aggregation,
-  replacing the honest single-process snapshot where such a backend exists.
-
-**Why it matters:** Item 31 can browse individual audit events, but it cannot
-answer operational questions such as “Which policies reject the most
-requests?”, “Is queue pressure rising?”, or “Did cost-estimation availability
-regress?” Those trends are what let an administrator tune policy and capacity
-proactively — and phase 1 answers them now over the API, honestly scoped to
-what a single process can truthfully report.
-
-### 45. Dedicated non-admin "My access" portal ✅ DONE (phase 1)
-
-**Shipped:** A separate, dependency-free `/access/` static page
-(`querygate/access_ui/`), mounted and CSP/security-header-protected the same
-way `/admin/` is (`api/app.py`), showing the caller's identity/auth method/
-scopes/capabilities, visible connections, effective per-connection query
-guardrails, and mandatory row-filter claim readiness — plus a policy-filtered
-schema browser reusing the existing `list_tables`/`describe_table` REST
-endpoints unchanged. No new query/schema code path: the page authenticates
-with the caller's own token and calls the same principal-scoped endpoints
-that caller already has.
-
-The one new backend surface is additive to the existing `AccessSummary`
-model/`GET /api/v1/help/my-access` endpoint (also the MCP
-`describe_my_querygate_access` tool, which returns the same model): a new
-`connection_access` field lists, per visible connection, `EffectiveGuardrails`
-and `MandatoryFilterReadiness` — reusing the exact typed models item 39's
-candidate-policy simulation already built, now applied to the caller's own
-active policy instead of an uncommitted candidate, and across every
-mandatory filter on a policy-visible table rather than one requested table.
-Never a filter/claim *value* — only table/column/claim-name/source/
-readiness, matching that existing redaction posture. A mandatory filter on a
-table the caller's policy denies is excluded entirely (mirrors QG-19's
-"don't leak hidden-table filter metadata" reasoning).
-
-Verified per-principal, not just for one caller: two JWTs with different
-`sub` claims and a `principals:` policy override see different effective
-`max_joins` and different mandatory-filter claim readiness through the same
-`GET /help/my-access` call. See `tests/unit/test_product_guide.py`,
-`tests/integration/test_product_guide_api.py`, and the new
-`tests/integration/test_access_ui.py` (static-shell security headers, plus an
-explicit assertion that no admin-only nav/action/endpoint string ever
-appears in the shipped shell or script).
-
-**Deliberately deferred (phase 2, not a gap in this pass):** "safe
-explanations of recent personal denials." There is no principal-scoped
-audit-read path today — existing audit browsing
-(`api/admin_ui_routes.py`'s audit endpoints) requires `admin:config:read`
-and is global, not filtered to the caller's own events. Building one safely
-(bounded, redaction-safe, provably incapable of leaking another principal's
-rejection detail) is independent scope deserving its own review, not a UI
-bolt-on onto this pass.
-
-**Effort: M (2–3 days).** The required access-summary and policy-filtered
-schema APIs already exist, so this is mainly a focused UI/IA split plus tests
-proving the user route never imports admin-only data or actions.
-
-**Why it matters:** Regular authenticated users can open `/admin/` and inspect
-their visible connections/schema, but the surrounding control-plane navigation
-is misleading and fills the page with disabled actions. A reporting agent
-owner or analyst needs a clear explanation of their own access and limits, not
-an administrator console they mostly cannot use.
-
-**What to do:** Add a separate `/access/` experience showing the caller's
-identity/auth method, visible connections, policy-filtered schema/catalog,
-effective query limits, mandatory-claim requirements, and safe explanations of
-recent personal denials where the audit authorization model permits it. Never
-show raw YAML, other principals, global audit history, version controls, or
-admin navigation; keep `/admin/` explicitly scoped and worded for operators.
+A separate, dependency-free `/access/` static page showing identity, visible connections, effective guardrails, mandatory-filter readiness, and policy-filtered schema (phase 1); phase 2 added safe, principal-scoped explanations of the caller's own recent denials (`GET /help/my-recent-denials`). **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 45).
 
 ### 46. Validated policy templates and safe-start presets ✅ DONE
 
 Five fixed, code-reviewed presets (`querygate/admin/templates.py`): `deny-by-default`, `reporting-only`, `customer-support`, `tenant-isolated`, `bounded-analytics`. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 46).
 
-### 47. Safe draft recovery plus config export/import UX ✅ DONE (phase 1)
+### 47. Safe draft recovery plus config export/import UX ✅ DONE
 
-**Phase 1 (portable change-set bundle export/import + policy-only local
-recovery) ✅ DONE.** **Phase 2 (a server-side, authorized, encrypted-at-rest
-draft store with retention/deletion controls) not started — split out below
-because it is a distinct persistence subsystem with its own
-encryption/retention/audit design, and the file-based bundle already delivers
-cross-environment move and full-config recovery without it.**
-
-**Phase 1 shipped:** a portable *change-set bundle* built entirely on item
-25's existing governance plane (`admin/service.py`), never a shadow store.
-
-- **Model:** `ConfigChangeSetBundle` (`admin/models.py`,
-  `bundle_format="querygate.config-change-set/1"`) carries only the documents
-  an admin actually submitted (a change set, not a full snapshot), plus the id
-  and a sha256 content `base_fingerprint` of the base version those deltas were
-  composed against, plus a description. A `connections` document may
-  legitimately be present (the caller's own submitted content, on an explicit
-  download), which is why `contains_connections` is surfaced.
-- **Export** (`POST /api/v1/admin/config/export`, `export_change_set`) echoes
-  **only** the caller-submitted deltas — an unset document is never resolved
-  into the bundle — so it can never disclose the active connections/policy
-  content. `admin:config:write` scoped, like `/preview` and `/versions`.
-- **Import** (`POST /api/v1/admin/config/import`, `import_change_set`) is
-  validation-only: it re-validates the resolved candidate through the same
-  loaders `/validate` uses, detects a **stale base** via fingerprint
-  (`stale_base` + the specific `base_conflict_documents` that moved), enforces
-  `AppConfig.config_bundle_max_bytes` (default 1 MiB → a clean validation
-  failure, never OOM), and returns a **content-free** change signal. It never
-  stages or persists — staging still goes through the unchanged `/versions`
-  endpoint, so there is one governed mutation path.
-- **UI** (`admin_ui/`, Releases → Change set): Export/Import buttons wired to
-  those endpoints (import fills the draft editors from the locally-held bundle
-  and warns on drift), plus tab-scoped `localStorage` recovery of an
-  in-progress **policy** draft. Only the policy document is ever written to
-  browser storage; `connections.yaml` (credentials), secret references, and
-  bearer tokens never are — full-config recovery uses the downloaded file.
-- Audited as `export`/`import` `config.governance` actions
-  (`audit/events.py`); documented as **QG-30** in `docs/THREAT_MODEL.md`.
-
-Covered by `tests/unit/test_config_change_set.py` (11 cases: delta selection,
-no-active-disclosure, fingerprint stale-base, oversized rejection,
-missing-fingerprint warning, connections flag, import-never-persists),
-`tests/integration/test_admin_config_governance.py` (REST round-trip → stage,
-stale-base after the active moves, oversized rejection),
-`tests/security/test_adversarial_security.py` (export/import require write
-scope), and `tests/integration/test_admin_ui.py` (export/import shell +
-policy-only-localStorage invariant).
-
-**Effort: M (2–3 days).** Basic download/upload is small, but safe recovery
-must handle sensitive connection documents, version/fingerprint metadata,
-schema validation, stale-base conflicts, size limits, and browser-storage
-rules without creating an ungoverned shadow config store.
-
-**Why it matters:** Item 31 warns before abandoning an in-memory draft, but a
-tab crash or browser restart still loses work. Administrators also need a
-convenient way to move a reviewed change between environments while preserving
-the YAML/CLI path rather than copying text fields by hand.
-
-**What to do (phase 2):** Add a server-side, authorized, encrypted-at-rest
-draft store with retention/deletion controls and audit events, for
-full-config recovery that survives a lost download and works across devices —
-the heavier alternative this item's original scope named alongside the
-downloaded file. Keep it a governed store with its own retention/deletion and
-audit design; do not let it become a second config-mutation path around the
-existing validate → stage → apply flow.
+A portable change-set bundle for export/import + policy-only local recovery (phase 1); phase 2 added a server-side, encrypted-at-rest draft store with per-principal ownership, retention, and deletion controls. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 47).
 
 ### 48. Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) ✅ DONE
 
@@ -2043,4 +1865,34 @@ projection-only union. Closes regression-bar row 15 -> **16/16**, meeting the fl
 pillar's success criterion. 4/4 enforcement points mutation-verified.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 125).
+
+### 126. No per-caller rate limit on `GET /help/my-recent-denials`
+
+**Surfaced 2026-07-30 by the `auditors` security-invariant review of item 45
+phase 2, not a regression in this pass.** `GET /api/v1/help/my-recent-denials`
+requires only authentication (no scope, matching `/help/my-access`'s posture),
+and its handler calls `admin/anomaly.py`'s `JsonlAuditEventSource`, which reads
+and JSON-parses every line of the audit JSONL file per call (the
+`max_events_scanned` cap only bounds what's *kept in memory*, not how much of
+the file is scanned). Every other caller of that reader (`GET
+/admin/observability/anomalies`) requires `admin:observability:read`; this is
+the first time the same O(file-size) scan becomes triggerable by *any*
+authenticated caller, and there is no REST-level rate limit anywhere in the
+codebase to bound repeated calls.
+
+**Why not fixed inline:** the review explicitly judged this consistent with —
+not worse than — the existing posture of every other self-service endpoint
+(`/help/my-access`, schema browsing), none of which are rate-limited either;
+adding a new throttling mechanism is a deliberate product/design decision
+(scope, default interval, whether it should be per-endpoint or
+codebase-wide), not a small safe fix to make unprompted.
+
+**What to do (when prioritized):** either (a) add a lightweight per-principal
+cooldown scoped to this endpoint, mirroring item 43's existing
+`admin_connection_test_cooldown_seconds` precedent (a new
+`personal_denials_cooldown_seconds` config field + a 429/Retry-After response
+inside the window), or (b) make a recorded decision that the existing
+no-REST-rate-limiting posture is acceptable for this class of bounded local
+file read and close this as will-not-build. Either resolves it; doing neither
+leaves the residual undocumented.
 

@@ -29,6 +29,7 @@ from querygate.admin.models import (
     ConfigPreview,
     ConfigSemanticDiffRequest,
     ConfigVersion,
+    DraftSummary,
     PolicyBlastRadiusReport,
     PolicyTemplateRenderRequest,
     PolicyTemplateRenderResult,
@@ -39,7 +40,12 @@ from querygate.admin.models import (
 from querygate.config_reload import ReloadResult
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
-from querygate.core.exceptions import ConfigValidationError, NotFoundError, PolicyViolationError
+from querygate.core.exceptions import (
+    ConfigValidationError,
+    NotFoundError,
+    PolicyViolationError,
+    ServiceDisabledError,
+)
 from querygate.core.scopes import (
     ADMIN_CONFIG_APPROVE_SCOPE,
     ADMIN_CONFIG_READ_SCOPE,
@@ -232,6 +238,58 @@ def build_admin_config_router(
         # /versions with the bundle's documents.
         require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
         return await run_in_threadpool(governance.import_change_set, cfg, principal, bundle)
+
+    @router.post("/drafts", response_model=DraftSummary, status_code=status.HTTP_201_CREATED)
+    async def save_draft_endpoint(
+        bundle: ConfigChangeSetBundle, principal: Principal = Depends(get_principal)
+    ):
+        # Same sensitivity as export/import — a draft may carry a caller-
+        # submitted connections document with a literal credential — so this
+        # requires write scope, encrypted at rest rather than restricted to
+        # what the browser is willing to hold in localStorage.
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        try:
+            return await run_in_threadpool(governance.save_draft, cfg, principal, bundle)
+        except ServiceDisabledError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+        except ConfigValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
+
+    @router.get("/drafts", response_model=List[DraftSummary])
+    async def list_drafts_endpoint(principal: Principal = Depends(get_principal)):
+        # Metadata only (id/description/timestamps/contains_connections) — no
+        # bundle content is decrypted to serve a list, so read scope suffices,
+        # matching GET /versions.
+        require_scope(principal, ADMIN_CONFIG_READ_SCOPE)
+        try:
+            # list_for_principal does real synchronous I/O (a directory scan
+            # + manifest reads, plus opportunistic expiry pruning), matching
+            # its three sibling drafts endpoints in staying off the event loop.
+            return await run_in_threadpool(governance.list_my_drafts, cfg, principal)
+        except ServiceDisabledError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+
+    @router.get("/drafts/{draft_id}", response_model=ConfigChangeSetBundle)
+    async def load_draft_endpoint(draft_id: str, principal: Principal = Depends(get_principal)):
+        # Decrypts and returns the caller's own submitted content — the same
+        # sensitivity as export's response — so write scope, not read.
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        try:
+            return await run_in_threadpool(governance.load_draft, cfg, principal, draft_id)
+        except ServiceDisabledError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+        except NotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    @router.delete("/drafts/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_draft_endpoint(draft_id: str, principal: Principal = Depends(get_principal)):
+        require_scope(principal, ADMIN_CONFIG_WRITE_SCOPE)
+        try:
+            await run_in_threadpool(governance.delete_draft, cfg, principal, draft_id)
+        except ServiceDisabledError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+        except NotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
 
     @router.post("/versions", response_model=ConfigVersion, status_code=status.HTTP_201_CREATED)
     async def stage_endpoint(
