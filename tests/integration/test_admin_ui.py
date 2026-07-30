@@ -127,6 +127,10 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     assert 'id="export-change-set"' in response.text
     assert 'id="import-change-set"' in response.text
     assert "/admin/config/export" in script.text
+    # TODO.md item 47 phase 2: server-side encrypted-at-rest draft store.
+    assert 'id="save-draft-server"' in response.text
+    assert "Saved drafts" in response.text
+    assert "/admin/config/drafts" in script.text
     assert "/admin/config/import" in script.text
 
 

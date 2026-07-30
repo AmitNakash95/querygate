@@ -9,6 +9,13 @@ class NotFoundError(Exception):
     """Raised when a requested resource (connection, table) doesn't exist."""
 
 
+class ServiceDisabledError(Exception):
+    """Raised when an optional subsystem isn't configured on this deployment
+    (e.g. the item 47 phase 2 draft store with no encryption key set) — a
+    deployment/configuration condition, not a caller input error, so it maps
+    to 503 rather than a 4xx at the route layer."""
+
+
 class PolicyViolationError(ValueError):
     """Raised when a query violates the active policy: a disabled connection,
     a denied table/column, or an exceeded complexity cap. Subclasses
@@ -228,6 +235,7 @@ def public_error_message(exc: Exception) -> str:
             ConfigValidationError,
             CatalogGovernanceError,
             AuthorizationError,
+            ServiceDisabledError,
         ),
     ):
         return str(exc)

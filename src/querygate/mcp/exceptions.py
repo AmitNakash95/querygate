@@ -20,6 +20,7 @@ from querygate.core.exceptions import (
     PolicyViolationError,
     QueryValidationError,
     QuotaExceededError,
+    ServiceDisabledError,
     public_error_message,
 )
 from querygate.core.logging import get_logger
@@ -65,6 +66,12 @@ def _error_code_from_exception(exc: Exception) -> tuple[str, str]:
         return "RATE_LIMITED", public_error_message(exc)
     if isinstance(exc, (PolicyViolationError, QueryValidationError)):
         return "VALIDATION", public_error_message(exc)
+    # An optional subsystem isn't configured on this deployment (e.g. the
+    # item 47 phase 2 draft store with no encryption key) — no MCP tool
+    # wraps it today, but this keeps the vocabulary complete for the first
+    # one that does, rather than silently falling through to "INTERNAL".
+    if isinstance(exc, ServiceDisabledError):
+        return "SERVICE_DISABLED", public_error_message(exc)
     return "INTERNAL", public_error_message(exc)
 
 
