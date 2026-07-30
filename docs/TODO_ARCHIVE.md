@@ -3293,6 +3293,165 @@ rate-limited “test now” action that uses the same engine/timeout/TLS setting
 normal operation, never returns connection strings or raw driver text, and
 audits manual probes without turning them into query access.
 
+### 44. Admin observability and rejection-trend dashboard ✅ DONE
+
+**Shipped (phase 1 — the aggregation API plus a read-only browser panel):** A
+new `admin:observability:read`-scoped `GET
+/api/v1/admin/observability/overview` (`api/admin_observability_routes.py`)
+returning a typed, redaction-safe `ObservabilityOverview`
+(`admin/observability.py`) aggregated from the *existing* in-process Prometheus
+registry (`metrics.py`) — query volume, success/rejection categories, average
+duration, queue depth + wait-by-outcome, concurrency in-use/max/utilization,
+per-principal quota rejections by kind, and cost-estimation attempts/
+unavailable/would-reject with a derived `fail_open_rate` — both as a global
+rollup and a per-connection breakdown.
+
+The `/admin/` control plane renders it as an "Observability" section:
+overview cards (queries, top reject reason, avg duration, concurrency
+utilization, queue depth, cost-estimate fail-open rate), a per-connection
+table, and a banner echoing the snapshot's `note`/`since` so the honesty
+about durability is visible in the UI, not just the JSON. The panel calls the
+same scoped endpoint and shows an explicit "connect with
+admin:observability:read" empty state without it.
+
+The aggregator (`build_overview(registry)`) is pure over the registry it reads,
+so it's unit-tested against a fresh `CollectorRegistry`; the endpoint is
+integration-tested for scope enforcement (403 without the scope), honest
+snapshot labeling, real-activity reflection, and low-cardinality-only output;
+the panel is asserted in the admin-UI static-shell test.
+
+**Honesty about durability (item 44's explicit requirement):** the response is
+labeled `source="process_snapshot"`, `durable=false`, `since=<process start>`,
+with a `note` stating counters are cumulative-since-start, gauges are
+instantaneous, and — under the default in-process backends — everything is
+per-replica. It never implies a durable time-series store QueryGate does not
+own. Its own least-privilege scope (distinct from config/connection scopes)
+gates the whole overview, including the per-connection breakdown; output is
+built only from already-public, low-cardinality metric labels (never a query,
+value, principal, table, or column).
+
+**Phase 2 slice shipped (2026-07-29) — config/catalog-change trend card:** a
+third read on the same router, `GET /api/v1/admin/observability/config-changes`
+(`admin/config_trends.py`), following item 59's `AuditEventSource`-protocol
+shape (`ChangeEventSource`/`JsonlChangeEventSource`) rather than item 44 phase
+1's Prometheus-registry read. Unlike phase 1's process snapshot, the audit
+JSONL stream is durable, so this is a real recent-vs-baseline rate comparison
+(same two-window shape as item 59's per-principal anomaly detection, applied
+fleet-wide to `ConfigChangeEvent`/`CatalogGovernanceEvent` volume and
+by-action/outcome breakdown) rather than a since-process-start counter. Bounded
+by a configurable scan cap, honestly reports `source="disabled"` without the
+JSONL sink, and carries only action names/outcomes/counts — never version
+content, proposal text, or raw YAML. Rendered as a "Change velocity"
+subsection in the admin UI's Observability panel.
+
+**Phase 2 remainder shipped (2026-07-30) — external metrics backend + real
+trend charts:** a fourth read, `GET /api/v1/admin/observability/history`
+(`admin/metrics_history.py`), closes both items the phase-2 slice above
+deliberately deferred. `MetricsHistorySource` is a narrow read-only Protocol
+(the same composable-interface shape as `SecretResolver`/`DialectAdapter`/
+`AuditSink`) with one concrete backend today, `PrometheusMetricsHistorySource`
+— it queries an **operator-configured** Prometheus-compatible HTTP API (one
+already scraping this deployment's own `/metrics`) for five fixed named
+series (successful/rejected query rate, avg duration, queue depth,
+concurrency utilization), each a fleet-wide PromQL aggregate over QueryGate's
+own already-public metric labels — QueryGate only ever reads from this
+backend, never writes to it, and no caller-influenced query ever reaches it.
+With no backend configured (the default, `METRICS_HISTORY_BACKEND=none`) the
+endpoint honestly reports `source="disabled"`; an unreachable/erroring backend
+is likewise reported as `backend_error` rather than 5xx-ing the dashboard.
+Points-per-series are bounded by construction (a too-fine step for the
+configured window is widened, never the window truncated), mirroring
+`config_trends.py`'s scan cap. Rendered as a "Trend charts" subsection in the
+admin UI's Observability panel — a dependency-free inline-SVG sparkline per
+series (no charting library), consistent with the rest of the control plane.
+
+**Why it matters:** Item 31 can browse individual audit events, but it cannot
+answer operational questions such as “Which policies reject the most
+requests?”, “Is queue pressure rising?”, or “Did cost-estimation availability
+regress?” Those trends are what let an administrator tune policy and capacity
+proactively — and phase 1 answers them now over the API, honestly scoped to
+what a single process can truthfully report.
+
+### 45. Dedicated non-admin "My access" portal ✅ DONE
+
+**Shipped:** A separate, dependency-free `/access/` static page
+(`querygate/access_ui/`), mounted and CSP/security-header-protected the same
+way `/admin/` is (`api/app.py`), showing the caller's identity/auth method/
+scopes/capabilities, visible connections, effective per-connection query
+guardrails, and mandatory row-filter claim readiness — plus a policy-filtered
+schema browser reusing the existing `list_tables`/`describe_table` REST
+endpoints unchanged. No new query/schema code path: the page authenticates
+with the caller's own token and calls the same principal-scoped endpoints
+that caller already has.
+
+The one new backend surface is additive to the existing `AccessSummary`
+model/`GET /api/v1/help/my-access` endpoint (also the MCP
+`describe_my_querygate_access` tool, which returns the same model): a new
+`connection_access` field lists, per visible connection, `EffectiveGuardrails`
+and `MandatoryFilterReadiness` — reusing the exact typed models item 39's
+candidate-policy simulation already built, now applied to the caller's own
+active policy instead of an uncommitted candidate, and across every
+mandatory filter on a policy-visible table rather than one requested table.
+Never a filter/claim *value* — only table/column/claim-name/source/
+readiness, matching that existing redaction posture. A mandatory filter on a
+table the caller's policy denies is excluded entirely (mirrors QG-19's
+"don't leak hidden-table filter metadata" reasoning).
+
+Verified per-principal, not just for one caller: two JWTs with different
+`sub` claims and a `principals:` policy override see different effective
+`max_joins` and different mandatory-filter claim readiness through the same
+`GET /help/my-access` call. See `tests/unit/test_product_guide.py`,
+`tests/integration/test_product_guide_api.py`, and the new
+`tests/integration/test_access_ui.py` (static-shell security headers, plus an
+explicit assertion that no admin-only nav/action/endpoint string ever
+appears in the shipped shell or script).
+
+**Phase 2 shipped (2026-07-30) — safe explanations of recent personal
+denials:** `GET /api/v1/help/my-recent-denials` (`api/help_routes.py`,
+`help/personal_denials.py`), requiring only authentication like `/help/
+my-access` — no admin scope. Reuses item 59's already-tested
+`JsonlAuditEventSource` (`admin/anomaly.py`) to read the persisted
+`query.execution` audit stream rather than writing a third file-parsing
+implementation, then applies a pure, principal-scoped filter
+(`select_recent_denials`): only the caller's own `outcome="rejected"` events,
+most recent first, capped by `AppConfig.personal_denials_limit`. Each denial
+carries only `occurred_at`/`connection`/`surface`/a stable `reason` label
+(drawn from `AuditEvent.error_category`:
+`policy`/`schema`/`quota`/`cost_estimate`/`concurrency`/`queue_full`/
+`approval_required`/`not_found`/`db_error`) and one fixed, human-readable
+explanation per category — never `query_shape`, another principal's activity,
+or a table/column identifier beyond the category name. The report's own
+`own_denials_found`/`truncated` counters are themselves caller-scoped, not a
+fleet-wide scan total, even though the underlying reader scans every
+principal's events — a distinction that matters here specifically because,
+unlike item 59's admin-scoped anomaly report, this endpoint carries no scope
+requirement at all, so a raw scan-wide count would leak cross-principal audit
+volume to any authenticated caller (caught and fixed via `auditors` review
+before this shipped). Honestly reports `source="disabled"` without the JSONL
+sink. Verified end-to-end with two JWTs (distinct `sub` claims, since a
+single API-key list maps to one shared subject): each principal sees only
+their own denial, proven both by exact list contents and by asserting the
+other principal's connection id/subject never appears anywhere in the
+response body (`tests/integration/test_personal_denials_api.py`). Surfaced as
+a "Recent denials" panel on the existing `/access/` portal.
+
+**Effort: M (2–3 days).** The required access-summary and policy-filtered
+schema APIs already exist, so this is mainly a focused UI/IA split plus tests
+proving the user route never imports admin-only data or actions.
+
+**Why it matters:** Regular authenticated users can open `/admin/` and inspect
+their visible connections/schema, but the surrounding control-plane navigation
+is misleading and fills the page with disabled actions. A reporting agent
+owner or analyst needs a clear explanation of their own access and limits, not
+an administrator console they mostly cannot use.
+
+**What to do:** Add a separate `/access/` experience showing the caller's
+identity/auth method, visible connections, policy-filtered schema/catalog,
+effective query limits, mandatory-claim requirements, and safe explanations of
+recent personal denials where the audit authorization model permits it. Never
+show raw YAML, other principals, global audit history, version controls, or
+admin navigation; keep `/admin/` explicitly scoped and worded for operators.
+
 ### 46. Validated policy templates and safe-start presets ✅ DONE
 
 **Shipped:** Five fixed, code-reviewed presets (`querygate/admin/templates.py`):
@@ -3356,6 +3515,104 @@ candidate simulation, and show item 40's semantic diff before staging. Default
 to restrictive values, never infer table/column grants from names, never embed
 credentials or tenant values, and keep generated YAML fully editable/exportable
 for infrastructure-as-code users.
+
+### 47. Safe draft recovery plus config export/import UX ✅ DONE
+
+**Phase 1 shipped:** a portable *change-set bundle* built entirely on item
+25's existing governance plane (`admin/service.py`), never a shadow store.
+
+- **Model:** `ConfigChangeSetBundle` (`admin/models.py`,
+  `bundle_format="querygate.config-change-set/1"`) carries only the documents
+  an admin actually submitted (a change set, not a full snapshot), plus the id
+  and a sha256 content `base_fingerprint` of the base version those deltas were
+  composed against, plus a description. A `connections` document may
+  legitimately be present (the caller's own submitted content, on an explicit
+  download), which is why `contains_connections` is surfaced.
+- **Export** (`POST /api/v1/admin/config/export`, `export_change_set`) echoes
+  **only** the caller-submitted deltas — an unset document is never resolved
+  into the bundle — so it can never disclose the active connections/policy
+  content. `admin:config:write` scoped, like `/preview` and `/versions`.
+- **Import** (`POST /api/v1/admin/config/import`, `import_change_set`) is
+  validation-only: it re-validates the resolved candidate through the same
+  loaders `/validate` uses, detects a **stale base** via fingerprint
+  (`stale_base` + the specific `base_conflict_documents` that moved), enforces
+  `AppConfig.config_bundle_max_bytes` (default 1 MiB → a clean validation
+  failure, never OOM), and returns a **content-free** change signal. It never
+  stages or persists — staging still goes through the unchanged `/versions`
+  endpoint, so there is one governed mutation path.
+- **UI** (`admin_ui/`, Releases → Change set): Export/Import buttons wired to
+  those endpoints (import fills the draft editors from the locally-held bundle
+  and warns on drift), plus tab-scoped `localStorage` recovery of an
+  in-progress **policy** draft. Only the policy document is ever written to
+  browser storage; `connections.yaml` (credentials), secret references, and
+  bearer tokens never are — full-config recovery uses the downloaded file.
+- Audited as `export`/`import` `config.governance` actions
+  (`audit/events.py`); documented as **QG-30** in `docs/THREAT_MODEL.md`.
+
+Covered by `tests/unit/test_config_change_set.py` (11 cases: delta selection,
+no-active-disclosure, fingerprint stale-base, oversized rejection,
+missing-fingerprint warning, connections flag, import-never-persists),
+`tests/integration/test_admin_config_governance.py` (REST round-trip → stage,
+stale-base after the active moves, oversized rejection),
+`tests/security/test_adversarial_security.py` (export/import require write
+scope), and `tests/integration/test_admin_ui.py` (export/import shell +
+policy-only-localStorage invariant).
+
+**Phase 2 shipped (2026-07-30) — server-side encrypted-at-rest draft store:**
+`admin/draft_store.py`'s `DraftStore` persists the exact same
+`ConfigChangeSetBundle` phase 1 downloads, Fernet-encrypted at rest (a key
+derived via SHA-256 from `AppConfig.draft_store_encryption_key`, matching the
+plain-string-secret posture `audit_ledger_hmac_key`/`approval_token_hmac_key`
+already established — no pre-formatted base64 key required from the
+operator). `POST/GET/GET-by-id/DELETE /api/v1/admin/config/drafts[/{id}]`
+(`api/admin_config_routes.py`) save/list/load/delete a caller's own drafts;
+listing is metadata-only (`DraftSummary` — id/description/timestamps/
+`contains_connections`, `admin:config:read`) while save/load/delete touch
+actual document content and require `admin:config:write`, the same split
+`/versions` already uses. Ownership is enforced per-principal: loading or
+deleting another principal's draft raises the same `NotFoundError` as an
+unknown id, so the endpoint can never become a draft-id enumeration or
+existence oracle. **A residual `auditors` review surfaced and this pass
+documents rather than silently leaving untested:** isolation is only as
+fine-grained as the deployment's identity model — under static `api_keys`
+every configured key shares one `api_key_subject`, so two admins each holding
+their own key see and can delete each other's drafts (the same limitation
+item 45's `/help/my-recent-denials` already has); JWT auth is required for
+real per-admin isolation, proven by a dedicated regression test. Retention is
+opportunistic (no cron): every save/list call
+prunes expired drafts first (`AppConfig.draft_store_retention_seconds`,
+default 7 days), and `AppConfig.draft_store_max_drafts_per_principal`
+(default 20) bounds storage per admin — over the cap must delete before
+saving again, rather than one draft silently evicting another. The subsystem
+fails closed: an empty encryption key means every draft endpoint reports a
+clean `503`, never writing plaintext. New audited actions
+`save_draft`/`load_draft`/`delete_draft` (`ConfigChangeEvent.draft_id`) —
+never the draft's document content, matching `export`/`import`'s existing
+redaction posture. No new config-mutation path: a loaded draft still flows
+through the unchanged validate/stage/apply plane. Surfaced as a "Saved
+drafts" panel alongside the phase-1 export/import buttons in the admin UI.
+
+Covered by `tests/unit/test_draft_store.py` (23 cases: encrypted round-trip,
+plaintext-never-on-disk, cross-principal isolation on load/delete, per-
+principal listing, retention/expiry + pruning, the per-principal cap, wrong-
+key decryption failure, disabled-store handling, and the service-layer
+audit-wrapped functions), `tests/integration/test_draft_store_api.py` (9
+cases: scope/auth enforcement, full REST round-trip, 404s, 503-when-disabled,
+the cap enforced over REST, a two-JWT cross-principal isolation proof
+mirroring item 45's, and an audit-stream assertion proving `save_draft`/
+`load_draft` events never carry document content), and
+`tests/security/test_adversarial_security.py` (drafts folded into the
+existing config-governance read/write scope-separation tests).
+
+**Effort: M (2–3 days).** Basic download/upload is small, but safe recovery
+must handle sensitive connection documents, version/fingerprint metadata,
+schema validation, stale-base conflicts, size limits, and browser-storage
+rules without creating an ungoverned shadow config store.
+
+**Why it matters:** Item 31 warns before abandoning an in-memory draft, but a
+tab crash or browser restart still loses work. Administrators also need a
+convenient way to move a reviewed change between environments while preserving
+the YAML/CLI path rather than copying text fields by hand.
 
 ### 48. Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) ✅ DONE
 

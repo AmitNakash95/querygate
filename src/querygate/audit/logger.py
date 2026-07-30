@@ -131,6 +131,7 @@ def audit_config_change(
     description: Optional[str] = None,
     duration_ms: Optional[int] = None,
     error_category: Optional[str] = None,
+    draft_id: Optional[str] = None,
 ) -> None:
     """Record a config-governance action (validate/preview/simulate/diff/stage/apply/rollback) —
     same durable sink as `audit_query`, so a customer's audit trail covers
@@ -150,6 +151,7 @@ def audit_config_change(
         outcome="success" if outcome == "success" else "rejected",
         error_category=error_category,
         duration_ms=max(duration_ms or 0, 0),
+        draft_id=draft_id,
     )
     log.info(
         "audit.config_change",

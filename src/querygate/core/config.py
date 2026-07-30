@@ -42,6 +42,18 @@ class AuditSinkBackend(str, Enum):
     JSONL_CHAINED = "jsonl_chained"
 
 
+class MetricsHistoryBackend(str, Enum):
+    """Time-windowed metrics history source for the observability dashboard
+    (TODO.md item 44, phase 2). NONE (default) means QueryGate's own
+    in-process snapshot (admin/observability.py) is the only trend surface;
+    PROMETHEUS queries an operator-configured Prometheus-compatible HTTP API
+    for real history and cross-replica aggregation, since QueryGate owns no
+    time-series store of its own."""
+
+    NONE = "none"
+    PROMETHEUS = "prometheus"
+
+
 def _parse_str_list(value: Any) -> Any:
     """Accept a JSON array, a comma-separated string, or a list as-is."""
     if isinstance(value, list):
@@ -276,6 +288,33 @@ class AppConfig(BaseSettings):
     change_trend_baseline_window_seconds: float = pyd.Field(default=86400.0, gt=0)
     change_trend_max_events_scanned: int = pyd.Field(default=200_000, ge=1)
 
+    # Time-windowed metrics history for the observability dashboard (TODO.md
+    # item 44, phase 2 remainder) — queries an *operator-configured* external
+    # metrics backend for real trend charts, since item 44 phase 1's
+    # process-snapshot registry has no stored history to plot. Default backend
+    # "none" keeps the endpoint honest (source="disabled"); set backend to
+    # "prometheus" and prometheus_url to a reachable Prometheus HTTP API (one
+    # already scraping this deployment's /metrics) to enable it. QueryGate only
+    # ever reads from this backend — it never writes to it.
+    metrics_history_backend: MetricsHistoryBackend = pyd.Field(default=MetricsHistoryBackend.NONE)
+    metrics_history_prometheus_url: str = pyd.Field(default="")
+    metrics_history_window_seconds: float = pyd.Field(default=6 * 3600.0, gt=0)
+    metrics_history_step_seconds: float = pyd.Field(default=60.0, gt=0)
+    # Upper bound on points returned per series — bounds the request even if
+    # an operator configures a wide window with a tiny step, by widening the
+    # effective step rather than ever returning an unbounded series.
+    metrics_history_max_points_per_series: int = pyd.Field(default=500, ge=1)
+    metrics_history_request_timeout_seconds: float = pyd.Field(default=5.0, gt=0)
+
+    # Safe explanations of the caller's own recent denials (TODO.md item 45,
+    # phase 2) — a principal-scoped, self-service read of the persisted audit
+    # stream reached from GET /help/my-recent-denials. Requires
+    # audit_sink_backend=jsonl; with backend=none the endpoint honestly
+    # reports source="disabled".
+    personal_denials_lookback_seconds: float = pyd.Field(default=86400.0, gt=0)
+    personal_denials_max_events_scanned: int = pyd.Field(default=50_000, ge=1)
+    personal_denials_limit: int = pyd.Field(default=20, ge=1)
+
     # Config-governance version history (querygate/admin/) — staged/applied/
     # rolled-back snapshots of connections.yaml/policy.yaml/catalog.yaml,
     # separate from the files AppConfig itself points at (which the existing
@@ -296,6 +335,19 @@ class AppConfig(BaseSettings):
     # is far above any legitimate change set; it bounds the import endpoint so
     # a hostile/oversized upload is a clean client error, never an OOM.
     config_bundle_max_bytes: int = pyd.Field(default=1024 * 1024, ge=1)
+
+    # Server-side encrypted-at-rest draft store (TODO.md item 47, phase 2) —
+    # an optional alternative to the phase-1 download/upload bundle, for
+    # full-config recovery (including a `connections` document, which may
+    # carry a literal credential) that survives a lost download and works
+    # across devices. Empty key (the default) means the subsystem is
+    # disabled: the REST endpoints fail closed with a clean 503 rather than
+    # ever writing plaintext. Never a second config-mutation path — a loaded
+    # draft still flows through the unchanged validate/stage/apply plane.
+    draft_store_dir: str = pyd.Field(default="var/drafts")
+    draft_store_encryption_key: str = pyd.Field(default="")
+    draft_store_retention_seconds: float = pyd.Field(default=7 * 86400.0, gt=0)
+    draft_store_max_drafts_per_principal: int = pyd.Field(default=20, ge=1)
 
     concurrency_backend: ConcurrencyBackend = pyd.Field(default=ConcurrencyBackend.IN_PROCESS)
     concurrency_redis_url: str = pyd.Field(default="")
