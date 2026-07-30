@@ -369,7 +369,11 @@ position.
   baseline rates over the durable audit stream, no external infra). Box
   stays `[ ]` — time-window trend *charts* and the external metrics-backend
   read are still open.
-- [ ] **45 (phase 2)** — Non-admin "My access" portal.
+- [x] **45** — Non-admin "My access" portal. ✅ **Shipped** (phase 1: identity/
+  connections/guardrails/schema; phase 2, 2026-07-30: safe explanations of the
+  caller's own recent denials via `GET /help/my-recent-denials`, reusing item
+  59's `JsonlAuditEventSource` rather than a third file-parsing
+  implementation).
 - [ ] **47 (phase 2)** — Safe draft recovery + config export/import UX.
 - [x] **50 (phase 2)** — Per-principal rate limits / query quotas over time. ✅
   **Shipped** (`RedisQuotaLimiter` — cross-replica shared quota budget via Lua,

@@ -6,8 +6,9 @@ from typing import Callable, Literal
 
 from fastapi import APIRouter, Depends, Query
 
+from querygate.admin.anomaly import JsonlAuditEventSource
 from querygate.core.auth import Principal
-from querygate.core.config import AppConfig
+from querygate.core.config import AppConfig, AuditSinkBackend
 from querygate.help.models import (
     AccessSummary,
     ConfigFieldExplanation,
@@ -17,6 +18,7 @@ from querygate.help.models import (
     RedactedConfiguration,
     SetupChecklistResponse,
 )
+from querygate.help.personal_denials import RecentDenialsReport, build_recent_denials_report
 from querygate.help.service import get_guide_service
 
 
@@ -64,6 +66,19 @@ def build_help_router(
     @router.get("/my-access", response_model=AccessSummary)
     async def describe_my_access(principal: Principal = Depends(get_principal)):
         return get_guide_service().access_summary(principal)
+
+    @router.get("/my-recent-denials", response_model=RecentDenialsReport)
+    async def describe_my_recent_denials(principal: Principal = Depends(get_principal)):
+        source = None
+        if cfg.audit_sink_backend == AuditSinkBackend.JSONL:
+            source = JsonlAuditEventSource(cfg.audit_jsonl_path)
+        return build_recent_denials_report(
+            source,
+            principal_id=principal.subject,
+            lookback_seconds=cfg.personal_denials_lookback_seconds,
+            max_events_scanned=cfg.personal_denials_max_events_scanned,
+            limit=cfg.personal_denials_limit,
+        )
 
     @router.get("/configuration", response_model=RedactedConfiguration)
     async def inspect_configuration(principal: Principal = Depends(get_principal)):

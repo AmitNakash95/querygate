@@ -276,6 +276,15 @@ class AppConfig(BaseSettings):
     change_trend_baseline_window_seconds: float = pyd.Field(default=86400.0, gt=0)
     change_trend_max_events_scanned: int = pyd.Field(default=200_000, ge=1)
 
+    # Safe explanations of the caller's own recent denials (TODO.md item 45,
+    # phase 2) — a principal-scoped, self-service read of the persisted audit
+    # stream reached from GET /help/my-recent-denials. Requires
+    # audit_sink_backend=jsonl; with backend=none the endpoint honestly
+    # reports source="disabled".
+    personal_denials_lookback_seconds: float = pyd.Field(default=86400.0, gt=0)
+    personal_denials_max_events_scanned: int = pyd.Field(default=50_000, ge=1)
+    personal_denials_limit: int = pyd.Field(default=20, ge=1)
+
     # Config-governance version history (querygate/admin/) — staged/applied/
     # rolled-back snapshots of connections.yaml/policy.yaml/catalog.yaml,
     # separate from the files AppConfig itself points at (which the existing
