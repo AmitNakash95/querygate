@@ -156,6 +156,7 @@ order-of-magnitude, not commitments.
 | 123 | ✅ A select-item `CASE`'s conditions are absent from the audit shape | S | 120 |
 | 124 | ✅ Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
 | 125 | ✅ ★ A window function as an `Expression` operand (bar row 15 → 16/16) | XL | 100, 101 |
+| 126 | No per-caller rate limit on `GET /help/my-recent-denials` | S | 45 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -553,65 +554,9 @@ regress?” Those trends are what let an administrator tune policy and capacity
 proactively — and phase 1 answers them now over the API, honestly scoped to
 what a single process can truthfully report.
 
-### 45. Dedicated non-admin "My access" portal ✅ DONE (phase 1)
+### 45. Dedicated non-admin "My access" portal ✅ DONE
 
-**Shipped:** A separate, dependency-free `/access/` static page
-(`querygate/access_ui/`), mounted and CSP/security-header-protected the same
-way `/admin/` is (`api/app.py`), showing the caller's identity/auth method/
-scopes/capabilities, visible connections, effective per-connection query
-guardrails, and mandatory row-filter claim readiness — plus a policy-filtered
-schema browser reusing the existing `list_tables`/`describe_table` REST
-endpoints unchanged. No new query/schema code path: the page authenticates
-with the caller's own token and calls the same principal-scoped endpoints
-that caller already has.
-
-The one new backend surface is additive to the existing `AccessSummary`
-model/`GET /api/v1/help/my-access` endpoint (also the MCP
-`describe_my_querygate_access` tool, which returns the same model): a new
-`connection_access` field lists, per visible connection, `EffectiveGuardrails`
-and `MandatoryFilterReadiness` — reusing the exact typed models item 39's
-candidate-policy simulation already built, now applied to the caller's own
-active policy instead of an uncommitted candidate, and across every
-mandatory filter on a policy-visible table rather than one requested table.
-Never a filter/claim *value* — only table/column/claim-name/source/
-readiness, matching that existing redaction posture. A mandatory filter on a
-table the caller's policy denies is excluded entirely (mirrors QG-19's
-"don't leak hidden-table filter metadata" reasoning).
-
-Verified per-principal, not just for one caller: two JWTs with different
-`sub` claims and a `principals:` policy override see different effective
-`max_joins` and different mandatory-filter claim readiness through the same
-`GET /help/my-access` call. See `tests/unit/test_product_guide.py`,
-`tests/integration/test_product_guide_api.py`, and the new
-`tests/integration/test_access_ui.py` (static-shell security headers, plus an
-explicit assertion that no admin-only nav/action/endpoint string ever
-appears in the shipped shell or script).
-
-**Deliberately deferred (phase 2, not a gap in this pass):** "safe
-explanations of recent personal denials." There is no principal-scoped
-audit-read path today — existing audit browsing
-(`api/admin_ui_routes.py`'s audit endpoints) requires `admin:config:read`
-and is global, not filtered to the caller's own events. Building one safely
-(bounded, redaction-safe, provably incapable of leaking another principal's
-rejection detail) is independent scope deserving its own review, not a UI
-bolt-on onto this pass.
-
-**Effort: M (2–3 days).** The required access-summary and policy-filtered
-schema APIs already exist, so this is mainly a focused UI/IA split plus tests
-proving the user route never imports admin-only data or actions.
-
-**Why it matters:** Regular authenticated users can open `/admin/` and inspect
-their visible connections/schema, but the surrounding control-plane navigation
-is misleading and fills the page with disabled actions. A reporting agent
-owner or analyst needs a clear explanation of their own access and limits, not
-an administrator console they mostly cannot use.
-
-**What to do:** Add a separate `/access/` experience showing the caller's
-identity/auth method, visible connections, policy-filtered schema/catalog,
-effective query limits, mandatory-claim requirements, and safe explanations of
-recent personal denials where the audit authorization model permits it. Never
-show raw YAML, other principals, global audit history, version controls, or
-admin navigation; keep `/admin/` explicitly scoped and worded for operators.
+A separate, dependency-free `/access/` static page showing identity, visible connections, effective guardrails, mandatory-filter readiness, and policy-filtered schema (phase 1); phase 2 added safe, principal-scoped explanations of the caller's own recent denials (`GET /help/my-recent-denials`). **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 45).
 
 ### 46. Validated policy templates and safe-start presets ✅ DONE
 
@@ -2043,4 +1988,34 @@ projection-only union. Closes regression-bar row 15 -> **16/16**, meeting the fl
 pillar's success criterion. 4/4 enforcement points mutation-verified.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 125).
+
+### 126. No per-caller rate limit on `GET /help/my-recent-denials`
+
+**Surfaced 2026-07-30 by the `auditors` security-invariant review of item 45
+phase 2, not a regression in this pass.** `GET /api/v1/help/my-recent-denials`
+requires only authentication (no scope, matching `/help/my-access`'s posture),
+and its handler calls `admin/anomaly.py`'s `JsonlAuditEventSource`, which reads
+and JSON-parses every line of the audit JSONL file per call (the
+`max_events_scanned` cap only bounds what's *kept in memory*, not how much of
+the file is scanned). Every other caller of that reader (`GET
+/admin/observability/anomalies`) requires `admin:observability:read`; this is
+the first time the same O(file-size) scan becomes triggerable by *any*
+authenticated caller, and there is no REST-level rate limit anywhere in the
+codebase to bound repeated calls.
+
+**Why not fixed inline:** the review explicitly judged this consistent with —
+not worse than — the existing posture of every other self-service endpoint
+(`/help/my-access`, schema browsing), none of which are rate-limited either;
+adding a new throttling mechanism is a deliberate product/design decision
+(scope, default interval, whether it should be per-endpoint or
+codebase-wide), not a small safe fix to make unprompted.
+
+**What to do (when prioritized):** either (a) add a lightweight per-principal
+cooldown scoped to this endpoint, mirroring item 43's existing
+`admin_connection_test_cooldown_seconds` precedent (a new
+`personal_denials_cooldown_seconds` config field + a 429/Retry-After response
+inside the window), or (b) make a recorded decision that the existing
+no-REST-rate-limiting posture is acceptable for this class of bounded local
+file read and close this as will-not-build. Either resolves it; doing neither
+leaves the residual undocumented.
 

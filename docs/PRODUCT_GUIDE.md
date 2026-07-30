@@ -4957,6 +4957,42 @@ reasoning behind them, newest first. Added to incrementally as work happens
   trend *charts* and querying an operator-configured external metrics backend
   remain deferred — those still need a store QueryGate does not own; this slice
   needed none.
+- **2026-07-30 — Safe explanations of a caller's own recent denials reuse item
+  59's audit reader rather than a third file-parsing implementation, and are
+  self-service (no admin scope) by construction (TODO.md item 45, phase 2).**
+  `GET /api/v1/help/my-recent-denials` (`help/personal_denials.py`) answers the
+  question item 45 phase 1 explicitly deferred: "why was my recent query
+  rejected?" **Why it reuses `admin/anomaly.py`'s `JsonlAuditEventSource`:**
+  the underlying I/O — stream the audit JSONL file, unwrap the hash-chained
+  ledger envelope, tolerate malformed lines — is identical to item 59's, since
+  both read the same `query.execution` event stream; only the window shape
+  differs (a single lookback here, vs. item 59's recent-vs-baseline
+  comparison), so a nominal `baseline_window_seconds` reuses the tested reader
+  instead of duplicating chain-envelope-unwrapping logic a third time (item
+  44 phase 2's `config_trends.py` was the second instance, justified there
+  because it reads a genuinely different event pair). **Why no admin scope:**
+  unlike every other audit-stream reader in the codebase (item 59, item 44
+  phase 2), this is reached from `/help/my-recent-denials` with the same
+  posture as `/help/my-access` — authentication only — because the response
+  is filtered to the caller's own `principal_id` before any data is returned,
+  the same identity `execution/service.py` already scopes delegated policy
+  resolution by, so there is no cross-principal disclosure to gate. Verified
+  end-to-end with two JWTs (distinct `sub` claims): each principal sees only
+  their own denial, proven both by exact response contents and by asserting
+  the other principal's connection id/subject never appears anywhere in either
+  response body (`tests/integration/test_personal_denials_api.py`). Each
+  denial carries only a stable `reason` label (drawn from
+  `AuditEvent.error_category`) and one fixed explanation per category — never
+  `query_shape`, another principal's activity, or a table/column identifier.
+  **A residual caught by `auditors` review before shipping:** the report's
+  scan-diagnostic fields (renamed `own_denials_found`, alongside `truncated`)
+  must themselves stay caller-scoped rather than reporting the underlying
+  reader's fleet-wide event count — safe on item 59's admin-scoped sibling,
+  but this endpoint carries no scope requirement at all, so a raw scan-wide
+  number would have leaked cross-principal audit volume to any authenticated
+  caller; fixed before commit, with a regression test proving the count never
+  reflects other principals' activity. Surfaced as a "Recent denials" panel on
+  the existing `/access/` portal.
 - **2026-07-21 — Structured template authoring feeds the shared release, and
   keeps the query skeleton as validated JSON rather than a visual AST builder
   (TODO.md item 87).** Three choices. **(1) It composes into the change-set

@@ -10,6 +10,7 @@
     selectedConnection: null,
     tables: [],
     selectedTable: null,
+    denials: null,
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -136,6 +137,33 @@
     $("#filter-list").innerHTML = rows.length ? rows.join("") : '<p class="empty">No mandatory row filters apply to your visible connections.</p>';
   }
 
+  function renderDenials() {
+    const report = state.denials;
+    const note = $("#denials-note");
+    if (!report) {
+      note.hidden = true;
+      $("#denial-list").innerHTML = '<p class="empty">Connect to load your recent denials.</p>';
+      return;
+    }
+    if (report.source === "disabled") {
+      note.hidden = true;
+      $("#denial-list").innerHTML =
+        '<p class="empty">Denial history is disabled — this deployment has no persisted audit sink enabled.</p>';
+      return;
+    }
+    note.hidden = false;
+    note.textContent = `${report.note} (lookback ${Math.round(report.lookback_seconds / 3600)}h; ${report.own_denials_found} of your requests were rejected${report.truncated ? ", list may be incomplete" : ""})`;
+    const denials = report.denials || [];
+    $("#denial-list").innerHTML = denials.length
+      ? denials.map((denial) => `
+          <div class="column-row">
+            <strong>${escapeHtml(denial.connection)}</strong>
+            <span>${escapeHtml(denial.explanation)} <small>(${escapeHtml(denial.occurred_at)} · ${escapeHtml(denial.surface)})</small></span>
+            <span class="status-chip bad">${escapeHtml(denial.reason)}</span>
+          </div>`).join("")
+      : '<p class="empty">No recent denials.</p>';
+  }
+
   function populateConnectionSelect() {
     const options = state.connections.map((connection) => `<option value="${escapeHtml(connection.id)}">${escapeHtml(connection.id)}</option>`).join("");
     $("#connection-select").innerHTML = `<option value="">Select a connection</option>${options}`;
@@ -197,6 +225,13 @@
     renderConnectionCards();
     renderFilterList();
     populateConnectionSelect();
+    try {
+      state.denials = await api("/help/my-recent-denials");
+    } catch (error) {
+      state.denials = null;
+      toast(error.message, "bad");
+    }
+    renderDenials();
   }
 
   function disconnect() {
@@ -216,6 +251,8 @@
     $("#table-list").innerHTML = "";
     $("#column-list").innerHTML = "";
     $("#table-title").textContent = "Select a table";
+    state.denials = null;
+    renderDenials();
     $("#auth-token").value = "";
     $("#auth-dialog").showModal();
   }
