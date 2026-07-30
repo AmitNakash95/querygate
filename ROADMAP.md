@@ -374,7 +374,10 @@ position.
   caller's own recent denials via `GET /help/my-recent-denials`, reusing item
   59's `JsonlAuditEventSource` rather than a third file-parsing
   implementation).
-- [ ] **47 (phase 2)** — Safe draft recovery + config export/import UX.
+- [x] **47** — Safe draft recovery + config export/import UX. ✅ **Shipped**
+  (phase 1: portable change-set bundle export/import + policy-only local
+  recovery; phase 2, 2026-07-30: server-side encrypted-at-rest draft store
+  with per-principal ownership, retention, and deletion controls).
 - [x] **50 (phase 2)** — Per-principal rate limits / query quotas over time. ✅
   **Shipped** (`RedisQuotaLimiter` — cross-replica shared quota budget via Lua,
   closing the per-replica-multiplication gap).

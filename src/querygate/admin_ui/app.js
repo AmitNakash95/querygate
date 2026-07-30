@@ -127,6 +127,7 @@
     observability: null,
     anomalies: null,
     changeTrend: null,
+    serverDrafts: null,
     templateSources: {},
   };
 
@@ -262,6 +263,7 @@
       if (!state.templateList.length) loadTemplates();
     }
     if (name === "observability" && state.access && !state.observability) loadObservability();
+    if (name === "changes" && state.access && !state.serverDrafts) loadDraftList();
   }
 
   function formatDate(value) {
@@ -889,6 +891,103 @@
       toast(error.message, "bad");
     } finally {
       setBusy(button, false);
+    }
+  }
+
+  // --- Server-side encrypted draft store (item 47 phase 2) -------------------
+
+  function renderDraftList() {
+    const drafts = state.serverDrafts || [];
+    $("#draft-list").innerHTML = drafts.length
+      ? drafts.map((draft) => `
+          <div class="column-row">
+            <strong>${escapeHtml(draft.description || "(no description)")}</strong>
+            <span>saved ${escapeHtml(draft.created_at)} · expires ${escapeHtml(draft.expires_at)}${draft.contains_connections ? " · includes connections.yaml" : ""}</span>
+            <span class="row-actions">
+              <button class="text-button" type="button" data-load-draft="${escapeHtml(draft.id)}">Load</button>
+              <button class="text-button danger" type="button" data-delete-draft="${escapeHtml(draft.id)}">Delete</button>
+            </span>
+          </div>`).join("")
+      : '<p class="empty-state">No saved drafts.</p>';
+  }
+
+  async function loadDraftList() {
+    if (!hasScope("admin:config:read")) {
+      state.serverDrafts = null;
+      $("#draft-list").innerHTML = '<p class="empty-state">Connect with config-read scope to see your saved drafts.</p>';
+      return;
+    }
+    const button = $("#refresh-drafts");
+    setBusy(button, true, "Loading…");
+    try {
+      state.serverDrafts = await api("/admin/config/drafts");
+      renderDraftList();
+    } catch (error) {
+      state.serverDrafts = null;
+      $("#draft-list").innerHTML = error.status === 503
+        ? '<p class="empty-state">The server-side draft store is not configured on this deployment.</p>'
+        : `<p class="empty-state">${escapeHtml(error.message)}</p>`;
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function saveDraftToServer() {
+    if (!canWrite()) { toast("Config-write scope is required to save a draft.", "bad"); return; }
+    const payload = draftPayload();
+    if (!Object.keys(payload).length) {
+      toast("Edit a document before saving a draft.", "bad");
+      return;
+    }
+    const button = $("#save-draft-server");
+    setBusy(button, true, "Saving…");
+    try {
+      payload.description = $("#stage-description").value.trim() || null;
+      const bundle = await api("/admin/config/export", { method: "POST", body: JSON.stringify(payload) });
+      await api("/admin/config/drafts", { method: "POST", body: JSON.stringify(bundle) });
+      toast("Draft saved to the server.");
+      await loadDraftList();
+    } catch (error) {
+      toast(error.status === 503 ? "The server-side draft store is not configured on this deployment." : error.message, "bad");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function loadDraftFromServer(draftId) {
+    if (!canWrite()) { toast("Config-write scope is required to load a draft.", "bad"); return; }
+    try {
+      const bundle = await api(`/admin/config/drafts/${encodeURIComponent(draftId)}`);
+      documentKeys.forEach((key) => {
+        if (bundle.documents[key] !== undefined) state.draftDocuments[key] = bundle.documents[key];
+      });
+      state.validatedFingerprint = null;
+      savePolicyDraftLocally();
+      syncDirtyState();
+      renderEditor();
+      await parsePolicyDocument().catch((error) => toast(error.message, "bad"));
+      toast("Draft loaded into the editors. Validate, then stage as usual.");
+    } catch (error) {
+      toast(error.status === 404 ? "That draft no longer exists." : error.message, "bad");
+    }
+  }
+
+  async function deleteDraftFromServer(draftId) {
+    const draft = (state.serverDrafts || []).find((item) => item.id === draftId);
+    const label = draft && draft.description ? draft.description : "this draft";
+    const phrase = "DELETE";
+    const confirmed = await confirmAction({
+      title: "Delete saved draft?",
+      message: `This permanently removes “${label}” from the server — it cannot be recovered. Type ${phrase} to continue.`,
+      phrase,
+    });
+    if (!confirmed) { toast(`Confirmation cancelled. Enter “${phrase}” exactly to proceed.`); return; }
+    try {
+      await api(`/admin/config/drafts/${encodeURIComponent(draftId)}`, { method: "DELETE" });
+      toast("Draft deleted.");
+      await loadDraftList();
+    } catch (error) {
+      toast(error.status === 404 ? "That draft was already deleted." : error.message, "bad");
     }
   }
 
@@ -2723,6 +2822,14 @@
       const file = event.target.files && event.target.files[0];
       if (file) importChangeSet(file).catch((error) => toast(error.message, "bad"));
       event.target.value = "";
+    });
+    $("#refresh-drafts").addEventListener("click", () => loadDraftList());
+    $("#save-draft-server").addEventListener("click", () => saveDraftToServer());
+    $("#draft-list").addEventListener("click", (event) => {
+      const load = event.target.closest("[data-load-draft]");
+      const del = event.target.closest("[data-delete-draft]");
+      if (load) loadDraftFromServer(load.dataset.loadDraft);
+      if (del) deleteDraftFromServer(del.dataset.deleteDraft);
     });
     $("#refresh-history").addEventListener("click", () => loadGovernance(true).then(() => toast("Version history refreshed.")).catch((error) => toast(error.message, "bad")));
     $("#history-body").addEventListener("click", (event) => {

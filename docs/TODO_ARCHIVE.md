@@ -3437,6 +3437,104 @@ to restrictive values, never infer table/column grants from names, never embed
 credentials or tenant values, and keep generated YAML fully editable/exportable
 for infrastructure-as-code users.
 
+### 47. Safe draft recovery plus config export/import UX ✅ DONE
+
+**Phase 1 shipped:** a portable *change-set bundle* built entirely on item
+25's existing governance plane (`admin/service.py`), never a shadow store.
+
+- **Model:** `ConfigChangeSetBundle` (`admin/models.py`,
+  `bundle_format="querygate.config-change-set/1"`) carries only the documents
+  an admin actually submitted (a change set, not a full snapshot), plus the id
+  and a sha256 content `base_fingerprint` of the base version those deltas were
+  composed against, plus a description. A `connections` document may
+  legitimately be present (the caller's own submitted content, on an explicit
+  download), which is why `contains_connections` is surfaced.
+- **Export** (`POST /api/v1/admin/config/export`, `export_change_set`) echoes
+  **only** the caller-submitted deltas — an unset document is never resolved
+  into the bundle — so it can never disclose the active connections/policy
+  content. `admin:config:write` scoped, like `/preview` and `/versions`.
+- **Import** (`POST /api/v1/admin/config/import`, `import_change_set`) is
+  validation-only: it re-validates the resolved candidate through the same
+  loaders `/validate` uses, detects a **stale base** via fingerprint
+  (`stale_base` + the specific `base_conflict_documents` that moved), enforces
+  `AppConfig.config_bundle_max_bytes` (default 1 MiB → a clean validation
+  failure, never OOM), and returns a **content-free** change signal. It never
+  stages or persists — staging still goes through the unchanged `/versions`
+  endpoint, so there is one governed mutation path.
+- **UI** (`admin_ui/`, Releases → Change set): Export/Import buttons wired to
+  those endpoints (import fills the draft editors from the locally-held bundle
+  and warns on drift), plus tab-scoped `localStorage` recovery of an
+  in-progress **policy** draft. Only the policy document is ever written to
+  browser storage; `connections.yaml` (credentials), secret references, and
+  bearer tokens never are — full-config recovery uses the downloaded file.
+- Audited as `export`/`import` `config.governance` actions
+  (`audit/events.py`); documented as **QG-30** in `docs/THREAT_MODEL.md`.
+
+Covered by `tests/unit/test_config_change_set.py` (11 cases: delta selection,
+no-active-disclosure, fingerprint stale-base, oversized rejection,
+missing-fingerprint warning, connections flag, import-never-persists),
+`tests/integration/test_admin_config_governance.py` (REST round-trip → stage,
+stale-base after the active moves, oversized rejection),
+`tests/security/test_adversarial_security.py` (export/import require write
+scope), and `tests/integration/test_admin_ui.py` (export/import shell +
+policy-only-localStorage invariant).
+
+**Phase 2 shipped (2026-07-30) — server-side encrypted-at-rest draft store:**
+`admin/draft_store.py`'s `DraftStore` persists the exact same
+`ConfigChangeSetBundle` phase 1 downloads, Fernet-encrypted at rest (a key
+derived via SHA-256 from `AppConfig.draft_store_encryption_key`, matching the
+plain-string-secret posture `audit_ledger_hmac_key`/`approval_token_hmac_key`
+already established — no pre-formatted base64 key required from the
+operator). `POST/GET/GET-by-id/DELETE /api/v1/admin/config/drafts[/{id}]`
+(`api/admin_config_routes.py`) save/list/load/delete a caller's own drafts;
+listing is metadata-only (`DraftSummary` — id/description/timestamps/
+`contains_connections`, `admin:config:read`) while save/load/delete touch
+actual document content and require `admin:config:write`, the same split
+`/versions` already uses. Ownership is enforced per-principal: loading or
+deleting another principal's draft raises the same `NotFoundError` as an
+unknown id, so the endpoint can never become a draft-id enumeration or
+existence oracle. **A residual `auditors` review surfaced and this pass
+documents rather than silently leaving untested:** isolation is only as
+fine-grained as the deployment's identity model — under static `api_keys`
+every configured key shares one `api_key_subject`, so two admins each holding
+their own key see and can delete each other's drafts (the same limitation
+item 45's `/help/my-recent-denials` already has); JWT auth is required for
+real per-admin isolation, proven by a dedicated regression test. Retention is
+opportunistic (no cron): every save/list call
+prunes expired drafts first (`AppConfig.draft_store_retention_seconds`,
+default 7 days), and `AppConfig.draft_store_max_drafts_per_principal`
+(default 20) bounds storage per admin — over the cap must delete before
+saving again, rather than one draft silently evicting another. The subsystem
+fails closed: an empty encryption key means every draft endpoint reports a
+clean `503`, never writing plaintext. New audited actions
+`save_draft`/`load_draft`/`delete_draft` (`ConfigChangeEvent.draft_id`) —
+never the draft's document content, matching `export`/`import`'s existing
+redaction posture. No new config-mutation path: a loaded draft still flows
+through the unchanged validate/stage/apply plane. Surfaced as a "Saved
+drafts" panel alongside the phase-1 export/import buttons in the admin UI.
+
+Covered by `tests/unit/test_draft_store.py` (23 cases: encrypted round-trip,
+plaintext-never-on-disk, cross-principal isolation on load/delete, per-
+principal listing, retention/expiry + pruning, the per-principal cap, wrong-
+key decryption failure, disabled-store handling, and the service-layer
+audit-wrapped functions), `tests/integration/test_draft_store_api.py` (9
+cases: scope/auth enforcement, full REST round-trip, 404s, 503-when-disabled,
+the cap enforced over REST, a two-JWT cross-principal isolation proof
+mirroring item 45's, and an audit-stream assertion proving `save_draft`/
+`load_draft` events never carry document content), and
+`tests/security/test_adversarial_security.py` (drafts folded into the
+existing config-governance read/write scope-separation tests).
+
+**Effort: M (2–3 days).** Basic download/upload is small, but safe recovery
+must handle sensitive connection documents, version/fingerprint metadata,
+schema validation, stale-base conflicts, size limits, and browser-storage
+rules without creating an ungoverned shadow config store.
+
+**Why it matters:** Item 31 warns before abandoning an in-memory draft, but a
+tab crash or browser restart still loses work. Administrators also need a
+convenient way to move a reviewed change between environments while preserving
+the YAML/CLI path rather than copying text fields by hand.
+
 ### 48. Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) ✅ DONE
 
 **Phase 1 (file-configured, invocable templates) ✅ DONE. Phase 2 (governed

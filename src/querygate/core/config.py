@@ -306,6 +306,19 @@ class AppConfig(BaseSettings):
     # a hostile/oversized upload is a clean client error, never an OOM.
     config_bundle_max_bytes: int = pyd.Field(default=1024 * 1024, ge=1)
 
+    # Server-side encrypted-at-rest draft store (TODO.md item 47, phase 2) —
+    # an optional alternative to the phase-1 download/upload bundle, for
+    # full-config recovery (including a `connections` document, which may
+    # carry a literal credential) that survives a lost download and works
+    # across devices. Empty key (the default) means the subsystem is
+    # disabled: the REST endpoints fail closed with a clean 503 rather than
+    # ever writing plaintext. Never a second config-mutation path — a loaded
+    # draft still flows through the unchanged validate/stage/apply plane.
+    draft_store_dir: str = pyd.Field(default="var/drafts")
+    draft_store_encryption_key: str = pyd.Field(default="")
+    draft_store_retention_seconds: float = pyd.Field(default=7 * 86400.0, gt=0)
+    draft_store_max_drafts_per_principal: int = pyd.Field(default=20, ge=1)
+
     concurrency_backend: ConcurrencyBackend = pyd.Field(default=ConcurrencyBackend.IN_PROCESS)
     concurrency_redis_url: str = pyd.Field(default="")
     # Should comfortably exceed the longest legitimate query (policy
