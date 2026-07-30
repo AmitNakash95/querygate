@@ -1122,6 +1122,19 @@ async def test_config_governance_write_endpoints_require_write_scope():
             headers=headers,
         )
         apply_resp = await client.post("/api/v1/admin/config/versions/1/apply", headers=headers)
+        save_draft_resp = await client.post(
+            "/api/v1/admin/config/drafts",
+            json={
+                "bundle_format": "querygate.config-change-set/1",
+                "created_at": "2026-07-30T00:00:00Z",
+                "documents": {"policy": "default:\n  enabled: true\n"},
+            },
+            headers=headers,
+        )
+        load_draft_resp = await client.get("/api/v1/admin/config/drafts/any-id", headers=headers)
+        delete_draft_resp = await client.delete(
+            "/api/v1/admin/config/drafts/any-id", headers=headers
+        )
 
     assert stage_resp.status_code == 403
     assert validate_resp.status_code == 403
@@ -1132,6 +1145,13 @@ async def test_config_governance_write_endpoints_require_write_scope():
     # candidate; both are write-scoped, so config-read alone is insufficient.
     assert export_resp.status_code == 403
     assert import_resp.status_code == 403
+    # The server-side draft store (item 47 phase 2) carries the same
+    # sensitivity as export/import — a draft may hold a caller-submitted
+    # connections document with a literal credential — so save/load/delete
+    # all require config-write; config-read alone is insufficient.
+    assert save_draft_resp.status_code == 403
+    assert load_draft_resp.status_code == 403
+    assert delete_draft_resp.status_code == 403
     # The semantic diff echoes resolved policy detail, so config-write alone is
     # insufficient — it also requires config-read (both, like /simulate).
     assert diff_resp.status_code == 403
@@ -1168,6 +1188,7 @@ async def test_config_governance_read_endpoints_require_read_scope():
         schema_check_resp = await client.post(
             "/api/v1/admin/config/check-template-schema", json={}, headers=headers
         )
+        list_drafts_resp = await client.get("/api/v1/admin/config/drafts", headers=headers)
 
     assert list_resp.status_code == 403
     assert current_resp.status_code == 403
@@ -1180,6 +1201,9 @@ async def test_config_governance_read_endpoints_require_read_scope():
     # The live-schema check reveals live column/table existence, so config-write
     # alone is insufficient — it also requires config-read.
     assert schema_check_resp.status_code == 403
+    # Listing saved drafts is metadata-only (like GET /versions) — config-write
+    # alone is insufficient, it also requires config-read.
+    assert list_drafts_resp.status_code == 403
 
 
 @pytest.mark.asyncio

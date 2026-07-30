@@ -1,0 +1,235 @@
+"""Unit tests for safe explanations of a caller's own recent denials
+(TODO.md item 45, phase 2).
+
+`select_recent_denials` is a pure function over a list of `AuditEvent`s, so
+these tests drive it directly with hand-built events — no app, no clock, no
+global state. `build_recent_denials_report` is tested against a temp file via
+the reused `JsonlAuditEventSource` (item 59), mirroring
+`tests/unit/test_anomaly.py`'s and `tests/unit/test_config_trends.py`'s shape.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pydantic as pyd
+import pytest
+
+from querygate.admin.anomaly import JsonlAuditEventSource
+from querygate.audit.events import AuditEvent
+from querygate.help.personal_denials import (
+    RecentDenialsReport,
+    build_recent_denials_report,
+    select_recent_denials,
+)
+
+pytestmark = pytest.mark.unit
+
+_NOW = datetime(2026, 7, 30, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _event(
+    *,
+    at: datetime,
+    principal: str = "user-a",
+    connection: str = "demo",
+    outcome: str = "rejected",
+    error_category: str | None = "policy",
+    surface: str = "rest",
+) -> AuditEvent:
+    return AuditEvent(
+        occurred_at=at,
+        principal_id=principal,
+        connection_id=connection,
+        policy_decision="denied" if outcome == "rejected" else "allowed",
+        outcome=outcome,
+        surface=surface,
+        query_shape={"from": "customers", "select": [{"kind": "column", "column": "id"}]},
+        error_category=error_category,
+        duration_ms=3,
+    )
+
+
+# --- select_recent_denials ---------------------------------------------------
+
+
+def test_no_events_yields_no_denials():
+    assert select_recent_denials([], principal_id="user-a", limit=10) == []
+
+
+def test_only_the_callers_own_events_are_returned():
+    events = [
+        _event(at=_NOW, principal="user-a"),
+        _event(at=_NOW, principal="user-b"),
+    ]
+    denials = select_recent_denials(events, principal_id="user-a", limit=10)
+    assert len(denials) == 1
+
+
+def test_success_events_are_excluded_even_for_the_caller():
+    events = [_event(at=_NOW, principal="user-a", outcome="success", error_category=None)]
+    assert select_recent_denials(events, principal_id="user-a", limit=10) == []
+
+
+def test_denials_are_sorted_most_recent_first():
+    events = [
+        _event(at=_NOW - timedelta(seconds=300), principal="user-a", connection="c-old"),
+        _event(at=_NOW, principal="user-a", connection="c-new"),
+        _event(at=_NOW - timedelta(seconds=100), principal="user-a", connection="c-mid"),
+    ]
+    denials = select_recent_denials(events, principal_id="user-a", limit=10)
+    assert [d.connection for d in denials] == ["c-new", "c-mid", "c-old"]
+
+
+def test_denials_are_capped_at_limit():
+    events = [_event(at=_NOW - timedelta(seconds=i)) for i in range(5)]
+    denials = select_recent_denials(events, principal_id="user-a", limit=2)
+    assert len(denials) == 2
+
+
+@pytest.mark.parametrize(
+    "category,expected_snippet",
+    [
+        ("policy", "policy"),
+        ("schema", "table or column"),
+        ("quota", "quota"),
+        ("cost_estimate", "estimated cost"),
+        ("concurrency", "concurrency limit"),
+        ("queue_full", "queue"),
+        ("approval_required", "approval"),
+        ("not_found", "does not exist"),
+        ("db_error", "database itself"),
+    ],
+)
+def test_known_categories_get_a_specific_explanation(category, expected_snippet):
+    denials = select_recent_denials(
+        [_event(at=_NOW, error_category=category)], principal_id="user-a", limit=10
+    )
+    assert denials[0].reason == category
+    assert expected_snippet in denials[0].explanation
+
+
+def test_unknown_category_falls_back_to_generic_explanation():
+    denials = select_recent_denials(
+        [_event(at=_NOW, error_category=None)], principal_id="user-a", limit=10
+    )
+    assert denials[0].reason == "unknown"
+    assert "wasn't recorded" in denials[0].explanation
+
+
+def test_denial_never_carries_the_query_shape():
+    denials = select_recent_denials([_event(at=_NOW)], principal_id="user-a", limit=10)
+    blob = denials[0].model_dump_json()
+    assert "query_shape" not in blob
+    assert "customers" not in blob
+
+
+# --- build_recent_denials_report ---------------------------------------------
+
+
+def _write_jsonl(path, events):
+    with open(path, "w", encoding="utf-8") as handle:
+        for event in events:
+            handle.write(event.model_dump_json(exclude_none=True) + "\n")
+
+
+def test_report_with_no_source_is_disabled_not_error():
+    report = build_recent_denials_report(None, principal_id="user-a", now=_NOW)
+    assert report.source == "disabled"
+    assert report.denials == []
+    assert report.generated_at == _NOW.isoformat()
+
+
+def test_report_end_to_end_filters_to_the_caller(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    _write_jsonl(
+        path,
+        [
+            _event(at=_NOW - timedelta(seconds=100), principal="user-a", connection="c1"),
+            _event(at=_NOW - timedelta(seconds=50), principal="user-b", connection="c2"),
+        ],
+    )
+    report = build_recent_denials_report(
+        JsonlAuditEventSource(str(path)),
+        principal_id="user-a",
+        now=_NOW,
+        lookback_seconds=3600.0,
+    )
+    assert report.source == "jsonl"
+    # Two events exist in the file (one per principal), but own_denials_found
+    # must reflect only the caller's own — never the fleet-wide scan total.
+    assert report.own_denials_found == 1
+    assert len(report.denials) == 1
+    assert report.denials[0].connection == "c1"
+
+
+def test_own_denials_found_never_reflects_fleet_wide_volume(tmp_path):
+    """Regression: own_denials_found must count only the caller's own
+    denials, never the total scanned across every principal — this endpoint
+    requires no admin scope, so a fleet-wide count would leak cross-principal
+    audit volume to any authenticated caller."""
+    path = tmp_path / "audit.jsonl"
+    _write_jsonl(
+        path,
+        [_event(at=_NOW - timedelta(seconds=i), principal="someone-else") for i in range(50)]
+        + [_event(at=_NOW, principal="user-a")],
+    )
+    report = build_recent_denials_report(
+        JsonlAuditEventSource(str(path)), principal_id="user-a", now=_NOW
+    )
+    assert report.own_denials_found == 1
+
+
+def test_report_is_empty_but_still_jsonl_when_stream_is_quiet(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    _write_jsonl(path, [_event(at=_NOW - timedelta(seconds=50_000))])  # outside lookback
+    report = build_recent_denials_report(
+        JsonlAuditEventSource(str(path)),
+        principal_id="user-a",
+        now=_NOW,
+        lookback_seconds=3600.0,
+    )
+    assert report.source == "jsonl"
+    assert report.denials == []
+
+
+def test_report_never_leaks_another_principals_denial(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    _write_jsonl(path, [_event(at=_NOW, principal="someone-else", connection="secret-conn")])
+    report = build_recent_denials_report(
+        JsonlAuditEventSource(str(path)), principal_id="user-a", now=_NOW
+    )
+    blob = report.model_dump_json()
+    assert "secret-conn" not in blob
+    assert "someone-else" not in blob
+
+
+def test_report_respects_configured_limit(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    _write_jsonl(path, [_event(at=_NOW - timedelta(seconds=i)) for i in range(10)])
+    report = build_recent_denials_report(
+        JsonlAuditEventSource(str(path)), principal_id="user-a", now=_NOW, limit=3
+    )
+    assert len(report.denials) == 3
+
+
+def test_report_is_redaction_safe():
+    """The serialized report must never carry a query shape, SQL, or another
+    principal's identity — only occurred-at, connection, surface, reason, and
+    a fixed explanation. Proven against the live schema, not by eye."""
+
+    class _Source:
+        def load_query_events(self, *, now, thresholds):
+            return [_event(at=_NOW, principal="user-a")], 0, False
+
+    report = build_recent_denials_report(_Source(), principal_id="user-a", now=_NOW)
+    blob = report.model_dump_json()
+    for forbidden in ("query_shape", "customers", '"select"'):
+        assert forbidden not in blob
+
+    with pytest.raises(pyd.ValidationError):
+        RecentDenialsReport(
+            generated_at=_NOW.isoformat(),
+            lookback_seconds=1,
+            leaked_field=1,  # type: ignore[call-arg]
+        )

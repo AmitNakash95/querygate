@@ -35,6 +35,7 @@ from querygate.admin.models import (
     ConfigSemanticDiffRequest,
     ConfigVersion,
     ConfigVersionStatus,
+    DraftSummary,
     EffectiveGuardrails,
     MandatoryFilterReadiness,
     PolicyBlastRadiusReport,
@@ -42,6 +43,7 @@ from querygate.admin.models import (
     TemplateSchemaCheck,
     TemplateSchemaCheckResult,
 )
+from querygate.admin.draft_store import get_draft_store
 from querygate.admin.store import ConfigVersionStore, get_config_version_store
 from querygate.audit.logger import audit_config_change
 from querygate.cli import LoadedConfigContext, load_config_context, validate_config
@@ -55,6 +57,7 @@ from querygate.core.exceptions import (
     NotFoundError,
     PolicyViolationError,
     QueryValidationError,
+    ServiceDisabledError,
 )
 from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE
 from querygate.policy.models import Policy
@@ -1032,6 +1035,131 @@ def import_change_set(
         contains_connections=contains_connections,
         ready_to_stage=not errors and bool(documents_map),
         warnings=warnings,
+    )
+
+
+def save_draft(cfg: AppConfig, principal: Principal, bundle: ConfigChangeSetBundle) -> DraftSummary:
+    """Persist `bundle` server-side, encrypted at rest, owned by the caller
+    (item 47 phase 2). Raises `ServiceDisabledError` when the store is
+    disabled (no encryption key configured), or `ConfigValidationError` when
+    the caller is already at `draft_store_max_drafts_per_principal`."""
+    start = time.monotonic()
+    store = get_draft_store(cfg)
+    if store is None:
+        raise ServiceDisabledError(
+            "the server-side draft store is not configured on this deployment"
+        )
+    try:
+        summary = store.save(
+            principal_id=principal.subject,
+            bundle=bundle,
+            description=bundle.description,
+            retention_seconds=cfg.draft_store_retention_seconds,
+            max_drafts=cfg.draft_store_max_drafts_per_principal,
+        )
+    except ConfigValidationError as exc:
+        audit_config_change(
+            action="save_draft",
+            outcome="rejected",
+            principal=principal.subject,
+            principal_scopes=sorted(principal.scopes),
+            auth_method=principal.auth_method,
+            description=bundle.description,
+            error_category="validation",
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        raise
+    audit_config_change(
+        action="save_draft",
+        outcome="success",
+        principal=principal.subject,
+        principal_scopes=sorted(principal.scopes),
+        auth_method=principal.auth_method,
+        description=bundle.description,
+        draft_id=summary.id,
+        duration_ms=int((time.monotonic() - start) * 1000),
+    )
+    return summary
+
+
+def list_my_drafts(cfg: AppConfig, principal: Principal) -> List[DraftSummary]:
+    """The caller's own saved drafts, metadata only — never audited as its
+    own action, matching the unaudited `GET /versions` list precedent."""
+    store = get_draft_store(cfg)
+    if store is None:
+        raise ServiceDisabledError(
+            "the server-side draft store is not configured on this deployment"
+        )
+    return store.list_for_principal(principal.subject)
+
+
+def load_draft(cfg: AppConfig, principal: Principal, draft_id: str) -> ConfigChangeSetBundle:
+    """Decrypt and return one of the caller's own saved drafts. Raises
+    `NotFoundError` uniformly for "doesn't exist", "expired", and "exists but
+    belongs to someone else" — never an existence/ownership oracle."""
+    start = time.monotonic()
+    store = get_draft_store(cfg)
+    if store is None:
+        raise ServiceDisabledError(
+            "the server-side draft store is not configured on this deployment"
+        )
+    try:
+        bundle = store.load(draft_id, principal_id=principal.subject)
+    except NotFoundError:
+        audit_config_change(
+            action="load_draft",
+            outcome="rejected",
+            principal=principal.subject,
+            principal_scopes=sorted(principal.scopes),
+            auth_method=principal.auth_method,
+            draft_id=draft_id,
+            error_category="not_found",
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        raise
+    audit_config_change(
+        action="load_draft",
+        outcome="success",
+        principal=principal.subject,
+        principal_scopes=sorted(principal.scopes),
+        auth_method=principal.auth_method,
+        draft_id=draft_id,
+        duration_ms=int((time.monotonic() - start) * 1000),
+    )
+    return bundle
+
+
+def delete_draft(cfg: AppConfig, principal: Principal, draft_id: str) -> None:
+    """Delete one of the caller's own saved drafts. Same uniform
+    `NotFoundError` posture as `load_draft`."""
+    start = time.monotonic()
+    store = get_draft_store(cfg)
+    if store is None:
+        raise ServiceDisabledError(
+            "the server-side draft store is not configured on this deployment"
+        )
+    try:
+        store.delete(draft_id, principal_id=principal.subject)
+    except NotFoundError:
+        audit_config_change(
+            action="delete_draft",
+            outcome="rejected",
+            principal=principal.subject,
+            principal_scopes=sorted(principal.scopes),
+            auth_method=principal.auth_method,
+            draft_id=draft_id,
+            error_category="not_found",
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        raise
+    audit_config_change(
+        action="delete_draft",
+        outcome="success",
+        principal=principal.subject,
+        principal_scopes=sorted(principal.scopes),
+        auth_method=principal.auth_method,
+        draft_id=draft_id,
+        duration_ms=int((time.monotonic() - start) * 1000),
     )
 
 

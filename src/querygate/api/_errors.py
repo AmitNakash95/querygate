@@ -51,6 +51,7 @@ from querygate.core.exceptions import (
     PolicyViolationError,
     QueryValidationError,
     QuotaExceededError,
+    ServiceDisabledError,
     public_error_message,
 )
 from querygate.core.logging import get_logger
@@ -101,6 +102,7 @@ _ACTIONABLE = (
     QueryValidationError,
     ConfigValidationError,
     AuthorizationError,
+    ServiceDisabledError,
 )
 
 
@@ -248,3 +250,13 @@ def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AuthorizationError)
     async def _authorization(_request: Request, exc: AuthorizationError) -> JSONResponse:
         return _response(exc, status.HTTP_403_FORBIDDEN)
+
+    # An optional subsystem isn't configured on this deployment (e.g. the
+    # item 47 phase 2 draft store with no encryption key) — a deployment/
+    # configuration condition, not caller input, so 503 rather than a 4xx.
+    # The draft routes already catch this locally today, but registering it
+    # here too means any future caller (a new route, an MCP tool) that lets
+    # it propagate gets the same safe status instead of a masked 500.
+    @app.exception_handler(ServiceDisabledError)
+    async def _service_disabled(_request: Request, exc: ServiceDisabledError) -> JSONResponse:
+        return _response(exc, status.HTTP_503_SERVICE_UNAVAILABLE)

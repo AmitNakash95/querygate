@@ -278,6 +278,14 @@
             <div id="change-set-result" class="validation-result"><p class="empty-state">Export the current draft, or import a previously exported bundle.</p></div>
           </article>
         </div>
+        <div class="stage-grid">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">Saved drafts</p><h3>Server-side, encrypted-at-rest recovery</h3></div><button id="refresh-drafts" class="button secondary" type="button">Refresh</button></div>
+            <p class="validation-note">An alternative to downloading a change set: the same bundle, saved server-side and encrypted at rest, so it survives a lost download and works from another device. Only you can load or delete your own saved drafts. Requires the deployment to have a draft-store encryption key configured.</p>
+            <div class="stage-actions"><button id="save-draft-server" class="button secondary" type="button">Save current draft to server</button></div>
+            <div id="draft-list" class="connection-list"><p class="empty-state">Connect with config-read scope to see your saved drafts.</p></div>
+          </article>
+        </div>
       </section>
 
       <section id="view-history" class="view" data-view="history" hidden>
@@ -562,6 +570,13 @@
           </table>
         </div>
         <p id="change-trend-empty" class="empty-state" hidden></p>
+
+        <div class="observability-subsection">
+          <div><p class="eyebrow">Trend charts</p><h3>Real time-windowed history from an external metrics backend.</h3><p>Item 44 phase 1's cards above are a current-process snapshot with no stored history to plot. This reads an <em>operator-configured</em> Prometheus-compatible HTTP API — already scraping this deployment's own metrics — for a real trend line over the configured window. Requires <code>admin:observability:read</code>. With no backend configured, this section reports as disabled rather than faking a chart.</p></div>
+        </div>
+        <p id="history-note" class="observability-snapshot" hidden></p>
+        <div id="history-charts" class="observability-cards" hidden></div>
+        <p id="history-empty" class="empty-state" hidden></p>
       </section>
     </main>
   </div>

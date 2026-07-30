@@ -4957,6 +4957,121 @@ reasoning behind them, newest first. Added to incrementally as work happens
   trend *charts* and querying an operator-configured external metrics backend
   remain deferred — those still need a store QueryGate does not own; this slice
   needed none.
+- **2026-07-30 — Safe explanations of a caller's own recent denials reuse item
+  59's audit reader rather than a third file-parsing implementation, and are
+  self-service (no admin scope) by construction (TODO.md item 45, phase 2).**
+  `GET /api/v1/help/my-recent-denials` (`help/personal_denials.py`) answers the
+  question item 45 phase 1 explicitly deferred: "why was my recent query
+  rejected?" **Why it reuses `admin/anomaly.py`'s `JsonlAuditEventSource`:**
+  the underlying I/O — stream the audit JSONL file, unwrap the hash-chained
+  ledger envelope, tolerate malformed lines — is identical to item 59's, since
+  both read the same `query.execution` event stream; only the window shape
+  differs (a single lookback here, vs. item 59's recent-vs-baseline
+  comparison), so a nominal `baseline_window_seconds` reuses the tested reader
+  instead of duplicating chain-envelope-unwrapping logic a third time (item
+  44 phase 2's `config_trends.py` was the second instance, justified there
+  because it reads a genuinely different event pair). **Why no admin scope:**
+  unlike every other audit-stream reader in the codebase (item 59, item 44
+  phase 2), this is reached from `/help/my-recent-denials` with the same
+  posture as `/help/my-access` — authentication only — because the response
+  is filtered to the caller's own `principal_id` before any data is returned,
+  the same identity `execution/service.py` already scopes delegated policy
+  resolution by, so there is no cross-principal disclosure to gate. Verified
+  end-to-end with two JWTs (distinct `sub` claims): each principal sees only
+  their own denial, proven both by exact response contents and by asserting
+  the other principal's connection id/subject never appears anywhere in either
+  response body (`tests/integration/test_personal_denials_api.py`). Each
+  denial carries only a stable `reason` label (drawn from
+  `AuditEvent.error_category`) and one fixed explanation per category — never
+  `query_shape`, another principal's activity, or a table/column identifier.
+  **A residual caught by `auditors` review before shipping:** the report's
+  scan-diagnostic fields (renamed `own_denials_found`, alongside `truncated`)
+  must themselves stay caller-scoped rather than reporting the underlying
+  reader's fleet-wide event count — safe on item 59's admin-scoped sibling,
+  but this endpoint carries no scope requirement at all, so a raw scan-wide
+  number would have leaked cross-principal audit volume to any authenticated
+  caller; fixed before commit, with a regression test proving the count never
+  reflects other principals' activity. Surfaced as a "Recent denials" panel on
+  the existing `/access/` portal.
+- **2026-07-30 — The server-side draft store persists the exact same bundle
+  phase 1 downloads, encrypted at rest, rather than inventing a second
+  document shape (TODO.md item 47, phase 2).** `admin/draft_store.py`'s
+  `DraftStore` (behind `POST/GET/GET-by-id/DELETE /admin/config/drafts[/{id}]`)
+  answers what phase 1 explicitly deferred: recovery that survives a lost
+  download and works across devices, without the browser ever holding the
+  file. **Why the same `ConfigChangeSetBundle`, not a new model:** a stored
+  draft and a downloaded one are the same artifact under two delivery
+  mechanisms — keeping one shape means loading a draft still hands the caller
+  back through the unchanged validate/stage/apply flow, exactly like
+  importing a downloaded bundle, with no second config-mutation path to keep
+  in sync. **Why encryption, not just access control:** a bundle can
+  legitimately carry a `connections` document with a literal credential —
+  the same reason phase 1 never writes it to browser `localStorage` — so the
+  server-side store encrypts the bundle at rest (Fernet, keyed by a SHA-256
+  derivation of `AppConfig.draft_store_encryption_key`, matching the plain-
+  string-secret ergonomics `audit_ledger_hmac_key`/`approval_token_hmac_key`
+  already established rather than demanding a pre-formatted key from the
+  operator) instead of relying on scope checks alone. An empty key disables
+  the subsystem outright (a clean `503`), never a silent plaintext fallback.
+  **Why ownership is enforced at the storage layer, not just the route:**
+  `DraftStore.load`/`.delete` raise the identical `NotFoundError` for "doesn't
+  exist," "expired," and "exists but belongs to someone else" — proven
+  end-to-end with two JWT principals, not just asserted — so the endpoint
+  structurally cannot become a draft-id enumeration oracle even if a future
+  route-layer check were ever loosened. **A residual `auditors` review
+  surfaced and this pass documents rather than leaving silently untested:**
+  isolation is only as fine-grained as the deployment's identity model — this
+  codebase's static `api_keys` all share one `api_key_subject`, so two admins
+  each holding their own key are NOT isolated from each other's drafts (the
+  same limitation item 45's `/help/my-recent-denials` already carries); real
+  per-admin isolation needs JWT auth, proven by a dedicated regression test
+  rather than left as an implicit assumption. **Why per-principal retention
+  bounds, not a cron job:** every save/list call opportunistically prunes
+  expired drafts first, and `draft_store_max_drafts_per_principal` (default
+  20) rejects an over-cap save rather than silently evicting an older draft
+  — deterministic behavior an admin can reason about, with no background
+  sweeper to operate. Surfaced as a "Saved drafts" panel beside the existing
+  export/import buttons in the admin UI.
+- **2026-07-30 — Real trend charts read an operator-configured external
+  metrics backend instead of QueryGate building a time-series store of its own
+  (TODO.md item 44, phase 2 remainder — now fully `✅ DONE`).** `GET
+  /api/v1/admin/observability/history` (`admin/metrics_history.py`) closes the
+  two gaps the 2026-07-29 change-velocity slice explicitly deferred: real
+  time-window trend charts, and querying an external metrics backend. **Why an
+  external backend, not QueryGate's own store:** the North Star's non-goals
+  rule out QueryGate owning a warehouse/time-series store of its own, and
+  standing one up just to chart five gauges would be a disproportionate,
+  hard-to-operate addition for a read-only convenience panel — an operator
+  already running Prometheus against this deployment's `/metrics` is a much
+  smaller lift, and it's the same shape as this repo's other "reuse what the
+  operator already has" calls (the JSONL audit sink, `docs/RELEASING.md`'s
+  registry choice). **Why a Protocol, not a hardcoded Prometheus client:**
+  `MetricsHistorySource` is a narrow read-only seam with one concrete
+  implementation today (`PrometheusMetricsHistorySource`) registered by a
+  `MetricsHistoryBackend` config enum — the same composable-interface
+  doctrine as `SecretResolver`/`DialectAdapter`/`AuditSink` — so a future
+  backend (e.g. a hosted TSDB) is one more class, never a branch at the route.
+  **Why five fixed named series, not an arbitrary-PromQL passthrough:** the
+  dashboard answers a small, known set of operational questions (query rate,
+  rejection rate, avg duration, queue depth, concurrency utilization); letting
+  a caller submit its own PromQL would be a second uncontrolled query surface
+  in a codebase whose entire premise is that the *only* surface is a validated
+  AST — so every query sent to the backend is one of five fixed templates
+  QueryGate composes itself, parameterized only by the admin-configured
+  window/step, never by request input. **Why honest degradation, not a 5xx:**
+  an unreachable or misconfigured backend is caught and surfaced as
+  `backend_error` on a 200 response (`source="prometheus"`, empty series)
+  rather than failing the whole dashboard request — the same "report the gap
+  honestly, don't crash" posture phase 1's `process_snapshot` labeling and
+  phase 2's `source="disabled"` already established. **Why the step is
+  widened, never the window:** `metrics_history_max_points_per_series` bounds
+  the request by construction the same way `config_trends.py`'s scan cap
+  does — an operator misconfiguring a wide window with a tiny step gets a
+  coarser chart, never an unbounded backend query or a silently truncated
+  time range. Rendered as a "Trend charts" subsection with one dependency-free
+  inline-SVG sparkline per series (no charting library, consistent with the
+  rest of the vanilla-JS control plane) under the same
+  `admin:observability:read` scope as every other Observability read.
 - **2026-07-21 — Structured template authoring feeds the shared release, and
   keeps the query skeleton as validated JSON rather than a visual AST builder
   (TODO.md item 87).** Three choices. **(1) It composes into the change-set
