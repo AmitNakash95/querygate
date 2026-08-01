@@ -87,7 +87,8 @@ claim when the work ships or before explicitly handing the item back.
 - [x] **90** — Delegated agent identity into policy + dual-identity audit (F1).
   ✅ **Shipped** (RFC 8693 actor→policy, dual-identity audit, MCP OAuth
   resource-server conformance RFC 9728/8707/6750). The attribution half of the
-  Proof pillar is now realized — advertise it; complete the pillar with item 91.*
+  Proof pillar; with item 91 also shipped, the pillar is realized end-to-end —
+  advertise it.*
 - [x] **91** — Tamper-evident hash-chained audit ledger + per-query receipts
   (F5). ✅ **Shipped** (`AUDIT_SINK_BACKEND=jsonl_chained`, SHA-256/HMAC chain,
   `querygate-audit verify`/`receipt`). *Pairs with 90 to produce the "prove
@@ -100,6 +101,24 @@ claim when the work ships or before explicitly handing the item back.
   reproducible corpus + `querygate-security-benchmark` CLI + published report,
   100% catch vs. 0% modeled raw-SQL baseline); box stays `[ ]` until phase 2's
   live LLM/Toolbox run (needs external infra).
+- [ ] **127** — Reject an MCP request whose routing headers disagree with its
+  body. *Added 2026-07-30 by `competitive-scan`. The MCP `2026-07-28` spec
+  mandates this server-side check precisely because a gateway authorizing on
+  `Mcp-Name` while the server executes the body is a confused deputy — and
+  "QueryGate behind someone else's front door" (P4) is exactly that topology.
+  Prospective, not a live bug (we speak `2025-11-25`), but it is a boundary
+  bypass, it belongs in the adversarial suite, and it is deliberately
+  independent of item 128 so it can ship now and fail closed the moment a
+  gateway starts sending the headers.* **Depends on 86.**
+- [ ] **136** — The `jsonl_chained` audit backend silently disables four shipped
+  read surfaces. *Pre-existing defect found 2026-07-30 by `auditors`. Opting
+  into the tamper-evident posture item 91 shipped currently costs
+  `/help/my-recent-denials`, the anomaly report, the change-trend report, and
+  the admin UI audit browser. Three readers already unwrap the envelope and are
+  refused at the gate; the fourth (`_audit_page`) has **no** unwrap, so a
+  gate-only fix would turn it from honestly-disabled into silently-empty. Phase
+  0 because it makes the stronger audit configuration worse than the weaker one
+  — backwards for the security-review story.* **Depends on 91; blocks 134.**
 
 ### Phase 1 — Pilot-readiness (let one design partner deploy & trust it)
 
@@ -112,6 +131,15 @@ claim when the work ships or before explicitly handing the item back.
   consumer `cosign verify`/`gh attestation verify` docs). Box stays `[ ]` until
   the two maintainer-gated bits — the *first* executed signed release (a
   deliberate tag push) and a chosen Python package-index — are done.
+- [ ] **135** — Automatic (TTL/lease-driven) credential re-resolution, without
+  an operator-triggered reload. *Added 2026-07-30 by `competitive-scan`; scope
+  corrected the same day by `auditors` — an earlier draft wrongly claimed
+  rotation requires a process restart. It does not: item 13 shipped
+  reload-triggered re-resolution with in-flight-safe engine disposal, and
+  README/PRODUCT_GUIDE/THREAT_MODEL document it correctly. The real gap is that
+  the refresh is **operator-pull only** — no TTL, no lease awareness, no
+  automatic trigger — so short-TTL dynamic credentials expire into failures
+  between reloads. Add the trigger, not the plumbing.* **Depends on 13.**
 - [x] **56** — HA / multi-region reference deployment + DR runbook (start with a
   supported Helm path). *A pilot has to actually deploy; unblocks the
   "deployed in a day" pilot success criterion.* ✅ **Shipped** (zero-downtime
@@ -148,7 +176,18 @@ claim when the work ships or before explicitly handing the item back.
   item 53).
 - [ ] **53** — Independent third-party security audit + published report.
   *External validation enterprise buyers ask for. Needs vendor coordination —
-  see "Coordination-gated" note below.*
+  see "Coordination-gated" note below.* **Highest trust-per-effort item on the
+  board:** it converts the central claim from self-asserted to
+  third-party-attested, which is the objection that actually closes a security
+  review.
+- [ ] **134** — Compliance-grade (WORM) audit retention + managed search.
+  *Added 2026-07-30 by `competitive-scan`; scope corrected the same day by
+  `auditors`. Item 91's chain **does** detect in-ledger deletion; the residual
+  is prevention, availability, and whole-file loss — retention is a separate
+  control regulated buyers ask for by name. Note there is **no sink registry**
+  today (`configure_audit_sink` is an `if`-chain), so this item owns building
+  one, composing with the chain rather than replacing it, and getting a remote
+  PUT off the request path.* **Depends on 91, 136.**
 - [x] **60** — Bug bounty / responsible disclosure program. *Cheap, durable
   trust signal; stand up after 53 clears the obvious issues.* ✅ **Shipped**
   (coordinated-disclosure program in `SECURITY.md`: recognition-only structure +
@@ -353,6 +392,50 @@ position.
 - [ ] **19** — Additional dialects (MySQL, Snowflake, BigQuery, …). *Removes the
   "QueryGate is narrow" objection. **Depends on 57**; also downstream of the
   engine — each new adapter must render every Phase 4 primitive.*
+- [ ] **128** — Conform to the final MCP `2026-07-28` protocol revision. *Added
+  2026-07-30 by `competitive-scan`; the spec went final on 2026-07-28 (the
+  2026-07-22 scan saw only the RC) and we are a full revision behind on
+  `2025-11-25`. This sits in Adoption, not Moat, because the sharp edge is
+  **distribution**: an intermediary enforcing policy on mirrored headers is told
+  to reject the request when the protocol version is older or absent, so we
+  infer a conforming gateway gains a defensible reason not to front us —
+  directly against the P4 play.* **Gated on Python SDK availability — track
+  upstream, do not hand-roll the transport.**
+- [ ] **129** — Never advertise a principal-varying MCP result as
+  shared-cacheable. *The new revision's `cacheScope` lets shared intermediaries
+  reuse a `tools/list`/`resources/read` response across callers; our MCP surface
+  is per-principal by construction, so `"public"` on such a result would leak
+  one caller's visible connection/table surface to another. Encode it as a
+  tested invariant (à la `test_credential_redaction.py`), because the failure
+  mode is a default nobody chose, not a policy bug.* **Depends on 128.**
+- [ ] **130** — Annotate `connection` with `x-mcp-header` for gateway-native
+  authorization. *P4 expressed in the spec's own mechanism: a fronting gateway
+  can enforce "this identity may only reach connection X" on a header without
+  parsing the body, while the query-**shape** decision it structurally cannot
+  make stays ours. Annotate `connection` only — mirroring AST internals into
+  headers would leak query semantics to intermediaries.* **Depends on 128, 127.**
+- [ ] **132** — Reconcile stale shipped-status claims left behind by items
+  90–93. *Surfaced by the `auditors` claim review on 2026-07-30. Cheap, and it
+  is outward-facing: GO_TO_MARKET.md understates four shipped capabilities, and
+  item 93's body still points an implementer at a module deleted in July.*
+- [ ] **133** — Caller-facing, quota-metered verdict endpoint (play P4).
+  *Added 2026-07-30 by `competitive-scan`; scope corrected the same day by
+  `auditors`. The decision logic already ships twice (item 31 active-policy,
+  item 39 draft-aware and already accepting a `StructuredQuery`) — what is
+  unscoped is the **non-admin, caller-facing, quota-metered** verdict about the
+  **calling** principal, which is what a gateway needs. Filed in Adoption rather
+  than Moat by the same test applied to item 128: NORTH_STAR files P4 under the
+  leverage moves (turn competitors into distribution), not the three pillars,
+  and its gateway value compounds once 128/130 land. Reuse the shared evaluator;
+  do not extend `explain`; design it against the discovery-oracle channels
+  (THREAT_MODEL QG-19/QG-24).* **Depends on 26, 31, 39, 45, 121.**
+- [ ] **131** — Publish the StructuredQuery AST as a namespaced MCP extension.
+  *The new extensions framework gives strategic play P2 a standards-blessed
+  vehicle. Owning the citable **artifact** is the answer to Cube/DAB having
+  adopted our messaging. Internal half (author the spec, reserve the namespace,
+  declare + test it) is safe to build; **external publication is decision-gated**
+  — a standing commitment and an outward-facing act, maintainer's call.*
+  **Depends on 128.**
 
 ### Phase 6 — Catalog & observability depth (lowest marginal ROI — opportunistic)
 
