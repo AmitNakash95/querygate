@@ -76,7 +76,7 @@ order-of-magnitude, not commitments.
 | 42 | ✅ Four-eyes config approval and separation of duties | XL | 10, 23, 25, 31 |
 | 43 | ✅ Admin connection-operations and health workspace (phase 1: admin connection-status API; phase 2a: "test now" probe; phase 2b: browser workspace) | L | 7, 12, 31 |
 | 44 | ✅ Admin observability and rejection-trend dashboard (phase 1: admin-scoped aggregated overview API + read-only browser cards panel; phase 2: time-window charts, config/catalog-change trend, external metrics backend not started) | L | 12, 23, 31, 35 |
-| 45 | ✅ Dedicated non-admin "My access" portal (phase 1: identity, guardrails, mandatory-filter readiness, schema browser; phase 2: personal denial history not started) | M | 22, 31, 33 |
+| 45 | ✅ Dedicated non-admin "My access" portal (phase 1: identity, guardrails, mandatory-filter readiness, schema browser; phase 2: personal denial history via `GET /help/my-recent-denials`) | M | 22, 31, 33 |
 | 46 | ✅ Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
 | 47 | ✅ Safe draft recovery plus config export/import UX (phase 1: change-set export/import + policy-only local recovery; phase 2: server-side encrypted draft store not started) | M | 13, 25, 31 |
 | 48 | ✅ Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) (phase 1: file-configured invocable templates + REST/MCP; phase 2: governed authoring via the config-versioning plane) | L | 6, 22, 25, 32B |
@@ -124,7 +124,7 @@ order-of-magnitude, not commitments.
 | 90 | ✅ Delegated agent identity (on-behalf-of) into policy + dual-identity audit | M | 8, 10, 23 |
 | 91 | ✅ Tamper-evident hash-chained audit ledger + per-query compliance receipts | M | 23 |
 | 92 | ✅ In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) | L | 26, 90, 91 |
-| 93 | ✅ Governed Writes — structured, bounded, previewable, governed agent mutations (governance tier shipped: preview/diff, gated execution, approval, batch, upserts; reversibility/undo REMOVED 2026-07-23; `release-smoke` write round-trip open) | XL | 25, 48, 90, 91 |
+| 93 | ✅ Governed Writes — structured, bounded, previewable, governed agent mutations (governance tier shipped: preview/diff, gated execution, approval, batch, upserts; reversibility/undo REMOVED 2026-07-23; `release-smoke` write round-trip shipped) | XL | 25, 48, 90, 91 |
 | 94 | ✅ Verify/enable prepared-statement plan reuse for template execution | S | 48 |
 | 95 | ✅ Discoverable scope catalog + recommended role bundles for IdP integration | S | 10, 90 |
 | 96 | ✅ Unify the AST reference-walk into a single canonical visitor | M | — |
@@ -162,7 +162,7 @@ order-of-magnitude, not commitments.
 | 129 | Never advertise a principal-varying MCP result as shared-cacheable | S | 128 |
 | 130 | Annotate `connection` with `x-mcp-header` for gateway-native authorization | S | 127, 128 |
 | 131 | Publish the StructuredQuery AST as a namespaced MCP extension | M | 128 |
-| 132 | Reconcile stale shipped-status claims left behind by items 90–93 | S | — |
+| 132 | ✅ Reconcile stale shipped-status claims left behind by items 90–93 | S | — |
 | 133 | Caller-facing quota-metered verdict endpoint (play P4) — reuses 31/39's decision logic | M–L | 26, 31, 39, 45, 121 |
 | 134 | Compliance-grade (WORM) audit retention + managed search | L | 91, 136 |
 | 135 | Automatic (TTL/lease-driven) credential re-resolution, without an operator reload | M | 13 |
@@ -791,7 +791,8 @@ Shipped: a zero-downtime Helm chart (`updateStrategy.maxUnavailable: 0` +
 multi-zone overlay (autoscaling floor 3, PDB, zone/host topology spread,
 Redis-shared concurrency), an optional RWX config-governance PVC, and
 `deploy/HA_DR.md` — the shared-state correctness matrix (concurrency shared;
-quota still per-replica until item 50 phase 2; config/audit per-replica unless
+quota per-replica unless the Redis quota backend is configured (item 50 phase
+2 shipped the mechanism, opt-in); config/audit per-replica unless
 shared), the multi-replica zero-downtime config-reload contract, multi-zone/
 multi-region topology, and a backup/restore + RTO/RPO DR procedure. Chart HA
 invariants are asserted against `helm template` in
@@ -1203,10 +1204,12 @@ WHERE, in-txn cap, atomic — single or all-or-nothing batch), *previewed* (dry-
 + bounded masking-aware old→new diff), *approved* (REST token + MCP elicitation),
 *attributed* (dual-identity, tamper-evident, redaction-safe audit). REST + MCP surfaces,
 clean typed errors, an adversarial security suite, and proven on **SQLite +
-real Postgres + real MSSQL + the shipped image + a concurrency load gate**. Only
-two **reasoned deferrals** remain (not "not started" — deliberate, recorded):
-upsert-undo (per-row insert-or-update is ambiguous to reverse) and
-approval-binds-to-diff-hash (over-engineering vs the current fingerprint binding).
+real Postgres + real MSSQL + the shipped image + a concurrency load gate**. One
+**reasoned deferral** remains (not "not started" — deliberate, recorded):
+approval-binds-to-diff-hash (over-engineering vs the current fingerprint
+binding). (An earlier "upsert-undo" deferral is moot: reversibility/undo was
+removed entirely on 2026-07-23 — see below — so there is no undo mechanism
+left for upserts to be a special case of.)
 
 **Phase 2a shipped (gated write EXECUTION, REST; maintainer-approved, Decision
 Log recorded).** `execution/write_execution.py`'s `WriteExecutionService.execute()`
@@ -1365,16 +1368,15 @@ reports the right count AND **changes nothing** — before == after — plus
 deny-by-default). The `IN (subquery)` (item 97) is rejected in a write WHERE for
 phase 1.
 
-**Phase 2b–3 (not started):** phase 2a above shipped the core gated *execution*
-(single transaction, in-txn row cap, item-92 approval on the row *count*,
-dual-identity audit [90], tamper-evident audit [91]). Still open — **phase 2b:**
-the transactional row-level old→new *diff* preview (the current preview reports
-the affected *count* + parameterized SQL; the killer per-row diff runs the DML in
-a rolled-back txn) and approval on that diff, the MCP `run_structured_writes`
-execute tool, the adversarial write security suite, the `release-smoke` write
-round-trip, and the write concurrency load gate; **phase 3:** reversibility/
-compensation + upserts + batch + MSSQL parity + scalar-function/CASE SET-values +
-NOT NULL/FK/unique pre-validation.
+**Phase 2b–3 planning note — superseded, kept for history only.** This
+paragraph originally scoped phase 2b/3 as "not started." Every item it listed
+has since shipped (row-level diff preview + approval, the MCP
+`run_structured_writes` execute tool, the adversarial write security suite,
+the `release-smoke` write round-trip, the write concurrency load gate,
+upserts, atomic batch, MSSQL parity, constraint pre-validation) or was
+deliberately removed (reversibility/compensation — see the 2026-07-23 removal
+note above). See "Comprehensively shipped" at the top of this item and the
+phase 2a/2b sections above for what actually shipped.
 
 **Effort: XL (cleanly phaseable; Phase 1 is L and carries zero write risk).
 Priority: flagship. Status: decision-gated (crosses read-only). Depends on:
@@ -1475,13 +1477,17 @@ spine. No second enforcement point is invented.
    "requires approval" rejection carrying an approval token bound to the exact
    compiled write + diff hash. Approval, approver identity, and decision are
    audited.
-9. **`execution/compensation.py` — bounded compensation/undo.** Before a gated
+9. **`execution/compensation.py` — bounded compensation/undo — REMOVED
+   2026-07-23, do not point an implementer here.** This was originally planned
+   (and briefly shipped, see the Phase 3a/3b history below) as: before a gated
    mutation commits, capture a redaction-aware **pre-image snapshot** of the
    affected rows (bounded by policy rows/bytes/TTL) and emit a governed rollback
-   operation that re-applies the pre-image under the same pipeline. **Honest
-   limits, documented:** bounded reversibility only — cannot unwind cascading
-   triggers/FK actions or side-effects, and downstream consumers may already
-   have read the changed value. Sell bounded rollback, never a time machine.
+   operation that re-applies the pre-image under the same pipeline. The module,
+   `execution/redis_compensation.py`, `POST /write/undo`, and the MCP
+   `undo_structured_write` tool were all deleted in the 2026-07-23 reversibility
+   removal (Decision Log, `docs/PRODUCT_GUIDE.md`) — undo forced a second copy
+   of real row values outside the customer's DB, against the data-never-leaves
+   North Star. There is no file at this path today.
 10. **Transaction, concurrency, session guardrails** — writes run through
     `execution/concurrency.py` (a dedicated write limiter; a write must not be
     starved by or starve reads) and `connections/engine.py` with
@@ -2155,76 +2161,14 @@ are draft-only by charter.
 
 **Effort:** M (internal half). **Depends on:** 128.
 
-### 132. Reconcile stale shipped-status claims left behind by items 90–93
+### 132. Reconcile stale shipped-status claims left behind by items 90–93 ✅ DONE
 
-**Surfaced 2026-07-30 by the `auditors` claim review of the `competitive-scan`
-pass; pre-existing drift, not caused by that pass.** Items 90, 91, 92, and 93
-all shipped, but several surfaces still describe them as open or partial. Each
-was verified against the code:
+Fixed the drift across `GO_TO_MARKET.md`, `README.md`, and `TODO.md` itself
+left behind by items 90–93 (and, surfaced along the way, items 45/50/56/58)
+describing shipped capability as open or partial; a post-build claim-reviewer
+audit caught three further stale spots in the same pass.
 
-- **`docs/business/GO_TO_MARKET.md` "Product claims: current versus pending"** —
-  the "Safe to claim now" list omits delegated identity (90), the tamper-evident
-  ledger + receipts (91), in-query approval (92), and governed writes (93), all
-  shipped. That file's own header commits it to staying "aligned with the
-  technical roadmap in `TODO.md`", and it is the **sole** outlier:
-  `LANDING_MARKET_POSITIONING_RESEARCH_2026-07-26.md` and `landing/security.html`
-  already reflect all four. Note its "Do not claim yet → compliance-grade/WORM
-  audit retention" line is still **correct** (item 91 is not WORM) — do not
-  over-correct that one. A `pitch-sync` job.
-- **`README.md`** — the heading "In-query human-in-the-loop approval (phase 1)"
-  keeps a stale phase suffix while the body directly beneath documents the
-  phase-2 behavior (`approval_sensitivities`, two triggers).
-- **Item 93's own worklist surface** — the quick-scan row says the
-  `release-smoke` write round-trip is open, but `scripts/release_smoke.sh`
-  already runs `write/preview` → `write/execute` (insert) → `write/execute`
-  (delete) against real Postgres in the built image and prints "container
-  executed a governed write". The body also still carries a "Phase 2b–3 (not
-  started)" paragraph and an eviction action item for
-  `execution/compensation.py` — **a file deleted on 2026-07-23** with the
-  write-undo feature. This is the largest stale surface in the worklist.
-
-**Why it matters:** these are claim-accuracy defects, and the GO_TO_MARKET one
-is outward-facing — understating shipped capability costs real credibility in
-exactly the security-review conversation the North Star's success metric turns
-on. The item-93 residue is worse in kind: an action item pointing at a deleted
-module will send a future agent hunting for code that does not exist.
-
-**Effort:** S. **Depends on:** — (pure reconciliation; verify each against the
-code before editing, since some sub-claims like WORM are correctly negative).
-
-**Also in scope (found 2026-07-30 while scoping items 134/135):**
-
-- GO_TO_MARKET.md's HA/DR claim still says "the per-principal *quota* budget is
-  still per-replica until item 50 phase 2" — item 50 is fully ✅ DONE including
-  phase 2 (`execution/redis_quota.py`'s `RedisQuotaLimiter` makes the window one
-  shared budget across replicas). **Correct it to *conditional*, not deletion:**
-  cross-replica quota is real only when the Redis backend is configured
-  (`init_redis_quota_limiter` is opt-in), so "per-replica unless the Redis quota
-  backend is configured" is the accurate wording. Deleting the caveat outright
-  would create a new false claim for a Redis-less deployment.
-- GO_TO_MARKET.md's "Do not claim yet → secrets-manager rotation" is likewise
-  understated post-item-13: README, PRODUCT_GUIDE, and THREAT_MODEL all
-  correctly document reload-triggered re-resolution. Correct it to name the
-  real residual (no automatic/TTL-driven refresh — item 135), rather than
-  implying no rotation support at all.
-- TODO.md's own quick-scan row for item 45 still says "phase 2: personal denial
-  history not started" while the `### 45.` heading is plain `✅ DONE` and item
-  126 references the shipped `GET /help/my-recent-denials`. `worklist-check`
-  regenerates the `✅` column but not the parenthetical, so this needs a hand
-  fix.
-- ~~Item 58's body quoted a stale `14/14 vs. 0/14`~~ — **fixed inline
-  2026-07-30** to the published `16/16 vs. 0/16`
-  (`docs/business/SECURITY_BENCHMARK.md`). Left recorded here because the
-  remaining task is a *sweep*: grep the repo for other hard-coded benchmark
-  figures, since the report's whole value is that it is reproducible and it
-  warns against quoting from memory.
-- **Surfaced 2026-08-01 by the `claim-reviewer` audit of item 136.**
-  `README.md`'s `/access/` section still says recent-personal-denial history
-  "is intentionally not included in this first pass... tracked as TODO item 45
-  phase 2" — the same stale claim as the quick-scan row two bullets above, but
-  in a second location. Item 45 phase 2 (`GET /help/my-recent-denials`) has
-  shipped and self-service, no-admin-scope access is documented correctly
-  elsewhere in the same README. Update or delete that paragraph.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 132).
 
 ### 133. The verdict endpoint — expose the decision without the execution (play P4)
 

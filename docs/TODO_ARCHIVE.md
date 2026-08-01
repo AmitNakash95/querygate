@@ -8498,6 +8498,69 @@ large batch from a real, conformant 2026-07-28 gateway once item 128 lands —
 a product tradeoff between pre-auth cost and future-client compatibility, not
 a small/safe fix, and left for a maintainer decision alongside item 128.
 
+### 132. Reconcile stale shipped-status claims left behind by items 90–93 ✅ DONE
+
+**Surfaced 2026-07-30 by the `auditors` claim review of the `competitive-scan`
+pass; pre-existing drift, not caused by that pass.** Items 90, 91, 92, and 93
+all shipped, but several surfaces still described them as open or partial.
+
+**What shipped — every claim verified against the code before editing:**
+
+- `docs/business/GO_TO_MARKET.md`'s "Safe to claim now" list gained four
+  bullets for items 90 (delegated agent identity, dual-identity audit, MCP
+  OAuth resource-server conformance RFC 9728/8707/6750), 91 (tamper-evident
+  hash-chained audit ledger + per-query receipts, `AUDIT_SINK_BACKEND=jsonl_chained`),
+  92 (in-query approval, both triggers), and 93 (governed writes — deny-by-default,
+  preview/diff, gated/audited execution; reversibility/undo explicitly named
+  as removed so it's never mis-claimed). The existing "do not claim yet →
+  compliance-grade/WORM audit retention" line was left as-is (still correct —
+  item 91 is chain-integrity detection, not WORM retention).
+- The same file's HA/DR quota bullet and "secrets-manager rotation" bullet
+  were corrected from unconditional/understated framing to the accurate
+  residual: quota sharing is real only when `RedisQuotaLimiter` is configured
+  (opt-in); credential rotation *without a process restart* already works
+  (`POST /api/v1/admin/reload-config`, in-flight-safe engine disposal — item
+  13) and the real gap is the refresh being operator-pull only, not automatic
+  (item 135, still open).
+- `README.md`'s "In-query human-in-the-loop approval (phase 1)" heading
+  dropped its stale phase suffix (the body already documented both shipped
+  triggers). Its `/access/` section's stale "personal-denial history not
+  included in this first pass" paragraph was rewritten to describe the
+  shipped `GET /api/v1/help/my-recent-denials` endpoint (authentication-only,
+  no admin scope, `principal_id`-filtered, configurable lookback).
+- `TODO.md`'s own quick-scan rows for items 45 and 93 were corrected (item 45's
+  "personal denial history not started" parenthetical; item 93's
+  "`release-smoke` write round-trip open" → shipped, verified directly against
+  `scripts/release_smoke.sh`'s real insert→verify→delete→verify round-trip
+  against real Postgres in the built image).
+- Item 93's own body: a "Phase 2b–3 (not started)" planning paragraph —
+  everything it listed had since shipped or been deliberately removed — was
+  replaced with a superseded/history note; the numbered design-plan's
+  `execution/compensation.py` entry (a file deleted 2026-07-23 with the
+  write-undo feature) was marked removed so it stops sending an implementer
+  hunting for nonexistent code; a now-meaningless "upsert-undo" deferral
+  (undo itself was removed entirely, so there's no mechanism left for upserts
+  to be a special case of) was dropped, leaving `approval-binds-to-diff-hash`
+  as the sole remaining reasoned deferral.
+- A benchmark-figure sweep (the original `14/14`→`16/16` fix already landed
+  2026-07-30) found no further stale hard-coded figures outside
+  `TECHNICAL_REVIEW.md`, which is a dated point-in-time snapshot correctly
+  left unedited — it reported what was true on 2026-07-23, not a living claim.
+
+**Post-build `claim-reviewer` audit (2026-08-01)** found three further stale
+spots surfaced by, but not part of, this same reconciliation pass — all fixed
+in the same commit: README's approval section still claimed MCP elicitation
+approval as "the one remaining piece" three lines below a heading this item
+had just marked complete, when `mcp/elicitation.py` had shipped it weeks
+earlier; GO_TO_MARKET's "do not claim yet" list still said "signed
+release/SBOM distribution" in blanket form when `sales/index.html` already
+carried the precise, reconciled framing (mechanism built and CI-tested,
+no release cut through it yet) — reused verbatim; and item 56's own HA/DR body
+carried the identical stale quota phrase GO_TO_MARKET's copy had just been
+corrected away from.
+
+**Effort:** S. **Depends on:** none.
+
 ### 136. The `jsonl_chained` audit backend silently disables four shipped read surfaces ✅ DONE
 
 **Surfaced 2026-07-30 by the `auditors` architecture review while scoping item
