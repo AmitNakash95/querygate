@@ -88,23 +88,10 @@ If none applies, name every reviewer as not applicable and stop. Do not invent a
 review to make the audit look busy. This explicit result satisfies the mandatory
 completion gate; silently omitting the audit does not.
 
-Use these QueryGate standards for the specialized reviewers:
-
-- `security-invariant-reviewer`: read
-  `.claude/skills/security-invariant-check/SKILL.md`; also use
-  `.claude/skills/adversarial-probe/SKILL.md` as a threat checklist, but remain
-  report-only.
-- `test-contract-reviewer`: read `.claude/skills/test-gap/SKILL.md`.
-- `claim-reviewer`: read `.claude/skills/claim-verify/SKILL.md`.
-- `architecture-boundary-reviewer`: enforce the one read/write request
-  pipeline, the single catalog mutation path, Protocol/implementation/registry
-  dispatch, mechanical dialect translation, reject-don't-emulate, and no new
-  product non-goal without a recorded decision.
-- `ui-a11y-reviewer`: inspect semantic structure, labels/names, keyboard and
-  focus behavior, dialogs/live regions, contrast, responsive layout, reduced
-  motion, and safe rendering of operator/database-provided text. Check
-  bidirectional-text isolation where external identifiers or values can appear;
-  do not assume the whole product is RTL.
+Each reviewer's full standards, checklist, and report format live in its own
+`.claude/agents/<reviewer-name>.md` — read the relevant one before briefing
+that reviewer rather than restating its criteria here, so there is exactly one
+place each reviewer's standard can drift out of date.
 
 Require each selected reviewer to cover and explicitly mark these categories
 clean or not clean:
@@ -125,6 +112,20 @@ clean or not clean:
 
 ## 3. Launch report-only reviewers in parallel
 
+Launch each selected reviewer as its dedicated `subagent_type` — literally
+`security-invariant-reviewer`, `architecture-boundary-reviewer`,
+`test-contract-reviewer`, `ui-a11y-reviewer`, or `claim-reviewer`, matching the
+agent definitions under `.claude/agents/`. Each of those definitions drops
+`Write`/`Edit` from its tool list, closing the specific failure mode of a
+generic subagent given only a report-only *instruction* while still holding
+full tool access — don't fall back to a generic subagent for these roles.
+This narrows the surface but does not make "report only" airtight: `Bash`
+remains available and can itself write, move, or stage files (`>`, `sed -i`,
+`git add`/`commit`, …), so the restriction reduces the blast radius of a
+misbehaving reviewer rather than eliminating it. Treat it as raising the bar,
+not as a guarantee that lets you skip briefing each reviewer not to touch the
+tree.
+
 Launch one subagent per selected reviewer in a single parallel batch, using
 background execution when the runtime supports it. Do not serialize reviewers.
 These reviewer subtasks are internal stages of this invocation: tell them not to
@@ -134,16 +135,18 @@ Give each reviewer a tailored brief containing:
 
 1. The exact target (working tree, commit, or range), including base/head.
 2. The file-by-file inventory and each file's responsibility.
-3. The governing documents to read **before** judging the design.
+3. The governing documents to read **before** judging the design (its own
+   `.claude/agents/<name>.md` already directs it to its skill-level standards
+   — add anything target-specific here).
 4. Numbered questions derived from the riskiest or least-certain choices in the
    diff. Ask about clever shortcuts and duplicated enforcement explicitly.
 5. The categories the reviewer must mark clean when no issue is found.
 6. This instruction:
 
    > Read the complete changed files and the adjacent call sites, models, and
-   > tests; use the diff only as a locator. Report only—change nothing and do
-   > not run the test suite. Separate target-caused findings from pre-existing
-   > observations.
+   > tests; use the diff only as a locator. Do not run the test suite — your
+   > tool access is already restricted to read-only tools. Separate
+   > target-caused findings from pre-existing observations.
 
 Require this response shape:
 
