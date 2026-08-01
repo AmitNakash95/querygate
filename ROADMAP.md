@@ -449,7 +449,7 @@ position.
   parsing the body, while the query-**shape** decision it structurally cannot
   make stays ours. Annotate `connection` only — mirroring AST internals into
   headers would leak query semantics to intermediaries.* **Depends on 128, 127.**
-- [ ] **132** — Reconcile stale shipped-status claims left behind by items
+- [x] **132** — Reconcile stale shipped-status claims left behind by items
   90–93. *Surfaced by the `auditors` claim review on 2026-07-30. Cheap, and it
   is outward-facing: GO_TO_MARKET.md understates four shipped capabilities, and
   item 93's body still points an implementer at a module deleted in July.*
