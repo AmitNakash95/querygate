@@ -179,6 +179,11 @@ A task isn't done when it "works."
 - Reviewer subagents launched by `auditors` are internal stages of their parent
   audit, not top-level user tasks. They return their report to the parent and
   **must not invoke `auditors` recursively**.
+- State the auditors report — target, the 1–10 rating, reviewers run/N/A,
+  findings and verdicts, what was fixed — **in the final chat response
+  itself**, not only as an internal step. Producing the report is not the same
+  as surfacing it; a clean audit or a trivial-task N/A is not a substitute for
+  stating the rating.
 
 **Definition of done for non-trivial repository changes** (skip the following
 change-specific checks only for trivial one-liners, pure formatting,
