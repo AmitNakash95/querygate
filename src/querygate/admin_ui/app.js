@@ -2292,7 +2292,7 @@
       wrap.hidden = true;
       empty.hidden = false;
       empty.textContent =
-        "Anomaly surfacing is disabled — enable the JSONL audit sink (AUDIT_SINK_BACKEND=jsonl) to compute per-principal baselines.";
+        "Anomaly surfacing is disabled — enable the JSONL audit sink (AUDIT_SINK_BACKEND=jsonl or jsonl_chained) to compute per-principal baselines.";
       return;
     }
     const windowLabel = `recent ${obsDuration(report.recent_window_seconds)} vs baseline ${obsDuration(report.baseline_window_seconds)}`;
@@ -2362,7 +2362,7 @@
       wrap.hidden = true;
       empty.hidden = false;
       empty.textContent =
-        "Change-trend surfacing is disabled — enable the JSONL audit sink (AUDIT_SINK_BACKEND=jsonl) to compute config/catalog change volume.";
+        "Change-trend surfacing is disabled — enable the JSONL audit sink (AUDIT_SINK_BACKEND=jsonl or jsonl_chained) to compute config/catalog change volume.";
       return;
     }
     const windowLabel = `recent ${obsDuration(report.recent_window_seconds)} vs baseline ${obsDuration(report.baseline_window_seconds)}`;

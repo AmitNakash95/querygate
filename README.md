@@ -827,7 +827,8 @@ The control plane provides:
   and only shown when the proposal's status makes that action legal, a
   publish-conflict preview, and connection-scoped catalog version rollback;
 - filtered, newest-first browsing of persisted JSONL query/config/catalog/
-  connection-probe audit events (when `AUDIT_SINK_BACKEND=jsonl`);
+  connection-probe audit events (when `AUDIT_SINK_BACKEND=jsonl` or
+  `jsonl_chained`);
 - a connection health workspace — the same credential-free per-connection
   status the admin API above returns, plus a "Test now" button per
   connection (gated on the separate `admin:connections:test` scope) that

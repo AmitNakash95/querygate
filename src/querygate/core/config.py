@@ -41,6 +41,20 @@ class AuditSinkBackend(str, Enum):
     # reordering are detectable via `querygate-audit verify`.
     JSONL_CHAINED = "jsonl_chained"
 
+    def is_locally_readable(self) -> bool:
+        """Whether QueryGate's own read surfaces (the personal-denials
+        report, the anomaly report, the config/catalog change-trend report,
+        and the admin UI audit browser — TODO.md item 136) can read this
+        backend's persisted stream back off local disk. Both JSONL variants
+        share one underlying file format — `JSONL_CHAINED` wraps each event
+        in a hash-chain envelope that readers transparently unwrap via
+        `audit.ledger.unwrap_envelope` — so both are readable; `NONE` has
+        nothing persisted to read. The single capability lookup every such
+        gate must use instead of an equality/inequality check against one
+        member, so a future backend (TODO.md item 134) declares its
+        readability once here rather than at every call site."""
+        return self in (AuditSinkBackend.JSONL, AuditSinkBackend.JSONL_CHAINED)
+
 
 class MetricsHistoryBackend(str, Enum):
     """Time-windowed metrics history source for the observability dashboard
@@ -266,8 +280,9 @@ class AppConfig(BaseSettings):
 
     # Read-only per-principal anomaly surfacing over the persisted audit stream
     # (TODO.md item 59). Purely a signal for a human admin — never wired into
-    # enforcement. Requires audit_sink_backend=jsonl; with backend=none the
-    # anomaly endpoint honestly reports source="disabled". A caller's recent
+    # enforcement. Requires a locally-readable audit_sink_backend (jsonl or
+    # jsonl_chained — AuditSinkBackend.is_locally_readable()); with backend=none
+    # the anomaly endpoint honestly reports source="disabled". A caller's recent
     # window is compared against its own preceding baseline window.
     anomaly_recent_window_seconds: float = pyd.Field(default=3600.0, gt=0)
     anomaly_baseline_window_seconds: float = pyd.Field(default=86400.0, gt=0)
@@ -282,8 +297,8 @@ class AppConfig(BaseSettings):
     # (TODO.md item 44, phase 2 slice). Same recent-vs-baseline shape as the
     # anomaly windows above, applied to config.governance/catalog.governance
     # events fleet-wide rather than query.execution events per-principal.
-    # Requires audit_sink_backend=jsonl; with backend=none the endpoint
-    # honestly reports source="disabled".
+    # Requires a locally-readable audit_sink_backend (jsonl or jsonl_chained);
+    # with backend=none the endpoint honestly reports source="disabled".
     change_trend_recent_window_seconds: float = pyd.Field(default=3600.0, gt=0)
     change_trend_baseline_window_seconds: float = pyd.Field(default=86400.0, gt=0)
     change_trend_max_events_scanned: int = pyd.Field(default=200_000, ge=1)
@@ -308,9 +323,9 @@ class AppConfig(BaseSettings):
 
     # Safe explanations of the caller's own recent denials (TODO.md item 45,
     # phase 2) — a principal-scoped, self-service read of the persisted audit
-    # stream reached from GET /help/my-recent-denials. Requires
-    # audit_sink_backend=jsonl; with backend=none the endpoint honestly
-    # reports source="disabled".
+    # stream reached from GET /help/my-recent-denials. Requires a
+    # locally-readable audit_sink_backend (jsonl or jsonl_chained); with
+    # backend=none the endpoint honestly reports source="disabled".
     personal_denials_lookback_seconds: float = pyd.Field(default=86400.0, gt=0)
     personal_denials_max_events_scanned: int = pyd.Field(default=50_000, ge=1)
     personal_denials_limit: int = pyd.Field(default=20, ge=1)

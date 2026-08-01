@@ -102,6 +102,28 @@ def make_record(
     return LedgerRecord(seq=seq, prev_hash=prev_hash, event=event, hash=digest)
 
 
+def unwrap_envelope(raw: Any) -> Any:
+    """Transparently unwrap a hash-chained ledger envelope (TODO.md item 91).
+
+    A `jsonl_chained` record wraps the same redaction-safe event body a plain
+    `jsonl` sink would write under an `"event"` key, alongside chain metadata
+    (`seq`/`prev_hash`/`hash`). Every reader of the persisted audit stream
+    that also has to accept the plain backend calls this first so it sees one
+    shape regardless of which backend wrote the file. Returns `raw` unchanged
+    if it doesn't look like an envelope (a plain `jsonl` line, or anything
+    malformed — the caller's own validation reports that). Requires all four
+    `LedgerRecord` keys, not just `event`/`hash`, so a plain event body that
+    happens to carry same-named fields of its own is never mistaken for an
+    envelope and silently unwrapped into something else."""
+    if (
+        isinstance(raw, dict)
+        and raw.keys() >= {"seq", "prev_hash", "event", "hash"}
+        and isinstance(raw["event"], dict)
+    ):
+        return raw["event"]
+    return raw
+
+
 @dataclass(frozen=True)
 class ChainVerificationResult:
     """Outcome of verifying a hash-chained ledger.
