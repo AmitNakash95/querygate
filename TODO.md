@@ -157,7 +157,7 @@ order-of-magnitude, not commitments.
 | 124 | ✅ Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
 | 125 | ✅ ★ A window function as an `Expression` operand (bar row 15 → 16/16) | XL | 100, 101 |
 | 126 | No per-caller rate limit on `GET /help/my-recent-denials` | S | 45 |
-| 127 | Reject an MCP request whose routing headers disagree with its body | S–M | 86 |
+| 127 | ✅ Reject an MCP request whose routing headers disagree with its body | S–M | 86 |
 | 128 | Conform to the final MCP `2026-07-28` protocol revision | L | 90, 92, 93 |
 | 129 | Never advertise a principal-varying MCP result as shared-cacheable | S | 128 |
 | 130 | Annotate `connection` with `x-mcp-header` for gateway-native authorization | S | 127, 128 |
@@ -1906,82 +1906,17 @@ no-REST-rate-limiting posture is acceptable for this class of bounded local
 file read and close this as will-not-build. Either resolves it; doing neither
 leaves the residual undocumented.
 
-### 127. Reject an MCP request whose routing headers disagree with its body (gateway confused-deputy)
+### 127. Reject an MCP request whose routing headers disagree with its body (gateway confused-deputy) ✅ DONE
 
-**Surfaced 2026-07-30 by `competitive-scan`.** The MCP `2026-07-28`
-specification (final — see item 128) mirrors `method` and `params.name` into
-required `Mcp-Method` / `Mcp-Name` HTTP headers so that intermediaries
-"(load balancers, gateways, observability tooling) can route and inspect
-requests without parsing the body." It therefore also mandates the matching
-server-side defense:
-
-> Servers that process the request body **MUST** reject requests where the
-> values specified in the headers do not match the corresponding values in the
-> request body. This prevents potential security vulnerabilities when different
-> components in the network rely on different sources of truth (e.g., a load
-> balancer routing on the header value while the MCP server executes based on
-> the body value).
-> — [Streamable HTTP § Server Validation](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
-
-**Why it matters more for QueryGate than for a typical MCP server.** The P4
-leverage move (`docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) is to sit
-*behind* MCP gateways and proxies as the enforcement point they can't be. That
-is exactly the deployment where this mismatch is a real confused-deputy: a
-fronting gateway authorizes `Mcp-Name: list_tables` for a low-privilege
-identity, while the body it forwards calls `run_structured_writes`. The
-gateway's tool-level authorization is then silently void, and QueryGate — the
-component that *did* see the body — executed the privileged operation anyway.
-Every deployment story we sell (sole-credential holder, enforcement point
-behind the front door) assumes the caller cannot lie to the layer in front of
-us about which tool it is invoking.
-
-**Current state (verified 2026-07-30, prospective not live):** `grep` across
-`src/` and `tests/` finds no handling of `Mcp-Method`, `Mcp-Name`,
-`MCP-Protocol-Version`, or `HeaderMismatch` anywhere. QueryGate speaks
-`2025-11-25` (item 128), which does not define these headers, so there is **no
-live vulnerability today** — a conforming gateway will not yet be relying on
-them. The exposure begins the moment either side moves: a gateway that trusts
-the headers, or our own upgrade under item 128.
-
-**What to build.** Extend `mcp/transport_guard.py` — the ASGI wrapper already
-sitting *outside* the MCP mount that pre-scans raw body bytes for item 86's
-size/depth guards, so it is already the one place that sees headers and body
-together before the transport parses either. Validate that, when present,
-`Mcp-Method` equals the body `method` and `Mcp-Name` equals `params.name` /
-`params.uri` (decoding the `=?base64?…?=` sentinel first, per the spec's Value
-Encoding rules), and reject a mismatch with HTTP `400` and JSON-RPC error code
-`-32020` (`HeaderMismatch`). Validate-if-present, not require: that makes this
-shippable **now**, independent of item 128, and it fails closed the instant a
-gateway starts sending the headers. Add the mismatch case to the adversarial
-security suite (`adversarial-probe`), since this is a boundary-bypass vector,
-not a conformance nicety.
-
-**Four implementation constraints — pin these down before writing code:**
-
-1. **Run the check strictly *after* item 86's depth scan.** The guard exists
-   precisely so a hostile body is never handed to `json.loads`; this item needs
-   to parse `method`/`params.name`. Parsing before `_structural_depth_exceeds`
-   returns False reintroduces the `RecursionError`→500 that item 86 fixed, via
-   the item extending it.
-2. **Fail closed on an unparseable body.** "Validate-if-present" governs the
-   *header* side only. Header present + body unparseable or not a single
-   JSON-RPC request object must **reject**, not skip — otherwise the bypass is
-   simply "send a shape that defeats the parser."
-3. **Decide the error envelope explicitly.** `_reject` currently emits a
-   REST-shaped `{"error": {"code", "message"}}` body by deliberate design
-   ("malformed input is a client error, never a 5xx"). Recommend keeping that
-   shape and carrying `-32020` in `code`, rather than emitting a second
-   envelope from the same middleware.
-4. **Do not validate that `Mcp-Name` names a *registered* tool here.** This
-   guard runs *outside* `MCPAuthMiddleware`, so that check would turn it into an
-   unauthenticated tool-enumeration oracle. Agreement with the body is the whole
-   job.
-
-**Cost note:** the guard is pre-auth, so this adds an unauthenticated
-`json.loads` of up to `mcp_max_request_bytes` (default 4 MiB) per request, where
-today's pre-auth work is a short-circuiting byte scan. Bound it deliberately.
-
-**Effort:** S–M. **Depends on:** 86. **Does not depend on 128** — deliberately.
+`mcp/transport_guard.py`'s `MCPRequestGuardMiddleware` now rejects a request
+whose present `Mcp-Method`/`Mcp-Name` header disagrees with the body's
+`method`/`params.name`/`params.uri` (HTTP 400 + JSON-RPC `-32020
+HeaderMismatch`), closing the confused-deputy gap where a fronting gateway
+authorizes on the header while QueryGate executes the body — checked strictly
+after item 86's depth scan, with the spec's Base64 sentinel encoding decoded
+before comparison. Validate-if-present, not required, since QueryGate speaks
+protocol `2025-11-25` (item 128) which doesn't yet define these headers.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 127).
 
 ### 128. Conform to the final MCP `2026-07-28` protocol revision
 
