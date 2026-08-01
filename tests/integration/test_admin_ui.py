@@ -34,13 +34,13 @@ connections:
     return str(connections_file), str(policy_file)
 
 
-def _settings(tmp_path, monkeypatch, *, scopes=None, audit_path=None):
+def _settings(tmp_path, monkeypatch, *, scopes=None, audit_path=None, audit_backend=None):
     monkeypatch.setenv("ADMIN_UI_DB_URL", "postgresql+asyncpg://user:pass@localhost/demo")
     connections_file, policy_file = _write_source_files(tmp_path)
     return AppConfig(
         environment="localhost",
         mcp_enabled=False,
-        audit_sink_backend="jsonl" if audit_path else "none",
+        audit_sink_backend=audit_backend or ("jsonl" if audit_path else "none"),
         audit_jsonl_path=str(audit_path or tmp_path / "unused.jsonl"),
         connections_file=connections_file,
         policy_file=policy_file,
@@ -412,6 +412,77 @@ async def test_audit_browser_accepts_connection_probe_event_type(tmp_path, monke
     assert page.json()["events"][0]["event_id"] == "probe-1"
     assert page.json()["events"][0]["event_type"] == "connection.probe"
     assert unsupported.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_audit_browser_reads_hash_chained_ledger(tmp_path, monkeypatch):
+    """TODO.md item 136: `AUDIT_SINK_BACKEND=jsonl_chained` used to leave this
+    surface refused at the gate (`source="disabled"`), and if the gate alone
+    were widened it would have gone silently empty instead — `_audit_page` had
+    no envelope unwrap, so every real record would count as `malformed`. Both
+    the gate and the reader must accept the tamper-evident backend."""
+    from querygate.audit.ledger import GENESIS_PREV_HASH, make_record
+
+    audit_path = tmp_path / "audit.jsonl"
+    event = AuditEvent(
+        event_id="query-1",
+        connection_id="demo",
+        principal_id="agent-a",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "orders"},
+        duration_ms=4,
+    )
+    record = make_record(0, GENESIS_PREV_HASH, event.model_dump(mode="json", exclude_none=True))
+    audit_path.write_text(record.model_dump_json() + "\n")
+    app = create_app(
+        _settings(tmp_path, monkeypatch, audit_path=audit_path, audit_backend="jsonl_chained")
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        page = await client.get(
+            "/api/v1/admin/ui/audit/events?event_type=query.execution",
+            headers=_auth(),
+        )
+
+    assert page.status_code == 200
+    assert page.json()["source"] == "jsonl"
+    assert page.json()["total"] == 1
+    assert page.json()["malformed"] == 0
+    assert page.json()["events"][0]["event_id"] == "query-1"
+
+
+@pytest.mark.asyncio
+async def test_audit_browser_reports_disabled_without_a_locally_readable_backend(
+    tmp_path, monkeypatch
+):
+    """TODO.md item 136: the same gate line this item fixed
+    (`is_locally_readable()`) must still refuse `AuditSinkBackend.NONE`, even
+    when a file that would otherwise parse as valid audit events already
+    exists at the configured path — proving the gate short-circuits on the
+    backend, not merely on an absent/empty file."""
+    audit_path = tmp_path / "audit.jsonl"
+    event = AuditEvent(
+        event_id="query-1",
+        connection_id="demo",
+        principal_id="agent-a",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "orders"},
+        duration_ms=4,
+    )
+    audit_path.write_text(event.model_dump_json(exclude_none=True) + "\n")
+    app = create_app(_settings(tmp_path, monkeypatch, audit_path=audit_path, audit_backend="none"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        page = await client.get("/api/v1/admin/ui/audit/events", headers=_auth())
+
+    assert page.status_code == 200
+    assert page.json() == {
+        "source": "disabled",
+        "events": [],
+        "total": 0,
+        "malformed": 0,
+        "next_cursor": None,
+    }
 
 
 @pytest.mark.asyncio

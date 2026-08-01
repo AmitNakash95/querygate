@@ -23,6 +23,7 @@ from querygate.audit.ledger import (
     compute_record_hash,
     extract_receipt_for_event_id,
     make_record,
+    unwrap_envelope,
     verify_chain,
     verify_receipt,
 )
@@ -271,3 +272,52 @@ def test_configure_audit_sink_selects_chained_backend(tmp_path):
     assert isinstance(sink, HashChainedAuditSink)
     sink.emit(_audit_event("c1"))
     assert verify_chain(ledger.read_text(encoding="utf-8").splitlines(), key=b"k").ok
+
+
+# --- unwrap_envelope (TODO.md item 136) ---------------------------------------
+#
+# The read-only surfaces that browse the persisted audit stream (the admin UI
+# audit browser, the anomaly report, the config/catalog change-trend report,
+# and /help/my-recent-denials) all have to accept either backend's on-disk
+# shape. This is the one shared primitive they all call to normalize a
+# jsonl_chained envelope back to the plain event body a jsonl sink would have
+# written, before their own event-schema validation runs.
+
+
+def test_unwrap_envelope_returns_the_embedded_event_for_a_real_record():
+    event = _event("q1")
+    record = make_record(0, GENESIS_PREV_HASH, event)
+    raw = json.loads(record.model_dump_json())
+    assert unwrap_envelope(raw) == event
+
+
+def test_unwrap_envelope_passes_through_a_plain_jsonl_event_unchanged():
+    event = _event("q1")
+    assert unwrap_envelope(event) == event
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not-a-dict",
+        123,
+        None,
+        [1, 2, 3],
+        {},
+        {"event": {"event_type": "query.execution"}},  # hash missing
+        {"hash": "x"},  # event missing
+        {"event": "not-a-dict", "hash": "x", "seq": 0, "prev_hash": GENESIS_PREV_HASH},
+    ],
+)
+def test_unwrap_envelope_passes_through_anything_not_shaped_like_a_full_record(raw):
+    assert unwrap_envelope(raw) == raw
+
+
+def test_unwrap_envelope_does_not_unwrap_a_partial_envelope_only_event_and_hash():
+    # TODO.md item 136 security-review finding: duck-typing on only two of the
+    # four LedgerRecord keys (event + hash) would let a plain event body that
+    # happens to carry its own same-named "event"/"hash" fields be silently
+    # unwrapped into something else. Requiring all four keys means only a
+    # genuine chain record — which always carries seq/prev_hash too — unwraps.
+    partial = {"event": {"event_type": "query.execution"}, "hash": "deadbeef"}
+    assert unwrap_envelope(partial) == partial

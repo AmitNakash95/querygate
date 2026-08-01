@@ -166,7 +166,9 @@ order-of-magnitude, not commitments.
 | 133 | Caller-facing quota-metered verdict endpoint (play P4) — reuses 31/39's decision logic | M–L | 26, 31, 39, 45, 121 |
 | 134 | Compliance-grade (WORM) audit retention + managed search | L | 91, 136 |
 | 135 | Automatic (TTL/lease-driven) credential re-resolution, without an operator reload | M | 13 |
-| 136 | `jsonl_chained` audit backend silently disables four shipped read surfaces | S–M | 91 |
+| 136 | ✅ `jsonl_chained` audit backend silently disables four shipped read surfaces | S–M | 91 |
+| 137 | Audit read surfaces neither verify nor disclose hash-chain integrity | S–M | 91, 136 |
+| 138 | Audit read surfaces scan the entire persisted file on every request, unbounded by lines read | S–M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2213,6 +2215,13 @@ code before editing, since some sub-claims like WORM are correctly negative).
   remaining task is a *sweep*: grep the repo for other hard-coded benchmark
   figures, since the report's whole value is that it is reproducible and it
   warns against quoting from memory.
+- **Surfaced 2026-08-01 by the `claim-reviewer` audit of item 136.**
+  `README.md`'s `/access/` section still says recent-personal-denial history
+  "is intentionally not included in this first pass... tracked as TODO item 45
+  phase 2" — the same stale claim as the quick-scan row two bullets above, but
+  in a second location. Item 45 phase 2 (`GET /help/my-recent-denials`) has
+  shipped and self-service, no-admin-scope access is documented correctly
+  elsewhere in the same README. Update or delete that paragraph.
 
 ### 133. The verdict endpoint — expose the decision without the execution (play P4)
 
@@ -2488,66 +2497,110 @@ string assertion.
 **Effort:** M. **Depends on:** 13 (which shipped the re-resolution this builds a
 trigger for).
 
-### 136. The `jsonl_chained` audit backend silently disables four shipped read surfaces
+### 136. The `jsonl_chained` audit backend silently disables four shipped read surfaces ✅ DONE
 
-**Surfaced 2026-07-30 by the `auditors` architecture review while scoping item
-134; pre-existing defect, not a regression from that pass.** Four route-level
-gates admit only the *plain* backend:
+Fixed by replacing four scattered equality gates with one
+`AuditSinkBackend.is_locally_readable()` capability lookup and giving the
+admin UI audit browser the same chain-envelope unwrap the other three readers
+already had (extracted once as `audit.ledger.unwrap_envelope()`).
 
-- `api/help_routes.py` — `if cfg.audit_sink_backend == AuditSinkBackend.JSONL`
-  (`GET /help/my-recent-denials`)
-- `api/admin_observability_routes.py` (two sites) — `!= AuditSinkBackend.JSONL:
-  return None` (`GET /admin/observability/anomalies`, the config change-trend
-  report)
-- `api/admin_ui_routes.py` — `!= AuditSinkBackend.JSONL` inside `_audit_page`
-  (`GET /api/v1/admin/ui/audit/events`, the admin UI audit browser)
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 136).
 
-**Two different bugs, and conflating them makes one surface worse.** For the
-first three, the reader already handles the format — `admin/anomaly.py` and
-`admin/config_trends.py` both transparently unwrap the hash-chained envelope —
-so the capability exists and is refused at the door. **`_audit_page` is
-different: it has no unwrap.** It calls `_AUDIT_EVENT_ADAPTER.validate_python(raw)`
-directly on the raw line, and a `LedgerRecord` (`{seq, prev_hash, event, hash}`)
-fails that discriminated union and is counted as `malformed`. So a capability
-lookup applied uniformly — the natural reading, since it is a config-level
-predicate — would turn that surface from honestly `source="disabled"` into
-**silently empty with a rising malformed count**, which is strictly worse than
-today. That surface needs the *reader* fix as well as the gate fix.
+### 137. Audit read surfaces neither verify nor disclose hash-chain integrity
 
-**The failure:** a deployment running `AUDIT_SINK_BACKEND=jsonl_chained` — the
-tamper-evident configuration item 91 shipped and documents as opt-in, the one a
-regulated buyer would actually enable — loses all four surfaces. **Choosing the
-stronger audit posture silently costs four observability features**, which is
-precisely backwards. Blast radius is bounded (the default is `none`, which
-disables them anyway, and `.env.example` ships `jsonl`, which works), so only an
-operator who deliberately opts into tamper-evidence is affected — but that is
-exactly the design partner whose security team we are trying to impress.
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 136.**
+Item 136 made the four read-only observability/help surfaces (the admin UI
+audit browser, the anomaly report, the config/catalog change-trend report,
+`/help/my-recent-denials`) accept `AUDIT_SINK_BACKEND=jsonl_chained` the same
+way they already accepted plain `jsonl`. That fix is correct and in scope —
+but it also newly makes those four surfaces reachable *readers* of the
+chained-ledger file, and none of them verify the chain or say they didn't.
 
-**Why tests stay green:** the route helpers *are* tested, but only for two of
-three cells — `test_route_helpers_map_config_to_thresholds_and_source` (in
-`tests/unit/test_anomaly.py` and `test_config_trends.py`) asserts `jsonl` is
-served and `none` is disabled. **`jsonl_chained` is untested at the route-helper
-boundary**, even though `tests/unit/test_anomaly.py` proves the *reader* handles
-it. That specific missing cell is the test gap.
+**The gap, precisely.** `audit/ledger.py`'s own module docstring says the
+chain is "verify-only... nothing in the request pipeline reads the chain" —
+`querygate-audit verify` is the only place integrity is actually checked. The
+four surfaces' `unwrap_envelope` call (added by item 136) only recognizes the
+envelope *shape* (all four `LedgerRecord` keys present); it never recomputes
+`hash` or checks chain linkage. An actor with append access to
+`AUDIT_JSONL_PATH` (compromised app user, writable log volume, a log-shipping
+sidecar) can append a fabricated `{"seq":0,"prev_hash":"...","event":{...},
+"hash":"anything"}` line with an arbitrary `event` body, and all four surfaces
+will display it as a genuine event — the anomaly detector can be pushed over a
+threshold or diluted below one, and (worst case) a forged event could be
+attributed to another principal in that principal's own `/help/my-recent-denials`
+view. Also, on a successful chained-backend read, all four surfaces report
+`source="jsonl"` — the same literal a plain-`jsonl` read reports — so an
+operator or auditor reading the API response cannot tell which backend, and
+therefore which integrity posture, actually produced it.
 
-**What to do:**
+**Why this is a new item, not folded into 136.** Fixing it changes the public
+response contract (a new `source` value and/or a `chain_verified` field) and
+requires a product decision on cost/posture: real per-request verification
+recomputes a SHA-256/HMAC over every scanned line (cheap per-line, but adds up
+over `max_events_scanned`), is only meaningful for forgery-resistance when
+`AUDIT_LEDGER_HMAC_KEY` is set, and needs a decision on what an unkeyed chain's
+"verified" even means to report honestly. Item 136's own scope was strictly
+"restore the read access the four surfaces already had for `jsonl`"; widening
+that read access's *trust model* is a distinct call.
 
-1. Replace the four equality gates with a **capability lookup** (which backends
-   are readable), not a widened `in (JSONL, JSONL_CHAINED)` tuple — item 134
-   adds another backend and would otherwise repeat this bug a third time.
-2. Give `_audit_page` the same envelope unwrap the other two readers have,
-   **before** letting its gate admit the chained backend.
-3. Add the missing `jsonl_chained` route-helper cell per surface, and
-   mutation-verify each.
-4. **Reconcile the docs, which are already right.** `.env.example` documents the
-   anomaly endpoint as "Requires `AUDIT_SINK_BACKEND=jsonl` **or
-   `jsonl_chained`**" — the doc promises what the code refuses, independent
-   corroboration that this is a defect and not a deliberate restriction. Re-check
-   README and PRODUCT_GUIDE for the same promise on the other surfaces.
+**What to do (decision first, per CLAUDE.md's engine-philosophy precedent —
+record the choice, then build it):**
 
-**Effort:** S–M (the `_audit_page` reader fix makes it more than a one-line
-gate change). **Depends on:** 91. **Blocks:** 134 (which must not replicate the
-pattern), and materially affects 133 (item 45's help surface is cited there as a
-denial-vocabulary precedent, and it is currently dark on the tamper-evident
-config).
+1. Decide and record in the PRODUCT_GUIDE Decision Log: disclosure-only
+   (cheapest — widen `source`'s `Literal` to include `"jsonl_chained"` and
+   report the actual configured backend instead of always `"jsonl"`, so a
+   reader at least knows which posture produced the response), or real
+   verification (recompute `compute_record_hash`/`hmac.compare_digest` per
+   record read, using `cfg.audit_ledger_hmac_key` when set, and count a
+   self-inconsistent record as `malformed` rather than displaying it), or both.
+2. If verification is chosen, add it once beside `unwrap_envelope` in
+   `audit/ledger.py` (e.g. `verify_record(raw, key) -> bool`) so all three
+   readers (`admin/anomaly.py`, `admin/config_trends.py`,
+   `api/admin_ui_routes.py`) call the same primitive — mirroring how item 136
+   itself consolidated the envelope unwrap.
+3. Regression test: write a chain-valid record, then a second record whose
+   embedded `event` was mutated without recomputing `hash` (a forged insertion,
+   not a broken link — chain linkage alone doesn't catch this since the forged
+   record can chain correctly to a legitimate predecessor if the attacker also
+   fixes up `prev_hash`/`seq`); assert the reader does not present it as clean.
+
+**Effort:** S (disclosure only) to M (real verification). **Depends on:** 91,
+136.
+
+### 138. Audit read surfaces scan the entire persisted file on every request, unbounded by lines read
+
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 136.**
+`admin/anomaly.py`'s `JsonlAuditEventSource.load_query_events` and
+`admin/config_trends.py`'s `JsonlChangeEventSource.load_change_events` both
+stream and `json.loads`/pydantic-validate **every line** of
+`AUDIT_JSONL_PATH` on every request; `max_events_scanned` bounds only the
+retained deque, not the read itself, so there is no early exit. The admin UI
+audit browser (`_audit_page`) has the same shape. `/help/my-recent-denials`
+reaches this path with **authentication only, no admin scope, and no
+rate-limit/quota middleware** — by design (the response is filtered to the
+caller's own `principal_id` before return), but that means the least-privileged
+authenticated caller can trigger a full-file scan on demand.
+
+**Why this is out of scope for item 136, not caused by it.** This gap is
+pre-existing and already live today for the **default** `AUDIT_SINK_BACKEND=jsonl`
+backend (the value `.env.example` ships) — item 136 only made the identical,
+already-shipped behavior reachable under `jsonl_chained` too, which is the
+literal definition of the parity that item was fixing. Fixing the resource
+bound is a general audit-reader hardening independent of which backend wrote
+the file, and touches the default-backend read path in production today, so it
+needs its own scoping and testing rather than riding in on a bug-fix commit.
+
+**What to do:** add a hard cap on **lines read**, not just events retained —
+e.g. an explicit `max_lines_read` (or a multiplier on `max_events_scanned`) in
+`AnomalyThresholds`/`ChangeTrendThresholds`/the admin UI's page-size handling,
+breaking out of the per-line loop once hit and setting the existing
+`truncated` flag. Keep the cap in the shared reader so all three (four,
+counting `/help/my-recent-denials`'s reuse of `JsonlAuditEventSource`)
+consumers inherit it from one place, per the repo's composable-interfaces
+doctrine. Regression test: a file with many more lines than the cap; assert
+the reader stops early (e.g. by counting `json.loads` calls or bounding wall
+time) and reports `truncated=True`.
+
+**Effort:** S–M. **Depends on:** none (touches the already-shipped `jsonl`
+path, item 91 for the `jsonl_chained` share of it).
 

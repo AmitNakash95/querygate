@@ -5497,3 +5497,36 @@ reasoning behind them, newest first. Added to incrementally as work happens
   pass the required-scope gate. The whole mode is opt-in
   (`MCP_OAUTH_RESOURCE_SERVER_ENABLED`) so existing deployments are unaffected.
   See [The Core Request Pipeline](#the-core-request-pipeline) (`TODO.md` item 90 phase 2).
+- **2026-08-01 — Opting into the tamper-evident audit backend no longer
+  silently disables four read surfaces (`TODO.md` item 136).** `/help/my-recent-
+  denials`, the anomaly report, the config/catalog change-trend report, and the
+  admin UI audit browser each gated on `audit_sink_backend == AuditSinkBackend.
+  JSONL`, so `AUDIT_SINK_BACKEND=jsonl_chained` — the posture item 91 shipped and
+  a regulated buyer would actually enable — refused all four, even though three
+  of the four readers already transparently unwrapped the chain envelope and
+  could serve them. **Two fixes, not one.** (1) The four equality/inequality
+  gates are now one capability lookup, `AuditSinkBackend.is_locally_readable()`
+  — `{JSONL, JSONL_CHAINED}` today — so a future backend (item 134) declares
+  readability once instead of every call site repeating the check (and the bug)
+  a third time. (2) The admin UI audit browser's `_audit_page` had **no**
+  envelope unwrap at all (unlike the other three), so a gate-only fix would have
+  turned it from honestly `source="disabled"` into silently empty with a rising
+  `malformed` count — it now calls the same unwrap the other three use. That
+  unwrap itself was duplicated inline in two readers (`admin/anomaly.py`,
+  `admin/config_trends.py`); a 2026-07-30 Decision Log entry above reasoned
+  explicitly about not tripling it, so this fix also extracts it once as
+  `audit.ledger.unwrap_envelope()` and points all three readers at it — the
+  concern that entry raised is now moot rather than deferred. The extraction is
+  not a pure move: the two inline copies it replaced matched on only two of
+  `LedgerRecord`'s four keys (`event` + `hash`); the shared function requires
+  all four (`seq`/`prev_hash`/`event`/`hash`), a hardening caught by the
+  `security-invariant-reviewer` audit of this change, closing a latent path for
+  a plain event body carrying its own same-named fields to be misread as a
+  chain envelope. That same audit found two further gaps this fix deliberately
+  left open rather than folding in — the four surfaces still neither verify the
+  chain nor disclose which backend actually produced a `source="jsonl"`
+  response (`TODO.md` item 137, needs a maintainer decision on posture/cost),
+  and the underlying line-by-line file scan is unbounded by lines read, a
+  pre-existing gap for the default `jsonl` backend that this change also makes
+  reachable under `jsonl_chained` (`TODO.md` item 138). See [Auth &
+  Transports](#auth--transports) and [The `help/` module](#the-help-module--a-queryable-product-guide).

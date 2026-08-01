@@ -8497,3 +8497,108 @@ over-threshold body under a present header would also reject a legitimate
 large batch from a real, conformant 2026-07-28 gateway once item 128 lands —
 a product tradeoff between pre-auth cost and future-client compatibility, not
 a small/safe fix, and left for a maintainer decision alongside item 128.
+
+### 136. The `jsonl_chained` audit backend silently disables four shipped read surfaces ✅ DONE
+
+**Surfaced 2026-07-30 by the `auditors` architecture review while scoping item
+134; pre-existing defect, not a regression from that pass.** Four route-level
+gates admitted only the *plain* backend:
+
+- `api/help_routes.py` — `if cfg.audit_sink_backend == AuditSinkBackend.JSONL`
+  (`GET /help/my-recent-denials`)
+- `api/admin_observability_routes.py` (two sites) — `!= AuditSinkBackend.JSONL:
+  return None` (`GET /admin/observability/anomalies`, the config change-trend
+  report)
+- `api/admin_ui_routes.py` — `!= AuditSinkBackend.JSONL` inside `_audit_page`
+  (`GET /api/v1/admin/ui/audit/events`, the admin UI audit browser)
+
+**Two different bugs, and conflating them would have made one surface worse.**
+For the first three, the reader already handled the format — `admin/anomaly.py`
+and `admin/config_trends.py` both transparently unwrapped the hash-chained
+envelope — so the capability existed and was refused at the door. `_audit_page`
+was different: it had no unwrap at all. It called
+`_AUDIT_EVENT_ADAPTER.validate_python(raw)` directly on the raw line, and a
+`LedgerRecord` (`{seq, prev_hash, event, hash}`) fails that discriminated union
+and is counted as `malformed`. So a gate-only fix applied uniformly would have
+turned that surface from honestly `source="disabled"` into silently empty with
+a rising malformed count — strictly worse than before. That surface needed the
+*reader* fix as well as the gate fix.
+
+**The failure:** a deployment running `AUDIT_SINK_BACKEND=jsonl_chained` — the
+tamper-evident configuration item 91 shipped and documents as opt-in, the one a
+regulated buyer would actually enable — lost all four surfaces. Choosing the
+stronger audit posture silently cost four observability features, which is
+precisely backwards.
+
+**What shipped:**
+
+1. `core/config.py`'s `AuditSinkBackend` gained a single capability lookup,
+   `is_locally_readable()` (`{JSONL, JSONL_CHAINED}`), replacing all four
+   scattered equality/inequality checks — a future backend (item 134)
+   declares its readability once here instead of repeating the check (and the
+   bug class) at a third and fourth call site.
+2. `_audit_page` gained the same envelope unwrap the other two readers had.
+   That unwrap itself was duplicated inline in two readers
+   (`admin/anomaly.py`, `admin/config_trends.py`); rather than adding a third
+   copy, it was extracted once as `audit.ledger.unwrap_envelope()` and all
+   three readers now call it. The extraction is not a pure move: the two
+   inline copies it replaced matched on only two of `LedgerRecord`'s four
+   keys (`event` + `hash`); the shared function requires all four
+   (`seq`/`prev_hash`/`event`/`hash`), a hardening caught by the
+   post-build `security-invariant-reviewer` audit that closes a latent path
+   for a plain event body carrying its own same-named fields to be misread
+   as a chain envelope.
+3. The missing `jsonl_chained` route-helper cell was added per surface
+   (`tests/unit/test_anomaly.py`, `tests/unit/test_config_trends.py`), plus
+   full HTTP-level regression tests for all four surfaces
+   (`tests/integration/test_admin_ui.py`,
+   `tests/integration/test_personal_denials_api.py`,
+   `tests/integration/test_anomaly_api.py`,
+   `tests/integration/test_config_trends_api.py`), each writing a real
+   `make_record`-built chained ledger and asserting the surface serves it.
+4. `README.md`'s admin UI audit-browser line and the admin UI's own two
+   "disabled" empty-state hint strings (`admin_ui/app.js`) were reconciled to
+   name both backends; `.env.example` and `docs/PRODUCT_GUIDE.md` already
+   named both correctly, which was independent corroboration the code (not
+   the docs) was the defect.
+
+**Post-build `auditors` audit (2026-08-01, all four reviewers run in
+parallel — security-invariant, architecture-boundary, test-contract,
+claim).** Architecture-boundary and claim came back clean bar nits (a stale
+"Requires audit_sink_backend=jsonl" comment repeated in three `AppConfig`
+field docstrings, fixed; a pre-existing, unrelated README claim about item 45
+phase 2 being unshipped, filed under item 132 rather than fixed inline since
+it's untouched by this diff). Test-contract found two real coverage gaps,
+both closed: no full HTTP-level `jsonl_chained` test for the anomaly/
+change-trend endpoints (only the unit-level route-helper call was tested) —
+added; no negative-path test proving the admin UI audit browser's gate still
+refuses `AuditSinkBackend.NONE` even when a file that would otherwise parse
+exists at the configured path — added. Security-invariant confirmed the fix
+introduces no bypass (envelope contents still pass through the pre-existing
+`extra="forbid"` event-schema validation before reaching any response; no
+`require_scope`/`Depends(get_principal)` line touched; `/help/my-recent-
+denials`'s cross-principal filter untouched) and found two real but
+deliberately out-of-scope gaps, filed as items 137 and 138 rather than folded
+in: the four surfaces neither verify the chain nor disclose which backend
+produced a `source="jsonl"` response (item 137, needs a maintainer decision on
+disclosure vs. verification posture/cost), and the underlying per-request file
+scan is unbounded by lines read — pre-existing for the default `jsonl` backend,
+which this item's fix also made reachable under `jsonl_chained` (item 138). It
+also flagged that `unwrap_envelope` duck-typed on only two of `LedgerRecord`'s
+four keys; tightened to require all four as part of this item (see point 2
+above), with a dedicated regression test
+(`tests/unit/test_audit_ledger.py::test_unwrap_envelope_does_not_unwrap_a_partial_envelope_only_event_and_hash`)
+and mutation verification recorded below.
+
+**Mutation-verified:** reverting `is_locally_readable()` to a plain `==
+AuditSinkBackend.JSONL` check made all new/extended `jsonl_chained` tests fail
+for the expected reason across every surface, including the two full
+HTTP-level tests added post-audit; reverting `_audit_page`'s new
+`unwrap_envelope` call made its dedicated integration test fail (`total` 1 ->
+0); reverting `unwrap_envelope`'s four-key check back to two keys made the
+dedicated partial-envelope regression test fail. All three reverted cleanly
+afterward and the full suite (1865 unit, 329 integration excluding real_db,
+424 security) passed on the final tree.
+
+**Effort:** S–M. **Depends on:** 91. **Blocks:** 134 (which must not
+replicate the pattern).

@@ -20,9 +20,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from querygate.api._errors import require_scope
 from querygate.audit.events import PersistableEvent
+from querygate.audit.ledger import unwrap_envelope
 from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
-from querygate.core.config import AppConfig, AuditSinkBackend
+from querygate.core.config import AppConfig
 from querygate.core.exceptions import PolicyViolationError
 from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE, ADMIN_CONFIG_WRITE_SCOPE
 from querygate.policy.loader import PolicyStore, get_policy_store
@@ -347,7 +348,7 @@ def _audit_page(
     connection: Optional[str],
     action: Optional[str],
 ) -> AuditEventPage:
-    if cfg.audit_sink_backend != AuditSinkBackend.JSONL:
+    if not cfg.audit_sink_backend.is_locally_readable():
         return AuditEventPage(source="disabled", events=[], total=0, malformed=0)
 
     path = Path(cfg.audit_jsonl_path)
@@ -364,6 +365,7 @@ def _audit_page(
         for line in handle:
             try:
                 raw = json.loads(line)
+                raw = unwrap_envelope(raw)
                 event = _AUDIT_EVENT_ADAPTER.validate_python(raw)
                 item = event.model_dump(mode="json", exclude_none=True)
             except (json.JSONDecodeError, pyd.ValidationError, TypeError):
