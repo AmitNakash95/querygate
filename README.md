@@ -414,7 +414,7 @@ has silently stopped evaluating queries on that connection.
 `querygate_cost_estimation_attempts_total{connection}` is the matching
 denominator for computing a fail-open rate.
 
-### In-query human-in-the-loop approval (phase 1)
+### In-query human-in-the-loop approval
 
 Some reads shouldn't run unattended just because they pass policy — a query
 whose pre-execution estimate is very large is the exfiltration leg of the
@@ -461,10 +461,10 @@ curl -X POST -H "Authorization: Bearer $CALLER_KEY" \
 The token is a stateless HMAC (set `APPROVAL_TOKEN_HMAC_KEY`) bound to the exact
 query fingerprint and a short expiry — it can't be forged, can't be replayed
 against a *different* query, and can't be replayed indefinitely; any
-missing-key/forged/expired/mismatched token fails closed. The one remaining
-piece is an interactive **MCP elicitation** approval channel (approve inside one
-MCP session instead of the REST round-trip). A deployment that sets no approval
-thresholds or sensitivities is completely unaffected.
+missing-key/forged/expired/mismatched token fails closed. An interactive **MCP
+elicitation** approval channel also ships — an MCP caller can approve inside the
+same session (`Context.elicit`) instead of the REST round-trip. A deployment
+that sets no approval thresholds or sensitivities is completely unaffected.
 
 ### Governed writes — preview, execute, approve, diff
 
@@ -864,11 +864,15 @@ browsing; those stay `/admin/`-only. Served same-origin with the same
 restrictive Content Security Policy, no-referrer/nosniff headers, and
 no-store HTML as `/admin/`.
 
-Recent-personal-denial history (e.g. "here's what was rejected for you this
-week") is intentionally not included in this first pass — there is no
-principal-scoped audit-read path today (existing audit browsing is
-`admin:config:read`-gated and global), and building one safely is
-independent scope, tracked as TODO item 45 phase 2.
+Recent-personal-denial history ("here's what was rejected for you this week")
+is a second, separate self-service endpoint: `GET /api/v1/help/my-recent-denials`
+(also authentication-only, no admin scope). It answers *why* your own recent
+queries were rejected — a stable reason label (`policy`, `schema`, `quota`,
+`cost_estimate`, ...) plus a human-readable explanation per denial, filtered to
+the caller's own `principal_id` before any response is built, over a
+configurable lookback window. Never another principal's activity, a query
+value, or a table/column identifier beyond what the caller's own request
+already referenced (TODO item 45 phase 2).
 
 ### Admin connection-status API
 
