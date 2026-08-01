@@ -7,16 +7,72 @@
 #
 # Unlike the Claude Code PreToolUse hook in .claude/settings.json (which only
 # gates commits Claude makes), this runs on ANY `git commit` — terminal, IDE,
-# or agent. It enforces: formatting clean + unit tests green, before the commit
-# is created. Bypass a single commit with `git commit --no-verify` if you must.
+# or agent. It enforces, in order (cheapest first): no unresolved merge
+# markers, no credential-shaped strings, no oversized blobs, formatting clean,
+# unit tests green. Bypass a single commit with `git commit --no-verify` if
+# you must.
+#
+# Deliberately NOT ported from the reference template's equivalent hook: a
+# rule blocking commits of .claude/settings.local.json. QueryGate tracks that
+# file on purpose as a durable, reviewable permissions layer.
+#
+# Tests: sh .githooks/test-pre-commit.sh
 #
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+self=".githooks/pre-commit"
+
+# Staged, still-present files (added/copied/modified/renamed). Reading them
+# line-by-line (never via unquoted word splitting) is what makes paths with
+# spaces work; a literal newline in a path is not handled.
+staged_f="$(mktemp -t qg-precommit-staged.XXXXXX)"
+trap 'rm -f "$staged_f"' EXIT
+git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR > "$staged_f"
+
+if [ -s "$staged_f" ]; then
+  # --- 1. Merge-conflict markers --------------------------------------------
+  while IFS= read -r f; do
+    [ "$f" = "$self" ] && continue
+    git show ":$f" 2>/dev/null | grep -Iq . || continue          # skip binaries
+    if git show ":$f" 2>/dev/null | grep -Eq '^(<<<<<<< |=======$|>>>>>>> )'; then
+      echo "[pre-commit] BLOCKED — $f contains unresolved merge-conflict markers." >&2
+      exit 1
+    fi
+  done < "$staged_f"
+
+  # --- 2. Secret-shaped content ----------------------------------------------
+  # High-signal patterns only. A hit here is a BLOCK, not a lead: verify by
+  # eye, then rotate the credential — removing it from the diff is not enough
+  # once it has existed on disk.
+  while IFS= read -r f; do
+    [ "$f" = "$self" ] && continue
+    git show ":$f" 2>/dev/null | grep -Iq . || continue
+    if git show ":$f" 2>/dev/null | grep -Eq \
+        -e 'BEGIN [A-Z ]*PRIVATE KEY' \
+        -e 'AKIA[0-9A-Z]{16}' \
+        -e 'ghp_[A-Za-z0-9]{36}' \
+        -e 'xox[baprs]-[A-Za-z0-9-]{10,}' \
+        -e 'sk-[A-Za-z0-9_-]{32,}'; then
+      echo "[pre-commit] BLOCKED — $f contains a credential-shaped string. Verify, then ROTATE it if real." >&2
+      exit 1
+    fi
+  done < "$staged_f"
+
+  # --- 3. Oversized blobs -----------------------------------------------------
+  while IFS= read -r f; do
+    size=$(git cat-file -s ":$f" 2>/dev/null || echo 0)
+    if [ "$size" -gt 5242880 ]; then
+      echo "[pre-commit] BLOCKED — $f is $((size / 1048576))MB staged. Use LFS or keep it out of git." >&2
+      exit 1
+    fi
+  done < "$staged_f"
+fi
+
 log="$(mktemp -t qg-precommit.XXXXXX)"
-trap 'rm -f "$log"' EXIT
+trap 'rm -f "$log" "$staged_f"' EXIT
 
 echo "[pre-commit] formatting check (black)…"
 if ! poetry run black --check src/ tests/ >"$log" 2>&1; then
@@ -32,4 +88,4 @@ if ! poetry run pytest -m "unit and not real_db" -q -p no:cacheprovider >"$log" 
   exit 1
 fi
 
-echo "[pre-commit] OK — formatting clean, unit tests green."
+echo "[pre-commit] OK — floor clear (no conflict markers/secrets/oversized blobs, formatting clean, unit tests green)."
