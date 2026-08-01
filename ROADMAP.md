@@ -110,8 +110,9 @@ claim when the work ships or before explicitly handing the item back.
   bypass, it belongs in the adversarial suite, and it is deliberately
   independent of item 128 so it can ship now and fail closed the moment a
   gateway starts sending the headers.* **Depends on 86.**
-- [ ] **136** — The `jsonl_chained` audit backend silently disables four shipped
-  read surfaces. *Pre-existing defect found 2026-07-30 by `auditors`. Opting
+- [x] **136** — The `jsonl_chained` audit backend silently disables four shipped
+  read surfaces.
+  *Pre-existing defect found 2026-07-30 by `auditors`. Opting
   into the tamper-evident posture item 91 shipped currently costs
   `/help/my-recent-denials`, the anomaly report, the change-trend report, and
   the admin UI audit browser. Three readers already unwrap the envelope and are
@@ -119,6 +120,22 @@ claim when the work ships or before explicitly handing the item back.
   gate-only fix would turn it from honestly-disabled into silently-empty. Phase
   0 because it makes the stronger audit configuration worse than the weaker one
   — backwards for the security-review story.* **Depends on 91; blocks 134.**
+- [ ] **137** — Audit read surfaces neither verify nor disclose hash-chain
+  integrity. *Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of
+  item 136: the four surfaces item 136 made able to read the `jsonl_chained`
+  ledger neither recompute the chain hash nor tell a caller which backend
+  actually produced a `source="jsonl"` response. Needs a maintainer decision
+  (disclosure-only vs. real per-request verification) recorded in the
+  PRODUCT_GUIDE Decision Log as the item's own first step — same pattern as
+  items 100–106 — not a reason to defer it.* **Depends on 91, 136.**
+- [ ] **138** — Audit read surfaces scan the entire persisted file on every
+  request, unbounded by lines read. *Surfaced 2026-08-01 by the
+  `security-invariant-reviewer` audit of item 136. Pre-existing for the
+  default `jsonl` backend (item 136 only extended the same already-shipped
+  behavior to `jsonl_chained`, which is that item's whole point) — filed
+  separately because fixing it touches the default-backend read path in
+  production today and deserves its own scoping/tests rather than riding in on
+  a bug-fix commit.*
 
 ### Phase 1 — Pilot-readiness (let one design partner deploy & trust it)
 

@@ -40,6 +40,7 @@ from typing import Deque, Dict, List, Literal, Optional, Protocol, Set, Tuple
 import pydantic as pyd
 
 from querygate.audit.events import AuditEvent
+from querygate.audit.ledger import unwrap_envelope
 
 AnomalyKind = Literal["volume_spike", "rejection_rate_spike", "new_connection_access"]
 
@@ -345,18 +346,7 @@ class JsonlAuditEventSource:
                 except json.JSONDecodeError:
                     malformed += 1
                     continue
-                # Transparently unwrap a hash-chained ledger envelope (item 91):
-                # when audit_sink_backend=jsonl_chained, each line wraps the event
-                # under an "event" key alongside chain metadata (seq/hash). The
-                # embedded body is the same query.execution event this reader
-                # already understands.
-                if (
-                    isinstance(raw, dict)
-                    and "event" in raw
-                    and "hash" in raw
-                    and isinstance(raw["event"], dict)
-                ):
-                    raw = raw["event"]
+                raw = unwrap_envelope(raw)
                 # Only query-execution events; other event types (config/catalog
                 # governance, probes) share the file but aren't caller behavior.
                 if not isinstance(raw, dict) or raw.get("event_type") != "query.execution":

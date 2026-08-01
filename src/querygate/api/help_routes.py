@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query
 
 from querygate.admin.anomaly import JsonlAuditEventSource
 from querygate.core.auth import Principal
-from querygate.core.config import AppConfig, AuditSinkBackend
+from querygate.core.config import AppConfig
 from querygate.help.models import (
     AccessSummary,
     ConfigFieldExplanation,
@@ -70,7 +70,7 @@ def build_help_router(
     @router.get("/my-recent-denials", response_model=RecentDenialsReport)
     async def describe_my_recent_denials(principal: Principal = Depends(get_principal)):
         source = None
-        if cfg.audit_sink_backend == AuditSinkBackend.JSONL:
+        if cfg.audit_sink_backend.is_locally_readable():
             source = JsonlAuditEventSource(cfg.audit_jsonl_path)
         return build_recent_denials_report(
             source,

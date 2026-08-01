@@ -488,6 +488,18 @@ def test_route_helpers_map_config_to_thresholds_and_source(tmp_path):
     assert isinstance(source, JsonlAuditEventSource)
     assert str(source.path) == audit_path
 
+    # The tamper-evident backend shares the same on-disk format (item 91's
+    # envelope is transparently unwrapped by the reader) and must be equally
+    # readable here (item 136 — was silently gated out before the fix).
+    cfg_chained = AppConfig(
+        environment="localhost",
+        audit_sink_backend="jsonl_chained",
+        audit_jsonl_path=audit_path,
+    )
+    source_chained = _anomaly_source(cfg_chained)
+    assert isinstance(source_chained, JsonlAuditEventSource)
+    assert str(source_chained.path) == audit_path
+
     # No persisted sink → no source (endpoint reports "disabled").
     cfg_none = AppConfig(environment="localhost", audit_sink_backend="none")
     assert _anomaly_source(cfg_none) is None

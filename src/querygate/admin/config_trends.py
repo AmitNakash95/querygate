@@ -48,6 +48,7 @@ from typing import Deque, Dict, List, Literal, Optional, Protocol, Tuple, Union
 import pydantic as pyd
 
 from querygate.audit.events import CatalogGovernanceEvent, ConfigChangeEvent
+from querygate.audit.ledger import unwrap_envelope
 
 ChangeEvent = Union[ConfigChangeEvent, CatalogGovernanceEvent]
 
@@ -247,15 +248,7 @@ class JsonlChangeEventSource:
                 except json.JSONDecodeError:
                     malformed += 1
                     continue
-                # Transparently unwrap a hash-chained ledger envelope (item 91),
-                # same as admin.anomaly.JsonlAuditEventSource.
-                if (
-                    isinstance(raw, dict)
-                    and "event" in raw
-                    and "hash" in raw
-                    and isinstance(raw["event"], dict)
-                ):
-                    raw = raw["event"]
+                raw = unwrap_envelope(raw)
                 if not isinstance(raw, dict):
                     continue
                 event_type = raw.get("event_type")
