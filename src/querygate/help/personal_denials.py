@@ -161,6 +161,7 @@ def build_recent_denials_report(
     now: Optional[datetime] = None,
     lookback_seconds: float = 86400.0,
     max_events_scanned: int = 50_000,
+    max_lines_read: int = 50_000,
     limit: int = 20,
 ) -> RecentDenialsReport:
     """Assemble a full report from a source. `source=None` means the persisted
@@ -179,6 +180,10 @@ def build_recent_denials_report(
         recent_window_seconds=lookback_seconds,
         baseline_window_seconds=1.0,
         max_events_scanned=max_events_scanned,
+        # TODO.md item 138: kept independently tunable rather than inheriting
+        # AnomalyThresholds' own default, since this surface is reachable
+        # with authentication only, no admin scope, by design (item 45).
+        max_lines_read=max_lines_read,
     )
     events, malformed, truncated = source.load_query_events(now=now, thresholds=thresholds)
     denials = select_recent_denials(events, principal_id=principal_id, limit=limit)

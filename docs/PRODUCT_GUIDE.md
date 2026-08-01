@@ -5530,3 +5530,91 @@ reasoning behind them, newest first. Added to incrementally as work happens
   pre-existing gap for the default `jsonl` backend that this change also makes
   reachable under `jsonl_chained` (`TODO.md` item 138). See [Auth &
   Transports](#auth--transports) and [The `help/` module](#the-help-module--a-queryable-product-guide).
+- **2026-08-01 — Every reader of the persisted audit stream now scans
+  tail-first, bounded by lines read, not just lines retained (`TODO.md`
+  item 138).** Before this, `admin/anomaly.py`, `admin/config_trends.py`, and
+  the admin UI audit browser (`api/admin_ui_routes.py`'s `_audit_page`) all
+  streamed the JSONL file forward from the beginning and relied on a bounded
+  in-memory deque to keep only what mattered — correct, but unbounded in the
+  amount of *work* done: a large audit history meant parsing and validating
+  every line on every request, regardless of how much was actually needed.
+  **Why not just cap lines read from the start, the simplest fix:** a forward
+  scan capped at N lines reads the *oldest* N lines first (the sink only
+  appends), so on a file larger than the cap it would silently never reach
+  the recent window or newest page a caller actually asked for — worse than
+  no bound at all, since the exact security/observability signal these
+  surfaces exist for would go quietly blind at high volume, the moment it
+  matters most. **The fix instead reads backward:** a new shared primitive,
+  `audit.file_reader.iter_lines_reverse()`, reads the file in fixed-size
+  chunks from the end, splitting on the raw newline byte (safe regardless of
+  chunk boundaries, since `0x0A` never appears inside a multi-byte UTF-8
+  sequence). Because the sink only appends, the physically newest lines are
+  always what every one of these readers wants most, so a hard cap on lines
+  *read* (`AnomalyThresholds.max_lines_read`, `ChangeTrendThresholds.max_lines_read`,
+  `AppConfig.audit_page_max_lines_read`, `personal_denials_max_lines_read`) can
+  bound worst-case work without ever trading away correctness. `admin/anomaly.py`'s,
+  `admin/config_trends.py`'s, and `_audit_page`'s bounded deques were all
+  removed entirely — reading tail-first, the first `max_events_scanned` (or,
+  for `_audit_page`, `cursor + limit`) matches encountered *are* the newest N
+  by construction, so there's nothing left for a deque to evict. `_audit_page`
+  gained a new `truncated` field on its response (`AuditEventPage`) for the
+  same reason the other two reports already had one: once a cap can fire, "no
+  more matches found" and "stopped looking before finding out" are different
+  claims, and conflating them would be a silent regression from the
+  honest-disabled posture this audit surface has kept since item 31.
+  `truncated` is deliberately conservative — it can report `True` even when
+  every real match was already found (the scan simply kept going,
+  sight-unseen, until the line cap fired on trailing non-matching lines) —
+  rather than risk ever reporting `False` when data could plausibly be missing.
+
+  **Hardened same-day by a second `security-invariant-reviewer` pass, before
+  this item shipped.** The first cut bounded only *line count*, defaulted to
+  2,000,000 everywhere, and left `anomaly_max_lines_read`/
+  `change_trend_max_lines_read`/`personal_denials_max_lines_read` unwired from
+  `AppConfig` (the thresholds objects had the field; the routers never read it
+  from config, so it was stuck at the class default) — an `architecture-boundary-reviewer`
+  finding, fixed by threading all three. The bigger issue: `iter_lines_reverse`
+  itself was algorithmically unsound for a *single undelimited run* — the
+  carry-forward buffer (`chunk + carry`) is fully re-copied every chunk, so a
+  region with no newline at all costs O(run_length²), not O(run_length), and
+  nothing bounded run length, since the line-count cap only increments once a
+  line is actually yielded. Measured: at the shipped 2,000,000-line default,
+  a realistic ~800-byte audit line put per-request cost at ~1.6 GB read and
+  10-40s of blocking work on `/help/my-recent-denials` — authenticated-only,
+  no admin scope, no rate limit — which is a bound in the formal sense and
+  not one in the practical sense. Fixed with two new independent bounds
+  inside `iter_lines_reverse` itself, both raising a typed
+  `AuditFileReadBounded` rather than returning silently (so every caller's
+  `truncated` stays accurate — a silent stop would have looked identical to
+  reaching the start of the file): `max_line_bytes` (default 1 MiB) aborts an
+  undelimited run before it can grow past a fixed, cheap size; `max_total_bytes`
+  (default 256 MiB) bounds total bytes read regardless of how many lines that
+  spans, closing a companion gap where a file padded with an enormous number
+  of *blank* lines was never counted against the line cap at all (blank lines
+  are filtered inside the generator, before a caller's own counter ever sees
+  them). The three `max_lines_read` defaults were also lowered from 2,000,000
+  to 200,000 (50,000 for `personal_denials_max_lines_read`, defaulted tighter
+  than the admin-scoped surfaces since it's the one reachable with
+  authentication only) — now a real backstop underneath the byte-level bounds,
+  not the sole line of defense. A fourth, narrower finding — a short read
+  during in-place file truncation (`logrotate copytruncate`, not the
+  rename-and-recreate rotation `JsonlAuditSink` already tolerates) could splice
+  non-adjacent byte ranges into a fabricated line while still reporting
+  `truncated=False` — is closed the same way: a short read from `handle.read`
+  now raises `AuditFileReadBounded` rather than being silently concatenated.
+
+  **Deliberately not folded into this item**, filed as follow-ups instead of
+  fixed inline, since each is either a distinct subsystem or a real
+  correctness/performance tradeoff needing its own scoping: bounding audit-line
+  size at the *source* (the read-query AST's unbounded `select`/`join`/`group_by`
+  lists, and `audit/sinks.py`'s own `_read_last_line` startup-path reader,
+  which shares the pre-fix unbounded-growth shape) — `TODO.md` item 139;
+  `_audit_page`'s pagination can still materialize up to `cursor + limit` ≈
+  1,000,100 dicts given the existing `cursor` query-param ceiling — `TODO.md`
+  item 140; and converting the line-count cap into a practically-tight,
+  window-based early exit (stop after N consecutive out-of-window matches,
+  tail-first-native) — a real further tightening, but one that trades a small,
+  bounded ordering-tolerance assumption for speed, which is a call for the
+  maintainer, not a default to reach for under review pressure — `TODO.md`
+  item 141.
+  See [The `help/` module](#the-help-module--a-queryable-product-guide).

@@ -8602,3 +8602,103 @@ afterward and the full suite (1865 unit, 329 integration excluding real_db,
 
 **Effort:** S–M. **Depends on:** 91. **Blocks:** 134 (which must not
 replicate the pattern).
+
+### 138. Audit read surfaces scan the entire persisted file on every request, unbounded by lines read ✅ DONE
+
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 136.**
+`admin/anomaly.py`'s `JsonlAuditEventSource.load_query_events` and
+`admin/config_trends.py`'s `JsonlChangeEventSource.load_change_events` both
+streamed and `json.loads`/pydantic-validated **every line** of
+`AUDIT_JSONL_PATH` on every request; `max_events_scanned` bounded only the
+retained deque, not the read itself, so there was no early exit. The admin UI
+audit browser (`_audit_page`) had the same shape. `/help/my-recent-denials`
+reaches this path with authentication only, no admin scope, and no
+rate-limit/quota middleware — by design (the response is filtered to the
+caller's own `principal_id` before return) — so the least-privileged
+authenticated caller could trigger a full-file scan on demand. Pre-existing
+for the default `AUDIT_SINK_BACKEND=jsonl` backend; item 136 only made the
+identical, already-shipped behavior reachable under `jsonl_chained` too.
+
+**What shipped:**
+
+1. A new shared primitive, `audit/file_reader.py`'s `iter_lines_reverse()`,
+   reads the audit file backward from EOF in fixed byte chunks, yielding
+   complete lines newest-physical-line-first, without loading the file into
+   memory. Because the sink only ever appends, this means the data every
+   caller actually wants — the recent window, the newest page — is examined
+   first. **Why not just cap a forward scan:** capping lines read from the
+   *start* of a large file would silently return stale or empty results,
+   since the oldest lines are read first — worse than no bound at all for
+   exactly the surfaces this item exists to protect.
+2. All three readers (`admin/anomaly.py`, `admin/config_trends.py`,
+   `api/admin_ui_routes.py`'s `_audit_page`) switched from a forward scan +
+   bounded `collections.deque` to iterating `iter_lines_reverse`, each with a
+   new hard cap on lines *read* (`AnomalyThresholds.max_lines_read`,
+   `ChangeTrendThresholds.max_lines_read`, `AppConfig.audit_page_max_lines_read`,
+   `personal_denials_max_lines_read`) — independent of how many are retained.
+   The deques were removed entirely: reading tail-first, the first N matches
+   encountered already *are* the newest N by construction. `AuditEventPage`
+   (the admin UI audit browser's response model) gained a `truncated: bool`
+   field for the same reason the other two report models already had one.
+3. **Hardened same-day by a second `security-invariant-reviewer` pass**
+   before this item shipped, catching real defects in the first cut: the
+   `max_lines_read` fields existed on the thresholds models but were never
+   threaded from `AppConfig` for two of three surfaces (an
+   `architecture-boundary-reviewer` finding) — fixed. More seriously,
+   `iter_lines_reverse` itself was algorithmically unsound for a single
+   undelimited byte run: the carry-forward buffer is fully re-copied every
+   chunk, making an unterminated "line" cost O(length²) instead of
+   O(length), and nothing bounded that length since the line-count cap only
+   increments once a line is actually yielded. Measured at the originally
+   shipped 2,000,000-line default: ~1.6 GB read and 10-40s of blocking work
+   per request on `/help/my-recent-denials` at realistic audit-line sizes —
+   a bound in the formal sense, not the practical one. Fixed with two
+   independent bounds inside `iter_lines_reverse`, both raising a typed
+   `AuditFileReadBounded` rather than stopping silently (so `truncated`
+   stays accurate rather than looking identical to reaching the start of the
+   file): `max_line_bytes` (1 MiB default) aborts an undelimited run before
+   it can grow past a fixed size; `max_total_bytes` (256 MiB default) bounds
+   total bytes read regardless of line count, closing a companion gap where
+   a file padded with enormous numbers of blank lines was never counted
+   against the line cap (blank lines are filtered before a caller's own
+   counter sees them). The `max_lines_read` defaults were also lowered from
+   2,000,000 to 200,000 (50,000 for `personal_denials_max_lines_read`,
+   defaulted tighter than the admin-scoped surfaces since it's the one
+   reachable with authentication only) — now a real backstop under the
+   byte-level bounds rather than the sole line of defense. A fourth finding
+   — a short read during in-place file truncation could splice non-adjacent
+   byte ranges into a fabricated line while still reporting
+   `truncated=False` — is closed the same way: a short `handle.read` now
+   raises `AuditFileReadBounded` instead of being silently concatenated.
+4. Test-contract and claim-review findings from the same pass: added a
+   `truncated is False` regression on `_audit_page`'s ordinary (no-cap-hit)
+   path, since none of the existing tests asserted the field's default;
+   clarified a test comment that overclaimed what it alone proved (an exact
+   `max_events_scanned` boundary test, which cannot on its own distinguish a
+   `>` vs `>=` off-by-one — that variant is covered by a sibling over-cap
+   test); corrected the PRODUCT_GUIDE Decision Log entry, which had
+   originally named only two of the three readers whose deques were removed.
+
+**Deliberately not folded into this item**, filed as follow-ups instead:
+bounding audit-line size at the *source* (the read-query AST's unbounded
+`select`/`join`/`group_by` lists, and `audit/sinks.py`'s own
+`_read_last_line` startup-path reader, which shares the pre-fix
+unbounded-growth shape) — item 139; `_audit_page`'s pagination can still
+materialize up to `cursor + limit` ≈ 1,000,100 dicts given the existing
+`cursor` ceiling — item 140; converting the line-count cap into a
+practically-tight, window-based early exit — a real further tightening, but
+one that trades a small, bounded ordering-tolerance assumption for speed,
+which needs a maintainer decision rather than being built under review
+pressure — item 141.
+
+**Mutation-verified:** every new enforcement point was broken deliberately,
+confirmed to fail the specific test guarding it, and restored — the tail-first
+iteration direction (all three readers), each line-count cap's break
+condition (all three readers), `iter_lines_reverse`'s carry-forward logic,
+its `max_line_bytes`/`max_total_bytes`/short-read guards, and each reader's
+`AuditFileReadBounded` exception handling. Full suite (1898 unit, 333
+integration excluding real_db, 424 security) passed on the final tree.
+
+**Effort:** S–M (grew to M with the algorithmic hardening). **Depends on:**
+none (touches the already-shipped `jsonl` path, item 91 for the
+`jsonl_chained` share of it).
