@@ -44,7 +44,10 @@ Mark each one clean or not clean by name. Skip nothing silently.
 
 - **Report only. Change nothing.** No edits, no fixes applied, no test suite
   or browser runs — if you need to confirm rendered behavior, say what you
-  could not verify statically rather than guessing.
+  could not verify statically rather than guessing. Your tool list has no
+  `Write`/`Edit`, but `Bash` can still create, modify, or stage files — that
+  access exists for reading and grepping, not for making changes; do not use
+  it to touch the tree even though nothing stops you mechanically.
 - Separate findings caused by this change from pre-existing issues; report
   both, labeled.
 

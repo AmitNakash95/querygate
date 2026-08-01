@@ -110,6 +110,21 @@ stage
 run_hook; rc=$?
 assert_blocked "blocks a staged blob over 5MB" "$rc" "MB staged"
 
+setup
+# The oversized-blob check must self-exclude too, same as checks 1 and 2 —
+# pad a copy of the hook itself past the threshold and confirm it is not
+# blocked on its own size.
+cp "$HOOK" "$WORK/repo/.githooks/pre-commit"
+dd if=/dev/zero bs=1048576 count=6 >> "$WORK/repo/.githooks/pre-commit" 2>/dev/null
+stage
+run_hook
+name="self-exclusion: the hook's own file padded past 5MB is not blocked on its own size"
+if grep -q "MB staged" "$WORK/out"; then
+  bad "$name" "the hook flagged its own (self-excluded) file as an oversized blob"
+else
+  ok "$name"
+fi
+
 # --- Negative controls: none of the three new checks false-positive --------
 
 setup
@@ -138,19 +153,31 @@ else
   ok "$name"
 fi
 
+# The hook's own source defines these regexes as literal text, which happens
+# not to match any of them (verified separately) — so committing an
+# unrelated change alongside the hook staying unblocked, by itself, proves
+# nothing about the `[ "$f" = "$self" ] && continue` self-exclusion line;
+# the test would pass identically if that line were deleted. Exercise the
+# exclusion for real: append a genuinely-matching secret to the copied hook
+# file and confirm it is NOT blocked, with a sibling control proving the
+# identical string IS blocked when it isn't self.
 setup
-# The hook's own source defines these regexes as literal text; committing an
-# unrelated change alongside the hook must not have it flag itself.
 cp "$HOOK" "$WORK/repo/.githooks/pre-commit"
-printf '# comment\n' >> "$WORK/repo/.githooks/pre-commit"
+printf 'AKIA%s\n' "ABCDEFGHIJKLMNOP" >> "$WORK/repo/.githooks/pre-commit"
 stage
 run_hook
-name="the hook's own regex-defining source does not self-trigger the secret check"
+name="self-exclusion: a genuinely-matching secret appended to the hook's own file is not blocked"
 if grep -q "credential-shaped string" "$WORK/out"; then
-  bad "$name" "the hook flagged its own pattern definitions as a secret"
+  bad "$name" "the hook flagged its own (self-excluded) file despite the exclusion"
 else
   ok "$name"
 fi
+
+setup
+printf 'AKIA%s\n' "ABCDEFGHIJKLMNOP" > "$WORK/repo/unrelated.txt"
+stage
+run_hook; rc=$?
+assert_blocked "self-exclusion control: the identical string in a non-hook file IS blocked" "$rc" "credential-shaped string"
 
 echo
 if [ "$fail" -eq 0 ]; then
