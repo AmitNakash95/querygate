@@ -235,3 +235,38 @@ async def test_my_recent_denials_respects_configured_limit(tmp_path):
         )
     assert resp.status_code == 200
     assert len(resp.json()["denials"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_my_recent_denials_respects_configured_max_lines_read(tmp_path):
+    # TODO.md item 138 (security-review follow-up): personal_denials_max_lines_read
+    # must be independently operator-configurable and actually reach the
+    # reader, not silently stuck at AnomalyThresholds' own class default —
+    # this is the one surface reachable with authentication only, no admin
+    # scope, so an operator needs to be able to tighten it on its own.
+    path = tmp_path / "audit.jsonl"
+    now = datetime.now(timezone.utc)
+    _write_events(
+        path,
+        [_event(at=now - timedelta(seconds=1000), principal="reader")]
+        + [_event(at=now - timedelta(seconds=i), principal="someone-else") for i in range(50)],
+    )
+    app = create_app(
+        _settings(
+            api_keys=["reader-key"],
+            api_key_subject="reader",
+            audit_sink_backend="jsonl",
+            audit_jsonl_path=str(path),
+            personal_denials_max_lines_read=5,
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.get(
+            "/api/v1/help/my-recent-denials", headers={"Authorization": "Bearer reader-key"}
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    # The caller's own denial sits behind 50 newer events belonging to
+    # another principal; a line-read cap of 5 stops well before reaching it.
+    assert body["denials"] == []
+    assert body["truncated"] is True

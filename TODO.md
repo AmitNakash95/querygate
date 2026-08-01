@@ -168,7 +168,10 @@ order-of-magnitude, not commitments.
 | 135 | Automatic (TTL/lease-driven) credential re-resolution, without an operator reload | M | 13 |
 | 136 | ✅ `jsonl_chained` audit backend silently disables four shipped read surfaces | S–M | 91 |
 | 137 | Audit read surfaces neither verify nor disclose hash-chain integrity | S–M | 91, 136 |
-| 138 | Audit read surfaces scan the entire persisted file on every request, unbounded by lines read | S–M | — |
+| 138 | ✅ Audit read surfaces scan the entire persisted file on every request, unbounded by lines read | S–M | — |
+| 139 | Bound audit-line size at the source (AST list caps + audit/sinks.py's own unbounded-read defect) | M | 138 |
+| 140 | `_audit_page` pagination can still materialize ~1M dicts per request | S–M | 138 |
+| 141 | Convert audit-reader line caps into practically-tight window-based early exits | S | 138 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2567,40 +2570,112 @@ record the choice, then build it):**
 **Effort:** S (disclosure only) to M (real verification). **Depends on:** 91,
 136.
 
-### 138. Audit read surfaces scan the entire persisted file on every request, unbounded by lines read
+### 138. Audit read surfaces scan the entire persisted file on every request, unbounded by lines read ✅ DONE
 
-**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 136.**
-`admin/anomaly.py`'s `JsonlAuditEventSource.load_query_events` and
-`admin/config_trends.py`'s `JsonlChangeEventSource.load_change_events` both
-stream and `json.loads`/pydantic-validate **every line** of
-`AUDIT_JSONL_PATH` on every request; `max_events_scanned` bounds only the
-retained deque, not the read itself, so there is no early exit. The admin UI
-audit browser (`_audit_page`) has the same shape. `/help/my-recent-denials`
-reaches this path with **authentication only, no admin scope, and no
-rate-limit/quota middleware** — by design (the response is filtered to the
-caller's own `principal_id` before return), but that means the least-privileged
-authenticated caller can trigger a full-file scan on demand.
+Fixed by switching all three audit-stream readers to a new shared
+`audit.file_reader.iter_lines_reverse()` primitive (tail-first, byte-chunked)
+with independent per-surface line/byte caps, replacing the old forward-scan +
+bounded-deque approach; hardened by a second security review pass that closed
+an algorithmic complexity defect in the new reader and threaded the missing
+config fields.
 
-**Why this is out of scope for item 136, not caused by it.** This gap is
-pre-existing and already live today for the **default** `AUDIT_SINK_BACKEND=jsonl`
-backend (the value `.env.example` ships) — item 136 only made the identical,
-already-shipped behavior reachable under `jsonl_chained` too, which is the
-literal definition of the parity that item was fixing. Fixing the resource
-bound is a general audit-reader hardening independent of which backend wrote
-the file, and touches the default-backend read path in production today, so it
-needs its own scoping and testing rather than riding in on a bug-fix commit.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 138).
 
-**What to do:** add a hard cap on **lines read**, not just events retained —
-e.g. an explicit `max_lines_read` (or a multiplier on `max_events_scanned`) in
-`AnomalyThresholds`/`ChangeTrendThresholds`/the admin UI's page-size handling,
-breaking out of the per-line loop once hit and setting the existing
-`truncated` flag. Keep the cap in the shared reader so all three (four,
-counting `/help/my-recent-denials`'s reuse of `JsonlAuditEventSource`)
-consumers inherit it from one place, per the repo's composable-interfaces
-doctrine. Regression test: a file with many more lines than the cap; assert
-the reader stops early (e.g. by counting `json.loads` calls or bounding wall
-time) and reports `truncated=True`.
+### 139. Bound audit-line size at the source, not just at the reader
 
-**Effort:** S–M. **Depends on:** none (touches the already-shipped `jsonl`
-path, item 91 for the `jsonl_chained` share of it).
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138.**
+Item 138 made `audit.file_reader.iter_lines_reverse` bail (raise
+`AuditFileReadBounded`) on a single undelimited byte run longer than
+`max_line_bytes` (default 1 MiB), which bounds the *reader's* worst case. It
+does not address the two places an oversized line can originate:
+
+1. **The read-query AST has no size limit on `select`/`joins`/`group_by`/
+   `order_by`.** `query_ast/models.py`'s `StructuredQuery.select` has
+   `min_length=1` and no `max_length`; `execution/service.py`'s
+   `normalize_query_shape(query)` runs **before** policy validation and is
+   written to the audit event even on the rejection path (`service.py:804`).
+   An authenticated caller with query rights (no special privilege needed) can
+   submit a `StructuredQuery` with tens of thousands of `select` entries;
+   policy correctly rejects it (e.g. `max_select_columns`), but the rejection
+   audit event still serializes the full oversized `query_shape` as one JSONL
+   line first.
+2. **`audit/sinks.py`'s `_read_last_line`** (used at process startup to
+   resume a `jsonl_chained` ledger's sequence/hash) has the identical
+   unbounded-expanding-read shape item 138 fixed in `iter_lines_reverse` —
+   `handle.read(size - pos)` grows to the whole file if no newline is ever
+   found, and it runs once at boot, so one oversized trailing line delays or
+   OOMs startup rather than one request.
+
+**What to do:** (a) add `max_length` to `StructuredQuery`'s list fields in
+`query_ast/models.py` (or a tree-wide node-count cap, matching the pattern
+`max_where_predicates`/`max_expression_nodes` already established for other
+AST shapes) — the exact cap is a product decision (is there a legitimate use
+case for very wide selects?), record it in the PRODUCT_GUIDE Decision Log; (b)
+fold `audit/sinks.py:_read_last_line` into the same bounded primitive
+`iter_lines_reverse` already provides, rather than leaving a second
+hand-rolled tail reader with the same defect class the composable-interfaces
+doctrine exists to prevent.
+
+**Effort:** M (the AST cap needs a product decision on the right limit; the
+sinks.py fold-in is S once item 138's primitive exists). **Depends on:** 138.
+
+### 140. `_audit_page` pagination can still materialize ~1M dicts per request
+
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138.**
+`GET /api/v1/admin/ui/audit/events`'s `cursor` query param is
+`Query(default=0, ge=0, le=1_000_000)`; `_audit_page` retains up to
+`cursor + limit` matched, fully-parsed event dicts before slicing the response
+page. A `cursor` near the ceiling therefore still allocates on the order of a
+gigabyte for one admin-scoped request. This bound predates item 138 unchanged
+(the old `deque(maxlen=cursor + limit + 1)` had the identical size), so item
+138 did not introduce it — but it is the same class of defect that item
+exists to fix, in the same function, and admin-scoped is not the same as
+unbounded-safe.
+
+**What to do:** lower the `cursor` ceiling to something a legitimate
+"load more" UI flow would actually reach (the admin UI pages 50 at a time —
+a few thousand covers deep manual paging without approaching six figures), or
+change the pagination shape entirely (e.g. an opaque cursor keyed to file
+position rather than a match-count offset, avoiding the need to re-derive
+`cursor` matches from the start on every page). Either is a product/API-shape
+decision, not a pure hardening — record the choice in the PRODUCT_GUIDE
+Decision Log before implementing.
+
+**Effort:** S (lower the ceiling) to M (cursor redesign). **Depends on:** 138.
+
+### 141. Convert audit-reader line caps into practically-tight window-based early exits
+
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138;
+deliberately not built as part of that item.** `admin/anomaly.py` and
+`admin/config_trends.py` both scan tail-first now (item 138), which makes a
+targeted optimization possible that wasn't before: once the scan has seen a
+long consecutive run of matching-type events whose `occurred_at` is at or
+before `window_start`, it is very likely (though not certain — see below) that
+every remaining, physically-earlier line is also out of window, since the
+audit sink only appends and writes are lock-serialized within a process. Item
+138 deliberately did not build this: `occurred_at` is set at event
+**construction** time, before the (possibly slightly later) write, so under
+concurrent request handling two events' physical write order and their
+`occurred_at` order are not *guaranteed* identical — only overwhelmingly
+likely for realistic concurrency levels. An early exit on this basis is a
+correctness/performance tradeoff (a bounded chance of silently reporting
+`truncated=False` while actually missing a handful of borderline events),
+not a pure hardening, and item 138 already ships a strictly-safe bound
+(`max_lines_read`/`max_line_bytes`/`max_total_bytes`, all fail-closed to
+`truncated=True`) — this item would only make that existing safe bound
+*tighter in the common case*, not fix a live gap.
+
+**What to do, if approved:** add a `max_consecutive_out_of_window` threshold
+(e.g. default 5,000 — tunable slack for reordering/clock skew) to
+`AnomalyThresholds`/`ChangeTrendThresholds`; track a consecutive-out-of-window
+counter across only the caller's own matching event type (not lines of other
+types, which say nothing about this stream's recency); break once the
+threshold is hit, **without** setting `stopped_early`/`truncated` (the window
+genuinely ended, as far as the tolerance allows). Record the accepted
+ordering-tolerance assumption explicitly in the PRODUCT_GUIDE Decision Log
+before building — this is exactly the kind of judgment call CLAUDE.md's
+working agreement reserves for the maintainer, not a default an agent should
+reach for under time pressure.
+
+**Effort:** S once approved. **Depends on:** 138.
 

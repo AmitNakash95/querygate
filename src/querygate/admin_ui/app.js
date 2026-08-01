@@ -1181,7 +1181,7 @@
       if (!append) list.innerHTML = "";
       if (page.events.length) list.insertAdjacentHTML("beforeend", page.events.map(renderAuditEvent).join(""));
       if (!list.children.length) list.innerHTML = `<p class="empty-state">${page.source === "disabled" ? "The persisted JSONL audit sink is disabled for this deployment." : "No matching events."}</p>`;
-      $("#audit-count").textContent = `${page.total} matching event${page.total === 1 ? "" : "s"}`;
+      $("#audit-count").textContent = `${page.total} matching event${page.total === 1 ? "" : "s"}${page.truncated ? " (scan truncated — more may exist)" : ""}`;
       $("#audit-source").textContent = page.malformed ? `${page.malformed} malformed lines skipped` : `Source: ${page.source}`;
       $("#audit-more").hidden = page.next_cursor === null;
     } catch (error) {
