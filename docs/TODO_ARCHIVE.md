@@ -8358,3 +8358,142 @@ the window computed nothing.
 
 **Effort: XL. Priority: high** (closes the ★ flagship pillar's success criterion).
 Depends on: items 100, 101.
+
+### 127. Reject an MCP request whose routing headers disagree with its body (gateway confused-deputy) ✅ DONE
+
+**Surfaced 2026-07-30 by `competitive-scan`.** The MCP `2026-07-28`
+specification (final — see item 128) mirrors `method` and `params.name` into
+required `Mcp-Method` / `Mcp-Name` HTTP headers so that intermediaries
+"(load balancers, gateways, observability tooling) can route and inspect
+requests without parsing the body." It therefore also mandates the matching
+server-side defense:
+
+> Servers that process the request body **MUST** reject requests where the
+> values specified in the headers do not match the corresponding values in the
+> request body. This prevents potential security vulnerabilities when different
+> components in the network rely on different sources of truth (e.g., a load
+> balancer routing on the header value while the MCP server executes based on
+> the body value).
+> — [Streamable HTTP § Server Validation](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+
+**Why it matters more for QueryGate than for a typical MCP server.** The P4
+leverage move (`docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) is to sit
+*behind* MCP gateways and proxies as the enforcement point they can't be. That
+is exactly the deployment where this mismatch is a real confused-deputy: a
+fronting gateway authorizes `Mcp-Name: list_tables` for a low-privilege
+identity, while the body it forwards calls `run_structured_writes`. The
+gateway's tool-level authorization is then silently void, and QueryGate — the
+component that *did* see the body — executed the privileged operation anyway.
+
+**Current state at build time (verified 2026-07-30, prospective not live):**
+QueryGate speaks protocol `2025-11-25` (item 128), which does not define these
+headers, so there was no live vulnerability — a conforming gateway would not
+yet rely on them. The exposure begins the moment either side moves: a gateway
+that trusts the headers, or QueryGate's own upgrade under item 128.
+
+**What shipped.** `mcp/transport_guard.py`'s `MCPRequestGuardMiddleware` — the
+same ASGI wrapper that pre-scans raw body bytes for item 86's size/depth
+guards, already the one place that sees headers and body together before the
+transport parses either — gained a header/body agreement check
+(`_header_body_mismatch`), run strictly *after* item 86's depth scan so a
+hostile deep body can't reach this check's own `json.loads` first. When
+present, `Mcp-Method` must equal the body's `method` and `Mcp-Name` must equal
+`params.name` / `params.uri`; a mismatch is rejected with HTTP `400` and
+JSON-RPC error code `-32020` (`HeaderMismatch`), reusing the existing
+`{"error": {"code", "message"}}` reject envelope rather than a second one.
+Validate-if-present, not require — shippable now, independent of item 128,
+and it fails closed the instant a gateway starts sending the headers.
+
+The spec's Base64 "sentinel" header-value encoding (`=?base64?...?=`, used
+when a name isn't safely representable as a plain ASCII header value) is
+decoded before comparison (`_decode_sentinel_value`); a header wearing the
+sentinel's markers that doesn't actually decode as base64/UTF-8 is rejected as
+malformed rather than compared as literal text — fail-closed, not a silent
+fallback to raw-string comparison. `Mcp-Name` is deliberately **not** checked
+against the set of registered tools here: this guard runs outside
+`MCPAuthMiddleware`, so that check would turn it into an unauthenticated
+tool-enumeration oracle — agreement with the body is the whole job.
+
+**Four defects found and fixed by the post-build `auditors` pass** (all four
+reviewers — security-invariant, architecture-boundary, test-contract, and
+claim — were run in parallel; each is recorded here with its finding ID):
+
+1. **Unhandled parser exception on a small, well-formed-looking body
+   (security-invariant QG-127-1).** `json.loads` can raise a bare `ValueError`
+   (CPython's integer-string-conversion guard trips on an ~5,000-digit numeric
+   literal, well under both the byte and depth caps) that the original
+   `except (json.JSONDecodeError, UnicodeDecodeError)` didn't catch, so it
+   propagated to an unhandled 500 pre-auth — exactly the "malformed input is a
+   client error, never a 5xx" regression item 86 exists to prevent. Widened to
+   `except (ValueError, UnicodeDecodeError, RecursionError)` (`JSONDecodeError`
+   is a `ValueError` subclass, so this only widens, never narrows).
+2. **First-match on a repeated routing header (security-invariant QG-127-2,
+   independently found by architecture-boundary Finding 1).** `Mcp-Method`/
+   `Mcp-Name` sent twice with disagreeing values has no single source of truth
+   for an intermediary to agree with QueryGate about; taking the first
+   occurrence let a caller satisfy this guard with one value while a
+   differently-configured gateway authorizes on a different occurrence of the
+   same header name — reproducing the exact confused-deputy shape this item
+   closes. A repeated routing header is now rejected outright.
+3. **`params.name`-only field selection (architecture-boundary Finding 3,
+   independently found by test-contract F2).** The original
+   `params.get("name", params.get("uri"))` always preferred `name`, so a
+   `resources/read`-shaped body (which mirrors `params.uri`, not `params.name`,
+   per the spec's own table) was never actually checked against the field the
+   header is supposed to agree with — and a body carrying *both* fields was
+   silently resolved by whichever key happened to be checked first. Selection
+   is now driven by `method` (`resources/*` prefers `uri`), and a body carrying
+   both `name` and `uri` is rejected as ambiguous rather than guessed at.
+4. **Ordering test asserted only "some non-null code" (test-contract F1).**
+   `test_mcp_deeply_nested_body_with_routing_header_hits_depth_guard_not_header_check`
+   would have stayed green even if a future change made the header check run
+   first and land on the same observable HTTP status by some other path.
+   Tightened to assert the depth guard's specific `MALFORMED_REQUEST` code.
+
+Claim-reviewer also caught this write-up's own test count drifting ("eight"
+vs. the seven tests that existed at that point) and flagged that the adjacent
+`docs/business/` strategy docs (`MARKET_DOMINATION_ANALYSIS.md`,
+`COMPETITOR_MCP_GATEWAYS.md`, `NORTH_STAR.md`) still described item 127 as
+unshipped — both corrected.
+
+**Coverage.** 13 test functions (14 test items — one is parametrized ×2) in
+`tests/security/test_malformed_input_fuzzing.py` (already the item-86 MCP
+transport-guard suite): the literal confused-deputy scenario on both
+`Mcp-Name` and `Mcp-Method`, matching headers passing through unaffected,
+sentinel-encoded names decoding correctly, a malformed sentinel failing
+closed, an unparseable body under a present header failing closed, a
+non-object JSON body (e.g. a bare array) failing closed, a deeply-nested body
+with a routing header present still hitting the depth guard specifically (not
+the header check, and not a `RecursionError`), the integer-conversion
+`ValueError` failing closed rather than 500ing, a repeated routing header
+being rejected (both header names, parametrized), a `resources/read`-shaped
+body matching correctly against `params.uri`, the mirror mismatch case, and a
+body carrying both `params.name` and `params.uri` being rejected as
+ambiguous. Every enforcement point — the original set plus all four
+post-audit fixes — was mutation-verified: flipping the method/name equality
+checks, letting a JSON-parse failure return "no mismatch", letting a
+malformed sentinel fall back to raw-string comparison, reordering the header
+check ahead of the depth scan (reproduces the exact `RecursionError` item 86
+exists to prevent), narrowing the exception clause back down, dropping the
+duplicate-header check, dropping the both-fields-ambiguous check, and
+reverting the `uri`-preference logic each made a distinct, targeted test fail
+for the expected reason. One mutation survived a first, weaker version of the
+malformed-sentinel test — the header and the body's `params.name` must be set
+to the *same* still-encoded sentinel text for the test to distinguish
+"decoded and rejected" from "coincidentally never equal as raw strings" —
+corrected before landing.
+
+**Effort:** S–M. **Depends on:** 86 (shipped). **Does not depend on 128** —
+deliberately.
+
+**Known residual, recorded rather than fixed (security-invariant QG-127-3):**
+the pre-auth `json.loads` this item adds is bounded only by the existing
+`mcp_max_request_bytes` (default 4 MiB), not a smaller dedicated cap — an
+unauthenticated caller can force a full parse of up to that size per request
+by adding one small header, at roughly 4x the CPU and 10x the memory of the
+byte/depth scan alone (measured: ~0.16s CPU / ~36MB peak heap for a 3.5MB
+body). A dedicated smaller cap would reduce this, but rejecting an
+over-threshold body under a present header would also reject a legitimate
+large batch from a real, conformant 2026-07-28 gateway once item 128 lands —
+a product tradeoff between pre-auth cost and future-client compatibility, not
+a small/safe fix, and left for a maintainer decision alongside item 128.

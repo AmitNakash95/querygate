@@ -2740,6 +2740,29 @@ error on the MCP surface too, never a 5xx. Both thresholds are configurable
 (`mcp_max_request_bytes` / `mcp_max_request_depth`) with defaults far above
 any legitimate batch, so normal traffic is untouched.
 
+The same middleware also closes a gateway confused-deputy gap (TODO item
+127). The MCP `2026-07-28` spec mirrors `method`/`params.name`/`params.uri`
+into `Mcp-Method`/`Mcp-Name` HTTP headers so a fronting gateway can route and
+authorize without parsing the body — and requires the server to reject a
+request where a present header disagrees with the body (`400` +
+`-32020 HeaderMismatch`), because otherwise a gateway authorizing on the
+header while QueryGate executes the body is a confused deputy (e.g. a
+gateway permits `Mcp-Name: list_tables` for a low-privilege caller while the
+body actually invokes `run_structured_writes`). QueryGate currently speaks
+protocol `2025-11-25` (item 128), which doesn't define these headers, so this
+validates **if present**, not required — it fails closed the moment a
+gateway starts sending them, run strictly after the depth scan above (so a
+hostile deep body can't reach this check's own `json.loads` first). Base64
+"sentinel"-encoded header values (`=?base64?...?=`, used when a name isn't
+safely ASCII) are decoded before comparison; a header wearing the sentinel's
+markers that doesn't actually decode is rejected as malformed rather than
+compared as literal text. `Mcp-Name` is checked against `params.uri` for a
+`resources/*` method and `params.name` otherwise (a body carrying both is
+rejected as ambiguous rather than guessed at), and a routing header sent more
+than once — which has no single source of truth for an intermediary to agree
+with QueryGate about — is rejected outright rather than resolved by first
+match.
+
 The actual tools, one module per concern:
 
 - `mcp/tools/connections.py` — `list_connections`.

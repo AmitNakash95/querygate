@@ -101,7 +101,7 @@ claim when the work ships or before explicitly handing the item back.
   reproducible corpus + `querygate-security-benchmark` CLI + published report,
   100% catch vs. 0% modeled raw-SQL baseline); box stays `[ ]` until phase 2's
   live LLM/Toolbox run (needs external infra).
-- [ ] **127** — Reject an MCP request whose routing headers disagree with its
+- [x] **127** — Reject an MCP request whose routing headers disagree with its
   body. *Added 2026-07-30 by `competitive-scan`. The MCP `2026-07-28` spec
   mandates this server-side check precisely because a gateway authorizing on
   `Mcp-Name` while the server executes the body is a confused deputy — and
