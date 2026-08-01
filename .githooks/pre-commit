@@ -13,8 +13,21 @@
 # you must.
 #
 # Deliberately NOT ported from the reference template's equivalent hook: a
-# rule blocking commits of .claude/settings.local.json. QueryGate tracks that
-# file on purpose as a durable, reviewable permissions layer.
+# rule blocking commits of .claude/settings.local.json. That file is already
+# gitignored here (see .gitignore) so the rule would never fire; unlike the
+# template, this repo has no tracked file in that role to protect.
+#
+# Known limitations, disclosed rather than silently accepted:
+#   - Checks 1-2 skip any file `grep -I` treats as binary (a NUL-byte
+#     heuristic). A UTF-16/UTF-32-encoded text file is NUL-heavy by
+#     construction and will slip past both the conflict-marker and
+#     secret-shape checks undetected.
+#   - The secret-shape check (#2) matches known vendor key formats only
+#     (AWS/GitHub/Slack/OpenAI-style keys, PEM headers) — it has no generic
+#     detector for a bare password/DSN/connection-string value, since this
+#     repo's own test suite legitimately contains many fake
+#     scheme://user:pass@host-shaped demo credentials that a naive generic
+#     pattern would false-positive on constantly.
 #
 # Tests: sh .githooks/test-pre-commit.sh
 #
@@ -63,6 +76,7 @@ if [ -s "$staged_f" ]; then
 
   # --- 3. Oversized blobs -----------------------------------------------------
   while IFS= read -r f; do
+    [ "$f" = "$self" ] && continue
     size=$(git cat-file -s ":$f" 2>/dev/null || echo 0)
     if [ "$size" -gt 5242880 ]; then
       echo "[pre-commit] BLOCKED — $f is $((size / 1048576))MB staged. Use LFS or keep it out of git." >&2
