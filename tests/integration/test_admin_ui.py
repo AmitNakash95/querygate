@@ -34,7 +34,7 @@ connections:
     return str(connections_file), str(policy_file)
 
 
-def _settings(tmp_path, monkeypatch, *, scopes=None, audit_path=None, audit_backend=None):
+def _settings(tmp_path, monkeypatch, *, scopes=None, audit_path=None, audit_backend=None, **extra):
     monkeypatch.setenv("ADMIN_UI_DB_URL", "postgresql+asyncpg://user:pass@localhost/demo")
     connections_file, policy_file = _write_source_files(tmp_path)
     return AppConfig(
@@ -48,6 +48,7 @@ def _settings(tmp_path, monkeypatch, *, scopes=None, audit_path=None, audit_back
         api_key_scopes=(
             scopes if scopes is not None else ["admin:config:read", "admin:config:write"]
         ),
+        **extra,
     )
 
 
@@ -368,6 +369,11 @@ async def test_audit_browser_is_filtered_newest_first_and_redaction_safe(tmp_pat
     assert page.json()["malformed"] == 1
     assert page.json()["events"][0]["event_id"] == "query-2"
     assert older.json()["events"][0]["event_id"] == "query-1"
+    # The ordinary (no-cap-hit) path must report truncated=False, not just
+    # default to it — a regression that always set truncated=True on this
+    # branch would otherwise slip past every other test in this file, none
+    # of which are near audit_page_max_lines_read.
+    assert page.json()["truncated"] is False
     assert "params" not in json.dumps(page.json())
     assert "rows" not in json.dumps(page.json())
 
@@ -482,7 +488,123 @@ async def test_audit_browser_reports_disabled_without_a_locally_readable_backend
         "total": 0,
         "malformed": 0,
         "next_cursor": None,
+        "truncated": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_audit_browser_finds_newest_events_past_a_huge_prefix_of_old_lines(
+    tmp_path, monkeypatch
+):
+    """TODO.md item 138: reading tail-first means a line-read cap far smaller
+    than the file still finds the newest matching events completely — a
+    forward-and-cap scan from the start of the file would have found none of
+    them, since they're the physically last lines written."""
+    audit_path = tmp_path / "audit.jsonl"
+    with open(audit_path, "w", encoding="utf-8") as handle:
+        # A different event_type so the query.execution filter below excludes
+        # every one of these, regardless of how many precede the real matches.
+        for i in range(2000):
+            handle.write(
+                ConnectionProbeEvent(
+                    event_id=f"ancient-{i}",
+                    connection_id="demo",
+                    principal_id="agent-a",
+                    outcome="success",
+                    probe_healthy=True,
+                ).model_dump_json(exclude_none=True)
+                + "\n"
+            )
+        for i in range(3):
+            handle.write(
+                AuditEvent(
+                    event_id=f"recent-{i}",
+                    connection_id="demo",
+                    principal_id="agent-a",
+                    policy_decision="allowed",
+                    outcome="success",
+                    query_shape={"from": "orders"},
+                    duration_ms=1,
+                ).model_dump_json(exclude_none=True)
+                + "\n"
+            )
+    app = create_app(
+        _settings(
+            tmp_path,
+            monkeypatch,
+            audit_path=audit_path,
+            audit_backend="jsonl",
+            audit_page_max_lines_read=10,
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        page = await client.get(
+            "/api/v1/admin/ui/audit/events?event_type=query.execution&limit=10",
+            headers=_auth(),
+        )
+
+    body = page.json()
+    assert page.status_code == 200
+    ids = [e["event_id"] for e in body["events"]]
+    assert ids == ["recent-2", "recent-1", "recent-0"]
+    assert body["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_audit_browser_bounds_lines_read_not_just_page_size(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit.jsonl"
+    with open(audit_path, "w", encoding="utf-8") as handle:
+        for i in range(500):
+            handle.write(
+                ConnectionProbeEvent(
+                    event_id=f"probe-{i}",
+                    connection_id="demo",
+                    principal_id="admin-a",
+                    outcome="success",
+                    probe_healthy=True,
+                ).model_dump_json(exclude_none=True)
+                + "\n"
+            )
+    app = create_app(
+        _settings(
+            tmp_path,
+            monkeypatch,
+            audit_path=audit_path,
+            audit_backend="jsonl",
+            audit_page_max_lines_read=20,
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        page = await client.get(
+            "/api/v1/admin/ui/audit/events?event_type=query.execution",
+            headers=_auth(),
+        )
+
+    body = page.json()
+    assert page.status_code == 200
+    assert body["events"] == []  # every line is a connection.probe, never matched
+    assert body["total"] == 0
+    assert body["truncated"] is True  # stopped at the line cap, not because it finished
+
+
+@pytest.mark.asyncio
+async def test_audit_browser_reports_truncated_when_the_underlying_reader_bails(
+    tmp_path, monkeypatch
+):
+    # audit.file_reader.iter_lines_reverse raises AuditFileReadBounded on an
+    # internal safety bound (an oversized undelimited line, here) rather than
+    # silently stopping — the route must catch it and return a normal 200
+    # with truncated=True, not a 500.
+    audit_path = tmp_path / "audit.jsonl"
+    audit_path.write_bytes(b"x" * 2_000_000)  # one giant line, no newline anywhere
+    app = create_app(_settings(tmp_path, monkeypatch, audit_path=audit_path, audit_backend="jsonl"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        page = await client.get("/api/v1/admin/ui/audit/events", headers=_auth())
+
+    body = page.json()
+    assert page.status_code == 200
+    assert body["events"] == []
+    assert body["truncated"] is True
 
 
 @pytest.mark.asyncio

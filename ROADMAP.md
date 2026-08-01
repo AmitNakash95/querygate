@@ -128,7 +128,7 @@ claim when the work ships or before explicitly handing the item back.
   (disclosure-only vs. real per-request verification) recorded in the
   PRODUCT_GUIDE Decision Log as the item's own first step — same pattern as
   items 100–106 — not a reason to defer it.* **Depends on 91, 136.**
-- [ ] **138** — Audit read surfaces scan the entire persisted file on every
+- [x] **138** — Audit read surfaces scan the entire persisted file on every
   request, unbounded by lines read. *Surfaced 2026-08-01 by the
   `security-invariant-reviewer` audit of item 136. Pre-existing for the
   default `jsonl` backend (item 136 only extended the same already-shipped
@@ -136,6 +136,24 @@ claim when the work ships or before explicitly handing the item back.
   separately because fixing it touches the default-backend read path in
   production today and deserves its own scoping/tests rather than riding in on
   a bug-fix commit.*
+- [ ] **139** — Bound audit-line size at the source (AST list caps +
+  `audit/sinks.py`'s own unbounded-read defect). *Surfaced 2026-08-01 by the
+  `security-invariant-reviewer` audit of item 138. Needs a maintainer decision
+  on the right AST list-size cap, recorded in the PRODUCT_GUIDE Decision Log
+  as the item's own first step.* **Depends on 138.**
+- [ ] **140** — `_audit_page` pagination can still materialize ~1M dicts per
+  request. *Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of
+  item 138; pre-existing (the old deque had the identical bound), same class
+  of defect item 138 exists to fix. Needs a maintainer decision on the
+  cursor-ceiling/pagination-shape tradeoff, recorded as the item's own first
+  step.* **Depends on 138.**
+- [ ] **141** — Convert audit-reader line caps into practically-tight
+  window-based early exits. *Surfaced 2026-08-01 by the
+  `security-invariant-reviewer` audit of item 138; deliberately not built as
+  part of it. Trades a bounded ordering-tolerance assumption for speed on an
+  already-safe (fail-closed) bound — needs an explicit maintainer decision
+  recorded in the PRODUCT_GUIDE Decision Log before building, per CLAUDE.md's
+  working agreement on judgment calls.* **Depends on 138.**
 
 ### Phase 1 — Pilot-readiness (let one design partner deploy & trust it)
 

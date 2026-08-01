@@ -69,6 +69,7 @@ def _change_trend_thresholds(cfg: AppConfig) -> ChangeTrendThresholds:
         recent_window_seconds=cfg.change_trend_recent_window_seconds,
         baseline_window_seconds=cfg.change_trend_baseline_window_seconds,
         max_events_scanned=cfg.change_trend_max_events_scanned,
+        max_lines_read=cfg.change_trend_max_lines_read,
     )
 
 
@@ -112,6 +113,7 @@ def _anomaly_thresholds(cfg: AppConfig) -> AnomalyThresholds:
         volume_spike_ratio=cfg.anomaly_volume_spike_ratio,
         rejection_rate_delta=cfg.anomaly_rejection_rate_delta,
         max_events_scanned=cfg.anomaly_max_events_scanned,
+        max_lines_read=cfg.anomaly_max_lines_read,
         max_principals_reported=cfg.anomaly_max_principals_reported,
     )
 

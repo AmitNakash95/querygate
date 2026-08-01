@@ -77,6 +77,7 @@ def build_help_router(
             principal_id=principal.subject,
             lookback_seconds=cfg.personal_denials_lookback_seconds,
             max_events_scanned=cfg.personal_denials_max_events_scanned,
+            max_lines_read=cfg.personal_denials_max_lines_read,
             limit=cfg.personal_denials_limit,
         )
 

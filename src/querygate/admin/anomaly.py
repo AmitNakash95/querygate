@@ -23,23 +23,26 @@ SQL, predicate value, row, table, or column beyond what the event schema
 reads only `event_type == "query.execution"` events and ignores their
 `query_shape`.
 
-**Bounded by construction.** The file is streamed once into a bounded deque, so
-a long-running deployment's entire audit history can never make one request
-allocate unbounded memory; the report caps the number of principals and the
-per-principal new-connection list, and flags `truncated` when a cap was hit.
+**Bounded by construction.** The reader (`audit.file_reader.iter_lines_reverse`,
+TODO.md item 138) reads the file tail-first and stops once either the
+retained-event cap or a hard lines-read cap is hit, so a long-running
+deployment's entire audit history can never make one request allocate
+unbounded memory or do unbounded work; the report also caps the number of
+principals and the per-principal new-connection list, and flags `truncated`
+when any cap was hit.
 """
 
 from __future__ import annotations
 
 import json
-from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Deque, Dict, List, Literal, Optional, Protocol, Set, Tuple
+from typing import Dict, List, Literal, Optional, Protocol, Set, Tuple
 
 import pydantic as pyd
 
 from querygate.audit.events import AuditEvent
+from querygate.audit.file_reader import AuditFileReadBounded, iter_lines_reverse
 from querygate.audit.ledger import unwrap_envelope
 
 AnomalyKind = Literal["volume_spike", "rejection_rate_spike", "new_connection_access"]
@@ -73,8 +76,23 @@ class AnomalyThresholds(pyd.BaseModel):
     volume_spike_ratio: float = pyd.Field(default=3.0, gt=1)
     # Absolute increase in rejection fraction (0..1) that counts as a spike.
     rejection_rate_delta: float = pyd.Field(default=0.3, gt=0, le=1)
-    # Memory/time bound on how many in-window events one report will scan.
+    # Memory bound on how many in-window events one report retains.
     max_events_scanned: int = pyd.Field(default=200_000, ge=1)
+    # TODO.md item 138: hard bound on total *lines read from disk*, independent
+    # of how many are retained — bounds worst-case parse/validate work on an
+    # oversized or adversarial file. The reader scans tail-first (newest
+    # physical line first, since the sink only appends), so this cap is hit
+    # only after every genuinely recent line has already been seen; it never
+    # trades away the window's correctness the way capping a forward scan
+    # from the start of the file would. Either cap can fire first — there's
+    # no requirement that one exceed the other. Defaulted to match
+    # `max_events_scanned` rather than far above it (an earlier default of
+    # 2,000,000 was measured, per a 2026-08-01 security review, at up to
+    # ~1.6 GB read and 10-40s of blocking work per request at realistic audit
+    # line sizes — not a meaningful bound in practice); `iter_lines_reverse`'s
+    # own `max_line_bytes`/`max_total_bytes` are the hard backstop beneath
+    # this line-count budget.
+    max_lines_read: int = pyd.Field(default=200_000, ge=1)
     # Report caps — keep one response bounded regardless of principal count.
     max_principals_reported: int = pyd.Field(default=100, ge=1)
     max_new_connections_per_principal: int = pyd.Field(default=10, ge=1)
@@ -309,17 +327,23 @@ class AuditEventSource(Protocol):
         self, *, now: datetime, thresholds: AnomalyThresholds
     ) -> Tuple[List[AuditEvent], int, bool]:
         """Return (events, malformed_line_count, truncated). `truncated` is True
-        when more in-window events existed than `max_events_scanned`."""
+        when the scan stopped early — either `max_events_scanned` in-window
+        events were already found, or `max_lines_read` lines were read —
+        before it could be sure no more recent-window events remained."""
         ...
 
 
 class JsonlAuditEventSource:
     """Reads `query.execution` events from the JSONL audit sink's file.
 
-    Streams the file once into a bounded deque, so a huge audit history never
-    makes one report allocate memory proportional to the whole file. Lines that
-    aren't a valid `query.execution` event are counted as `malformed` and
-    skipped, never fatal — the same tolerance as item 44's audit viewer.
+    Reads tail-first (`audit.file_reader.iter_lines_reverse`): since the sink
+    only ever appends, the physically newest lines — which is what a
+    recent-vs-baseline window needs — are seen before the oldest, so a hard
+    cap on lines read (`max_lines_read`) bounds worst-case work without
+    risking never reaching the window at all, the way capping a forward scan
+    from the beginning of a large file would. Lines that aren't a valid
+    `query.execution` event are counted as `malformed` and skipped, never
+    fatal — the same tolerance as item 44's audit viewer.
     """
 
     def __init__(self, path: str) -> None:
@@ -331,16 +355,21 @@ class JsonlAuditEventSource:
         window_start = now - timedelta(
             seconds=thresholds.recent_window_seconds + thresholds.baseline_window_seconds
         )
-        kept: Deque[AuditEvent] = deque(maxlen=thresholds.max_events_scanned)
-        matched = 0
+        kept: List[AuditEvent] = []
         malformed = 0
+        lines_read = 0
+        stopped_early = False
         if not self.path.exists():
             return [], 0, False
-        with self.path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
+        try:
+            for line in iter_lines_reverse(self.path):
+                if len(kept) >= thresholds.max_events_scanned:
+                    stopped_early = True
+                    break
+                if lines_read >= thresholds.max_lines_read:
+                    stopped_early = True
+                    break
+                lines_read += 1
                 try:
                     raw = json.loads(line)
                 except json.JSONDecodeError:
@@ -361,10 +390,13 @@ class JsonlAuditEventSource:
                     occurred = occurred.replace(tzinfo=timezone.utc)
                 if occurred <= window_start or occurred > now:
                     continue
-                matched += 1
                 kept.append(event)
-        truncated = matched > thresholds.max_events_scanned
-        return list(kept), malformed, truncated
+        except AuditFileReadBounded:
+            # An internal safety bound (oversized line, total-bytes budget, or
+            # the file changing size mid-scan) fired before the scan reached
+            # the start of the file — must not be reported as complete.
+            stopped_early = True
+        return kept, malformed, stopped_early
 
 
 def build_anomaly_report(

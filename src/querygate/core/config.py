@@ -269,6 +269,13 @@ class AppConfig(BaseSettings):
     # head hash. Never logged; verification (`querygate-audit verify --hmac-key`)
     # needs the same value.
     audit_ledger_hmac_key: str = pyd.Field(default="")
+    # TODO.md item 138: hard bound on total *lines read from disk* per admin
+    # UI audit-browser page request, independent of `limit`/`cursor` — bounds
+    # worst-case parse/validate work on an oversized or adversarial file. The
+    # reader (`api/admin_ui_routes.py`'s `_audit_page`) scans tail-first
+    # (`audit.file_reader.iter_lines_reverse`), so this cap is hit only after
+    # every genuinely recent line has already been seen.
+    audit_page_max_lines_read: int = pyd.Field(default=200_000, ge=1)
 
     # HMAC key that signs in-query approval tokens (execution/approval.py,
     # TODO.md item 92). Empty (the default) means the approval gate cannot issue
@@ -291,6 +298,9 @@ class AppConfig(BaseSettings):
     anomaly_volume_spike_ratio: float = pyd.Field(default=3.0, gt=1)
     anomaly_rejection_rate_delta: float = pyd.Field(default=0.3, gt=0, le=1)
     anomaly_max_events_scanned: int = pyd.Field(default=200_000, ge=1)
+    # TODO.md item 138: hard bound on total *lines read from disk*, independent
+    # of how many are retained — see `admin.anomaly.AnomalyThresholds.max_lines_read`.
+    anomaly_max_lines_read: int = pyd.Field(default=200_000, ge=1)
     anomaly_max_principals_reported: int = pyd.Field(default=100, ge=1)
 
     # Config/catalog-change trend surfacing over the persisted audit stream
@@ -302,6 +312,9 @@ class AppConfig(BaseSettings):
     change_trend_recent_window_seconds: float = pyd.Field(default=3600.0, gt=0)
     change_trend_baseline_window_seconds: float = pyd.Field(default=86400.0, gt=0)
     change_trend_max_events_scanned: int = pyd.Field(default=200_000, ge=1)
+    # TODO.md item 138: hard bound on total *lines read from disk*, independent
+    # of how many are retained — see `admin.config_trends.ChangeTrendThresholds.max_lines_read`.
+    change_trend_max_lines_read: int = pyd.Field(default=200_000, ge=1)
 
     # Time-windowed metrics history for the observability dashboard (TODO.md
     # item 44, phase 2 remainder) — queries an *operator-configured* external
@@ -328,6 +341,12 @@ class AppConfig(BaseSettings):
     # backend=none the endpoint honestly reports source="disabled".
     personal_denials_lookback_seconds: float = pyd.Field(default=86400.0, gt=0)
     personal_denials_max_events_scanned: int = pyd.Field(default=50_000, ge=1)
+    # TODO.md item 138: hard bound on total *lines read from disk*, independent
+    # of how many are retained. Kept independently tunable (rather than
+    # inheriting anomaly_max_lines_read) and defaulted tighter than the
+    # admin-scoped surfaces, since this is the one reachable with
+    # authentication only, no admin scope, by design (item 45).
+    personal_denials_max_lines_read: int = pyd.Field(default=50_000, ge=1)
     personal_denials_limit: int = pyd.Field(default=20, ge=1)
 
     # Config-governance version history (querygate/admin/) — staged/applied/

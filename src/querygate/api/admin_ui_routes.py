@@ -10,7 +10,6 @@ persisted audit stream.
 from __future__ import annotations
 
 import json
-from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional
 
@@ -20,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from querygate.api._errors import require_scope
 from querygate.audit.events import PersistableEvent
+from querygate.audit.file_reader import AuditFileReadBounded, iter_lines_reverse
 from querygate.audit.ledger import unwrap_envelope
 from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
@@ -170,6 +170,11 @@ class AuditEventPage(pyd.BaseModel):
     total: int = pyd.Field(ge=0)
     malformed: int = pyd.Field(ge=0)
     next_cursor: Optional[int] = pyd.Field(default=None, ge=0)
+    # TODO.md item 138: True when the underlying scan stopped at its
+    # `audit_page_max_lines_read` bound before it could be sure no more
+    # matching lines remained — `total` (and therefore pagination) may be
+    # incomplete as a result.
+    truncated: bool = False
 
     model_config = pyd.ConfigDict(extra="forbid")
 
@@ -355,14 +360,25 @@ def _audit_page(
     if not path.exists():
         return AuditEventPage(source="empty", events=[], total=0, malformed=0)
 
-    # Keep only enough newest matching records to serve this page.  The file
-    # is streamed once, so a long-running deployment cannot make one UI page
-    # allocate memory proportional to its entire audit history.
-    records: deque[Dict[str, Any]] = deque(maxlen=cursor + limit + 1)
+    # Scan tail-first (TODO.md item 138): since the sink only ever appends,
+    # the physically newest lines are what a newest-first page needs, so a
+    # hard cap on lines read (`audit_page_max_lines_read`) bounds worst-case
+    # parse/validate work without risking never reaching a recent page the
+    # way capping a forward scan from the start of the file would. Only the
+    # first `cursor + limit` matches are retained — enough to serve this
+    # page — but every match within the line-read bound is still counted
+    # toward `total`.
+    matches: List[Dict[str, Any]] = []
     total = 0
     malformed = 0
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
+    lines_read = 0
+    truncated = False
+    try:
+        for line in iter_lines_reverse(path):
+            if lines_read >= cfg.audit_page_max_lines_read:
+                truncated = True
+                break
+            lines_read += 1
             try:
                 raw = json.loads(line)
                 raw = unwrap_envelope(raw)
@@ -382,10 +398,12 @@ def _audit_page(
             if action is not None and item.get("action") != action:
                 continue
             total += 1
-            records.append(item)
+            if len(matches) < cursor + limit:
+                matches.append(item)
+    except AuditFileReadBounded:
+        truncated = True
 
-    newest_first = list(reversed(records))
-    events = newest_first[cursor : cursor + limit]
+    events = matches[cursor : cursor + limit]
     next_cursor = cursor + len(events) if total > cursor + len(events) else None
     return AuditEventPage(
         source="jsonl",
@@ -393,6 +411,7 @@ def _audit_page(
         total=total,
         malformed=malformed,
         next_cursor=next_cursor,
+        truncated=truncated,
     )
 
 
