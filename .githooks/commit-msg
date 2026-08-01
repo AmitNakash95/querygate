@@ -1,0 +1,41 @@
+#!/bin/sh
+# commit-msg: human-authorship floor.
+#
+# The human operator is the sole author of every commit in this repo (see the
+# user's global CLAUDE.md commit-authorship rule). An agent (Claude or any
+# other) must never attribute itself as a co-author. This hook is the
+# mechanical backstop: it strips any `Co-Authored-By` trailer naming a known
+# AI/agent before the commit is written, in case an agent's default tooling
+# appended one anyway. It never blocks the commit — it strips the trailer and
+# lets the commit through, or (if the strip itself fails) warns and leaves the
+# message untouched rather than silently claiming success.
+#
+# Known limitation: matches the trailer only on a single line (the common,
+# git-generated form) — a manually folded/continued trailer is not detected.
+# Same class of limitation as pre-commit's newline-in-path gap.
+#
+# Enable once per clone (same as pre-commit): make install-hooks
+#
+set -u
+
+MSG_FILE="${1:-}"
+[ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || exit 0
+
+# Case-insensitive match on well-known AI/agent identifiers, keyed narrowly
+# enough that a human co-author whose name merely contains "claude" (e.g.
+# "Ann Mclaude") is never caught — \b requires it as its own word.
+PATTERN='^Co-Authored-By:.*(\bclaude\b|anthropic|openai|chatgpt|\bgpt-|copilot|\bgemini\b)'
+
+if grep -Eiq "$PATTERN" "$MSG_FILE"; then
+  TMP="$MSG_FILE.tmp.$$"
+  trap 'rm -f "$TMP"' EXIT INT TERM
+  grep -Eiv "$PATTERN" "$MSG_FILE" > "$TMP"
+  rc=$?
+  if [ "$rc" -le 1 ] && mv "$TMP" "$MSG_FILE"; then
+    echo "commit-msg: stripped an AI/agent co-author trailer — the human operator is the sole commit author." >&2
+  else
+    echo "commit-msg: WARNING — could not strip an AI/agent co-author trailer automatically. Remove it by hand before pushing." >&2
+  fi
+fi
+
+exit 0
