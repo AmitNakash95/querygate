@@ -10,9 +10,13 @@
 # lets the commit through, or (if the strip itself fails) warns and leaves the
 # message untouched rather than silently claiming success.
 #
-# Known limitation: matches the trailer only on a single line (the common,
-# git-generated form) — a manually folded/continued trailer is not detected.
-# Same class of limitation as pre-commit's newline-in-path gap.
+# Known limitations:
+#   - Matches the trailer only on a single line (the common, git-generated
+#     form) — a manually folded/continued trailer is not detected. Same class
+#     of limitation as pre-commit's newline-in-path gap.
+#   - The identifier list (claude/anthropic/openai/chatgpt/gpt-/copilot/
+#     gemini) is the well-known set as of 2026, not exhaustive — a trailer
+#     naming a different AI tool not in this list passes through unstripped.
 #
 # Enable once per clone (same as pre-commit): make install-hooks
 #

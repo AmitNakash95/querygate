@@ -115,12 +115,16 @@ clean or not clean:
 Launch each selected reviewer as its dedicated `subagent_type` — literally
 `security-invariant-reviewer`, `architecture-boundary-reviewer`,
 `test-contract-reviewer`, `ui-a11y-reviewer`, or `claim-reviewer`, matching the
-agent definitions under `.claude/agents/`. Each of those definitions restricts
-its subagent to `Read, Grep, Glob, Bash` — no `Write`/`Edit` — so "report
-only" is a structural property of the agent, not just an instruction it could
-ignore under access it still has. (A generic subagent given a report-only
-*instruction* but full tool access is exactly the failure mode this
-restriction closes — don't fall back to a generic subagent for these roles.)
+agent definitions under `.claude/agents/`. Each of those definitions drops
+`Write`/`Edit` from its tool list, closing the specific failure mode of a
+generic subagent given only a report-only *instruction* while still holding
+full tool access — don't fall back to a generic subagent for these roles.
+This narrows the surface but does not make "report only" airtight: `Bash`
+remains available and can itself write, move, or stage files (`>`, `sed -i`,
+`git add`/`commit`, …), so the restriction reduces the blast radius of a
+misbehaving reviewer rather than eliminating it. Treat it as raising the bar,
+not as a guarantee that lets you skip briefing each reviewer not to touch the
+tree.
 
 Launch one subagent per selected reviewer in a single parallel batch, using
 background execution when the runtime supports it. Do not serialize reviewers.

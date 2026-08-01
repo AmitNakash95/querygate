@@ -126,6 +126,34 @@ else
   ok "$name"
 fi
 
+# --- I/O-failure fallback path: the strip itself can fail (unwritable dir) -
+# Forces the `else` branch (WARNING, message left untouched) by making the
+# message file's directory read-only so the atomic write-then-rename cannot
+# complete. Skipped when running as root, since root bypasses permission bits
+# and the failure could never be forced.
+
+if [ "$(id -u)" = "0" ]; then
+  printf "SKIP  I/O failure fallback (running as root — permission bits are not enforced)\n"
+else
+  mkdir -p "$WORK/ro"
+  ROMSG="$WORK/ro/msg"
+  printf 'fix: thing\n\nCo-Authored-By: Claude <claude@example.org>\n' > "$ROMSG"
+  chmod 555 "$WORK/ro"
+  sh "$HOOK" "$ROMSG" >"$WORK/out" 2>&1
+  rc=$?
+  chmod u+w "$WORK/ro"
+  name="I/O failure fallback: unwritable directory leaves trailer intact and warns, never blocks"
+  if [ "$rc" -ne 0 ]; then
+    bad "$name" "hook exited $rc, contract is never-block"
+  elif ! grep -qi 'Co-Authored-By' "$ROMSG"; then
+    bad "$name" "trailer was removed despite the write failure"
+  elif ! grep -q 'WARNING' "$WORK/out"; then
+    bad "$name" "no WARNING emitted on the fallback path"
+  else
+    ok "$name"
+  fi
+fi
+
 # --- hook never blocks even on a malformed invocation ----------------------
 
 sh "$HOOK" >"$WORK/out" 2>&1

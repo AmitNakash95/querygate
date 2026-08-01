@@ -57,7 +57,10 @@ Mark each one clean or not clean by name. Skip nothing silently.
 ## Rules of engagement
 
 - **Report only. Change nothing.** No edits, no fixes applied, no test suite
-  runs.
+  runs. Your tool list has no `Write`/`Edit`, but `Bash` can still create,
+  modify, or stage files — that access exists for reading and grepping, not
+  for making changes; do not use it to touch the tree even though nothing
+  stops you mechanically.
 - Read the complete changed files and their call sites/models/tests — the diff
   is a locator, not the review surface.
 - Separate findings caused by this change from pre-existing ones; report both,

@@ -56,7 +56,11 @@ Mark each one clean or not clean by name. Skip nothing silently.
 ## Rules of engagement
 
 - **Report only. Change nothing. Do not run the test suite** — read tests
-  statically; running them is the parent audit's job after triage.
+  statically; running them is the parent audit's job after triage. Your tool
+  list has no `Write`/`Edit`, but `Bash` can still create, modify, or stage
+  files — that access exists for reading and grepping, not for making
+  changes; do not use it to touch the tree even though nothing stops you
+  mechanically.
 - Read the complete test file and the production code it targets — the diff
   is a locator.
 - Separate findings caused by this change from pre-existing weak tests;
