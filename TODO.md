@@ -157,6 +157,16 @@ order-of-magnitude, not commitments.
 | 124 | ✅ Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
 | 125 | ✅ ★ A window function as an `Expression` operand (bar row 15 → 16/16) | XL | 100, 101 |
 | 126 | No per-caller rate limit on `GET /help/my-recent-denials` | S | 45 |
+| 127 | Reject an MCP request whose routing headers disagree with its body | S–M | 86 |
+| 128 | Conform to the final MCP `2026-07-28` protocol revision | L | 90, 92, 93 |
+| 129 | Never advertise a principal-varying MCP result as shared-cacheable | S | 128 |
+| 130 | Annotate `connection` with `x-mcp-header` for gateway-native authorization | S | 127, 128 |
+| 131 | Publish the StructuredQuery AST as a namespaced MCP extension | M | 128 |
+| 132 | Reconcile stale shipped-status claims left behind by items 90–93 | S | — |
+| 133 | Caller-facing quota-metered verdict endpoint (play P4) — reuses 31/39's decision logic | M–L | 26, 31, 39, 45, 121 |
+| 134 | Compliance-grade (WORM) audit retention + managed search | L | 91, 136 |
+| 135 | Automatic (TTL/lease-driven) credential re-resolution, without an operator reload | M | 13 |
+| 136 | `jsonl_chained` audit backend silently disables four shipped read surfaces | S–M | 91 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -802,8 +812,8 @@ compiler parameter binding + the AST-only no-raw-SQL structural invariant)
 with no DB/network/LLM, the `querygate-security-benchmark` CLI (`run`/`list`,
 `--json`, exit-0-iff-clean so it can gate CI), and the published report
 `docs/business/SECURITY_BENCHMARK.md`. Current corpus: QueryGate blocks
-**14/14 (100%)** structural boundary attacks vs. a structurally-modeled
-raw-SQL-passthrough baseline at **0/14 (0%)**, with **2** documented
+**16/16 (100%)** structural boundary attacks vs. a structurally-modeled
+raw-SQL-passthrough baseline at **0/16 (0%)**, with **2** documented
 inference residuals disclosed (never counted as catches) and sub-millisecond
 per-query guardrail overhead. Tests: `tests/unit/test_security_benchmark.py`.
 The baseline is a declared *structural model* of a naive SQL-forwarding
@@ -1895,4 +1905,714 @@ inside the window), or (b) make a recorded decision that the existing
 no-REST-rate-limiting posture is acceptable for this class of bounded local
 file read and close this as will-not-build. Either resolves it; doing neither
 leaves the residual undocumented.
+
+### 127. Reject an MCP request whose routing headers disagree with its body (gateway confused-deputy)
+
+**Surfaced 2026-07-30 by `competitive-scan`.** The MCP `2026-07-28`
+specification (final — see item 128) mirrors `method` and `params.name` into
+required `Mcp-Method` / `Mcp-Name` HTTP headers so that intermediaries
+"(load balancers, gateways, observability tooling) can route and inspect
+requests without parsing the body." It therefore also mandates the matching
+server-side defense:
+
+> Servers that process the request body **MUST** reject requests where the
+> values specified in the headers do not match the corresponding values in the
+> request body. This prevents potential security vulnerabilities when different
+> components in the network rely on different sources of truth (e.g., a load
+> balancer routing on the header value while the MCP server executes based on
+> the body value).
+> — [Streamable HTTP § Server Validation](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+
+**Why it matters more for QueryGate than for a typical MCP server.** The P4
+leverage move (`docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) is to sit
+*behind* MCP gateways and proxies as the enforcement point they can't be. That
+is exactly the deployment where this mismatch is a real confused-deputy: a
+fronting gateway authorizes `Mcp-Name: list_tables` for a low-privilege
+identity, while the body it forwards calls `run_structured_writes`. The
+gateway's tool-level authorization is then silently void, and QueryGate — the
+component that *did* see the body — executed the privileged operation anyway.
+Every deployment story we sell (sole-credential holder, enforcement point
+behind the front door) assumes the caller cannot lie to the layer in front of
+us about which tool it is invoking.
+
+**Current state (verified 2026-07-30, prospective not live):** `grep` across
+`src/` and `tests/` finds no handling of `Mcp-Method`, `Mcp-Name`,
+`MCP-Protocol-Version`, or `HeaderMismatch` anywhere. QueryGate speaks
+`2025-11-25` (item 128), which does not define these headers, so there is **no
+live vulnerability today** — a conforming gateway will not yet be relying on
+them. The exposure begins the moment either side moves: a gateway that trusts
+the headers, or our own upgrade under item 128.
+
+**What to build.** Extend `mcp/transport_guard.py` — the ASGI wrapper already
+sitting *outside* the MCP mount that pre-scans raw body bytes for item 86's
+size/depth guards, so it is already the one place that sees headers and body
+together before the transport parses either. Validate that, when present,
+`Mcp-Method` equals the body `method` and `Mcp-Name` equals `params.name` /
+`params.uri` (decoding the `=?base64?…?=` sentinel first, per the spec's Value
+Encoding rules), and reject a mismatch with HTTP `400` and JSON-RPC error code
+`-32020` (`HeaderMismatch`). Validate-if-present, not require: that makes this
+shippable **now**, independent of item 128, and it fails closed the instant a
+gateway starts sending the headers. Add the mismatch case to the adversarial
+security suite (`adversarial-probe`), since this is a boundary-bypass vector,
+not a conformance nicety.
+
+**Four implementation constraints — pin these down before writing code:**
+
+1. **Run the check strictly *after* item 86's depth scan.** The guard exists
+   precisely so a hostile body is never handed to `json.loads`; this item needs
+   to parse `method`/`params.name`. Parsing before `_structural_depth_exceeds`
+   returns False reintroduces the `RecursionError`→500 that item 86 fixed, via
+   the item extending it.
+2. **Fail closed on an unparseable body.** "Validate-if-present" governs the
+   *header* side only. Header present + body unparseable or not a single
+   JSON-RPC request object must **reject**, not skip — otherwise the bypass is
+   simply "send a shape that defeats the parser."
+3. **Decide the error envelope explicitly.** `_reject` currently emits a
+   REST-shaped `{"error": {"code", "message"}}` body by deliberate design
+   ("malformed input is a client error, never a 5xx"). Recommend keeping that
+   shape and carrying `-32020` in `code`, rather than emitting a second
+   envelope from the same middleware.
+4. **Do not validate that `Mcp-Name` names a *registered* tool here.** This
+   guard runs *outside* `MCPAuthMiddleware`, so that check would turn it into an
+   unauthenticated tool-enumeration oracle. Agreement with the body is the whole
+   job.
+
+**Cost note:** the guard is pre-auth, so this adds an unauthenticated
+`json.loads` of up to `mcp_max_request_bytes` (default 4 MiB) per request, where
+today's pre-auth work is a short-circuiting byte scan. Bound it deliberately.
+
+**Effort:** S–M. **Depends on:** 86. **Does not depend on 128** — deliberately.
+
+### 128. Conform to the final MCP `2026-07-28` protocol revision
+
+**Surfaced 2026-07-30 by `competitive-scan`.** The `2026-07-28` MCP
+specification [shipped final on 2026-07-28](https://blog.modelcontextprotocol.io/posts/2026-07-28/)
+— the 2026-07-22 scan saw only the release candidate, and `auth.py`'s module
+docstring was written against that RC. It is described by its maintainers as
+the largest revision since launch. QueryGate is pinned to `mcp = ">=1.28.1"`,
+whose `LATEST_PROTOCOL_VERSION` is **`2025-11-25`** — a full revision behind,
+and the gap is now load-bearing rather than cosmetic.
+
+**What changed that actually touches this codebase:**
+
+- **The protocol core is stateless.** `initialize`/`initialized` and the
+  `Mcp-Session-Id` header are gone; every request carries its own protocol
+  version, client info, and capabilities in `_meta`. The GET stream endpoint
+  and `Last-Event-ID` resumability are removed.
+- **Multi Round-Trip Requests (MRTR, SEP-2322) replace server-initiated
+  requests.** A server **MUST NOT** send JSON-RPC requests on an SSE stream
+  any more. Elicitation is now returned *inside* the result as
+  `resultType: "input_required"` with `inputRequests`, and the client retries
+  the call with `inputResponses` plus a server-issued opaque `requestState`.
+  **This is the mechanism items 92/93 use** (`mcp/elicitation.py` calls
+  `Context.elicit`) for in-session approval of a gated read/write.
+- **Required routing headers** `Mcp-Method` / `Mcp-Name` and header–body
+  agreement (item 127 covers the security half).
+- **Authorization hardening — mostly NOT ours.** RFC 9207 issuer validation,
+  `application_type` in DCR, credential-to-issuer binding, and the DCR →
+  Client ID Metadata Documents (CIMD) migration are **client-side and
+  authorization-server-side obligations**. QueryGate's MCP surface is a
+  *resource server* only (`mcp/oauth_metadata.py` publishes RFC 9728 metadata;
+  `mcp/auth.py` enforces RFC 8707 audience binding) and contains no OAuth
+  client or client-registration path. Listed for completeness — **do not build
+  a conformance surface for these, and do not read them as an open
+  authorization gap.** The resource-server-relevant work in this item is the
+  transport, MRTR, and the routing headers.
+- **Deprecations** (12-month minimum window): Roots, Sampling, Logging, and
+  the legacy HTTP+SSE transport.
+
+**Why it matters — this is a distribution risk, not just hygiene.** The spec
+instructs intermediaries that enforce policy on the mirrored headers to
+"verify that the `MCP-Protocol-Version` header indicates a version that
+requires header–body validation. If the version is older or the header is
+absent, the intermediary **SHOULD** reject the request rather than trusting
+unvalidated header values." A conforming MCP gateway therefore has a
+standards-blessed reason to **refuse to front a server on our revision** —
+which lands directly on the P4 "turn gateways into distribution" play. AWS's
+Bedrock AgentCore Gateway already advertises 2026-07-28 support, so this is
+live in the market, not theoretical.
+
+**Sequencing note:** this is gated on the Python SDK. `mcp` 1.28.1 reports
+`2025-11-25`; the new revision's SDKs were in beta at spec release. Track the
+SDK, don't hand-roll the transport.
+
+**The MRTR port of items 92/93 is the substantive work, and it has two traps.**
+
+1. **Integrity-protecting `requestState` is necessary but NOT sufficient.** The
+   spec requires servers to treat `requestState` as attacker-controlled and
+   protect its integrity (HMAC/AEAD). But an HMAC over an opaque request id
+   satisfies that while still letting a caller obtain approval for query A and
+   replay the state against query B. Under today's `Context.elicit` the token
+   never leaves the process and is minted from the *server's* fingerprint of the
+   *server's* validated AST; under MRTR the call **returns** and the retry
+   carries its own `queries` argument. So the real invariant is: reuse
+   `execution/approval.py`'s existing fingerprint-bound token **verbatim** as
+   `requestState`, and have the retry path **re-derive the fingerprint from the
+   resubmitted AST and compare**. That comparison is this item's
+   mutation-verified enforcement point.
+2. **`ApprovalResolver`'s shape cannot express return-and-retry.**
+   `execution/service.py`'s `ApprovalResolver` is a mid-pipeline
+   `await`-and-continue callback returning a token; MRTR has no suspend/resume —
+   the call must return. Implement the port **at the MCP tool layer**
+   (`mcp/tools/query.py`/`write.py`): catch `ApprovalRequiredError`, build the
+   `input_required` result there, and feed the token back on retry through the
+   existing `approval_tokens` map. **`execution/service.py` must not learn about
+   MRTR** — it is the transport-agnostic single pipeline that also serves REST,
+   and the comment above `ApprovalResolver` already records that it "never
+   imports MCP." Propagating an MCP-shaped terminal outcome up through it is a
+   layer inversion, and it is the tempting shortcut.
+
+Two smaller constraints in the same port: `execute_many` fires the resolver
+**per batch item**, so specify the batch → `inputRequests` (plural) mapping
+rather than leaving it to chance; and preserve the fail-closed opt-in gating
+(`mcp_elicitation_approval_enabled` + `approval_token_hmac_key`) — a rewrite
+that drops it silently enables an approval channel with no authenticated
+approver identity.
+
+**Effort:** L. **Depends on:** 90, 92, 93, and upstream SDK availability.
+
+### 129. Never advertise a principal-varying MCP result as shared-cacheable
+
+**Surfaced 2026-07-30 by `competitive-scan`.** The `2026-07-28` revision adds
+caching metadata (SEP-2549) to `tools/list`, `prompts/list`, `resources/list`,
+and `resources/read`: a `ttlMs` freshness hint and a `cacheScope` of `"public"`
+or `"private"`, modelled on HTTP `Cache-Control`, where `public` permits
+**shared intermediaries** to cache and reuse the response across callers.
+
+**Aim this at `tools/list`, not at tool results.** The caching metadata attaches
+to `tools/list` / `prompts/list` / `resources/list` / `resources/read` — *not*
+to `tools/call` results, so `list_connections`'s per-caller output is not the
+exposed surface (an easy mis-aim: it is a tool whose *result* varies, which the
+spec does not make cacheable). The genuinely principal-varying **list** surface
+is `tools/list`, filtered by `_install_scoped_tool_listing` in `mcp/server.py`
+via `_SCOPE_GATED_TOOLS`. Note QueryGate currently registers **zero** resources
+and **zero** prompts, so a test written only against those is close to vacuous —
+the test must therefore also fail if a resource or prompt is ever registered
+without an explicit `cacheScope`.
+
+**Why this is a security rule for QueryGate specifically.** Our MCP surface is
+per-principal by construction, and the spec explicitly blesses this ("the set
+**MAY** vary by the authorization presented on the request"). But a
+principal-varying result marked `cacheScope: "public"` and cached by a shared
+gateway — the very intermediary the P4 play courts — would serve one
+principal's visible tool surface to another, eroding the deny-by-default
+posture without a single line of policy code being wrong.
+
+**Honest severity:** this is defense-in-depth, not an authorization bypass.
+`mcp/server.py` already records that scoped tool listing is
+"token-savings/defense-in-depth only" and that the real boundary is each tool's
+call-time scope check. Keep that framing — do not let this item's write-up imply
+the tool list is a security boundary.
+
+The failure mode is a *default*, not a decision: whichever value the SDK or a
+future refactor emits when nobody thought about it. So encode it as an
+invariant with a test, in the manner of `tests/unit/test_credential_redaction.py`
+(which asserts the no-credential invariant against the live schemas rather
+than trusting convention): **every MCP result whose content depends on the
+caller must carry `cacheScope: "private"`**, asserted against the actual
+emitted payloads, so adding a new per-principal tool cannot silently regress
+it.
+
+**Current state:** no `cacheScope`/`ttlMs` handling exists (verified
+2026-07-30); this is prospective, and lands with item 128.
+
+**Effort:** S. **Depends on:** 128.
+
+### 130. Annotate `connection` with `x-mcp-header` so a fronting gateway can authorize per-connection without parsing the body
+
+**Surfaced 2026-07-30 by `competitive-scan`.** The `2026-07-28` revision lets a
+server mark primitive tool parameters with an `x-mcp-header` annotation;
+conforming clients **MUST** mirror those values into `Mcp-Param-{Name}` HTTP
+headers, so "network intermediaries (load balancers, proxies, WAFs) can route
+and process requests based on parameter values without parsing the request
+body."
+
+**Why it matters — this is the P4 play expressed in the spec's own mechanism.**
+Every QueryGate tool takes a `connection` id: a primitive string that is
+already public (`PublicConnectionInfo` exposes it; the spec warns only against
+annotating *sensitive* parameters — passwords, keys, PII — which this is not).
+Annotating it means a customer's existing gateway can enforce "this agent
+identity may only reach the `analytics` connection" at the edge, cheaply and
+natively, while the decision it structurally *cannot* make — whether this
+particular query *shape* is allowed — stays with QueryGate. That is precisely
+the "complement, not rival; make them a channel" thesis, and it lowers the
+integration cost of putting QueryGate behind an incumbent front door.
+
+**The mirrored header is a routing hint, never an authoritative access
+decision — and it is deliberately non-exhaustive.** A read's top-level
+`connection` is not the only connection a request can touch: every `JoinSpec`
+carries its own optional `connection` for same-instance cross-database joins
+(`query_ast/models.py`, resolved at pipeline step 2 against the `join_group`
+policy rule). A single-valued `Mcp-Param-Connection` mirrors `params.connection`
+only, so a request headed `analytics` may still legitimately join `crm`, and
+item 127's header–body check — which compares header to `params.connection` —
+will pass. **Do not describe this as closing the cross-connection case; it does
+not.** Two consequences the implementer must carry:
+
+- The gateway's per-connection verdict is **additive only**. It never
+  substitutes for `resolve_visible_connection(connection_id, principal=…)`
+  (`connections/visibility.py`), which resolves per-principal policy the
+  gateway cannot compute. Copy the precedent wording already used for the
+  analogous mechanism in `mcp/server.py` (`_SCOPE_GATED_TOOLS`: *"Visibility
+  only — the actual authorization boundary is each tool's own call-time scope
+  check; this dict must never become a substitute for that check."*).
+- Document the join case explicitly in the integration guide, so an operator
+  writing an edge rule knows it is a coarse filter and that `join_group` policy
+  is what actually bounds cross-connection reach.
+
+**Scope:** annotate `connection` only. Resist annotating query internals —
+mirroring AST content into headers would leak query semantics to
+intermediaries and invert the confidentiality posture.
+
+**Effort:** S. **Depends on:** 128, 127.
+
+### 131. Publish the StructuredQuery AST as a namespaced MCP extension
+
+**Surfaced 2026-07-30 by `competitive-scan`.** The `2026-07-28` revision adds a
+formal **extensions framework** with reverse-DNS namespacing — the tasks
+feature moved out of experimental core into `io.modelcontextprotocol/tasks`
+under it. This gives strategic play P2 ("open the contract — publish the
+StructuredQuery AST as an open standard",
+`docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) a standards-blessed vehicle
+it previously lacked: the AST can be declared as a named, versioned MCP
+extension rather than a product-specific JSON schema.
+
+**Why it matters.** The durable moat is the *contract*, not the
+implementation. A named extension is citable in a security review, gives
+gateway and client authors something to implement against, and makes
+"structured, not raw SQL" a thing others can adopt on our terms — while every
+enforcement decision stays in our pipeline. It also directly answers the
+convergence risk the scan keeps flagging: Cube and Microsoft DAB now use our
+messaging, so owning the *artifact* matters more than owning the phrase.
+
+**Scope for the code half (safe to do):** author the extension specification in
+`docs/`, pick and reserve the namespace, and declare it from the MCP surface's
+capability/`_meta` metadata with a conformance test.
+
+**Hard boundary — the extension declares a *contract*, never a *method*.** It
+MUST NOT introduce a namespaced JSON-RPC method that accepts a query. That would
+be a second query-execution path beside `tools/call` and the one pipeline —
+the identical rejection class as the GraphQL decision (`docs/PRODUCT_GUIDE.md`
+Decision Log, 2026-07-22) and as `execute_sql`. Note the precedent this item
+cites, `io.modelcontextprotocol/tasks`, *does* define methods — so the obvious
+reading of "implement an extension" is exactly the wrong one here. State the
+exclusion in the spec document itself.
+
+**Generate the published schema; do not hand-write it.** `query_ast/models.py`
+is the source of truth, and `clients/typescript/src/types.ts` is already a
+hand-mirrored second copy carrying known drift. A hand-authored spec would be a
+third — and unlike the in-tree TS client, where drift is a local bug, drift in a
+*published* standard becomes a compatibility commitment. Emit the schema from
+the Pydantic models (`model_json_schema`) and have the conformance test assert
+generated == published, the same live-schema technique
+`tests/unit/test_credential_redaction.py` uses for the credential invariant.
+
+**Decision-gated for the publication half:** actually publishing an external
+standard is a commitment (versioning, compatibility, community process) and an
+outward-facing act — maintainer's call, not an agent's. Do not publish
+externally as part of implementing this; `competitive-scan` and `pitch-sync`
+are draft-only by charter.
+
+**Effort:** M (internal half). **Depends on:** 128.
+
+### 132. Reconcile stale shipped-status claims left behind by items 90–93
+
+**Surfaced 2026-07-30 by the `auditors` claim review of the `competitive-scan`
+pass; pre-existing drift, not caused by that pass.** Items 90, 91, 92, and 93
+all shipped, but several surfaces still describe them as open or partial. Each
+was verified against the code:
+
+- **`docs/business/GO_TO_MARKET.md` "Product claims: current versus pending"** —
+  the "Safe to claim now" list omits delegated identity (90), the tamper-evident
+  ledger + receipts (91), in-query approval (92), and governed writes (93), all
+  shipped. That file's own header commits it to staying "aligned with the
+  technical roadmap in `TODO.md`", and it is the **sole** outlier:
+  `LANDING_MARKET_POSITIONING_RESEARCH_2026-07-26.md` and `landing/security.html`
+  already reflect all four. Note its "Do not claim yet → compliance-grade/WORM
+  audit retention" line is still **correct** (item 91 is not WORM) — do not
+  over-correct that one. A `pitch-sync` job.
+- **`README.md`** — the heading "In-query human-in-the-loop approval (phase 1)"
+  keeps a stale phase suffix while the body directly beneath documents the
+  phase-2 behavior (`approval_sensitivities`, two triggers).
+- **Item 93's own worklist surface** — the quick-scan row says the
+  `release-smoke` write round-trip is open, but `scripts/release_smoke.sh`
+  already runs `write/preview` → `write/execute` (insert) → `write/execute`
+  (delete) against real Postgres in the built image and prints "container
+  executed a governed write". The body also still carries a "Phase 2b–3 (not
+  started)" paragraph and an eviction action item for
+  `execution/compensation.py` — **a file deleted on 2026-07-23** with the
+  write-undo feature. This is the largest stale surface in the worklist.
+
+**Why it matters:** these are claim-accuracy defects, and the GO_TO_MARKET one
+is outward-facing — understating shipped capability costs real credibility in
+exactly the security-review conversation the North Star's success metric turns
+on. The item-93 residue is worse in kind: an action item pointing at a deleted
+module will send a future agent hunting for code that does not exist.
+
+**Effort:** S. **Depends on:** — (pure reconciliation; verify each against the
+code before editing, since some sub-claims like WORM are correctly negative).
+
+**Also in scope (found 2026-07-30 while scoping items 134/135):**
+
+- GO_TO_MARKET.md's HA/DR claim still says "the per-principal *quota* budget is
+  still per-replica until item 50 phase 2" — item 50 is fully ✅ DONE including
+  phase 2 (`execution/redis_quota.py`'s `RedisQuotaLimiter` makes the window one
+  shared budget across replicas). **Correct it to *conditional*, not deletion:**
+  cross-replica quota is real only when the Redis backend is configured
+  (`init_redis_quota_limiter` is opt-in), so "per-replica unless the Redis quota
+  backend is configured" is the accurate wording. Deleting the caveat outright
+  would create a new false claim for a Redis-less deployment.
+- GO_TO_MARKET.md's "Do not claim yet → secrets-manager rotation" is likewise
+  understated post-item-13: README, PRODUCT_GUIDE, and THREAT_MODEL all
+  correctly document reload-triggered re-resolution. Correct it to name the
+  real residual (no automatic/TTL-driven refresh — item 135), rather than
+  implying no rotation support at all.
+- TODO.md's own quick-scan row for item 45 still says "phase 2: personal denial
+  history not started" while the `### 45.` heading is plain `✅ DONE` and item
+  126 references the shipped `GET /help/my-recent-denials`. `worklist-check`
+  regenerates the `✅` column but not the parenthetical, so this needs a hand
+  fix.
+- ~~Item 58's body quoted a stale `14/14 vs. 0/14`~~ — **fixed inline
+  2026-07-30** to the published `16/16 vs. 0/16`
+  (`docs/business/SECURITY_BENCHMARK.md`). Left recorded here because the
+  remaining task is a *sweep*: grep the repo for other hard-coded benchmark
+  figures, since the report's whole value is that it is reproducible and it
+  warns against quoting from memory.
+
+### 133. The verdict endpoint — expose the decision without the execution (play P4)
+
+**Surfaced 2026-07-30 by `competitive-scan`.** `MARKET_DOMINATION_ANALYSIS.md`
+§7 names P4 as one of the two leverage moves, `NORTH_STAR.md` lists it under
+"the two leverage moves", `COMPETITORS.md` tells us to build it, and
+`COMPETITOR_MCP_GATEWAYS.md`'s Decision leads with it. Its sibling leverage move
+(the P6 safety benchmark) is item 58 — **phase 1 shipped and published**
+(corpus, `querygate-security-benchmark` CLI, `docs/business/SECURITY_BENCHMARK.md`);
+phase 2 is externally blocked on a model provider and a GCP/Toolbox environment.
+**Do not quote the benchmark figures from memory** — the report says so itself,
+and an earlier draft of this item quoted a stale 14/14 that item 58's own body
+still carries; read `docs/business/SECURITY_BENCHMARK.md` for the current
+numbers.
+
+**Correction (2026-07-30, `auditors`): a `StructuredQuery` allow/deny verdict
+already ships — twice.** An earlier draft of this item claimed the verdict had
+"never been scoped." That is false, and an implementer must not build a third
+evaluator:
+
+- **Item 39 ✅** — `POST /api/v1/admin/config/simulate`
+  (`admin/models.py`'s `CandidatePolicySimulationRequest` carries
+  `query: Optional[StructuredQuery]`) returns a typed allow/deny decision,
+  per-column allow/deny, effective guardrails, and typed reason codes against
+  *candidate* config.
+- **Item 31 ✅** — `POST /admin/ui/policy/test`, the active-policy
+  "test as principal" path.
+
+**What is genuinely unscoped** is therefore narrower and is the whole point of
+this item: a **caller-facing, non-admin, quota-metered** verdict about the
+**calling** principal. Item 39 is gated on `admin:config:read` *and*
+`admin:config:write` together and answers about a *target* principal — exactly
+inverted from what a gateway needs, which is "may **this** caller run **this**
+query, right now." Build that on the existing decision logic; do not restate it.
+
+**What it is.** An authenticated endpoint that answers *"would this
+`StructuredQuery` be allowed for me, and if not, why?"* — returning the
+decision, a safe reason, and optionally the compiled plan, **without executing
+anything**. MCP gateways, proxies, and CI checks can then call QueryGate for the
+query-semantic verdict they structurally cannot compute themselves.
+
+**Why it matters — the market moved toward this on 2026-07-30.** The final MCP
+`2026-07-28` spec makes intermediaries route and authorize on the *tool name*
+in a header, explicitly without parsing the body (items 127/130). So a gateway
+can decide *which tool*, and by the protocol's own architecture cannot decide
+*which query shape*. That is precisely the decision this endpoint sells them.
+Every gateway that adopts it becomes a front door **to** QueryGate rather than
+a competitor.
+
+**Three design constraints, in priority order:**
+
+1. **Reuse the same *evaluator*; shape the *reason* at the transport
+   boundary.** Non-negotiable #4 requires one database path and one
+   `StructuredQueryService` — it does not require one method. Add a **new
+   service method** that calls the shared `_validate_and_compile`
+   (`validate_policy` → `validate_schema` → compile). **Do NOT "extend
+   `explain`"** (an earlier draft of this item said to, wrongly):
+   `execution/service.py`'s `explain` deliberately never opens a DB session —
+   documented in its docstring and enforced by
+   `tests/unit/test_service.py::test_explain_does_not_open_a_db_session` — so
+   the optional plan half (item 26) cannot be added there without breaking a
+   shipped invariant; and `explain` today takes a concurrency slot but consumes
+   **no quota** and emits **no audit event**, both of which constraint 3
+   requires. A new method satisfies #4 fully with zero second evaluator.
+2. **A verdict endpoint is a discovery oracle unless designed against it, and
+   the shipped denial messages are already one.** The pilot criterion is
+   "denied connections, tables, and columns remain *undiscoverable*", but
+   `validation/policy_validation.py` raises `PolicyViolationError(f"Column
+   {column_ref.ref!r} is not accessible under the active policy")` and
+   `core/exceptions.py`'s `public_error_message` returns `str(exc)` **verbatim**
+   for that type. So today's `explain`/`execute` already echo the caller's
+   identifier back with a confirm/deny bit. **This item owns the decision** of
+   whether the shipped messages are tightened too — a verdict endpoint that is
+   safer than `explain` is theatre while `explain` is open to the same caller.
+   Two leak channels to close, neither of which message-redaction alone fixes:
+   - **The category channel.** `validate_policy` runs strictly before
+     `validate_schema`, so `policy` vs. `schema` distinguishes "on your deny
+     surface" from "absent from the database" for any caller-supplied
+     identifier — a per-probe oracle. Collapse them into one
+     `not-available-to-you` category on this surface. **This is new work, not a
+     copy:** `help/personal_denials.py` takes only *half* the posture
+     deliberately — it never surfaces the identifier, and it hedges the `schema`
+     explanation with "or isn't visible to you" — but its `_DENIAL_GUIDANCE` map
+     still returns `policy` and `schema` as **distinct `reason` labels**, so that
+     module is itself an instance of the channel this constraint closes. (Whether
+     `/help/my-recent-denials` should collapse them too is a question this item
+     raises; it is retrospective and rate-capped, so its exposure differs.)
+   - **The cost-estimate channel.** `estimated_rows`/`estimated_total_cost` are
+     *data-dependent*: they leak table cardinality and, with a predicate, value
+     selectivity — strictly more than the allow/deny bit. Make the plan half
+     opt-in per policy, off by default.
+   **Precedents to reuse** (an earlier draft cited 45/121 loosely; 121 is about
+   scope-completeness, not redaction): item 45's
+   `help/personal_denials.py` categorical vocabulary (category, never the
+   identifier); `catalog/retrieval.py`'s `policy_hidden_identifier_tokens` /
+   `policy_safe_catalog_text`, which is the shipped mechanism for tiering text
+   against the caller's *own resolved policy*; item 121 for the separate
+   requirement that a report over a multi-scope query be **scope-complete**
+   (every set-op arm, every nested subquery). `docs/THREAT_MODEL.md` **QG-19**
+   and **QG-24** already threat-model this exact oracle class — extend them
+   rather than inventing a second redaction policy.
+3. **Rate-limit and audit it like execution.** It is cheaper than a query, so
+   it is *more* attractive to abuse. It must consume quota
+   (`execution/quota.py`) and emit a redaction-safe audit event; a caller must
+   not be able to probe policy for free. Note `explain` is session-free but not
+   DB-free — `validate_schema` reflects on a cold cache — so do not size the
+   limit as if the operation were free.
+
+**Non-goals for this item:** it does not execute, does not return rows, does
+not accept SQL, and does not become a second enforcement point — it *reports*
+the one pipeline's decision.
+
+**Effort:** M–L. **Depends on:** 31 and 39 (the existing verdict logic to reuse),
+26 (cost estimation, for the optional plan half), 45 + 121 (denial vocabulary;
+scope-completeness).
+
+### 134. Compliance-grade (WORM) audit retention + managed search
+
+**Surfaced 2026-07-30 by `competitive-scan`.** `GO_TO_MARKET.md`'s "Do not
+claim yet" list has named compliance-grade/WORM audit retention and managed
+search since early on, and **no item has ever covered it** — verified across
+`TODO.md` *and* `docs/TODO_ARCHIVE.md`. Item 23's archived body explicitly
+scoped it *out*: "Retention, immutable/WORM storage, and SIEM shipping remain
+operator responsibilities." That is a deliberate deferral, and this item is
+where it comes due.
+
+**State the gap precisely — item 91 detects more than an earlier draft of this
+item credited.** `verify_chain()` *does* detect in-ledger deletion (sequence
+gap / `prev_hash` linkage break), insertion, reordering, and — with
+`expected_head` — records dropped from the end. The residual, already written
+correctly in `docs/THREAT_MODEL.md`, is **prevention, availability, and
+whole-file loss**: the chain is detection-only, assumes a single logical
+writer, and tail truncation is detectable only against an externally anchored
+head. Retention is a *different control* from integrity, which is exactly why
+auditors ask for both by name. Reuse THREAT_MODEL.md's wording; do not
+understate item 91 to make this item look bigger.
+
+**Why it matters.** For the regulated ICP (fintech/healthcare — the buyers the
+whole Proof pillar targets), a chain proving nobody edited the records is only
+half the answer when the question is "can you produce them." EU AI Act Art.
+26(6) requires deployers **of high-risk AI systems** to keep automatically
+generated logs for at least six months. **Do not attach a timing argument to
+this:** Art. 26 is a Chapter III high-risk obligation, so its application date
+moved with the Digital Omnibus deferral (Annex III → 2 Dec 2027; Annex I → 2
+Aug 2028). §2.3's "survived intact" means *not amended in substance*, not
+"still lands in Aug 2026" — only Article 50 transparency was expressly
+confirmed on the original schedule. The retention-vs-integrity argument stands
+on its own without a deadline.
+
+**Shape — there is NO sink registry today; creating one is part of this item.**
+An earlier draft said "one more class plus one registry entry (the same
+doctrine as `SecretResolver`)." That is wrong: `audit/sinks.py`'s
+`configure_audit_sink` is an inline `if backend == "none"/"jsonl"/
+"jsonl_chained"` chain — the exact dispatch shape non-negotiable #6 forbids —
+whereas `secrets/resolvers.py`'s `build_secret_resolver_registry` is a real
+dict. So this item must:
+
+1. Add the WORM sink class, targeting object-lock storage (S3 Object Lock
+   compliance mode, Azure immutable blob) with retention period and legal hold.
+2. **Convert `configure_audit_sink` to a registry**, mirroring
+   `build_secret_resolver_registry` — do not add a fourth `if`.
+3. **Fix the reader-side gates first — see item 136, which this depends on.**
+   Four routes hard-code `AuditSinkBackend.JSONL` (`api/help_routes.py`,
+   `api/admin_observability_routes.py` ×2, `api/admin_ui_routes.py`), so any
+   non-plain backend makes `/help/my-recent-denials`, the anomaly report, the
+   config change-trend report, and the admin UI audit browser return
+   `source="disabled"`. Land item 136's capability lookup **before** adding a
+   backend here, or this item dark-fires four shipped surfaces — including the
+   one item 133 cites as a precedent.
+4. **Compose with the chain; do not replace it.** `audit/sinks.py` holds a
+   *single* global `_sink`, so as the code stands choosing WORM would **lose**
+   tamper-evidence — the opposite of this item's own "buyers ask for both"
+   rationale. Use a decorator/composite sink, the shape `CompositeAuthenticator`
+   already sets as precedent.
+5. **Decide object granularity — it is load-bearing.** `verify_chain` tolerates
+   whole-file rotation (a later starting `seq` is accepted) but fails
+   permanently on a `seq` gap. One object per event therefore guarantees a
+   broken `verify` at the first retention expiry. Use **per-segment objects
+   aligned with the rotation allowance**, never per-event.
+6. **Get the write path off the request path.** `AuditSink` is sync
+   `emit`/`close` with no batching and no read side, and `audit/logger.py`
+   calls `emit` synchronously from inside `async def execute`. A remote
+   object-lock PUT per event would block the event loop on every query. Phase 1
+   owns a buffered/batched or async-capable sink, an explicit fail-open vs.
+   fail-closed decision for a WORM write failure, and retention/legal-hold on a
+   **separate** Protocol rather than widening `AuditSink`.
+
+Managed search over retained events is the second half and can be phased.
+
+**The invariant that must not bend:** non-negotiable #3 — persisted audit
+events never include SQL, predicate values, rows, exceptions, or credentials.
+WORM makes retention *permanent*, which makes any redaction slip permanent
+too, and unlike a JSONL file it cannot be corrected afterward by design. Treat
+the redaction tests as a hard gate on this item, and mutation-verify them.
+
+**Effort:** L (phase 1: WORM sink; phase 2: managed search). **Depends on:** 91,
+136 (land the capability lookup before adding a fourth backend).
+
+### 135. Automatic credential re-resolution (TTL/lease-driven), without an operator-triggered reload
+
+**Surfaced 2026-07-30 by `competitive-scan`; scope corrected the same day by
+`auditors` after an earlier draft got the current behavior wrong.** Read the
+correction first — it is most of this item.
+
+**What already ships (item 13 — do NOT rebuild it).** Rotation without a
+process restart **works today**: `config_reload.py` re-runs
+`ConnectionRegistry.from_file(..., resolver_registry=...)`, which re-resolves
+every `${vault:…}` reference; `_dispose_stale_engines` diffs
+`old_profile.connection_string != new_profile.connection_string` and disposes
+exactly the affected engines; and `connections/engine.py`'s `dispose_engine`
+already documents the in-flight-safe property ("a connection currently checked
+out finishes its work normally and is then discarded"). It is reachable via
+`POST /api/v1/admin/reload-config`. `README.md`, `docs/PRODUCT_GUIDE.md`, and
+`docs/THREAT_MODEL.md` all state this correctly, and item 13's archived body
+says it closed "the rotation gap this item's own 'why it matters' called out."
+An earlier draft of this item claimed "every query fails until someone restarts
+the process" — **that is false**, and reconciling those three accurate docs down
+to it would have manufactured the exact drift item 132 exists to fix.
+
+**The genuine, narrower gap.** The refresh is **operator-pull only**. There is
+no TTL, no lease awareness, and no automatic trigger, so a rotation that nobody
+follows with a reload still opens an outage window — and short-TTL dynamic
+credentials (Vault's main value proposition) expire into failures between
+reloads. For a product whose flagship deployment has QueryGate holding the
+**only** database credential, "your credential rotation requires a coordinated
+admin call" is the operational objection a security reviewer raises.
+
+**Shape.** Add the *trigger*, not the plumbing:
+
+- A **separate optional Protocol** (e.g. `LeasedSecretResolver` with
+  `resolve_with_lease(reference) -> (value, expires_at)`), implemented only by
+  backends that actually have leases, probed at the one refresh call site. Do
+  **not** widen `SecretResolver` — its module docstring states the narrow
+  one-method design on purpose, and adding `ttl()`/`invalidate()` forces
+  lifecycle onto backends that have none. Compose, don't widen
+  (`CompositeAuthenticator` is the precedent).
+- Reuse `_dispose_stale_engines` / `dispose_engine` verbatim for the recycle
+  half. It is already correct and already in-flight-safe.
+- On env: `EnvSecretResolver._runtime_environment()` rebuilds
+  `{**dotenv_values(".env"), **os.environ}` on **every** `resolve()`, so env is
+  already re-resolvable — it is **leaseless**, not un-refreshable. It supports
+  invalidate-and-refetch; it cannot support TTL-driven proactive refresh. (An
+  earlier draft invoked reject-don't-emulate here; that was wrong twice — the
+  capability exists, and that doctrine is a compiler/dialect rule about not
+  synthesizing query structure, not a secrets rule.)
+
+**Invariant guard:** non-negotiable #2 — no credential on any returned model.
+The *compare* path is already safe (`config_reload.py` compares in memory and
+logs ids only).
+
+**Measured, not assumed** (an earlier draft asserted a leak mechanism that does
+not exist in the pinned version — the repo's "measure the shape the product
+actually emits" rule applies here): against **SQLAlchemy 2.0.41**,
+`make_url("<garbage>")` raises `ArgumentError: Could not parse SQLAlchemy URL
+from given URL string` with **no URL and no password**; a bad port raises
+`ValueError` carrying only the offending fragment; a bad driver raises
+`NoSuchModuleError`; and `str(URL)` renders the password as `***`. SQLAlchemy
+1.x *did* echo the full string; 2.x does not. **So the URL-parse path is not
+itself the leak** — do not write a test against that mechanism and declare the
+guard shipped when it passes trivially.
+
+**The residual is real but structural, not mechanism-specific:** automatic
+refresh moves credential handling from once-at-startup (under an operator's eye)
+to **routine and request-time**, across new code paths. So the test this item
+needs is broad, not targeted: when re-resolution yields a malformed or rotated
+value, the resolved secret appears in neither the response body nor **any**
+emitted log record, anywhere on the refresh path — asserted without assuming a
+particular driver exception carries it. Note
+`tests/unit/test_credential_redaction.py` is essentially a *schema-shape* test
+(Pydantic models, OpenAPI, MCP tool schemas) and is the wrong home for a runtime
+string assertion.
+
+**Effort:** M. **Depends on:** 13 (which shipped the re-resolution this builds a
+trigger for).
+
+### 136. The `jsonl_chained` audit backend silently disables four shipped read surfaces
+
+**Surfaced 2026-07-30 by the `auditors` architecture review while scoping item
+134; pre-existing defect, not a regression from that pass.** Four route-level
+gates admit only the *plain* backend:
+
+- `api/help_routes.py` — `if cfg.audit_sink_backend == AuditSinkBackend.JSONL`
+  (`GET /help/my-recent-denials`)
+- `api/admin_observability_routes.py` (two sites) — `!= AuditSinkBackend.JSONL:
+  return None` (`GET /admin/observability/anomalies`, the config change-trend
+  report)
+- `api/admin_ui_routes.py` — `!= AuditSinkBackend.JSONL` inside `_audit_page`
+  (`GET /api/v1/admin/ui/audit/events`, the admin UI audit browser)
+
+**Two different bugs, and conflating them makes one surface worse.** For the
+first three, the reader already handles the format — `admin/anomaly.py` and
+`admin/config_trends.py` both transparently unwrap the hash-chained envelope —
+so the capability exists and is refused at the door. **`_audit_page` is
+different: it has no unwrap.** It calls `_AUDIT_EVENT_ADAPTER.validate_python(raw)`
+directly on the raw line, and a `LedgerRecord` (`{seq, prev_hash, event, hash}`)
+fails that discriminated union and is counted as `malformed`. So a capability
+lookup applied uniformly — the natural reading, since it is a config-level
+predicate — would turn that surface from honestly `source="disabled"` into
+**silently empty with a rising malformed count**, which is strictly worse than
+today. That surface needs the *reader* fix as well as the gate fix.
+
+**The failure:** a deployment running `AUDIT_SINK_BACKEND=jsonl_chained` — the
+tamper-evident configuration item 91 shipped and documents as opt-in, the one a
+regulated buyer would actually enable — loses all four surfaces. **Choosing the
+stronger audit posture silently costs four observability features**, which is
+precisely backwards. Blast radius is bounded (the default is `none`, which
+disables them anyway, and `.env.example` ships `jsonl`, which works), so only an
+operator who deliberately opts into tamper-evidence is affected — but that is
+exactly the design partner whose security team we are trying to impress.
+
+**Why tests stay green:** the route helpers *are* tested, but only for two of
+three cells — `test_route_helpers_map_config_to_thresholds_and_source` (in
+`tests/unit/test_anomaly.py` and `test_config_trends.py`) asserts `jsonl` is
+served and `none` is disabled. **`jsonl_chained` is untested at the route-helper
+boundary**, even though `tests/unit/test_anomaly.py` proves the *reader* handles
+it. That specific missing cell is the test gap.
+
+**What to do:**
+
+1. Replace the four equality gates with a **capability lookup** (which backends
+   are readable), not a widened `in (JSONL, JSONL_CHAINED)` tuple — item 134
+   adds another backend and would otherwise repeat this bug a third time.
+2. Give `_audit_page` the same envelope unwrap the other two readers have,
+   **before** letting its gate admit the chained backend.
+3. Add the missing `jsonl_chained` route-helper cell per surface, and
+   mutation-verify each.
+4. **Reconcile the docs, which are already right.** `.env.example` documents the
+   anomaly endpoint as "Requires `AUDIT_SINK_BACKEND=jsonl` **or
+   `jsonl_chained`**" — the doc promises what the code refuses, independent
+   corroboration that this is a defect and not a deliberate restriction. Re-check
+   README and PRODUCT_GUIDE for the same promise on the other surfaces.
+
+**Effort:** S–M (the `_audit_page` reader fix makes it more than a one-line
+gate change). **Depends on:** 91. **Blocks:** 134 (which must not replicate the
+pattern), and materially affects 133 (item 45's help surface is cited there as a
+denial-vocabulary precedent, and it is currently dark on the tamper-evident
+config).
 
