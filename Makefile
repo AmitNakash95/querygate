@@ -22,9 +22,14 @@ deps-update: ## Update all dependencies to latest allowed versions
 	poetry update
 
 .PHONY: install-hooks
-install-hooks: ## Enable the committed git pre-commit gate (black + unit tests) for this clone — run once per contributor
+install-hooks: ## Enable the committed git hooks (pre-commit gate + commit-msg authorship strip) for this clone — run once per contributor
 	git config core.hooksPath .githooks
-	@echo "Enabled .githooks/pre-commit — 'git commit' now runs black --check + unit tests. Bypass a commit with --no-verify."
+	@echo "Enabled .githooks/{pre-commit,commit-msg} — 'git commit' now runs the pre-commit floor and strips AI co-author trailers. Bypass a commit with --no-verify."
+
+.PHONY: test-hooks
+test-hooks: ## Run the mutation-tested suites for .githooks/pre-commit and .githooks/commit-msg
+	sh .githooks/test-pre-commit.sh
+	sh .githooks/test-commit-msg.sh
 
 # ─── App ──────────────────────────────────────────────────────────────────────
 .PHONY: run
