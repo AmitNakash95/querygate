@@ -1,10 +1,11 @@
 """MCP tool: discover which connections this deployment exposes.
 
-Note: deliberately does NOT use `from __future__ import annotations` — FastMCP
-resolves each tool's forward-referenced annotations against the *wrapping*
-function's `__globals__` (the `safe_mcp_tool` decorator's module), not this
-module's, so stringified annotations here would fail to resolve at
-registration time. Keeping annotations as real objects sidesteps that.
+Note: deliberately does NOT use `from __future__ import annotations` —
+`MCPServer` resolves each tool's forward-referenced annotations against the
+*wrapping* function's `__globals__` (the `safe_mcp_tool` decorator's
+module), not this module's, so stringified annotations here would fail to
+resolve at registration time. Keeping annotations as real objects sidesteps
+that.
 """
 
 from typing import List, Union

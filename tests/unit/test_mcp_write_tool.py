@@ -7,14 +7,21 @@ preview-vs-execute routing and resolver wiring.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from mcp.types import ElicitResult, InputRequiredResult
 
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import ApprovalRequiredError
-from querygate.execution.write_execution import WriteExecutionService, WriteResult
+from querygate.execution.approval import issue_approval_token, write_fingerprint
+from querygate.execution.write_execution import (
+    WriteBatchItemResult,
+    WriteExecutionService,
+    WriteResult,
+)
 from querygate.mcp.tools import write as wtool
 from querygate.write_ast.models import DeleteStatement, WritePredicate
 
@@ -89,40 +96,136 @@ async def test_tool_preview_mode_never_executes(monkeypatch):
     exec_cls.assert_not_called()  # preview never touches the execution service
 
 
+def _config(enabled: bool) -> AppConfig:
+    return AppConfig(
+        environment="localhost",
+        mcp_elicitation_approval_enabled=enabled,
+        approval_token_hmac_key="k",
+    )
+
+
+def _ctx(*, request_state=None, responses=None) -> MagicMock:
+    ctx = MagicMock()
+    ctx.request_state = request_state
+    ctx.input_responses = responses or {}
+    return ctx
+
+
 @pytest.mark.asyncio
-async def test_tool_execute_mode_passes_resolver_only_when_enabled(monkeypatch):
+async def test_tool_returns_input_required_on_first_gated_call(monkeypatch):
+    """TODO.md item 128: a gated write's first call (no prior request_state)
+    must surface InputRequiredResult, not a bare error, when the operator
+    opted in and a real interactive ctx is present."""
     monkeypatch.setattr(wtool, "get_mcp_caller", lambda: _CALLER)
-    captured = {}
+    fp = write_fingerprint(_delete(1))
+    gated = WriteBatchItemResult(
+        error="needs approval", approval_fingerprint=fp, approval_reasons=["big write"]
+    )
 
     async def _fake_execute_many(writes, **kwargs):
-        captured["resolver"] = kwargs.get("approval_resolver")
-        return []
+        assert kwargs.get("approval_tokens") == {}
+        return [gated]
 
     exec_service = MagicMock()
     exec_service.execute_many = _fake_execute_many
 
-    def _config(enabled):
-        return AppConfig(
-            environment="localhost",
-            mcp_elicitation_approval_enabled=enabled,
-            approval_token_hmac_key="k",
-        )
+    with patch.object(wtool, "WriteExecutionService", return_value=exec_service):
+        monkeypatch.setattr(wtool, "get_mcp_config", lambda: _config(True))
+        result = await wtool.run_structured_writes("demo", [_delete(1)], mode="execute", ctx=_ctx())
+
+    assert isinstance(result, InputRequiredResult)
+    assert "w0" in result.input_requests
+
+
+@pytest.mark.asyncio
+async def test_tool_admits_the_write_on_a_resolved_retry(monkeypatch):
+    monkeypatch.setattr(wtool, "get_mcp_caller", lambda: _CALLER)
+    fp = write_fingerprint(_delete(1))
+    ok = WriteBatchItemResult(operation="delete", table="orders", affected_rows=1, executed=True)
+
+    async def _fake_execute_many(writes, **kwargs):
+        token = kwargs.get("approval_tokens", {}).get(fp)
+        assert token is not None
+        return [ok]
+
+    exec_service = MagicMock()
+    exec_service.execute_many = _fake_execute_many
+
+    pending = json.dumps(
+        {
+            "w0": issue_approval_token(
+                fingerprint=fp, approver_subject="mcp:pending-elicitation", key="k"
+            )
+        }
+    )
+    retry_ctx = _ctx(
+        request_state=pending,
+        responses={"w0": ElicitResult(action="accept", content={"approve": True})},
+    )
 
     with patch.object(wtool, "WriteExecutionService", return_value=exec_service):
-        # ctx present + operator opted in -> a resolver is built and passed.
         monkeypatch.setattr(wtool, "get_mcp_config", lambda: _config(True))
-        await wtool.run_structured_writes("demo", [_delete(1)], mode="execute", ctx=MagicMock())
-        assert captured["resolver"] is not None
+        result = await wtool.run_structured_writes(
+            "demo", [_delete(1)], mode="execute", ctx=retry_ctx
+        )
 
-        # Operator opted out -> no resolver (gated writes stay fail-closed).
+    assert not isinstance(result, InputRequiredResult)
+    assert result.results[0].executed is True
+
+
+@pytest.mark.asyncio
+async def test_tool_stays_fail_closed_when_channel_disabled(monkeypatch):
+    monkeypatch.setattr(wtool, "get_mcp_caller", lambda: _CALLER)
+    fp = write_fingerprint(_delete(1))
+    gated = WriteBatchItemResult(
+        error="needs approval", approval_fingerprint=fp, approval_reasons=["big write"]
+    )
+
+    async def _fake_execute_many(writes, **kwargs):
+        assert kwargs.get("approval_tokens") == {}
+        return [gated]
+
+    exec_service = MagicMock()
+    exec_service.execute_many = _fake_execute_many
+
+    with patch.object(wtool, "WriteExecutionService", return_value=exec_service):
+        # Operator opted out -> stays fail-closed, no InputRequiredResult.
         monkeypatch.setattr(wtool, "get_mcp_config", lambda: _config(False))
-        await wtool.run_structured_writes("demo", [_delete(1)], mode="execute", ctx=MagicMock())
-        assert captured["resolver"] is None
+        result = await wtool.run_structured_writes("demo", [_delete(1)], mode="execute", ctx=_ctx())
+        assert not isinstance(result, InputRequiredResult)
+        assert result.results[0].error is not None
 
-        # No ctx (client without an interactive channel) -> no resolver.
+        # No ctx (client without an interactive channel) -> same fail-closed shape.
         monkeypatch.setattr(wtool, "get_mcp_config", lambda: _config(True))
-        await wtool.run_structured_writes("demo", [_delete(1)], mode="execute", ctx=None)
-        assert captured["resolver"] is None
+        result = await wtool.run_structured_writes("demo", [_delete(1)], mode="execute", ctx=None)
+        assert not isinstance(result, InputRequiredResult)
+        assert result.results[0].error is not None
+
+
+@pytest.mark.asyncio
+async def test_atomic_mode_never_builds_input_required(monkeypatch):
+    """Atomic writes have no per-item token channel — fails closed on a gated
+    write the same way it always has, never pausing for elicitation."""
+    monkeypatch.setattr(wtool, "get_mcp_caller", lambda: _CALLER)
+    fp = write_fingerprint(_delete(1))
+    gated = WriteBatchItemResult(
+        error="needs approval", approval_fingerprint=fp, approval_reasons=["big write"]
+    )
+
+    async def _fake_execute_many(writes, **kwargs):
+        assert "approval_tokens" not in kwargs or kwargs["approval_tokens"] == {}
+        return [gated]
+
+    exec_service = MagicMock()
+    exec_service.execute_many = _fake_execute_many
+
+    with patch.object(wtool, "WriteExecutionService", return_value=exec_service):
+        monkeypatch.setattr(wtool, "get_mcp_config", lambda: _config(True))
+        result = await wtool.run_structured_writes(
+            "demo", [_delete(1)], mode="execute", atomic=True, ctx=_ctx()
+        )
+
+    assert not isinstance(result, InputRequiredResult)
 
 
 # --------------------------------------------------------------------------- #
