@@ -423,7 +423,7 @@ locally-buildable Phase 6 phase-2 slices (44/45/47) first. The walk should
 treat 19 as coming after every other eligible item, not in its listed
 position.
 
-- [ ] **146** — "5-minute first governed query" quickstart. *Added
+- [x] **146** — "5-minute first governed query" quickstart. *Added
   2026-08-05 by `product-scorecard`. Executes the 2026-07-22
   `COMPETITOR_GOOGLE_TOOLBOX.md` Decision's own commitment ("a '5-minute
   first governed query' quickstart") to close the one dimension that brief's
