@@ -691,6 +691,109 @@ async def test_mcp_run_structured_queries_explain_mode_never_executes():
 
 
 @pytest.mark.asyncio
+async def test_mcp_run_structured_queries_verdict_mode_never_executes_and_omits_plan():
+    """TODO.md item 133: mode="verdict" is quota-checked and audited (unlike
+    mode="explain") but still never opens a DB session, and never reveals
+    the compiled plan unless the connection's policy opts in."""
+    customers = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("name", sa.String(100)),
+    )
+    _reset_mcp_session_manager()
+    settings = _mcp_settings(mcp_api_keys=[])
+    app = create_app(settings)
+    with (
+        patch("querygate.execution.service.get_engine", return_value=MagicMock()),
+        patch(
+            "querygate.validation.schema_validation.get_table_schema",
+            AsyncMock(return_value=customers),
+        ),
+        patch("querygate.execution.service.session_scope") as mock_scope,
+    ):
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post(
+                "/mcp/",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "run_structured_queries",
+                        "arguments": {
+                            "connection": "demo",
+                            "queries": [
+                                {"from": "customers", "select": ["customers.id"], "limit": 5}
+                            ],
+                            "mode": "verdict",
+                        },
+                    },
+                },
+                headers=_HEADERS_JSON,
+            )
+    mock_scope.assert_not_called()
+    assert resp.status_code == 200
+    result = _parse_mcp_response(resp)["result"]["structuredContent"]["result"]
+    item = result["results"][0]
+    assert item["allowed"] is True
+    assert item["plan"] is None
+    assert item["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_run_structured_queries_verdict_mode_denial_is_generic_through_the_real_transport():
+    """item 133's audit found the only MCP-level verdict coverage exercised
+    the allowed branch — a field-mapping bug specific to
+    `BatchVerdictItemToolResult(**r.model_dump())`'s re-wrap step (a stray
+    field name, or `reason`/`message` dropped/renamed) could only manifest on
+    the denied branch, since the allowed defaults construct cleanly with
+    mostly-None fields either way. This drives a policy-denied query through
+    the real MCP dispatch/serialization path and pins the exact collapsed
+    contract REST/e2e already prove at the service layer."""
+    _reset_mcp_session_manager()
+    set_policy_store(PolicyStore(default=Policy(denied_tables=["customers"]), overrides={}))
+    settings = _mcp_settings(mcp_api_keys=[])
+    app = create_app(settings)
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(
+            transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+        ) as client,
+    ):
+        resp = await client.post(
+            "/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {
+                    "name": "run_structured_queries",
+                    "arguments": {
+                        "connection": "demo",
+                        "queries": [{"from": "customers", "select": ["customers.id"], "limit": 5}],
+                        "mode": "verdict",
+                    },
+                },
+            },
+            headers=_HEADERS_JSON,
+        )
+    assert resp.status_code == 200
+    result = _parse_mcp_response(resp)["result"]["structuredContent"]["result"]
+    item = result["results"][0]
+    assert item["allowed"] is False
+    assert item["reason"] == "not-available-to-you"
+    assert item["plan"] is None
+    assert item["error"] is None
+    assert "customers" not in (item["message"] or "")
+
+
+@pytest.mark.asyncio
 async def test_mcp_run_structured_queries_isolates_per_item_failure():
     """One invalid query in the list must not fail the others (default
     mode="execute") — same batch semantics the old execute_structured_queries

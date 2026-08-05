@@ -98,7 +98,7 @@ _SCHEMA_REF_PREFIX = "#/components/schemas/"
 # Operations that accept a *recursive* AST, removed from the schema handed to the
 # scanner (see the module docstring for why removal, not --exclude-path-regex):
 #   * the read StructuredQuery AST (joins/subqueries/expressions nest) —
-#     query/explain/batch/approve, template-run, admin query-simulate;
+#     query/explain/verdict/batch/approve, template-run, admin query-simulate;
 #   * the write AST (nested WhereGroup predicates, subqueries) —
 #     write/preview, write/execute, write/approve.
 # Not a coverage gap: those exact operations get deeper, purpose-built
@@ -109,7 +109,7 @@ _SCHEMA_REF_PREFIX = "#/components/schemas/"
 # Schemathesis owns the other ~60 documented operations (admin config/catalog,
 # help, templates, connections).
 EXCLUDED_PATHS = re.compile(
-    r"(/query(/explain|/batch|/approve)?"
+    r"(/query(/explain|/verdict|/batch|/approve)?"
     r"|/write/(preview|execute|approve)"
     r"|/query-templates/[^/]+/run"
     r"|/admin/config/simulate)$"

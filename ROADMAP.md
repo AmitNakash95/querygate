@@ -154,6 +154,27 @@ claim when the work ships or before explicitly handing the item back.
   already-safe (fail-closed) bound — needs an explicit maintainer decision
   recorded in the PRODUCT_GUIDE Decision Log before building, per CLAUDE.md's
   working agreement on judgment calls.* **Depends on 138.**
+- [ ] **142** — `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated
+  threats. *Surfaced 2026-08-01/02 by the `claim-reviewer`/
+  `security-invariant-reviewer` audit of item 133; pre-existing, not
+  introduced by that item. Mechanical rename + cross-reference sweep, XS
+  effort — flagged separately rather than folded into item 133's diff since
+  renumbering a threat-model ID other docs may reference is an identifier-
+  stability change, not a drive-by.*
+- [ ] **143** — `cryptography` 49.0.0 has an unreviewed CVE
+  (`PYSEC-2026-3552`), blocking `make release-check`'s SBOM/dep-audit step.
+  *Surfaced 2026-08-02 while running the release gate for item 133; unrelated
+  — no dependency file was touched. QueryGate's own code never calls the
+  vulnerable `pkcs7_decrypt_*` functions, so this is likely a justified-
+  allowlist case, but that's the `dep-audit` skill's call. Blocks the release
+  gate for every future item until resolved.*
+- [ ] **144** — `verdict()` emits no query metrics, and `/metrics` is
+  unauthenticated. *Surfaced 2026-08-02 by the `security-invariant-reviewer`
+  re-audit of item 133. verdict() shares execute()'s quota budget but leaves
+  no metrics trail of its own; separately, /metrics being unauthenticated
+  already exposes a policy-vs-schema rejection-reason label for existing
+  traffic (pre-existing, unrelated). Needs a maintainer call on whether to
+  gate /metrics, recorded before building.*
 
 ### Phase 1 — Pilot-readiness (let one design partner deploy & trust it)
 
@@ -453,7 +474,7 @@ position.
   90–93. *Surfaced by the `auditors` claim review on 2026-07-30. Cheap, and it
   is outward-facing: GO_TO_MARKET.md understates four shipped capabilities, and
   item 93's body still points an implementer at a module deleted in July.*
-- [ ] **133** — Caller-facing, quota-metered verdict endpoint (play P4).
+- [x] **133** — Caller-facing, quota-metered verdict endpoint (play P4).
   *Added 2026-07-30 by `competitive-scan`; scope corrected the same day by
   `auditors`. The decision logic already ships twice (item 31 active-policy,
   item 39 draft-aware and already accepting a `StructuredQuery`) — what is

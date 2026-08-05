@@ -5618,3 +5618,109 @@ reasoning behind them, newest first. Added to incrementally as work happens
   maintainer, not a default to reach for under review pressure — `TODO.md`
   item 141.
   See [The `help/` module](#the-help-module--a-queryable-product-guide).
+- **2026-08-01 — A caller-facing verdict endpoint reuses the read pipeline's
+  shared validation seam, and deliberately answers less than `explain` does
+  (`TODO.md` item 133, the P4 leverage-move play).** `POST .../query/verdict`
+  and MCP `run_structured_queries(mode="verdict")` add a new
+  `StructuredQueryService.verdict()` method that calls the same
+  `_validate_and_compile` seam `execute`/`explain` already share (non-negotiable
+  #4 — one path, not a second evaluator) and answers only "would this be
+  allowed", for a caller (an MCP gateway, proxy, or CI check) that needs a
+  yes/no rather than debug detail. This is response-shape hygiene, not a
+  privilege boundary: the same principal that can call `verdict` can call
+  `explain`/`query` with the same credential and get the real message —
+  QueryGate has no scope today that distinguishes "may see a verdict" from
+  "may see debug detail" (a verdict-only-caller confinement would be a new
+  scope, an explicit product decision, not something this item adds). Several
+  deliberate design choices, all because a verdict-shaped endpoint is a
+  discovery oracle unless designed against it (`docs/THREAT_MODEL.md`
+  QG-19/QG-24 already establish this class for the admin simulation and "my
+  access" surfaces; this entry adds QG-34):
+  - **A denial always reports the same generic `reason="not-available-to-you"`,
+    never the real exception or which validator raised it.** `validate_policy`
+    runs strictly before `validate_schema`, so distinguishing "on your policy's
+    deny list" from "doesn't exist in the schema" — even just the *category*,
+    without the identifier — would let a caller enumerate identifiers and
+    reconstruct both the schema and the policy boundary one query at a time.
+    The collapse has to hold for every exception `_validate_and_compile` can
+    raise for a shape reason, and patching it type-by-type already missed
+    twice: the original except clause caught only
+    `(PolicyViolationError, QueryValidationError)`; a first audit pass found
+    `NotFoundError` (a join's own `connection` field naming a connection the
+    caller can't see) and `sa.exc.NoSuchTableError` (a wholly non-existent
+    table, which reflection raises directly rather than through
+    `QueryValidationError`) missing, the second escaping as an uncaught 500
+    that was itself a distinguishable fourth outcome; a second audit pass on
+    that same fix then found the four-type allow-list itself was still
+    reachable-but-missed by a plain `ValueError` from an unresolved
+    `${ENV_VAR}` connection-string secret. The except clause is now a
+    deliberate catch-all (`except Exception`), not an allow-list — safe
+    because `_get_policy`/`enforce_query_quota`/`concurrency_slot` all run
+    strictly before this inner block, so nothing reaching it is a
+    quota/concurrency system failure, only a genuine query-shape rejection.
+    `help/personal_denials.py`'s `_is_own_denial` excludes
+    `operation="query_verdict"` events entirely, rather than the "different
+    surface, different posture" argument this entry originally made for
+    leaving that channel open: on reflection, the caller reading a verdict
+    endpoint is the same caller who can immediately read `/help/my-recent-
+    denials` afterward, so "retrospective, about the caller's own
+    already-submitted queries" doesn't hold as a distinction — the caller's
+    own already-submitted *verdict probe* is exactly the query in question.
+    Every other operation's category is still surfaced there unchanged.
+  - **`explain` is deliberately left untouched.** `explain_many`'s per-item
+    `error` field already echoes the real validation message via
+    `public_error_message` (unchanged, pre-existing behavior) — an
+    authenticated caller using `explain` already needs identifier-level detail
+    to debug their own query, a different posture from `verdict`'s "may I"
+    question. Whether to also tighten `explain` was explicitly named as this
+    item's own open question (not a copy of QG-19/QG-24's oracle, since
+    `explain` requires the same authentication `verdict` does — the concern
+    would be about debug-detail richness, not privilege); tightening it here
+    would have been unrelated scope creep, so it is recorded as considered and
+    rejected, not silently skipped.
+  - The compiled plan (SQL text + touched-table list) is omitted by default —
+    `Policy.verdict_include_plan`, off by default — since which tables end up
+    referenced is itself data-dependent enough to be a discovery channel; an
+    operator opts a connection in deliberately, the same posture
+    `log_query_literals` already uses for a different disclosure axis.
+  - Unlike `explain` (deliberately free — a pure, always-cheap compile
+    preview with no DB round trip), `verdict` calls `enforce_query_quota`
+    (consuming one unit **when the connection's policy configures a quota
+    window** — off by default, same as every other read) and emits a
+    redaction-safe `operation="query_verdict"` audit event on every outcome,
+    including a quota/concurrency rejection: this item's own audit found the
+    first cut called `enforce_query_quota` outside any try/except that led to
+    `audit_query`, so a quota-throttled probe left no trace — fixed by
+    wrapping quota reservation, connection resolution, and the concurrency
+    admission in an outer handler that audits then re-raises, mirroring
+    `execute`'s outer handler. `verdict` also now passes the same
+    `principal_subject`/`max_queue_depth`/`max_queue_depth_per_principal`
+    caps to `concurrency_slot` that `execute` does, closing an unbounded-queue
+    gap the first cut left open — the same gap was then also found still
+    open in `explain()` (a pre-existing issue, not introduced by this item,
+    but standing out once `verdict` was fixed and `explain` wasn't), and
+    fixed there too in the same pass for consistency. A quota/concurrency
+    failure still propagates as a real error rather than being reported as
+    `allowed=False` — it's "the endpoint couldn't answer right now", not a
+    verdict about the query's shape; the outer handler that audits this
+    failure classifies a `NotFoundError` (e.g. an MCP caller naming an
+    unregistered connection, since MCP's `_service()` doesn't pre-resolve
+    connection visibility the way REST's does) as `error_category="not_found"`,
+    matching `execute`'s own outer handler, rather than falling through to
+    the generic `"db_error"` label. The plan-compile-and-success-audit block
+    also moved inside the outer `try` (compiling the plan text doesn't need
+    the concurrency slot, only to happen before the `except`), so a
+    `_compile_to_text` failure — or a failure in the audit call itself — is
+    still audited and reported as a real error, instead of 500ing silently
+    with the quota unit already spent and zero trace left behind.
+  - **Scope is policy-and-schema shape only** — `verdict` stops at
+    `_validate_and_compile` and does not evaluate the approval gate (item 92)
+    or the cost-estimation gate, both of which `execute` still enforces. A
+    query reported `allowed: true` can still be paused for human approval or
+    refused by a cost cap when actually run; a caller treating `verdict` as a
+    full execution simulation would be wrong to. Implementing either gate
+    here would need a DB-free cost/sensitivity evaluation path of its own —
+    out of scope for this item, left for a follow-up if a design partner
+    needs it.
+  See [The Core Request Pipeline](#the-core-request-pipeline) and
+  [`docs/THREAT_MODEL.md`](THREAT_MODEL.md) QG-34.
