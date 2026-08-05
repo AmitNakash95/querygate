@@ -185,11 +185,9 @@ schema and MCP tool schemas**, so it catches drift, not just convention.
 
 ## Threat model
 
-[docs/THREAT_MODEL.md](THREAT_MODEL.md) enumerates 35 threats across IDs
-QG-01…QG-34 (QG-32 is used for two unrelated threats — a pre-existing
-numbering slip tracked as TODO.md item 142, not introduced here), each mapped
-to its compensating control and the test(s) that enforce it. The gates on
-this page are the automated, continuously-run backbone of that model.
+[docs/THREAT_MODEL.md](THREAT_MODEL.md) enumerates 35 threats (QG-01…QG-35),
+each mapped to its compensating control and the test(s) that enforce it. The
+gates on this page are the automated, continuously-run backbone of that model.
 
 ## External attestations
 
