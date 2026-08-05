@@ -154,8 +154,9 @@ claim when the work ships or before explicitly handing the item back.
   already-safe (fail-closed) bound — needs an explicit maintainer decision
   recorded in the PRODUCT_GUIDE Decision Log before building, per CLAUDE.md's
   working agreement on judgment calls.* **Depends on 138.**
-- [ ] **142** — `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated
-  threats. *Surfaced 2026-08-01/02 by the `claim-reviewer`/
+- [x] **142** — `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated
+  threats.
+  *Surfaced 2026-08-01/02 by the `claim-reviewer`/
   `security-invariant-reviewer` audit of item 133; pre-existing, not
   introduced by that item. Mechanical rename + cross-reference sweep, XS
   effort — flagged separately rather than folded into item 133's diff since

@@ -8879,6 +8879,42 @@ its `max_line_bytes`/`max_total_bytes`/short-read guards, and each reader's
 `AuditFileReadBounded` exception handling. Full suite (1898 unit, 333
 integration excluding real_db, 424 security) passed on the final tree.
 
+### 142. `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats ✅ DONE
+
+**Surfaced 2026-08-01/02 by the `claim-reviewer`/`security-invariant-reviewer`
+audit of item 133; pre-existing, not introduced by that item.** `QG-32`
+labeled both the audit-ledger tamper-evidence threat (item 91) and the
+approval-token forgery threat (item 92) — `docs/THREAT_MODEL.md` had 35
+distinct threat rows across only 34 unique `QG-` IDs. `TECHNICAL_REVIEW.md`
+(a dated, point-in-time snapshot document, deliberately left unchanged) had
+already flagged a related "QG-31-vs-QG-32" stale-count inconsistency from an
+earlier pass, so this duplicate had survived at least one prior review.
+
+**Shipped.** Renamed the item-92 approval-token-forgery row's ID from
+`QG-32` to `QG-35` (the next unused ID), keeping the item-91 audit-ledger
+row's ID stable at `QG-32` so every existing correct reference to it (a
+second `docs/THREAT_MODEL.md` cross-reference and `docs/TODO_ARCHIVE.md`'s
+own item-91 write-up) stayed correct without further edits.
+`docs/SECURITY_POSTURE.md`'s summary line was simplified from item 133's
+transitional "35 threats across IDs QG-01…QG-34 (QG-32 is used for two
+unrelated threats...)" wording to the clean final form: "enumerates 35
+threats (QG-01…QG-35)". `docs/THREAT_MODEL.md`'s own "Last reviewed" date was
+bumped for the content edit.
+
+**Verified via `claim-reviewer`** (the only applicable reviewer for a
+doc-only ID rename — no code, test, or UI surface changed): row/ID counts
+independently re-derived as exactly 35/35 with no gap or duplicate; both the
+renamed and kept-stable rows confirmed intact (correct column count, no
+truncation from the ID-only edit); every one of the five "should stay
+untouched" references (the ledger cross-reference in THREAT_MODEL.md itself,
+the item-91 archive write-up, TECHNICAL_REVIEW.md's point-in-time snapshot,
+a historical already-completed ROADMAP.md entry, and the absence of any test
+referencing either ID) independently re-verified correct; a broader
+`QG-3[0-9]` sweep across README/PRODUCT_GUIDE/business docs found no missed
+reference. No blocking findings.
+
+**Effort:** XS. **Depends on:** none.
+
 **Effort:** S–M (grew to M with the algorithmic hardening). **Depends on:**
 none (touches the already-shipped `jsonl` path, item 91 for the
 `jsonl_chained` share of it).
