@@ -176,6 +176,12 @@ claim when the work ships or before explicitly handing the item back.
   already exposes a policy-vs-schema rejection-reason label for existing
   traffic (pre-existing, unrelated). Needs a maintainer call on whether to
   gate /metrics, recorded before building.*
+- [ ] **145** — Purpose-bound access: enforce the declared `intent`, don't
+  just log it (feature F7). *Surfaced 2026-08-05 by `competitive-scan`. Advances
+  the Structural pillar (query-*shape* policy) with a mechanic Immuta owns and
+  no MCP gateway or DB-vendor server matches; composes with policy resolution
+  and audit machinery already shipped (items 90, 49) rather than opening new
+  surface area.*
 
 ### Phase 1 — Pilot-readiness (let one design partner deploy & trust it)
 
@@ -237,6 +243,13 @@ claim when the work ships or before explicitly handing the item back.
   board:** it converts the central claim from self-asserted to
   third-party-attested, which is the objection that actually closes a security
   review.
+- [ ] **147** — Self-serve procurement evidence page. *Added 2026-08-05 by
+  `product-scorecard`. Productizes the `trust-evidence` skill's ad hoc packet
+  into a persistent, always-current `/trust` surface composed read-only from
+  already-shipped artifacts (SBOM, item 54's compliance mapping, item 58's
+  benchmark results, item 60's disclosure program) — the "hand it to them"
+  step Phase 2's other items don't cover. No new evidence generated, no
+  non-negotiable touched.* **Depends on 54, 58 (phase 1), 60.**
 - [ ] **134** — Compliance-grade (WORM) audit retention + managed search.
   *Added 2026-07-30 by `competitive-scan`; scope corrected the same day by
   `auditors`. Item 91's chain **does** detect in-ledger deletion; the residual
@@ -410,6 +423,15 @@ locally-buildable Phase 6 phase-2 slices (44/45/47) first. The walk should
 treat 19 as coming after every other eligible item, not in its listed
 position.
 
+- [ ] **146** — "5-minute first governed query" quickstart. *Added
+  2026-08-05 by `product-scorecard`. Executes the 2026-07-22
+  `COMPETITOR_GOOGLE_TOOLBOX.md` Decision's own commitment ("a '5-minute
+  first governed query' quickstart") to close the one dimension that brief's
+  scoring table concedes to a competitor (onboarding/time-to-first-query:
+  Toolbox 9, QueryGate 6) — left un-actioned for two weeks. Pure composition
+  over already-shipped read-only surfaces (item 48 templates, item 51 SDKs,
+  catalog reflection); no new AST, no non-negotiable touched.* **Depends on
+  48, 51 (both shipped).**
 - [ ] **51** — Typed client-side query-builder SDK (Python + TypeScript).
   *Lowers integration friction for the next wave of adopters.* **Phase 1
   shipped** (in-tree Python builder); **phase 2a shipped** (in-tree TypeScript
