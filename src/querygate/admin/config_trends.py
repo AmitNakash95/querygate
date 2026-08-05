@@ -51,7 +51,7 @@ import pydantic as pyd
 
 from querygate.audit.events import CatalogGovernanceEvent, ConfigChangeEvent
 from querygate.audit.file_reader import AuditFileReadBounded, iter_lines_reverse
-from querygate.audit.ledger import unwrap_envelope
+from querygate.audit.ledger import unwrap_envelope, verify_envelope_hash
 
 ChangeEvent = Union[ConfigChangeEvent, CatalogGovernanceEvent]
 
@@ -104,9 +104,11 @@ class ChangeWindowStat(pyd.BaseModel):
 class ConfigCatalogChangeTrend(pyd.BaseModel):
     """Bounded, redaction-safe change-volume trend over the audit stream."""
 
-    # "jsonl": read the persisted stream (0 events is still "jsonl", not an
-    # error). "disabled": no persisted sink is configured, nothing to read.
-    source: Literal["jsonl", "disabled"] = "jsonl"
+    # "jsonl"/"jsonl_chained": read the persisted stream under the actually
+    # configured backend (0 events is still a "jsonl*" source, not an error;
+    # TODO.md item 137 disclosed which backend, previously always "jsonl").
+    # "disabled": no persisted sink is configured, nothing to read.
+    source: Literal["jsonl", "jsonl_chained", "disabled"] = "jsonl"
     generated_at: str
     recent_window_seconds: float
     baseline_window_seconds: float
@@ -233,8 +235,10 @@ class JsonlChangeEventSource:
     audit sink's file. Same tail-first-scan + chain-envelope-unwrap shape as
     `admin.anomaly.JsonlAuditEventSource` (TODO.md item 138)."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, ledger_key: Optional[bytes] = None) -> None:
         self.path = Path(path)
+        # TODO.md item 137: see `admin.anomaly.JsonlAuditEventSource.__init__`.
+        self.ledger_key = ledger_key
 
     def load_change_events(
         self, *, now: datetime, thresholds: ChangeTrendThresholds
@@ -260,6 +264,11 @@ class JsonlChangeEventSource:
                 try:
                     raw = json.loads(line)
                 except json.JSONDecodeError:
+                    malformed += 1
+                    continue
+                if verify_envelope_hash(raw, key=self.ledger_key) is False:
+                    # TODO.md item 137: a chain envelope whose own hash
+                    # doesn't match its contents — never display it as clean.
                     malformed += 1
                     continue
                 raw = unwrap_envelope(raw)
@@ -293,9 +302,11 @@ def build_change_trend_report(
     *,
     now: Optional[datetime] = None,
     thresholds: Optional[ChangeTrendThresholds] = None,
+    backend_label: Literal["jsonl", "jsonl_chained"] = "jsonl",
 ) -> ConfigCatalogChangeTrend:
     """Assemble a full report from a source. `source=None` means the persisted
-    sink is disabled — reported honestly as `source="disabled"`, not an error."""
+    sink is disabled — reported honestly as `source="disabled"`, not an error.
+    `backend_label` (TODO.md item 137) is the actually configured backend."""
     thresholds = thresholds or ChangeTrendThresholds()
     now = now or datetime.now(timezone.utc)
     base = dict(
@@ -311,7 +322,7 @@ def build_change_trend_report(
         events, now=now, thresholds=thresholds
     )
     return ConfigCatalogChangeTrend(
-        source="jsonl",
+        source=backend_label,
         events_scanned=len(events),
         malformed=malformed,
         truncated=truncated,

@@ -8783,6 +8783,102 @@ afterward and the full suite (1865 unit, 329 integration excluding real_db,
 **Effort:** S–M. **Depends on:** 91. **Blocks:** 134 (which must not
 replicate the pattern).
 
+### 137. Audit read surfaces neither verify nor disclose hash-chain integrity ✅ DONE
+
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 136.**
+Item 136 made the four read-only observability/help surfaces (the admin UI
+audit browser, the anomaly report, the config/catalog change-trend report,
+`/help/my-recent-denials`) accept `AUDIT_SINK_BACKEND=jsonl_chained` the same
+way they already accepted plain `jsonl`. That fix is correct and in scope —
+but it also newly makes those four surfaces reachable *readers* of the
+chained-ledger file, and none of them verify the chain or say they didn't.
+
+**The gap, precisely.** `audit/ledger.py`'s own module docstring says the
+chain is "verify-only... nothing in the request pipeline reads the chain" —
+`querygate-audit verify` is the only place integrity is actually checked. The
+four surfaces' `unwrap_envelope` call (added by item 136) only recognizes the
+envelope *shape* (all four `LedgerRecord` keys present); it never recomputes
+`hash` or checks chain linkage. An actor with append access to
+`AUDIT_JSONL_PATH` (compromised app user, writable log volume, a log-shipping
+sidecar) can append a fabricated `{"seq":0,"prev_hash":"...","event":{...},
+"hash":"anything"}` line with an arbitrary `event` body, and all four surfaces
+will display it as a genuine event — the anomaly detector can be pushed over a
+threshold or diluted below one, and (worst case) a forged event could be
+attributed to another principal in that principal's own `/help/my-recent-denials`
+view. Also, on a successful chained-backend read, all four surfaces report
+`source="jsonl"` — the same literal a plain-`jsonl` read reports — so an
+operator or auditor reading the API response cannot tell which backend, and
+therefore which integrity posture, actually produced it.
+
+**Why this is a new item, not folded into 136.** Fixing it changes the public
+response contract (a new `source` value and/or a `chain_verified` field) and
+requires a product decision on cost/posture: real per-request verification
+recomputes a SHA-256/HMAC over every scanned line (cheap per-line, but adds up
+over `max_events_scanned`), is only meaningful for forgery-resistance when
+`AUDIT_LEDGER_HMAC_KEY` is set, and needs a decision on what an unkeyed chain's
+"verified" even means to report honestly. Item 136's own scope was strictly
+"restore the read access the four surfaces already had for `jsonl`"; widening
+that read access's *trust model* is a distinct call.
+
+**Decision (recorded in `docs/PRODUCT_GUIDE.md`'s Decision Log, 2026-08-05,
+per the item-100–106 precedent that the Decision Log entry is the item's own
+first step): both.**
+
+1. **Disclosure.** `source` on all four response models
+   (`AnomalyReport`, `ConfigCatalogChangeTrend`, `RecentDenialsReport`,
+   `AuditEventPage`) widened from a `jsonl`/`disabled`(/`empty`) `Literal` to
+   include `"jsonl_chained"`, and each route now passes through the actually
+   configured `cfg.audit_sink_backend.value` instead of a hardcoded `"jsonl"`.
+2. **Real per-record verification.** A new `audit/ledger.py` primitive,
+   `verify_envelope_hash(raw, *, key=None) -> Optional[bool]`, recomputes
+   `compute_record_hash` over `{seq, prev_hash, event}` and compares in
+   constant time (`hmac.compare_digest`) against the record's own `hash`.
+   Returns `None` for a plain (non-envelope) line — unchanged behavior — and
+   `True`/`False` for an envelope. All three readers (`admin.anomaly
+   .JsonlAuditEventSource`, `admin.config_trends.JsonlChangeEventSource`,
+   `api.admin_ui_routes._audit_page`) call it immediately before
+   `unwrap_envelope` and count a `False` result as `malformed` rather than
+   displaying it — mirroring how item 136 itself consolidated the envelope
+   unwrap into one shared primitive. A new `resolve_ledger_key(raw: str) ->
+   Optional[bytes]` helper (also shared with `audit/sinks.py`'s write path,
+   which previously inlined the identical conversion) turns
+   `cfg.audit_ledger_hmac_key` into the same key bytes the sink HMACs with,
+   so a keyed chain verifies correctly rather than against the wrong
+   (unkeyed) assumption.
+
+**Stated honestly, not oversold.** This is self-consistency verification
+only, not full chain-linkage verification — a windowed/reverse-order scan
+(the shape every one of these readers uses) never walks the whole file from
+genesis, so it cannot by itself prove no record was *dropped*; that remains
+`querygate-audit verify`'s job. It is real per-record forgery *detection* for
+the concrete attack this item's report describes. Per `audit/ledger.py`'s own
+already-documented integrity model, an unkeyed chain still only detects
+tampering relative to a trusted external anchor — forgery is *infeasible*
+(not just detectable) only when `AUDIT_LEDGER_HMAC_KEY` is set. Nothing here
+changes that model; it only makes the four read surfaces observe it correctly
+instead of trusting an envelope's shape alone.
+
+**Coverage.** A genuine chain-valid record followed by a hand-forged one
+(correct `prev_hash`/`seq` chained onto it, `hash: "anything"`, an arbitrary
+`event` body) — verifying the forged record is counted `malformed` and
+excluded from the response — at both the unit level (one new test per reader
+in `test_anomaly.py`/`test_config_trends.py`) and the full HTTP level (a new
+integration test on the admin UI audit browser); the three existing
+"reads a hash-chained ledger" tests were corrected to pass the sink's own key
+to the reader (they had silently been comparing against the *wrong* key,
+which this item's fix would otherwise have broken) and the four existing
+"reads a hash-chained ledger" `source=="jsonl"` assertions across the admin
+UI, anomaly, config-trends, and personal-denials integration suites were
+updated to `"jsonl_chained"`, matching the new disclosure behavior.
+**Mutation-verified:** replacing `verify_envelope_hash`'s final
+`hmac.compare_digest(...)` with an unconditional `True` made every new forged-
+record regression test fail for the expected reason (a genuine event count
+mismatch); reverted, and the full unit + integration + `make test-security`
+suites pass on the final tree.
+
+**Effort:** M (both disclosure and real verification, not just one).
+**Depends on:** 91, 136.
+
 ### 138. Audit read surfaces scan the entire persisted file on every request, unbounded by lines read ✅ DONE
 
 **Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 136.**

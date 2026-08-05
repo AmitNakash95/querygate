@@ -12,6 +12,7 @@ from querygate.audit.ledger import (
     GENESIS_PREV_HASH,
     LedgerRecord,
     make_record,
+    resolve_ledger_key,
 )
 
 
@@ -200,7 +201,7 @@ def configure_audit_sink(
         set_audit_sink(JsonlAuditSink(jsonl_path, fsync=fsync))
         return
     if backend == "jsonl_chained":
-        key = ledger_hmac_key.encode("utf-8") if ledger_hmac_key.strip() else None
+        key = resolve_ledger_key(ledger_hmac_key)
         set_audit_sink(HashChainedAuditSink(jsonl_path, key=key, fsync=fsync))
         return
     raise ValueError(f"Unsupported audit sink backend: {backend!r}")

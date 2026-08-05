@@ -451,10 +451,63 @@ async def test_audit_browser_reads_hash_chained_ledger(tmp_path, monkeypatch):
         )
 
     assert page.status_code == 200
-    assert page.json()["source"] == "jsonl"
+    assert page.json()["source"] == "jsonl_chained"
     assert page.json()["total"] == 1
     assert page.json()["malformed"] == 0
     assert page.json()["events"][0]["event_id"] == "query-1"
+
+
+@pytest.mark.asyncio
+async def test_audit_browser_rejects_a_forged_chain_record(tmp_path, monkeypatch):
+    """TODO.md item 137: a chain envelope whose own hash doesn't match its
+    contents (a record appended by an actor with file access, not derived from
+    a real emit) must never be displayed as a clean event — chain linkage
+    alone wouldn't catch this, since the forgery can still supply a
+    plausible-looking `prev_hash`/`seq`."""
+    from querygate.audit.ledger import GENESIS_PREV_HASH, LedgerRecord, make_record
+
+    audit_path = tmp_path / "audit.jsonl"
+    genuine = AuditEvent(
+        event_id="query-1",
+        connection_id="demo",
+        principal_id="agent-a",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "orders"},
+        duration_ms=4,
+    )
+    record = make_record(0, GENESIS_PREV_HASH, genuine.model_dump(mode="json", exclude_none=True))
+    forged_event = AuditEvent(
+        event_id="query-2",
+        connection_id="demo",
+        principal_id="agent-a",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "secret_table"},
+        duration_ms=4,
+    )
+    forged = LedgerRecord(
+        seq=1,
+        prev_hash=record.hash,
+        event=forged_event.model_dump(mode="json", exclude_none=True),
+        hash="anything",
+    )
+    audit_path.write_text(record.model_dump_json() + "\n" + forged.model_dump_json() + "\n")
+    app = create_app(
+        _settings(tmp_path, monkeypatch, audit_path=audit_path, audit_backend="jsonl_chained")
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        page = await client.get(
+            "/api/v1/admin/ui/audit/events?event_type=query.execution",
+            headers=_auth(),
+        )
+
+    assert page.status_code == 200
+    assert page.json()["source"] == "jsonl_chained"
+    assert page.json()["total"] == 1
+    assert page.json()["malformed"] == 1
+    assert page.json()["events"][0]["event_id"] == "query-1"
+    assert all(e["event_id"] != "query-2" for e in page.json()["events"])
 
 
 @pytest.mark.asyncio

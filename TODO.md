@@ -167,7 +167,7 @@ order-of-magnitude, not commitments.
 | 134 | Compliance-grade (WORM) audit retention + managed search | L | 91, 136 |
 | 135 | Automatic (TTL/lease-driven) credential re-resolution, without an operator reload | M | 13 |
 | 136 | ✅ `jsonl_chained` audit backend silently disables four shipped read surfaces | S–M | 91 |
-| 137 | Audit read surfaces neither verify nor disclose hash-chain integrity | S–M | 91, 136 |
+| 137 | ✅ Audit read surfaces neither verify nor disclose hash-chain integrity | S–M | 91, 136 |
 | 138 | ✅ Audit read surfaces scan the entire persisted file on every request, unbounded by lines read | S–M | — |
 | 139 | Bound audit-line size at the source (AST list caps + audit/sinks.py's own unbounded-read defect) | M | 138 |
 | 140 | `_audit_page` pagination can still materialize ~1M dicts per request | S–M | 138 |
@@ -2353,66 +2353,14 @@ already had (extracted once as `audit.ledger.unwrap_envelope()`).
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 136).
 
-### 137. Audit read surfaces neither verify nor disclose hash-chain integrity
+### 137. Audit read surfaces neither verify nor disclose hash-chain integrity ✅ DONE
 
-**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 136.**
-Item 136 made the four read-only observability/help surfaces (the admin UI
-audit browser, the anomaly report, the config/catalog change-trend report,
-`/help/my-recent-denials`) accept `AUDIT_SINK_BACKEND=jsonl_chained` the same
-way they already accepted plain `jsonl`. That fix is correct and in scope —
-but it also newly makes those four surfaces reachable *readers* of the
-chained-ledger file, and none of them verify the chain or say they didn't.
+All four durable audit read surfaces now disclose the actually configured
+backend (`source` includes `"jsonl_chained"`, not always `"jsonl"`) and
+verify each chain envelope's own hash before displaying it, via a shared
+`audit/ledger.verify_envelope_hash` primitive.
 
-**The gap, precisely.** `audit/ledger.py`'s own module docstring says the
-chain is "verify-only... nothing in the request pipeline reads the chain" —
-`querygate-audit verify` is the only place integrity is actually checked. The
-four surfaces' `unwrap_envelope` call (added by item 136) only recognizes the
-envelope *shape* (all four `LedgerRecord` keys present); it never recomputes
-`hash` or checks chain linkage. An actor with append access to
-`AUDIT_JSONL_PATH` (compromised app user, writable log volume, a log-shipping
-sidecar) can append a fabricated `{"seq":0,"prev_hash":"...","event":{...},
-"hash":"anything"}` line with an arbitrary `event` body, and all four surfaces
-will display it as a genuine event — the anomaly detector can be pushed over a
-threshold or diluted below one, and (worst case) a forged event could be
-attributed to another principal in that principal's own `/help/my-recent-denials`
-view. Also, on a successful chained-backend read, all four surfaces report
-`source="jsonl"` — the same literal a plain-`jsonl` read reports — so an
-operator or auditor reading the API response cannot tell which backend, and
-therefore which integrity posture, actually produced it.
-
-**Why this is a new item, not folded into 136.** Fixing it changes the public
-response contract (a new `source` value and/or a `chain_verified` field) and
-requires a product decision on cost/posture: real per-request verification
-recomputes a SHA-256/HMAC over every scanned line (cheap per-line, but adds up
-over `max_events_scanned`), is only meaningful for forgery-resistance when
-`AUDIT_LEDGER_HMAC_KEY` is set, and needs a decision on what an unkeyed chain's
-"verified" even means to report honestly. Item 136's own scope was strictly
-"restore the read access the four surfaces already had for `jsonl`"; widening
-that read access's *trust model* is a distinct call.
-
-**What to do (decision first, per CLAUDE.md's engine-philosophy precedent —
-record the choice, then build it):**
-
-1. Decide and record in the PRODUCT_GUIDE Decision Log: disclosure-only
-   (cheapest — widen `source`'s `Literal` to include `"jsonl_chained"` and
-   report the actual configured backend instead of always `"jsonl"`, so a
-   reader at least knows which posture produced the response), or real
-   verification (recompute `compute_record_hash`/`hmac.compare_digest` per
-   record read, using `cfg.audit_ledger_hmac_key` when set, and count a
-   self-inconsistent record as `malformed` rather than displaying it), or both.
-2. If verification is chosen, add it once beside `unwrap_envelope` in
-   `audit/ledger.py` (e.g. `verify_record(raw, key) -> bool`) so all three
-   readers (`admin/anomaly.py`, `admin/config_trends.py`,
-   `api/admin_ui_routes.py`) call the same primitive — mirroring how item 136
-   itself consolidated the envelope unwrap.
-3. Regression test: write a chain-valid record, then a second record whose
-   embedded `event` was mutated without recomputing `hash` (a forged insertion,
-   not a broken link — chain linkage alone doesn't catch this since the forged
-   record can chain correctly to a legitimate predecessor if the attacker also
-   fixes up `prev_hash`/`seq`); assert the reader does not present it as clean.
-
-**Effort:** S (disclosure only) to M (real verification). **Depends on:** 91,
-136.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 137).
 
 ### 138. Audit read surfaces scan the entire persisted file on every request, unbounded by lines read ✅ DONE
 

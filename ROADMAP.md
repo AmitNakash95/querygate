@@ -120,7 +120,7 @@ claim when the work ships or before explicitly handing the item back.
   gate-only fix would turn it from honestly-disabled into silently-empty. Phase
   0 because it makes the stronger audit configuration worse than the weaker one
   — backwards for the security-review story.* **Depends on 91; blocks 134.**
-- [ ] **137** — Audit read surfaces neither verify nor disclose hash-chain
+- [x] **137** — Audit read surfaces neither verify nor disclose hash-chain
   integrity. *Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of
   item 136: the four surfaces item 136 made able to read the `jsonl_chained`
   ledger neither recompute the chain hash nor tell a caller which backend
