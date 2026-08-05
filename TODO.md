@@ -169,7 +169,7 @@ order-of-magnitude, not commitments.
 | 136 | ✅ `jsonl_chained` audit backend silently disables four shipped read surfaces | S–M | 91 |
 | 137 | ✅ Audit read surfaces neither verify nor disclose hash-chain integrity | S–M | 91, 136 |
 | 138 | ✅ Audit read surfaces scan the entire persisted file on every request, unbounded by lines read | S–M | — |
-| 139 | Bound audit-line size at the source (AST list caps + audit/sinks.py's own unbounded-read defect) | M | 138 |
+| 139 | ✅ Bound audit-line size at the source (AST list caps + audit/sinks.py's own unbounded-read defect) | M | 138 |
 | 140 | `_audit_page` pagination can still materialize ~1M dicts per request | S–M | 138 |
 | 141 | Convert audit-reader line caps into practically-tight window-based early exits | S | 138 |
 | 142 | ✅ `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats | XS | — |
@@ -2373,43 +2373,14 @@ config fields.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 138).
 
-### 139. Bound audit-line size at the source, not just at the reader
+### 139. Bound audit-line size at the source, not just at the reader ✅ DONE
 
-**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138.**
-Item 138 made `audit.file_reader.iter_lines_reverse` bail (raise
-`AuditFileReadBounded`) on a single undelimited byte run longer than
-`max_line_bytes` (default 1 MiB), which bounds the *reader's* worst case. It
-does not address the two places an oversized line can originate:
+Hard `max_length` caps on `StructuredQuery`'s `select`/`joins`/`group_by`/
+`order_by`/`correlate`/`ctes` and `SetOpSpec.arms` (enforced at request-parse
+time, before `normalize_query_shape` runs), plus `audit/sinks.py`'s startup
+tail-read folded into item 138's bounded `iter_lines_reverse`.
 
-1. **The read-query AST has no size limit on `select`/`joins`/`group_by`/
-   `order_by`.** `query_ast/models.py`'s `StructuredQuery.select` has
-   `min_length=1` and no `max_length`; `execution/service.py`'s
-   `normalize_query_shape(query)` runs **before** policy validation and is
-   written to the audit event even on the rejection path (`service.py:804`).
-   An authenticated caller with query rights (no special privilege needed) can
-   submit a `StructuredQuery` with tens of thousands of `select` entries;
-   policy correctly rejects it (e.g. `max_select_columns`), but the rejection
-   audit event still serializes the full oversized `query_shape` as one JSONL
-   line first.
-2. **`audit/sinks.py`'s `_read_last_line`** (used at process startup to
-   resume a `jsonl_chained` ledger's sequence/hash) has the identical
-   unbounded-expanding-read shape item 138 fixed in `iter_lines_reverse` —
-   `handle.read(size - pos)` grows to the whole file if no newline is ever
-   found, and it runs once at boot, so one oversized trailing line delays or
-   OOMs startup rather than one request.
-
-**What to do:** (a) add `max_length` to `StructuredQuery`'s list fields in
-`query_ast/models.py` (or a tree-wide node-count cap, matching the pattern
-`max_where_predicates`/`max_expression_nodes` already established for other
-AST shapes) — the exact cap is a product decision (is there a legitimate use
-case for very wide selects?), record it in the PRODUCT_GUIDE Decision Log; (b)
-fold `audit/sinks.py:_read_last_line` into the same bounded primitive
-`iter_lines_reverse` already provides, rather than leaving a second
-hand-rolled tail reader with the same defect class the composable-interfaces
-doctrine exists to prevent.
-
-**Effort:** M (the AST cap needs a product decision on the right limit; the
-sinks.py fold-in is S once item 138's primitive exists). **Depends on:** 138.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 139).
 
 ### 140. `_audit_page` pagination can still materialize ~1M dicts per request
 

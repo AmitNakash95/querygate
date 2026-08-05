@@ -3366,6 +3366,55 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-05 — hard structural size caps on the read AST's list fields, and
+  `audit/sinks.py`'s startup tail-read folded into the item-138 bounded
+  reader (TODO.md item 139).** `execution/service.py`'s `normalize_query_shape`
+  runs at the top of `execute()`/`explain()`/`verdict()`, before
+  `validate_policy` — so a syntactically valid but pathologically large
+  `StructuredQuery` (tens of thousands of `select`/`joins`/`group_by`/
+  `order_by`/`correlate`/`ctes`/`set_op.arms` entries) got its full shape
+  serialized into one audit-log line before policy's own
+  `max_select_columns`/`max_joins`/`max_group_by` caps ever had a chance to
+  reject the query. Following the item-100–106 precedent (this Decision Log
+  entry is the item's own first step), the decision is a **hard, non-operator-
+  tunable `max_length`** on each of `StructuredQuery.select` (1000),
+  `.joins` (200), `.group_by` (500), `.order_by` (500), `.correlate` (50),
+  `.ctes` (50), and `SetOpSpec.arms` (50) in `query_ast/models.py` — enforced
+  by Pydantic at request-parsing time, before any application code
+  (including `normalize_query_shape`) ever sees the payload, so a caller
+  never reaches the audit-log-amplification path at all. These are
+  deliberately **not** the same knob as the existing operator-tunable
+  `Policy.max_select_columns`/`max_joins`/`max_group_by` (checked later in
+  `validation/policy_validation.py`, defaults 30/5/10): the AST cap is a hard
+  ceiling generous enough that no realistic operator-raised policy cap would
+  ever hit it (10–100x headroom over each field's Policy default, or over a
+  sane maximum for fields with no Policy cap at all, like `order_by`), sized
+  only to bound the worst case rather than to enforce a product limit.
+  `correlate`/`ctes`/`SetOpSpec.arms` were added beyond the item's own three
+  named fields (`select`/`joins`/`group_by`/`order_by`) because reading
+  `normalize_query_shape` end to end (per CLAUDE.md's "measure the shape the
+  product actually emits" discipline) showed both are walked into the audit
+  shape exactly the same way, including recursively through nested CTE
+  bodies and set-op arms — `intent` was checked too and confirmed **already**
+  excluded from the audit event by design, so it needed no change.
+  Separately, `audit/sinks.py`'s `_read_last_line` (used once at process
+  startup to resume a `jsonl_chained` ledger's head) had the identical
+  unbounded-expanding-read shape item 138 fixed for every other audit
+  reader — `chunk = handle.read(size - pos)` re-reads a growing span for a
+  trailing region with no newline, worst case the whole file, once per boot.
+  It's now a thin wrapper over `audit.file_reader.iter_lines_reverse` (the
+  same bounded primitive the four read-only surfaces use), reusing the
+  composable read-path rather than carrying a second hand-rolled tail
+  scanner — a bound-exceeded read now raises the same "refuse to silently
+  fork the chain" `ValueError` `_recover_head` already raises for an
+  unparseable last line, rather than being misread as "file empty, start at
+  genesis" (which would have restarted the sequence at 0 over real prior
+  content). Mutation-verified: raising each cap by 100x (and separately,
+  short-circuiting `_read_last_line` to always return `None`) made the
+  corresponding new regression test fail for the expected reason; both
+  reverted and the full unit + integration + security suites pass on the
+  final tree.
+
 - **2026-08-05 — audit read surfaces both disclose the actual backend and
   verify chain-envelope self-consistency (TODO.md item 137).** Item 136 made
   the four durable read-only surfaces (`admin/anomaly.py`'s anomaly report,
