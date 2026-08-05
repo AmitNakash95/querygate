@@ -382,7 +382,13 @@ class StructuredQueryService:
         self, query: StructuredQuery
     ) -> Tuple[sa.Select, int, dict, str]:
         policy = self._get_policy()
-        validate_policy(query, policy, connection_id=self._connection_id)
+        # TODO.md item 145: `validate_policy` returns the purpose-narrowed
+        # effective Policy (unchanged if the query declares no purpose, or if
+        # this connection hasn't configured any). Rebinding `policy` here is
+        # what makes that narrowing actually reach the compiler below — its
+        # `mandatory_row_filters`/`column_masks` are read from this same
+        # local, not re-resolved from `self._get_policy()`.
+        policy = validate_policy(query, policy, connection_id=self._connection_id)
         # scope_tables collects each nested value_subquery's reflected tables
         # (item 97), keyed by node id, so the compiler can render IN (subquery).
         # Empty for a non-nested query.
@@ -757,6 +763,7 @@ class StructuredQueryService:
                         sql=sql,
                         params=params,
                         intent=query.intent,
+                        purpose=query.purpose,
                         row_count=len(rows),
                         duration_ms=int(elapsed_seconds * 1000),
                         principal=self._principal_subject,
@@ -826,6 +833,7 @@ class StructuredQueryService:
                 sql=sql,
                 params=params,
                 intent=query.intent,
+                purpose=query.purpose,
                 duration_ms=int((time.monotonic() - start) * 1000),
                 principal=self._principal_subject,
                 principal_scopes=self._principal_scopes,
@@ -1093,6 +1101,7 @@ class StructuredQueryService:
                         connection_id=self._connection_id,
                         sql=sql,
                         intent=query.intent,
+                        purpose=query.purpose,
                         duration_ms=int((time.monotonic() - start) * 1000),
                         principal=self._principal_subject,
                         principal_scopes=self._principal_scopes,
@@ -1131,6 +1140,7 @@ class StructuredQueryService:
                 connection_id=self._connection_id,
                 sql=sql,
                 intent=query.intent,
+                purpose=query.purpose,
                 duration_ms=int((time.monotonic() - start) * 1000),
                 principal=self._principal_subject,
                 principal_scopes=self._principal_scopes,
@@ -1148,6 +1158,7 @@ class StructuredQueryService:
                 connection_id=self._connection_id,
                 sql=sql,
                 intent=query.intent,
+                purpose=query.purpose,
                 duration_ms=int((time.monotonic() - start) * 1000),
                 principal=self._principal_subject,
                 principal_scopes=self._principal_scopes,
