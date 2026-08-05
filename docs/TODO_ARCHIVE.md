@@ -8879,6 +8879,18 @@ suites pass on the final tree.
 **Effort:** M (both disclosure and real verification, not just one).
 **Depends on:** 91, 136.
 
+**Post-ship hardening (2026-08-05, same-day mandatory audit).**
+`security-invariant-reviewer` found the self-consistency check itself was
+bypassable: a BARE (non-enveloped) forged line on a `jsonl_chained` backend
+made `verify_envelope_hash` correctly return `None` ("not shaped like an
+envelope" — indistinguishable from a legitimate plain-`jsonl` line) rather
+than `False`, so it was never counted malformed even though every line on a
+chained backend should be enveloped. Fixed with a `require_envelope: bool`
+flag on both readers plus `_audit_page`, true only when the configured
+backend is `jsonl_chained`; new regression tests (unit + integration) prove
+a bare line is now excluded. See `docs/PRODUCT_GUIDE.md`'s Decision Log,
+2026-08-05, for the full audit response.
+
 ### 138. Audit read surfaces scan the entire persisted file on every request, unbounded by lines read ✅ DONE
 
 **Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 136.**
@@ -9233,6 +9245,26 @@ All three reverted; full unit (1950), integration (344, excluding `real_db`),
 and security (463) suites pass on the final tree.
 
 **Effort:** M. **Depends on:** none.
+
+**Post-ship hardening (2026-08-05, same-day mandatory audit).** Four real
+defects found by `security-invariant-reviewer`/`architecture-boundary-
+reviewer`, all fixed same-day: (1) declared `purpose` was persisted to the
+audit event even on a connection with `allowed_purposes` empty — reopening
+`intent`'s free-text-in-audit-log channel under a different field name; now
+gated on `policy.allowed_purposes` being non-empty. (2) `Policy.for_purpose`'s
+`denied_columns`/`column_masks` merge used case-sensitive dict keys, so a
+case-mismatched table name between base and delta could silently drop one
+side's entries — for `column_masks` this was a real **unmask**, a "narrows
+never widens" violation; fixed with a canonicalizing merge helper. (3)
+`admin/service.py`'s candidate-policy simulation discarded the purpose-
+narrowed policy, so a purpose delta's mandatory filter never appeared in
+readiness reports; fixed with the same one-line reassignment `execution/
+service.py` uses. (4) `admin/access_diff.py` never diffed `allowed_purposes`/
+`purpose_policies` at all — an operator disabling the whole gate reported as
+no access change; fixed with a new `_diff_purposes` function (surfaced a
+second, pre-existing instance of the same gap for `column_masks`, filed as
+item 148). See `docs/PRODUCT_GUIDE.md`'s Decision Log, 2026-08-05, for the
+full audit response and every regression test/mutation-verification.
 
 ### 146. "5-minute first governed query" quickstart — close the named Toolbox onboarding gap ✅ DONE
 

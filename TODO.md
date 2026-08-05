@@ -178,6 +178,7 @@ order-of-magnitude, not commitments.
 | 145 | ✅ Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7) | M | — |
 | 146 | ✅ "5-minute first governed query" quickstart — close the named Toolbox onboarding gap | S–M | 48, 51 |
 | 147 | ✅ Self-serve procurement evidence page | S | 54, 58, 60 |
+| 148 | `admin/access_diff.py` never diffs `column_masks` at all | S | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2506,6 +2507,45 @@ A generated, git-committed `docs/TRUST_EVIDENCE.md` (`make trust-page`,
 compliance mapping, benchmark report, disclosure program, and live
 dependency-audit allowlist status verbatim into one always-current artifact,
 with a drift guard proving it stays current.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 147).
+
+### 148. `admin/access_diff.py` never diffs `column_masks` at all
+
+**Surfaced 2026-08-05 by `architecture-boundary-reviewer`/
+`security-invariant-reviewer`, while auditing item 145's fix for the same
+class of gap on `allowed_purposes`/`purpose_policies` (item 145's own fix
+added `_diff_purposes` and is not itself the bug here).** `Policy.column_masks`
+has been excluded from `GUARDRAIL_FIELDS` since item 49 shipped (masking),
+with an inline comment claiming it's "already diffed field-by-field by
+access_diff (tables, columns, masks, row filters)" — but `admin/access_diff.py`
+has no `_diff_masks`/equivalent function and no `category="column_mask"`
+anywhere; grep confirms zero references to `column_masks` in that file. Real,
+pre-existing (predates this session's items 137–147 entirely), not a
+regression from anything shipped today.
+
+**Impact.** An operator can add, remove, or change a `column_masks` entry in a
+candidate config version and `/admin/config/diff`'s semantic access diff
+reports **no access change** — the same "loosening reported as neutral"
+governance blind spot item 40 (semantic access diff) exists specifically to
+prevent, just for the one field that slipped through since item 49 shipped.
+
+**What to do:** add a `_diff_masks` function to `admin/access_diff.py`
+mirroring `_diff_mandatory_filters`'s shape (before/after keyed by
+`(table.casefold(), column.casefold())`, reporting added/removed/kind-changed
+as `category="column_mask"`, direction: removing a mask is `loosening`
+(reveals the real value), adding one is `tightening`, changing `kind`/
+`length`/`bucket_size` is `neutral` unless a clear stronger/weaker ordering
+can be established between mask kinds — probably not worth attempting, matching
+`_diff_mandatory_filters`'s own "value_changed → neutral" precedent for the
+same reason). Wire it into `_diff_connection` alongside the other per-connection
+diffs. Correct the stale inline comment in `policy/models.py`'s
+`_NON_GUARDRAIL_POLICY_FIELDS` once fixed.
+
+**Codebase fit:** `admin/access_diff.py`, `admin/models.py` (new
+`SemanticChangeCategory` member), `tests/unit/test_config_semantic_diff.py`.
+**Effort:** S. **Depends on:** none. **Risk:** low; read-only reporting
+change, no enforcement path touched.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 147).
 

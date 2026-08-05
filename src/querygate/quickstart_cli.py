@@ -54,6 +54,12 @@ def _print_error(resp: httpx.Response) -> int:
 
 
 def _is_sensitive(column: dict) -> bool:
+    """Whether the catalog LABELS this column sensitive — not a security
+    boundary of its own, just deference to whatever the catalog already
+    says (item 32). A connection with no catalog labels at all has every
+    column pass this check, the same as it would for any other catalog-
+    driven feature (found by `security-invariant-reviewer`, 2026-08-05:
+    "non-sensitive" would overstate the guarantee on such a deployment)."""
     catalog = column.get("catalog")
     return bool(catalog) and catalog.get("sensitivity", "none") != "none"
 
@@ -65,9 +71,10 @@ def _safe_columns(table: dict, *, limit: int = 3) -> list[str]:
 def _find_quickstart_table(
     client: httpx.Client, connection: str
 ) -> tuple[Optional[str], list[str]]:
-    """The first table with at least two non-sensitive columns — enough to
-    build a plain select, a filtered select, and a group-by aggregate.
-    Returns (table_name, safe_columns) or (None, []) if nothing qualifies."""
+    """The first table with at least two columns not labeled sensitive in the
+    catalog — enough to build a plain select, a filtered select, and a
+    group-by aggregate. Returns (table_name, safe_columns) or (None, []) if
+    nothing qualifies."""
     resp = client.get(f"/api/v1/{connection}/tables")
     if resp.status_code != 200:
         _print_error(resp)
@@ -181,9 +188,9 @@ def _cmd_quickstart(args: argparse.Namespace) -> int:
         if table is None:
             print(
                 f"No table on connection {args.connection!r} has at least two "
-                "non-sensitive columns visible to you — nothing to propose. Try "
-                "`GET /api/v1/{connection}/tables` yourself, or ask an operator "
-                "which tables you should have access to.",
+                "columns visible to you that aren't labeled sensitive in the "
+                "catalog — nothing to propose. Try `GET /api/v1/{connection}/tables` "
+                "yourself, or ask an operator which tables you should have access to.",
                 file=sys.stderr,
             )
             return 1
@@ -206,7 +213,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description=(
             "Propose 3 ready-to-run example queries for a connection, in under "
             "5 minutes (item 146) — REST curl, MCP tool-call, and Python SDK "
-            "snippets for each, scoped to non-sensitive columns."
+            "snippets for each, scoped to columns not labeled sensitive in the "
+            "catalog (a connection with no catalog labels at all has none "
+            "excluded this way — see the catalog docs to label sensitive columns)."
         ),
     )
     parser.add_argument("connection", help="Connection id to build examples against.")

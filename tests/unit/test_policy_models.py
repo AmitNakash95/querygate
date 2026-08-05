@@ -159,3 +159,58 @@ def test_for_purpose_never_removes_a_base_deny_or_mandatory_filter():
     assert "secrets" in narrowed.denied_tables
     assert "ssn" in narrowed.denied_columns["orders"]
     assert base_filter in narrowed.mandatory_row_filters
+
+
+def test_for_purpose_mask_merge_is_case_insensitive_on_the_table_key():
+    """Found by `security-invariant-reviewer` (2026-08-05): a plain dict merge
+    keyed by literal table-name casing would let a case-mismatched delta key
+    (e.g. "Customers" vs base's "customers") silently DROP the base's own
+    mask for that table — `_ci_lookup`'s first-match-wins read would only
+    ever see whichever key it inserted last, unmasking a column the base
+    policy protects. Real column/table casing legitimately differs across
+    reflection sources (`_ci_lookup`'s own docstring: "table-name casing in
+    policy.yaml isn't guaranteed to match what schema reflection returns")."""
+    base_mask = ColumnMask(column="email", kind=ColumnMaskKind.NULL)
+    delta_mask = ColumnMask(column="phone", kind=ColumnMaskKind.NULL)
+    policy = Policy(
+        column_masks={"customers": [base_mask]},
+        purpose_policies={"support": PurposePolicyDelta(column_masks={"Customers": [delta_mask]})},
+    )
+    narrowed = policy.for_purpose("support")
+    # Both masks must survive under whichever casing was used — the base's
+    # email mask must not vanish just because the delta spelled the table
+    # differently.
+    assert narrowed.column_mask("customers", "email") == base_mask
+    assert narrowed.column_mask("Customers", "phone") == delta_mask
+
+
+def test_for_purpose_denied_columns_merge_is_case_insensitive_on_the_table_key():
+    """Same defect class as the mask test above, opposite direction: a
+    case-mismatched delta key must not make the delta's own added deny
+    silently fail to apply."""
+    policy = Policy(
+        denied_columns={"orders": ["ssn"]},
+        purpose_policies={
+            "support": PurposePolicyDelta(denied_columns={"Orders": ["credit_card"]})
+        },
+    )
+    narrowed = policy.for_purpose("support")
+    assert not narrowed.column_allowed("orders", "ssn")
+    assert not narrowed.column_allowed("Orders", "credit_card")
+
+
+def test_for_purpose_mask_merge_preserves_a_base_mask_on_a_different_column_same_table():
+    """A naive `dict.update()`-style merge (replace the whole per-table list
+    rather than union it) would drop this base mask just because the delta
+    also touches this table — even with matching casing. Distinct from the
+    case-mismatch tests above: this is the same-key merge-completeness
+    check."""
+    base_mask = ColumnMask(column="ssn", kind=ColumnMaskKind.NULL)
+    delta_mask = ColumnMask(column="email", kind=ColumnMaskKind.NULL)
+    policy = Policy(
+        column_masks={"users": [base_mask]},
+        purpose_policies={"support": PurposePolicyDelta(column_masks={"users": [delta_mask]})},
+    )
+    narrowed = policy.for_purpose("support")
+    assert narrowed.column_mask("users", "ssn") == base_mask
+    assert narrowed.column_mask("users", "email") == delta_mask

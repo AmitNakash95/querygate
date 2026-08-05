@@ -410,6 +410,47 @@ def test_jsonl_source_rejects_a_forged_chain_record(tmp_path):
     assert malformed == 1
 
 
+def test_jsonl_source_rejects_a_bare_envelope_less_line_when_backend_is_chained(tmp_path):
+    """TODO.md item 137 regression (found by `security-invariant-reviewer`,
+    2026-08-05): `verify_envelope_hash` correctly returns `None` — not
+    `False` — for a line with no envelope shape at all, since that's exactly
+    what a legitimate plain-`jsonl` line looks like. But on a `jsonl_chained`
+    backend every persisted line MUST be an envelope, so a bare event line is
+    itself the forgery/corruption signal and must not pass through
+    unverified just because it isn't shaped like a (mismatched) envelope."""
+    from querygate.audit.sinks import HashChainedAuditSink
+
+    th = _thresholds()
+    path = tmp_path / "ledger.jsonl"
+    sink = HashChainedAuditSink(str(path), key=b"k")
+    genuine = _spread(1, start=_NOW - timedelta(seconds=900), span_seconds=1)[0]
+    sink.emit(genuine)
+
+    bare_event = _spread(1, start=_NOW - timedelta(seconds=600), span_seconds=1)[0]
+    with path.open("a") as f:
+        f.write(bare_event.model_dump_json(exclude_none=True) + "\n")
+
+    source = JsonlAuditEventSource(str(path), ledger_key=b"k", require_envelope=True)
+    loaded, malformed, _ = source.load_query_events(now=_NOW, thresholds=th)
+    assert len(loaded) == 1
+    assert malformed == 1
+
+
+def test_jsonl_source_accepts_a_bare_line_when_envelope_is_not_required(tmp_path):
+    """The default (`require_envelope=False`, a plain `jsonl` backend) must
+    keep accepting bare lines exactly as before — `require_envelope` is
+    opt-in, not a universal tightening."""
+    th = _thresholds()
+    path = tmp_path / "audit.jsonl"
+    event = _spread(1, start=_NOW - timedelta(seconds=600), span_seconds=1)[0]
+    path.write_text(event.model_dump_json(exclude_none=True) + "\n")
+
+    source = JsonlAuditEventSource(str(path))
+    loaded, malformed, _ = source.load_query_events(now=_NOW, thresholds=th)
+    assert len(loaded) == 1
+    assert malformed == 0
+
+
 # --- build_anomaly_report --------------------------------------------------
 
 

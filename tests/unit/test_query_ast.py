@@ -501,6 +501,83 @@ class TestAuditLineSizeCaps:
                 }
             )
 
+    # Companion "accepted at exactly the cap" tests for the remaining six
+    # fields — `select`'s pair (test_oversized_select_.../test_select_at_
+    # the_cap_...) already covers this direction; the other six only tested
+    # rejection at N+1 (found by `test-contract-reviewer`, 2026-08-05). An
+    # off-by-one rejecting at N itself would slip through undetected without
+    # these, even though it's Pydantic's own `max_length` doing the
+    # enforcement.
+
+    def test_joins_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "joins": [
+                    {"table": f"t{i}", "alias": f"t{i}", "on": ["orders.id", f"t{i}.id"]}
+                    for i in range(200)
+                ],
+            }
+        )
+        assert len(q.joins) == 200
+
+    def test_group_by_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "group_by": [f"orders.c{i}" for i in range(500)],
+            }
+        )
+        assert len(q.group_by) == 500
+
+    def test_order_by_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "order_by": [{"col": f"orders.c{i}"} for i in range(500)],
+            }
+        )
+        assert len(q.order_by) == 500
+
+    def test_correlate_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "correlate": [f"Customer.c{i}" for i in range(50)],
+            }
+        )
+        assert len(q.correlate) == 50
+
+    def test_ctes_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {
+                "from": "totals",
+                "select": ["totals.id"],
+                "ctes": [
+                    {"name": f"cte{i}", "query": {"from": "orders", "select": ["orders.id"]}}
+                    for i in range(50)
+                ],
+            }
+        )
+        assert len(q.ctes) == 50
+
+    def test_set_op_arms_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "set_op": {
+                    "op": "union",
+                    "arms": [{"from": "orders", "select": ["orders.id"]} for _ in range(50)],
+                },
+            }
+        )
+        assert len(q.set_op.arms) == 50
+
 
 class TestParseColumnRef:
     def test_valid(self):
