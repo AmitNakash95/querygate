@@ -8879,6 +8879,10 @@ its `max_line_bytes`/`max_total_bytes`/short-read guards, and each reader's
 `AuditFileReadBounded` exception handling. Full suite (1898 unit, 333
 integration excluding real_db, 424 security) passed on the final tree.
 
+**Effort:** S–M (grew to M with the algorithmic hardening). **Depends on:**
+none (touches the already-shipped `jsonl` path, item 91 for the
+`jsonl_chained` share of it).
+
 ### 142. `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats ✅ DONE
 
 **Surfaced 2026-08-01/02 by the `claim-reviewer`/`security-invariant-reviewer`
@@ -8915,6 +8919,27 @@ reference. No blocking findings.
 
 **Effort:** XS. **Depends on:** none.
 
-**Effort:** S–M (grew to M with the algorithmic hardening). **Depends on:**
-none (touches the already-shipped `jsonl` path, item 91 for the
-`jsonl_chained` share of it).
+### 143. `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step ✅ DONE
+
+**Surfaced 2026-08-02 while running the release gate for item 133; unrelated
+to that item — no dependency file was touched.** `make sbom`'s vulnerability
+audit failed closed on `cryptography 49.0.0`:
+`PYSEC-2026-3552`/`GHSA-g6cj-pr64-35w5`/`CVE-2026-69247`, a Bleichenbacher
+padding-oracle in `pkcs7_decrypt_der`/`pkcs7_decrypt_pem`/`pkcs7_decrypt_smime`
+(introduced in `cryptography` 44.0.0, fixed in 50.0.0). A quick check had
+found QueryGate's own code never calls any `pkcs7_decrypt_*` function,
+making a justified-allowlist entry look plausible, but the `dep-audit` skill's
+own priority order puts a real upgrade first.
+
+**Shipped.** `pyproject.toml`'s existing constraint (`cryptography >=44.0.1`)
+already permitted the fix — `poetry update cryptography` resolved cleanly to
+50.0.0 with zero other dependency changes, no lockfile drift
+(`poetry check` clean), and the full test suite (2708 tests) passed unchanged
+against the new version. `poetry run python scripts/generate_sbom.py`
+confirms zero unreviewed vulnerabilities (0 allowlisted — no allowlist entry
+was needed, since a real fix existed). `make release-check` now passes
+completely clean end to end, including the SBOM/dep-audit step that had been
+failing since item 133 surfaced this.
+
+**Effort:** XS–S (turned out to be XS — a clean upgrade was available, no
+allowlist judgment call needed). **Depends on:** none.
