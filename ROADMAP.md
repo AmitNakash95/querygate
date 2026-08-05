@@ -492,7 +492,9 @@ position.
   both + register).
 - [ ] **19** — Additional dialects (MySQL, Snowflake, BigQuery, …). *Removes the
   "QueryGate is narrow" objection. **Depends on 57**; also downstream of the
-  engine — each new adapter must render every Phase 4 primitive.*
+  engine — each new adapter must render every Phase 4 primitive.* **MySQL
+  phase 1 shipped 2026-08-06** (live-verified against a real MySQL 8.4
+  server); Snowflake/BigQuery remain open, each its own L–XL effort.
 - [ ] **128** — Conform to the final MCP `2026-07-28` protocol revision. *Added
   2026-07-30 by `competitive-scan`; the spec went final on 2026-07-28 (the
   2026-07-22 scan saw only the RC) and we are a full revision behind on

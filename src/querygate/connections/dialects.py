@@ -210,9 +210,75 @@ class MSSQLSessionAdapter(SessionDialectAdapter):
             # fmt: on
 
 
+class MySQLSessionAdapter(SessionDialectAdapter):
+    def build_engine_url(self, profile: ConnectionProfile) -> str:
+        return profile.connection_string
+
+    def build_connect_args(self, profile: ConnectionProfile, timeout_seconds: int) -> dict:
+        # asyncmy/PyMySQL-family connect() accepts connect_timeout (seconds) —
+        # the connection-attempt timeout, the same login-timeout role MSSQL's
+        # adapter documents for pyodbc's `timeout` kwarg. Real query-execution
+        # timeout is a session-level SET in apply_session_guardrails below,
+        # like Postgres — MySQL has no post-connect attribute to register the
+        # way pyodbc's SQL_ATTR_QUERY_TIMEOUT needs (register_query_timeout
+        # is a no-op here for the same reason it is for Postgres).
+        return {"connect_timeout": timeout_seconds}
+
+    def register_query_timeout(self, engine: AsyncEngine, timeout_seconds: int) -> None:
+        return None
+
+    async def apply_session_guardrails(
+        self,
+        session: AsyncSession,
+        *,
+        lock_timeout_seconds: int,
+        statement_timeout_seconds: int,
+    ) -> None:
+        # See PostgresSessionAdapter for the interpolation/nosemgrep rationale
+        # — both values are Pydantic-validated ints from Policy, never caller
+        # input, and neither SET takes a bind parameter.
+        # fmt: off
+        await session.execute(sa.text(f"SET SESSION innodb_lock_wait_timeout = {lock_timeout_seconds}"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        # MAX_EXECUTION_TIME is milliseconds and — a genuine MySQL limitation,
+        # not a QueryGate gap — only bounds SELECT statements; MySQL has no
+        # session-level statement timeout that also covers INSERT/UPDATE/
+        # DELETE the way Postgres's statement_timeout or MSSQL's LOCK_TIMEOUT
+        # (paired with query cancellation) do. Documented in
+        # docs/THREAT_MODEL.md rather than silently assumed equivalent.
+        await session.execute(sa.text(f"SET SESSION MAX_EXECUTION_TIME = {int(statement_timeout_seconds * 1000)}"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        # fmt: on
+        # UTC, deliberately — the same reasoning as Postgres's TIME ZONE pin.
+        # MySQL's TIMESTAMP columns (unlike DATETIME) convert to/from the
+        # session time_zone on every read/write, so without this pin a
+        # date_bucket/EXTRACT over a TIMESTAMP column would depend on the
+        # server's configured zone rather than the query. Fixed literal, no
+        # interpolation.
+        await session.execute(sa.text("SET SESSION time_zone = '+00:00'"))
+
+    async def capture_session_identifier(self, session: AsyncSession) -> str:
+        result = await session.execute(sa.text("SELECT CONNECTION_ID()"))
+        return str(result.scalar_one())
+
+    async def cancel_session(self, engine: AsyncEngine, identifier: str) -> None:
+        # KILL QUERY interrupts only the running statement and leaves the
+        # target connection alive — the same softer semantics as Postgres's
+        # pg_cancel_backend, and the reason it's used here rather than plain
+        # KILL (MySQL's whole-session-terminating form, the MSSQL-equivalent
+        # primitive). `identifier` is a driver-returned integer this adapter
+        # captured itself (never caller input); `int(...)` both validates
+        # that and is what makes the interpolation below safe, since MySQL's
+        # KILL takes a literal connection id, not a bind parameter.
+        conn_id = int(identifier)
+        async with engine.connect() as conn:
+            # fmt: off
+            await conn.execute(sa.text(f"KILL QUERY {conn_id}"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+            # fmt: on
+
+
 _SESSION_ADAPTERS: Dict[DatabaseDialect, SessionDialectAdapter] = {
     DatabaseDialect.POSTGRESQL: PostgresSessionAdapter(),
     DatabaseDialect.MSSQL: MSSQLSessionAdapter(),
+    DatabaseDialect.MYSQL: MySQLSessionAdapter(),
 }
 
 

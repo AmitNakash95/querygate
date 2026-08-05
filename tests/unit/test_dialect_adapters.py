@@ -13,6 +13,7 @@ import sqlalchemy as sa
 from querygate.compiler.dialect_adapters import (
     DialectAdapter,
     MSSQLDialectAdapter,
+    MySQLDialectAdapter,
     PostgresDialectAdapter,
     SQLiteDialectAdapter,
     get_dialect_adapter,
@@ -28,6 +29,9 @@ class TestGetDialectAdapter:
     def test_postgresql_and_mssql_resolve_to_their_own_adapter(self):
         assert isinstance(get_dialect_adapter("postgresql"), PostgresDialectAdapter)
         assert isinstance(get_dialect_adapter("mssql"), MSSQLDialectAdapter)
+
+    def test_mysql_resolves_to_its_own_adapter(self):
+        assert isinstance(get_dialect_adapter("mysql"), MySQLDialectAdapter)
 
     def test_unknown_dialect_falls_back_to_sqlite(self):
         assert isinstance(get_dialect_adapter("sqlite"), SQLiteDialectAdapter)
@@ -75,6 +79,20 @@ class TestDateBucketRegression:
         with pytest.raises(QueryValidationError, match="Unsupported date_bucket granularity"):
             SQLiteDialectAdapter().date_bucket(col, "decade")
 
+    @pytest.mark.parametrize("granularity", ["day", "week", "month", "quarter", "year"])
+    def test_mysql_supports_every_granularity(self, granularity):
+        # MySQL has no DATE_TRUNC — verified live against a real MySQL 8.4
+        # server (TODO.md item 19) that every idiom below truncates the
+        # time-of-day the same way Postgres's date_trunc does.
+        col = sa.column("created_at")
+        expr = MySQLDialectAdapter().date_bucket(col, granularity)
+        _render(expr)  # must not raise
+
+    def test_mysql_rejects_unsupported_granularity(self):
+        col = sa.column("created_at")
+        with pytest.raises(QueryValidationError, match="Unsupported date_bucket granularity"):
+            MySQLDialectAdapter().date_bucket(col, "decade")
+
 
 class TestOrderByTerms:
     def test_postgres_no_nulls_returns_single_term(self):
@@ -110,6 +128,21 @@ class TestOrderByTerms:
         assert len(terms) == 1
         assert "NULLS FIRST" in _render(terms[0]).upper()
 
+    def test_mysql_no_nulls_returns_single_term(self):
+        col = sa.column("status")
+        terms = MySQLDialectAdapter().order_by_terms(col, "desc", None)
+        assert len(terms) == 1
+
+    @pytest.mark.parametrize("nulls", ["first", "last"])
+    def test_mysql_nulls_rejected_not_emulated(self, nulls):
+        # MySQL has no NULLS FIRST/LAST syntax either — the same genuine gap
+        # as MSSQL, not a spelling difference.
+        col = sa.column("status")
+        with pytest.raises(
+            QueryValidationError, match="nulls first/last ordering is not supported"
+        ):
+            MySQLDialectAdapter().order_by_terms(col, "asc", nulls)
+
 
 class TestStatFn:
     def test_postgres_stddev_variance_render_plain_names(self):
@@ -125,6 +158,18 @@ class TestStatFn:
     def test_sqlite_stat_fn_rejected(self):
         with pytest.raises(QueryValidationError, match="not supported"):
             SQLiteDialectAdapter().stat_fn("stddev")
+
+    def test_mysql_stddev_variance_render_sample_stat_names(self):
+        # MySQL's bare STDDEV()/VARIANCE() are the POPULATION statistic, a
+        # genuinely different number from Postgres's/MSSQL's sample-statistic
+        # bare names — STDDEV_SAMP/VAR_SAMP are the real matches (verified
+        # live: STDDEV_SAMP/VAR_SAMP on the same data as MSSQL's STDEV/VAR
+        # agree; bare STDDEV/VARIANCE do not).
+        col = sa.column("amount")
+        rendered_std = _render(MySQLDialectAdapter().stat_fn("stddev")(col)).lower()
+        rendered_var = _render(MySQLDialectAdapter().stat_fn("variance")(col)).lower()
+        assert "stddev_samp" in rendered_std
+        assert "var_samp" in rendered_var
 
 
 class TestStringAgg:
@@ -145,6 +190,14 @@ class TestStringAgg:
         col = sa.column("email")
         rendered = _render(SQLiteDialectAdapter().string_agg(col, ", ")).lower()
         assert "group_concat" in rendered
+
+    def test_mysql_renders_group_concat_with_separator_keyword(self):
+        # MySQL's GROUP_CONCAT uses SEPARATOR as a keyword *inside* the call's
+        # parens, not a comma-separated second argument like SQLite's — the
+        # exact placement is verified against a live server.
+        col = sa.column("email")
+        rendered = _render(MySQLDialectAdapter().string_agg(col, ", ")).lower()
+        assert "group_concat(email separator" in rendered
 
 
 class TestArrayAgg:
@@ -169,6 +222,14 @@ class TestArrayAgg:
         with pytest.raises(QueryValidationError, match="not supported"):
             SQLiteDialectAdapter().array_agg(col)
 
+    def test_mysql_rejects_array_agg(self):
+        """MySQL has JSON_ARRAYAGG(), but — like SQLite's json_group_array()
+        — it returns a JSON-encoded string, not a real array/collection type,
+        so this stays a raise rather than a forced-parity emulation."""
+        col = sa.column("status")
+        with pytest.raises(QueryValidationError, match="JSON string"):
+            MySQLDialectAdapter().array_agg(col)
+
 
 class TestPercentileCont:
     def test_postgres_renders_percentile_cont(self):
@@ -192,6 +253,13 @@ class TestPercentileCont:
         with pytest.raises(QueryValidationError, match="ordered-set aggregate"):
             SQLiteDialectAdapter().percentile_cont(col, 0.5)
 
+    def test_mysql_rejects_percentile_cont(self):
+        """MySQL has no ordered-set aggregate support at all — no
+        PERCENTILE_CONT, no WITHIN GROUP."""
+        col = sa.column("total_amount")
+        with pytest.raises(QueryValidationError, match="ordered-set aggregate"):
+            MySQLDialectAdapter().percentile_cont(col, 0.5)
+
 
 class TestWindowFrame:
     """item 101 — the frame grammar is the one genuinely per-dialect part of a
@@ -200,6 +268,7 @@ class TestWindowFrame:
     _ADAPTERS = {
         "postgres": PostgresDialectAdapter(),
         "mssql": MSSQLDialectAdapter(),
+        "mysql": MySQLDialectAdapter(),
         "sqlite": SQLiteDialectAdapter(),
     }
 
@@ -223,6 +292,23 @@ class TestWindowFrame:
         with pytest.raises(QueryValidationError, match="RANGE frame with a numeric offset"):
             MSSQLDialectAdapter().window_frame("range", start, end)
 
-    @pytest.mark.parametrize("name", ["postgres", "sqlite"])
+    @pytest.mark.parametrize("name", ["postgres", "mysql", "sqlite"])
     def test_numeric_range_offsets_are_supported_off_mssql(self, name):
         assert self._ADAPTERS[name].window_frame("range", -6, 0) == {"range_": (-6, 0)}
+
+
+class TestMySQLAsyncmyParamstyleStaysPositional:
+    """Guards the justification behind `security/dependency-audit-allowlist.json`'s
+    PYSEC-2026-286 (asyncmy CVE-2025-65896) entry: that CVE is a SQL injection
+    via attacker-controlled DICT KEYS in a pyformat-style parameter mapping —
+    verified live (TODO.md item 19) that SQLAlchemy's mysql+asyncmy dialect
+    only ever hands asyncmy's cursor a positional tuple, never a dict, so the
+    vulnerable codepath is never reached. If a future SQLAlchemy release ever
+    changed this dialect's paramstyle to something dict-shaped, that
+    allowlist entry's justification would silently stop holding — this test
+    exists so that change fails loudly here instead."""
+
+    def test_asyncmy_dialect_paramstyle_is_positional_not_dict_based(self):
+        from sqlalchemy.dialects.mysql.asyncmy import MySQLDialect_asyncmy
+
+        assert MySQLDialect_asyncmy().paramstyle in ("format", "qmark", "numeric")
