@@ -348,10 +348,19 @@ def _merge_allowed_tables(existing: dict, patch: dict, rules_out: list[str], lab
     # An empty existing list means "no restriction" — adopting the template's
     # list only ever *adds* a restriction. A non-empty existing list is
     # already a restriction, so the template can only narrow it further.
+    #
+    # The intersection is case-insensitive (TODO.md item 149's bug class,
+    # found by `security-invariant-reviewer`): an existing entry "Orders" must
+    # still match the template's "orders" the same way `Policy.table_allowed`
+    # already treats them as the same table. A plain `in` check here missed
+    # that match, silently intersecting down to an EMPTY list — which
+    # `table_allowed` reads as "no restriction at all", the exact opposite of
+    # this module's own "monotonically restrictive" invariant.
+    template_folded = {table.casefold() for table in template_value}
     merged = (
         list(template_value)
         if not current
-        else [table for table in current if table in template_value]
+        else [table for table in current if table.casefold() in template_folded]
     )
     existing["allowed_tables"] = merged
     rules_out.append(
@@ -363,12 +372,19 @@ def _merge_denied_columns(existing: dict, patch: dict) -> None:
     if "denied_columns" not in patch:
         return
     current = _mapping(existing.get("denied_columns"))
+    # Resolve the patch's table key against an existing key that differs only
+    # in casing (same bug class as above): a plain `current.get(table, [])`
+    # would create a SECOND key instead of merging into the existing one, and
+    # `Policy._ci_lookup`'s first-match-wins read would then only ever see
+    # one of the two — silently dropping the other side's denied columns.
+    canonical = {table.casefold(): table for table in current}
     for table, columns in patch["denied_columns"].items():
-        merged_columns = list(current.get(table, []))
+        key = canonical.setdefault(table.casefold(), table)
+        merged_columns = list(current.get(key, []))
         for column in columns:
             if column not in merged_columns:
                 merged_columns.append(column)
-        current[table] = merged_columns
+        current[key] = merged_columns
     existing["denied_columns"] = current
 
 

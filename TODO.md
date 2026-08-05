@@ -179,7 +179,8 @@ order-of-magnitude, not commitments.
 | 146 | ✅ "5-minute first governed query" quickstart — close the named Toolbox onboarding gap | S–M | 48, 51 |
 | 147 | ✅ Self-serve procurement evidence page | S | 54, 58, 60 |
 | 148 | ✅ `admin/access_diff.py` never diffs `column_masks` at all | S | — |
-| 149 | `Policy`'s case-insensitive table-key lookups disagree on `casefold()` vs `lower()` | S | — |
+| 149 | ✅ `Policy`'s case-insensitive table-key lookups disagree on `casefold()` vs `lower()` | S–M | — |
+| 150 | `compiler/sqlalchemy_compiler.py`'s `mandatory_row_filters` matching uses `.lower()` vs `schema_validation.py`'s consistent subsystem | M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2520,33 +2521,61 @@ claimed this was already covered.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 148).
 
-### 149. `Policy`'s case-insensitive table-key lookups disagree on `casefold()` vs `lower()`
+### 149. `Policy`'s case-insensitive table-key lookups disagree on `casefold()` vs `lower()` ✅ DONE
+
+Standardized `Policy`/`WritePolicy`/`catalog/models.py`/`admin/templates.py` on
+`.casefold()` for every case-insensitive table/column-key comparison; the
+review this item's own fix went through found and fixed three sibling bugs
+along the way (a write-column deny list silently inert under any non-lowercase
+config key, a catalog sensitivity label unresolvable across a Unicode-casing
+edge case, and a policy template's allow-list merge that could silently widen
+to unrestricted). Recorded item 150 as an explicit, deliberately-deferred
+follow-up for the one sibling instance (compiler/`mandatory_row_filters`
+matching) that roots in a larger subsystem, not fixed here.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 149).
+
+### 150. `compiler/sqlalchemy_compiler.py`'s `mandatory_row_filters` matching uses `.lower()` against `schema_validation.py`'s `.lower()`-consistent AST name resolution
 
 **Surfaced 2026-08-05 by `security-invariant-reviewer`, while reviewing item
-148's `_diff_masks` fix.** Two different case-folding functions are used for
-the same conceptual operation (matching a policy-configured table name
-against another spelling of the same table) in the same file:
-`Policy._ci_lookup` (used by `column_allowed`/`column_mask`/`table_allowed`)
-lowercases with `.lower()`, while `Policy._merge_table_keyed` (item 145) and
-every table-keyed helper in `admin/access_diff.py` (`_dedupe_casefold`,
-`_named_tables`, `_diff_masks`'s own table/column matching) use `.casefold()`.
-The two disagree for a handful of real Unicode identifiers (e.g. German
-`"STRASSE"` vs `"straße"` — `.lower()` leaves them distinct, `.casefold()`
-unifies them), so a table name that hits this narrow mismatch could resolve
-differently in `column_mask`'s enforcement path than in `access_diff`'s
-reporting path, or merge two table keys the merge logic treats as distinct
-from what enforcement treats as distinct.
+149's fix for the identical bug class.** `mandatory_row_filters` compiling
+(`compile_mandatory_row_filters` in `compiler/sqlalchemy_compiler.py`)
+compares an AST-resolved physical table name against
+`MandatoryRowFilter.table` (an operator-configured value from `Policy`) using
+`.lower()` on both sides. This is higher-stakes than any instance item 149
+fixed: `mandatory_row_filters` is the tenant-scoping mechanism ("scope every
+query to tenant_id = ..."), so a table name that hits the `.lower()`/
+`.casefold()` disagreement window (item 149's `"STRASSE"`/`"straße"` example)
+would silently skip the tenant filter for that table.
 
-**Why it's low-priority, not urgent:** table names hitting the
-`lower()`/`casefold()` disagreement window are exotic (a handful of non-ASCII
-codepoints); most real schemas use ASCII identifiers, where the two functions
-agree completely. Pre-existing across the file (predates items 145 and 148),
-not a regression from either.
+**Why this wasn't fixed alongside item 149.** The comparison's left-hand side
+comes from `name_to_physical`, a dict built by
+`validation/schema_validation.py::effective_name_map` and consumed by
+`declared_cte_names`/`cte_source_names` and every caller across policy
+validation, schema validation, and compilation — all of which key on
+`.lower()` consistently with each other. That internal consistency is exactly
+why it doesn't show up as a live bug against catalog/policy lookups (which
+now use `.casefold()`): the AST subsystem's own dict keys and its own
+comparisons still agree with EACH OTHER. The bug is narrower and specific to
+where `mandatory_row_filters` (a `Policy` field, `.casefold()`-adjacent
+everywhere else in `policy/models.py` after item 149) crosses into that
+`.lower()`-consistent subsystem. Fixing it properly means switching
+`effective_name_map`/`declared_cte_names`/`cte_source_names` — and every call
+site — to `.casefold()`, not a one-line change: a larger, riskier edit to the
+core AST name-resolution pipeline shared by the whole validation/compilation
+path, which deserves its own dedicated, reviewed unit of work rather than a
+same-session patch alongside item 149's narrower fixes.
 
-**What to do:** standardize `Policy._ci_lookup` on `.casefold()` (matching
-`_merge_table_keyed` and every `admin/access_diff.py` helper), add a
-regression test with a table name in the disagreement window, and
-mutation-verify it fails against the current `.lower()` behavior.
+**What to do:** switch `effective_name_map`, `declared_cte_names`, and
+`cte_source_names` (all in `validation/schema_validation.py`) to `.casefold()`,
+grep every call site (policy validation, schema validation, compilation,
+`execution/approval.py`'s sensitivity scan) to confirm none assumes
+`.lower()`'s specific output, add a regression test with a table name in the
+disagreement window exercising `mandatory_row_filters`, and mutation-verify.
 
-**Effort:** S. **Depends on:** none.
+**Effort:** M (touches a shared subsystem with several call sites, not a
+single method). **Depends on:** none. **Risk:** medium — the AST
+name-resolution subsystem is on the hot path for every query; changes need the
+same mutation-verification rigor as item 149's, applied across more call
+sites.
 
