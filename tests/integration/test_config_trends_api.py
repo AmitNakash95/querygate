@@ -131,6 +131,61 @@ async def test_config_changes_surface_a_real_trend_from_the_jsonl_stream(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_config_changes_surface_a_real_trend_from_a_hash_chained_ledger(tmp_path):
+    """TODO.md item 136: AUDIT_SINK_BACKEND=jsonl_chained used to be refused at
+    this route's gate entirely (source="disabled"), even though the underlying
+    reader already unwrapped the chain envelope — this is the full HTTP-level
+    regression, not just the unit-level `_change_trend_source` helper test."""
+    from querygate.audit.ledger import GENESIS_PREV_HASH, make_record
+
+    path = tmp_path / "audit.jsonl"
+    now = datetime.now(timezone.utc)
+    events = [
+        ConfigChangeEvent(
+            occurred_at=now - timedelta(seconds=3600 + 60 * (i + 1)),
+            action="stage",
+            outcome="success",
+            description="a proposed change",
+        )
+        for i in range(10)
+    ] + [
+        ConfigChangeEvent(
+            occurred_at=now - timedelta(seconds=60 * (i + 1)),
+            action="apply",
+            outcome="success",
+            description="a proposed change",
+        )
+        for i in range(40)
+    ]
+    prev = GENESIS_PREV_HASH
+    with open(path, "w", encoding="utf-8") as handle:
+        for i, event in enumerate(events):
+            record = make_record(i, prev, event.model_dump(mode="json", exclude_none=True))
+            handle.write(record.model_dump_json() + "\n")
+            prev = record.hash
+
+    app = create_app(
+        _settings(
+            (_OBS_SCOPE,),
+            backend="jsonl_chained",
+            jsonl_path=str(path),
+            change_trend_recent_window_seconds=3600.0,
+            change_trend_baseline_window_seconds=3600.0,
+        )
+    )
+
+    resp = await _get(app)
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body["source"] == "jsonl"
+    assert body["events_scanned"] == 50
+    assert body["config_recent"]["total"] == 40
+    assert body["config_baseline"]["total"] == 10
+    assert body["config_volume_ratio"] == pytest.approx(4.0)
+
+
+@pytest.mark.asyncio
 async def test_config_changes_bounded_by_configured_scan_cap(tmp_path):
     path = tmp_path / "audit.jsonl"
     app = create_app(

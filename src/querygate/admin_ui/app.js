@@ -1181,7 +1181,7 @@
       if (!append) list.innerHTML = "";
       if (page.events.length) list.insertAdjacentHTML("beforeend", page.events.map(renderAuditEvent).join(""));
       if (!list.children.length) list.innerHTML = `<p class="empty-state">${page.source === "disabled" ? "The persisted JSONL audit sink is disabled for this deployment." : "No matching events."}</p>`;
-      $("#audit-count").textContent = `${page.total} matching event${page.total === 1 ? "" : "s"}`;
+      $("#audit-count").textContent = `${page.total} matching event${page.total === 1 ? "" : "s"}${page.truncated ? " (scan truncated — more may exist)" : ""}`;
       $("#audit-source").textContent = page.malformed ? `${page.malformed} malformed lines skipped` : `Source: ${page.source}`;
       $("#audit-more").hidden = page.next_cursor === null;
     } catch (error) {
@@ -2292,7 +2292,7 @@
       wrap.hidden = true;
       empty.hidden = false;
       empty.textContent =
-        "Anomaly surfacing is disabled — enable the JSONL audit sink (AUDIT_SINK_BACKEND=jsonl) to compute per-principal baselines.";
+        "Anomaly surfacing is disabled — enable the JSONL audit sink (AUDIT_SINK_BACKEND=jsonl or jsonl_chained) to compute per-principal baselines.";
       return;
     }
     const windowLabel = `recent ${obsDuration(report.recent_window_seconds)} vs baseline ${obsDuration(report.baseline_window_seconds)}`;
@@ -2362,7 +2362,7 @@
       wrap.hidden = true;
       empty.hidden = false;
       empty.textContent =
-        "Change-trend surfacing is disabled — enable the JSONL audit sink (AUDIT_SINK_BACKEND=jsonl) to compute config/catalog change volume.";
+        "Change-trend surfacing is disabled — enable the JSONL audit sink (AUDIT_SINK_BACKEND=jsonl or jsonl_chained) to compute config/catalog change volume.";
       return;
     }
     const windowLabel = `recent ${obsDuration(report.recent_window_seconds)} vs baseline ${obsDuration(report.baseline_window_seconds)}`;

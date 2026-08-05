@@ -112,6 +112,38 @@ async def test_my_recent_denials_surfaces_the_callers_own_denial(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_my_recent_denials_reads_hash_chained_ledger(tmp_path):
+    """TODO.md item 136: the tamper-evident backend used to be refused at this
+    surface's gate entirely (`source="disabled"`), even though the reader
+    already understood the chain envelope — a capability the config alone
+    should not have hidden."""
+    from querygate.audit.ledger import GENESIS_PREV_HASH, make_record
+
+    path = tmp_path / "audit.jsonl"
+    now = datetime.now(timezone.utc)
+    event = _event(at=now - timedelta(seconds=60), principal="reader", connection="demo")
+    record = make_record(0, GENESIS_PREV_HASH, event.model_dump(mode="json", exclude_none=True))
+    path.write_text(record.model_dump_json() + "\n")
+    app = create_app(
+        _settings(
+            api_keys=["reader-key"],
+            api_key_subject="reader",
+            audit_sink_backend="jsonl_chained",
+            audit_jsonl_path=str(path),
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.get(
+            "/api/v1/help/my-recent-denials", headers={"Authorization": "Bearer reader-key"}
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "jsonl"
+    assert len(body["denials"]) == 1
+    assert body["denials"][0]["connection"] == "demo"
+
+
+@pytest.mark.asyncio
 async def test_my_recent_denials_never_leaks_another_principals_denial(tmp_path):
     """The security-critical property: two principals (distinguished by JWT
     `sub`, since a single API-key list maps to one shared subject — same
@@ -203,3 +235,38 @@ async def test_my_recent_denials_respects_configured_limit(tmp_path):
         )
     assert resp.status_code == 200
     assert len(resp.json()["denials"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_my_recent_denials_respects_configured_max_lines_read(tmp_path):
+    # TODO.md item 138 (security-review follow-up): personal_denials_max_lines_read
+    # must be independently operator-configurable and actually reach the
+    # reader, not silently stuck at AnomalyThresholds' own class default —
+    # this is the one surface reachable with authentication only, no admin
+    # scope, so an operator needs to be able to tighten it on its own.
+    path = tmp_path / "audit.jsonl"
+    now = datetime.now(timezone.utc)
+    _write_events(
+        path,
+        [_event(at=now - timedelta(seconds=1000), principal="reader")]
+        + [_event(at=now - timedelta(seconds=i), principal="someone-else") for i in range(50)],
+    )
+    app = create_app(
+        _settings(
+            api_keys=["reader-key"],
+            api_key_subject="reader",
+            audit_sink_backend="jsonl",
+            audit_jsonl_path=str(path),
+            personal_denials_max_lines_read=5,
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.get(
+            "/api/v1/help/my-recent-denials", headers={"Authorization": "Bearer reader-key"}
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    # The caller's own denial sits behind 50 newer events belonging to
+    # another principal; a line-read cap of 5 stops well before reaching it.
+    assert body["denials"] == []
+    assert body["truncated"] is True
