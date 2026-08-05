@@ -3393,6 +3393,31 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-05 — the quickstart is a standalone `querygate-quickstart` CLI, not
+  a `querygate quickstart` subcommand (TODO.md item 146).** The item's own
+  prose showed the invocation `querygate quickstart <connection>`, but
+  `querygate` (`[project.scripts]` → `querygate.run:main`) is the uvicorn
+  server entrypoint with no subcommand dispatcher — every other CLI in this
+  repo (`querygate-config`, `querygate-semantic-memory`, `querygate-audit`,
+  `querygate-security-benchmark`, `querygate-scope-catalog`,
+  `querygate-validate-config`) is its own top-level `querygate-*` script, so
+  a new subcommand dispatcher on `querygate` itself would be a second CLI
+  pattern for no benefit. `querygate-quickstart` matches the established
+  convention (and the item's own parenthetical: "mirroring the existing
+  `querygate-config`/`querygate-semantic-memory` CLI shape") — a thin,
+  authenticated `httpx` client over already-shipped read-only REST routes
+  (`GET /{connection}/tables`, `GET /{connection}/tables/{table}`), adding no
+  new server-side authority. Sensitivity filtering reuses
+  `TableDescription.columns[].catalog.sensitivity` (item 32) directly — no
+  second sensitivity check invented, and no `catalog/search` round trip
+  needed since `describe_table` already carries it per column. Verified live
+  against the real demo Postgres (`docker compose up` + the packaged
+  `examples/` config): all three generated `curl` commands and the printed
+  Python SDK snippets execute and return real rows, not just plausible-
+  looking text. Mutation-verified: short-circuiting the sensitivity check to
+  always return "safe" made the sensitive-column regression test fail for
+  the expected reason (a PII column appeared in a proposed query).
+
 - **2026-08-05 — the procurement evidence page is a checked-in generated doc,
   not a live REST route (TODO.md item 147).** The item offered two shapes: "a
   served page (candidate: a `/trust` REST route... or a static generator

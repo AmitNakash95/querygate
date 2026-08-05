@@ -18,6 +18,7 @@ querygate-audit = "querygate.audit_cli:main"
 querygate-security-benchmark = "querygate.security_benchmark_cli:main"
 querygate-scope-catalog = "querygate.scope_catalog_cli:main"
 querygate-config = "querygate.config_cli:main"
+querygate-quickstart = "querygate.quickstart_cli:main"
 
 [project.urls]
 Repository = "https://github.com/AGitmit/QueryGate"

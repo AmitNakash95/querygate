@@ -176,7 +176,7 @@ order-of-magnitude, not commitments.
 | 143 | ✅ `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step | XS–S | — |
 | 144 | `verdict()` emits no query metrics, and `/metrics` is unauthenticated | S | — |
 | 145 | ✅ Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7) | M | — |
-| 146 | "5-minute first governed query" quickstart — close the named Toolbox onboarding gap | S–M | 48, 51 |
+| 146 | ✅ "5-minute first governed query" quickstart — close the named Toolbox onboarding gap | S–M | 48, 51 |
 | 147 | ✅ Self-serve procurement evidence page | S | 54, 58, 60 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
@@ -2487,48 +2487,17 @@ persisted to the audit event.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 145).
 
-### 146. "5-minute first governed query" quickstart — close the named Toolbox onboarding gap
+### 146. "5-minute first governed query" quickstart — close the named Toolbox onboarding gap ✅ DONE
 
-**Surfaced 2026-08-05 by `product-scorecard`.**
-`docs/business/COMPETITOR_GOOGLE_TOOLBOX.md`'s 2026-07-22 Decision commits
-explicitly: "Steal the onboarding lesson, not the architecture... QueryGate's
-discovery flow (list/describe/search_catalog) should be as close to
-zero-friction as the guardrails allow — a '5-minute first governed query'
-quickstart." That is the one dimension the brief's own scoring table hands
-to a competitor outright (Onboarding / time-to-first-query: Toolbox 9,
-QueryGate 6) — and the commitment to close it has sat as unactioned prose in
-a competitor brief for two weeks with no TODO item.
+A new `querygate-quickstart <connection>` CLI (thin authenticated HTTP client,
+no new server-side authority) finds a table with non-sensitive columns and
+prints a plain select, a filtered select, and a group-by aggregate, each with
+a `curl`, an MCP tool-call, and a Python-SDK snippet — verified live against
+a real server. The optional admin_ui "Quickstart" panel mentioned in the
+item's body was not built (explicitly optional there; the CLI alone closes
+the named gap).
 
-**Why it matters.** Today a new caller must chain `list_connections` →
-`search_catalog`/`describe_schema` → hand-author a `StructuredQuery` from
-raw JSON (or the item-51 builder) before running a first query. Toolbox's
-edge is a literally-instant prebuilt-tools experience. QueryGate already has
-every ingredient — item 48's admin-approved query templates, the item-51
-Python/TypeScript client SDKs, and the catalog's `search_catalog`/
-`describe_schema` reflection — but nothing composes them into a guided
-first-five-minutes path.
-
-**What to do:** a `querygate quickstart <connection>` CLI command (mirroring
-the existing `querygate-config`/`querygate-semantic-memory` CLI shape) that:
-(1) reflects the connection's catalog, (2) proposes 3–5 read-only example
-`StructuredQuery` bodies — a plain select, a filtered select, an aggregate —
-scoped to tables/columns the catalog doesn't mark sensitive, and (3) prints
-ready-to-run REST curl, MCP tool-call, and Python-SDK snippets for each.
-Optionally mirror it as a "Quickstart" panel on a connection's admin_ui
-detail page. This is pure composition over already-shipped **read-only**
-surfaces (catalog reflection + item-48 templates + item-51 builder) — no new
-AST field, no new enforcement point, nothing that touches a non-negotiable.
-
-**Explicitly out of scope:** auto-*persisting* the generated examples as
-`templates.yaml` entries — that is item 48's governed authoring path, with
-its own review gate; the quickstart proposes ad hoc example queries a caller
-runs directly, it does not write to the template store.
-
-**Codebase fit.** Likely a new `cli/quickstart.py` alongside the existing
-CLIs; reuses `schema/reflection.py` and `catalog/` read paths, and the
-item-51 `client/builder.py` to render the snippets. **Effort:** S–M.
-**Depends on:** 48, 51 (both shipped). **Risk:** low; read-only, additive,
-no server-side behavior change.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 146).
 
 ### 147. Self-serve procurement evidence page ✅ DONE
 
