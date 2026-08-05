@@ -9159,3 +9159,77 @@ failing since item 133 surfaced this.
 
 **Effort:** XS–S (turned out to be XS — a clean upgrade was available, no
 allowlist judgment call needed). **Depends on:** none.
+
+### 145. Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7) ✅ DONE
+
+**Surfaced 2026-08-05 by `competitive-scan`.** `StructuredQuery.intent`
+(`query_ast/models.py`) is logged with the compiled SQL for audit/debugging
+today and never enforced. Immuta's flagship primitive — purpose-based access,
+where a caller must declare *why* it needs the data from an allowed set of
+purposes, and that purpose narrows what it can see — is real and, per the
+2026-07-22 survey (`docs/business/MARKET_DOMINATION_ANALYSIS.md` F7), "barely
+exists elsewhere": the access proxies log a justification string at best; no
+MCP gateway or DB-vendor server enforces a declared purpose at all.
+
+**Why it's newly actionable.** The AST field and the audit wiring already
+exist — this is "enforce a value we already carry," not new surface area. It
+composes with machinery already shipped: per-principal `Policy` resolution
+(item 90's actor/subject chain), `mandatory_row_filters`, and column
+masking/deny — a purpose is just another input to the same resolution, not a
+new enforcement point.
+
+**Shipped.** All four scope points, plus the propagation fix the item's own
+scope implied but didn't spell out:
+
+1. **A new field, `StructuredQuery.purpose: Optional[str]`** (max_length 200)
+   — NOT a repurposed `intent`, which stays free text and stays excluded
+   from the persisted audit event.
+2. **`Policy.allowed_purposes: list[str]`** (empty = unrestricted, the same
+   convention `allowed_tables` uses) gates every query on a connection once
+   non-empty — connection-wide, not a second "which tables are
+   purpose-gated" concept the item's scope didn't ask for. A missing or
+   unrecognized purpose is rejected in `validation/policy_validation.py`'s
+   new `resolve_purpose_policy`, before any DB touch.
+3. **`Policy.purpose_policies: dict[str, PurposePolicyDelta]`** and
+   `Policy.for_purpose(purpose)` apply the narrowing. `PurposePolicyDelta`
+   has no "allow" field — only additional `denied_tables`/`denied_columns`/
+   `mandatory_row_filters`/`column_masks`, unioned onto the base `Policy` —
+   so "narrows never widens" holds by construction, not convention.
+4. **The propagation fix:** `validate_policy` now RETURNS the effective
+   (possibly purpose-narrowed) `Policy`, and `execution/service.py`'s
+   `_validate_and_compile` rebinds its local `policy` to that return value
+   before compiling. Without this, a purpose delta's `mandatory_row_filters`/
+   `column_masks` would pass validation but never reach
+   `compiler/sqlalchemy_compiler.py` (which reads `policy.mandatory_row_filters`/
+   `policy.column_mask` directly from whatever `Policy` it's handed) —
+   silently doing nothing. `explain()`/`verdict()` share the same choke
+   point, so both inherit the fix.
+5. **The declared purpose is persisted** (`AuditEvent.purpose`) — unlike
+   `intent`, it's a fixed allow-listed token, not caller-authored prose, so
+   this doesn't reopen the redaction guarantee (non-negotiable #3).
+
+Full design rationale for all five points recorded in
+`docs/PRODUCT_GUIDE.md`'s Decision Log (2026-08-05) and its new "Purpose-bound
+access" section.
+
+**Client SDK parity.** Both the Python (`client/builder.py`) and TypeScript
+(`clients/typescript/src/builder.ts`) client builders got a matching
+`.purpose(...)` method, and the shared cross-language kitchen-sink parity
+fixture (`tests/fixtures/client_builder_kitchen_sink.json`, item 51) was
+updated to include the new field — both `make test-ts-client` and the Python
+parity test stayed green.
+
+**Coverage.** Unit tests for `Policy.for_purpose` (union semantics per field,
+mask precedence, the base-policy-untouched invariant), `validate_policy`'s
+purpose gate (missing/unrecognized/valid purpose, narrowing applied), and an
+end-to-end `StructuredQueryService.execute` test proving a purpose delta's
+`mandatory_row_filters` entry reaches the COMPILED SQL, not just validation.
+**Mutation-verified:** dropping the base `denied_tables` from the union (only
+keeping the delta's) made the "narrows never widens" tests fail on exactly
+that assertion; dropping `_validate_and_compile`'s policy reassignment made
+the compiled-SQL test fail (filter never reached the SQL); disabling the
+missing-purpose check made the gate tests fail with the wrong fallback error.
+All three reverted; full unit (1950), integration (344, excluding `real_db`),
+and security (463) suites pass on the final tree.
+
+**Effort:** M. **Depends on:** none.

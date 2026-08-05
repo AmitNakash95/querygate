@@ -792,9 +792,48 @@ def _validate_correlation(query: StructuredQuery, scoped: List, policy: Policy) 
             )
 
 
-def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) -> None:
+def resolve_purpose_policy(query: StructuredQuery, policy: Policy) -> Policy:
+    """Enforce the purpose gate (TODO.md item 145, feature F7) and return the
+    effective, purpose-narrowed `Policy` for the rest of validation — and,
+    through the caller's own reuse of the returned value, compilation — to
+    use.
+
+    `allowed_purposes` empty (the default) means this connection has not
+    opted into purpose-gating at all: a declared `purpose` is accepted but
+    has no effect, matching the "empty allow-list = unrestricted" convention
+    every other `Policy` allow-list already uses. Once `allowed_purposes` is
+    non-empty, every query on this connection must declare a purpose from
+    that set — a missing or unrecognized purpose is rejected here, before
+    any DB touch, the same posture as an unresolvable claim
+    (`MandatoryRowFilter.resolve`). `Policy.for_purpose` guarantees the
+    result never grants more than `policy` itself already allows.
+    """
+    if not policy.allowed_purposes:
+        return policy
+    if query.purpose is None:
+        raise PolicyViolationError(
+            "this connection requires a declared purpose (one of "
+            f"{sorted(policy.allowed_purposes)}); none was given"
+        )
+    if query.purpose not in policy.allowed_purposes:
+        raise PolicyViolationError(
+            f"purpose {query.purpose!r} is not permitted on this connection "
+            f"(allowed: {sorted(policy.allowed_purposes)})"
+        )
+    return policy.for_purpose(query.purpose)
+
+
+def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) -> Policy:
     if not policy.enabled:
         raise PolicyViolationError(f"Connection {connection_id!r} is disabled by policy")
+
+    # Purpose narrowing (item 145) runs first, before any other policy check,
+    # and every check below reads the (possibly narrowed) `policy` this
+    # rebinds to — the same one place the rest of the pipeline (the compiler,
+    # via the caller's reuse of this function's return value) must also see,
+    # so a purpose's additional deny/filter/mask rules are never checked here
+    # but skipped at compile time.
+    policy = resolve_purpose_policy(query, policy)
 
     # Enumerate the query, every cte body (item 105) and every nested
     # value_subquery (item 97) as independent scopes. For a plain query this is
@@ -816,6 +855,8 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
     _enforce_tree_wide_caps(scopes, policy)
     for scope in scopes:
         _validate_scope(scope, policy, cte_names)
+
+    return policy
 
 
 def validate_batch_size(count: int, policy: Policy) -> None:
