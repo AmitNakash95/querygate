@@ -3395,6 +3395,55 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-05 — items 148/149's own mandatory security reviews each found a
+  real defect one level deeper than the item's own scope, fixed same-day; one
+  (item 149's) was a fail-open human-approval-gate bypass.** Item 148 (diff
+  `Policy.column_masks`) shipped a `_diff_masks` implementation whose first
+  draft flattened the masks dict directly; both `security-invariant-reviewer`
+  and `architecture-boundary-reviewer` independently found it misclassified a
+  real loosening as a false tightening whenever a table-specific mask
+  shadowed a `"*"` wildcard entry — fixed by resolving through
+  `Policy.column_mask()` itself instead of reimplementing its precedence
+  rules (verified directly: `Policy.column_mask` evaluated against the
+  reproduction before any fix landed). The same review also found
+  `blast_radius.py`'s risk-priority table missing `column_mask` **and** the
+  pre-existing `purpose_access` (item 145) — both silently fell to the
+  lowest-priority bucket — fixed, plus an exhaustiveness test
+  (`typing.get_args(SemanticChangeCategory)` against the priority dict) so no
+  future category can repeat the gap silently.
+  Item 149 (standardize `Policy`'s case-insensitive lookups on `.casefold()`,
+  not `.lower()`) grew from a single-method fix into four sites once its own
+  `security-invariant-reviewer` pass ran: `WritePolicy.write_column_allowed`
+  looked up `denied_write_columns` via a literal `.get(table_name.lower(), [])`
+  — a plain exact-key dict lookup with **no** case-insensitive fallback at
+  all — so a deny-list key configured with any casing other than all-lowercase
+  never matched, regardless of the write statement's own table casing (write
+  deny-by-default silently inert; confirmed with a direct Python
+  reproduction before fixing). `catalog/models.py`'s `TableCatalogEntry.column`/
+  `ConnectionCatalog.table` used `.lower()` while this class's own uniqueness
+  validators already used `.casefold()`, so a catalog entry the module treats
+  as one unique table/column could fail to resolve — and an unresolved entry
+  means its sensitivity label silently never reaches the human-approval gate
+  (item 92 phase 2): a genuine fail-open bypass on a Unicode-casing edge case,
+  confirmed empirically before fixing. `admin/templates.py`'s policy-template
+  merge (item 46) matched table names with **no** case-folding at all — the
+  most reachable of the four, since it fails on any casing mismatch, not just
+  the exotic Unicode window — and could silently widen an existing allow-list
+  to empty (which `Policy.table_allowed` reads as *unrestricted*), directly
+  inverting that module's own stated "monotonically restrictive" guarantee.
+  All four were fixed with regression tests and mutation-verified (each
+  enforcement line broken deliberately, confirmed to fail for the reported
+  reason, restored). A fifth, related instance —
+  `compiler/sqlalchemy_compiler.py`'s `mandatory_row_filters` (tenant-scoping)
+  matching against `validation/schema_validation.py`'s `.lower()`-consistent
+  AST name-resolution subsystem — was found but deliberately **not** fixed in
+  the same change: it roots in a shared subsystem with several call sites
+  (`effective_name_map`/`declared_cte_names`/`cte_source_names`), not a
+  one-line fix, and was recorded as TODO.md item 150 for its own dedicated,
+  reviewed unit of work rather than a same-session patch under time pressure.
+  Full unit (2012), integration (345, excluding `real_db`), and security (463)
+  suites green on the final tree.
+
 - **2026-08-05 — mandatory post-session audit of items 137/139/140/145/146/147
   found 6 real, confirmed defects across security-invariant, architecture, and
   test-contract review; all fixed same-day, each with a regression test that

@@ -138,6 +138,30 @@ class MandatoryRowFilter(pyd.BaseModel):
         return principal.claims[self.from_claim]
 
 
+def _ci_lookup(mapping: dict[str, list], key: str) -> Optional[list]:
+    """Case-insensitive dict lookup, shared by `WritePolicy` and `Policy` —
+    table-name casing in policy.yaml isn't guaranteed to match what schema
+    reflection returns (dialects differ: Postgres lowercases unquoted
+    identifiers, MSSQL usually preserves case), so an exact-string dict
+    lookup here can silently fail to match a configured rule.
+
+    Uses `.casefold()`, not `.lower()` (TODO.md item 149): a handful of real
+    Unicode identifiers disagree between the two (e.g. German `"STRASSE"` vs
+    `"straße"` — `.lower()` leaves them distinct, `.casefold()` unifies
+    them), and every OTHER case-insensitive table-key comparison in this
+    module (`Policy._merge_table_keyed`, and every table-keyed helper in
+    `admin/access_diff.py`) already uses `.casefold()`. A previous version of
+    this function used `.lower()`, the one holdout — found by
+    `security-invariant-reviewer` while reviewing item 148's `_diff_masks`
+    fix, fixed here rather than left as a live inconsistency.
+    """
+    target = key.casefold()
+    for k, value in mapping.items():
+        if k.casefold() == target:
+            return value
+    return None
+
+
 class WritePolicy(pyd.BaseModel):
     """Governed-writes policy (TODO.md item 93). Deny-by-default: writes are OFF
     unless `enabled` is true AND the target table is in `allowed_tables` AND the
@@ -181,18 +205,28 @@ class WritePolicy(pyd.BaseModel):
     def table_writable(self, table_name: str) -> bool:
         if not self.enabled:
             return False
-        name = table_name.lower()
-        return any(t.lower() == name for t in self.allowed_tables)
+        target = table_name.casefold()
+        return any(t.casefold() == target for t in self.allowed_tables)
 
     def operation_allowed(self, op: str) -> bool:
         return self.enabled and op in self.allowed_operations
 
     def write_column_allowed(self, table_name: str, column_name: str) -> bool:
-        col = column_name.lower()
-        for key in (table_name.lower(), "*"):
-            for denied in self.denied_write_columns.get(key, []):
-                if denied.lower() == col:
-                    return False
+        col = column_name.casefold()
+        # `_ci_lookup`, not a literal `.get(table_name.casefold(), [])`: the
+        # PREVIOUS version of this method looked up the dict by exact key
+        # match on the lowercased table name, so a `denied_write_columns` key
+        # configured with any casing other than all-lowercase (e.g. the same
+        # "Orders" casing `allowed_tables` legitimately uses elsewhere in the
+        # same policy) never matched at all — the deny list was silently
+        # inert for that table regardless of what casing the caller passed.
+        # Found while fixing item 149's Policy-side casefold/lower skew;
+        # this was the more severe sibling bug on the write-deny path.
+        denied = (_ci_lookup(self.denied_write_columns, table_name) or []) + (
+            _ci_lookup(self.denied_write_columns, "*") or []
+        )
+        if any(d.casefold() == col for d in denied):
+            return False
         # Also honor the read denied_columns for the *_KEY convention? Kept
         # separate deliberately: a column can be readable but not writable and
         # vice versa; write policy is its own axis.
@@ -615,39 +649,25 @@ class Policy(pyd.BaseModel):
         )
 
     def table_allowed(self, table_name: str) -> bool:
-        name = table_name.lower()
-        if any(t.lower() == name for t in self.denied_tables):
+        target = table_name.casefold()
+        if any(t.casefold() == target for t in self.denied_tables):
             return False
         if self.allowed_tables:
-            return any(t.lower() == name for t in self.allowed_tables)
+            return any(t.casefold() == target for t in self.allowed_tables)
         return True
 
-    @staticmethod
-    def _ci_lookup(mapping: dict[str, list[str]], table_name: str) -> Optional[list[str]]:
-        """Case-insensitive dict lookup — table-name casing in policy.yaml
-        isn't guaranteed to match what schema reflection returns (dialects
-        differ: Postgres lowercases unquoted identifiers, MSSQL usually
-        preserves case), so an exact-string dict lookup here can silently
-        fail to match a configured rule.
-        """
-        target = table_name.lower()
-        for key, value in mapping.items():
-            if key.lower() == target:
-                return value
-        return None
-
     def column_allowed(self, table_name: str, column_name: str) -> bool:
-        col = column_name.lower()
-        denied = (self._ci_lookup(self.denied_columns, table_name) or []) + (
-            self._ci_lookup(self.denied_columns, "*") or []
+        col = column_name.casefold()
+        denied = (_ci_lookup(self.denied_columns, table_name) or []) + (
+            _ci_lookup(self.denied_columns, "*") or []
         )
-        if any(c.lower() == col for c in denied):
+        if any(c.casefold() == col for c in denied):
             return False
-        allowed_specific = self._ci_lookup(self.allowed_columns, table_name)
-        allowed_wildcard = self._ci_lookup(self.allowed_columns, "*")
+        allowed_specific = _ci_lookup(self.allowed_columns, table_name)
+        allowed_wildcard = _ci_lookup(self.allowed_columns, "*")
         allowed = allowed_specific if allowed_specific is not None else allowed_wildcard
         if allowed is not None:
-            return any(c.lower() == col for c in allowed)
+            return any(c.casefold() == col for c in allowed)
         return True
 
     def column_mask(self, table_name: str, column_name: str) -> Optional[ColumnMask]:
@@ -656,15 +676,15 @@ class Policy(pyd.BaseModel):
         first case-insensitive match on `column` wins. Same case-insensitive
         table lookup as `column_allowed` (see `_ci_lookup`).
         """
-        col = column_name.lower()
+        col = column_name.casefold()
         for masks in (
-            self._ci_lookup(self.column_masks, table_name),
-            self._ci_lookup(self.column_masks, "*"),
+            _ci_lookup(self.column_masks, table_name),
+            _ci_lookup(self.column_masks, "*"),
         ):
             if masks is None:
                 continue
             for mask in masks:
-                if mask.column.lower() == col:
+                if mask.column.casefold() == col:
                     return mask
         return None
 

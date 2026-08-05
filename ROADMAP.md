@@ -299,10 +299,20 @@ claim when the work ships or before explicitly handing the item back.
   semantic access diff's item-40 governance guarantee ("a loosening change is
   never reported as no change") has had this one hole the whole time. Small,
   self-contained, mirrors `_diff_mandatory_filters`'s existing shape.*
-- [ ] **149** — `Policy`'s case-insensitive table-key lookups disagree on
-  `casefold()` vs `lower()`. *Surfaced 2026-08-05 by `security-invariant-
-  reviewer` while reviewing item 148's fix. Low-priority (exotic Unicode
-  table names only); pre-existing across the file.*
+- [x] **149** — `Policy`'s case-insensitive table-key lookups disagree on
+  `casefold()` vs `lower()`. ✅ **Shipped** — grew from a `Policy`-only fix
+  into a 4-site fix (`Policy`, `WritePolicy`, `catalog/models.py`,
+  `admin/templates.py`) once this item's own mandatory security review found
+  three sibling bugs, one of them a fail-open approval-gate bypass.
+  *Surfaced 2026-08-05 by `security-invariant-reviewer` while reviewing item
+  148's fix.*
+- [ ] **150** — `compiler/sqlalchemy_compiler.py`'s `mandatory_row_filters`
+  matching uses `.lower()` against `schema_validation.py`'s `.lower()`-
+  consistent AST name-resolution subsystem. *Surfaced 2026-08-05 by
+  `security-invariant-reviewer` while reviewing item 149's fix; deliberately
+  deferred from it — fixing it properly means switching a shared subsystem
+  with several call sites, not a one-line change, so it deserves its own
+  dedicated review rather than a same-session patch.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 

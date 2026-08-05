@@ -97,6 +97,48 @@ def test_template_adds_a_new_allow_list_when_none_existed():
     assert section["allowed_tables"] == ["orders", "customers"]
 
 
+def test_template_narrowing_intersection_is_case_insensitive_on_the_table_name():
+    # A plain `in` check on the raw table strings previously missed a match
+    # differing only in casing, silently intersecting down to an EMPTY list --
+    # which `Policy.table_allowed` reads as "no restriction at all", the exact
+    # opposite of this module's own "monotonically restrictive" invariant
+    # (found by `security-invariant-reviewer`, TODO.md item 149).
+    existing = yaml.safe_dump({"connections": {"demo": {"allowed_tables": ["Orders"]}}})
+
+    result = render_template(
+        "reporting-only",
+        {"connection": "demo", "allowed_tables": ["orders", "customers"], "max_limit": 20},
+        existing,
+    )
+
+    section = yaml.safe_load(result.policy_yaml)["connections"]["demo"]
+    assert section["allowed_tables"] == ["Orders"]
+
+
+def test_denied_columns_merge_resolves_an_existing_table_key_of_different_casing():
+    # A plain `current.get(table, [])` previously created a SECOND key instead
+    # of merging into the existing one whenever the casing differed --
+    # `Policy._ci_lookup`'s first-match-wins read would then only ever see one
+    # of the two, silently dropping the other side's denied columns (found by
+    # `security-invariant-reviewer`, TODO.md item 149).
+    existing = yaml.safe_dump({"connections": {"demo": {"denied_columns": {"Customers": ["ssn"]}}}})
+
+    result = render_template(
+        "customer-support",
+        {
+            "connection": "demo",
+            "allowed_tables": ["customers"],
+            "pii_table": "customers",
+            "pii_columns": ["email"],
+        },
+        existing,
+    )
+
+    section = yaml.safe_load(result.policy_yaml)["connections"]["demo"]
+    assert list(section["denied_columns"].keys()) == ["Customers"]
+    assert sorted(section["denied_columns"]["Customers"]) == ["email", "ssn"]
+
+
 def test_customer_support_unions_denied_columns_without_dropping_existing_ones():
     existing = yaml.safe_dump({"connections": {"demo": {"denied_columns": {"customers": ["ssn"]}}}})
 

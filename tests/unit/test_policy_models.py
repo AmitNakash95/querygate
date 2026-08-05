@@ -161,6 +161,29 @@ def test_for_purpose_never_removes_a_base_deny_or_mandatory_filter():
     assert base_filter in narrowed.mandatory_row_filters
 
 
+def test_column_allowed_table_key_matching_uses_casefold_not_lower():
+    # `.lower()` and `.casefold()` disagree on a handful of real Unicode
+    # identifiers: "STRASSE".lower() == "strasse" but "straße".lower() ==
+    # "straße" (unchanged, not "strasse") -- while .casefold() unifies both
+    # to "strasse". `Policy._ci_lookup` used to use `.lower()`, the one
+    # holdout against every other case-insensitive table-key comparison in
+    # this codebase (`Policy._merge_table_keyed`, every table-keyed helper in
+    # `admin/access_diff.py`) already using `.casefold()` (TODO.md item 149).
+    policy = Policy(denied_columns={"STRASSE": ["hausnummer"]})
+    assert policy.column_allowed("straße", "hausnummer") is False
+
+
+def test_table_allowed_table_key_matching_uses_casefold_not_lower():
+    policy = Policy(allowed_tables=["STRASSE"])
+    assert policy.table_allowed("straße") is True
+
+
+def test_column_mask_table_key_matching_uses_casefold_not_lower():
+    mask = ColumnMask(column="hausnummer", kind=ColumnMaskKind.NULL)
+    policy = Policy(column_masks={"STRASSE": [mask]})
+    assert policy.column_mask("straße", "hausnummer") is not None
+
+
 def test_for_purpose_mask_merge_is_case_insensitive_on_the_table_key():
     """Found by `security-invariant-reviewer` (2026-08-05): a plain dict merge
     keyed by literal table-name casing would let a case-mismatched delta key
