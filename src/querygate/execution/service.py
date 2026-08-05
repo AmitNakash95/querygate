@@ -84,6 +84,8 @@ from querygate.metrics import (
     QUERY_DURATION_SECONDS,
     QUERY_QUOTA_REJECTIONS_TOTAL,
     QUEUE_WAIT_SECONDS,
+    VERDICT_DURATION_SECONDS,
+    VERDICTS_TOTAL,
     classify_rejection,
 )
 from querygate.policy.models import CostEstimationMode, Policy
@@ -1151,6 +1153,10 @@ class StructuredQueryService:
                         rejection_reason=str(exc),
                         operation="query_verdict",
                     )
+                    VERDICTS_TOTAL.labels(connection=self._connection_id, outcome="denied").inc()
+                    VERDICT_DURATION_SECONDS.labels(connection=self._connection_id).observe(
+                        time.monotonic() - start
+                    )
                     return VerdictResult(
                         allowed=False,
                         reason="not-available-to-you",
@@ -1183,6 +1189,10 @@ class StructuredQueryService:
                 policy_decision="allowed",
                 operation="query_verdict",
             )
+            VERDICTS_TOTAL.labels(connection=self._connection_id, outcome="allowed").inc()
+            VERDICT_DURATION_SECONDS.labels(connection=self._connection_id).observe(
+                time.monotonic() - start
+            )
             return VerdictResult(allowed=True, plan=plan)
         except Exception as exc:
             audit_query(
@@ -1205,6 +1215,17 @@ class StructuredQueryService:
                 rejection_reason=str(exc),
                 operation="query_verdict",
             )
+            # A quota/concurrency failure here is a system-busy state, not a
+            # shape verdict (see the docstring above and QG-34's residual) —
+            # it deliberately does not touch VERDICTS_TOTAL, but it still
+            # spends the same per-principal quota budget execute() does, so
+            # it must be visible on the same counter execute() reports
+            # through, or an operator has no verdict-shaped signal for "why
+            # is this agent throttled" (TODO.md item 144).
+            if isinstance(exc, QuotaExceededError):
+                QUERY_QUOTA_REJECTIONS_TOTAL.labels(
+                    connection=self._connection_id, quota_kind=exc.quota_kind
+                ).inc()
             raise
 
     async def verdict_many(self, queries: List[StructuredQuery]) -> List[BatchVerdictItemResult]:

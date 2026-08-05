@@ -247,6 +247,16 @@ class AppConfig(BaseSettings):
     # GET /health's readiness signal (see querygate/health.py).
     health_check_interval_seconds: float = pyd.Field(default=30)
 
+    # GET /metrics (TODO.md item 144, docs/THREAT_MODEL.md QG-36) already
+    # labels rejections "policy" vs "schema" for existing execute/explain
+    # traffic — the same distinction the verdict endpoint's response body
+    # deliberately collapses (QG-34). Secure by default: a caller needs
+    # admin:metrics:read to scrape it, same Authenticator/scope machinery as
+    # every other admin surface. Set false only when the endpoint's network
+    # reachability is already restricted (e.g. a sidecar-only scrape path)
+    # and an operator has made that tradeoff deliberately.
+    metrics_require_auth: bool = pyd.Field(default=True)
+
     # Minimum interval between two manually triggered "test now" probes
     # (item 43 phase 2) against the same connection. A manual probe opens a
     # real connection to the target database on demand, so this bounds how

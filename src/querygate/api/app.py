@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette import status
@@ -17,7 +17,7 @@ from querygate.api.admin_config_routes import build_admin_config_router
 from querygate.api.admin_connections_routes import build_admin_connections_router
 from querygate.api.admin_observability_routes import build_admin_observability_router
 from querygate.api.admin_ui_routes import build_admin_ui_router
-from querygate.api._errors import install_exception_handlers
+from querygate.api._errors import install_exception_handlers, require_scope
 from querygate.api.auth import build_principal_dependency
 from querygate.api.catalog_governance_routes import build_catalog_governance_router
 from querygate.api.help_routes import build_help_router
@@ -25,9 +25,11 @@ from querygate.api.routes import build_router
 from querygate.audit.sinks import configure_audit_sink, reset_audit_sink
 from querygate.catalog.refresh import CatalogRefreshMonitor
 from querygate.catalog.usage import CatalogUsageLearningMonitor
+from querygate.core.auth import Principal
 from querygate.core.config import AppConfig, ConcurrencyBackend
 from querygate.core.config import config as default_config
 from querygate.core.logging import ContextLogger, context_logger, get_logger
+from querygate.core.scopes import ADMIN_METRICS_READ_SCOPE
 from querygate.execution.concurrency import clear_redis_limiter, init_redis_limiter
 from querygate.health import HealthMonitor
 from querygate.metrics import CONTENT_TYPE_LATEST, render_latest
@@ -242,9 +244,18 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             ),
         )
 
-    @application.get("/metrics", tags=["health"])
-    async def metrics() -> Response:
-        return Response(content=render_latest(), media_type=CONTENT_TYPE_LATEST)
+    if conf.metrics_require_auth:
+
+        @application.get("/metrics", tags=["health"])
+        async def metrics(principal: Principal = Depends(principal_dependency)) -> Response:
+            require_scope(principal, ADMIN_METRICS_READ_SCOPE)
+            return Response(content=render_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    else:
+
+        @application.get("/metrics", tags=["health"])
+        async def metrics_unauthenticated() -> Response:
+            return Response(content=render_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return application
 
