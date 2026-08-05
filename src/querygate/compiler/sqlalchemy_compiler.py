@@ -110,7 +110,7 @@ def _aggregate_fn(fn_name: str, dialect: str) -> Any:
 
 def _table_by_name(tables: Dict[str, sa.Table], name: str) -> sa.Table:
     for key, table in tables.items():
-        if key.lower() == name.lower():
+        if key.casefold() == name.casefold():
             return table
     raise QueryValidationError(f"Unknown table {name!r}")
 
@@ -523,7 +523,7 @@ def _mask_for_select_ref(
     """The ColumnMask configured for a bare projection ref, resolved against
     the physical table (an alias can never dodge a mask), or None."""
     table, column = parse_column_ref(ref)
-    physical = name_to_physical.get(table.lower(), table)
+    physical = name_to_physical.get(table.casefold(), table)
     return policy.column_mask(physical, column)
 
 
@@ -656,7 +656,7 @@ def _build_select_columns(
 
 def _equality_bound_columns(join: Any) -> Optional[set]:
     """The joined table's columns pinned by equality to another table's column,
-    lowercased — or None if this join's shape is not a pure equality conjunction.
+    case-folded — or None if this join's shape is not a pure equality conjunction.
 
     Both spellings are read: `on`/`extra_on` pairs, and a `condition` that is a
     `Predicate` or an all-`and` tree of `eq` predicates comparing `col` to
@@ -669,7 +669,7 @@ def _equality_bound_columns(join: Any) -> Optional[set]:
     if join.type == "cross":
         return None
 
-    joined = (join.alias or join.table).lower()
+    joined = (join.alias or join.table).casefold()
     bound: set = set()
 
     def _take(left_ref: str, right_ref: str) -> bool:
@@ -678,8 +678,8 @@ def _equality_bound_columns(join: Any) -> Optional[set]:
             other_table, _ = parse_column_ref(other)
             # Only a comparison against a DIFFERENT table constrains the join's
             # grain; `a.x = a.y` says nothing about how many right rows match.
-            if table.lower() == joined and other_table.lower() != joined:
-                bound.add(column.lower())
+            if table.casefold() == joined and other_table.casefold() != joined:
+                bound.add(column.casefold())
                 return True
         return False
 
@@ -716,7 +716,7 @@ def _equality_bound_columns(join: Any) -> Optional[set]:
 
 
 def _unique_column_sets(source: Any) -> List[set]:
-    """Every set of column names that is unique in `source`, lowercased —
+    """Every set of column names that is unique in `source`, case-folded —
     its primary key, plus every unique constraint and unique index reflected
     from the database (backends surface these differently: SQLite reports a
     `UniqueConstraint`, Postgres typically a unique `Index`, so both are read).
@@ -745,15 +745,15 @@ def _unique_column_sets(source: Any) -> List[set]:
     if not isinstance(table, sa.Table):
         return []
     sets: List[set] = []
-    pk = {c.name.lower() for c in table.primary_key.columns}
+    pk = {c.name.casefold() for c in table.primary_key.columns}
     if pk:
         sets.append(pk)
     for constraint in table.constraints:
         if isinstance(constraint, sa.UniqueConstraint) and len(constraint.columns) > 0:
-            sets.append({c.name.lower() for c in constraint.columns})
+            sets.append({c.name.casefold() for c in constraint.columns})
     for index in table.indexes:
         if index.unique and len(index.columns) > 0:
-            sets.append({c.name.lower() for c in index.columns})
+            sets.append({c.name.casefold() for c in index.columns})
     return sets
 
 
@@ -809,8 +809,8 @@ def _apply_mandatory_row_filters(
         matches = [
             key
             for key in tables
-            if name_to_physical.get(key.lower(), key).lower() == row_filter.table.lower()
-            and name_to_physical.get(key.lower(), key).lower() not in cte_names
+            if name_to_physical.get(key.casefold(), key).casefold() == row_filter.table.casefold()
+            and name_to_physical.get(key.casefold(), key).casefold() not in cte_names
         ]
         if not matches:
             continue
@@ -992,7 +992,7 @@ def compile_structured_query(
     reflected tables, so an `IN (subquery)` in the WHERE clause and every set-op arm
     compile through this same path recursively.
 
-    `cte_objects` (item 105) maps each lowercased cte name to the compiled `WITH`
+    `cte_objects` (item 105) maps each case-folded cte name to the compiled `WITH`
     block, so a scope referencing one by name binds to the real construct rather
     than to the typeless placeholder schema validation resolved its columns
     against. It is built here on the way in and threaded down, never rebuilt.
@@ -1003,7 +1003,7 @@ def compile_structured_query(
             # Compiled in declaration order, which the no-forward-reference rule
             # makes dependency order, so a block reading an earlier block finds it
             # already in `cte_objects` below.
-            cte_objects[spec.name.lower()] = _compile_cte(
+            cte_objects[spec.name.casefold()] = _compile_cte(
                 spec, policy, dialect, principal, subquery_tables, cte_objects
             )
 
@@ -1099,10 +1099,10 @@ def _resolve_cte_references(
     name_to_physical = effective_name_map(query)
     resolved: Dict[str, Any] = dict(tables)
     for name in tables:
-        source_name = name_to_physical.get(name.lower(), name).lower()
+        source_name = name_to_physical.get(name.casefold(), name).casefold()
         cte = cte_objects.get(source_name)
         if cte is not None:
-            resolved[name] = cte if name.lower() == source_name else cte.alias(name)
+            resolved[name] = cte if name.casefold() == source_name else cte.alias(name)
     return resolved
 
 

@@ -79,7 +79,7 @@ async def validate_write_schema(
         for pred in iter_where_predicates(to_read_where(where)):
             for ref in predicate_column_refs(pred):
                 ref_table, ref_col = parse_column_ref(ref)
-                if ref_table.lower() != statement.table.lower():
+                if ref_table.casefold() != statement.table.casefold():
                     raise QueryValidationError(
                         f"A write's WHERE may only reference its target table "
                         f"{statement.table!r}, not {ref_table!r}"

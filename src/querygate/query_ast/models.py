@@ -1648,19 +1648,19 @@ class StructuredQuery(pyd.BaseModel):
         ]
         physical_counts: Dict[str, int] = {}
         for physical, _alias in occurrences:
-            key = physical.lower()
+            key = physical.casefold()
             physical_counts[key] = physical_counts.get(key, 0) + 1
 
         seen: Set[str] = set()
         for physical, alias in occurrences:
-            effective = (alias or physical).lower()
+            effective = (alias or physical).casefold()
             if effective in seen:
                 raise ValueError(
                     f"Duplicate table/alias {effective!r} — every from/join effective "
                     "name (its alias if given, else its table name) must be unique"
                 )
             seen.add(effective)
-            if physical_counts[physical.lower()] > 1 and alias is None:
+            if physical_counts[physical.casefold()] > 1 and alias is None:
                 raise ValueError(
                     f"Table {physical!r} is used more than once in this query "
                     "(a self-join) — every occurrence must have an explicit alias, "
@@ -1759,7 +1759,7 @@ class StructuredQuery(pyd.BaseModel):
         """
         seen: Set[str] = set()
         for spec in self.ctes:
-            key = spec.name.lower()
+            key = spec.name.casefold()
             if key in seen:
                 raise ValueError(
                     f"Duplicate cte name {spec.name!r} — every cte name must be unique"

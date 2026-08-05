@@ -556,10 +556,10 @@ class StructuredQueryService:
         cte_names = declared_cte_names(query)
 
         for _depth, scope in iter_query_scopes(query):
-            if scope.from_table.lower() not in cte_names:
+            if scope.from_table.casefold() not in cte_names:
                 _add_table(scope.from_table)
             for join in scope.joins:
-                if join.connection is not None or join.table.lower() in cte_names:
+                if join.connection is not None or join.table.casefold() in cte_names:
                     continue
                 _add_table(join.table)
                 pair = _join_relationship_pair(join)
