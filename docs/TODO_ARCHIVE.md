@@ -8979,6 +8979,90 @@ integration excluding real_db, 424 security) passed on the final tree.
 none (touches the already-shipped `jsonl` path, item 91 for the
 `jsonl_chained` share of it).
 
+### 139. Bound audit-line size at the source, not just at the reader ✅ DONE
+
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138.**
+Item 138 made `audit.file_reader.iter_lines_reverse` bail (raise
+`AuditFileReadBounded`) on a single undelimited byte run longer than
+`max_line_bytes` (default 1 MiB), which bounds the *reader's* worst case. It
+does not address the two places an oversized line can originate:
+
+1. **The read-query AST has no size limit on `select`/`joins`/`group_by`/
+   `order_by`.** `query_ast/models.py`'s `StructuredQuery.select` has
+   `min_length=1` and no `max_length`; `execution/service.py`'s
+   `normalize_query_shape(query)` runs **before** policy validation and is
+   written to the audit event even on the rejection path (`service.py:804`).
+   An authenticated caller with query rights (no special privilege needed) can
+   submit a `StructuredQuery` with tens of thousands of `select` entries;
+   policy correctly rejects it (e.g. `max_select_columns`), but the rejection
+   audit event still serializes the full oversized `query_shape` as one JSONL
+   line first.
+2. **`audit/sinks.py`'s `_read_last_line`** (used at process startup to
+   resume a `jsonl_chained` ledger's sequence/hash) has the identical
+   unbounded-expanding-read shape item 138 fixed in `iter_lines_reverse` —
+   `handle.read(size - pos)` grows to the whole file if no newline is ever
+   found, and it runs once at boot, so one oversized trailing line delays or
+   OOMs startup rather than one request.
+
+**Decision (recorded in `docs/PRODUCT_GUIDE.md`'s Decision Log, 2026-08-05,
+per the item-100–106 precedent): a hard, non-operator-tunable `max_length`**
+on the AST's list fields, enforced by Pydantic at request-parsing time —
+before `normalize_query_shape` or anything else in application code ever
+sees the payload — rather than reordering policy validation ahead of audit
+normalization (riskier, and out of this item's "bound it at the source"
+scope). Deliberately **not** the same knob as `Policy.max_select_columns`/
+`max_joins`/`max_group_by` (operator-tunable, checked later in
+`validation/policy_validation.py`): the AST cap is a hard ceiling sized only
+to bound worst-case size, with generous headroom (10–100x) over each field's
+Policy default or, for a field with no Policy cap at all, over a sane
+maximum:
+
+- `StructuredQuery.select`: `max_length=1000` (Policy default 30)
+- `.joins`: `200` (Policy default 5)
+- `.group_by`: `500` (Policy default 10)
+- `.order_by`: `500` (no existing Policy cap)
+- `.correlate`: `50` (Policy `max_correlated_refs` default 2)
+- `.ctes`: `50` (Policy `max_cte_count` default 3)
+- `SetOpSpec.arms`: `50` (Policy `max_set_op_arms` default 3)
+
+The last three weren't named by this item's own report, but reading
+`normalize_query_shape` end to end (`audit/events.py`) showed both
+`correlate` and `ctes` — recursively, through nested CTE bodies — and
+`set_op.arms` are walked into the audit shape the identical way `select`/
+`joins`/`group_by`/`order_by` are, so the same gap applied to all of them;
+`intent` was checked too and confirmed **already excluded** from the audit
+event by design (`audit/events.py`'s own docstring), so it needed no change.
+
+**Part 2 — `audit/sinks.py:_read_last_line` folded into item 138's bounded
+reader.** Rather than hand-patch the second tail-scanner with its own bound
+(which the composable-interfaces doctrine argues against — a second reader
+carrying the same defect class is itself the problem, not just this one
+instance of it), `_read_last_line` is now a thin wrapper over
+`audit.file_reader.iter_lines_reverse`. A bound-exceeded tail (no newline
+within `max_line_bytes`) now raises the same "refuse to silently fork the
+chain" `ValueError` `_recover_head` already raises for an unparseable last
+line — deliberately **not** treated as "file empty, start at genesis" (the
+`None` case), since that would silently restart the sequence counter at 0
+over a file with real prior content, a worse outcome than failing loud.
+
+**Coverage.** Nine new unit tests (`test_query_ast.py::TestAuditLineSizeCaps`)
+assert each of the seven capped fields rejects one-over-the-limit and accepts
+exactly-at-the-limit; one new unit test
+(`test_audit_ledger.py::test_sink_refuses_to_resume_a_ledger_whose_tail_has_no_newline_within_bounds`)
+writes a 2 MiB newline-free ledger tail and asserts `HashChainedAuditSink`
+raises instead of silently forking. **Mutation-verified:** raising the
+`select` cap by 100x made its regression test fail for the expected reason;
+short-circuiting `_read_last_line` to always return `None` made both the new
+test and the pre-existing `test_sink_recovers_head_across_restart` fail (the
+latter for a genuinely different, equally correct reason — it caught the
+chain silently restarting at seq 0). Both reverted; full unit (1929),
+integration (343 excluding `real_db`), and security (463) suites pass on the
+final tree.
+
+**Effort:** M (the AST cap needed a product decision on the right limit; the
+sinks.py fold-in was S once item 138's primitive existed, as scoped).
+**Depends on:** 138.
+
 ### 142. `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats ✅ DONE
 
 **Surfaced 2026-08-01/02 by the `claim-reviewer`/`security-invariant-reviewer`

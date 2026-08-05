@@ -254,6 +254,20 @@ def test_sink_refuses_to_resume_a_corrupt_ledger(tmp_path):
         HashChainedAuditSink(str(ledger), key=b"k")
 
 
+def test_sink_refuses_to_resume_a_ledger_whose_tail_has_no_newline_within_bounds(tmp_path):
+    """TODO.md item 139: `_read_last_line` used to hand-roll its own tail
+    scan, growing its read window without bound for a trailing region with no
+    newline at all — worst case reading the whole file into memory once at
+    process startup. It now delegates to `audit.file_reader.iter_lines_reverse`
+    (item 138's bounded reader), so a tail this oversized fails loud instead —
+    the same "refuse to silently fork the chain" posture as an unparseable
+    last line, not a resource exhaustion risk on boot."""
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_bytes(b"x" * (2 * 1024 * 1024))  # no newline anywhere, > max_line_bytes (1 MiB)
+    with pytest.raises(ValueError, match="Cannot resume"):
+        HashChainedAuditSink(str(ledger), key=b"k")
+
+
 def test_chained_envelope_adds_no_new_event_data(tmp_path):
     # Redaction invariant: the embedded event equals the plain event dump, and
     # the envelope adds only seq/prev_hash/hash — nothing derived from values.

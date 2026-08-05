@@ -136,7 +136,7 @@ claim when the work ships or before explicitly handing the item back.
   separately because fixing it touches the default-backend read path in
   production today and deserves its own scoping/tests rather than riding in on
   a bug-fix commit.*
-- [ ] **139** — Bound audit-line size at the source (AST list caps +
+- [x] **139** — Bound audit-line size at the source (AST list caps +
   `audit/sinks.py`'s own unbounded-read defect). *Surfaced 2026-08-01 by the
   `security-invariant-reviewer` audit of item 138. Needs a maintainer decision
   on the right AST list-size cap, recorded in the PRODUCT_GUIDE Decision Log

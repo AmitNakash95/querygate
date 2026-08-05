@@ -408,6 +408,100 @@ class TestStructuredQueryModels:
             )
 
 
+class TestAuditLineSizeCaps:
+    """TODO.md item 139: a hard structural ceiling on the AST's list fields,
+    independent of the operator-tunable Policy caps checked later in
+    validation/policy_validation.py — closes the gap where a pathologically
+    large (but syntactically valid) query would still have its full shape
+    serialized into one audit-log line by normalize_query_shape() before
+    policy validation ever runs, regardless of whether the query would go on
+    to be rejected anyway."""
+
+    def test_oversized_select_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="select"):
+            StructuredQuery.model_validate(
+                {"from": "orders", "select": [f"orders.c{i}" for i in range(1001)]}
+            )
+
+    def test_select_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {"from": "orders", "select": [f"orders.c{i}" for i in range(1000)]}
+        )
+        assert len(q.select) == 1000
+
+    def test_oversized_joins_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="joins"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "orders",
+                    "select": ["orders.id"],
+                    "joins": [
+                        {"table": f"t{i}", "alias": f"t{i}", "on": ["orders.id", f"t{i}.id"]}
+                        for i in range(201)
+                    ],
+                }
+            )
+
+    def test_oversized_group_by_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="group_by"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "orders",
+                    "select": ["orders.id"],
+                    "group_by": [f"orders.c{i}" for i in range(501)],
+                }
+            )
+
+    def test_oversized_order_by_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="order_by"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "orders",
+                    "select": ["orders.id"],
+                    "order_by": [{"col": f"orders.c{i}"} for i in range(501)],
+                }
+            )
+
+    def test_oversized_correlate_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="correlate"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "orders",
+                    "select": ["orders.id"],
+                    "correlate": [f"Customer.c{i}" for i in range(51)],
+                }
+            )
+
+    def test_oversized_ctes_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="ctes"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "totals",
+                    "select": ["totals.id"],
+                    "ctes": [
+                        {
+                            "name": f"cte{i}",
+                            "query": {"from": "orders", "select": ["orders.id"]},
+                        }
+                        for i in range(51)
+                    ],
+                }
+            )
+
+    def test_oversized_set_op_arms_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="arms"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "orders",
+                    "select": ["orders.id"],
+                    "set_op": {
+                        "op": "union",
+                        "arms": [{"from": "orders", "select": ["orders.id"]} for _ in range(51)],
+                    },
+                }
+            )
+
+
 class TestParseColumnRef:
     def test_valid(self):
         assert parse_column_ref("orders.status") == ("orders", "status")
