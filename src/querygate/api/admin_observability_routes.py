@@ -59,6 +59,7 @@ from querygate.admin.metrics_history import (
 )
 from querygate.admin.observability import ObservabilityOverview, build_overview
 from querygate.api._errors import require_scope
+from querygate.audit.ledger import resolve_ledger_key
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig, MetricsHistoryBackend
 from querygate.core.scopes import ADMIN_OBSERVABILITY_READ_SCOPE
@@ -79,7 +80,9 @@ def _change_trend_source(cfg: AppConfig) -> Optional[ChangeEventSource]:
     # reported honestly as source="disabled".
     if not cfg.audit_sink_backend.is_locally_readable():
         return None
-    return JsonlChangeEventSource(cfg.audit_jsonl_path)
+    return JsonlChangeEventSource(
+        cfg.audit_jsonl_path, ledger_key=resolve_ledger_key(cfg.audit_ledger_hmac_key)
+    )
 
 
 def _metrics_history_thresholds(cfg: AppConfig) -> MetricsHistoryThresholds:
@@ -124,7 +127,9 @@ def _anomaly_source(cfg: AppConfig) -> Optional[AuditEventSource]:
     # reported honestly as source="disabled".
     if not cfg.audit_sink_backend.is_locally_readable():
         return None
-    return JsonlAuditEventSource(cfg.audit_jsonl_path)
+    return JsonlAuditEventSource(
+        cfg.audit_jsonl_path, ledger_key=resolve_ledger_key(cfg.audit_ledger_hmac_key)
+    )
 
 
 def build_admin_observability_router(
@@ -140,13 +145,19 @@ def build_admin_observability_router(
     @router.get("/anomalies", response_model=AnomalyReport)
     async def observability_anomalies(principal: Principal = Depends(get_principal)):
         require_scope(principal, ADMIN_OBSERVABILITY_READ_SCOPE)
-        return build_anomaly_report(_anomaly_source(cfg), thresholds=_anomaly_thresholds(cfg))
+        return build_anomaly_report(
+            _anomaly_source(cfg),
+            thresholds=_anomaly_thresholds(cfg),
+            backend_label=cfg.audit_sink_backend.value,
+        )
 
     @router.get("/config-changes", response_model=ConfigCatalogChangeTrend)
     async def observability_config_changes(principal: Principal = Depends(get_principal)):
         require_scope(principal, ADMIN_OBSERVABILITY_READ_SCOPE)
         return build_change_trend_report(
-            _change_trend_source(cfg), thresholds=_change_trend_thresholds(cfg)
+            _change_trend_source(cfg),
+            thresholds=_change_trend_thresholds(cfg),
+            backend_label=cfg.audit_sink_backend.value,
         )
 
     @router.get("/history", response_model=MetricsHistoryReport)

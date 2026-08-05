@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from querygate.api._errors import require_scope
 from querygate.audit.events import PersistableEvent
 from querygate.audit.file_reader import AuditFileReadBounded, iter_lines_reverse
-from querygate.audit.ledger import unwrap_envelope
+from querygate.audit.ledger import resolve_ledger_key, unwrap_envelope, verify_envelope_hash
 from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
@@ -165,7 +165,9 @@ class PolicyTestResponse(pyd.BaseModel):
 
 
 class AuditEventPage(pyd.BaseModel):
-    source: Literal["jsonl", "disabled", "empty"]
+    # TODO.md item 137: "jsonl"/"jsonl_chained" discloses the actually
+    # configured backend rather than always reporting "jsonl".
+    source: Literal["jsonl", "jsonl_chained", "disabled", "empty"]
     events: List[Dict[str, Any]]
     total: int = pyd.Field(ge=0)
     malformed: int = pyd.Field(ge=0)
@@ -368,6 +370,7 @@ def _audit_page(
     # first `cursor + limit` matches are retained — enough to serve this
     # page — but every match within the line-read bound is still counted
     # toward `total`.
+    ledger_key = resolve_ledger_key(cfg.audit_ledger_hmac_key)
     matches: List[Dict[str, Any]] = []
     total = 0
     malformed = 0
@@ -381,6 +384,11 @@ def _audit_page(
             lines_read += 1
             try:
                 raw = json.loads(line)
+                if verify_envelope_hash(raw, key=ledger_key) is False:
+                    # TODO.md item 137: a chain envelope whose own hash
+                    # doesn't match its contents — never display it as clean.
+                    malformed += 1
+                    continue
                 raw = unwrap_envelope(raw)
                 event = _AUDIT_EVENT_ADAPTER.validate_python(raw)
                 item = event.model_dump(mode="json", exclude_none=True)
@@ -406,7 +414,7 @@ def _audit_page(
     events = matches[cursor : cursor + limit]
     next_cursor = cursor + len(events) if total > cursor + len(events) else None
     return AuditEventPage(
-        source="jsonl",
+        source=cfg.audit_sink_backend.value,
         events=events,
         total=total,
         malformed=malformed,

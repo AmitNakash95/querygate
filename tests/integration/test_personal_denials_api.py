@@ -138,7 +138,7 @@ async def test_my_recent_denials_reads_hash_chained_ledger(tmp_path):
         )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["source"] == "jsonl"
+    assert body["source"] == "jsonl_chained"
     assert len(body["denials"]) == 1
     assert body["denials"][0]["connection"] == "demo"
 
