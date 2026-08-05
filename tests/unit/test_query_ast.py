@@ -210,6 +210,26 @@ class TestStructuredQueryModels:
                 joins=[JoinSpec(table="customers", alias="o", on=["o.customer_id", "o.id"])],
             )
 
+    def test_duplicate_effective_name_rejected_across_a_casefold_lower_disagreement(self):
+        # "STRASSE".lower() == "strasse" but "straße".lower() == "straße" (unchanged
+        # -- ß is not in .lower()'s ASCII-only fold), while .casefold() unifies both
+        # to "strasse". This validator must use the SAME fold as
+        # `schema_validation.effective_name_map`, or the AST could accept two
+        # "distinct" effective names that the compiler's name map then silently
+        # collapses into one -- losing a table from the query graph (found by
+        # `security-invariant-reviewer` while reviewing TODO.md item 150's fix).
+        with pytest.raises(ValueError, match="Duplicate table/alias"):
+            StructuredQuery(
+                from_table="customers",
+                from_alias="straße",
+                select=["straße.id", "STRASSE.id"],
+                joins=[
+                    JoinSpec(
+                        table="orders", alias="STRASSE", on=["straße.id", "STRASSE.customer_id"]
+                    )
+                ],
+            )
+
     def test_not_group_accepted(self):
         g = WhereGroup(not_terms=Predicate(col="orders.status", op="eq", value="x"))
         assert g.not_terms is not None

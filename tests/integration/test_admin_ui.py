@@ -321,6 +321,58 @@ async def test_policy_simulation_uses_target_principal_and_redacts_filter_value(
 
 
 @pytest.mark.asyncio
+async def test_policy_simulation_mandatory_filter_match_survives_a_casefold_lower_disagreement(
+    tmp_path, monkeypatch
+):
+    # "STRASSE".casefold() == "straße".casefold() but "STRASSE".lower() != "straße".lower()
+    # (ß is not in .lower()'s ASCII-only fold). `policy.table_allowed`/`column_allowed`
+    # (called a few lines above the mandatory-filter match in `_test_policy`) already
+    # casefold, so the mandatory-filter match must too, or this simulator can report a
+    # simulated allowed=True verdict with no mandatory filter listed, for exactly the
+    # table/filter pair real execution would reject (TODO.md item 150).
+    set_policy_store(
+        PolicyStore(
+            default=Policy(enabled=False),
+            overrides={},
+            principal_overrides={
+                "reporting-agent": {
+                    "demo": {
+                        "enabled": True,
+                        "allowed_tables": ["STRASSE"],
+                        "mandatory_row_filters": [
+                            MandatoryRowFilter(
+                                table="straße", column="tenant_id", from_claim="tenant_id"
+                            ).model_dump()
+                        ],
+                    }
+                }
+            },
+        )
+    )
+    app = create_app(_settings(tmp_path, monkeypatch))
+    request = {
+        "principal": "reporting-agent",
+        "connection": "demo",
+        "table": "STRASSE",
+        "columns": [],
+        "claims": {},
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        response = await client.post("/api/v1/admin/ui/policy/test", json=request, headers=_auth())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mandatory_filters"] == [
+        {
+            "table": "straße",
+            "column": "tenant_id",
+            "source": "claim:tenant_id",
+            "satisfied": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_audit_browser_is_filtered_newest_first_and_redaction_safe(tmp_path, monkeypatch):
     audit_path = tmp_path / "audit.jsonl"
     events = [

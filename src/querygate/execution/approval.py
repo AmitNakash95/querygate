@@ -122,14 +122,14 @@ def sensitivity_approval_reasons(
         name_to_physical = effective_name_map(scope)
         for column_ref in iter_column_refs(scope):
             table, column = parse_column_ref(column_ref.ref)
-            physical = name_to_physical.get(table.lower(), table)
+            physical = name_to_physical.get(table.casefold(), table)
             # A cte name (item 105) is not a table, so it has no catalog entry to
             # carry a label. Skipped explicitly rather than left to `get_table`
             # returning None, because a catalog entry that happened to share the
             # block's name would otherwise report a hit naming a table this query
             # never read. No trigger is lost: the block's body is its own scope in
             # this same walk, and that is where its real columns are labelled.
-            if physical.lower() in cte_names:
+            if physical.casefold() in cte_names:
                 continue
             entry = store.get_table(connection_id, physical)
             if entry is None:

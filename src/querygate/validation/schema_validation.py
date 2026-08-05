@@ -90,9 +90,9 @@ def effective_name_map(query: StructuredQuery) -> Dict[str, str]:
     apply to) and schema validation/compilation (which physical table to
     reflect, and which occurrences need a SQL alias).
     """
-    mapping: Dict[str, str] = {(query.from_alias or query.from_table).lower(): query.from_table}
+    mapping: Dict[str, str] = {(query.from_alias or query.from_table).casefold(): query.from_table}
     for join in query.joins:
-        mapping[(join.alias or join.table).lower()] = join.table
+        mapping[(join.alias or join.table).casefold()] = join.table
     return mapping
 
 
@@ -546,18 +546,19 @@ def iter_correlations(query: StructuredQuery) -> Iterator[Correlation]:
 
 
 def declared_cte_names(query: StructuredQuery) -> FrozenSet[str]:
-    """Lowercased names of every cte this query declares (item 105).
+    """Case-folded (`.casefold()`, TODO.md item 150) names of every cte this
+    query declares (item 105).
 
     Only the ROOT query may declare ctes — `_validate_cte_constraints` enforces
     that — so this is the whole namespace for the query tree, and the callers that
     need to tell "this from/join name is a cte" from "this is a physical table"
     take this one frozenset rather than re-deriving it per scope.
     """
-    return frozenset(spec.name.lower() for spec in query.ctes)
+    return frozenset(spec.name.casefold() for spec in query.ctes)
 
 
 def cte_source_names(query: StructuredQuery) -> Set[str]:
-    """Every lowercased from/join *source* name used anywhere in this query's own
+    """Every case-folded (`.casefold()`) from/join *source* name used anywhere in this query's own
     scope tree — i.e. the names that could be resolving to a cte.
 
     Deliberately the `from`/`table` name and NOT the alias: `{"from": "daily",
@@ -566,13 +567,13 @@ def cte_source_names(query: StructuredQuery) -> Set[str]:
     """
     names: Set[str] = set()
     for _depth, scope in iter_query_scopes(query):
-        names.add(scope.from_table.lower())
-        names.update(join.table.lower() for join in scope.joins)
+        names.add(scope.from_table.casefold())
+        names.update(join.table.casefold() for join in scope.joins)
     return names
 
 
 def cte_chain_depths(query: StructuredQuery) -> Dict[str, int]:
-    """How deep each cte sits in the *reference chain*, by lowercased name — 1 for
+    """How deep each cte sits in the *reference chain*, by case-folded name — 1 for
     a block reading only physical tables, 2 for one reading a 1, and so on.
 
     This is what `max_subquery_depth` is charged for a cte, and it makes the
@@ -589,7 +590,7 @@ def cte_chain_depths(query: StructuredQuery) -> Dict[str, int]:
     depths: Dict[str, int] = {}
     for spec in query.ctes:
         referenced = cte_source_names(spec.query) & set(depths)
-        depths[spec.name.lower()] = 1 + max((depths[name] for name in referenced), default=0)
+        depths[spec.name.casefold()] = 1 + max((depths[name] for name in referenced), default=0)
     return depths
 
 
@@ -624,7 +625,7 @@ def iter_query_scopes(
     if query.ctes:
         depths = cte_chain_depths(query)
         for spec in query.ctes:
-            yield from iter_query_scopes(spec.query, _depth + depths[spec.name.lower()])
+            yield from iter_query_scopes(spec.query, _depth + depths[spec.name.casefold()])
     if query.set_op is not None:
         for arm in query.set_op.arms:
             yield from iter_query_scopes(arm, _depth)
@@ -694,8 +695,8 @@ def iter_column_refs(query: StructuredQuery) -> Iterator[ColumnRef]:
 
 
 def resolve_column(table: sa.Table, column_name: str) -> sa.Column:
-    col_map = {c.name.lower(): c for c in table.c}
-    key = column_name.lower()
+    col_map = {c.name.casefold(): c for c in table.c}
+    key = column_name.casefold()
     if key not in col_map:
         raise QueryValidationError(f"Column '{column_name}' not found in table '{table.name}'")
     return col_map[key]
@@ -869,7 +870,7 @@ def resolve_query_table_connections(
     production visibility/join-group rule against isolated candidate stores.
     Normal query execution leaves it unset and therefore uses the live stores.
 
-    ``cte_names`` (item 105) are the statement's cte names, lowercased. A cte is
+    ``cte_names`` (item 105) are the statement's cte names, case-folded. A cte is
     computed by this statement rather than living in a database, so naming one as a
     cross-connection join target is rejected rather than quietly resolved against
     the primary connection — silently ignoring the field would tell an operator
@@ -885,7 +886,7 @@ def resolve_query_table_connections(
     table_connection: Dict[str, str] = {(query.from_alias or query.from_table): connection_id}
     for join in query.joins:
         join_connection_id = join.connection or connection_id
-        if join.connection is not None and join.table.lower() in known_ctes:
+        if join.connection is not None and join.table.casefold() in known_ctes:
             raise QueryValidationError(
                 f"join to cte {join.table!r} may not set `connection` — a cte is computed "
                 "by this query, not read from another connection."
@@ -920,9 +921,9 @@ def _validate_join_graph(query: StructuredQuery) -> None:
     that path, so it is not a bypass — but the cross gate must stay where it is
     rather than being "consolidated" here on the assumption policy always ran.
     """
-    known = {(query.from_alias or query.from_table).lower()}
+    known = {(query.from_alias or query.from_table).casefold()}
     for join in query.joins:
-        joined_table = (join.alias or join.table).lower()
+        joined_table = (join.alias or join.table).casefold()
         if join.type == "cross":
             known.add(joined_table)
             continue
@@ -930,13 +931,15 @@ def _validate_join_graph(query: StructuredQuery) -> None:
         if join.on is not None:
             left_t, _ = parse_column_ref(join.on[0])
             right_t, _ = parse_column_ref(join.on[1])
-            sides = {left_t.lower(), right_t.lower()}
+            sides = {left_t.casefold(), right_t.casefold()}
         else:
             # A general `condition` may legitimately be about more than the joined
             # pair (`JOIN c ON c.x = a.x AND c.y = b.y`), so the rule generalizes to
             # the set of tables it references rather than a fixed pair.
             assert join.condition is not None  # nosec B101 — the AST guarantees one form
-            sides = {parse_column_ref(ref)[0].lower() for ref in _where_column_refs(join.condition)}
+            sides = {
+                parse_column_ref(ref)[0].casefold() for ref in _where_column_refs(join.condition)
+            }
 
         if joined_table not in sides:
             raise QueryValidationError(
@@ -967,7 +970,7 @@ def _validate_join_graph(query: StructuredQuery) -> None:
         for pair in join.extra_on:
             extra_t0, _ = parse_column_ref(pair[0])
             extra_t1, _ = parse_column_ref(pair[1])
-            if {extra_t0.lower(), extra_t1.lower()} != sides:
+            if {extra_t0.casefold(), extra_t1.casefold()} != sides:
                 raise QueryValidationError(
                     f"extra_on pair {pair!r} for join to {join.table!r} must reference "
                     "the same two tables as `on` — a join's condition is always about "
@@ -1016,7 +1019,7 @@ async def validate_schema(
         reflected[id(spec.query)] = body_tables
         if scope_tables is not None:
             scope_tables[id(spec.query)] = body_tables
-        cte_tables[spec.name.lower()] = _cte_projection_table(spec, body_tables)
+        cte_tables[spec.name.casefold()] = _cte_projection_table(spec, body_tables)
 
     # A correlated subquery resolves its declared outer refs against the PARENT's
     # reflected tables, so a parent must be reflected before its children. The scope
@@ -1057,12 +1060,12 @@ async def validate_schema(
                 # because its parent had declared it, so "one level" held in name
                 # only. Measured 2026-07-27 by the grandparent case in
                 # `test_correlation_boundary.py`, which this line is what fails.
-                own_names = {n.lower() for n in effective_name_map(scope)}
+                own_names = {n.casefold() for n in effective_name_map(scope)}
                 visible: Dict[str, sa.Table] = {}
                 for ref in nested.correlate:
                     table_name, column_name = parse_column_ref(ref)
                     outer = scoped_tables.get(table_name)
-                    if outer is not None and table_name.lower() not in own_names:
+                    if outer is not None and table_name.casefold() not in own_names:
                         outer = None  # inherited by the parent, not the parent's own
                     if outer is None:
                         raise QueryValidationError(
@@ -1264,13 +1267,13 @@ def _cte_projection_table(spec: CteSpec, body_tables: Dict[str, sa.Table]) -> sa
     names = [select_item_output_name(item, body_tables) for item in spec.query.select]
     seen: Set[str] = set()
     for name in names:
-        if name.lower() in seen:
+        if name.casefold() in seen:
             raise QueryValidationError(
                 f"cte {spec.name!r} projects more than one column named {name!r}, so "
                 f"{spec.name}.{name} would be ambiguous — give one of them a distinct "
                 "`as` alias."
             )
-        seen.add(name.lower())
+        seen.add(name.casefold())
     return sa.Table(spec.name, sa.MetaData(), *[sa.Column(name) for name in names])
 
 
@@ -1310,8 +1313,8 @@ async def _reflect_and_validate_scope(
         t, _ = parse_column_ref(column_ref.ref)
         needed.add(t)
 
-    declared_tables = set(name_to_physical) | {n.lower() for n in (correlated_tables or {})}
-    undeclared_tables = sorted(name for name in needed if name.lower() not in declared_tables)
+    declared_tables = set(name_to_physical) | {n.casefold() for n in (correlated_tables or {})}
+    undeclared_tables = sorted(name for name in needed if name.casefold() not in declared_tables)
     if undeclared_tables:
         raise QueryValidationError(
             "Column references may only use the query's from table/alias or an "
@@ -1328,8 +1331,8 @@ async def _reflect_and_validate_scope(
         if outer is not None:
             tables[name] = outer
             continue
-        physical_name = name_to_physical[name.lower()]
-        physical_key = physical_name.lower()
+        physical_name = name_to_physical[name.casefold()]
+        physical_key = physical_name.casefold()
         # A cte name resolves to the block's projected shape, never to reflection —
         # `_load_table` would (correctly) fail to find a table by that name. This is
         # also the only place a cte reference is turned into something columns
@@ -1341,7 +1344,7 @@ async def _reflect_and_validate_scope(
                     connection_id, physical_name, table_connection.get(name, connection_id)
                 )
             source = physical_tables[physical_key]
-        tables[name] = source if name.lower() == physical_key else source.alias(name)
+        tables[name] = source if name.casefold() == physical_key else source.alias(name)
 
     _validate_select_columns(query, tables)
     _validate_join_columns(query, tables)

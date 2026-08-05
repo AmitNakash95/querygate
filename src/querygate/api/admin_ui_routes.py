@@ -117,7 +117,7 @@ class PolicyTestRequest(pyd.BaseModel):
     @classmethod
     def _normalize_columns(cls, values: List[str]) -> List[str]:
         normalized = [value.strip() for value in values if value.strip()]
-        if len(set(value.lower() for value in normalized)) != len(normalized):
+        if len(set(value.casefold() for value in normalized)) != len(normalized):
             raise ValueError("columns must not contain duplicates")
         return normalized
 
@@ -294,7 +294,11 @@ def _test_policy(request: PolicyTestRequest) -> PolicyTestResponse:
 
     filter_decisions: List[MandatoryFilterDecision] = []
     for row_filter in policy.mandatory_row_filters:
-        if request.table is not None and row_filter.table.lower() != request.table.lower():
+        # `.casefold()`, not `.lower()` (TODO.md item 150): `policy.table_allowed`/
+        # `column_allowed` a few lines above already casefold, so this simulator's
+        # mandatory-filter match must too, or it can report a simulated `allowed=True`
+        # verdict for a table/filter pair real execution would actually reject.
+        if request.table is not None and row_filter.table.casefold() != request.table.casefold():
             continue
         satisfied = True
         try:

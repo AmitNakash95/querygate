@@ -9552,3 +9552,118 @@ security (463) suites green on the final tree.
 **Effort:** S as scoped; M once the four sibling bugs found by this item's own
 mandatory security review were folded in.
 **Depends on:** none.
+
+### 150. `compiler/sqlalchemy_compiler.py`'s `mandatory_row_filters` matching uses `.lower()` against `schema_validation.py`'s `.lower()`-consistent AST name resolution ✅ DONE
+
+**Surfaced 2026-08-05 by `security-invariant-reviewer`, while reviewing item
+149's fix for the identical bug class.** `mandatory_row_filters` compiling
+compared an AST-resolved physical table name against `MandatoryRowFilter.table`
+(an operator-configured value from `Policy`, unconstrained by the AST's own
+`VALID_TABLE_NAME` ASCII-only pattern) using `.lower()` on both sides — the
+one instance item 149 deliberately deferred, since it roots in a subsystem
+with several call sites rather than a single method.
+
+**Shipped, as a mechanical, uniform sweep.** Confirmed first that the subsystem
+in question — `validation/schema_validation.py`'s `effective_name_map`,
+`declared_cte_names`, `cte_source_names`, and every function built on them
+across `validation/schema_validation.py`, `validation/policy_validation.py`,
+`execution/approval.py`, `execution/service.py`, and
+`compiler/sqlalchemy_compiler.py` — was internally self-consistent (every one
+of its own `.lower()` call sites agreed with every other), which is why it
+never surfaced as a live bug against `Policy`/`catalog` (already `.casefold()`
+after item 149): the mismatch only bites where a `.casefold()`-side value
+(like `MandatoryRowFilter.table`) crosses into this `.lower()`-side subsystem.
+Read every one of the ~64 `.lower()` call sites across the five files (table/
+column/alias/cte-name comparisons, self-join detection, correlation-boundary
+resolution, k-anonymity uniqueness sets, cte-projection dedup) individually
+before touching anything, to confirm each one is genuinely an identifier
+comparison this bug class applies to and not something unrelated — none were.
+Switched every one to `.casefold()` in the same change (a 1:1 substitution,
+confirmed by diff stat: only `.lower()` → `.casefold()` changed, nothing
+else), plus the docstrings that explicitly described the old `.lower()`
+behavior ("lowercased names" → "case-folded names").
+
+**Why a blanket sweep was the right level, not a narrower patch.** For pure-
+ASCII identifiers (the overwhelming majority of real schemas), `.lower()` and
+`.casefold()` are defined to produce identical output — Python's `.casefold()`
+is a strict superset of `.lower()`, more aggressive only for a handful of
+non-ASCII cases (German `ß`, Turkish dotted/dotless İ/ı, certain ligatures).
+Switching every self-consistent site together preserves ASCII behavior
+*exactly* while closing the Unicode-casing gap everywhere at once — confirmed
+by the fact that all 2012 previously-passing unit tests kept passing
+unchanged after the sweep, with no test needing an update for the ASCII case.
+A narrower patch touching only the flagged `mandatory_row_filters` comparison
+would have left `effective_name_map`'s own dict keys on `.lower()` while
+`MandatoryRowFilter.table`-adjacent code compared via `.casefold()` — the
+exact kind of half-migrated inconsistency item 149 was created to close, not
+reproduce one level down.
+
+**A real regression was found by this item's own mandatory two-reviewer
+self-review before landing, and fixed in the same change.** Both
+`security-invariant-reviewer` and `architecture-boundary-reviewer`
+independently found that the 5-file sweep above missed
+`query_ast/models.py`'s own `_validate_table_aliases`/`_validate_cte_names`
+validators — the AST-layer uniqueness checks `effective_name_map` relies on
+as a *precondition* (its dict is only well-defined because the AST already
+guarantees every effective name/cte name is unique). Those validators were
+still `.lower()`-based. Confirmed directly: `StructuredQuery(from_table=
+"customers", from_alias="straße", joins=[JoinSpec(table="orders",
+alias="STRASSE", ...)])` was accepted as having two DISTINCT effective names
+(`.lower()` keeps `"straße"` and `"strasse"` apart), while the now-`.casefold()`
+`effective_name_map` collapsed both to one key — silently dropping `customers`
+from the query graph entirely, a real integrity gap the sweep introduced by
+fixing the consumer side without fixing the precondition the consumers
+depend on. `JoinSpec.table`/`alias` and `from_table`/`from_alias` carry no
+ASCII-only pattern (unlike `CteSpec.name`, which does — see below), so this
+was genuinely caller-reachable. Fixed with the same mechanical substitution
+in `query_ast/models.py`'s two validators; verified the reproduction is
+correctly rejected after the fix.
+
+**Two further leftover `.lower()` sites in the identical bug class, found by
+the same review pass, also fixed:** `api/admin_ui_routes.py`'s policy
+simulator (`_test_policy`) matched a simulated table against
+`mandatory_row_filters` using `.lower()` two lines below where it calls the
+now-`.casefold()` `policy.table_allowed`/`column_allowed` — a simulated
+`allowed=True` verdict with no mandatory filter listed for exactly the
+table/filter pair real execution would reject, reachable since both the
+request's `table` field and `MandatoryRowFilter.table` are unconstrained
+strings. The same file's `_normalize_columns` request-body duplicate check
+was switched too, for the same reason (a lower-severity, request-payload-only
+consistency gap). `validation/write_schema_validation.py`'s WHERE-ref-must-
+match-target-table check was also switched — **but this one is provably
+unreachable in production**, not merely low-severity: both sides of that
+comparison (`ref_table` via `parse_column_ref`'s `sanitize_table_name`,
+`statement.table` via `_load_table`'s `sanitize_table_name`) are already
+restricted to `schema/reflection.py`'s ASCII-only `VALID_TABLE_NAME` pattern
+before this comparison ever runs, so neither side can carry a non-ASCII
+character to begin with. Fixed anyway for consistency (harmless, zero
+behavior change for the only inputs that can ever reach it), but deliberately
+left without a dedicated regression test — manufacturing one would require
+also bypassing `sanitize_table_name`, which is not the shape of a genuine
+test.
+
+**Coverage.** `tests/unit/test_compiler.py::test_mandatory_row_filter_applies_despite_a_casefold_lower_disagreement_in_table_name`:
+a real physical table named `"STRASSE"` (the only spelling reflectable at all
+for a genuine DB table — `VALID_TABLE_NAME` rejects any non-ASCII table name
+at load time, which is exactly why THIS mismatch can only ever originate on
+the *policy*-configured side, never the AST/reflection side) with a
+`mandatory_row_filters` entry configured `table="straße"`; asserts the filter
+value still appears in the compiled statement. `tests/unit/test_query_ast.py::test_duplicate_effective_name_rejected_across_a_casefold_lower_disagreement`:
+the `"straße"`/`"STRASSE"` alias-collision reproduction above, asserting
+rejection with a typed error instead of silent AST/compiler disagreement
+(added a CTE-name variant too, then removed it on realizing `CteSpec.name`'s
+own `^[A-Za-z_][A-Za-z0-9_]*$` pattern makes a casefold/lower-disagreeing cte
+name unconstructible — that specific test would have been non-vacuous but
+non-discriminating, since plain ASCII case-insensitivity was already covered
+by an existing test). `tests/integration/test_admin_ui.py::test_policy_simulation_mandatory_filter_match_survives_a_casefold_lower_disagreement`:
+the `_test_policy` simulator fix, end-to-end through the real route.
+**Mutation-verified:** every one of the four fixed comparisons (compiler's
+`_apply_mandatory_row_filters`, `query_ast/models.py`'s two validators,
+`admin_ui_routes.py`'s simulator match) was broken deliberately and confirmed
+to fail its own regression test for the exact reported reason, then restored.
+Full unit (2014), integration (346), and security (463) suites green on the
+final tree.
+
+**Effort:** M as scoped; grew similarly to items 148/149 once this item's own
+mandatory review found the AST-layer precondition gap and two further
+leftover sites. **Depends on:** none.
