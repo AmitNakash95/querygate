@@ -784,9 +784,230 @@ class SQLiteDialectAdapter(DialectAdapter):
         )
 
 
+_MYSQL_EXTRACT_FIELDS: Dict[str, str] = {
+    "year": "year",
+    "quarter": "quarter",
+    "month": "month",
+    "day": "day",
+    "hour": "hour",
+    "minute": "minute",
+    "second": "second",
+}
+
+# DATE_ADD's unit keyword per IntervalUnit — exhaustive for the same reason
+# every other per-dialect unit map in this module is: a future unit reaching
+# an f-string unguarded would silently render an invalid keyword rather than
+# raising a typed error.
+_MYSQL_DATEADD_UNITS: Dict[str, str] = {
+    "year": "YEAR",
+    "month": "MONTH",
+    "week": "WEEK",
+    "day": "DAY",
+    "hour": "HOUR",
+    "minute": "MINUTE",
+    "second": "SECOND",
+}
+
+
+class MySQLDialectAdapter(DialectAdapter):
+    def date_bucket(self, col: Any, granularity: str) -> Any:
+        # MySQL has no DATE_TRUNC; each granularity gets its own idiom, all
+        # wrapped in DATE(...) so every branch zeroes the time-of-day the same
+        # way Postgres's date_trunc does — DATE_SUB alone leaves the original
+        # clock reading in place, which would silently disagree with Postgres/
+        # MSSQL for the exact same query (verified live: without the outer
+        # DATE(), 'week' returned a timestamp with the original time-of-day
+        # still attached).
+        if granularity == "day":
+            return sa.func.date(col)
+        if granularity == "week":
+            # WEEKDAY() is 0=Monday..6=Sunday, so this steps back to the
+            # Monday of the current week — the same ISO-week start Postgres's
+            # date_trunc('week', ...) uses. SUBDATE(date, days) — the
+            # 2-argument plain-integer form, not SUBDATE(date, INTERVAL ...)
+            # — is documented as exactly DATE_SUB(date, INTERVAL days DAY);
+            # using it (rather than an INTERVAL clause) lets the day count
+            # stay a normal composable expression (WEEKDAY(col)) instead of
+            # raw SQL text, since MySQL's INTERVAL clause has no bind-
+            # parameter or sub-expression form of its own for the count.
+            return sa.func.date(sa.func.subdate(col, sa.func.weekday(col)))
+        if granularity == "month":
+            return sa.func.str_to_date(sa.func.date_format(col, "%Y-%m-01"), "%Y-%m-%d")
+        if granularity == "quarter":
+            return sa.func.str_to_date(
+                sa.func.concat(
+                    sa.func.year(col),
+                    "-",
+                    sa.func.lpad((sa.func.quarter(col) - 1) * 3 + 1, 2, "0"),
+                    "-01",
+                ),
+                "%Y-%m-%d",
+            )
+        if granularity == "year":
+            return sa.func.str_to_date(sa.func.date_format(col, "%Y-01-01"), "%Y-%m-%d")
+        raise QueryValidationError(f"Unsupported date_bucket granularity: {granularity!r}")
+
+    def order_by_terms(
+        self,
+        col_expr: Any,
+        direction: Literal["asc", "desc"],
+        nulls: Optional[Literal["first", "last"]],
+    ) -> List[Any]:
+        expr = _direction_expr(col_expr, direction)
+        if nulls is None:
+            return [expr]
+        # MySQL has NO "NULLS FIRST/LAST" syntax at all (unlike Postgres/
+        # SQLite) — the same genuine gap as MSSQL, not a spelling difference,
+        # so this is a hard rejection rather than synthesizing the CASE-bucket
+        # workaround on the caller's behalf (item 74's reject-don't-emulate
+        # posture; see MSSQLDialectAdapter above for the identical reasoning).
+        raise QueryValidationError(
+            "nulls first/last ordering is not supported on MySQL: MySQL has no "
+            "NULLS FIRST/LAST syntax. Order by a CASE 0/1 'is null' bucket first "
+            "to place nulls explicitly."
+        )
+
+    def stat_fn(self, name: Literal["stddev", "variance"]) -> Callable[..., Any]:
+        # MySQL's bare STDDEV()/VARIANCE() are the POPULATION statistic
+        # (equivalent to STDDEV_POP/VAR_POP) — a genuinely different number
+        # from Postgres's bare stddev()/variance() (sample statistic, N-1
+        # denominator) and from MSSQL's STDEV()/VAR() (also sample). Using the
+        # bare names here would render fine and silently return a different
+        # value than the identical query on Postgres/MSSQL — exactly the
+        # "renders fine, breaks live" trap this module's date-part maps guard
+        # against, just for a number instead of a date. STDDEV_SAMP/VAR_SAMP
+        # are MySQL's real sample-statistic functions, matching the other two
+        # dialects' semantics exactly.
+        return {"stddev": sa.func.stddev_samp, "variance": sa.func.var_samp}[name]
+
+    def string_agg(self, col_expr: Any, delimiter: str) -> Any:
+        # MySQL's GROUP_CONCAT uses SEPARATOR as a keyword *inside* the call's
+        # parens (`GROUP_CONCAT(col SEPARATOR 'sep')`), not a comma-separated
+        # second argument — applying .op("SEPARATOR") to col_expr itself
+        # (before it becomes group_concat's argument) renders exactly that,
+        # verified against a live server.
+        return sa.func.group_concat(col_expr.op("SEPARATOR")(delimiter))
+
+    def array_agg(self, col_expr: Any) -> Any:
+        # MySQL has JSON_ARRAYAGG(), but — like SQLite's json_group_array() —
+        # it returns a JSON-encoded string, not a real array/collection type.
+        # Mapping it would be the exact forced-parity emulation CLAUDE.md's
+        # engine philosophy rules out, not a lucky shape match, so this stays
+        # a hard rejection the same way SQLite's does.
+        raise QueryValidationError(
+            "array_agg is not supported on MySQL: JSON_ARRAYAGG() returns a JSON "
+            "string, not a real array/collection type"
+        )
+
+    def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
+        # MySQL has no ordered-set aggregate support at all (no
+        # PERCENTILE_CONT, no WITHIN GROUP) — the same gap as SQLite, for the
+        # same reason.
+        raise QueryValidationError(
+            "percentile_cont is not supported on MySQL: MySQL has no ordered-set "
+            "aggregate (WITHIN GROUP) support"
+        )
+
+    def scalar_function(self, name: str, args: List[Any]) -> Any:
+        if name == "ceil":
+            return sa.func.ceil(args[0])
+        if name == "length":
+            # MySQL's LENGTH() returns the BYTE length (multi-byte characters
+            # count as more than one), unlike Postgres's character-counting
+            # length() — a genuine encoding-dependent difference, not a
+            # rendering choice; CHAR_LENGTH() would be the character-counting
+            # form if a caller needs that instead, but this AST primitive maps
+            # to the dialect's own "length" idiom the same way Postgres/MSSQL
+            # already do.
+            return sa.func.length(args[0])
+        if name == "substring":
+            return sa.func.substring(*args)
+        if name == "round":
+            # MySQL's ROUND(x) and ROUND(x, d) both work natively for any
+            # numeric type — no numeric-cast trap like Postgres's
+            # round(double precision, integer) gap.
+            return sa.func.round(args[0], args[1]) if len(args) == 2 else sa.func.round(args[0])
+        raise QueryValidationError(f"Unsupported scalar function {name!r} on MySQL")
+
+    def window_frame(
+        self, mode: Literal["rows", "range"], start: Optional[int], end: Optional[int]
+    ) -> Dict[str, Any]:
+        # MySQL 8.0+ supports the full window-frame grammar, including RANGE
+        # with a numeric offset — verified against a live server, unlike
+        # MSSQL's genuine RANGE-offset gap.
+        return _frame_kwargs(mode, start, end)
+
+    def set_operation(self, op: str, all_rows: bool, selects: List[Any]) -> Any:
+        # MySQL 8.0.31+ added native INTERSECT/EXCEPT, but — like MSSQL —
+        # only the distinct forms; there is no ALL variant of either.
+        # UNION ALL is fully supported.
+        if all_rows and op != "union":
+            raise _no_all_variant(op, "MySQL")
+        return _compound(op, all_rows, selects)
+
+    def extract_part(self, part: str, expr: Any) -> Any:
+        if part == "dayofweek":
+            # DAYOFWEEK() is 1=Sunday..7=Saturday; subtracting 1 gives
+            # Postgres's 0=Sunday..6=Saturday numbering exactly, with no
+            # server-config dependency (unlike MSSQL's DATEFIRST-relative
+            # DATEPART(weekday, ...), MySQL's DAYOFWEEK() is fixed regardless
+            # of session/server settings).
+            return sa.func.dayofweek(expr) - 1
+        if part == "week":
+            # WEEK(x, 3) is MySQL's mode-3 form: ISO 8601 week numbering
+            # (Monday-first, week 1 = the first week with 4+ days) — verified
+            # live to agree with Postgres's EXTRACT(week FROM ...) and
+            # MSSQL's DATEPART(iso_week, ...) for the same date.
+            return sa.func.week(expr, 3)
+        if part == "dayofyear":
+            return sa.func.dayofyear(expr)
+        field = _MYSQL_EXTRACT_FIELDS.get(part)
+        if field is None:
+            raise _missing_part(part, "MySQL")
+        # MySQL supports the SQL-standard EXTRACT(unit FROM expr) directly for
+        # these fields — verified live it returns a plain integer already, no
+        # PostgresDialectAdapter-style flooring/casting needed.
+        return sa.extract(field, expr)
+
+    def current_timestamp(self, kind: Literal["timestamp", "date"]) -> Any:
+        # UTC_TIMESTAMP(), not NOW()/SYSDATE(): those return the server's
+        # local wall clock. Like MSSQL, MySQL has no session time zone to pin
+        # the way Postgres does, so the UTC choice is made in the function
+        # itself rather than relying on session state.
+        if kind == "date":
+            return sa.cast(sa.func.utc_timestamp(), sa.Date)
+        return sa.func.utc_timestamp()
+
+    def date_add(self, expr: Any, unit: str, amount: int) -> Any:
+        # MySQL's DATE_ADD takes the unit as a keyword inside an INTERVAL
+        # clause, not a function argument — there is no parameterized form
+        # for the keyword (the same shape as MSSQL's DATEADD keyword arg).
+        # The keyword comes from an exhaustive map, never caller text; only
+        # `amount` is caller-supplied, and it binds as a real parameter via
+        # bindparams — no caller-derived content reaches the statement text.
+        keyword = _MYSQL_DATEADD_UNITS.get(unit)
+        if keyword is None:
+            raise _missing_unit(unit, "MySQL")
+        interval = sa.text(f"INTERVAL :amt {keyword}").bindparams(
+            amt=amount
+        )  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        return sa.func.date_add(expr, interval)
+
+    def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
+        if mask.kind is ColumnMaskKind.NULL:
+            return sa.null()
+        if mask.kind is ColumnMaskKind.BUCKET:
+            return _bucket_mask(col_expr, mask)
+        if mask.kind is ColumnMaskKind.LAST:
+            return sa.func.right(sa.cast(col_expr, sa.Text), mask.length)
+        # HASH — SHA2-256 hex digest of the text form.
+        return sa.func.sha2(sa.cast(col_expr, sa.Text), 256)
+
+
 _ADAPTERS: Dict[str, DialectAdapter] = {
     DatabaseDialect.POSTGRESQL: PostgresDialectAdapter(),
     DatabaseDialect.MSSQL: MSSQLDialectAdapter(),
+    DatabaseDialect.MYSQL: MySQLDialectAdapter(),
 }
 _FALLBACK = SQLiteDialectAdapter()
 

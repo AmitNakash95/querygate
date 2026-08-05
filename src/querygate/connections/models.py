@@ -34,6 +34,7 @@ class DatabaseDialect(StrEnum):
 
     POSTGRESQL = "postgresql"
     MSSQL = "mssql"
+    MYSQL = "mysql"
 
 
 _VALID_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]*$")

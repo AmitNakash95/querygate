@@ -1618,13 +1618,13 @@ Agent (MCP) / Client (REST)
 └───────────────────────────────────────────────────────────────┘
         │
         ▼
-  Real Postgres / MSSQL database
+  Real Postgres / MSSQL / MySQL database
 ```
 
 - **`connections/`** — `ConnectionProfile` registry loaded from YAML,
   `${...}`-interpolated connection strings, per-dialect engine/session
-  lifecycle (`dialects.py` is the only place Postgres/MSSQL-specific SQL
-  lives).
+  lifecycle (`dialects.py` is the only place Postgres/MSSQL/MySQL-specific
+  SQL lives).
 - **`secrets/`** — pluggable `${scheme:reference}` secret resolution
   (`SecretResolver` protocol): the built-in `env` backend plus an optional
   `vault` backend, selectable per-reference without touching how
@@ -1851,11 +1851,11 @@ Being upfront about what's not done yet:
   threat model and adversarial regression suite, but has not yet undergone an
   independent penetration test or formal compliance certification.
 
-MSSQL support (including the query-execution-timeout guardrail) and the
-Postgres statement-timeout guardrail are both verified against real
-servers, not just unit-tested SQL text — see
-`tests/integration/test_mssql_live.py` and
-`tests/integration/test_postgres_timeout.py`. The real-Postgres load/soak
+MSSQL support (including the query-execution-timeout guardrail), MySQL
+support (item 19 phase 1), and the Postgres statement-timeout guardrail are
+all verified against real servers, not just unit-tested SQL text — see
+`tests/integration/test_mssql_live.py`, `tests/integration/test_mysql_live.py`,
+and `tests/integration/test_postgres_timeout.py`. The real-Postgres load/soak
 harness also proves the observed database concurrency cap, overflow rejection,
 queued completion, timeout cancellation, `queue_mode=fail_fast` never
 waiting, and a caller-shortened `wait_timeout_seconds` being honored under

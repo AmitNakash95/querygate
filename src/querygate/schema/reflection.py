@@ -54,7 +54,13 @@ async def list_live_tables(connection_id: str) -> list[str]:
     schema filter, which would otherwise leak internal database structure into
     `list_tables()` for any connection without an explicit `known_tables` seed,
     and made schema-refresh scanning (`catalog/refresh.py`) fail outright by
-    trying to reflect them under the wrong schema.
+    trying to reflect them under the wrong schema. MySQL has the same problem
+    with its own two additional system schemas: `mysql` (internal server
+    tables — users, plugins, ...) and `performance_schema` (live monitoring
+    tables) are otherwise both listed by `INFORMATION_SCHEMA.TABLES` alongside
+    a connection's real tables (confirmed live against a real MySQL 8.4
+    server, TODO.md item 19) — `sys` and `information_schema` themselves are
+    already excluded above and happen to be spelled identically to MSSQL's.
     """
     from querygate.connections.engine import session_scope
 
@@ -63,7 +69,8 @@ async def list_live_tables(connection_id: str) -> list[str]:
             sa.text(
                 "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
                 "WHERE TABLE_TYPE = 'BASE TABLE' "
-                "AND TABLE_SCHEMA NOT IN ('pg_catalog', 'information_schema', 'sys')"
+                "AND TABLE_SCHEMA NOT IN "
+                "('pg_catalog', 'information_schema', 'sys', 'mysql', 'performance_schema')"
             )
         )
         return [row[0] for row in result.all()]

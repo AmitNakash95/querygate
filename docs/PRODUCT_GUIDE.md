@@ -3308,9 +3308,9 @@ only used in a `where` clause, not just in `select`. See
 [Core Request Pipeline](#the-core-request-pipeline).
 
 **"What databases does it support?"**
-Postgres and MSSQL in production. SQLite is used only internally for tests
-and examples — it's never a supported registry dialect for a real
-deployment. See [Core Request Pipeline](#the-core-request-pipeline).
+Postgres, MSSQL, and MySQL in production (item 19 phase 1). SQLite is used
+only internally for tests and examples — it's never a supported registry
+dialect for a real deployment. See [Core Request Pipeline](#the-core-request-pipeline).
 
 **"How does an agent connect — does it need a special client?"**
 Two transports, both backed by the exact same validation/execution pipeline
@@ -3394,6 +3394,42 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-08-06 — item 19 phase 1 added MySQL as a third registry dialect**,
+  purely additive per the item-57 adapter architecture: `MySQLDialectAdapter`
+  (`compiler/dialect_adapters.py`) and `MySQLSessionAdapter`
+  (`connections/dialects.py`), registered in their respective registries — no
+  existing dispatch site touched. Two genuine capability gaps, decided the
+  same reject-don't-emulate way as MSSQL's: (1) MySQL's bare
+  `STDDEV()`/`VARIANCE()` are the *population* statistic, a different number
+  from Postgres's/MSSQL's sample-statistic bare names — mapped to
+  `STDDEV_SAMP`/`VAR_SAMP` instead to preserve the cross-dialect semantic
+  contract, verified live; (2) MySQL's `ON DUPLICATE KEY UPDATE` fires on a
+  collision with *any* unique/PK constraint, with no way to name a specific
+  target the way `conflict_columns` declares one, so upsert is rejected with
+  its own accurate message (the generic "no ON CONFLICT clause" text would
+  have been factually wrong for MySQL, which does have an upsert idiom — just
+  not one that can honor a specific conflict target). Live testing against a
+  real MySQL 8.4 server (`tests/integration/test_mysql_live.py`,
+  `make test-mysql-live`) surfaced one real pre-existing gap unrelated to the
+  adapter itself: `schema/reflection.py`'s `list_live_tables()` excluded
+  Postgres's/MSSQL's system schemas but not MySQL's own two (`mysql`,
+  `performance_schema`), which would have leaked internal server tables into
+  `list_tables()` for any MySQL connection without an explicit `known_tables`
+  seed — fixed and covered by a regression test. **Scope, stated honestly:**
+  covered here are `dialect_adapters.py`/`dialects.py` unit tests (including
+  the item-102 exhaustive per-dialect date/time-primitive suite), a live
+  REST-to-real-server integration suite, and CI wiring
+  (`.github/workflows/ci.yml`'s `mysql-live` job, `docker-compose.yml`'s
+  `mysql` profile). *Not* extended in this pass: the several OTHER
+  exhaustive per-dialect unit-test files (`test_compiler.py`, `test_cte.py`,
+  `test_nonequi_joins.py`, `test_set_operations.py`, `test_column_masking.py`)
+  still parametrize only `postgresql`/`mssql`/`sqlite` — a real, open gap for
+  a future pass, not silently claimed as covered. `execution/cost_estimation.py`
+  has no MySQL estimator either (falls back to the existing documented
+  "any other dialect proceeds under the reactive guardrails" behavior,
+  unchanged). TODO.md item 19 stays open for the remaining dialects
+  (Snowflake, BigQuery, ...) it was always scoped to cover.
 
 - **2026-08-05 — item 150 closed the one gap item 149 deliberately deferred:
   `mandatory_row_filters` (tenant-scoping) compared an AST-resolved table name
