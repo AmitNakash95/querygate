@@ -243,6 +243,10 @@ security-scan: ## Run the batchable local security gates (Bandit + Semgrep SAST,
 product-guide-html: ## Render docs/PRODUCT_GUIDE.md into the browsable docs/product-guide.html
 	poetry run python scripts/generate_product_guide_html.py
 
+.PHONY: trust-page
+trust-page: ## Regenerate docs/TRUST_EVIDENCE.md, the composed procurement evidence page (item 147)
+	poetry run python scripts/generate_trust_page.py
+
 # ─── Release ──────────────────────────────────────────────────────────────────
 .PHONY: sbom
 sbom: ## Generate a CycloneDX SBOM, dependency vulnerability report, and SHA256SUMS from dist/ (run `poetry build` first)

@@ -177,7 +177,7 @@ order-of-magnitude, not commitments.
 | 144 | `verdict()` emits no query metrics, and `/metrics` is unauthenticated | S | — |
 | 145 | ✅ Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7) | M | — |
 | 146 | "5-minute first governed query" quickstart — close the named Toolbox onboarding gap | S–M | 48, 51 |
-| 147 | Self-serve procurement evidence page | S | 54, 58, 60 |
+| 147 | ✅ Self-serve procurement evidence page | S | 54, 58, 60 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2530,48 +2530,13 @@ item-51 `client/builder.py` to render the snippets. **Effort:** S–M.
 **Depends on:** 48, 51 (both shipped). **Risk:** low; read-only, additive,
 no server-side behavior change.
 
-### 147. Self-serve procurement evidence page
+### 147. Self-serve procurement evidence page ✅ DONE
 
-**Surfaced 2026-08-05 by `product-scorecard`.** The `trust-evidence` skill
-already assembles a defensible security-posture packet — SBOM, item-54
-compliance mapping, item-58 benchmark results, threat-model coverage,
-credential-redaction evidence — but only ad hoc, hand-rebuilt per prospect
-engagement. `docs/business/NORTH_STAR.md`'s own stated posture is "we are
-not behind on capability, we are behind on evidence and market presence,"
-and the one defined success metric is a design partner's security team
-signing off; the artifact that shortens that review cycle doesn't persist
-anywhere a prospect can be pointed at today.
+A generated, git-committed `docs/TRUST_EVIDENCE.md` (`make trust-page`,
+`scripts/generate_trust_page.py`) composes the security posture doc,
+compliance mapping, benchmark report, disclosure program, and live
+dependency-audit allowlist status verbatim into one always-current artifact,
+with a drift guard proving it stays current.
 
-**Why it matters.** Phase 2 (Enterprise procurement unlocks) already ships
-items 53/54/60/134 as procurement-facing controls; this is the missing
-"hand it to them" step. A live page beats a stale exported PDF because the
-artifacts it cites (current SBOM, latest benchmark pass/fail, the
-compliance-mapping table) drift as the codebase changes, and a hand-assembled
-packet goes stale between rebuilds — exactly the kind of gap a careful
-prospect's security reviewer will notice.
-
-**What to do:** a served page (candidate: a `/trust` REST route plus a
-matching admin_ui view, or a static generator invoked at release time) that
-composes, **read-only**, from artifacts that already exist: the current SBOM
-(`scripts/generate_sbom.py`), `docs/COMPLIANCE_MAPPING.md`, the latest
-`security_benchmark` results (item 58 phase 1), a link to `SECURITY.md`'s
-disclosure program (item 60), and the architectural guarantees
-`trust-evidence` already documents (no-raw-SQL, credential split,
-redaction-safe audit). No new evidence is generated — this only turns what
-already exists into a stable, always-current, shareable artifact instead of
-a bespoke one-off document per prospect.
-
-**Explicitly out of scope:** implying any control that doesn't exist — no
-unearned SOC 2 / ISO / third-party-pentest claims (the same guardrail
-`trust-evidence` already enforces, non-negotiable to carry forward here);
-this item must not become a marketing page — `pitch-sync`/`GO_TO_MARKET.md`
-own outward copy, this is the evidentiary companion to it, not a
-replacement.
-
-**Codebase fit.** New route module alongside `api/help_routes.py`/`admin/`;
-reads `scripts/generate_sbom.py` output, `docs/COMPLIANCE_MAPPING.md`, and
-`security_benchmark.py`'s persisted results. No new mutation path, nothing
-that touches a non-negotiable. **Effort:** S. **Depends on:** 54, 58
-(phase 1), 60 (all shipped). **Risk:** low; read-only composition of
-existing, already-reviewed artifacts.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 147).
 
