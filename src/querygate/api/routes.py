@@ -51,6 +51,7 @@ from querygate.execution.service import (
     StructuredQueryResult,
     StructuredQueryService,
     TableDescription,
+    VerdictResult,
 )
 from querygate.policy.loader import get_policy
 from querygate.query_ast.models import StructuredQuery
@@ -254,6 +255,14 @@ def build_router(
         service = _service(connection, principal)
         with mask_unexpected():
             return await service.explain(query)
+
+    @router.post("/{connection}/query/verdict", response_model=VerdictResult)
+    async def query_verdict(
+        connection: str, query: StructuredQuery, principal: Principal = Depends(get_principal)
+    ):
+        service = _service(connection, principal)
+        with mask_unexpected():
+            return await service.verdict(query)
 
     @router.post(
         "/{connection}/query", response_model=Union[StructuredQueryResult, AsyncQueryAdmission]
