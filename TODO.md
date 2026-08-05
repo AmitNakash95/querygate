@@ -172,7 +172,7 @@ order-of-magnitude, not commitments.
 | 139 | Bound audit-line size at the source (AST list caps + audit/sinks.py's own unbounded-read defect) | M | 138 |
 | 140 | `_audit_page` pagination can still materialize ~1M dicts per request | S–M | 138 |
 | 141 | Convert audit-reader line caps into practically-tight window-based early exits | S | 138 |
-| 142 | `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats | XS | — |
+| 142 | ✅ `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats | XS | — |
 | 143 | `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step | XS–S | — |
 | 144 | `verdict()` emits no query metrics, and `/metrics` is unauthenticated | S | — |
 
@@ -2520,31 +2520,13 @@ reach for under time pressure.
 
 **Effort:** S once approved. **Depends on:** 138.
 
-### 142. `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats
+### 142. `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats ✅ DONE
 
-**Surfaced 2026-08-01/02 by the `claim-reviewer`/`security-invariant-reviewer`
-audit of item 133; pre-existing, not introduced by that item.** `QG-32` labels
-both the audit-ledger tamper-evidence threat (item 91) and the approval-token
-forgery threat (item 92) — `docs/THREAT_MODEL.md` has 35 distinct threat rows
-across only 34 unique `QG-` IDs. `TECHNICAL_REVIEW.md` already flags a related
-"QG-31-vs-QG-32" stale-count inconsistency from an earlier pass, so this
-duplicate has survived at least one prior review. `docs/SECURITY_POSTURE.md`'s
-summary line has been corrected (item 133) to state the true row/ID counts
-rather than implying a clean 1-34 sequence, but the underlying duplicate ID
-itself is unresolved.
+Renamed the item-92 approval-gate row's ID to `QG-35`, keeping item-91's
+audit-ledger row stable at `QG-32`; `docs/SECURITY_POSTURE.md`'s count
+corrected to a clean "35 threats (QG-01…QG-35)".
 
-**What to do:** renumber one of the two `QG-32` rows (the numerically-later
-content chronologically, i.e. the item-92 approval-token-forgery row, to keep
-the item-91 audit-ledger row's existing ID stable) to the next unused ID
-(`QG-35`), and update every cross-reference: the row itself, any other
-doc/test that names that specific ID (grep `QG-32` and the new `QG-35` after
-the rename), and `docs/SECURITY_POSTURE.md`'s summary line back to a clean
-`35 threats (QG-01…QG-35)`. Low risk, mechanical — flagged as a separate item
-rather than folded into item 133 because renumbering a threat-model ID that
-other docs may reference is the kind of identifier-stability change CLAUDE.md
-asks to make deliberately, not as a drive-by inside an unrelated item's diff.
-
-**Effort:** XS.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 142).
 
 ### 143. `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step
 
