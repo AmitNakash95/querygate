@@ -10,13 +10,16 @@ security suites.
 
 from __future__ import annotations
 
-from querygate.admin.blast_radius import compute_blast_radius_report
+from typing import get_args
+
+from querygate.admin.blast_radius import _RISK_CATEGORY_PRIORITY, compute_blast_radius_report
+from querygate.admin.models import SemanticChangeCategory
 from querygate.catalog.loader import CatalogStore
 from querygate.cli import LoadedConfigContext
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry
 from querygate.policy.loader import PolicyStore
-from querygate.policy.models import MandatoryRowFilter, Policy
+from querygate.policy.models import ColumnMask, ColumnMaskKind, MandatoryRowFilter, Policy
 
 
 def _profile(connection_id: str = "demo", **overrides) -> ConnectionProfile:
@@ -195,6 +198,27 @@ def test_highest_risk_cap_marks_analysis_incomplete():
     assert len(report.highest_risk) == 1
     assert report.analysis_incomplete is True
     assert any("ranked below the top" in reason for reason in report.incomplete_reasons)
+
+
+def test_every_semantic_change_category_has_a_risk_priority():
+    # A category missing from `_RISK_CATEGORY_PRIORITY` silently falls to the
+    # lowest-priority default in `_risk_key`, ranking a real loosening below
+    # every named category regardless of severity (item 148 self-review).
+    missing = set(get_args(SemanticChangeCategory)) - set(_RISK_CATEGORY_PRIORITY)
+    assert missing == set()
+
+
+def test_column_mask_removal_ranks_above_guardrail_loosening():
+    mask = ColumnMask(column="ssn", kind=ColumnMaskKind.NULL)
+    active = _ctx(Policy(allowed_tables=["orders"], max_limit=100, column_masks={"orders": [mask]}))
+    candidate = _ctx(Policy(allowed_tables=["orders"], max_limit=500))
+
+    report = compute_blast_radius_report(active, candidate)
+
+    categories_in_order = [item.change.category for item in report.highest_risk]
+    assert "column_mask" in categories_in_order
+    assert "guardrail" in categories_in_order
+    assert categories_in_order.index("column_mask") < categories_in_order.index("guardrail")
 
 
 def test_baseline_incomplete_reason_is_preserved_when_no_principal_evaluation_needed():

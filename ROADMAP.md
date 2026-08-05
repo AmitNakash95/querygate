@@ -291,13 +291,18 @@ claim when the work ships or before explicitly handing the item back.
 - [x] **41** — Policy-change blast-radius analysis. *Completes the config-change
   safety trio (39/40/41).* ✅ **Shipped** (ph1 ranked aggregation + ph2 paginated
   per-principal evaluation via a `principal_offset`/`next_principal_offset` cursor).
-- [ ] **148** — `admin/access_diff.py` never diffs `column_masks` at all.
+- [x] **148** — `admin/access_diff.py` never diffs `column_masks` at all.
+  ✅ **Shipped** (`_diff_masks` added, mirrors `_diff_mandatory_filters`).
   *Surfaced 2026-08-05 by `architecture-boundary-reviewer`/`security-invariant-
   reviewer` while auditing item 145's own fix for the identical gap on
   `allowed_purposes`. Pre-existing since item 49 (masking) shipped — the
   semantic access diff's item-40 governance guarantee ("a loosening change is
   never reported as no change") has had this one hole the whole time. Small,
   self-contained, mirrors `_diff_mandatory_filters`'s existing shape.*
+- [ ] **149** — `Policy`'s case-insensitive table-key lookups disagree on
+  `casefold()` vs `lower()`. *Surfaced 2026-08-05 by `security-invariant-
+  reviewer` while reviewing item 148's fix. Low-priority (exotic Unicode
+  table names only); pre-existing across the file.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 

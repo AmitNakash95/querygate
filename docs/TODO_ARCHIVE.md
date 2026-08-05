@@ -9375,3 +9375,84 @@ HTML/CSS marketing page — that's `pitch-sync`/`GO_TO_MARKET.md`'s job, and
 ISO / third-party-pentest claims (nothing here asserts one).
 
 **Effort:** S. **Depends on:** 54, 58 (phase 1), 60 (all shipped).
+
+### 148. `admin/access_diff.py` never diffs `column_masks` at all ✅ DONE
+
+**Surfaced 2026-08-05 by `architecture-boundary-reviewer`/
+`security-invariant-reviewer`, while auditing item 145's fix for the same
+class of gap on `allowed_purposes`/`purpose_policies`.** `Policy.column_masks`
+had been excluded from `GUARDRAIL_FIELDS` since item 49 shipped (masking),
+with an inline comment claiming it was "already diffed field-by-field by
+access_diff (tables, columns, masks, row filters)" — but `admin/access_diff.py`
+had no `_diff_masks`/equivalent function and no `category="column_mask"`
+anywhere. Real, pre-existing since item 49, not a regression from anything
+shipped earlier that session.
+
+**Shipped.** `admin/access_diff.py._diff_masks` diffs `Policy.column_masks`,
+resolving through `Policy.column_mask(table, column)` itself rather than
+flattening the raw `dict[table, list[ColumnMask]]` — so the diff sees exactly
+what enforcement sees: a table-specific entry always wins over the `"*"`
+wildcard, and within one table's list the first case-insensitive column match
+wins. `_named_mask_columns_for_table` builds the per-table column universe
+(named columns for that table, plus any named under `"*"`); the table
+universe is `_named_tables(...)` unioned with every table keyed in either
+policy's `column_masks` (excluding `"*"`); a wildcard entry on either side adds
+the same "tables the policy does not name may also be affected" incompleteness
+note `_diff_tables` already uses for its own allow-list-emptiness toggle.
+Removing a mask is `loosening` (the real value becomes visible again); adding
+one is `tightening`; changing `kind`/`length`/`bucket_size` is `modified`/
+`neutral` — mirroring `_diff_mandatory_filters`'s own "value_changed → neutral"
+precedent, since there is no general ordering between mask kinds. Wired into
+`_diff_connection` alongside the other per-connection diffs; `"column_mask"`
+added to `SemanticChangeCategory` (`admin/models.py`), to `_CATEGORY_PRIORITY`
+(`admin/access_diff.py`, ranked with `column_access`), and to
+`_RISK_CATEGORY_PRIORITY` (`admin/blast_radius.py`, ranked with
+`column_access`) — the latter table was also missing `purpose_access`
+(item 145's own category), found and fixed the same way while adding
+`column_mask`. The stale `policy/models.py::_NON_GUARDRAIL_POLICY_FIELDS`
+comment that made the false "already diffed" claim was corrected in the same
+change.
+
+**Caught by this item's own mandatory self-review, not shipped as first
+written:** the first `_diff_masks` draft *did* flatten `column_masks` with a
+plain dict keyed by `(table.casefold(), column.casefold())`, treating `"*"`
+as an ordinary table name. Two independently launched reviewers
+(`security-invariant-reviewer` and `architecture-boundary-reviewer`) both
+found the same defect: moving an unchanged mask from `"*"` to one specific
+table is a no-op for that table (the specific entry now provides what the
+wildcard used to) but a real **loosening** for every other table the
+wildcard used to cover — the flattened-map version reported the no-op as a
+false `tightening` and missed the real loosening on the other tables
+entirely. A second, related bug: two masks on the same column within one
+table's list resolve first-match-wins at read time (`Policy.column_mask`)
+but the flattened map kept whichever the dict-comprehension inserted last,
+so a real enforcement-level mask change could be silently reported as no
+change. Confirmed directly (`Policy.column_mask` evaluated against both
+scenarios before any fix) before rewriting `_diff_masks` to resolve through
+`Policy.column_mask` itself instead of reimplementing its precedence rules.
+
+**Coverage.** `tests/unit/test_config_semantic_diff.py`: mask added is
+tightening, mask removed is loosening (with the real mask parameters — not
+just presence — asserted), a `kind`/`length` change is `modified`/`neutral`
+rather than silently dropped, a `BUCKET`-kind display is asserted (not just
+`NULL`/`LAST`), the table key is case-insensitive, an unchanged mask reports
+nothing, a table-specific entry shadowing a wildcard is NOT a false
+`tightening` (regression test for the finding above — asserts the shadowed
+table reports no change while a genuinely-unmasked other table correctly
+reports `loosening`), and duplicate same-column entries resolve first-match
+exactly like `Policy.column_mask` (regression test for the second finding).
+`tests/unit/test_blast_radius.py` gained a matching pair: a `column_mask`
+loosening ranks ahead of a `guardrail` loosening, and an exhaustiveness test
+(`test_every_semantic_change_category_has_a_risk_priority`, using
+`typing.get_args(SemanticChangeCategory)`) that fails if any future category
+is added to `SemanticChangeCategory` without a matching
+`_RISK_CATEGORY_PRIORITY` entry — closing the whole class of bug, not just
+this one instance. **Mutation-verified:** commenting out the `_diff_masks(...)`
+call site made 5 of 7 mask tests fail for the expected reason (the two
+"reports nothing" tests correctly stayed green either way); reverting
+`_RISK_CATEGORY_PRIORITY` to omit `column_mask`/`purpose_access` made both new
+blast-radius tests fail for the expected reason. Both reverted; full unit
+(2003) and security (463) suites green on the final tree.
+
+**Effort:** S (grew to M once the self-review findings were incorporated).
+**Depends on:** none.

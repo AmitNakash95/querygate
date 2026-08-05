@@ -36,6 +36,7 @@ from querygate.core.auth import Principal
 from querygate.policy.models import (
     GUARDRAIL_FIELDS,
     INVERTED_GUARDRAIL_FIELDS,
+    ColumnMask,
     CostEstimationMode,
     Policy,
 )
@@ -361,6 +362,131 @@ def _diff_mandatory_filters(diff: _Diff, connection: str, before: Policy, after:
                 )
 
 
+def _mask_display(mask: ColumnMask) -> str:
+    if mask.length is not None:
+        return f"{mask.kind.value}:{mask.length}"
+    if mask.bucket_size is not None:
+        return f"{mask.kind.value}:{mask.bucket_size}"
+    return mask.kind.value
+
+
+def _mask_tables(policy: Policy) -> set[str]:
+    return {table for table in policy.column_masks if table != "*"}
+
+
+def _named_mask_columns_for_table(policy: Policy, table: str) -> set[str]:
+    """Columns explicitly named for `table` (or under the `"*"` wildcard,
+    since a wildcard entry masks that column on every table)."""
+    target = table.casefold()
+    cols: set[str] = set()
+    for key, masks in policy.column_masks.items():
+        if key == "*" or key.casefold() == target:
+            cols.update(mask.column for mask in masks)
+    return cols
+
+
+def _diff_masks(
+    diff: _Diff,
+    connection: str,
+    before_profile: ConnectionProfile,
+    before: Policy,
+    after_profile: ConnectionProfile,
+    after: Policy,
+) -> None:
+    """`Policy.column_masks` (item 49) — mirrors `_diff_mandatory_filters`'s
+    shape, but resolves through `Policy.column_mask()` rather than flattening
+    the raw dict, so the diff sees exactly what enforcement sees: a
+    table-specific entry wins over the `"*"` wildcard, and within one table's
+    list the first case-insensitive column match wins.
+
+    An earlier version of this function flattened `column_masks` directly and
+    treated `"*"` as an ordinary table name — found by `security-invariant-
+    reviewer`/`architecture-boundary-reviewer` (2026-08-05, item 148 self-
+    review) to misclassify a real loosening as tightening whenever a
+    table-specific entry shadowed a wildcard one (the wildcard's "removal"
+    and the specific entry's "addition" were reported as two independent
+    changes instead of net effect), and to silently miss a duplicate-column
+    entry within one table's list (first-match-wins at read time, last-write-
+    wins in the flattened map). Both are fixed by resolving through the same
+    method `column_allowed`/`_diff_columns` already delegates to.
+
+    Removing a mask reveals the real value (loosening); adding one suppresses
+    it (tightening); changing `kind`/`length`/`bucket_size` is reported but
+    not classified — like `_diff_mandatory_filters`'s own "value_changed"
+    case, there is no general ordering between mask kinds.
+    """
+    before_wild = "*" in before.column_masks
+    after_wild = "*" in after.column_masks
+    if before_wild or after_wild:
+        diff.note(
+            f"Connection {connection!r} has a wildcard column mask configured; tables the "
+            "policy does not name may also be masked and are not individually listed here."
+        )
+    tables = (
+        _named_tables(before_profile, before)
+        | _named_tables(after_profile, after)
+        | _mask_tables(before)
+        | _mask_tables(after)
+    )
+    for table in _dedupe_casefold(tables):
+        columns = _named_mask_columns_for_table(before, table) | _named_mask_columns_for_table(
+            after, table
+        )
+        for column in _dedupe_casefold(columns):
+            b_mask = before.column_mask(table, column)
+            a_mask = after.column_mask(table, column)
+            if b_mask == a_mask:
+                continue
+            if b_mask is not None and a_mask is None:
+                diff.add(
+                    SemanticAccessChange(
+                        category="column_mask",
+                        connection=connection,
+                        object=f"{table}.{column}",
+                        change_type="removed",
+                        direction="loosening",
+                        before=_mask_display(b_mask),
+                        after=None,
+                        detail=(
+                            f"Column mask on {table}.{column} was removed on connection "
+                            f"{connection!r} — callers now see the real value."
+                        ),
+                    )
+                )
+            elif b_mask is None and a_mask is not None:
+                diff.add(
+                    SemanticAccessChange(
+                        category="column_mask",
+                        connection=connection,
+                        object=f"{table}.{column}",
+                        change_type="added",
+                        direction="tightening",
+                        before=None,
+                        after=_mask_display(a_mask),
+                        detail=(
+                            f"Column mask on {table}.{column} was added on connection "
+                            f"{connection!r}."
+                        ),
+                    )
+                )
+            else:
+                diff.add(
+                    SemanticAccessChange(
+                        category="column_mask",
+                        connection=connection,
+                        object=f"{table}.{column}",
+                        change_type="modified",
+                        direction="neutral",
+                        before=_mask_display(b_mask),
+                        after=_mask_display(a_mask),
+                        detail=(
+                            f"Column mask on {table}.{column} on connection {connection!r} "
+                            f"changed from {_mask_display(b_mask)} to {_mask_display(a_mask)}."
+                        ),
+                    )
+                )
+
+
 def _diff_purposes(diff: _Diff, connection: str, before: Policy, after: Policy) -> None:
     """Purpose-bound access (item 145): `allowed_purposes` empty means the
     gate itself is off for this connection — the same "empty allow-list =
@@ -591,6 +717,7 @@ def _diff_connection(
         allowed_in_both = _diff_tables(diff, connection, a_profile, a_policy, c_profile, c_policy)
         _diff_columns(diff, connection, allowed_in_both, a_policy, c_policy)
         _diff_mandatory_filters(diff, connection, a_policy, c_policy)
+        _diff_masks(diff, connection, a_profile, a_policy, c_profile, c_policy)
         _diff_purposes(diff, connection, a_policy, c_policy)
         _diff_join_group(diff, connection, a_profile, c_profile)
 
@@ -602,8 +729,9 @@ _CATEGORY_PRIORITY = {
     "purpose_access": 2,
     "table_access": 3,
     "column_access": 4,
-    "guardrail": 5,
-    "join_group": 6,
+    "column_mask": 5,
+    "guardrail": 6,
+    "join_group": 7,
 }
 
 

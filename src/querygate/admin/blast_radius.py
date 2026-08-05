@@ -35,11 +35,26 @@ DEFAULT_MAX_HIGHEST_RISK = 25
 
 # Only loosening changes are risk-ranked at all — a tightening or neutral
 # change is not a blast-radius concern. Lower number == higher priority.
+#
+# Every `SemanticChangeCategory` literal must have an entry here — a category
+# with no entry silently falls to `_risk_key`'s `.get(..., 4)` default,
+# ranking it below every named category regardless of how severe a loosening
+# in it actually is. `test_blast_radius.py::test_every_semantic_change_category_has_a_risk_priority`
+# fails until a new category is added below (found missing for `column_mask`
+# by `architecture-boundary-reviewer`, 2026-08-05, item 148 self-review;
+# `purpose_access` was independently found missing the same way while fixing it).
 _RISK_CATEGORY_PRIORITY = {
     "mandatory_filter": 0,
+    # A purpose-gate loosening (e.g. disabling the gate entirely) can silently
+    # switch off every purpose-scoped narrowing rule for a connection at
+    # once — the same fleet-wide severity as removing a mandatory filter.
+    "purpose_access": 0,
     "connection_visibility": 1,
     "table_access": 1,
     "column_access": 1,
+    # A mask removal reveals a real column value, the same severity class as
+    # an outright column-access grant.
+    "column_mask": 1,
     "guardrail": 2,
     "join_group": 3,
 }
