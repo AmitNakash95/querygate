@@ -175,6 +175,9 @@ order-of-magnitude, not commitments.
 | 142 | ✅ `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats | XS | — |
 | 143 | ✅ `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step | XS–S | — |
 | 144 | `verdict()` emits no query metrics, and `/metrics` is unauthenticated | S | — |
+| 145 | Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7) | M | — |
+| 146 | "5-minute first governed query" quickstart — close the named Toolbox onboarding gap | S–M | 48, 51 |
+| 147 | Self-serve procurement evidence page | S | 54, 58, 60 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2570,4 +2573,149 @@ acknowledging `/metrics`'s existing exposure, or gate `/metrics` behind an
 latter is a real infra decision, not a default an agent should reach for.
 
 **Effort:** S.
+
+### 145. Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7)
+
+**Surfaced 2026-08-05 by `competitive-scan`.** `StructuredQuery.intent`
+(`query_ast/models.py`) is logged with the compiled SQL for audit/debugging
+today and never enforced. Immuta's flagship primitive — purpose-based access,
+where a caller must declare *why* it needs the data from an allowed set of
+purposes, and that purpose narrows what it can see — is real and, per the
+2026-07-22 survey (`docs/business/MARKET_DOMINATION_ANALYSIS.md` F7), "barely
+exists elsewhere": the access proxies log a justification string at best; no
+MCP gateway or DB-vendor server enforces a declared purpose at all. Immuta
+still leads this specific mechanic technically; verified unchanged this
+refresh (no evidence of a purpose-enforcement feature shipping elsewhere
+since the 2026-07-22 survey).
+
+**Why it's newly actionable.** The AST field and the audit wiring already
+exist — this is "enforce a value we already carry," not new surface area. It
+composes with machinery already shipped: per-principal `Policy` resolution
+(item 90's actor/subject chain), `mandatory_row_filters`, and column
+masking/deny — a purpose is just another input to the same resolution, not a
+new enforcement point.
+
+**Scope.**
+
+1. **`intent` today is free natural-language text — purpose-gating needs a
+   closed set.** Add a separate, optional structured field (e.g.
+   `StructuredQuery.purpose: Optional[str]`) validated against a
+   per-connection `Policy.allowed_purposes: list[str]` (empty = unrestricted,
+   the existing allow-list convention). Do **not** repurpose `intent` itself
+   — it is documented as free text for audit/debugging and must keep that
+   shape; conflating the two would make a purpose declaration also carry
+   arbitrary caller-authored prose into a policy decision.
+2. **Purpose narrows, never widens.** A policy maps `purpose → Policy` deltas
+   (an allow/deny/masking override applied *on top of* the principal's
+   resolved policy, same composition shape as claim-driven row filters) —
+   never a purpose that grants access the principal's base policy denies.
+   Missing/absent purpose falls back to the connection's default policy
+   (unrestricted, same as today) unless `allowed_purposes` is non-empty, in
+   which case a query touching a purpose-gated table/column without a
+   declared purpose is rejected the same way an unresolvable claim is today.
+3. **Audit the declared purpose** (redaction-safe — it's a fixed token from
+   the allow-list, not free text, so this does not reopen non-negotiable #3).
+4. **Runs in `validation/policy_validation.py`**, before any DB touch, same
+   position as every other policy check in the one pipeline.
+
+**Explicitly out of scope:** a purpose-*taxonomy* editor/UI, purpose
+inheritance/hierarchies, or wiring `intent`'s free text into any policy
+decision — those are speculative beyond what the gap actually calls for.
+
+**Codebase fit.** `query_ast/models.py` (new field), `policy/models.py`
+(`allowed_purposes` + purpose-keyed policy deltas), `validation/
+policy_validation.py` (the check), `audit/events.py` (record the declared
+purpose). **Effort:** M. **TODO relation:** new — distinct from `intent`
+(logged, unenforced) and from item 90 (identity, not purpose). **Risk:** low;
+purely additive and only narrows access; mutation-verify the "narrows never
+widens" direction specifically (a flipped precedence would let a purpose
+grant more than the base policy allows).
+
+### 146. "5-minute first governed query" quickstart — close the named Toolbox onboarding gap
+
+**Surfaced 2026-08-05 by `product-scorecard`.**
+`docs/business/COMPETITOR_GOOGLE_TOOLBOX.md`'s 2026-07-22 Decision commits
+explicitly: "Steal the onboarding lesson, not the architecture... QueryGate's
+discovery flow (list/describe/search_catalog) should be as close to
+zero-friction as the guardrails allow — a '5-minute first governed query'
+quickstart." That is the one dimension the brief's own scoring table hands
+to a competitor outright (Onboarding / time-to-first-query: Toolbox 9,
+QueryGate 6) — and the commitment to close it has sat as unactioned prose in
+a competitor brief for two weeks with no TODO item.
+
+**Why it matters.** Today a new caller must chain `list_connections` →
+`search_catalog`/`describe_schema` → hand-author a `StructuredQuery` from
+raw JSON (or the item-51 builder) before running a first query. Toolbox's
+edge is a literally-instant prebuilt-tools experience. QueryGate already has
+every ingredient — item 48's admin-approved query templates, the item-51
+Python/TypeScript client SDKs, and the catalog's `search_catalog`/
+`describe_schema` reflection — but nothing composes them into a guided
+first-five-minutes path.
+
+**What to do:** a `querygate quickstart <connection>` CLI command (mirroring
+the existing `querygate-config`/`querygate-semantic-memory` CLI shape) that:
+(1) reflects the connection's catalog, (2) proposes 3–5 read-only example
+`StructuredQuery` bodies — a plain select, a filtered select, an aggregate —
+scoped to tables/columns the catalog doesn't mark sensitive, and (3) prints
+ready-to-run REST curl, MCP tool-call, and Python-SDK snippets for each.
+Optionally mirror it as a "Quickstart" panel on a connection's admin_ui
+detail page. This is pure composition over already-shipped **read-only**
+surfaces (catalog reflection + item-48 templates + item-51 builder) — no new
+AST field, no new enforcement point, nothing that touches a non-negotiable.
+
+**Explicitly out of scope:** auto-*persisting* the generated examples as
+`templates.yaml` entries — that is item 48's governed authoring path, with
+its own review gate; the quickstart proposes ad hoc example queries a caller
+runs directly, it does not write to the template store.
+
+**Codebase fit.** Likely a new `cli/quickstart.py` alongside the existing
+CLIs; reuses `schema/reflection.py` and `catalog/` read paths, and the
+item-51 `client/builder.py` to render the snippets. **Effort:** S–M.
+**Depends on:** 48, 51 (both shipped). **Risk:** low; read-only, additive,
+no server-side behavior change.
+
+### 147. Self-serve procurement evidence page
+
+**Surfaced 2026-08-05 by `product-scorecard`.** The `trust-evidence` skill
+already assembles a defensible security-posture packet — SBOM, item-54
+compliance mapping, item-58 benchmark results, threat-model coverage,
+credential-redaction evidence — but only ad hoc, hand-rebuilt per prospect
+engagement. `docs/business/NORTH_STAR.md`'s own stated posture is "we are
+not behind on capability, we are behind on evidence and market presence,"
+and the one defined success metric is a design partner's security team
+signing off; the artifact that shortens that review cycle doesn't persist
+anywhere a prospect can be pointed at today.
+
+**Why it matters.** Phase 2 (Enterprise procurement unlocks) already ships
+items 53/54/60/134 as procurement-facing controls; this is the missing
+"hand it to them" step. A live page beats a stale exported PDF because the
+artifacts it cites (current SBOM, latest benchmark pass/fail, the
+compliance-mapping table) drift as the codebase changes, and a hand-assembled
+packet goes stale between rebuilds — exactly the kind of gap a careful
+prospect's security reviewer will notice.
+
+**What to do:** a served page (candidate: a `/trust` REST route plus a
+matching admin_ui view, or a static generator invoked at release time) that
+composes, **read-only**, from artifacts that already exist: the current SBOM
+(`scripts/generate_sbom.py`), `docs/COMPLIANCE_MAPPING.md`, the latest
+`security_benchmark` results (item 58 phase 1), a link to `SECURITY.md`'s
+disclosure program (item 60), and the architectural guarantees
+`trust-evidence` already documents (no-raw-SQL, credential split,
+redaction-safe audit). No new evidence is generated — this only turns what
+already exists into a stable, always-current, shareable artifact instead of
+a bespoke one-off document per prospect.
+
+**Explicitly out of scope:** implying any control that doesn't exist — no
+unearned SOC 2 / ISO / third-party-pentest claims (the same guardrail
+`trust-evidence` already enforces, non-negotiable to carry forward here);
+this item must not become a marketing page — `pitch-sync`/`GO_TO_MARKET.md`
+own outward copy, this is the evidentiary companion to it, not a
+replacement.
+
+**Codebase fit.** New route module alongside `api/help_routes.py`/`admin/`;
+reads `scripts/generate_sbom.py` output, `docs/COMPLIANCE_MAPPING.md`, and
+`security_benchmark.py`'s persisted results. No new mutation path, nothing
+that touches a non-negotiable. **Effort:** S. **Depends on:** 54, 58
+(phase 1), 60 (all shipped). **Risk:** low; read-only composition of
+existing, already-reviewed artifacts.
 
