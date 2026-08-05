@@ -41,6 +41,14 @@ in aggregate to admins. This module attaches one fixed, human-readable
 explanation per category and never surfaces `AuditEvent.query_shape` (which,
 while already values-free, is more internal detail than a "why was this
 rejected" explanation needs).
+
+**One deliberate exception: `operation="query_verdict"` events are excluded
+entirely** (`_is_own_denial`), not just relabeled. `StructuredQueryService.
+verdict` (TODO.md item 133) exists specifically to answer "would this be
+allowed" without revealing whether a denial came from policy or schema; if
+this module surfaced that same event's real `error_category` back to the
+same caller, it would let the caller read back the answer verdict()'s
+response deliberately withheld from them.
 """
 
 from __future__ import annotations
@@ -128,7 +136,20 @@ def _reason_and_explanation(error_category: Optional[str]) -> Tuple[str, str]:
 
 
 def _is_own_denial(event: AuditEvent, principal_id: str) -> bool:
-    return event.principal_id == principal_id and event.outcome == "rejected"
+    # `query_verdict` events (TODO.md item 133) are deliberately excluded:
+    # `StructuredQueryService.verdict` collapses every denial into one
+    # generic response specifically so a caller cannot learn whether policy
+    # or schema rejected their query — surfacing this operation's own
+    # `error_category` back through the caller's own denial history would
+    # let the same caller reopen that exact channel by reading back the
+    # probe they just submitted (see `execution/service.py`'s `verdict`
+    # docstring and docs/THREAT_MODEL.md QG-34). Every other operation's
+    # category is still safe to reveal here.
+    return (
+        event.principal_id == principal_id
+        and event.outcome == "rejected"
+        and event.operation != "query_verdict"
+    )
 
 
 def select_recent_denials(
@@ -161,6 +182,7 @@ def build_recent_denials_report(
     now: Optional[datetime] = None,
     lookback_seconds: float = 86400.0,
     max_events_scanned: int = 50_000,
+    max_lines_read: int = 50_000,
     limit: int = 20,
 ) -> RecentDenialsReport:
     """Assemble a full report from a source. `source=None` means the persisted
@@ -179,6 +201,10 @@ def build_recent_denials_report(
         recent_window_seconds=lookback_seconds,
         baseline_window_seconds=1.0,
         max_events_scanned=max_events_scanned,
+        # TODO.md item 138: kept independently tunable rather than inheriting
+        # AnomalyThresholds' own default, since this surface is reachable
+        # with authentication only, no admin scope, by design (item 45).
+        max_lines_read=max_lines_read,
     )
     events, malformed, truncated = source.load_query_events(now=now, thresholds=thresholds)
     denials = select_recent_denials(events, principal_id=principal_id, limit=limit)

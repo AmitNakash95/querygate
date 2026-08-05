@@ -2740,6 +2740,29 @@ error on the MCP surface too, never a 5xx. Both thresholds are configurable
 (`mcp_max_request_bytes` / `mcp_max_request_depth`) with defaults far above
 any legitimate batch, so normal traffic is untouched.
 
+The same middleware also closes a gateway confused-deputy gap (TODO item
+127). The MCP `2026-07-28` spec mirrors `method`/`params.name`/`params.uri`
+into `Mcp-Method`/`Mcp-Name` HTTP headers so a fronting gateway can route and
+authorize without parsing the body — and requires the server to reject a
+request where a present header disagrees with the body (`400` +
+`-32020 HeaderMismatch`), because otherwise a gateway authorizing on the
+header while QueryGate executes the body is a confused deputy (e.g. a
+gateway permits `Mcp-Name: list_tables` for a low-privilege caller while the
+body actually invokes `run_structured_writes`). QueryGate currently speaks
+protocol `2025-11-25` (item 128), which doesn't define these headers, so this
+validates **if present**, not required — it fails closed the moment a
+gateway starts sending them, run strictly after the depth scan above (so a
+hostile deep body can't reach this check's own `json.loads` first). Base64
+"sentinel"-encoded header values (`=?base64?...?=`, used when a name isn't
+safely ASCII) are decoded before comparison; a header wearing the sentinel's
+markers that doesn't actually decode is rejected as malformed rather than
+compared as literal text. `Mcp-Name` is checked against `params.uri` for a
+`resources/*` method and `params.name` otherwise (a body carrying both is
+rejected as ambiguous rather than guessed at), and a routing header sent more
+than once — which has no single source of truth for an intermediary to agree
+with QueryGate about — is rejected outright rather than resolved by first
+match.
+
 The actual tools, one module per concern:
 
 - `mcp/tools/connections.py` — `list_connections`.
@@ -5474,3 +5497,230 @@ reasoning behind them, newest first. Added to incrementally as work happens
   pass the required-scope gate. The whole mode is opt-in
   (`MCP_OAUTH_RESOURCE_SERVER_ENABLED`) so existing deployments are unaffected.
   See [The Core Request Pipeline](#the-core-request-pipeline) (`TODO.md` item 90 phase 2).
+- **2026-08-01 — Opting into the tamper-evident audit backend no longer
+  silently disables four read surfaces (`TODO.md` item 136).** `/help/my-recent-
+  denials`, the anomaly report, the config/catalog change-trend report, and the
+  admin UI audit browser each gated on `audit_sink_backend == AuditSinkBackend.
+  JSONL`, so `AUDIT_SINK_BACKEND=jsonl_chained` — the posture item 91 shipped and
+  a regulated buyer would actually enable — refused all four, even though three
+  of the four readers already transparently unwrapped the chain envelope and
+  could serve them. **Two fixes, not one.** (1) The four equality/inequality
+  gates are now one capability lookup, `AuditSinkBackend.is_locally_readable()`
+  — `{JSONL, JSONL_CHAINED}` today — so a future backend (item 134) declares
+  readability once instead of every call site repeating the check (and the bug)
+  a third time. (2) The admin UI audit browser's `_audit_page` had **no**
+  envelope unwrap at all (unlike the other three), so a gate-only fix would have
+  turned it from honestly `source="disabled"` into silently empty with a rising
+  `malformed` count — it now calls the same unwrap the other three use. That
+  unwrap itself was duplicated inline in two readers (`admin/anomaly.py`,
+  `admin/config_trends.py`); a 2026-07-30 Decision Log entry above reasoned
+  explicitly about not tripling it, so this fix also extracts it once as
+  `audit.ledger.unwrap_envelope()` and points all three readers at it — the
+  concern that entry raised is now moot rather than deferred. The extraction is
+  not a pure move: the two inline copies it replaced matched on only two of
+  `LedgerRecord`'s four keys (`event` + `hash`); the shared function requires
+  all four (`seq`/`prev_hash`/`event`/`hash`), a hardening caught by the
+  `security-invariant-reviewer` audit of this change, closing a latent path for
+  a plain event body carrying its own same-named fields to be misread as a
+  chain envelope. That same audit found two further gaps this fix deliberately
+  left open rather than folding in — the four surfaces still neither verify the
+  chain nor disclose which backend actually produced a `source="jsonl"`
+  response (`TODO.md` item 137, needs a maintainer decision on posture/cost),
+  and the underlying line-by-line file scan is unbounded by lines read, a
+  pre-existing gap for the default `jsonl` backend that this change also makes
+  reachable under `jsonl_chained` (`TODO.md` item 138). See [Auth &
+  Transports](#auth--transports) and [The `help/` module](#the-help-module--a-queryable-product-guide).
+- **2026-08-01 — Every reader of the persisted audit stream now scans
+  tail-first, bounded by lines read, not just lines retained (`TODO.md`
+  item 138).** Before this, `admin/anomaly.py`, `admin/config_trends.py`, and
+  the admin UI audit browser (`api/admin_ui_routes.py`'s `_audit_page`) all
+  streamed the JSONL file forward from the beginning and relied on a bounded
+  in-memory deque to keep only what mattered — correct, but unbounded in the
+  amount of *work* done: a large audit history meant parsing and validating
+  every line on every request, regardless of how much was actually needed.
+  **Why not just cap lines read from the start, the simplest fix:** a forward
+  scan capped at N lines reads the *oldest* N lines first (the sink only
+  appends), so on a file larger than the cap it would silently never reach
+  the recent window or newest page a caller actually asked for — worse than
+  no bound at all, since the exact security/observability signal these
+  surfaces exist for would go quietly blind at high volume, the moment it
+  matters most. **The fix instead reads backward:** a new shared primitive,
+  `audit.file_reader.iter_lines_reverse()`, reads the file in fixed-size
+  chunks from the end, splitting on the raw newline byte (safe regardless of
+  chunk boundaries, since `0x0A` never appears inside a multi-byte UTF-8
+  sequence). Because the sink only appends, the physically newest lines are
+  always what every one of these readers wants most, so a hard cap on lines
+  *read* (`AnomalyThresholds.max_lines_read`, `ChangeTrendThresholds.max_lines_read`,
+  `AppConfig.audit_page_max_lines_read`, `personal_denials_max_lines_read`) can
+  bound worst-case work without ever trading away correctness. `admin/anomaly.py`'s,
+  `admin/config_trends.py`'s, and `_audit_page`'s bounded deques were all
+  removed entirely — reading tail-first, the first `max_events_scanned` (or,
+  for `_audit_page`, `cursor + limit`) matches encountered *are* the newest N
+  by construction, so there's nothing left for a deque to evict. `_audit_page`
+  gained a new `truncated` field on its response (`AuditEventPage`) for the
+  same reason the other two reports already had one: once a cap can fire, "no
+  more matches found" and "stopped looking before finding out" are different
+  claims, and conflating them would be a silent regression from the
+  honest-disabled posture this audit surface has kept since item 31.
+  `truncated` is deliberately conservative — it can report `True` even when
+  every real match was already found (the scan simply kept going,
+  sight-unseen, until the line cap fired on trailing non-matching lines) —
+  rather than risk ever reporting `False` when data could plausibly be missing.
+
+  **Hardened same-day by a second `security-invariant-reviewer` pass, before
+  this item shipped.** The first cut bounded only *line count*, defaulted to
+  2,000,000 everywhere, and left `anomaly_max_lines_read`/
+  `change_trend_max_lines_read`/`personal_denials_max_lines_read` unwired from
+  `AppConfig` (the thresholds objects had the field; the routers never read it
+  from config, so it was stuck at the class default) — an `architecture-boundary-reviewer`
+  finding, fixed by threading all three. The bigger issue: `iter_lines_reverse`
+  itself was algorithmically unsound for a *single undelimited run* — the
+  carry-forward buffer (`chunk + carry`) is fully re-copied every chunk, so a
+  region with no newline at all costs O(run_length²), not O(run_length), and
+  nothing bounded run length, since the line-count cap only increments once a
+  line is actually yielded. Measured: at the shipped 2,000,000-line default,
+  a realistic ~800-byte audit line put per-request cost at ~1.6 GB read and
+  10-40s of blocking work on `/help/my-recent-denials` — authenticated-only,
+  no admin scope, no rate limit — which is a bound in the formal sense and
+  not one in the practical sense. Fixed with two new independent bounds
+  inside `iter_lines_reverse` itself, both raising a typed
+  `AuditFileReadBounded` rather than returning silently (so every caller's
+  `truncated` stays accurate — a silent stop would have looked identical to
+  reaching the start of the file): `max_line_bytes` (default 1 MiB) aborts an
+  undelimited run before it can grow past a fixed, cheap size; `max_total_bytes`
+  (default 256 MiB) bounds total bytes read regardless of how many lines that
+  spans, closing a companion gap where a file padded with an enormous number
+  of *blank* lines was never counted against the line cap at all (blank lines
+  are filtered inside the generator, before a caller's own counter ever sees
+  them). The three `max_lines_read` defaults were also lowered from 2,000,000
+  to 200,000 (50,000 for `personal_denials_max_lines_read`, defaulted tighter
+  than the admin-scoped surfaces since it's the one reachable with
+  authentication only) — now a real backstop underneath the byte-level bounds,
+  not the sole line of defense. A fourth, narrower finding — a short read
+  during in-place file truncation (`logrotate copytruncate`, not the
+  rename-and-recreate rotation `JsonlAuditSink` already tolerates) could splice
+  non-adjacent byte ranges into a fabricated line while still reporting
+  `truncated=False` — is closed the same way: a short read from `handle.read`
+  now raises `AuditFileReadBounded` rather than being silently concatenated.
+
+  **Deliberately not folded into this item**, filed as follow-ups instead of
+  fixed inline, since each is either a distinct subsystem or a real
+  correctness/performance tradeoff needing its own scoping: bounding audit-line
+  size at the *source* (the read-query AST's unbounded `select`/`join`/`group_by`
+  lists, and `audit/sinks.py`'s own `_read_last_line` startup-path reader,
+  which shares the pre-fix unbounded-growth shape) — `TODO.md` item 139;
+  `_audit_page`'s pagination can still materialize up to `cursor + limit` ≈
+  1,000,100 dicts given the existing `cursor` query-param ceiling — `TODO.md`
+  item 140; and converting the line-count cap into a practically-tight,
+  window-based early exit (stop after N consecutive out-of-window matches,
+  tail-first-native) — a real further tightening, but one that trades a small,
+  bounded ordering-tolerance assumption for speed, which is a call for the
+  maintainer, not a default to reach for under review pressure — `TODO.md`
+  item 141.
+  See [The `help/` module](#the-help-module--a-queryable-product-guide).
+- **2026-08-01 — A caller-facing verdict endpoint reuses the read pipeline's
+  shared validation seam, and deliberately answers less than `explain` does
+  (`TODO.md` item 133, the P4 leverage-move play).** `POST .../query/verdict`
+  and MCP `run_structured_queries(mode="verdict")` add a new
+  `StructuredQueryService.verdict()` method that calls the same
+  `_validate_and_compile` seam `execute`/`explain` already share (non-negotiable
+  #4 — one path, not a second evaluator) and answers only "would this be
+  allowed", for a caller (an MCP gateway, proxy, or CI check) that needs a
+  yes/no rather than debug detail. This is response-shape hygiene, not a
+  privilege boundary: the same principal that can call `verdict` can call
+  `explain`/`query` with the same credential and get the real message —
+  QueryGate has no scope today that distinguishes "may see a verdict" from
+  "may see debug detail" (a verdict-only-caller confinement would be a new
+  scope, an explicit product decision, not something this item adds). Several
+  deliberate design choices, all because a verdict-shaped endpoint is a
+  discovery oracle unless designed against it (`docs/THREAT_MODEL.md`
+  QG-19/QG-24 already establish this class for the admin simulation and "my
+  access" surfaces; this entry adds QG-34):
+  - **A denial always reports the same generic `reason="not-available-to-you"`,
+    never the real exception or which validator raised it.** `validate_policy`
+    runs strictly before `validate_schema`, so distinguishing "on your policy's
+    deny list" from "doesn't exist in the schema" — even just the *category*,
+    without the identifier — would let a caller enumerate identifiers and
+    reconstruct both the schema and the policy boundary one query at a time.
+    The collapse has to hold for every exception `_validate_and_compile` can
+    raise for a shape reason, and patching it type-by-type already missed
+    twice: the original except clause caught only
+    `(PolicyViolationError, QueryValidationError)`; a first audit pass found
+    `NotFoundError` (a join's own `connection` field naming a connection the
+    caller can't see) and `sa.exc.NoSuchTableError` (a wholly non-existent
+    table, which reflection raises directly rather than through
+    `QueryValidationError`) missing, the second escaping as an uncaught 500
+    that was itself a distinguishable fourth outcome; a second audit pass on
+    that same fix then found the four-type allow-list itself was still
+    reachable-but-missed by a plain `ValueError` from an unresolved
+    `${ENV_VAR}` connection-string secret. The except clause is now a
+    deliberate catch-all (`except Exception`), not an allow-list — safe
+    because `_get_policy`/`enforce_query_quota`/`concurrency_slot` all run
+    strictly before this inner block, so nothing reaching it is a
+    quota/concurrency system failure, only a genuine query-shape rejection.
+    `help/personal_denials.py`'s `_is_own_denial` excludes
+    `operation="query_verdict"` events entirely, rather than the "different
+    surface, different posture" argument this entry originally made for
+    leaving that channel open: on reflection, the caller reading a verdict
+    endpoint is the same caller who can immediately read `/help/my-recent-
+    denials` afterward, so "retrospective, about the caller's own
+    already-submitted queries" doesn't hold as a distinction — the caller's
+    own already-submitted *verdict probe* is exactly the query in question.
+    Every other operation's category is still surfaced there unchanged.
+  - **`explain` is deliberately left untouched.** `explain_many`'s per-item
+    `error` field already echoes the real validation message via
+    `public_error_message` (unchanged, pre-existing behavior) — an
+    authenticated caller using `explain` already needs identifier-level detail
+    to debug their own query, a different posture from `verdict`'s "may I"
+    question. Whether to also tighten `explain` was explicitly named as this
+    item's own open question (not a copy of QG-19/QG-24's oracle, since
+    `explain` requires the same authentication `verdict` does — the concern
+    would be about debug-detail richness, not privilege); tightening it here
+    would have been unrelated scope creep, so it is recorded as considered and
+    rejected, not silently skipped.
+  - The compiled plan (SQL text + touched-table list) is omitted by default —
+    `Policy.verdict_include_plan`, off by default — since which tables end up
+    referenced is itself data-dependent enough to be a discovery channel; an
+    operator opts a connection in deliberately, the same posture
+    `log_query_literals` already uses for a different disclosure axis.
+  - Unlike `explain` (deliberately free — a pure, always-cheap compile
+    preview with no DB round trip), `verdict` calls `enforce_query_quota`
+    (consuming one unit **when the connection's policy configures a quota
+    window** — off by default, same as every other read) and emits a
+    redaction-safe `operation="query_verdict"` audit event on every outcome,
+    including a quota/concurrency rejection: this item's own audit found the
+    first cut called `enforce_query_quota` outside any try/except that led to
+    `audit_query`, so a quota-throttled probe left no trace — fixed by
+    wrapping quota reservation, connection resolution, and the concurrency
+    admission in an outer handler that audits then re-raises, mirroring
+    `execute`'s outer handler. `verdict` also now passes the same
+    `principal_subject`/`max_queue_depth`/`max_queue_depth_per_principal`
+    caps to `concurrency_slot` that `execute` does, closing an unbounded-queue
+    gap the first cut left open — the same gap was then also found still
+    open in `explain()` (a pre-existing issue, not introduced by this item,
+    but standing out once `verdict` was fixed and `explain` wasn't), and
+    fixed there too in the same pass for consistency. A quota/concurrency
+    failure still propagates as a real error rather than being reported as
+    `allowed=False` — it's "the endpoint couldn't answer right now", not a
+    verdict about the query's shape; the outer handler that audits this
+    failure classifies a `NotFoundError` (e.g. an MCP caller naming an
+    unregistered connection, since MCP's `_service()` doesn't pre-resolve
+    connection visibility the way REST's does) as `error_category="not_found"`,
+    matching `execute`'s own outer handler, rather than falling through to
+    the generic `"db_error"` label. The plan-compile-and-success-audit block
+    also moved inside the outer `try` (compiling the plan text doesn't need
+    the concurrency slot, only to happen before the `except`), so a
+    `_compile_to_text` failure — or a failure in the audit call itself — is
+    still audited and reported as a real error, instead of 500ing silently
+    with the quota unit already spent and zero trace left behind.
+  - **Scope is policy-and-schema shape only** — `verdict` stops at
+    `_validate_and_compile` and does not evaluate the approval gate (item 92)
+    or the cost-estimation gate, both of which `execute` still enforces. A
+    query reported `allowed: true` can still be paused for human approval or
+    refused by a cost cap when actually run; a caller treating `verdict` as a
+    full execution simulation would be wrong to. Implementing either gate
+    here would need a DB-free cost/sensitivity evaluation path of its own —
+    out of scope for this item, left for a follow-up if a design partner
+    needs it.
+  See [The Core Request Pipeline](#the-core-request-pipeline) and
+  [`docs/THREAT_MODEL.md`](THREAT_MODEL.md) QG-34.

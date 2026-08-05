@@ -490,6 +490,26 @@ def test_where_shape_records_a_not_group_rather_than_an_empty_or():
     }
 
 
+def test_audit_sink_backend_locally_readable_is_exhaustively_classified():
+    # TODO.md item 136: is_locally_readable() is the single capability lookup
+    # every read surface's gate now calls instead of an equality check against
+    # one member. Pin every current member's classification explicitly, and
+    # assert the parametrization covers the whole enum, so adding a new
+    # backend (TODO.md item 134) fails this test until it is deliberately
+    # classified rather than silently inheriting Python's default membership
+    # behavior for an un-enumerated value.
+    from querygate.core.config import AuditSinkBackend
+
+    expected = {
+        AuditSinkBackend.NONE: False,
+        AuditSinkBackend.JSONL: True,
+        AuditSinkBackend.JSONL_CHAINED: True,
+    }
+    assert set(expected) == set(AuditSinkBackend)
+    for backend, readable in expected.items():
+        assert backend.is_locally_readable() is readable, backend
+
+
 def test_jsonl_sink_appends_versioned_events_with_private_file_mode(tmp_path):
     path = tmp_path / "audit" / "events.jsonl"
     sink = JsonlAuditSink(str(path), fsync=True)

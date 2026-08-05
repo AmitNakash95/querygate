@@ -152,6 +152,9 @@ Prefer these skills over improvising the workflow; they encode the repo's rules.
 | After a feature/design change touched docs-worthy surface | `product-guide-sync` |
 | Hardening the AST/policy boundary or "try to break it" | `adversarial-probe` |
 | Improving coverage / finding untested code | `test-gap` |
+| Restructuring code with behavior held constant (extract/rename/consolidate) | `refactor` |
+| Diagnosing and fixing a bug down to its root cause | `debug` |
+| Hands-on design/UX critique of the running admin_ui/access_ui | `ui-ux-critic` |
 | Checking that doc/marketing claims are backed by code+test | `claim-verify` |
 | Updating landing page / sales copy after a capability ships | `pitch-sync` |
 | Periodic market check / competitor comparison | `competitive-scan` |

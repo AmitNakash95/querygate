@@ -101,7 +101,7 @@ claim when the work ships or before explicitly handing the item back.
   reproducible corpus + `querygate-security-benchmark` CLI + published report,
   100% catch vs. 0% modeled raw-SQL baseline); box stays `[ ]` until phase 2's
   live LLM/Toolbox run (needs external infra).
-- [ ] **127** — Reject an MCP request whose routing headers disagree with its
+- [x] **127** — Reject an MCP request whose routing headers disagree with its
   body. *Added 2026-07-30 by `competitive-scan`. The MCP `2026-07-28` spec
   mandates this server-side check precisely because a gateway authorizing on
   `Mcp-Name` while the server executes the body is a confused deputy — and
@@ -110,8 +110,9 @@ claim when the work ships or before explicitly handing the item back.
   bypass, it belongs in the adversarial suite, and it is deliberately
   independent of item 128 so it can ship now and fail closed the moment a
   gateway starts sending the headers.* **Depends on 86.**
-- [ ] **136** — The `jsonl_chained` audit backend silently disables four shipped
-  read surfaces. *Pre-existing defect found 2026-07-30 by `auditors`. Opting
+- [x] **136** — The `jsonl_chained` audit backend silently disables four shipped
+  read surfaces.
+  *Pre-existing defect found 2026-07-30 by `auditors`. Opting
   into the tamper-evident posture item 91 shipped currently costs
   `/help/my-recent-denials`, the anomaly report, the change-trend report, and
   the admin UI audit browser. Three readers already unwrap the envelope and are
@@ -119,6 +120,62 @@ claim when the work ships or before explicitly handing the item back.
   gate-only fix would turn it from honestly-disabled into silently-empty. Phase
   0 because it makes the stronger audit configuration worse than the weaker one
   — backwards for the security-review story.* **Depends on 91; blocks 134.**
+- [ ] **137** — Audit read surfaces neither verify nor disclose hash-chain
+  integrity. *Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of
+  item 136: the four surfaces item 136 made able to read the `jsonl_chained`
+  ledger neither recompute the chain hash nor tell a caller which backend
+  actually produced a `source="jsonl"` response. Needs a maintainer decision
+  (disclosure-only vs. real per-request verification) recorded in the
+  PRODUCT_GUIDE Decision Log as the item's own first step — same pattern as
+  items 100–106 — not a reason to defer it.* **Depends on 91, 136.**
+- [x] **138** — Audit read surfaces scan the entire persisted file on every
+  request, unbounded by lines read. *Surfaced 2026-08-01 by the
+  `security-invariant-reviewer` audit of item 136. Pre-existing for the
+  default `jsonl` backend (item 136 only extended the same already-shipped
+  behavior to `jsonl_chained`, which is that item's whole point) — filed
+  separately because fixing it touches the default-backend read path in
+  production today and deserves its own scoping/tests rather than riding in on
+  a bug-fix commit.*
+- [ ] **139** — Bound audit-line size at the source (AST list caps +
+  `audit/sinks.py`'s own unbounded-read defect). *Surfaced 2026-08-01 by the
+  `security-invariant-reviewer` audit of item 138. Needs a maintainer decision
+  on the right AST list-size cap, recorded in the PRODUCT_GUIDE Decision Log
+  as the item's own first step.* **Depends on 138.**
+- [ ] **140** — `_audit_page` pagination can still materialize ~1M dicts per
+  request. *Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of
+  item 138; pre-existing (the old deque had the identical bound), same class
+  of defect item 138 exists to fix. Needs a maintainer decision on the
+  cursor-ceiling/pagination-shape tradeoff, recorded as the item's own first
+  step.* **Depends on 138.**
+- [ ] **141** — Convert audit-reader line caps into practically-tight
+  window-based early exits. *Surfaced 2026-08-01 by the
+  `security-invariant-reviewer` audit of item 138; deliberately not built as
+  part of it. Trades a bounded ordering-tolerance assumption for speed on an
+  already-safe (fail-closed) bound — needs an explicit maintainer decision
+  recorded in the PRODUCT_GUIDE Decision Log before building, per CLAUDE.md's
+  working agreement on judgment calls.* **Depends on 138.**
+- [x] **142** — `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated
+  threats.
+  *Surfaced 2026-08-01/02 by the `claim-reviewer`/
+  `security-invariant-reviewer` audit of item 133; pre-existing, not
+  introduced by that item. Mechanical rename + cross-reference sweep, XS
+  effort — flagged separately rather than folded into item 133's diff since
+  renumbering a threat-model ID other docs may reference is an identifier-
+  stability change, not a drive-by.*
+- [x] **143** — `cryptography` 49.0.0 has an unreviewed CVE
+  (`PYSEC-2026-3552`), blocking `make release-check`'s SBOM/dep-audit step.
+  *Surfaced 2026-08-02 while running the release gate for item 133; unrelated
+  — no dependency file was touched. QueryGate's own code never calls the
+  vulnerable `pkcs7_decrypt_*` functions, so this is likely a justified-
+  allowlist case, but that's the `dep-audit` skill's call. Blocks the release
+  gate for every future item until resolved.*
+- [ ] **144** — `verdict()` emits no query metrics, and `/metrics` is
+  unauthenticated. *Surfaced 2026-08-02 by the `security-invariant-reviewer`
+  re-audit of item 133. verdict() shares execute()'s quota budget but leaves
+  no metrics trail of its own; separately, /metrics being unauthenticated
+  already exposes a policy-vs-schema rejection-reason label for existing
+  traffic (pre-existing, unrelated). Needs a maintainer call on whether to
+  gate /metrics, recorded before building.*
 
 ### Phase 1 — Pilot-readiness (let one design partner deploy & trust it)
 
@@ -414,11 +471,11 @@ position.
   parsing the body, while the query-**shape** decision it structurally cannot
   make stays ours. Annotate `connection` only — mirroring AST internals into
   headers would leak query semantics to intermediaries.* **Depends on 128, 127.**
-- [ ] **132** — Reconcile stale shipped-status claims left behind by items
+- [x] **132** — Reconcile stale shipped-status claims left behind by items
   90–93. *Surfaced by the `auditors` claim review on 2026-07-30. Cheap, and it
   is outward-facing: GO_TO_MARKET.md understates four shipped capabilities, and
   item 93's body still points an implementer at a module deleted in July.*
-- [ ] **133** — Caller-facing, quota-metered verdict endpoint (play P4).
+- [x] **133** — Caller-facing, quota-metered verdict endpoint (play P4).
   *Added 2026-07-30 by `competitive-scan`; scope corrected the same day by
   `auditors`. The decision logic already ships twice (item 31 active-policy,
   item 39 draft-aware and already accepting a `StructuredQuery`) — what is

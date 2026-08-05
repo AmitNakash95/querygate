@@ -27,6 +27,7 @@ is item 36 phase 1's `test_policy_boundaries.py`.
 
 from __future__ import annotations
 
+import base64
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -238,6 +239,15 @@ def _patched_service() -> tuple:
     return execute, explain, execute_many, explain_many
 
 
+def _patched_service_with_verdict() -> tuple:
+    """Like `_patched_service`, plus `verdict` (item 133) — used by the REST
+    boundary tests below, which parametrize over `query/verdict` too since it
+    accepts the same `StructuredQuery` body as `query`/`query/explain`."""
+    execute, explain, execute_many, explain_many = _patched_service()
+    verdict = patch(f"{_SERVICE}.verdict", new_callable=AsyncMock)
+    return execute, explain, execute_many, explain_many, verdict
+
+
 # ---------------------------------------------------------------------------
 # REST boundary
 # ---------------------------------------------------------------------------
@@ -245,12 +255,18 @@ def _patched_service() -> tuple:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case_id", list(_MALFORMED_QUERIES))
-@pytest.mark.parametrize("path", ["query", "query/explain", "query/approve"])
+@pytest.mark.parametrize("path", ["query", "query/explain", "query/approve", "query/verdict"])
 async def test_rest_malformed_query_rejected_cleanly(case_id: str, path: str):
     payload = _MALFORMED_QUERIES[case_id]
     app = create_app(_settings())
-    execute, explain, execute_many, explain_many = _patched_service()
-    with execute as m_execute, explain as m_explain, execute_many, explain_many:
+    execute, explain, execute_many, explain_many, verdict = _patched_service_with_verdict()
+    with (
+        execute as m_execute,
+        explain as m_explain,
+        execute_many,
+        explain_many,
+        verdict as m_verdict,
+    ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
             resp = await client.post(f"/api/v1/demo/{path}", json=payload)
 
@@ -259,6 +275,7 @@ async def test_rest_malformed_query_rejected_cleanly(case_id: str, path: str):
     # Rejected at validation — execution never happened.
     m_execute.assert_not_awaited()
     m_explain.assert_not_awaited()
+    m_verdict.assert_not_awaited()
     # Parseable JSON body, no server-internal leak.
     resp.json()
     _assert_no_internal_leak(resp.text)
@@ -306,12 +323,20 @@ async def test_rest_malformed_batch_envelope_rejected_cleanly(payload: object):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case_id", list(_RAW_MALFORMED_BODIES))
-@pytest.mark.parametrize("path", ["query", "query/explain", "query/batch", "query/approve"])
+@pytest.mark.parametrize(
+    "path", ["query", "query/explain", "query/batch", "query/approve", "query/verdict"]
+)
 async def test_rest_raw_malformed_body_rejected_cleanly(case_id: str, path: str):
     body = _RAW_MALFORMED_BODIES[case_id]
     app = create_app(_settings())
-    execute, explain, execute_many, explain_many = _patched_service()
-    with execute as m_execute, explain as m_explain, execute_many as m_many, explain_many:
+    execute, explain, execute_many, explain_many, verdict = _patched_service_with_verdict()
+    with (
+        execute as m_execute,
+        explain as m_explain,
+        execute_many as m_many,
+        explain_many,
+        verdict as m_verdict,
+    ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
             resp = await client.post(
                 f"/api/v1/demo/{path}",
@@ -325,31 +350,39 @@ async def test_rest_raw_malformed_body_rejected_cleanly(case_id: str, path: str)
     m_execute.assert_not_awaited()
     m_explain.assert_not_awaited()
     m_many.assert_not_awaited()
+    m_verdict.assert_not_awaited()
     _assert_no_internal_leak(resp.text)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field", _RAW_SQL_SMUGGLE_FIELDS)
-@pytest.mark.parametrize("path", ["query", "query/explain", "query/approve"])
+@pytest.mark.parametrize("path", ["query", "query/explain", "query/approve", "query/verdict"])
 async def test_rest_raw_sql_field_is_rejected_not_ignored(field: str, path: str):
     """QG-01: there is no raw-SQL field. A smuggled `sql`/`query`/... field is
     rejected as an unpermitted extra field, never silently dropped, and never
     reaches execution."""
     app = create_app(_settings())
-    execute, explain, execute_many, explain_many = _patched_service()
-    with execute as m_execute, explain as m_explain, execute_many, explain_many:
+    execute, explain, execute_many, explain_many, verdict = _patched_service_with_verdict()
+    with (
+        execute as m_execute,
+        explain as m_explain,
+        execute_many,
+        explain_many,
+        verdict as m_verdict,
+    ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
             resp = await client.post(f"/api/v1/demo/{path}", json=_query_with_extra_field(field))
 
     assert resp.status_code == 422
     m_execute.assert_not_awaited()
     m_explain.assert_not_awaited()
+    m_verdict.assert_not_awaited()
     _assert_no_internal_leak(resp.text)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
-@pytest.mark.parametrize("path", ["query", "query/explain", "query/batch"])
+@pytest.mark.parametrize("path", ["query", "query/explain", "query/batch", "query/verdict"])
 async def test_rest_non_finite_number_is_a_clean_422_not_a_500(literal: str, path: str):
     """Regression for TODO.md item 36 phase 2a: `NaN`/`Infinity` (accepted by
     Python's json parser, not valid JSON) in a numeric field used to make the
@@ -360,8 +393,14 @@ async def test_rest_non_finite_number_is_a_clean_422_not_a_500(literal: str, pat
     inner = f'{{"from":"customers","select":["customers.id"],"limit":{literal}}}'
     body = f'{{"queries":[{inner}]}}' if path == "query/batch" else inner
     app = create_app(_settings())
-    execute, explain, execute_many, explain_many = _patched_service()
-    with execute as m_execute, explain as m_explain, execute_many as m_many, explain_many:
+    execute, explain, execute_many, explain_many, verdict = _patched_service_with_verdict()
+    with (
+        execute as m_execute,
+        explain as m_explain,
+        execute_many as m_many,
+        explain_many,
+        verdict as m_verdict,
+    ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
             resp = await client.post(
                 f"/api/v1/demo/{path}",
@@ -373,6 +412,7 @@ async def test_rest_non_finite_number_is_a_clean_422_not_a_500(literal: str, pat
     m_execute.assert_not_awaited()
     m_explain.assert_not_awaited()
     m_many.assert_not_awaited()
+    m_verdict.assert_not_awaited()
     resp.json()  # body encodes cleanly
     _assert_no_internal_leak(resp.text)
 
@@ -604,6 +644,432 @@ async def test_mcp_oversized_body_is_rejected_as_413_before_execution():
             resp = await client.post("/mcp/", content=raw_request.encode(), headers=_MCP_HEADERS)
 
     assert resp.status_code == 413, f"got {resp.status_code}: {resp.text[:200]!r}"
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------- #
+# MCP routing-header/body agreement (TODO.md item 127 — the MCP `2026-07-28`
+# gateway confused-deputy guard). QueryGate speaks protocol `2025-11-25`, which
+# doesn't define `Mcp-Method`/`Mcp-Name`, so a real client never sends them
+# today and every test above omits them; these tests exercise a caller (or a
+# fronting gateway) that already sends the newer headers.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_mcp_name_header_disagreeing_with_body_is_rejected_as_header_mismatch():
+    """The literal confused-deputy scenario item 127 exists to close: a gateway
+    authorizes on `Mcp-Name` while QueryGate would execute whatever the body
+    says. A header claiming one tool while the body invokes another must be
+    rejected before the tool ever runs, with the spec's `-32020` code."""
+    _reset_mcp_session_manager()
+    arguments = {"connection": "demo", "queries": [{"from": "customers", "select": ["x"]}]}
+    body = _mcp_call("run_structured_queries", arguments)
+    headers = {**_MCP_HEADERS, "Mcp-Method": "tools/call", "Mcp-Name": "list_connections"}
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", json=body, headers=headers)
+
+    assert resp.status_code == 400, f"got {resp.status_code}: {resp.text[:200]!r}"
+    payload = json.loads(resp.text)
+    assert payload["error"]["code"] == -32020, payload
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_method_header_disagreeing_with_body_is_rejected_as_header_mismatch():
+    """Same confused-deputy shape, on the `Mcp-Method` side: a gateway routing
+    on `Mcp-Method: resources/read` while the body is actually a `tools/call`
+    must be rejected, never silently executed as the body says."""
+    _reset_mcp_session_manager()
+    arguments = {"connection": "demo", "queries": [{"from": "customers", "select": ["x"]}]}
+    body = _mcp_call("run_structured_queries", arguments)
+    headers = {**_MCP_HEADERS, "Mcp-Method": "resources/read"}
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", json=body, headers=headers)
+
+    assert resp.status_code == 400, f"got {resp.status_code}: {resp.text[:200]!r}"
+    payload = json.loads(resp.text)
+    assert payload["error"]["code"] == -32020, payload
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_matching_routing_headers_pass_through():
+    """A caller (or gateway) that sends `Mcp-Method`/`Mcp-Name` in honest
+    agreement with the body is unaffected — the guard is a mismatch check,
+    not a requirement to omit these headers."""
+    _reset_mcp_session_manager()
+    arguments = {"connection": "demo", "queries": [{"from": "customers", "select": ["x"]}]}
+    body = _mcp_call("run_structured_queries", arguments)
+    headers = {
+        **_MCP_HEADERS,
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "run_structured_queries",
+    }
+    mock_result = StructuredQueryResult(rows=[], row_count=0, truncated=False, limit=50, offset=0)
+    app = create_app(_mcp_settings())
+    with patch(
+        f"{_SERVICE}.execute_many", new_callable=AsyncMock, return_value=[mock_result]
+    ) as m_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", json=body, headers=headers)
+
+    assert resp.status_code == 200, f"got {resp.status_code}: {resp.text[:300]!r}"
+    m_many.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mcp_base64_sentinel_name_header_is_decoded_before_comparison():
+    """A name outside the header-safe character set must be carried as the
+    spec's `=?base64?...?=` sentinel and decoded before comparison — a plain
+    string comparison against the still-encoded header would falsely reject
+    every legitimately-encoded name."""
+    _reset_mcp_session_manager()
+    arguments = {"connection": "demo", "queries": [{"from": "customers", "select": ["x"]}]}
+    body = _mcp_call("run_structured_queries", arguments)
+    encoded = base64.b64encode(b"run_structured_queries").decode("ascii")
+    headers = {
+        **_MCP_HEADERS,
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": f"=?base64?{encoded}?=",
+    }
+    mock_result = StructuredQueryResult(rows=[], row_count=0, truncated=False, limit=50, offset=0)
+    app = create_app(_mcp_settings())
+    with patch(
+        f"{_SERVICE}.execute_many", new_callable=AsyncMock, return_value=[mock_result]
+    ) as m_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", json=body, headers=headers)
+
+    assert resp.status_code == 200, f"got {resp.status_code}: {resp.text[:300]!r}"
+    m_many.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mcp_malformed_base64_sentinel_header_is_rejected():
+    """A header wearing the sentinel's markers but not actually valid base64
+    must fail closed (a malformed header), not be compared as literal text.
+
+    The body's `params.name` is set to the exact same (still-encoded) string
+    as the header, so a broken implementation that fell back to comparing the
+    raw, undecoded header text against the body would see them as equal and
+    wrongly accept the request — proving this test actually exercises the
+    decode-or-reject path, not a coincidental string mismatch."""
+    _reset_mcp_session_manager()
+    arguments = {"connection": "demo", "queries": [{"from": "customers", "select": ["x"]}]}
+    sentinel_text = "=?base64?not-valid-base64!!?="
+    body = _mcp_call(sentinel_text, arguments)
+    headers = {**_MCP_HEADERS, "Mcp-Name": sentinel_text}
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", json=body, headers=headers)
+
+    assert resp.status_code == 400, f"got {resp.status_code}: {resp.text[:200]!r}"
+    payload = json.loads(resp.text)
+    assert payload["error"]["code"] == -32020, payload
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_routing_header_present_over_unparseable_body_fails_closed():
+    """'Validate-if-present' governs the header side only: once a routing
+    header is present, an unparseable or non-object body must still be
+    rejected, not waved through because 'there's nothing to compare against'
+    — otherwise the bypass is simply sending a body shape that defeats the
+    comparison."""
+    _reset_mcp_session_manager()
+    headers = {**_MCP_HEADERS, "Mcp-Method": "tools/call"}
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post(
+                "/mcp/", content=b'{"jsonrpc": "2.0"', headers=headers
+            )  # truncated JSON
+
+    assert resp.status_code == 400, f"got {resp.status_code}: {resp.text[:200]!r}"
+    payload = json.loads(resp.text)
+    assert payload["error"]["code"] == -32020, payload
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_deeply_nested_body_with_routing_header_hits_depth_guard_not_header_check():
+    """The header-agreement check runs strictly after item 86's depth scan
+    (TODO.md item 127 constraint): a body deep enough to trip the parser's
+    recursion guard must still be rejected as a clean 4xx even when a routing
+    header is also present, and must never reach `json.loads` inside the
+    header check (which would reintroduce the `RecursionError`->500 item 86
+    fixed)."""
+    _reset_mcp_session_manager()
+    deep_query = _deep_query_raw(50000)
+    raw_request = (
+        '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":'
+        '{"name":"run_structured_queries","arguments":'
+        '{"connection":"demo","queries":[' + deep_query + "]}}}"
+    )
+    headers = {**_MCP_HEADERS, "Mcp-Method": "tools/call", "Mcp-Name": "run_structured_queries"}
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", content=raw_request.encode(), headers=headers)
+
+    assert 400 <= resp.status_code < 500, f"got {resp.status_code}"
+    payload = json.loads(resp.text)
+    # Specifically the depth guard's code, not the header check's -32020 — a
+    # weaker "some non-null code" assertion would stay green even if the
+    # header check ran first and happened not to crash on this body.
+    assert payload["error"].get("code") == "MALFORMED_REQUEST", payload
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_header_check_never_500s_on_a_body_json_cannot_fully_parse():
+    """`json.loads` can raise more than `JSONDecodeError`/`UnicodeDecodeError` —
+    e.g. a `ValueError` from CPython's integer-string-conversion guard on an
+    absurdly long numeric literal, well under both the byte and depth caps.
+    Under a present routing header, that must still be a clean 4xx, never an
+    unhandled 500 (the item-86 posture this guard exists to hold everywhere)."""
+    _reset_mcp_session_manager()
+    huge_int = "1" * 5000
+    raw_request = ('{"method":"tools/call","params":{"name":"x"},"x":' + huge_int + "}").encode()
+    headers = {**_MCP_HEADERS, "Mcp-Method": "tools/call"}
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", content=raw_request, headers=headers)
+
+    assert 400 <= resp.status_code < 500, f"got {resp.status_code}: {resp.text[:200]!r}"
+    payload = json.loads(resp.text)
+    assert payload["error"]["code"] == -32020, payload
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header_name", ["Mcp-Method", "Mcp-Name"])
+async def test_mcp_repeated_routing_header_is_rejected_not_first_match(header_name: str):
+    """A header repeated with disagreeing values has no single source of truth
+    for an intermediary to agree with QueryGate about — accepting whichever
+    occurrence happens to match the body (first-match) would let a caller
+    satisfy this guard with one value while a gateway authorizes on a
+    different occurrence of the same header name, reopening the confused-
+    deputy gap this item exists to close."""
+    _reset_mcp_session_manager()
+    arguments = {"connection": "demo", "queries": [{"from": "customers", "select": ["x"]}]}
+    body = _mcp_call("run_structured_queries", arguments)
+    matching_value = "tools/call" if header_name == "Mcp-Method" else "run_structured_queries"
+    headers = [(k, v) for k, v in _MCP_HEADERS.items()]
+    headers.append((header_name, matching_value))
+    headers.append((header_name, "something-else"))
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", json=body, headers=headers)
+
+    assert resp.status_code == 400, f"got {resp.status_code}: {resp.text[:200]!r}"
+    payload = json.loads(resp.text)
+    assert payload["error"]["code"] == -32020, payload
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_name_header_matches_params_uri_for_resource_style_body():
+    """The spec mirrors `Mcp-Name` from `params.name` **or** `params.uri`
+    depending on the request kind (`resources/read` uses `uri`). A body
+    shaped like a resource read must be checked against `uri`, not
+    unconditionally against a (missing) `name`."""
+    _reset_mcp_session_manager()
+    raw_request = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/read",
+            "params": {"uri": "file:///projects/config.json"},
+        }
+    ).encode()
+    headers = {
+        **_MCP_HEADERS,
+        "Mcp-Method": "resources/read",
+        "Mcp-Name": "file:///projects/config.json",
+    }
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", content=raw_request, headers=headers)
+
+    # Must not be rejected as a header mismatch (-32020); whatever status the
+    # (unregistered) resources/read method gets downstream is out of scope.
+    if resp.status_code == 400:
+        payload = json.loads(resp.text)
+        assert payload["error"]["code"] != -32020, payload
+    m_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_name_header_disagreeing_with_params_uri_is_rejected():
+    """The mirror of the pass-through case above: a resource-style body whose
+    `Mcp-Name` disagrees with `params.uri` must be rejected, not silently
+    compared against a `name` field the body doesn't carry (which would
+    always report `None != None` -&gt; false agreement is impossible, but would
+    also never catch a real `uri` mismatch)."""
+    _reset_mcp_session_manager()
+    raw_request = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/read",
+            "params": {"uri": "file:///projects/secret.json"},
+        }
+    ).encode()
+    headers = {
+        **_MCP_HEADERS,
+        "Mcp-Method": "resources/read",
+        "Mcp-Name": "file:///projects/public.json",
+    }
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", content=raw_request, headers=headers)
+
+    assert resp.status_code == 400, f"got {resp.status_code}: {resp.text[:200]!r}"
+    payload = json.loads(resp.text)
+    assert payload["error"]["code"] == -32020, payload
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_name_header_rejects_a_body_carrying_both_name_and_uri():
+    """A body carrying both `params.name` and `params.uri` is ambiguous about
+    which one `Mcp-Name` is meant to agree with — reject rather than
+    guess, so a header can't be validated against a decoy field while the
+    transport executes on the other one."""
+    _reset_mcp_session_manager()
+    raw_request = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "run_structured_queries", "uri": "not-really-a-tool-call"},
+        }
+    ).encode()
+    headers = {**_MCP_HEADERS, "Mcp-Name": "run_structured_queries"}
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", content=raw_request, headers=headers)
+
+    assert resp.status_code == 400, f"got {resp.status_code}: {resp.text[:200]!r}"
+    payload = json.loads(resp.text)
+    assert payload["error"]["code"] == -32020, payload
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_routing_header_present_over_non_object_json_body_fails_closed():
+    """A syntactically valid JSON body that isn't a single JSON-RPC object
+    (e.g. a bare array) must still fail closed under a present routing
+    header, not be waved through because there's nothing dict-shaped to
+    compare against."""
+    _reset_mcp_session_manager()
+    headers = {**_MCP_HEADERS, "Mcp-Method": "tools/call"}
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", content=b"[1,2,3]", headers=headers)
+
+    assert resp.status_code == 400, f"got {resp.status_code}: {resp.text[:200]!r}"
+    payload = json.loads(resp.text)
+    assert payload["error"]["code"] == -32020, payload
     _assert_no_internal_leak(resp.text)
     m_many.assert_not_awaited()
 

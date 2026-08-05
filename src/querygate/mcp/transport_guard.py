@@ -11,9 +11,26 @@ surface matches REST's "malformed input is a client error, never a 5xx"
 posture. Both thresholds are configurable with generous defaults
 (``AppConfig.mcp_max_request_bytes`` / ``mcp_max_request_depth``) so legitimate
 large batches are unaffected.
+
+TODO.md item 127. The MCP ``2026-07-28`` Streamable HTTP spec mirrors
+``method``/``params.name``/``params.uri`` into ``Mcp-Method``/``Mcp-Name`` HTTP
+headers so intermediaries (load balancers, gateways) can route on them without
+parsing the body, and mandates that a server processing the body reject any
+request where a present header disagrees with the body (``-32020
+HeaderMismatch``) — otherwise a gateway authorizing on the header while
+QueryGate executes the body is a confused deputy. QueryGate currently speaks
+protocol revision ``2025-11-25`` (item 128), which does not define these
+headers, so this validates **if present**, not required — shippable now,
+independent of the protocol upgrade, and it fails closed the moment a fronting
+gateway starts sending them.
 """
 
 from __future__ import annotations
+
+import base64
+import binascii
+import json
+from typing import Iterable
 
 from starlette import status
 from starlette.responses import JSONResponse
@@ -27,6 +44,12 @@ _OPENERS = frozenset((0x7B, 0x5B))  # { [
 _CLOSERS = frozenset((0x7D, 0x5D))  # } ]
 _QUOTE = 0x22  # "
 _BACKSLASH = 0x5C  # \
+
+_MCP_METHOD_HEADER = b"mcp-method"
+_MCP_NAME_HEADER = b"mcp-name"
+_BASE64_SENTINEL_PREFIX = "=?base64?"
+_BASE64_SENTINEL_SUFFIX = "?="
+_HEADER_MISMATCH_CODE = -32020
 
 
 def _structural_depth_exceeds(raw: bytes, max_depth: int) -> bool:
@@ -62,6 +85,104 @@ def _structural_depth_exceeds(raw: bytes, max_depth: int) -> bool:
             if depth > 0:
                 depth -= 1
     return False
+
+
+def _decode_sentinel_value(raw: str) -> str | None:
+    """Decode the spec's ``=?base64?...?=`` header-value sentinel.
+
+    Returns the decoded value, the original value unchanged if it isn't the
+    sentinel shape, or ``None`` if it has the sentinel's markers but the
+    payload doesn't actually decode as base64/UTF-8 — a malformed header
+    ("contains invalid characters" in the spec's validation-failure list),
+    which must fail closed rather than compare against the raw sentinel text.
+    """
+    if raw.startswith(_BASE64_SENTINEL_PREFIX) and raw.endswith(_BASE64_SENTINEL_SUFFIX):
+        payload = raw[len(_BASE64_SENTINEL_PREFIX) : -len(_BASE64_SENTINEL_SUFFIX)]
+        try:
+            return base64.b64decode(payload, validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            return None
+    return raw
+
+
+def _find_header_values(headers: Iterable[tuple[bytes, bytes]], name: bytes) -> list[str]:
+    return [
+        value.decode("latin-1") for header_name, value in headers if header_name.lower() == name
+    ]
+
+
+def _clip(value: object, limit: int = 200) -> str:
+    """Bound an attacker-controlled value before it's echoed into a message."""
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit] + "...'"
+
+
+def _header_body_mismatch(headers: Iterable[tuple[bytes, bytes]], raw: bytes) -> str | None:
+    """Return a HeaderMismatch message if a present routing header disagrees
+    with the parsed body, else ``None``.
+
+    Deliberately validate-if-present (TODO.md item 127): QueryGate does not
+    yet require ``Mcp-Method``/``Mcp-Name`` (they're undefined pre-2026-07-28,
+    item 128), so their absence is not itself a violation. But once either is
+    present, the body must be parseable and must agree — a hostile or
+    malformed body under a present header fails closed rather than being
+    waved through, per the spec's own validation-failure list.
+    """
+    method_values = _find_header_values(headers, _MCP_METHOD_HEADER)
+    name_values = _find_header_values(headers, _MCP_NAME_HEADER)
+    if not method_values and not name_values:
+        return None
+
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        # ValueError covers json.JSONDecodeError plus the stdlib int/str
+        # conversion guard on an absurdly long numeric literal; RecursionError
+        # covers a body deep enough to defeat the parser if an operator ever
+        # raises mcp_max_request_depth above the interpreter's own limit.
+        return "Header mismatch: request body is not valid JSON."
+    if not isinstance(body, dict):
+        return "Header mismatch: request body is not a single JSON-RPC request object."
+
+    if method_values:
+        if len(method_values) > 1:
+            return "Header mismatch: Mcp-Method header is repeated."
+        decoded = _decode_sentinel_value(method_values[0])
+        if decoded is None:
+            return "Header mismatch: Mcp-Method header value is malformed."
+        if decoded != body.get("method"):
+            return (
+                f"Header mismatch: Mcp-Method header value {_clip(decoded)} does not "
+                f"match body value {_clip(body.get('method'))}"
+            )
+
+    if name_values:
+        if len(name_values) > 1:
+            return "Header mismatch: Mcp-Name header is repeated."
+        decoded = _decode_sentinel_value(name_values[0])
+        if decoded is None:
+            return "Header mismatch: Mcp-Name header value is malformed."
+        params = body.get("params")
+        method = body.get("method")
+        if isinstance(params, dict):
+            has_name, has_uri = "name" in params, "uri" in params
+            if has_name and has_uri:
+                # A body carrying both mirrored fields is ambiguous about
+                # which one the header is meant to agree with — reject
+                # rather than guess (TODO.md item 127 constraint 2's
+                # fail-closed posture, extended to this shape).
+                return "Header mismatch: body carries both params.name and params.uri."
+            prefer_uri = isinstance(method, str) and method.startswith("resources/")
+            body_name = params.get("uri") if prefer_uri and has_uri else params.get("name")
+        else:
+            body_name = None
+        if decoded != body_name:
+            return (
+                f"Header mismatch: Mcp-Name header value {_clip(decoded)} does not "
+                f"match body value {_clip(body_name)}"
+            )
+
+    return None
 
 
 class MCPRequestGuardMiddleware:
@@ -143,6 +264,22 @@ class MCPRequestGuardMiddleware:
             )
             return
 
+        # Item 127: only after the depth scan has cleared the body as safe to
+        # parse — parsing an attacker-deep body here would reintroduce the
+        # RecursionError the scan above exists to prevent.
+        mismatch = _header_body_mismatch(scope.get("headers") or (), buffered)
+        if mismatch is not None:
+            await self._reject(
+                scope,
+                send,
+                status.HTTP_400_BAD_REQUEST,
+                _HEADER_MISMATCH_CODE,
+                mismatch,
+                path=scope.get("path"),
+                log_reason="HEADER_MISMATCH",
+            )
+            return
+
         await self._app(scope, _replay(buffered, receive), send)
 
     async def _reject(
@@ -150,12 +287,13 @@ class MCPRequestGuardMiddleware:
         scope: Scope,
         send: Send,
         status_code: int,
-        code: str,
+        code: int | str,
         message: str,
         *,
         path: object,
+        log_reason: str | None = None,
     ) -> None:
-        get_logger().warning("mcp.transport.rejected", reason=code, path=path)
+        get_logger().warning("mcp.transport.rejected", reason=log_reason or code, path=path)
         response = JSONResponse(
             content={"error": {"code": code, "message": message}},
             status_code=status_code,

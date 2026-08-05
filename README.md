@@ -414,7 +414,64 @@ has silently stopped evaluating queries on that connection.
 `querygate_cost_estimation_attempts_total{connection}` is the matching
 denominator for computing a fail-open rate.
 
-### In-query human-in-the-loop approval (phase 1)
+### Caller-facing verdict — would this be allowed?
+
+`POST .../query/verdict` (REST) and `run_structured_queries(mode="verdict")`
+(MCP) answer one question — *"would this `StructuredQuery` be allowed for me,
+right now?"* — without executing it and without the debug-level detail
+`mode="explain"` gives. It's built for a low-trust caller that needs a yes/no,
+not a schema tour: an MCP gateway deciding whether to forward a request, a
+proxy, or a CI check validating a query before it ships (TODO.md item 133).
+
+```bash
+curl -X POST $HOST/api/v1/demo/query/verdict \
+  -H "Authorization: Bearer $KEY" \
+  -d '{"from": "customers", "select": ["customers.id"], "limit": 10}'
+# {"allowed": true, "reason": null, "message": null, "plan": null}
+```
+
+A denial always reports the same generic `reason: "not-available-to-you"` —
+it never distinguishes "on your policy's deny list" from "doesn't exist in
+the schema" from "references a join connection you can't see". Policy is
+checked before schema on every request, so returning either failure's real
+message (or even just which one fired) would let a caller enumerate
+identifiers and reconstruct both the schema and the policy boundary one query
+at a time, the same discovery-oracle class `docs/THREAT_MODEL.md` QG-19/QG-24
+already close on the admin simulation and "my access" surfaces.
+`mode="explain"` is deliberately left as-is (it still echoes the real
+validation message) — it's a debugging tool for a caller who already has
+identifier-level access, a different posture than this endpoint's "may I"
+question. The response *bodies* are identical across every denial cause;
+response *timing* is not — schema validation does strictly more work than
+policy validation, so a sophisticated caller could in principle time the
+difference. Closing that would need a constant-time response floor, which
+this endpoint doesn't implement.
+
+A verdict answers policy-and-schema shape only, up through the same
+`_validate_and_compile` seam `execute`/`explain` share — it does not evaluate
+the approval gate (item 92) or the cost-estimation gate. A query reported
+`allowed: true` can still be paused for human approval, or refused by a
+cost-estimate cap, when actually executed.
+
+The compiled plan (SQL + touched tables) is omitted by default for the same
+reason — set `verdict_include_plan: true` on a connection's policy to opt in:
+
+```yaml
+policy:
+  verdict_include_plan: true   # off by default — the plan itself is a discovery channel
+```
+
+Unlike `explain` (deliberately free — a pure, always-cheap compile preview),
+a verdict call still reflects the schema (a cold-cache reflection is a real DB
+round trip) and is audited unconditionally — never silently skipped, the same
+posture `execute` takes (the audit event just omits execution-only fields
+like row/byte counts, since no rows are ever returned). It also consumes one
+unit of the caller's query quota **when the connection's policy configures
+one** (`max_requests_per_window`/`max_response_bytes_per_window`, both off by
+default, same as every other read) — under the default policy it is not
+metered, the same as `execute` would be.
+
+### In-query human-in-the-loop approval
 
 Some reads shouldn't run unattended just because they pass policy — a query
 whose pre-execution estimate is very large is the exfiltration leg of the
@@ -461,10 +518,10 @@ curl -X POST -H "Authorization: Bearer $CALLER_KEY" \
 The token is a stateless HMAC (set `APPROVAL_TOKEN_HMAC_KEY`) bound to the exact
 query fingerprint and a short expiry — it can't be forged, can't be replayed
 against a *different* query, and can't be replayed indefinitely; any
-missing-key/forged/expired/mismatched token fails closed. The one remaining
-piece is an interactive **MCP elicitation** approval channel (approve inside one
-MCP session instead of the REST round-trip). A deployment that sets no approval
-thresholds or sensitivities is completely unaffected.
+missing-key/forged/expired/mismatched token fails closed. An interactive **MCP
+elicitation** approval channel also ships — an MCP caller can approve inside the
+same session (`Context.elicit`) instead of the REST round-trip. A deployment
+that sets no approval thresholds or sensitivities is completely unaffected.
 
 ### Governed writes — preview, execute, approve, diff
 
@@ -827,7 +884,8 @@ The control plane provides:
   and only shown when the proposal's status makes that action legal, a
   publish-conflict preview, and connection-scoped catalog version rollback;
 - filtered, newest-first browsing of persisted JSONL query/config/catalog/
-  connection-probe audit events (when `AUDIT_SINK_BACKEND=jsonl`);
+  connection-probe audit events (when `AUDIT_SINK_BACKEND=jsonl` or
+  `jsonl_chained`);
 - a connection health workspace — the same credential-free per-connection
   status the admin API above returns, plus a "Test now" button per
   connection (gated on the separate `admin:connections:test` scope) that
@@ -863,11 +921,15 @@ browsing; those stay `/admin/`-only. Served same-origin with the same
 restrictive Content Security Policy, no-referrer/nosniff headers, and
 no-store HTML as `/admin/`.
 
-Recent-personal-denial history (e.g. "here's what was rejected for you this
-week") is intentionally not included in this first pass — there is no
-principal-scoped audit-read path today (existing audit browsing is
-`admin:config:read`-gated and global), and building one safely is
-independent scope, tracked as TODO item 45 phase 2.
+Recent-personal-denial history ("here's what was rejected for you this week")
+is a second, separate self-service endpoint: `GET /api/v1/help/my-recent-denials`
+(also authentication-only, no admin scope). It answers *why* your own recent
+queries were rejected — a stable reason label (`policy`, `schema`, `quota`,
+`cost_estimate`, ...) plus a human-readable explanation per denial, filtered to
+the caller's own `principal_id` before any response is built, over a
+configurable lookback window. Never another principal's activity, a query
+value, or a table/column identifier beyond what the caller's own request
+already referenced (TODO item 45 phase 2).
 
 ### Admin connection-status API
 

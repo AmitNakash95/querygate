@@ -76,7 +76,7 @@ order-of-magnitude, not commitments.
 | 42 | ✅ Four-eyes config approval and separation of duties | XL | 10, 23, 25, 31 |
 | 43 | ✅ Admin connection-operations and health workspace (phase 1: admin connection-status API; phase 2a: "test now" probe; phase 2b: browser workspace) | L | 7, 12, 31 |
 | 44 | ✅ Admin observability and rejection-trend dashboard (phase 1: admin-scoped aggregated overview API + read-only browser cards panel; phase 2: time-window charts, config/catalog-change trend, external metrics backend not started) | L | 12, 23, 31, 35 |
-| 45 | ✅ Dedicated non-admin "My access" portal (phase 1: identity, guardrails, mandatory-filter readiness, schema browser; phase 2: personal denial history not started) | M | 22, 31, 33 |
+| 45 | ✅ Dedicated non-admin "My access" portal (phase 1: identity, guardrails, mandatory-filter readiness, schema browser; phase 2: personal denial history via `GET /help/my-recent-denials`) | M | 22, 31, 33 |
 | 46 | ✅ Validated policy templates and safe-start presets | M | 17, 25, 31, 39 |
 | 47 | ✅ Safe draft recovery plus config export/import UX (phase 1: change-set export/import + policy-only local recovery; phase 2: server-side encrypted draft store not started) | M | 13, 25, 31 |
 | 48 | ✅ Pre-defined, admin-approved query templates ("Toolbox"-style curated tools) (phase 1: file-configured invocable templates + REST/MCP; phase 2: governed authoring via the config-versioning plane) | L | 6, 22, 25, 32B |
@@ -124,7 +124,7 @@ order-of-magnitude, not commitments.
 | 90 | ✅ Delegated agent identity (on-behalf-of) into policy + dual-identity audit | M | 8, 10, 23 |
 | 91 | ✅ Tamper-evident hash-chained audit ledger + per-query compliance receipts | M | 23 |
 | 92 | ✅ In-query human-in-the-loop approval for sensitive/expensive reads (MCP elicitation step-up) | L | 26, 90, 91 |
-| 93 | ✅ Governed Writes — structured, bounded, previewable, governed agent mutations (governance tier shipped: preview/diff, gated execution, approval, batch, upserts; reversibility/undo REMOVED 2026-07-23; `release-smoke` write round-trip open) | XL | 25, 48, 90, 91 |
+| 93 | ✅ Governed Writes — structured, bounded, previewable, governed agent mutations (governance tier shipped: preview/diff, gated execution, approval, batch, upserts; reversibility/undo REMOVED 2026-07-23; `release-smoke` write round-trip shipped) | XL | 25, 48, 90, 91 |
 | 94 | ✅ Verify/enable prepared-statement plan reuse for template execution | S | 48 |
 | 95 | ✅ Discoverable scope catalog + recommended role bundles for IdP integration | S | 10, 90 |
 | 96 | ✅ Unify the AST reference-walk into a single canonical visitor | M | — |
@@ -157,16 +157,24 @@ order-of-magnitude, not commitments.
 | 124 | ✅ Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
 | 125 | ✅ ★ A window function as an `Expression` operand (bar row 15 → 16/16) | XL | 100, 101 |
 | 126 | No per-caller rate limit on `GET /help/my-recent-denials` | S | 45 |
-| 127 | Reject an MCP request whose routing headers disagree with its body | S–M | 86 |
+| 127 | ✅ Reject an MCP request whose routing headers disagree with its body | S–M | 86 |
 | 128 | Conform to the final MCP `2026-07-28` protocol revision | L | 90, 92, 93 |
 | 129 | Never advertise a principal-varying MCP result as shared-cacheable | S | 128 |
 | 130 | Annotate `connection` with `x-mcp-header` for gateway-native authorization | S | 127, 128 |
 | 131 | Publish the StructuredQuery AST as a namespaced MCP extension | M | 128 |
-| 132 | Reconcile stale shipped-status claims left behind by items 90–93 | S | — |
-| 133 | Caller-facing quota-metered verdict endpoint (play P4) — reuses 31/39's decision logic | M–L | 26, 31, 39, 45, 121 |
+| 132 | ✅ Reconcile stale shipped-status claims left behind by items 90–93 | S | — |
+| 133 | ✅ Caller-facing quota-metered verdict endpoint (play P4) — reuses 31/39's decision logic | M–L | 26, 31, 39, 45, 121 |
 | 134 | Compliance-grade (WORM) audit retention + managed search | L | 91, 136 |
 | 135 | Automatic (TTL/lease-driven) credential re-resolution, without an operator reload | M | 13 |
-| 136 | `jsonl_chained` audit backend silently disables four shipped read surfaces | S–M | 91 |
+| 136 | ✅ `jsonl_chained` audit backend silently disables four shipped read surfaces | S–M | 91 |
+| 137 | Audit read surfaces neither verify nor disclose hash-chain integrity | S–M | 91, 136 |
+| 138 | ✅ Audit read surfaces scan the entire persisted file on every request, unbounded by lines read | S–M | — |
+| 139 | Bound audit-line size at the source (AST list caps + audit/sinks.py's own unbounded-read defect) | M | 138 |
+| 140 | `_audit_page` pagination can still materialize ~1M dicts per request | S–M | 138 |
+| 141 | Convert audit-reader line caps into practically-tight window-based early exits | S | 138 |
+| 142 | ✅ `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats | XS | — |
+| 143 | ✅ `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step | XS–S | — |
+| 144 | `verdict()` emits no query metrics, and `/metrics` is unauthenticated | S | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -786,7 +794,8 @@ Shipped: a zero-downtime Helm chart (`updateStrategy.maxUnavailable: 0` +
 multi-zone overlay (autoscaling floor 3, PDB, zone/host topology spread,
 Redis-shared concurrency), an optional RWX config-governance PVC, and
 `deploy/HA_DR.md` — the shared-state correctness matrix (concurrency shared;
-quota still per-replica until item 50 phase 2; config/audit per-replica unless
+quota per-replica unless the Redis quota backend is configured (item 50 phase
+2 shipped the mechanism, opt-in); config/audit per-replica unless
 shared), the multi-replica zero-downtime config-reload contract, multi-zone/
 multi-region topology, and a backup/restore + RTO/RPO DR procedure. Chart HA
 invariants are asserted against `helm template` in
@@ -1198,10 +1207,12 @@ WHERE, in-txn cap, atomic — single or all-or-nothing batch), *previewed* (dry-
 + bounded masking-aware old→new diff), *approved* (REST token + MCP elicitation),
 *attributed* (dual-identity, tamper-evident, redaction-safe audit). REST + MCP surfaces,
 clean typed errors, an adversarial security suite, and proven on **SQLite +
-real Postgres + real MSSQL + the shipped image + a concurrency load gate**. Only
-two **reasoned deferrals** remain (not "not started" — deliberate, recorded):
-upsert-undo (per-row insert-or-update is ambiguous to reverse) and
-approval-binds-to-diff-hash (over-engineering vs the current fingerprint binding).
+real Postgres + real MSSQL + the shipped image + a concurrency load gate**. One
+**reasoned deferral** remains (not "not started" — deliberate, recorded):
+approval-binds-to-diff-hash (over-engineering vs the current fingerprint
+binding). (An earlier "upsert-undo" deferral is moot: reversibility/undo was
+removed entirely on 2026-07-23 — see below — so there is no undo mechanism
+left for upserts to be a special case of.)
 
 **Phase 2a shipped (gated write EXECUTION, REST; maintainer-approved, Decision
 Log recorded).** `execution/write_execution.py`'s `WriteExecutionService.execute()`
@@ -1360,16 +1371,15 @@ reports the right count AND **changes nothing** — before == after — plus
 deny-by-default). The `IN (subquery)` (item 97) is rejected in a write WHERE for
 phase 1.
 
-**Phase 2b–3 (not started):** phase 2a above shipped the core gated *execution*
-(single transaction, in-txn row cap, item-92 approval on the row *count*,
-dual-identity audit [90], tamper-evident audit [91]). Still open — **phase 2b:**
-the transactional row-level old→new *diff* preview (the current preview reports
-the affected *count* + parameterized SQL; the killer per-row diff runs the DML in
-a rolled-back txn) and approval on that diff, the MCP `run_structured_writes`
-execute tool, the adversarial write security suite, the `release-smoke` write
-round-trip, and the write concurrency load gate; **phase 3:** reversibility/
-compensation + upserts + batch + MSSQL parity + scalar-function/CASE SET-values +
-NOT NULL/FK/unique pre-validation.
+**Phase 2b–3 planning note — superseded, kept for history only.** This
+paragraph originally scoped phase 2b/3 as "not started." Every item it listed
+has since shipped (row-level diff preview + approval, the MCP
+`run_structured_writes` execute tool, the adversarial write security suite,
+the `release-smoke` write round-trip, the write concurrency load gate,
+upserts, atomic batch, MSSQL parity, constraint pre-validation) or was
+deliberately removed (reversibility/compensation — see the 2026-07-23 removal
+note above). See "Comprehensively shipped" at the top of this item and the
+phase 2a/2b sections above for what actually shipped.
 
 **Effort: XL (cleanly phaseable; Phase 1 is L and carries zero write risk).
 Priority: flagship. Status: decision-gated (crosses read-only). Depends on:
@@ -1470,13 +1480,17 @@ spine. No second enforcement point is invented.
    "requires approval" rejection carrying an approval token bound to the exact
    compiled write + diff hash. Approval, approver identity, and decision are
    audited.
-9. **`execution/compensation.py` — bounded compensation/undo.** Before a gated
+9. **`execution/compensation.py` — bounded compensation/undo — REMOVED
+   2026-07-23, do not point an implementer here.** This was originally planned
+   (and briefly shipped, see the Phase 3a/3b history below) as: before a gated
    mutation commits, capture a redaction-aware **pre-image snapshot** of the
    affected rows (bounded by policy rows/bytes/TTL) and emit a governed rollback
-   operation that re-applies the pre-image under the same pipeline. **Honest
-   limits, documented:** bounded reversibility only — cannot unwind cascading
-   triggers/FK actions or side-effects, and downstream consumers may already
-   have read the changed value. Sell bounded rollback, never a time machine.
+   operation that re-applies the pre-image under the same pipeline. The module,
+   `execution/redis_compensation.py`, `POST /write/undo`, and the MCP
+   `undo_structured_write` tool were all deleted in the 2026-07-23 reversibility
+   removal (Decision Log, `docs/PRODUCT_GUIDE.md`) — undo forced a second copy
+   of real row values outside the customer's DB, against the data-never-leaves
+   North Star. There is no file at this path today.
 10. **Transaction, concurrency, session guardrails** — writes run through
     `execution/concurrency.py` (a dedicated write limiter; a write must not be
     starved by or starve reads) and `connections/engine.py` with
@@ -1906,82 +1920,17 @@ no-REST-rate-limiting posture is acceptable for this class of bounded local
 file read and close this as will-not-build. Either resolves it; doing neither
 leaves the residual undocumented.
 
-### 127. Reject an MCP request whose routing headers disagree with its body (gateway confused-deputy)
+### 127. Reject an MCP request whose routing headers disagree with its body (gateway confused-deputy) ✅ DONE
 
-**Surfaced 2026-07-30 by `competitive-scan`.** The MCP `2026-07-28`
-specification (final — see item 128) mirrors `method` and `params.name` into
-required `Mcp-Method` / `Mcp-Name` HTTP headers so that intermediaries
-"(load balancers, gateways, observability tooling) can route and inspect
-requests without parsing the body." It therefore also mandates the matching
-server-side defense:
-
-> Servers that process the request body **MUST** reject requests where the
-> values specified in the headers do not match the corresponding values in the
-> request body. This prevents potential security vulnerabilities when different
-> components in the network rely on different sources of truth (e.g., a load
-> balancer routing on the header value while the MCP server executes based on
-> the body value).
-> — [Streamable HTTP § Server Validation](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
-
-**Why it matters more for QueryGate than for a typical MCP server.** The P4
-leverage move (`docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) is to sit
-*behind* MCP gateways and proxies as the enforcement point they can't be. That
-is exactly the deployment where this mismatch is a real confused-deputy: a
-fronting gateway authorizes `Mcp-Name: list_tables` for a low-privilege
-identity, while the body it forwards calls `run_structured_writes`. The
-gateway's tool-level authorization is then silently void, and QueryGate — the
-component that *did* see the body — executed the privileged operation anyway.
-Every deployment story we sell (sole-credential holder, enforcement point
-behind the front door) assumes the caller cannot lie to the layer in front of
-us about which tool it is invoking.
-
-**Current state (verified 2026-07-30, prospective not live):** `grep` across
-`src/` and `tests/` finds no handling of `Mcp-Method`, `Mcp-Name`,
-`MCP-Protocol-Version`, or `HeaderMismatch` anywhere. QueryGate speaks
-`2025-11-25` (item 128), which does not define these headers, so there is **no
-live vulnerability today** — a conforming gateway will not yet be relying on
-them. The exposure begins the moment either side moves: a gateway that trusts
-the headers, or our own upgrade under item 128.
-
-**What to build.** Extend `mcp/transport_guard.py` — the ASGI wrapper already
-sitting *outside* the MCP mount that pre-scans raw body bytes for item 86's
-size/depth guards, so it is already the one place that sees headers and body
-together before the transport parses either. Validate that, when present,
-`Mcp-Method` equals the body `method` and `Mcp-Name` equals `params.name` /
-`params.uri` (decoding the `=?base64?…?=` sentinel first, per the spec's Value
-Encoding rules), and reject a mismatch with HTTP `400` and JSON-RPC error code
-`-32020` (`HeaderMismatch`). Validate-if-present, not require: that makes this
-shippable **now**, independent of item 128, and it fails closed the instant a
-gateway starts sending the headers. Add the mismatch case to the adversarial
-security suite (`adversarial-probe`), since this is a boundary-bypass vector,
-not a conformance nicety.
-
-**Four implementation constraints — pin these down before writing code:**
-
-1. **Run the check strictly *after* item 86's depth scan.** The guard exists
-   precisely so a hostile body is never handed to `json.loads`; this item needs
-   to parse `method`/`params.name`. Parsing before `_structural_depth_exceeds`
-   returns False reintroduces the `RecursionError`→500 that item 86 fixed, via
-   the item extending it.
-2. **Fail closed on an unparseable body.** "Validate-if-present" governs the
-   *header* side only. Header present + body unparseable or not a single
-   JSON-RPC request object must **reject**, not skip — otherwise the bypass is
-   simply "send a shape that defeats the parser."
-3. **Decide the error envelope explicitly.** `_reject` currently emits a
-   REST-shaped `{"error": {"code", "message"}}` body by deliberate design
-   ("malformed input is a client error, never a 5xx"). Recommend keeping that
-   shape and carrying `-32020` in `code`, rather than emitting a second
-   envelope from the same middleware.
-4. **Do not validate that `Mcp-Name` names a *registered* tool here.** This
-   guard runs *outside* `MCPAuthMiddleware`, so that check would turn it into an
-   unauthenticated tool-enumeration oracle. Agreement with the body is the whole
-   job.
-
-**Cost note:** the guard is pre-auth, so this adds an unauthenticated
-`json.loads` of up to `mcp_max_request_bytes` (default 4 MiB) per request, where
-today's pre-auth work is a short-circuiting byte scan. Bound it deliberately.
-
-**Effort:** S–M. **Depends on:** 86. **Does not depend on 128** — deliberately.
+`mcp/transport_guard.py`'s `MCPRequestGuardMiddleware` now rejects a request
+whose present `Mcp-Method`/`Mcp-Name` header disagrees with the body's
+`method`/`params.name`/`params.uri` (HTTP 400 + JSON-RPC `-32020
+HeaderMismatch`), closing the confused-deputy gap where a fronting gateway
+authorizes on the header while QueryGate executes the body — checked strictly
+after item 86's depth scan, with the spec's Base64 sentinel encoding decoded
+before comparison. Validate-if-present, not required, since QueryGate speaks
+protocol `2025-11-25` (item 128) which doesn't yet define these headers.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 127).
 
 ### 128. Conform to the final MCP `2026-07-28` protocol revision
 
@@ -2215,184 +2164,23 @@ are draft-only by charter.
 
 **Effort:** M (internal half). **Depends on:** 128.
 
-### 132. Reconcile stale shipped-status claims left behind by items 90–93
+### 132. Reconcile stale shipped-status claims left behind by items 90–93 ✅ DONE
 
-**Surfaced 2026-07-30 by the `auditors` claim review of the `competitive-scan`
-pass; pre-existing drift, not caused by that pass.** Items 90, 91, 92, and 93
-all shipped, but several surfaces still describe them as open or partial. Each
-was verified against the code:
+Fixed the drift across `GO_TO_MARKET.md`, `README.md`, and `TODO.md` itself
+left behind by items 90–93 (and, surfaced along the way, items 45/50/56/58)
+describing shipped capability as open or partial; a post-build claim-reviewer
+audit caught three further stale spots in the same pass.
 
-- **`docs/business/GO_TO_MARKET.md` "Product claims: current versus pending"** —
-  the "Safe to claim now" list omits delegated identity (90), the tamper-evident
-  ledger + receipts (91), in-query approval (92), and governed writes (93), all
-  shipped. That file's own header commits it to staying "aligned with the
-  technical roadmap in `TODO.md`", and it is the **sole** outlier:
-  `LANDING_MARKET_POSITIONING_RESEARCH_2026-07-26.md` and `landing/security.html`
-  already reflect all four. Note its "Do not claim yet → compliance-grade/WORM
-  audit retention" line is still **correct** (item 91 is not WORM) — do not
-  over-correct that one. A `pitch-sync` job.
-- **`README.md`** — the heading "In-query human-in-the-loop approval (phase 1)"
-  keeps a stale phase suffix while the body directly beneath documents the
-  phase-2 behavior (`approval_sensitivities`, two triggers).
-- **Item 93's own worklist surface** — the quick-scan row says the
-  `release-smoke` write round-trip is open, but `scripts/release_smoke.sh`
-  already runs `write/preview` → `write/execute` (insert) → `write/execute`
-  (delete) against real Postgres in the built image and prints "container
-  executed a governed write". The body also still carries a "Phase 2b–3 (not
-  started)" paragraph and an eviction action item for
-  `execution/compensation.py` — **a file deleted on 2026-07-23** with the
-  write-undo feature. This is the largest stale surface in the worklist.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 132).
 
-**Why it matters:** these are claim-accuracy defects, and the GO_TO_MARKET one
-is outward-facing — understating shipped capability costs real credibility in
-exactly the security-review conversation the North Star's success metric turns
-on. The item-93 residue is worse in kind: an action item pointing at a deleted
-module will send a future agent hunting for code that does not exist.
+### 133. The verdict endpoint — expose the decision without the execution (play P4) ✅ DONE
 
-**Effort:** S. **Depends on:** — (pure reconciliation; verify each against the
-code before editing, since some sub-claims like WORM are correctly negative).
+Caller-facing `POST /{connection}/query/verdict` (REST) and MCP
+`run_structured_queries(mode="verdict")` answer "would this query be
+allowed?" without executing it, hardened across two `auditors` rounds into a
+fail-closed (not type-allow-listed) anti-oracle collapse.
 
-**Also in scope (found 2026-07-30 while scoping items 134/135):**
-
-- GO_TO_MARKET.md's HA/DR claim still says "the per-principal *quota* budget is
-  still per-replica until item 50 phase 2" — item 50 is fully ✅ DONE including
-  phase 2 (`execution/redis_quota.py`'s `RedisQuotaLimiter` makes the window one
-  shared budget across replicas). **Correct it to *conditional*, not deletion:**
-  cross-replica quota is real only when the Redis backend is configured
-  (`init_redis_quota_limiter` is opt-in), so "per-replica unless the Redis quota
-  backend is configured" is the accurate wording. Deleting the caveat outright
-  would create a new false claim for a Redis-less deployment.
-- GO_TO_MARKET.md's "Do not claim yet → secrets-manager rotation" is likewise
-  understated post-item-13: README, PRODUCT_GUIDE, and THREAT_MODEL all
-  correctly document reload-triggered re-resolution. Correct it to name the
-  real residual (no automatic/TTL-driven refresh — item 135), rather than
-  implying no rotation support at all.
-- TODO.md's own quick-scan row for item 45 still says "phase 2: personal denial
-  history not started" while the `### 45.` heading is plain `✅ DONE` and item
-  126 references the shipped `GET /help/my-recent-denials`. `worklist-check`
-  regenerates the `✅` column but not the parenthetical, so this needs a hand
-  fix.
-- ~~Item 58's body quoted a stale `14/14 vs. 0/14`~~ — **fixed inline
-  2026-07-30** to the published `16/16 vs. 0/16`
-  (`docs/business/SECURITY_BENCHMARK.md`). Left recorded here because the
-  remaining task is a *sweep*: grep the repo for other hard-coded benchmark
-  figures, since the report's whole value is that it is reproducible and it
-  warns against quoting from memory.
-
-### 133. The verdict endpoint — expose the decision without the execution (play P4)
-
-**Surfaced 2026-07-30 by `competitive-scan`.** `MARKET_DOMINATION_ANALYSIS.md`
-§7 names P4 as one of the two leverage moves, `NORTH_STAR.md` lists it under
-"the two leverage moves", `COMPETITORS.md` tells us to build it, and
-`COMPETITOR_MCP_GATEWAYS.md`'s Decision leads with it. Its sibling leverage move
-(the P6 safety benchmark) is item 58 — **phase 1 shipped and published**
-(corpus, `querygate-security-benchmark` CLI, `docs/business/SECURITY_BENCHMARK.md`);
-phase 2 is externally blocked on a model provider and a GCP/Toolbox environment.
-**Do not quote the benchmark figures from memory** — the report says so itself,
-and an earlier draft of this item quoted a stale 14/14 that item 58's own body
-still carries; read `docs/business/SECURITY_BENCHMARK.md` for the current
-numbers.
-
-**Correction (2026-07-30, `auditors`): a `StructuredQuery` allow/deny verdict
-already ships — twice.** An earlier draft of this item claimed the verdict had
-"never been scoped." That is false, and an implementer must not build a third
-evaluator:
-
-- **Item 39 ✅** — `POST /api/v1/admin/config/simulate`
-  (`admin/models.py`'s `CandidatePolicySimulationRequest` carries
-  `query: Optional[StructuredQuery]`) returns a typed allow/deny decision,
-  per-column allow/deny, effective guardrails, and typed reason codes against
-  *candidate* config.
-- **Item 31 ✅** — `POST /admin/ui/policy/test`, the active-policy
-  "test as principal" path.
-
-**What is genuinely unscoped** is therefore narrower and is the whole point of
-this item: a **caller-facing, non-admin, quota-metered** verdict about the
-**calling** principal. Item 39 is gated on `admin:config:read` *and*
-`admin:config:write` together and answers about a *target* principal — exactly
-inverted from what a gateway needs, which is "may **this** caller run **this**
-query, right now." Build that on the existing decision logic; do not restate it.
-
-**What it is.** An authenticated endpoint that answers *"would this
-`StructuredQuery` be allowed for me, and if not, why?"* — returning the
-decision, a safe reason, and optionally the compiled plan, **without executing
-anything**. MCP gateways, proxies, and CI checks can then call QueryGate for the
-query-semantic verdict they structurally cannot compute themselves.
-
-**Why it matters — the market moved toward this on 2026-07-30.** The final MCP
-`2026-07-28` spec makes intermediaries route and authorize on the *tool name*
-in a header, explicitly without parsing the body (items 127/130). So a gateway
-can decide *which tool*, and by the protocol's own architecture cannot decide
-*which query shape*. That is precisely the decision this endpoint sells them.
-Every gateway that adopts it becomes a front door **to** QueryGate rather than
-a competitor.
-
-**Three design constraints, in priority order:**
-
-1. **Reuse the same *evaluator*; shape the *reason* at the transport
-   boundary.** Non-negotiable #4 requires one database path and one
-   `StructuredQueryService` — it does not require one method. Add a **new
-   service method** that calls the shared `_validate_and_compile`
-   (`validate_policy` → `validate_schema` → compile). **Do NOT "extend
-   `explain`"** (an earlier draft of this item said to, wrongly):
-   `execution/service.py`'s `explain` deliberately never opens a DB session —
-   documented in its docstring and enforced by
-   `tests/unit/test_service.py::test_explain_does_not_open_a_db_session` — so
-   the optional plan half (item 26) cannot be added there without breaking a
-   shipped invariant; and `explain` today takes a concurrency slot but consumes
-   **no quota** and emits **no audit event**, both of which constraint 3
-   requires. A new method satisfies #4 fully with zero second evaluator.
-2. **A verdict endpoint is a discovery oracle unless designed against it, and
-   the shipped denial messages are already one.** The pilot criterion is
-   "denied connections, tables, and columns remain *undiscoverable*", but
-   `validation/policy_validation.py` raises `PolicyViolationError(f"Column
-   {column_ref.ref!r} is not accessible under the active policy")` and
-   `core/exceptions.py`'s `public_error_message` returns `str(exc)` **verbatim**
-   for that type. So today's `explain`/`execute` already echo the caller's
-   identifier back with a confirm/deny bit. **This item owns the decision** of
-   whether the shipped messages are tightened too — a verdict endpoint that is
-   safer than `explain` is theatre while `explain` is open to the same caller.
-   Two leak channels to close, neither of which message-redaction alone fixes:
-   - **The category channel.** `validate_policy` runs strictly before
-     `validate_schema`, so `policy` vs. `schema` distinguishes "on your deny
-     surface" from "absent from the database" for any caller-supplied
-     identifier — a per-probe oracle. Collapse them into one
-     `not-available-to-you` category on this surface. **This is new work, not a
-     copy:** `help/personal_denials.py` takes only *half* the posture
-     deliberately — it never surfaces the identifier, and it hedges the `schema`
-     explanation with "or isn't visible to you" — but its `_DENIAL_GUIDANCE` map
-     still returns `policy` and `schema` as **distinct `reason` labels**, so that
-     module is itself an instance of the channel this constraint closes. (Whether
-     `/help/my-recent-denials` should collapse them too is a question this item
-     raises; it is retrospective and rate-capped, so its exposure differs.)
-   - **The cost-estimate channel.** `estimated_rows`/`estimated_total_cost` are
-     *data-dependent*: they leak table cardinality and, with a predicate, value
-     selectivity — strictly more than the allow/deny bit. Make the plan half
-     opt-in per policy, off by default.
-   **Precedents to reuse** (an earlier draft cited 45/121 loosely; 121 is about
-   scope-completeness, not redaction): item 45's
-   `help/personal_denials.py` categorical vocabulary (category, never the
-   identifier); `catalog/retrieval.py`'s `policy_hidden_identifier_tokens` /
-   `policy_safe_catalog_text`, which is the shipped mechanism for tiering text
-   against the caller's *own resolved policy*; item 121 for the separate
-   requirement that a report over a multi-scope query be **scope-complete**
-   (every set-op arm, every nested subquery). `docs/THREAT_MODEL.md` **QG-19**
-   and **QG-24** already threat-model this exact oracle class — extend them
-   rather than inventing a second redaction policy.
-3. **Rate-limit and audit it like execution.** It is cheaper than a query, so
-   it is *more* attractive to abuse. It must consume quota
-   (`execution/quota.py`) and emit a redaction-safe audit event; a caller must
-   not be able to probe policy for free. Note `explain` is session-free but not
-   DB-free — `validate_schema` reflects on a cold cache — so do not size the
-   limit as if the operation were free.
-
-**Non-goals for this item:** it does not execute, does not return rows, does
-not accept SQL, and does not become a second enforcement point — it *reports*
-the one pipeline's decision.
-
-**Effort:** M–L. **Depends on:** 31 and 39 (the existing verdict logic to reuse),
-26 (cost estimation, for the optional plan half), 45 + 121 (denial vocabulary;
-scope-completeness).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 133).
 
 ### 134. Compliance-grade (WORM) audit retention + managed search
 
@@ -2553,66 +2341,233 @@ string assertion.
 **Effort:** M. **Depends on:** 13 (which shipped the re-resolution this builds a
 trigger for).
 
-### 136. The `jsonl_chained` audit backend silently disables four shipped read surfaces
+### 136. The `jsonl_chained` audit backend silently disables four shipped read surfaces ✅ DONE
 
-**Surfaced 2026-07-30 by the `auditors` architecture review while scoping item
-134; pre-existing defect, not a regression from that pass.** Four route-level
-gates admit only the *plain* backend:
+Fixed by replacing four scattered equality gates with one
+`AuditSinkBackend.is_locally_readable()` capability lookup and giving the
+admin UI audit browser the same chain-envelope unwrap the other three readers
+already had (extracted once as `audit.ledger.unwrap_envelope()`).
 
-- `api/help_routes.py` — `if cfg.audit_sink_backend == AuditSinkBackend.JSONL`
-  (`GET /help/my-recent-denials`)
-- `api/admin_observability_routes.py` (two sites) — `!= AuditSinkBackend.JSONL:
-  return None` (`GET /admin/observability/anomalies`, the config change-trend
-  report)
-- `api/admin_ui_routes.py` — `!= AuditSinkBackend.JSONL` inside `_audit_page`
-  (`GET /api/v1/admin/ui/audit/events`, the admin UI audit browser)
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 136).
 
-**Two different bugs, and conflating them makes one surface worse.** For the
-first three, the reader already handles the format — `admin/anomaly.py` and
-`admin/config_trends.py` both transparently unwrap the hash-chained envelope —
-so the capability exists and is refused at the door. **`_audit_page` is
-different: it has no unwrap.** It calls `_AUDIT_EVENT_ADAPTER.validate_python(raw)`
-directly on the raw line, and a `LedgerRecord` (`{seq, prev_hash, event, hash}`)
-fails that discriminated union and is counted as `malformed`. So a capability
-lookup applied uniformly — the natural reading, since it is a config-level
-predicate — would turn that surface from honestly `source="disabled"` into
-**silently empty with a rising malformed count**, which is strictly worse than
-today. That surface needs the *reader* fix as well as the gate fix.
+### 137. Audit read surfaces neither verify nor disclose hash-chain integrity
 
-**The failure:** a deployment running `AUDIT_SINK_BACKEND=jsonl_chained` — the
-tamper-evident configuration item 91 shipped and documents as opt-in, the one a
-regulated buyer would actually enable — loses all four surfaces. **Choosing the
-stronger audit posture silently costs four observability features**, which is
-precisely backwards. Blast radius is bounded (the default is `none`, which
-disables them anyway, and `.env.example` ships `jsonl`, which works), so only an
-operator who deliberately opts into tamper-evidence is affected — but that is
-exactly the design partner whose security team we are trying to impress.
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 136.**
+Item 136 made the four read-only observability/help surfaces (the admin UI
+audit browser, the anomaly report, the config/catalog change-trend report,
+`/help/my-recent-denials`) accept `AUDIT_SINK_BACKEND=jsonl_chained` the same
+way they already accepted plain `jsonl`. That fix is correct and in scope —
+but it also newly makes those four surfaces reachable *readers* of the
+chained-ledger file, and none of them verify the chain or say they didn't.
 
-**Why tests stay green:** the route helpers *are* tested, but only for two of
-three cells — `test_route_helpers_map_config_to_thresholds_and_source` (in
-`tests/unit/test_anomaly.py` and `test_config_trends.py`) asserts `jsonl` is
-served and `none` is disabled. **`jsonl_chained` is untested at the route-helper
-boundary**, even though `tests/unit/test_anomaly.py` proves the *reader* handles
-it. That specific missing cell is the test gap.
+**The gap, precisely.** `audit/ledger.py`'s own module docstring says the
+chain is "verify-only... nothing in the request pipeline reads the chain" —
+`querygate-audit verify` is the only place integrity is actually checked. The
+four surfaces' `unwrap_envelope` call (added by item 136) only recognizes the
+envelope *shape* (all four `LedgerRecord` keys present); it never recomputes
+`hash` or checks chain linkage. An actor with append access to
+`AUDIT_JSONL_PATH` (compromised app user, writable log volume, a log-shipping
+sidecar) can append a fabricated `{"seq":0,"prev_hash":"...","event":{...},
+"hash":"anything"}` line with an arbitrary `event` body, and all four surfaces
+will display it as a genuine event — the anomaly detector can be pushed over a
+threshold or diluted below one, and (worst case) a forged event could be
+attributed to another principal in that principal's own `/help/my-recent-denials`
+view. Also, on a successful chained-backend read, all four surfaces report
+`source="jsonl"` — the same literal a plain-`jsonl` read reports — so an
+operator or auditor reading the API response cannot tell which backend, and
+therefore which integrity posture, actually produced it.
 
-**What to do:**
+**Why this is a new item, not folded into 136.** Fixing it changes the public
+response contract (a new `source` value and/or a `chain_verified` field) and
+requires a product decision on cost/posture: real per-request verification
+recomputes a SHA-256/HMAC over every scanned line (cheap per-line, but adds up
+over `max_events_scanned`), is only meaningful for forgery-resistance when
+`AUDIT_LEDGER_HMAC_KEY` is set, and needs a decision on what an unkeyed chain's
+"verified" even means to report honestly. Item 136's own scope was strictly
+"restore the read access the four surfaces already had for `jsonl`"; widening
+that read access's *trust model* is a distinct call.
 
-1. Replace the four equality gates with a **capability lookup** (which backends
-   are readable), not a widened `in (JSONL, JSONL_CHAINED)` tuple — item 134
-   adds another backend and would otherwise repeat this bug a third time.
-2. Give `_audit_page` the same envelope unwrap the other two readers have,
-   **before** letting its gate admit the chained backend.
-3. Add the missing `jsonl_chained` route-helper cell per surface, and
-   mutation-verify each.
-4. **Reconcile the docs, which are already right.** `.env.example` documents the
-   anomaly endpoint as "Requires `AUDIT_SINK_BACKEND=jsonl` **or
-   `jsonl_chained`**" — the doc promises what the code refuses, independent
-   corroboration that this is a defect and not a deliberate restriction. Re-check
-   README and PRODUCT_GUIDE for the same promise on the other surfaces.
+**What to do (decision first, per CLAUDE.md's engine-philosophy precedent —
+record the choice, then build it):**
 
-**Effort:** S–M (the `_audit_page` reader fix makes it more than a one-line
-gate change). **Depends on:** 91. **Blocks:** 134 (which must not replicate the
-pattern), and materially affects 133 (item 45's help surface is cited there as a
-denial-vocabulary precedent, and it is currently dark on the tamper-evident
-config).
+1. Decide and record in the PRODUCT_GUIDE Decision Log: disclosure-only
+   (cheapest — widen `source`'s `Literal` to include `"jsonl_chained"` and
+   report the actual configured backend instead of always `"jsonl"`, so a
+   reader at least knows which posture produced the response), or real
+   verification (recompute `compute_record_hash`/`hmac.compare_digest` per
+   record read, using `cfg.audit_ledger_hmac_key` when set, and count a
+   self-inconsistent record as `malformed` rather than displaying it), or both.
+2. If verification is chosen, add it once beside `unwrap_envelope` in
+   `audit/ledger.py` (e.g. `verify_record(raw, key) -> bool`) so all three
+   readers (`admin/anomaly.py`, `admin/config_trends.py`,
+   `api/admin_ui_routes.py`) call the same primitive — mirroring how item 136
+   itself consolidated the envelope unwrap.
+3. Regression test: write a chain-valid record, then a second record whose
+   embedded `event` was mutated without recomputing `hash` (a forged insertion,
+   not a broken link — chain linkage alone doesn't catch this since the forged
+   record can chain correctly to a legitimate predecessor if the attacker also
+   fixes up `prev_hash`/`seq`); assert the reader does not present it as clean.
+
+**Effort:** S (disclosure only) to M (real verification). **Depends on:** 91,
+136.
+
+### 138. Audit read surfaces scan the entire persisted file on every request, unbounded by lines read ✅ DONE
+
+Fixed by switching all three audit-stream readers to a new shared
+`audit.file_reader.iter_lines_reverse()` primitive (tail-first, byte-chunked)
+with independent per-surface line/byte caps, replacing the old forward-scan +
+bounded-deque approach; hardened by a second security review pass that closed
+an algorithmic complexity defect in the new reader and threaded the missing
+config fields.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 138).
+
+### 139. Bound audit-line size at the source, not just at the reader
+
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138.**
+Item 138 made `audit.file_reader.iter_lines_reverse` bail (raise
+`AuditFileReadBounded`) on a single undelimited byte run longer than
+`max_line_bytes` (default 1 MiB), which bounds the *reader's* worst case. It
+does not address the two places an oversized line can originate:
+
+1. **The read-query AST has no size limit on `select`/`joins`/`group_by`/
+   `order_by`.** `query_ast/models.py`'s `StructuredQuery.select` has
+   `min_length=1` and no `max_length`; `execution/service.py`'s
+   `normalize_query_shape(query)` runs **before** policy validation and is
+   written to the audit event even on the rejection path (`service.py:804`).
+   An authenticated caller with query rights (no special privilege needed) can
+   submit a `StructuredQuery` with tens of thousands of `select` entries;
+   policy correctly rejects it (e.g. `max_select_columns`), but the rejection
+   audit event still serializes the full oversized `query_shape` as one JSONL
+   line first.
+2. **`audit/sinks.py`'s `_read_last_line`** (used at process startup to
+   resume a `jsonl_chained` ledger's sequence/hash) has the identical
+   unbounded-expanding-read shape item 138 fixed in `iter_lines_reverse` —
+   `handle.read(size - pos)` grows to the whole file if no newline is ever
+   found, and it runs once at boot, so one oversized trailing line delays or
+   OOMs startup rather than one request.
+
+**What to do:** (a) add `max_length` to `StructuredQuery`'s list fields in
+`query_ast/models.py` (or a tree-wide node-count cap, matching the pattern
+`max_where_predicates`/`max_expression_nodes` already established for other
+AST shapes) — the exact cap is a product decision (is there a legitimate use
+case for very wide selects?), record it in the PRODUCT_GUIDE Decision Log; (b)
+fold `audit/sinks.py:_read_last_line` into the same bounded primitive
+`iter_lines_reverse` already provides, rather than leaving a second
+hand-rolled tail reader with the same defect class the composable-interfaces
+doctrine exists to prevent.
+
+**Effort:** M (the AST cap needs a product decision on the right limit; the
+sinks.py fold-in is S once item 138's primitive exists). **Depends on:** 138.
+
+### 140. `_audit_page` pagination can still materialize ~1M dicts per request
+
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138.**
+`GET /api/v1/admin/ui/audit/events`'s `cursor` query param is
+`Query(default=0, ge=0, le=1_000_000)`; `_audit_page` retains up to
+`cursor + limit` matched, fully-parsed event dicts before slicing the response
+page. A `cursor` near the ceiling therefore still allocates on the order of a
+gigabyte for one admin-scoped request. This bound predates item 138 unchanged
+(the old `deque(maxlen=cursor + limit + 1)` had the identical size), so item
+138 did not introduce it — but it is the same class of defect that item
+exists to fix, in the same function, and admin-scoped is not the same as
+unbounded-safe.
+
+**What to do:** lower the `cursor` ceiling to something a legitimate
+"load more" UI flow would actually reach (the admin UI pages 50 at a time —
+a few thousand covers deep manual paging without approaching six figures), or
+change the pagination shape entirely (e.g. an opaque cursor keyed to file
+position rather than a match-count offset, avoiding the need to re-derive
+`cursor` matches from the start on every page). Either is a product/API-shape
+decision, not a pure hardening — record the choice in the PRODUCT_GUIDE
+Decision Log before implementing.
+
+**Effort:** S (lower the ceiling) to M (cursor redesign). **Depends on:** 138.
+
+### 141. Convert audit-reader line caps into practically-tight window-based early exits
+
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138;
+deliberately not built as part of that item.** `admin/anomaly.py` and
+`admin/config_trends.py` both scan tail-first now (item 138), which makes a
+targeted optimization possible that wasn't before: once the scan has seen a
+long consecutive run of matching-type events whose `occurred_at` is at or
+before `window_start`, it is very likely (though not certain — see below) that
+every remaining, physically-earlier line is also out of window, since the
+audit sink only appends and writes are lock-serialized within a process. Item
+138 deliberately did not build this: `occurred_at` is set at event
+**construction** time, before the (possibly slightly later) write, so under
+concurrent request handling two events' physical write order and their
+`occurred_at` order are not *guaranteed* identical — only overwhelmingly
+likely for realistic concurrency levels. An early exit on this basis is a
+correctness/performance tradeoff (a bounded chance of silently reporting
+`truncated=False` while actually missing a handful of borderline events),
+not a pure hardening, and item 138 already ships a strictly-safe bound
+(`max_lines_read`/`max_line_bytes`/`max_total_bytes`, all fail-closed to
+`truncated=True`) — this item would only make that existing safe bound
+*tighter in the common case*, not fix a live gap.
+
+**What to do, if approved:** add a `max_consecutive_out_of_window` threshold
+(e.g. default 5,000 — tunable slack for reordering/clock skew) to
+`AnomalyThresholds`/`ChangeTrendThresholds`; track a consecutive-out-of-window
+counter across only the caller's own matching event type (not lines of other
+types, which say nothing about this stream's recency); break once the
+threshold is hit, **without** setting `stopped_early`/`truncated` (the window
+genuinely ended, as far as the tolerance allows). Record the accepted
+ordering-tolerance assumption explicitly in the PRODUCT_GUIDE Decision Log
+before building — this is exactly the kind of judgment call CLAUDE.md's
+working agreement reserves for the maintainer, not a default an agent should
+reach for under time pressure.
+
+**Effort:** S once approved. **Depends on:** 138.
+
+### 142. `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats ✅ DONE
+
+Renamed the item-92 approval-gate row's ID to `QG-35`, keeping item-91's
+audit-ledger row stable at `QG-32`; `docs/SECURITY_POSTURE.md`'s count
+corrected to a clean "35 threats (QG-01…QG-35)".
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 142).
+
+### 143. `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step ✅ DONE
+
+Upgraded `cryptography` 49.0.0 → 50.0.0 via `poetry update` (the existing
+`>=44.0.1` constraint already permitted it) — a clean fix, no allowlist entry
+needed. `make release-check` now passes fully clean end to end.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 143).
+
+### 144. `verdict()` emits no query metrics, and `/metrics` is unauthenticated
+
+**Surfaced 2026-08-02 by the `security-invariant-reviewer` re-audit of item
+133; two related, non-blocking observability gaps.**
+
+1. **`verdict()` emits no `QUERIES_TOTAL`/`QUERIES_REJECTED_TOTAL`/
+   `QUERY_QUOTA_REJECTIONS_TOTAL`/`QUERY_DURATION_SECONDS` metrics at all**
+   (`execution/service.py`), unlike `execute()`. It consumes the *same*
+   per-principal quota budget `execute()` does (keyed
+   `(connection_id, principal_subject)`), so a gateway doing verdict-then-
+   execute can exhaust that budget through verdict calls alone — and an
+   operator's metrics-based "why is this agent throttled" debugging has no
+   verdict-shaped signal to look at; only the `execute` calls that actually
+   ran after the budget was already spent show up.
+2. **`/metrics` (`api/app.py`) is unauthenticated**, and
+   `QUERIES_REJECTED_TOTAL{reason=...}` already labels rejections
+   `"policy"` vs `"schema"` for the *existing* `execute`/`explain` traffic —
+   pre-existing, unrelated to item 133, but it means QG-34's collapse is
+   bounded by network placement (whether `/metrics` is reachable by the
+   caller), not by application code, and the threat-model row doesn't say
+   so today.
+
+**What to do, if approved:** for (1), add verdict-specific counters —
+**but not** a `reason`-labeled rejection counter on the denied path, since
+`/metrics` being unauthenticated (2) means a policy-vs-schema label there
+would publish exactly the distinction QG-34 collapses; use a single fixed
+`reason="verdict_denied"` or a dedicated `querygate_verdicts_total
+{connection,outcome}` with `outcome` restricted to `{allowed, denied}` only.
+For (2), either add a residual sentence to `docs/THREAT_MODEL.md` QG-34
+acknowledging `/metrics`'s existing exposure, or gate `/metrics` behind an
+`AppConfig` option (bearer requirement or bind-address restriction) — the
+latter is a real infra decision, not a default an agent should reach for.
+
+**Effort:** S.
 

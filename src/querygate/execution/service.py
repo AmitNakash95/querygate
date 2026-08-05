@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import pydantic as pyd
 import sqlalchemy as sa
@@ -188,6 +188,38 @@ class ExplainResult(pyd.BaseModel):
     params: Optional[str] = None
     tables: List[str]
     limit: int
+
+
+class VerdictPlan(pyd.BaseModel):
+    """Only present when `Policy.verdict_include_plan` opts in; omitted by
+    default since the compiled SQL and touched-table list are themselves a
+    discovery channel for a caller who couldn't otherwise see this schema."""
+
+    sql: str
+    tables: List[str]
+
+
+class VerdictResult(pyd.BaseModel):
+    """TODO.md item 133: would `query` be allowed for this principal, without
+    executing it. `reason`/`message` are deliberately coarse — see
+    `StructuredQueryService.verdict`'s docstring for why a denial never
+    distinguishes policy from schema."""
+
+    allowed: bool
+    reason: Optional[Literal["not-available-to-you"]] = None
+    message: Optional[str] = None
+    plan: Optional[VerdictPlan] = None
+
+
+class BatchVerdictItemResult(pyd.BaseModel):
+    allowed: Optional[bool] = None
+    reason: Optional[Literal["not-available-to-you"]] = None
+    message: Optional[str] = None
+    plan: Optional[VerdictPlan] = None
+    # A system-level failure (quota exhausted, connection at capacity) rather
+    # than a verdict about the query's shape — mirrors BatchExplainItemResult's
+    # per-item error tolerance.
+    error: Optional[str] = None
 
 
 class BatchQueryItemResult(pyd.BaseModel):
@@ -948,7 +980,12 @@ class StructuredQueryService:
         """
         policy = self._get_policy()
         async with concurrency_slot(
-            self._connection_id, policy.max_concurrency, policy.concurrency_wait_seconds
+            self._connection_id,
+            policy.max_concurrency,
+            policy.concurrency_wait_seconds,
+            principal_subject=self._principal_subject,
+            max_queue_depth=policy.max_queue_depth,
+            max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
         ):
             stmt, limit, tables, _dialect = await self._validate_and_compile(query)
             sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
@@ -963,6 +1000,186 @@ class StructuredQueryService:
                 results.append(BatchExplainItemResult(**result.model_dump()))
             except Exception as exc:
                 results.append(BatchExplainItemResult(error=public_error_message(exc)))
+        return results
+
+    @log_execution
+    async def verdict(self, query: StructuredQuery) -> VerdictResult:
+        """Report whether `query` would be allowed for this principal, without
+        executing it or (by default) revealing a compiled plan (TODO.md item
+        133 — the caller-facing counterpart to `explain`, for MCP gateways,
+        proxies, and CI checks that need "may I run this" without a database
+        round trip or debug-level detail).
+
+        Unlike `explain`, this is quota-metered and audited unconditionally
+        (never silently skipped, the same posture `execute` takes — though
+        the audit event omits execution-only fields like row/byte counts and
+        admission timing, since no rows are ever returned): it still
+        reflects the schema (a cold-cache reflection is a real DB round
+        trip), so leaving it free would make it strictly cheaper to abuse
+        than a real query for probing policy/schema shape.
+
+        A denial always reports `reason="not-available-to-you"` — it never
+        distinguishes "on your policy's deny list" from "doesn't exist in the
+        schema" from "references a join connection you can't see" from any
+        other shape-level rejection reason. The inner `except Exception`
+        below is deliberately a catch-all, not an allow-list of specific
+        exception types: an earlier version caught only
+        `(PolicyViolationError, QueryValidationError)`, then widened to add
+        `NotFoundError`/`sa.exc.NoSuchTableError` after this item's own audit
+        found each missing in turn — a pattern of type-by-type patching that
+        had already missed twice. `_get_policy`/`enforce_query_quota`/
+        `concurrency_slot` all run strictly before this inner block (in the
+        outer `try`), so nothing reaching it is a quota/concurrency system
+        failure — only `_validate_and_compile`'s validation/compilation/
+        reflection failures land here, and every one of those is a "this
+        query's shape isn't allowed" reason, never a "the system is busy"
+        one. Catching broadly here is therefore fail-closed, not a
+        weakening: `validate_policy` runs strictly before `validate_schema`,
+        so returning any exception's real message (or even just which
+        validator raised) would let a caller enumerate identifiers and
+        reconstruct both the schema and the policy boundary one query at a
+        time — the same oracle class `docs/THREAT_MODEL.md` QG-19/QG-24
+        already close on the admin simulation and "my access" surfaces.
+        `help/personal_denials.py` excludes `operation="query_verdict"`
+        events from the caller-facing denial history for the same reason —
+        a caller reading back their own already-submitted verdict probe's
+        category would reopen exactly the channel this collapse closes.
+
+        A quota or concurrency failure is a different kind of thing — "the
+        system couldn't answer right now", not a verdict about the query's
+        shape — so it is audited (for operator visibility) and then
+        re-raised as a real error via the outer `except`, mirroring
+        `execute`'s outer handler, rather than being folded into the generic
+        denial.
+
+        `explain` is deliberately left as-is (still echoes the real
+        validation message) — it is an authenticated debugging tool a caller
+        already needs identifier-level detail from, a different posture than
+        this surface's "may I" question; tightening `explain` too was
+        considered and rejected as unrelated scope creep for this item
+        (recorded in the PRODUCT_GUIDE Decision Log). Note this means
+        `explain` is not a privilege boundary either side of `verdict`: the
+        same principal that can call `verdict` can call `explain` and get
+        the real message, since QueryGate has no scope today that
+        distinguishes "may see a verdict" from "may see debug detail" —
+        `verdict`'s guarantee is response-shape hygiene for a caller that
+        only ever calls this endpoint, not confinement against a caller that
+        also has `explain`/`query` access (see docs/THREAT_MODEL.md QG-34's
+        residual).
+        """
+        start = time.monotonic()
+        query_shape = normalize_query_shape(query)
+        sql = ""
+        try:
+            policy = self._get_policy()
+            # Reserving the unit is the point (this is the quota-metering
+            # itself); there's no response body to attribute bytes to
+            # afterward, unlike `execute`'s `record_query_quota_bytes` call.
+            await enforce_query_quota(
+                policy, connection_id=self._connection_id, principal_subject=self._principal_subject
+            )
+            async with concurrency_slot(
+                self._connection_id,
+                policy.max_concurrency,
+                policy.concurrency_wait_seconds,
+                principal_subject=self._principal_subject,
+                max_queue_depth=policy.max_queue_depth,
+                max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
+            ):
+                try:
+                    stmt, _limit, tables, _dialect = await self._validate_and_compile(query)
+                except Exception as exc:
+                    audit_query(
+                        connection_id=self._connection_id,
+                        sql=sql,
+                        intent=query.intent,
+                        duration_ms=int((time.monotonic() - start) * 1000),
+                        principal=self._principal_subject,
+                        principal_scopes=self._principal_scopes,
+                        actor=self._principal_actor,
+                        delegation_chain=self._delegation_chain,
+                        auth_method=self._auth_method,
+                        surface=self._surface,
+                        query_shape=query_shape,
+                        error_category=(
+                            "not_found"
+                            if isinstance(exc, NotFoundError)
+                            else classify_rejection(exc)
+                        ),
+                        policy_decision="denied",
+                        rejected=True,
+                        rejection_reason=str(exc),
+                        operation="query_verdict",
+                    )
+                    return VerdictResult(
+                        allowed=False,
+                        reason="not-available-to-you",
+                        message="This query is not available to you under your effective policy.",
+                    )
+            # Outside the concurrency slot (compiling the plan text is pure
+            # CPU work, not a DB round trip — no reason to hold the slot for
+            # it) but still inside the outer `try`: a `_compile_to_text`
+            # failure or a failure in the audit call itself must still be
+            # audited (and reported as a real error, not a false "denied")
+            # rather than silently 500ing with a quota unit already spent
+            # and no trace left behind.
+            plan = None
+            if policy.verdict_include_plan:
+                sql, _params = _compile_to_text(stmt, include_literals=False)
+                plan = VerdictPlan(sql=sql, tables=sorted(tables))
+            audit_query(
+                connection_id=self._connection_id,
+                sql=sql,
+                intent=query.intent,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                principal=self._principal_subject,
+                principal_scopes=self._principal_scopes,
+                actor=self._principal_actor,
+                delegation_chain=self._delegation_chain,
+                auth_method=self._auth_method,
+                surface=self._surface,
+                query_shape=query_shape,
+                policy_decision="allowed",
+                operation="query_verdict",
+            )
+            return VerdictResult(allowed=True, plan=plan)
+        except Exception as exc:
+            audit_query(
+                connection_id=self._connection_id,
+                sql=sql,
+                intent=query.intent,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                principal=self._principal_subject,
+                principal_scopes=self._principal_scopes,
+                actor=self._principal_actor,
+                delegation_chain=self._delegation_chain,
+                auth_method=self._auth_method,
+                surface=self._surface,
+                query_shape=query_shape,
+                error_category=(
+                    "not_found" if isinstance(exc, NotFoundError) else classify_rejection(exc)
+                ),
+                rejected=True,
+                rejection_reason=str(exc),
+                operation="query_verdict",
+            )
+            raise
+
+    async def verdict_many(self, queries: List[StructuredQuery]) -> List[BatchVerdictItemResult]:
+        """Verdict each query independently; one failure doesn't drop the rest.
+
+        A `QuotaExceededError`/concurrency failure is a "couldn't determine
+        an answer right now" system state, not a verdict about the query's
+        shape, so it lands in `error` (mirroring `explain_many`'s per-item
+        error tolerance) rather than being reported as `allowed=False`.
+        """
+        results: List[BatchVerdictItemResult] = []
+        for query in queries:
+            try:
+                result = await self.verdict(query)
+                results.append(BatchVerdictItemResult(**result.model_dump()))
+            except Exception as exc:
+                results.append(BatchVerdictItemResult(error=public_error_message(exc)))
         return results
 
     @log_execution
