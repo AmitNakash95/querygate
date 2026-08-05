@@ -300,13 +300,15 @@ class TestWindowFrame:
 class TestMySQLAsyncmyParamstyleStaysPositional:
     """Guards the justification behind `security/dependency-audit-allowlist.json`'s
     PYSEC-2026-286 (asyncmy CVE-2025-65896) entry: that CVE is a SQL injection
-    via attacker-controlled DICT KEYS in a pyformat-style parameter mapping —
-    verified live (TODO.md item 19) that SQLAlchemy's mysql+asyncmy dialect
-    only ever hands asyncmy's cursor a positional tuple, never a dict, so the
-    vulnerable codepath is never reached. If a future SQLAlchemy release ever
-    changed this dialect's paramstyle to something dict-shaped, that
-    allowlist entry's justification would silently stop holding — this test
-    exists so that change fails loudly here instead."""
+    via attacker-controlled DICT KEYS in a pyformat-style parameter mapping.
+    SQLAlchemy's DBAPI execution layer shapes cursor parameters according to
+    the dialect's declared `paramstyle`; the mysql+asyncmy dialect declares
+    'format' (positional), so SQLAlchemy always hands asyncmy's cursor a
+    tuple, never a dict, and the vulnerable codepath is never reached. If a
+    future SQLAlchemy release ever changed this dialect's paramstyle to
+    something dict-shaped, that allowlist entry's justification would
+    silently stop holding — this test exists so that change fails loudly
+    here instead."""
 
     def test_asyncmy_dialect_paramstyle_is_positional_not_dict_based(self):
         from sqlalchemy.dialects.mysql.asyncmy import MySQLDialect_asyncmy

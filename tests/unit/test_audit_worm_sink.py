@@ -10,6 +10,7 @@ configure_audit_sink.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import boto3
@@ -256,6 +257,46 @@ class TestWormFlushMonitorFlush:
 
         assert after == before + 1
         assert buffer.size() == 1  # re-queued, not lost
+
+    async def test_a_flush_error_outside_the_put_does_not_kill_the_loop(self, monkeypatch):
+        """flush_once()'s own try/except only covers the S3 PUT — draining the
+        buffer and building the segment key happen outside it. _run()'s loop
+        must survive an exception from there too (fail-open, not fail-stopped),
+        or one bad flush permanently stops WORM archival for the process even
+        though every later event still enters the buffer fine."""
+        bucket = self._bucket()
+        monitor = self._monitor(bucket, interval_seconds=0.01)
+
+        calls = {"n": 0}
+        real_drain = monitor._buffer.drain
+
+        def _drain_raises_once():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("boom")
+            return real_drain()
+
+        monkeypatch.setattr(monitor._buffer, "drain", _drain_raises_once)
+
+        await monitor.start()
+        try:
+            monitor._buffer.enqueue(_event("a"))  # triggers the first (raising) flush
+            for _ in range(200):
+                if calls["n"] >= 1 and not monitor._task.done():
+                    break
+                await asyncio.sleep(0.01)
+            assert not monitor._task.done()  # the loop survived the RuntimeError
+
+            monitor._buffer.enqueue(_event("b"))  # a later flush must still work
+            for _ in range(200):
+                client = boto3.client("s3", region_name="us-east-1")
+                if client.list_objects_v2(Bucket=bucket).get("KeyCount"):
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                pytest.fail("a later flush never archived the re-enqueued event")
+        finally:
+            await monitor.stop()
 
 
 class TestCompositeAuditSink:

@@ -92,6 +92,21 @@ class SessionDialectAdapter(ABC):
         T-SQL exposes for this and terminates the whole session."""
         ...
 
+    def list_live_tables_extra_filter_sql(self) -> str:
+        """An extra SQL condition (starting with " AND ...", or "") appended
+        to `schema/reflection.py`'s `list_live_tables()` INFORMATION_SCHEMA
+        query, beyond the shared system-schema exclusion every dialect needs.
+
+        Postgres's and MSSQL's `INFORMATION_SCHEMA.TABLES` is already scoped
+        to the connected database — excluding the system schema names is
+        enough. MySQL's is not: it is a server-wide view spanning every
+        database the connecting user has any privilege on, so without this,
+        a MySQL connection whose user can see more than its own database
+        would leak other databases' table names into `list_tables()` (a
+        schema-shape disclosure, not just a system-table one). Default is a
+        no-op; MySQLSessionAdapter overrides it."""
+        return ""
+
 
 class PostgresSessionAdapter(SessionDialectAdapter):
     def build_engine_url(self, profile: ConnectionProfile) -> str:
@@ -244,7 +259,8 @@ class MySQLSessionAdapter(SessionDialectAdapter):
         # session-level statement timeout that also covers INSERT/UPDATE/
         # DELETE the way Postgres's statement_timeout or MSSQL's LOCK_TIMEOUT
         # (paired with query cancellation) do. Documented in
-        # docs/THREAT_MODEL.md rather than silently assumed equivalent.
+        # docs/THREAT_MODEL.md (QG-38) rather than silently assumed
+        # equivalent.
         await session.execute(sa.text(f"SET SESSION MAX_EXECUTION_TIME = {int(statement_timeout_seconds * 1000)}"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
         # fmt: on
         # UTC, deliberately — the same reasoning as Postgres's TIME ZONE pin.
@@ -273,6 +289,15 @@ class MySQLSessionAdapter(SessionDialectAdapter):
             # fmt: off
             await conn.execute(sa.text(f"KILL QUERY {conn_id}"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
             # fmt: on
+
+    def list_live_tables_extra_filter_sql(self) -> str:
+        # Unlike Postgres/MSSQL, MySQL's INFORMATION_SCHEMA.TABLES is
+        # server-wide, spanning every database the connecting user has any
+        # privilege on — confirmed against MySQL's own documented semantics
+        # (TODO.md item 19/128 audit). Restrict to the connected database so
+        # a user with cross-database privilege doesn't leak other databases'
+        # table names into list_tables().
+        return " AND TABLE_SCHEMA = DATABASE()"
 
 
 _SESSION_ADAPTERS: Dict[DatabaseDialect, SessionDialectAdapter] = {
@@ -326,3 +351,7 @@ async def capture_session_identifier(session: AsyncSession, dialect: DatabaseDia
 
 async def cancel_session(engine: AsyncEngine, dialect: DatabaseDialect, identifier: str) -> None:
     await get_session_adapter(dialect).cancel_session(engine, identifier)
+
+
+def list_live_tables_extra_filter_sql(dialect: DatabaseDialect) -> str:
+    return get_session_adapter(dialect).list_live_tables_extra_filter_sql()
