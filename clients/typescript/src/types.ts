@@ -354,4 +354,9 @@ export interface StructuredQuery {
   /** Named `WITH` blocks (item 105). Always `[]` here — see `CteSpec`. */
   ctes: CteSpec[];
   intent: string | null;
+  /** Closed-set purpose token (item 145, feature F7) checked against the
+   * connection's Policy.allowed_purposes; narrows the effective policy, never
+   * widens it. Unlike `intent` (free text), it IS persisted to the audit
+   * event. */
+  purpose: string | null;
 }

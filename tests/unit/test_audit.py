@@ -723,6 +723,73 @@ async def test_non_delegated_request_has_no_actor_fields(tmp_path):
     assert event["delegation_chain"] == []
 
 
+def test_purpose_is_persisted_in_the_audit_event_unlike_intent(tmp_path):
+    """TODO.md item 145 (F7): `purpose` is a fixed token from an operator
+    allow-list, not caller-authored prose like `intent` — so, unlike
+    `intent`, it IS persisted to the audit sink."""
+    path = tmp_path / "purpose.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    audit_query(
+        connection_id="demo",
+        sql="SELECT 1",
+        intent="do not persist this",
+        purpose="fraud_review",
+        query_shape={"from": "customers"},
+        duration_ms=1,
+    )
+    event = json.loads(path.read_text())
+    assert event["purpose"] == "fraud_review"
+    assert "intent" not in event
+    assert "do not persist this" not in path.read_text()
+
+
+def test_audit_event_excludes_purpose_key_when_not_declared(tmp_path):
+    path = tmp_path / "no_purpose.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    audit_query(
+        connection_id="demo",
+        sql="SELECT 1",
+        query_shape={"from": "customers"},
+        duration_ms=1,
+    )
+    event = json.loads(path.read_text())
+    assert "purpose" not in event
+
+
+@pytest.mark.asyncio
+async def test_execute_persists_the_declared_purpose_end_to_end(tmp_path):
+    path = tmp_path / "e2e_purpose.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    table = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("email", sa.String(200)),
+    )
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1, "email": "x@example.com"}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    query = StructuredQuery(
+        from_table="customers", select=["customers.id"], limit=10, purpose="fraud_review"
+    )
+    set_policy_store(PolicyStore(default=Policy(allowed_purposes=["fraud_review"]), overrides={}))
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query)
+
+    event = json.loads(path.read_text())
+    assert event["purpose"] == "fraud_review"
+
+
 @pytest.mark.asyncio
 async def test_rejected_event_has_category_without_exception_or_literals(tmp_path):
     path = tmp_path / "rejected.jsonl"

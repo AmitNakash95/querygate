@@ -1616,6 +1616,20 @@ class StructuredQuery(pyd.BaseModel):
             "with the compiled SQL for audit/debugging, never returned to the caller."
         ),
     )
+    purpose: Optional[str] = pyd.Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Closed-set purpose token this query is declared for (TODO.md item 145, "
+            "feature F7 — purpose-bound access), e.g. 'fraud_review'. Checked against "
+            "the connection's Policy.allowed_purposes and, if valid, narrows the "
+            "effective policy via Policy.purpose_policies — never widens it. Only the "
+            "TOP-LEVEL query's purpose is consulted; one set on a cte body, a set_op "
+            "arm, or a subquery is inert, the same as `intent`. Unlike `intent` (free "
+            "text, logged but never enforced), this is a fixed token from an "
+            "operator-configured allow-list, so it IS persisted in the audit event."
+        ),
+    )
 
     model_config = pyd.ConfigDict(populate_by_name=True, extra="forbid")
 

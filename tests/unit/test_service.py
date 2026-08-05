@@ -21,6 +21,7 @@ from sqlalchemy.exc import ProgrammingError
 from querygate.core.exceptions import (
     CapacityTimeoutError,
     CostEstimateExceededError,
+    PolicyViolationError,
     QueryValidationError,
     QueueFullError,
     public_error_message,
@@ -38,7 +39,12 @@ from querygate.execution.service import (
 )
 from querygate.metrics import REGISTRY
 from querygate.policy.loader import PolicyStore, set_policy_store
-from querygate.policy.models import CostEstimationMode, MandatoryRowFilter, Policy
+from querygate.policy.models import (
+    CostEstimationMode,
+    MandatoryRowFilter,
+    Policy,
+    PurposePolicyDelta,
+)
 from querygate.query_ast.models import Predicate, StructuredQuery
 
 
@@ -1386,6 +1392,68 @@ async def test_execute_mandatory_row_filter_resolved_from_principal_claim():
 
     compiled = str(captured_stmt["stmt"].compile(compile_kwargs={"literal_binds": True}))
     assert "Ada" in compiled
+
+
+@pytest.mark.asyncio
+async def test_execute_applies_a_purpose_delta_mandatory_row_filter_to_the_compiled_sql():
+    """TODO.md item 145 (F7): a purpose delta's mandatory_row_filters must
+    reach the COMPILER, not just policy_validation's checks — proving
+    `_validate_and_compile` actually reuses `validate_policy`'s returned,
+    purpose-narrowed Policy rather than the pre-narrowed one it started
+    with."""
+    table = _company_table()
+    query = StructuredQuery(
+        from_table="customers", select=["customers.id"], limit=10, purpose="support"
+    )
+
+    captured_stmt = {}
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = []
+
+    async def _execute(stmt):
+        captured_stmt["stmt"] = stmt
+        return mock_result
+
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(side_effect=_execute)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                allowed_purposes=["support"],
+                purpose_policies={
+                    "support": PurposePolicyDelta(
+                        mandatory_row_filters=[
+                            MandatoryRowFilter(table="customers", column="name", value="Ada")
+                        ]
+                    )
+                },
+            ),
+            overrides={},
+        )
+    )
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query)
+
+    compiled = str(captured_stmt["stmt"].compile(compile_kwargs={"literal_binds": True}))
+    assert "Ada" in compiled
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_a_query_missing_a_required_purpose():
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
+    set_policy_store(PolicyStore(default=Policy(allowed_purposes=["support"]), overrides={}))
+    service = StructuredQueryService(connection_id="demo")
+    with pytest.raises(PolicyViolationError, match="requires a declared purpose"):
+        await service.execute(query)
 
 
 # --- Agent-visible capacity waiting (TODO.md item 35 phase 1) --------------

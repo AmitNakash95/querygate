@@ -175,7 +175,7 @@ order-of-magnitude, not commitments.
 | 142 | ✅ `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats | XS | — |
 | 143 | ✅ `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step | XS–S | — |
 | 144 | `verdict()` emits no query metrics, and `/metrics` is unauthenticated | S | — |
-| 145 | Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7) | M | — |
+| 145 | ✅ Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7) | M | — |
 | 146 | "5-minute first governed query" quickstart — close the named Toolbox onboarding gap | S–M | 48, 51 |
 | 147 | Self-serve procurement evidence page | S | 54, 58, 60 |
 
@@ -2476,62 +2476,16 @@ latter is a real infra decision, not a default an agent should reach for.
 
 **Effort:** S.
 
-### 145. Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7)
+### 145. Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7) ✅ DONE
 
-**Surfaced 2026-08-05 by `competitive-scan`.** `StructuredQuery.intent`
-(`query_ast/models.py`) is logged with the compiled SQL for audit/debugging
-today and never enforced. Immuta's flagship primitive — purpose-based access,
-where a caller must declare *why* it needs the data from an allowed set of
-purposes, and that purpose narrows what it can see — is real and, per the
-2026-07-22 survey (`docs/business/MARKET_DOMINATION_ANALYSIS.md` F7), "barely
-exists elsewhere": the access proxies log a justification string at best; no
-MCP gateway or DB-vendor server enforces a declared purpose at all. Immuta
-still leads this specific mechanic technically; verified unchanged this
-refresh (no evidence of a purpose-enforcement feature shipping elsewhere
-since the 2026-07-22 survey).
+A new closed-set `StructuredQuery.purpose` field, checked against
+`Policy.allowed_purposes` and narrowing the effective policy via
+`Policy.purpose_policies`/`for_purpose` (deny/filter/mask-only, never
+"allow" — narrows by construction) — enforced in
+`validation/policy_validation.py`, propagated through to compilation, and
+persisted to the audit event.
 
-**Why it's newly actionable.** The AST field and the audit wiring already
-exist — this is "enforce a value we already carry," not new surface area. It
-composes with machinery already shipped: per-principal `Policy` resolution
-(item 90's actor/subject chain), `mandatory_row_filters`, and column
-masking/deny — a purpose is just another input to the same resolution, not a
-new enforcement point.
-
-**Scope.**
-
-1. **`intent` today is free natural-language text — purpose-gating needs a
-   closed set.** Add a separate, optional structured field (e.g.
-   `StructuredQuery.purpose: Optional[str]`) validated against a
-   per-connection `Policy.allowed_purposes: list[str]` (empty = unrestricted,
-   the existing allow-list convention). Do **not** repurpose `intent` itself
-   — it is documented as free text for audit/debugging and must keep that
-   shape; conflating the two would make a purpose declaration also carry
-   arbitrary caller-authored prose into a policy decision.
-2. **Purpose narrows, never widens.** A policy maps `purpose → Policy` deltas
-   (an allow/deny/masking override applied *on top of* the principal's
-   resolved policy, same composition shape as claim-driven row filters) —
-   never a purpose that grants access the principal's base policy denies.
-   Missing/absent purpose falls back to the connection's default policy
-   (unrestricted, same as today) unless `allowed_purposes` is non-empty, in
-   which case a query touching a purpose-gated table/column without a
-   declared purpose is rejected the same way an unresolvable claim is today.
-3. **Audit the declared purpose** (redaction-safe — it's a fixed token from
-   the allow-list, not free text, so this does not reopen non-negotiable #3).
-4. **Runs in `validation/policy_validation.py`**, before any DB touch, same
-   position as every other policy check in the one pipeline.
-
-**Explicitly out of scope:** a purpose-*taxonomy* editor/UI, purpose
-inheritance/hierarchies, or wiring `intent`'s free text into any policy
-decision — those are speculative beyond what the gap actually calls for.
-
-**Codebase fit.** `query_ast/models.py` (new field), `policy/models.py`
-(`allowed_purposes` + purpose-keyed policy deltas), `validation/
-policy_validation.py` (the check), `audit/events.py` (record the declared
-purpose). **Effort:** M. **TODO relation:** new — distinct from `intent`
-(logged, unenforced) and from item 90 (identity, not purpose). **Risk:** low;
-purely additive and only narrows access; mutation-verify the "narrows never
-widens" direction specifically (a flipped precedence would let a purpose
-grant more than the base policy allows).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 145).
 
 ### 146. "5-minute first governed query" quickstart — close the named Toolbox onboarding gap
 

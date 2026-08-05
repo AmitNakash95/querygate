@@ -5,9 +5,13 @@ from __future__ import annotations
 import pytest
 
 from querygate.core.exceptions import PolicyViolationError
-from querygate.policy.models import ColumnMask, Policy
+from querygate.policy.models import ColumnMask, MandatoryRowFilter, Policy, PurposePolicyDelta
 from querygate.query_ast.models import JoinSpec, Predicate, StructuredQuery, WhereGroup
-from querygate.validation.policy_validation import validate_batch_size, validate_policy
+from querygate.validation.policy_validation import (
+    resolve_purpose_policy,
+    validate_batch_size,
+    validate_policy,
+)
 
 
 def test_disabled_connection_rejected():
@@ -1091,3 +1095,91 @@ def test_masked_column_cannot_be_a_subquerys_window_output():
     policy = Policy(column_masks={"customers": [ColumnMask(column="name", kind="hash")]})
     with pytest.raises(PolicyViolationError, match="masked by policy"):
         validate_policy(query, policy, connection_id="demo")
+
+
+# --- Purpose-bound access (TODO.md item 145, feature F7) -------------------
+
+
+def _simple_query(**kwargs) -> StructuredQuery:
+    return StructuredQuery(from_table="orders", select=["orders.id"], **kwargs)
+
+
+def test_purpose_is_inert_when_allowed_purposes_is_empty():
+    """The 'empty allow-list = unrestricted' convention: a connection that
+    hasn't opted into purpose-gating accepts a query with no purpose, and one
+    with an arbitrary purpose, identically."""
+    policy = Policy()
+    assert validate_policy(_simple_query(), policy, connection_id="demo") == policy
+    assert (
+        validate_policy(_simple_query(purpose="anything"), policy, connection_id="demo") == policy
+    )
+
+
+def test_missing_purpose_is_rejected_once_allowed_purposes_is_set():
+    policy = Policy(allowed_purposes=["fraud_review", "support"])
+    with pytest.raises(PolicyViolationError, match="requires a declared purpose"):
+        validate_policy(_simple_query(), policy, connection_id="demo")
+
+
+def test_unrecognized_purpose_is_rejected():
+    policy = Policy(allowed_purposes=["fraud_review"])
+    with pytest.raises(PolicyViolationError, match="not permitted"):
+        validate_policy(_simple_query(purpose="marketing"), policy, connection_id="demo")
+
+
+def test_recognized_purpose_with_no_delta_passes_through_unchanged():
+    policy = Policy(allowed_purposes=["support"])
+    effective = validate_policy(_simple_query(purpose="support"), policy, connection_id="demo")
+    assert effective == policy
+
+
+def test_purpose_delta_denies_a_table_only_for_queries_declaring_it():
+    policy = Policy(
+        allowed_purposes=["support"],
+        purpose_policies={"support": PurposePolicyDelta(denied_tables=["orders"])},
+    )
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(_simple_query(purpose="support"), policy, connection_id="demo")
+    # Mutation-verify the direction: a query declaring NO purpose (inert on
+    # this connection since Policy.enabled/allowed_tables don't deny `orders`
+    # on their own) must NOT inherit the purpose-only restriction.
+    with pytest.raises(PolicyViolationError, match="requires a declared purpose"):
+        validate_policy(_simple_query(), policy, connection_id="demo")
+
+
+def test_purpose_delta_adds_a_mandatory_row_filter():
+    row_filter = MandatoryRowFilter(table="orders", column="region", value="us")
+    policy = Policy(
+        allowed_purposes=["support"],
+        purpose_policies={"support": PurposePolicyDelta(mandatory_row_filters=[row_filter])},
+    )
+    effective = validate_policy(_simple_query(purpose="support"), policy, connection_id="demo")
+    assert row_filter in effective.mandatory_row_filters
+    # The base Policy object itself is never mutated by resolving a purpose.
+    assert policy.mandatory_row_filters == []
+
+
+def test_purpose_cannot_widen_a_base_deny():
+    """The item's own stated risk: a flipped precedence would let a purpose
+    grant more than the base policy allows. A delta with an EMPTY
+    denied_tables list must never remove a base-level deny."""
+    policy = Policy(
+        denied_tables=["secrets"],
+        allowed_purposes=["support"],
+        purpose_policies={"support": PurposePolicyDelta()},
+    )
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(
+            StructuredQuery(from_table="secrets", select=["secrets.id"], purpose="support"),
+            policy,
+            connection_id="demo",
+        )
+
+
+def test_resolve_purpose_policy_is_the_shared_primitive_validate_policy_uses():
+    policy = Policy(
+        allowed_purposes=["support"],
+        purpose_policies={"support": PurposePolicyDelta(denied_tables=["orders"])},
+    )
+    resolved = resolve_purpose_policy(_simple_query(purpose="support"), policy)
+    assert "orders" in resolved.denied_tables

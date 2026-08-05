@@ -176,7 +176,7 @@ claim when the work ships or before explicitly handing the item back.
   already exposes a policy-vs-schema rejection-reason label for existing
   traffic (pre-existing, unrelated). Needs a maintainer call on whether to
   gate /metrics, recorded before building.*
-- [ ] **145** — Purpose-bound access: enforce the declared `intent`, don't
+- [x] **145** — Purpose-bound access: enforce the declared `intent`, don't
   just log it (feature F7). *Surfaced 2026-08-05 by `competitive-scan`. Advances
   the Structural pillar (query-*shape* policy) with a mechanic Immuta owns and
   no MCP gateway or DB-vendor server matches; composes with policy resolution

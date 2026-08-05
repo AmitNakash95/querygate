@@ -1986,6 +1986,33 @@ databases are close enough / trusted enough to combine," not something a
 caller can request their way around by naming both connections in a join
 clause.
 
+### Purpose-bound access: a declared reason that narrows, never widens
+
+**File:** `src/querygate/policy/models.py`, `validation/policy_validation.py`
+(item 145, feature F7). `StructuredQuery.purpose` is a closed-set token — not
+free text like `intent` — a caller declares alongside a query (e.g.
+`"fraud_review"`). If `Policy.allowed_purposes` is empty (the default), a
+connection hasn't opted into purpose-gating and a declared purpose is
+accepted but inert, the same "empty allow-list = unrestricted" convention
+`allowed_tables` uses. Once `allowed_purposes` is non-empty, *every* query on
+that connection must declare a purpose from the set, or it's rejected before
+any DB touch — the same posture as an unresolvable claim.
+
+A valid purpose narrows the effective policy via `Policy.purpose_policies`, a
+map from purpose token to a `PurposePolicyDelta`: additional
+`denied_tables`/`denied_columns`/`mandatory_row_filters`/`column_masks`
+unioned onto the connection's base `Policy`. There is deliberately no "allow"
+field on a delta — a purpose can only take away access the base policy
+already granted, never grant more, which makes "narrows never widens" true
+by construction rather than by convention. `validate_policy` returns this
+effective policy, and `execution/service.py` reuses it for compilation too
+(not just validation), so a purpose-added mandatory filter or column mask
+actually reaches the SQL — `explain()` and `verdict()` share the same
+choke point and get the same treatment. The declared purpose is persisted to
+the audit event (unlike `intent`, which is deliberately excluded): it's a
+fixed token from an operator-configured allow-list, not caller-authored
+prose, so recording it doesn't touch the redaction guarantee.
+
 ## Catalog / Semantic Layer
 
 ### The problem: knowing a schema isn't the same as understanding it
@@ -3365,6 +3392,77 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-08-05 — purpose-bound access: declared, closed-set, narrows-only
+  (TODO.md item 145, feature F7).** `StructuredQuery.intent` was free text,
+  logged but never enforced; Immuta's purpose-based access — where a caller
+  must declare *why* it needs data and that purpose narrows what it can see —
+  was flagged as a real, unmatched gap in the 2026-08-05 competitive scan.
+  Four design choices, each recorded because a flipped default would have
+  been a real security regression:
+  1. **A new field, `StructuredQuery.purpose`, not a repurposed `intent`.**
+     `intent` is documented free text and deliberately excluded from the
+     persisted audit event (`audit/events.py`'s own docstring: "no SQL,
+     parameter, intent... fields"); conflating the two would have put
+     arbitrary caller-authored prose into a policy decision. `purpose` is a
+     closed-set token instead, checked against `Policy.allowed_purposes`.
+  2. **`allowed_purposes` empty means the connection hasn't opted into
+     purpose-gating at all — a declared purpose is accepted but inert.**
+     The same "empty allow-list = unrestricted" convention every other
+     `Policy` list already uses (`allowed_tables`, `allowed_columns`).
+     **Once non-empty, EVERY query on that connection must declare a purpose
+     from the set** — not just queries touching some enumerated
+     "purpose-gated" subset of tables/columns. The alternative (per-table
+     purpose-gating) would need a second concept (which tables require a
+     purpose) the item's own scope didn't ask for and that adds real
+     complexity for a security feature; connection-wide is simpler, harder
+     to misconfigure into a false sense of security, and matches how every
+     other Policy allow-list already reads (a list-level switch, not a
+     row/column-level one).
+  3. **`PurposePolicyDelta` has no "allow" field — only additional
+     `denied_tables`/`denied_columns`/`mandatory_row_filters`/`column_masks`,
+     unioned onto the base `Policy` (`Policy.for_purpose`).** This makes
+     "narrows never widens" true by construction rather than by convention:
+     there is no field a misconfigured delta could set to grant more than
+     the base policy already allows. For `column_masks` specifically, the
+     delta's own masks are checked FIRST (so a purpose-specific stricter
+     mask on an already-masked column actually takes effect), but a
+     base-level deny/mandatory-filter can never be removed by any delta,
+     empty or not — the field literally isn't there to remove it with.
+  4. **`validate_policy` now returns the (possibly purpose-narrowed)
+     effective `Policy`, and `execution/service.py`'s `_validate_and_compile`
+     rebinds its local `policy` to that return value**, rather than
+     resolving the purpose gate in `policy_validation.py` while the
+     compiler keeps reading the un-narrowed policy from `_get_policy()`.
+     Column masking and mandatory-row-filters are *compiled in*
+     (`compiler/sqlalchemy_compiler.py` reads `policy.column_mask`/
+     `policy.mandatory_row_filters` directly from whatever `Policy` object
+     it's handed) — resolving the purpose only inside `policy_validation.py`
+     without this one-line propagation fix would have made a purpose delta's
+     mandatory filter pass *validation* but never reach the SQL, silently
+     doing nothing. `explain()` and `verdict()` share the same
+     `_validate_and_compile` choke point, so both inherit the fix for free.
+     The purpose token is also persisted to the audit event (`AuditEvent
+     .purpose`) — unlike `intent`, it's a fixed allow-listed token, not
+     caller-authored prose, so this doesn't reopen the redaction guarantee.
+  New `Policy` fields (`allowed_purposes`, `purpose_policies`) are excluded
+  from `GUARDRAIL_FIELDS` (item 115's drift guard) with a stated reason —
+  structural access rules, not scalar caps, the same treatment
+  `allowed_tables`/`mandatory_row_filters` already get.
+  **Mutation-verified:** reverting the `denied_tables` union to
+  `delta.denied_tables` alone (dropping the base policy's own list) made both
+  the `Policy.for_purpose` unit test and the `validate_policy` integration
+  test fail on exactly the widened-access assertion; dropping
+  `_validate_and_compile`'s policy reassignment made the compiled-SQL test
+  fail (the purpose delta's mandatory filter silently never reached the
+  SQL); disabling the missing-purpose check made both the unit and
+  `service.execute` tests fail with the wrong (fallback) error message. All
+  three reverted; full unit (1950), integration (344, excluding `real_db`),
+  and security (463) suites pass on the final tree. The Python
+  (`client/builder.py`) and TypeScript (`clients/typescript/src/builder.ts`)
+  client SDKs both got a matching `.purpose(...)` builder method and the
+  shared kitchen-sink parity fixture was updated, keeping item 51's
+  cross-language parity guard green.
 
 - **2026-08-05 — `_audit_page`'s `cursor` ceiling lowered from 1,000,000 to
   5,000, not redesigned (TODO.md item 140).** `GET /api/v1/admin/ui/audit/events`

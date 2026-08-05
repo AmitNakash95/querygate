@@ -390,6 +390,7 @@ def test_every_structuredquery_field_is_settable_by_the_builder():
         .offset(2)
         .top_n(1, order_by=[desc("n")], partition_by=["e.name"])
         .intent("everything")
+        .purpose("audit")
     )
     dumped = q.build().model_dump(by_alias=True)  # no exclusions: every key present
 

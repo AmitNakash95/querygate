@@ -199,6 +199,24 @@ class WritePolicy(pyd.BaseModel):
         return True
 
 
+class PurposePolicyDelta(pyd.BaseModel):
+    """A narrowing-only adjustment layered onto the principal's resolved
+    `Policy` when a query declares this purpose (TODO.md item 145, feature
+    F7 — purpose-bound access). By construction it can only take away access
+    the base `Policy` already granted: there is no "allow" field here, only
+    additional deny/filter/mask constraints unioned onto the base policy's
+    own (`Policy.for_purpose`), so a misconfigured delta cannot grant more
+    than the base policy already allows.
+    """
+
+    denied_tables: list[str] = pyd.Field(default_factory=list)
+    denied_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
+    mandatory_row_filters: list[MandatoryRowFilter] = pyd.Field(default_factory=list)
+    column_masks: dict[str, list[ColumnMask]] = pyd.Field(default_factory=dict)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
 class Policy(pyd.BaseModel):
     # Access and discovery switch. A resolved false value hides the
     # connection from REST/MCP listings and makes direct access behave as if
@@ -212,6 +230,21 @@ class Policy(pyd.BaseModel):
     denied_tables: list[str] = pyd.Field(default_factory=list)
     allowed_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
     denied_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
+
+    # Purpose-bound access (TODO.md item 145, feature F7): the closed set of
+    # purpose tokens a caller may declare (`StructuredQuery.purpose`) on this
+    # connection. Empty (the default) means this connection has not opted
+    # into purpose-gating at all — the same "empty allow-list = unrestricted"
+    # convention as `allowed_tables` — so a declared purpose is accepted but
+    # has no effect. Once non-empty, every query on this connection must
+    # declare a purpose from this set (enforced in
+    # `validation/policy_validation.py`).
+    allowed_purposes: list[str] = pyd.Field(default_factory=list)
+    # Per-purpose narrowing applied on top of the resolved policy when a query
+    # declares that purpose — see `for_purpose`. A purpose with no entry here
+    # is still a legitimate declaration (if listed in `allowed_purposes`)
+    # that adds no further narrowing beyond the base policy.
+    purpose_policies: dict[str, PurposePolicyDelta] = pyd.Field(default_factory=dict)
 
     # Governed writes (TODO.md item 93), deny-by-default and preview-only in
     # Phase 1. A read-only deployment leaves this at its default (writes off).
@@ -635,6 +668,43 @@ class Policy(pyd.BaseModel):
                     return mask
         return None
 
+    def for_purpose(self, purpose: Optional[str]) -> "Policy":
+        """The effective `Policy` once `purpose` is applied (TODO.md item 145).
+
+        Callers must validate `purpose` against `allowed_purposes` themselves
+        (`validation/policy_validation.py.resolve_purpose_policy` does this) —
+        this method only applies the narrowing, and narrows only, by
+        construction: every field `PurposePolicyDelta` carries is additive to
+        a deny-list, filter list, or mask list, never a replacement or an
+        "allow" that could grant more than this `Policy` already does.
+        `purpose=None`, or a purpose with no configured delta, returns this
+        `Policy` unchanged (not a copy) — the common case costs nothing.
+        """
+        if purpose is None:
+            return self
+        delta = self.purpose_policies.get(purpose)
+        if delta is None:
+            return self
+        merged_columns = {table: list(cols) for table, cols in self.denied_columns.items()}
+        for table, cols in delta.denied_columns.items():
+            merged_columns[table] = merged_columns.get(table, []) + list(cols)
+        # The delta's own masks are checked FIRST (see `column_mask`'s
+        # first-match-wins rule) so a purpose that adds a stricter mask to an
+        # otherwise-unmasked column actually takes effect; a column the base
+        # policy already masks keeps that mask unless the delta names the
+        # identical column, in which case the purpose-specific one wins.
+        merged_masks = {table: list(masks) for table, masks in delta.column_masks.items()}
+        for table, masks in self.column_masks.items():
+            merged_masks[table] = merged_masks.get(table, []) + list(masks)
+        return self.model_copy(
+            update={
+                "denied_tables": self.denied_tables + delta.denied_tables,
+                "denied_columns": merged_columns,
+                "mandatory_row_filters": self.mandatory_row_filters + delta.mandatory_row_filters,
+                "column_masks": merged_masks,
+            }
+        )
+
 
 # ---------------------------------------------------------------------------
 # The guardrail field set (TODO.md item 115) — ONE derivation, four consumers.
@@ -676,6 +746,13 @@ _NON_GUARDRAIL_POLICY_FIELDS = frozenset(
         "join_group",
         "write",
         "approval_sensitivities",
+        # TODO.md item 145 (F7): structural access rules, the same reason
+        # allowed_tables/denied_columns/mandatory_row_filters are excluded —
+        # a list and a dict of narrowing deltas have no scalar permissiveness
+        # to compare, and reporting them as opaque scalars would be worse
+        # than not reporting them at all.
+        "allowed_purposes",
+        "purpose_policies",
     }
 )
 

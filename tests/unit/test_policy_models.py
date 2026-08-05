@@ -8,7 +8,13 @@ import pytest
 
 from querygate.core.auth import Principal
 from querygate.core.exceptions import PolicyViolationError
-from querygate.policy.models import MandatoryRowFilter, Policy
+from querygate.policy.models import (
+    ColumnMask,
+    ColumnMaskKind,
+    MandatoryRowFilter,
+    Policy,
+    PurposePolicyDelta,
+)
 
 
 def test_requires_value_or_from_claim():
@@ -68,3 +74,88 @@ def test_min_group_size_rejects_k_below_two():
         Policy(min_group_size=1)
     with pytest.raises(ValueError):
         Policy(min_group_size=0)
+
+
+# --- Policy.for_purpose (TODO.md item 145, feature F7) ---------------------
+
+
+def test_for_purpose_none_returns_the_same_policy_unchanged():
+    policy = Policy(denied_tables=["secrets"])
+    assert policy.for_purpose(None) is policy
+
+
+def test_for_purpose_with_no_configured_delta_returns_the_same_policy_unchanged():
+    policy = Policy(allowed_purposes=["support"], denied_tables=["secrets"])
+    assert policy.for_purpose("support") is policy
+
+
+def test_for_purpose_unions_denied_tables():
+    policy = Policy(
+        denied_tables=["secrets"],
+        purpose_policies={"support": PurposePolicyDelta(denied_tables=["billing"])},
+    )
+    narrowed = policy.for_purpose("support")
+    assert set(narrowed.denied_tables) == {"secrets", "billing"}
+    # The base policy itself must be untouched — for_purpose returns a new
+    # object, never mutates the one it was called on.
+    assert policy.denied_tables == ["secrets"]
+
+
+def test_for_purpose_unions_denied_columns_per_table():
+    policy = Policy(
+        denied_columns={"orders": ["ssn"]},
+        purpose_policies={
+            "support": PurposePolicyDelta(denied_columns={"orders": ["credit_card"]})
+        },
+    )
+    narrowed = policy.for_purpose("support")
+    assert set(narrowed.denied_columns["orders"]) == {"ssn", "credit_card"}
+
+
+def test_for_purpose_appends_mandatory_row_filters():
+    base_filter = MandatoryRowFilter(table="orders", column="tenant_id", value="acme")
+    delta_filter = MandatoryRowFilter(table="orders", column="region", value="us")
+    policy = Policy(
+        mandatory_row_filters=[base_filter],
+        purpose_policies={"support": PurposePolicyDelta(mandatory_row_filters=[delta_filter])},
+    )
+    narrowed = policy.for_purpose("support")
+    assert narrowed.mandatory_row_filters == [base_filter, delta_filter]
+
+
+def test_for_purpose_adds_a_mask_to_a_previously_unmasked_column():
+    mask = ColumnMask(column="email", kind=ColumnMaskKind.NULL)
+    policy = Policy(
+        purpose_policies={"support": PurposePolicyDelta(column_masks={"users": [mask]})}
+    )
+    narrowed = policy.for_purpose("support")
+    assert narrowed.column_mask("users", "email") == mask
+    # The base (unnarrowed) policy must still see the column as unmasked.
+    assert policy.column_mask("users", "email") is None
+
+
+def test_for_purpose_mask_wins_over_a_base_mask_on_the_same_column():
+    base_mask = ColumnMask(column="ssn", kind=ColumnMaskKind.LAST, length=4)
+    purpose_mask = ColumnMask(column="ssn", kind=ColumnMaskKind.NULL)
+    policy = Policy(
+        column_masks={"users": [base_mask]},
+        purpose_policies={"support": PurposePolicyDelta(column_masks={"users": [purpose_mask]})},
+    )
+    narrowed = policy.for_purpose("support")
+    assert narrowed.column_mask("users", "ssn") == purpose_mask
+
+
+def test_for_purpose_never_removes_a_base_deny_or_mandatory_filter():
+    """The 'narrows never widens' invariant, stated as a test: whatever the
+    base Policy already restricts stays restricted after for_purpose."""
+    base_filter = MandatoryRowFilter(table="orders", column="tenant_id", value="acme")
+    policy = Policy(
+        denied_tables=["secrets"],
+        denied_columns={"orders": ["ssn"]},
+        mandatory_row_filters=[base_filter],
+        purpose_policies={"support": PurposePolicyDelta()},
+    )
+    narrowed = policy.for_purpose("support")
+    assert "secrets" in narrowed.denied_tables
+    assert "ssn" in narrowed.denied_columns["orders"]
+    assert base_filter in narrowed.mandatory_row_filters

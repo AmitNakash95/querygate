@@ -132,6 +132,12 @@ class AuditEvent(pyd.BaseModel):
     # never the pre-mask value, keeping this event redaction-safe. Lets an
     # operator distinguish "masked" from "denied" access in the same stream.
     masked_columns: List[str] = pyd.Field(default_factory=list)
+    # The declared purpose (TODO.md item 145, feature F7), if any — unlike
+    # `intent` (free text, excluded above), this IS persisted: it's a fixed
+    # token from the connection's Policy.allowed_purposes allow-list, not
+    # caller-authored prose, so it carries the same redaction-safe posture as
+    # `template_id`.
+    purpose: Optional[str] = None
 
     model_config = pyd.ConfigDict(extra="forbid")
 
