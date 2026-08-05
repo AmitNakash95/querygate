@@ -169,13 +169,11 @@ claim when the work ships or before explicitly handing the item back.
   vulnerable `pkcs7_decrypt_*` functions, so this is likely a justified-
   allowlist case, but that's the `dep-audit` skill's call. Blocks the release
   gate for every future item until resolved.*
-- [ ] **144** — `verdict()` emits no query metrics, and `/metrics` is
+- [x] **144** — `verdict()` emits no query metrics, and `/metrics` is
   unauthenticated. *Surfaced 2026-08-02 by the `security-invariant-reviewer`
-  re-audit of item 133. verdict() shares execute()'s quota budget but leaves
-  no metrics trail of its own; separately, /metrics being unauthenticated
-  already exposes a policy-vs-schema rejection-reason label for existing
-  traffic (pre-existing, unrelated). Needs a maintainer call on whether to
-  gate /metrics, recorded before building.*
+  re-audit of item 133. Shipped 2026-08-05: maintainer decided to gate
+  `/metrics` behind a new `admin:metrics:read` scope (not just document the
+  exposure) — see docs/TODO_ARCHIVE.md item 144.*
 - [x] **145** — Purpose-bound access: enforce the declared `intent`, don't
   just log it (feature F7). *Surfaced 2026-08-05 by `competitive-scan`. Advances
   the Structural pillar (query-*shape* policy) with a mechanic Immuta owns and

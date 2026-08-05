@@ -194,6 +194,29 @@ LEARNED_PROPOSALS_GENERATED_TOTAL = Counter(
     registry=REGISTRY,
 )
 
+VERDICTS_TOTAL = Counter(
+    "querygate_verdicts_total",
+    "Caller-facing verdict() calls (TODO.md item 133), by connection and "
+    "outcome. outcome is deliberately restricted to allowed | denied — never "
+    "a policy-vs-schema reason breakdown, since verdict()'s whole guarantee "
+    "(docs/THREAT_MODEL.md QG-34) is that a denial never distinguishes its "
+    "real cause; a reason label here would republish exactly the oracle "
+    "verdict()'s response body collapses. A quota/concurrency failure is a "
+    "system-busy state, not a shape verdict, so it is not counted here — see "
+    "querygate_query_quota_rejections_total instead.",
+    ["connection", "outcome"],  # outcome: allowed | denied
+    registry=REGISTRY,
+)
+
+VERDICT_DURATION_SECONDS = Histogram(
+    "querygate_verdict_duration_seconds",
+    "verdict() duration in seconds, by connection (both allowed and denied "
+    "outcomes — unlike querygate_query_duration_seconds, a denied verdict's "
+    "duration is still real validation/compile time, not noise).",
+    ["connection"],
+    registry=REGISTRY,
+)
+
 
 def classify_rejection(exc: BaseException) -> str:
     if isinstance(exc, QueueFullError):
@@ -239,6 +262,8 @@ __all__ = [
     "USAGE_SIGNAL_BUFFER_DROPPED_TOTAL",
     "USAGE_SIGNALS_RECORDED_TOTAL",
     "LEARNED_PROPOSALS_GENERATED_TOTAL",
+    "VERDICTS_TOTAL",
+    "VERDICT_DURATION_SECONDS",
     "classify_rejection",
     "render_latest",
 ]

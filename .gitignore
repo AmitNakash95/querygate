@@ -157,6 +157,7 @@ activemq-data/
 .env
 .env.production
 .envrc
+deploy/docker-compose/querygate-metrics-token
 .venv
 env/
 venv/
