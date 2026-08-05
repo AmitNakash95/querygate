@@ -174,7 +174,7 @@ order-of-magnitude, not commitments.
 | 141 | Convert audit-reader line caps into practically-tight window-based early exits | S | 138 |
 | 142 | ✅ `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats | XS | — |
 | 143 | ✅ `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step | XS–S | — |
-| 144 | `verdict()` emits no query metrics, and `/metrics` is unauthenticated | S | — |
+| 144 | ✅ `verdict()` emits no query metrics, and `/metrics` is unauthenticated | S | — |
 | 145 | ✅ Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7) | M | — |
 | 146 | ✅ "5-minute first governed query" quickstart — close the named Toolbox onboarding gap | S–M | 48, 51 |
 | 147 | ✅ Self-serve procurement evidence page | S | 54, 58, 60 |
@@ -2444,40 +2444,15 @@ needed. `make release-check` now passes fully clean end to end.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 143).
 
-### 144. `verdict()` emits no query metrics, and `/metrics` is unauthenticated
+### 144. `verdict()` emits no query metrics, and `/metrics` is unauthenticated ✅ DONE
 
-**Surfaced 2026-08-02 by the `security-invariant-reviewer` re-audit of item
-133; two related, non-blocking observability gaps.**
+Dedicated `querygate_verdicts_total{connection,outcome}` (allowed/denied
+only, never a reason) and `querygate_verdict_duration_seconds`; a
+verdict-driven quota exhaustion now increments the shared
+`querygate_query_quota_rejections_total`; `GET /metrics` now requires the new
+`admin:metrics:read` scope by default (`AppConfig.metrics_require_auth`).
 
-1. **`verdict()` emits no `QUERIES_TOTAL`/`QUERIES_REJECTED_TOTAL`/
-   `QUERY_QUOTA_REJECTIONS_TOTAL`/`QUERY_DURATION_SECONDS` metrics at all**
-   (`execution/service.py`), unlike `execute()`. It consumes the *same*
-   per-principal quota budget `execute()` does (keyed
-   `(connection_id, principal_subject)`), so a gateway doing verdict-then-
-   execute can exhaust that budget through verdict calls alone — and an
-   operator's metrics-based "why is this agent throttled" debugging has no
-   verdict-shaped signal to look at; only the `execute` calls that actually
-   ran after the budget was already spent show up.
-2. **`/metrics` (`api/app.py`) is unauthenticated**, and
-   `QUERIES_REJECTED_TOTAL{reason=...}` already labels rejections
-   `"policy"` vs `"schema"` for the *existing* `execute`/`explain` traffic —
-   pre-existing, unrelated to item 133, but it means QG-34's collapse is
-   bounded by network placement (whether `/metrics` is reachable by the
-   caller), not by application code, and the threat-model row doesn't say
-   so today.
-
-**What to do, if approved:** for (1), add verdict-specific counters —
-**but not** a `reason`-labeled rejection counter on the denied path, since
-`/metrics` being unauthenticated (2) means a policy-vs-schema label there
-would publish exactly the distinction QG-34 collapses; use a single fixed
-`reason="verdict_denied"` or a dedicated `querygate_verdicts_total
-{connection,outcome}` with `outcome` restricted to `{allowed, denied}` only.
-For (2), either add a residual sentence to `docs/THREAT_MODEL.md` QG-34
-acknowledging `/metrics`'s existing exposure, or gate `/metrics` behind an
-`AppConfig` option (bearer requirement or bind-address restriction) — the
-latter is a real infra decision, not a default an agent should reach for.
-
-**Effort:** S.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 144).
 
 ### 145. Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7) ✅ DONE
 

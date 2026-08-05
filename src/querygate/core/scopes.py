@@ -46,6 +46,16 @@ ADMIN_CONNECTIONS_TEST_SCOPE = "admin:connections:test"
 # principal — but a per-connection breakdown is still admin-gated per item 44.
 ADMIN_OBSERVABILITY_READ_SCOPE = "admin:observability:read"
 
+# Raw Prometheus scrape endpoint (TODO.md item 144). Its own scope, distinct
+# from admin:observability:read: the scraper (Prometheus, a sidecar) is a
+# different consumer than an admin-UI operator reading aggregated trends, and
+# /metrics exposes lower-level, higher-cardinality-adjacent signal (per-reason
+# rejection counters) that a dedicated least-privilege credential should gate
+# rather than folding into the observability-dashboard scope. Enforced only
+# when AppConfig.metrics_require_auth is true (the default; see
+# docs/THREAT_MODEL.md QG-36).
+ADMIN_METRICS_READ_SCOPE = "admin:metrics:read"
+
 # Catalog governance (TODO.md item 32B) — least-privilege, split by
 # operation rather than one broad "catalog admin" scope.
 CATALOG_GENERATE_SCOPE = "catalog:generate"
@@ -142,6 +152,11 @@ SCOPE_CATALOG: Tuple[ScopeInfo, ...] = (
         "Read aggregated query/rejection/pressure trends",
     ),
     ScopeInfo(
+        ADMIN_METRICS_READ_SCOPE,
+        "Admin · Observability",
+        "Scrape the raw Prometheus /metrics endpoint",
+    ),
+    ScopeInfo(
         CATALOG_GENERATE_SCOPE, "Catalog governance", "Generate draft catalog entries for review"
     ),
     ScopeInfo(
@@ -197,12 +212,14 @@ ROLE_BUNDLES: Tuple[RoleBundle, ...] = (
     ),
     RoleBundle(
         "Operator",
-        "Day-2 operations: reload config, check connection health, read trends.",
+        "Day-2 operations: reload config, check connection health, read trends "
+        "and scrape Prometheus metrics.",
         (
             ADMIN_RELOAD_CONFIG_SCOPE,
             ADMIN_CONNECTIONS_READ_SCOPE,
             ADMIN_CONNECTIONS_TEST_SCOPE,
             ADMIN_OBSERVABILITY_READ_SCOPE,
+            ADMIN_METRICS_READ_SCOPE,
         ),
     ),
     RoleBundle(

@@ -47,6 +47,7 @@ scope, only a valid identity.
 | Scope | Gates |
 |---|---|
 | `admin:observability:read` | Read aggregated query/rejection/pressure trends |
+| `admin:metrics:read` | Scrape the raw Prometheus /metrics endpoint |
 
 ### Catalog governance
 
@@ -87,12 +88,13 @@ Runs structured queries. Carries no authorization scope; table/column access is 
 
 ### Operator
 
-Day-2 operations: reload config, check connection health, read trends.
+Day-2 operations: reload config, check connection health, read trends and scrape Prometheus metrics.
 
 - `admin:reload-config`
 - `admin:connections:read`
 - `admin:connections:test`
 - `admin:observability:read`
+- `admin:metrics:read`
 
 ### Config Governor
 

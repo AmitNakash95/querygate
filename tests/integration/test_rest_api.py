@@ -655,12 +655,40 @@ async def test_jwt_enabled_in_local_dev_still_rejects_invalid_tokens():
 
 
 @pytest.mark.asyncio
-async def test_metrics_endpoint(app):
+async def test_metrics_endpoint_requires_auth_by_default():
+    """TODO.md item 144 / docs/THREAT_MODEL.md QG-36: metrics_require_auth
+    defaults to true, so an unauthenticated caller — including the local/dev
+    anonymous bypass, which grants no scopes — must not reach /metrics."""
+    app = create_app(_settings())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.get("/metrics")
+    assert resp.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint_requires_admin_metrics_read_scope():
+    app = create_app(_settings(api_keys=["secret-key"], api_key_scopes=["admin:connections:read"]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        wrong_scope = await client.get("/metrics", headers={"Authorization": "Bearer secret-key"})
+    assert wrong_scope.status_code == 403
+
+    app = create_app(_settings(api_keys=["secret-key"], api_key_scopes=["admin:metrics:read"]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.get("/metrics", headers={"Authorization": "Bearer secret-key"})
+    assert resp.status_code == 200
+    assert "querygate_queries_total" in resp.text
+    assert "querygate_concurrency_in_use" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint_reachable_unauthenticated_when_disabled():
+    """metrics_require_auth=False is an explicit operator opt-out (e.g. a
+    same-pod sidecar scrape path already restricts reachability)."""
+    app = create_app(_settings(metrics_require_auth=False))
     async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
         resp = await client.get("/metrics")
     assert resp.status_code == 200
     assert "querygate_queries_total" in resp.text
-    assert "querygate_concurrency_in_use" in resp.text
 
 
 @pytest.mark.asyncio

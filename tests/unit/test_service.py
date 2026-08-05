@@ -973,6 +973,100 @@ async def test_verdict_denial_emits_a_redaction_safe_rejected_audit_event():
 
 
 @pytest.mark.asyncio
+async def test_verdict_allowed_increments_verdicts_total():
+    """TODO.md item 144: verdict() previously emitted no metrics at all."""
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    before = _sample("querygate_verdicts_total", {"connection": "demo", "outcome": "allowed"})
+    with patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})):
+        service = StructuredQueryService(connection_id="demo")
+        result = await service.verdict(query)
+    after = _sample("querygate_verdicts_total", {"connection": "demo", "outcome": "allowed"})
+
+    assert result.allowed is True
+    assert after == before + 1
+
+
+@pytest.mark.asyncio
+async def test_verdict_denied_increments_verdicts_total_without_a_reason_label():
+    """The counter's `outcome` label must stay restricted to allowed/denied —
+    never a policy-vs-schema reason, or this fix would republish exactly the
+    oracle QG-34's response-body collapse exists to hide (see docs/THREAT_MODEL.md
+    QG-36)."""
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    set_policy_store(PolicyStore(default=Policy(denied_tables=["customers"]), overrides={}))
+    before = _sample("querygate_verdicts_total", {"connection": "demo", "outcome": "denied"})
+    service = StructuredQueryService(connection_id="demo")
+    result = await service.verdict(query)
+    after = _sample("querygate_verdicts_total", {"connection": "demo", "outcome": "denied"})
+
+    assert result.allowed is False
+    assert after == before + 1
+    # No `reason` label exists on this metric at all — get_sample_value with
+    # an extra label key simply wouldn't match a real sample, so assert the
+    # metric family only ever carries the two labels it's supposed to.
+    for metric in REGISTRY.collect():
+        if metric.name == "querygate_verdicts":
+            for sample in metric.samples:
+                assert set(sample.labels.keys()) == {"connection", "outcome"}
+
+
+@pytest.mark.asyncio
+async def test_verdict_records_duration():
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    before = _sample("querygate_verdict_duration_seconds_count", {"connection": "demo"})
+    with patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})):
+        service = StructuredQueryService(connection_id="demo")
+        await service.verdict(query)
+    after = _sample("querygate_verdict_duration_seconds_count", {"connection": "demo"})
+
+    assert after == before + 1
+
+
+@pytest.mark.asyncio
+async def test_verdict_quota_exceeded_increments_the_shared_quota_counter():
+    """verdict() shares execute()'s per-principal quota budget (TODO.md item
+    144's finding 1), so a verdict-driven quota exhaustion must be visible on
+    the same querygate_query_quota_rejections_total counter execute() reports
+    through — not silently invisible to metrics-based debugging."""
+    from querygate.core.exceptions import QuotaExceededError
+
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    before = _sample(
+        "querygate_query_quota_rejections_total",
+        {"connection": "demo", "quota_kind": "requests"},
+    )
+    before_verdicts = _sample(
+        "querygate_verdicts_total", {"connection": "demo", "outcome": "allowed"}
+    )
+    with patch.object(
+        svc,
+        "enforce_query_quota",
+        AsyncMock(
+            side_effect=QuotaExceededError(
+                "too many requests", quota_kind="requests", retry_after_seconds=1
+            )
+        ),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        with pytest.raises(QuotaExceededError):
+            await service.verdict(query)
+    after = _sample(
+        "querygate_query_quota_rejections_total",
+        {"connection": "demo", "quota_kind": "requests"},
+    )
+    after_verdicts = _sample(
+        "querygate_verdicts_total", {"connection": "demo", "outcome": "allowed"}
+    )
+
+    assert after == before + 1
+    # A quota failure is a system-busy state, not a shape verdict — it must
+    # not also count toward querygate_verdicts_total.
+    assert after_verdicts == before_verdicts
+
+
+@pytest.mark.asyncio
 async def test_verdict_many_partial_failure():
     """Mirrors test_explain_many_partial_failure: one query's system-level
     failure (not a shape verdict) doesn't drop the rest of the batch.

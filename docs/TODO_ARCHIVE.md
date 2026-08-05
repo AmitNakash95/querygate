@@ -9172,6 +9172,56 @@ failing since item 133 surfaced this.
 **Effort:** XS–S (turned out to be XS — a clean upgrade was available, no
 allowlist judgment call needed). **Depends on:** none.
 
+### 144. `verdict()` emits no query metrics, and `/metrics` is unauthenticated ✅ DONE
+
+**Surfaced 2026-08-02 by the `security-invariant-reviewer` re-audit of item
+133; two related, non-blocking observability gaps.** `verdict()` shared
+`execute()`'s per-principal quota budget while emitting no metrics of its
+own, so a caller could exhaust that budget through verdict calls alone with
+no verdict-shaped trace for an operator's "why is this agent throttled"
+debugging; separately, `GET /metrics` was unauthenticated, and already
+labels rejections `"policy"` vs `"schema"` for ordinary `execute`/`explain`
+traffic — the exact distinction `verdict()`'s own response body (QG-34)
+collapses.
+
+**Maintainer decision (both items this gap needed):** gate `/metrics`
+outright rather than only document the exposure, and add dedicated
+verdict-only counters rather than reusing `execute()`'s `reason`-labeled
+rejection counter.
+
+**Shipped.**
+
+1. **`querygate_verdicts_total{connection,outcome}`** (`metrics.py`) —
+   `outcome` restricted to `allowed`/`denied` only, deliberately never a
+   `reason` breakdown, so this fix cannot reopen the exact oracle QG-34
+   collapses. Incremented on `verdict()`'s allowed and denied return paths
+   only — a quota/concurrency failure is a system-busy state, not a shape
+   verdict (per the docstring's existing reasoning), so it does not touch
+   this counter.
+2. **`querygate_verdict_duration_seconds{connection}`** — observed on both
+   outcomes, since a denied verdict's duration is still real
+   validation/compile time, not noise (unlike `execute()`'s "successful
+   queries only" convention).
+3. **A verdict-driven quota exhaustion now increments the same
+   `querygate_query_quota_rejections_total` counter `execute()` reports
+   through** (`verdict()`'s outer `except`, gated on
+   `isinstance(exc, QuotaExceededError)`), so it's visible on the operator's
+   existing quota dashboard instead of invisible.
+4. **`AppConfig.metrics_require_auth`** (default `True`) gates `GET
+   /metrics` behind the same `Authenticator`/scope machinery as every other
+   admin surface, via a new least-privilege `admin:metrics:read` scope
+   (`core/scopes.py`, added to the "Operator" role bundle) — deliberately
+   separate from `admin:observability:read` (a different consumer: a
+   Prometheus scraper vs. an admin-UI operator reading aggregated trends).
+   Setting it `false` is an explicit, documented operator opt-out for a
+   deployment whose network reachability is already restricted.
+   `docs/THREAT_MODEL.md` gets a new QG-36 row; the docker-compose and Helm
+   reference deployments' bundled-Prometheus examples were updated to
+   authenticate their scrape (a bearer-token file / `bearerTokenSecret`)
+   rather than silently breaking.
+
+**Effort:** S. **Depends on:** none.
+
 ### 145. Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7) ✅ DONE
 
 **Surfaced 2026-08-05 by `competitive-scan`.** `StructuredQuery.intent`
