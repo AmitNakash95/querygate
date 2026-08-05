@@ -89,6 +89,20 @@ For development with automatic reload, use `make dev` (or its longer alias,
 `make run-dev`). `make run dev` is interpreted by Make as two separate
 targets and is not the development-server command.
 
+With the server running, get your first governed query in under 5 minutes:
+
+```bash
+export QUERYGATE_URL=http://localhost:8000
+export QUERYGATE_TOKEN=<a bearer token from your .env's API_KEYS>
+querygate-quickstart demo
+```
+
+`querygate-quickstart` (TODO.md item 146) reflects a connection's schema and
+prints 3 ready-to-run example queries — a plain select, a filtered select,
+and an aggregate — scoped to columns the catalog doesn't mark sensitive, each
+with a REST `curl`, an MCP tool-call, and a Python SDK snippet. It composes
+existing read-only discovery routes; it never writes anything.
+
 ## Persisted audit events
 
 The example environment enables an append-only JSONL sink at

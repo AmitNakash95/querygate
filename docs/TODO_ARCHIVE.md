@@ -9234,6 +9234,66 @@ and security (463) suites pass on the final tree.
 
 **Effort:** M. **Depends on:** none.
 
+### 146. "5-minute first governed query" quickstart — close the named Toolbox onboarding gap ✅ DONE
+
+**Surfaced 2026-08-05 by `product-scorecard`.**
+`docs/business/COMPETITOR_GOOGLE_TOOLBOX.md`'s 2026-07-22 Decision commits
+explicitly: "Steal the onboarding lesson, not the architecture... QueryGate's
+discovery flow (list/describe/search_catalog) should be as close to
+zero-friction as the guardrails allow — a '5-minute first governed query'
+quickstart." That is the one dimension the brief's own scoring table hands
+to a competitor outright (Onboarding / time-to-first-query: Toolbox 9,
+QueryGate 6).
+
+**Why it matters.** Today a new caller must chain `list_connections` →
+`search_catalog`/`describe_schema` → hand-author a `StructuredQuery` from
+raw JSON before running a first query. QueryGate already has every
+ingredient — item 48's admin-approved query templates, the item-51 Python/
+TypeScript client SDKs, and the catalog's `describe_schema` reflection —
+but nothing composed them into a guided first-five-minutes path.
+
+**Decision (recorded in `docs/PRODUCT_GUIDE.md`'s Decision Log, 2026-08-05):
+a standalone `querygate-quickstart` CLI, not a `querygate quickstart`
+subcommand.** The item's own prose showed `querygate quickstart <connection>`,
+but `querygate` is the uvicorn server entrypoint with no subcommand
+dispatcher — every other CLI in this repo is its own top-level `querygate-*`
+script, so `querygate-quickstart` matches the established convention (and
+the item's own "mirroring `querygate-config`" instruction).
+
+**Shipped.** `src/querygate/quickstart_cli.py`: a thin, authenticated
+`httpx` client (no new server-side authority) that (1) calls
+`GET /{connection}/tables` then `GET /{connection}/tables/{table}` to find
+the first table with ≥2 non-sensitive columns — reusing
+`TableDescription.columns[].catalog.sensitivity` (item 32) directly, no
+second sensitivity check invented and no extra `catalog/search` round trip;
+(2) proposes exactly the three shapes the item asked for — a plain select, a
+filtered select (`is_not_null`, so it's valid regardless of real data), and a
+group-by aggregate (`COUNT(*)`); (3) prints, per query, a ready `curl`
+command against `POST /{connection}/query`, an MCP `run_structured_queries`
+tool-call JSON, and an equivalent `client/builder.py` Python-SDK snippet.
+Never persists anything (item 48's template-authoring path is untouched, as
+scoped). Wired as `querygate-quickstart` in `pyproject.toml`'s
+`[project.scripts]`, documented in README.md's `## Quickstart` section
+(exactly the section a new reader hits right after starting the server).
+
+**Coverage.** `tests/unit/test_quickstart_cli.py`: skips a table whose
+columns are all sensitive and picks the next qualifying one, never surfaces
+a sensitive column in any proposed query, renders all three snippet kinds
+for all three query shapes, reports a clean non-error message when no table
+qualifies, and every "StructuredQuery body" block round-trips as valid JSON.
+**Verified live**, not just mocked: against the real demo Postgres
+(`docker compose up` + the packaged `examples/` connections/policy config),
+all three generated `curl` commands were executed for real and returned
+real rows, and the three printed Python SDK snippets were run directly and
+produced byte-identical bodies to what the CLI displayed.
+**Mutation-verified:** short-circuiting the sensitivity check to always
+report "safe" made the sensitive-column regression test fail for the
+expected reason (a PII column reaching a proposed query); reverted, and the
+full unit (1961), integration (344, excluding `real_db`), and security (463)
+suites pass on the final tree.
+
+**Effort:** S–M. **Depends on:** 48, 51 (both shipped).
+
 ### 147. Self-serve procurement evidence page ✅ DONE
 
 **Surfaced 2026-08-05 by `product-scorecard`.** The `trust-evidence` skill
