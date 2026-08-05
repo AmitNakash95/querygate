@@ -7,7 +7,7 @@
 
 **1 reviewed allowlist entries** (deny-by-default — every other known finding fails the release gate):
 
-- `PYSEC-2026-286` (asyncmy) — SQL injection (CVE-2025-65896, GHSA-qhqw-rrw9-25rm, CVSS 9.8) in asyncmy's converters.pyx escape_dict(): only dict VALUES are escaped, not dict KEYS, so a caller that passes cursor.execute(query, {attacker_controlled_key: value}) with a pyformat/dict-shaped parameter mapping can inject via the key. No fixed version exists yet upstream. Measured, not assumed (2026-08-06, TODO.md item 19): QueryGate never calls asyncmy's cursor directly — every MySQL query goes through SQLAlchemy Core via the async engine, and SQLAlchemy's mysql+asyncmy dialect's own paramstyle is 'format' (positional %s), confirmed empirically by tracing MySQLDialect_asyncmy.do_execute against a live server — every call observed parameters arriving as a plain tuple, never a dict, for both sa.text() bind params and Core Select bind params. The vulnerable escape_dict() codepath is therefore never reached by this codebase's usage pattern, matching the same evidence bar item 143's cryptography CVE review used (verified QueryGate's own code never calls the vulnerable function, not assumed from the advisory text alone). (tracking: TODO.md item 19 phase 1; re-review if asyncmy's paramstyle ever changes or a raw cursor call is ever introduced, and re-check on every dep-audit pass for an upstream fix version.)
+- `PYSEC-2026-286` (asyncmy) — SQL injection (CVE-2025-65896, GHSA-qhqw-rrw9-25rm, CVSS 9.8) in asyncmy's converters.pyx escape_dict(): only dict VALUES are escaped, not dict KEYS, so a caller that passes cursor.execute(query, {attacker_controlled_key: value}) with a pyformat/dict-shaped parameter mapping can inject via the key. No fixed version exists yet upstream. Measured, not assumed (2026-08-06, TODO.md item 19): QueryGate never calls asyncmy's cursor directly — every MySQL query goes through SQLAlchemy Core via the async engine. SQLAlchemy's DBAPI execution layer shapes the parameters it hands a cursor according to the dialect's declared `paramstyle`; the mysql+asyncmy dialect declares 'format' (positional %s), which SQLAlchemy always passes as a tuple/sequence, never a dict — regardless of whether the query is built via sa.text() or Core Select. escape_dict()'s vulnerable dict-KEYS codepath is only reached under a dict-shaped paramstyle (pyformat/named), so it is never reached by this dialect's usage pattern. Guarded going forward by a static regression test (tests/unit/test_dialect_adapters.py::TestMySQLAsyncmyParamstyleStaysPositional) asserting the dialect's declared paramstyle stays out of the dict-shaped set — it fails loudly if a future SQLAlchemy release ever changes that, which is when this entry needs re-review, not a live-server trace on every audit pass. (tracking: TODO.md item 19 phase 1; re-review if asyncmy's paramstyle ever changes or a raw cursor call is ever introduced, and re-check on every dep-audit pass for an upstream fix version.)
 
 ## Security & reliability posture
 
@@ -41,7 +41,7 @@ that weakened any of them would fail the build.
 |---|---|---|---|---|
 | **Core guarantee** | No raw-SQL path; validated-AST-only | Structured AST + Pydantic `forbid`; enforced by tests | ✅ Enforced | `make test-security` |
 | **SAST** | Static security analysis of source | **Bandit** + **Semgrep OSS** (`p/python`, `p/security-audit`, `p/owasp-top-ten`) | ✅ Clean (deny-by-default) | `make sast` + `make semgrep` |
-| **Dependencies** | Known-CVE audit of the exact shipped set | **pip-audit** against `poetry.lock` `main` group | ✅ Clean — **0 allowlisted** (all fixed) | `make sbom` |
+| **Dependencies** | Known-CVE audit of the exact shipped set | **pip-audit** against `poetry.lock` `main` group | ✅ Clean — **1 reviewed allowlist entry** (asyncmy, unreachable codepath) | `make sbom` |
 | **SBOM** | Software bill of materials | **CycloneDX** | ✅ Generated per release | `make sbom` |
 | **Container image** | OS + library CVEs, secrets, misconfig | **Trivy** on the shipped image | ✅ **0 HIGH/CRITICAL** (no exceptions) | `make scan-image` |
 | **Secrets** | No credential ever committed | **gitleaks** over full git history | ✅ Clean | `make scan-secrets` |
@@ -113,10 +113,15 @@ CI job: **SAST (Bandit + Semgrep OSS)**.
   the `main` group of `poetry.lock`, reproduced in a scratch venv — against the
   vulnerability database. The gate is **deny-by-default**: any known
   vulnerability without a reviewed entry in
-  `security/dependency-audit-allowlist.json` fails the build. That allowlist is
-  currently **empty**: every previously-known CVE in the shipped set was
-  *remediated by upgrading to a fixed version* (fastapi/starlette, mcp,
-  python-dotenv, click, idna), not accepted with a compensating control.
+  `security/dependency-audit-allowlist.json` fails the build. That allowlist
+  currently holds **one entry**: `PYSEC-2026-286` (asyncmy, the MySQL driver
+  added by item 19) — a SQL-injection CVE in a codepath (dict-keyed pyformat
+  parameters) SQLAlchemy's `mysql+asyncmy` dialect never reaches, since it
+  always hands the driver positional parameters; see the allowlist file's own
+  entry for the full reasoning and the regression test that guards it. Every
+  other previously-known CVE in the shipped set was *remediated by upgrading
+  to a fixed version* (fastapi/starlette, mcp, python-dotenv, click, idna),
+  not accepted with a compensating control.
 - **CycloneDX SBOM** is generated for that same set, alongside a SHA-256
   manifest of the built artifacts.
 
@@ -200,7 +205,7 @@ schema and MCP tool schemas**, so it catches drift, not just convention.
 
 ## Threat model
 
-[docs/THREAT_MODEL.md](THREAT_MODEL.md) enumerates 37 threats (QG-01…QG-37),
+[docs/THREAT_MODEL.md](THREAT_MODEL.md) enumerates 39 threats (QG-01…QG-39),
 each mapped to its compensating control and the test(s) that enforce it. The
 gates on this page are the automated, continuously-run backbone of that model.
 

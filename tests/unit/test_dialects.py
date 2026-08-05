@@ -21,12 +21,14 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from querygate.connections.dialects import (
     MSSQLSessionAdapter,
+    MySQLSessionAdapter,
     PostgresSessionAdapter,
     SessionDialectAdapter,
     _raw_pyodbc_connection,
     build_connect_args,
     build_engine_url,
     get_session_adapter,
+    list_live_tables_extra_filter_sql,
     register_query_timeout,
 )
 from querygate.connections.models import ConnectionProfile, DatabaseDialect
@@ -45,6 +47,18 @@ def test_session_adapter_registry_dispatches_per_dialect():
     assert issubclass(MSSQLSessionAdapter, SessionDialectAdapter)
     with pytest.raises(ValueError, match="Unsupported dialect"):
         get_session_adapter("oracle")  # type: ignore[arg-type]
+
+
+def test_list_live_tables_extra_filter_only_restricts_mysql():
+    """Postgres's/MSSQL's INFORMATION_SCHEMA.TABLES is already scoped to the
+    connected database — no extra filter needed. MySQL's is server-wide, so
+    it must add a `TABLE_SCHEMA = DATABASE()` restriction, or a connection
+    whose user can see more than its own database would leak other
+    databases' table names into list_tables() (schema/reflection.py)."""
+    assert list_live_tables_extra_filter_sql(DatabaseDialect.POSTGRESQL) == ""
+    assert list_live_tables_extra_filter_sql(DatabaseDialect.MSSQL) == ""
+    assert isinstance(get_session_adapter(DatabaseDialect.MYSQL), MySQLSessionAdapter)
+    assert "DATABASE()" in list_live_tables_extra_filter_sql(DatabaseDialect.MYSQL)
 
 
 def test_database_dialect_equals_its_plain_string_value():

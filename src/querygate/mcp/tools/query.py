@@ -224,7 +224,14 @@ async def run_structured_queries(
         on_wait_start=on_wait_start,
         on_admitted=on_admitted,
     )
-    if ctx is not None:
+    # Only offer in-session approval when NOTHING in the batch actually ran.
+    # MRTR's retry necessarily resubmits the identical `queries` argument, so
+    # once any item has executed for real, returning InputRequiredResult here
+    # would silently discard its result and re-run it on retry (wasted quota/
+    # cost at best; for the write-path sibling of this tool, a second commit).
+    # A gated item in a partially-executed batch instead stays fail-closed
+    # with its existing approval_fingerprint/approval_reasons error.
+    if ctx is not None and not any(r.error is None for r in results):
         pending = [
             (f"q{i}", r.approval_fingerprint, r.approval_reasons or [])
             for i, r in enumerate(results)
