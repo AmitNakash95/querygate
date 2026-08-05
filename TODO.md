@@ -173,7 +173,7 @@ order-of-magnitude, not commitments.
 | 140 | `_audit_page` pagination can still materialize ~1M dicts per request | S–M | 138 |
 | 141 | Convert audit-reader line caps into practically-tight window-based early exits | S | 138 |
 | 142 | ✅ `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats | XS | — |
-| 143 | `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step | XS–S | — |
+| 143 | ✅ `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step | XS–S | — |
 | 144 | `verdict()` emits no query metrics, and `/metrics` is unauthenticated | S | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
@@ -2528,33 +2528,13 @@ corrected to a clean "35 threats (QG-01…QG-35)".
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 142).
 
-### 143. `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step
+### 143. `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step ✅ DONE
 
-**Surfaced 2026-08-02 while running the release gate for item 133; unrelated
-to that item — no dependency file was touched.** `make sbom`'s vulnerability
-audit now fails closed on `cryptography 49.0.0`:
-`PYSEC-2026-3552`/`GHSA-g6cj-pr64-35w5`/`CVE-2026-69247`, a Bleichenbacher
-padding-oracle in `pkcs7_decrypt_der`/`pkcs7_decrypt_pem`/`pkcs7_decrypt_smime`
-(introduced in `cryptography` 44.0.0, fixed in 50.0.0). A quick check found
-QueryGate's own code never calls any `pkcs7_decrypt_*` function — the
-vulnerable path is S/MIME-gateway-shaped (auto-decrypting attacker-supplied
-`EnvelopedData` and reflecting the outcome), which this codebase doesn't do —
-so this is very likely a justified-allowlist case rather than an urgent
-upgrade, but that's the `dep-audit` skill's call to make properly (confirm no
-transitive caller either, e.g. inside `python-jose`/JWKS verification, before
-writing the allowlist justification), not a drive-by decision inside an
-unrelated item's diff.
+Upgraded `cryptography` 49.0.0 → 50.0.0 via `poetry update` (the existing
+`>=44.0.1` constraint already permitted it) — a clean fix, no allowlist entry
+needed. `make release-check` now passes fully clean end to end.
 
-**What to do:** run the `dep-audit` skill: either bump `cryptography` to
-`>=50.0.0` (check for breaking changes in the 45–50 range first — this
-dependency has a history of removing deprecated APIs on major bumps) or add a
-justified entry to `security/dependency-audit-allowlist.json` citing the
-unreachable-code-path finding above. Until resolved, `make release-check`
-fails at its `make sbom` step for every future run, unrelated to whatever
-item is being shipped — every agent hitting this should recognize it as this
-pre-existing, tracked issue rather than re-diagnosing it.
-
-**Effort:** XS–S.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 143).
 
 ### 144. `verdict()` emits no query metrics, and `/metrics` is unauthenticated
 

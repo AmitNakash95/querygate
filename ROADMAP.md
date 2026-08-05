@@ -162,7 +162,7 @@ claim when the work ships or before explicitly handing the item back.
   effort — flagged separately rather than folded into item 133's diff since
   renumbering a threat-model ID other docs may reference is an identifier-
   stability change, not a drive-by.*
-- [ ] **143** — `cryptography` 49.0.0 has an unreviewed CVE
+- [x] **143** — `cryptography` 49.0.0 has an unreviewed CVE
   (`PYSEC-2026-3552`), blocking `make release-check`'s SBOM/dep-audit step.
   *Surfaced 2026-08-02 while running the release gate for item 133; unrelated
   — no dependency file was touched. QueryGate's own code never calls the
