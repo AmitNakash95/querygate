@@ -9456,3 +9456,99 @@ blast-radius tests fail for the expected reason. Both reverted; full unit
 
 **Effort:** S (grew to M once the self-review findings were incorporated).
 **Depends on:** none.
+
+### 149. `Policy`'s case-insensitive table-key lookups disagree on `casefold()` vs `lower()` ✅ DONE
+
+**Surfaced 2026-08-05 by `security-invariant-reviewer`, while reviewing item
+148's `_diff_masks` fix.** `Policy._ci_lookup` (used by `column_allowed`/
+`column_mask`/`table_allowed`) lowercased with `.lower()`, while
+`Policy._merge_table_keyed` (item 145) and every table-keyed helper in
+`admin/access_diff.py` already used `.casefold()` — the two disagree on a
+handful of real Unicode identifiers (`"STRASSE".lower() != "straße".lower()`,
+but `.casefold()` unifies both to `"strasse"`, confirmed empirically).
+
+**Shipped, and grew in scope during its own mandatory self-review.**
+`_ci_lookup` was extracted from a `Policy` staticmethod to a module-level
+function in `policy/models.py` (its only two-line body is otherwise
+duplicated), switched to `.casefold()`, and every `Policy` method that used to
+inline `.lower()` (`table_allowed`, `column_allowed`, `column_mask`) now
+delegates to it.
+
+**A second, more severe bug was found and fixed in the same change:**
+`WritePolicy.write_column_allowed` looked up `denied_write_columns` via a
+literal `.get(table_name.lower(), [])` — a plain dict exact-key lookup, not
+going through any case-insensitive helper at all. A `denied_write_columns` key
+configured with any casing other than all-lowercase (e.g. `{"Orders": [...]}`
+— the same casing `allowed_tables` legitimately uses elsewhere in the same
+policy) **never matched, regardless of the write statement's own table
+casing** — the write-column deny list was silently inert. Confirmed directly
+with a Python script (`write_column_allowed("orders", "ssn")` returned `True`/
+allowed when it should have denied) before fixing. `WritePolicy.table_writable`
+was also switched to `.casefold()` for consistency (it was already correctly
+case-insensitive, just via the wrong function).
+
+**A third and fourth sibling bug were found by the mandatory
+`security-invariant-reviewer` audit of this item's own fix, and fixed in the
+same change rather than deferred:**
+- `catalog/models.py`'s `TableCatalogEntry.column`/`ConnectionCatalog.table`
+  used `.lower()` while this same class's own uniqueness validators
+  (`_relationship_identities_are_unique`'s column-uniqueness check,
+  `_table_names_are_unique`) already used `.casefold()` — so a catalog entry
+  the module's own validation treats as a single unique table/column could
+  fail to resolve here, and an unresolved catalog entry means a sensitivity
+  label silently doesn't reach `execution/approval.py`'s human-approval gate
+  (item 92 phase 2) — a fail-open approval bypass on the Unicode edge case.
+  Confirmed empirically (`catalog.table("straße")` returned `None` for an
+  entry keyed `"STRASSE"`) before fixing.
+- `admin/templates.py`'s `_merge_allowed_tables`/`_merge_denied_columns`
+  (item 46's policy templates) matched table names by plain ASCII-case-
+  sensitive `in`/dict-key lookup with **no** case-folding at all — a
+  materially more reachable bug than the Unicode edge case above, since it
+  fails for any casing mismatch (e.g. the ordinary "Orders" vs "orders" the
+  whole `_ci_lookup` mechanism exists to handle). An existing allow-list
+  keyed with different casing than the template's own casing would
+  intersect down to an **empty** list, which `Policy.table_allowed` reads as
+  *no restriction at all* — silently inverting this module's own stated
+  "monotonically restrictive" invariant. A differently-cased
+  `denied_columns` table key would create a second shadow key instead of
+  merging, silently dropping one side's denied columns. Fixed with a local
+  case-insensitive intersection/merge (mirroring `Policy._merge_table_keyed`'s
+  precedent) rather than importing that private helper across modules.
+
+**Deliberately NOT fixed under this item — recorded as item 150 instead:** the
+`security-invariant-reviewer` audit also found the identical bug class in
+`compiler/sqlalchemy_compiler.py`'s `mandatory_row_filters` matching (tenant
+row-scoping — higher stakes than any method fixed here) and in
+`execution/approval.py`'s sensitivity-scan table resolution, but both root in
+`validation/schema_validation.py`'s `effective_name_map`/`declared_cte_names`/
+`cte_source_names` — a foundational, internally-self-consistent `.lower()`
+subsystem used throughout AST alias resolution across policy validation,
+schema validation, and compilation. Properly fixing the compiler-side
+comparison requires switching that whole subsystem to `.casefold()`, not a
+one-line change like the four fixed above — a larger, riskier change to the
+core validation/compilation pipeline that deserves its own dedicated,
+reviewed unit of work rather than a same-session patch under time pressure.
+
+**Coverage.** `tests/unit/test_policy_models.py`: `column_allowed`/
+`table_allowed`/`column_mask` each resolve a genuine `"STRASSE"`/`"straße"`
+pair. `tests/unit/test_governed_writes.py`: the write-column deny check is
+pinned to its own exact message (not the looser "not writable" substring
+`table_writable` also raises), a casing-mismatched `denied_write_columns` key
+still denies, the `"*"` wildcard term (previously untested — deleting it kept
+the suite green) is exercised directly, and `table_writable`'s own case-
+insensitivity (independent of the column check) is asserted directly.
+`tests/unit/test_catalog.py`: a `"STRASSE"`/`"straße"` table+column pair
+resolves through `CatalogStore.get_table`/`.column()`. `tests/unit/
+test_policy_templates.py`: an existing "Orders" allow-list is not silently
+emptied by a lowercase-cased template, and an existing "Customers"
+denied-columns key merges with a lowercase-cased template patch into one key,
+not two. **Mutation-verified:** every one of the eight enforcement lines
+touched (both `Policy` case-fold sites, `WritePolicy`'s wildcard term and its
+own case-fold, both `catalog/models.py` methods, both `admin/templates.py`
+merges) was broken deliberately and confirmed to fail its own regression test
+for the exact reason, then restored. Full unit (2012), integration (345), and
+security (463) suites green on the final tree.
+
+**Effort:** S as scoped; M once the four sibling bugs found by this item's own
+mandatory security review were folded in.
+**Depends on:** none.
