@@ -18,6 +18,8 @@ from querygate.policy.loader import PolicyStore
 from querygate.catalog.models import SensitivityClass
 from querygate.policy.models import (
     GUARDRAIL_FIELDS,
+    ColumnMask,
+    ColumnMaskKind,
     CostEstimationMode,
     MandatoryRowFilter,
     Policy,
@@ -189,6 +191,103 @@ def test_mandatory_filter_static_value_change_is_reported_without_the_value():
     assert "scoping value" in change.detail
     serialized = diff.model_dump_json()
     assert "42" not in serialized and "99" not in serialized
+
+
+def test_column_mask_added_is_tightening_removed_is_loosening():
+    mask = ColumnMask(column="ssn", kind=ColumnMaskKind.NULL)
+    tightened = compute_access_diff(_ctx(Policy()), _ctx(Policy(column_masks={"orders": [mask]})))
+    (change,) = _changes_by(tightened, "column_mask")
+    assert change.object == "orders.ssn" and change.change_type == "added"
+    assert change.direction == "tightening"
+    assert change.after == "null"
+
+    loosened = compute_access_diff(_ctx(Policy(column_masks={"orders": [mask]})), _ctx(Policy()))
+    (change,) = _changes_by(loosened, "column_mask")
+    assert change.object == "orders.ssn" and change.change_type == "removed"
+    assert change.direction == "loosening"
+    assert change.before == "null"
+
+
+def test_column_mask_kind_change_is_reported_as_neutral_not_silently_dropped():
+    before = ColumnMask(column="ssn", kind=ColumnMaskKind.NULL)
+    after = ColumnMask(column="ssn", kind=ColumnMaskKind.LAST, length=4)
+    diff = compute_access_diff(
+        _ctx(Policy(column_masks={"orders": [before]})),
+        _ctx(Policy(column_masks={"orders": [after]})),
+    )
+    (change,) = _changes_by(diff, "column_mask")
+    assert change.change_type == "modified" and change.direction == "neutral"
+    assert change.before == "null" and change.after == "last:4"
+
+
+def test_column_mask_table_key_is_case_insensitive():
+    mask = ColumnMask(column="ssn", kind=ColumnMaskKind.NULL)
+    diff = compute_access_diff(
+        _ctx(Policy(column_masks={"Orders": [mask]})),
+        _ctx(Policy(column_masks={"orders": [mask]})),
+    )
+    assert _changes_by(diff, "column_mask") == []
+
+
+def test_no_mask_change_reports_nothing():
+    mask = ColumnMask(column="ssn", kind=ColumnMaskKind.NULL)
+    diff = compute_access_diff(
+        _ctx(Policy(column_masks={"orders": [mask]})),
+        _ctx(Policy(column_masks={"orders": [mask]})),
+    )
+    assert _changes_by(diff, "column_mask") == []
+
+
+def test_column_mask_bucket_kind_display():
+    before = ColumnMask(column="salary", kind=ColumnMaskKind.NULL)
+    after = ColumnMask(column="salary", kind=ColumnMaskKind.BUCKET, bucket_size=10000)
+    diff = compute_access_diff(
+        _ctx(Policy(column_masks={"orders": [before]})),
+        _ctx(Policy(column_masks={"orders": [after]})),
+    )
+    (change,) = _changes_by(diff, "column_mask")
+    assert change.after == "bucket:10000.0"
+
+
+def test_column_mask_table_specific_entry_shadowing_a_wildcard_is_not_a_false_tightening():
+    # A table-specific entry always wins over "*" (Policy.column_mask's own
+    # precedence rule) — moving the SAME mask from "*" to one specific table
+    # is a no-op for that table but a real loosening for every OTHER table
+    # the wildcard used to cover. A diff that flattens column_masks without
+    # resolving through Policy.column_mask misreports the no-op as a false
+    # "tightening" on the specific table (item 148 self-review finding).
+    mask = ColumnMask(column="ssn", kind=ColumnMaskKind.NULL)
+    diff = compute_access_diff(
+        _ctx(Policy(column_masks={"*": [mask]})),
+        _ctx(Policy(column_masks={"customers": [mask]})),
+    )
+    changes = _changes_by(diff, "column_mask")
+    # customers.ssn: masked before (via "*") AND after (via the specific
+    # entry) -- net effect is no change, so it must not appear at all.
+    assert not any(c.object == "customers.ssn" for c in changes)
+    # orders.ssn: masked before (via "*"), unmasked after (the wildcard is
+    # gone and "orders" has no entry of its own) -- a genuine loosening.
+    (orders_change,) = [c for c in changes if c.object == "orders.ssn"]
+    assert orders_change.change_type == "removed" and orders_change.direction == "loosening"
+
+
+def test_column_mask_duplicate_column_entries_resolve_first_match_like_enforcement():
+    # Policy.column_mask returns the FIRST case-insensitive column match
+    # within one table's list. A diff that instead flattens the list with a
+    # plain dict (last write wins) would compare the wrong pair of masks and
+    # miss a real enforcement-level change (item 148 self-review finding).
+    before_mask = ColumnMask(column="ssn", kind=ColumnMaskKind.NULL)
+    after_masks = [
+        ColumnMask(column="ssn", kind=ColumnMaskKind.LAST, length=4),
+        ColumnMask(column="ssn", kind=ColumnMaskKind.NULL),
+    ]
+    diff = compute_access_diff(
+        _ctx(Policy(column_masks={"orders": [before_mask]})),
+        _ctx(Policy(column_masks={"orders": after_masks})),
+    )
+    (change,) = _changes_by(diff, "column_mask")
+    assert change.change_type == "modified" and change.direction == "neutral"
+    assert change.before == "null" and change.after == "last:4"
 
 
 def test_join_group_change_is_neutral():

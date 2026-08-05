@@ -767,9 +767,10 @@ class Policy(pyd.BaseModel):
 
 # Policy fields that are not scalar caps. Each is excluded for a stated reason,
 # NOT because it doesn't matter:
-#   * the structural access rules are already diffed field-by-field by
-#     access_diff (tables, columns, masks, row filters) — reporting them again
-#     as opaque scalars would be worse, not better;
+#   * the structural access rules are diffed field-by-field by access_diff
+#     (tables, columns, row filters, and — since TODO.md item 148 fixed a
+#     pre-existing gap where this claim was false for it — masks too) —
+#     reporting them again as opaque scalars would be worse, not better;
 #   * `write` is a nested WritePolicy with its own caps; diffing those needs its
 #     own change category and is deliberately out of scope here;
 #   * `approval_sensitivities` is a list of labels, so it has no scalar

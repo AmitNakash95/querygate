@@ -178,7 +178,8 @@ order-of-magnitude, not commitments.
 | 145 | ✅ Purpose-bound access: enforce the declared `intent`, don't just log it (feature F7) | M | — |
 | 146 | ✅ "5-minute first governed query" quickstart — close the named Toolbox onboarding gap | S–M | 48, 51 |
 | 147 | ✅ Self-serve procurement evidence page | S | 54, 58, 60 |
-| 148 | `admin/access_diff.py` never diffs `column_masks` at all | S | — |
+| 148 | ✅ `admin/access_diff.py` never diffs `column_masks` at all | S | — |
+| 149 | `Policy`'s case-insensitive table-key lookups disagree on `casefold()` vs `lower()` | S | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2510,42 +2511,42 @@ with a drift guard proving it stays current.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 147).
 
-### 148. `admin/access_diff.py` never diffs `column_masks` at all
+### 148. `admin/access_diff.py` never diffs `column_masks` at all ✅ DONE
 
-**Surfaced 2026-08-05 by `architecture-boundary-reviewer`/
-`security-invariant-reviewer`, while auditing item 145's fix for the same
-class of gap on `allowed_purposes`/`purpose_policies` (item 145's own fix
-added `_diff_purposes` and is not itself the bug here).** `Policy.column_masks`
-has been excluded from `GUARDRAIL_FIELDS` since item 49 shipped (masking),
-with an inline comment claiming it's "already diffed field-by-field by
-access_diff (tables, columns, masks, row filters)" — but `admin/access_diff.py`
-has no `_diff_masks`/equivalent function and no `category="column_mask"`
-anywhere; grep confirms zero references to `column_masks` in that file. Real,
-pre-existing (predates this session's items 137–147 entirely), not a
-regression from anything shipped today.
+Added `_diff_masks` to `admin/access_diff.py` (mirrors `_diff_mandatory_filters`'s
+shape, case-insensitive on the table key) and a `"column_mask"`
+`SemanticChangeCategory`; corrected the stale `policy/models.py` comment that
+claimed this was already covered.
 
-**Impact.** An operator can add, remove, or change a `column_masks` entry in a
-candidate config version and `/admin/config/diff`'s semantic access diff
-reports **no access change** — the same "loosening reported as neutral"
-governance blind spot item 40 (semantic access diff) exists specifically to
-prevent, just for the one field that slipped through since item 49 shipped.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 148).
 
-**What to do:** add a `_diff_masks` function to `admin/access_diff.py`
-mirroring `_diff_mandatory_filters`'s shape (before/after keyed by
-`(table.casefold(), column.casefold())`, reporting added/removed/kind-changed
-as `category="column_mask"`, direction: removing a mask is `loosening`
-(reveals the real value), adding one is `tightening`, changing `kind`/
-`length`/`bucket_size` is `neutral` unless a clear stronger/weaker ordering
-can be established between mask kinds — probably not worth attempting, matching
-`_diff_mandatory_filters`'s own "value_changed → neutral" precedent for the
-same reason). Wire it into `_diff_connection` alongside the other per-connection
-diffs. Correct the stale inline comment in `policy/models.py`'s
-`_NON_GUARDRAIL_POLICY_FIELDS` once fixed.
+### 149. `Policy`'s case-insensitive table-key lookups disagree on `casefold()` vs `lower()`
 
-**Codebase fit:** `admin/access_diff.py`, `admin/models.py` (new
-`SemanticChangeCategory` member), `tests/unit/test_config_semantic_diff.py`.
-**Effort:** S. **Depends on:** none. **Risk:** low; read-only reporting
-change, no enforcement path touched.
+**Surfaced 2026-08-05 by `security-invariant-reviewer`, while reviewing item
+148's `_diff_masks` fix.** Two different case-folding functions are used for
+the same conceptual operation (matching a policy-configured table name
+against another spelling of the same table) in the same file:
+`Policy._ci_lookup` (used by `column_allowed`/`column_mask`/`table_allowed`)
+lowercases with `.lower()`, while `Policy._merge_table_keyed` (item 145) and
+every table-keyed helper in `admin/access_diff.py` (`_dedupe_casefold`,
+`_named_tables`, `_diff_masks`'s own table/column matching) use `.casefold()`.
+The two disagree for a handful of real Unicode identifiers (e.g. German
+`"STRASSE"` vs `"straße"` — `.lower()` leaves them distinct, `.casefold()`
+unifies them), so a table name that hits this narrow mismatch could resolve
+differently in `column_mask`'s enforcement path than in `access_diff`'s
+reporting path, or merge two table keys the merge logic treats as distinct
+from what enforcement treats as distinct.
 
-**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 147).
+**Why it's low-priority, not urgent:** table names hitting the
+`lower()`/`casefold()` disagreement window are exotic (a handful of non-ASCII
+codepoints); most real schemas use ASCII identifiers, where the two functions
+agree completely. Pre-existing across the file (predates items 145 and 148),
+not a regression from either.
+
+**What to do:** standardize `Policy._ci_lookup` on `.casefold()` (matching
+`_merge_table_keyed` and every `admin/access_diff.py` helper), add a
+regression test with a table name in the disagreement window, and
+mutation-verify it fails against the current `.lower()` behavior.
+
+**Effort:** S. **Depends on:** none.
 
