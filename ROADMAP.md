@@ -141,7 +141,7 @@ claim when the work ships or before explicitly handing the item back.
   `security-invariant-reviewer` audit of item 138. Needs a maintainer decision
   on the right AST list-size cap, recorded in the PRODUCT_GUIDE Decision Log
   as the item's own first step.* **Depends on 138.**
-- [ ] **140** — `_audit_page` pagination can still materialize ~1M dicts per
+- [x] **140** — `_audit_page` pagination can still materialize ~1M dicts per
   request. *Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of
   item 138; pre-existing (the old deque had the identical bound), same class
   of defect item 138 exists to fix. Needs a maintainer decision on the

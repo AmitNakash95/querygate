@@ -379,6 +379,27 @@ async def test_audit_browser_is_filtered_newest_first_and_redaction_safe(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_audit_browser_rejects_a_cursor_past_the_lowered_ceiling(tmp_path, monkeypatch):
+    """TODO.md item 140: the old cursor ceiling (1_000_000) let one request
+    retain on the order of a gigabyte of fully-parsed event dicts before
+    slicing the response page. Lowered to 5,000 — far past any real "load
+    more" admin session, but no longer six figures."""
+    app = create_app(_settings(tmp_path, monkeypatch))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        at_ceiling = await client.get(
+            "/api/v1/admin/ui/audit/events?cursor=5000",
+            headers=_auth(),
+        )
+        past_ceiling = await client.get(
+            "/api/v1/admin/ui/audit/events?cursor=5001",
+            headers=_auth(),
+        )
+
+    assert at_ceiling.status_code == 200
+    assert past_ceiling.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_audit_browser_accepts_connection_probe_event_type(tmp_path, monkeypatch):
     audit_path = tmp_path / "audit.jsonl"
     events = [
