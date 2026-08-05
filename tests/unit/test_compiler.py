@@ -298,6 +298,32 @@ class TestCompiler:
         with pytest.raises(PolicyViolationError, match="order_status"):
             compile_structured_query(query, tables, policy, principal=principal)
 
+    def test_mandatory_row_filter_applies_despite_a_casefold_lower_disagreement_in_table_name(self):
+        # "STRASSE".lower() == "strasse" but "straße".lower() == "straße" (unchanged) --
+        # .casefold() unifies both to "strasse". `compile_mandatory_row_filters`'s
+        # table match used to compare via `.lower()` against `effective_name_map`'s
+        # own `.lower()`-keyed dict, so a policy configured with "straße" would
+        # silently skip filtering a query against a table named "STRASSE" -- the
+        # tenant-scoping filter would silently not apply (found while fixing
+        # TODO.md item 150).
+        metadata = sa.MetaData()
+        strasse = sa.Table(
+            "STRASSE",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("hausnummer", sa.String(20)),
+        )
+        tables = {"STRASSE": strasse}
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="straße", column="hausnummer", value="42")
+            ]
+        )
+        query = StructuredQuery(from_table="STRASSE", select=["STRASSE.id"], limit=5)
+        stmt, _ = compile_structured_query(query, tables, policy)
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "42" in compiled
+
     def test_coalesce_renders_on_postgres_and_mssql(self):
         tables = _make_tables()
         query = StructuredQuery(

@@ -306,9 +306,11 @@ claim when the work ships or before explicitly handing the item back.
   three sibling bugs, one of them a fail-open approval-gate bypass.
   *Surfaced 2026-08-05 by `security-invariant-reviewer` while reviewing item
   148's fix.*
-- [ ] **150** — `compiler/sqlalchemy_compiler.py`'s `mandatory_row_filters`
+- [x] **150** — `compiler/sqlalchemy_compiler.py`'s `mandatory_row_filters`
   matching uses `.lower()` against `schema_validation.py`'s `.lower()`-
-  consistent AST name-resolution subsystem. *Surfaced 2026-08-05 by
+  consistent AST name-resolution subsystem. ✅ **Shipped** — a mechanical,
+  uniform sweep to `.casefold()` across ~64 call sites in five files.
+  *Surfaced 2026-08-05 by
   `security-invariant-reviewer` while reviewing item 149's fix; deliberately
   deferred from it — fixing it properly means switching a shared subsystem
   with several call sites, not a one-line change, so it deserves its own

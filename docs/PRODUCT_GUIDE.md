@@ -3395,6 +3395,51 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-05 — item 150 closed the one gap item 149 deliberately deferred:
+  `mandatory_row_filters` (tenant-scoping) compared an AST-resolved table name
+  against an operator-configured `Policy` value using `.lower()`, while every
+  `Policy` method item 149 fixed now uses `.casefold()`.** The comparison's
+  AST-side input comes from `validation/schema_validation.py`'s
+  `effective_name_map`/`declared_cte_names`/`cte_source_names`, a subsystem
+  shared by policy validation, schema validation, `execution/approval.py`,
+  `execution/service.py`, and `compiler/sqlalchemy_compiler.py` — internally
+  self-consistent (every site agreed with every other), which is exactly why
+  it never showed up as a live bug until a `.casefold()`-side value
+  (`MandatoryRowFilter.table`) crossed into it. Fixed with a mechanical,
+  uniform sweep: every one of the subsystem's ~64 `.lower()` call sites (read
+  individually first, to confirm each is genuinely an identifier comparison
+  and not something unrelated) switched to `.casefold()` together, since
+  `.casefold()` is defined to equal `.lower()` for pure-ASCII input — the
+  overwhelming majority of real schemas — so the sweep preserves existing
+  behavior exactly while closing the Unicode-casing gap everywhere at once.
+  Confirmed by the full pre-existing unit suite (2012 tests) passing unchanged
+  after the sweep, with zero test needing an update for the ASCII case. Added
+  a regression test with a real physical table (`"STRASSE"` — the only
+  spelling reflectable at all, since `schema/reflection.py`'s
+  `VALID_TABLE_NAME` rejects any non-ASCII table name at load time, which is
+  exactly why this mismatch can only originate on the policy-configured side)
+  and a `mandatory_row_filters` entry configured `table="straße"`; mutation-
+  verified by reverting the specific comparison to `.lower()` and confirming
+  the new test failed for the exact reported reason.
+  **This item's own mandatory two-reviewer self-review then found a real
+  regression the sweep itself introduced:** `query_ast/models.py`'s
+  `_validate_table_aliases`/`_validate_cte_names` — the AST-layer uniqueness
+  checks `effective_name_map` relies on as its precondition — were still
+  `.lower()`-based, so the AST could accept two aliases as distinct (under
+  `.lower()`) that `effective_name_map` (now `.casefold()`) then silently
+  collapsed into one key, dropping a table from the query graph with no
+  error. Confirmed directly, fixed with the same substitution, verified the
+  reproduction is now correctly rejected. Two further leftover `.lower()`
+  sites in the same bug class were also found and fixed: `admin_ui_routes.py`'s
+  policy simulator (a simulated `allowed=True` verdict that omitted a
+  mandatory filter real execution would enforce) and
+  `write_schema_validation.py`'s WHERE-ref check (provably unreachable in
+  production — both sides are already ASCII-restricted by
+  `sanitize_table_name` before that comparison runs — fixed for consistency,
+  deliberately left untested since a test would require also bypassing that
+  restriction). Full unit (2014), integration (346), and security (463)
+  suites green on the final tree.
+
 - **2026-08-05 — items 148/149's own mandatory security reviews each found a
   real defect one level deeper than the item's own scope, fixed same-day; one
   (item 149's) was a fail-open human-approval-gate bypass.** Item 148 (diff

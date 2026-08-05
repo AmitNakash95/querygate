@@ -77,8 +77,8 @@ def referenced_tables(query: StructuredQuery, cte_names: Optional[Set[str]] = No
     tables = {query.from_table, *(join.table for join in query.joins)}
     for column_ref in iter_column_refs(query):
         table, _column = parse_column_ref(column_ref.ref)
-        tables.add(name_to_physical.get(table.lower(), table))
-    return {table for table in tables if table.lower() not in cte_names}
+        tables.add(name_to_physical.get(table.casefold(), table))
+    return {table for table in tables if table.casefold() not in cte_names}
 
 
 def referenced_tables_tree_wide(query: StructuredQuery) -> Set[str]:
@@ -363,7 +363,7 @@ def _validate_scope(query: StructuredQuery, policy: Policy, cte_names: Set[str])
     columns get the full treatment, resolved against the subquery's own name map,
     never the outer's).
 
-    ``cte_names`` (item 105) are the statement's cte names, lowercased — the names
+    ``cte_names`` (item 105) are the statement's cte names, case-folded — the names
     in this scope that denote a computed block rather than a table."""
     # Bound every scalar Expression tree this scope carries (item 100) before
     # anything walks it: depth per tree, and WHEN-branch breadth on every
@@ -488,7 +488,7 @@ def _validate_scope(query: StructuredQuery, policy: Policy, cte_names: Set[str])
         # t is the ref's effective name (an alias, or the table name itself)
         # — always resolve to the PHYSICAL table before checking column
         # policy, so an alias can never be used to dodge a denied column.
-        physical_t = name_to_physical.get(t.lower(), t)
+        physical_t = name_to_physical.get(t.casefold(), t)
         # A ref into a cte names one of that block's OUTPUT columns, not a column
         # of any table, so there is no physical (table, column) pair to check here
         # (item 105). Enforcement is not skipped, only relocated to where the name
@@ -497,7 +497,7 @@ def _validate_scope(query: StructuredQuery, policy: Policy, cte_names: Set[str])
         # masked column additionally may not be projected by a cte at all —
         # `_validate_cte_constraints` — because a block's projection is an input to
         # another scope rather than a result handed to the caller.
-        if physical_t.lower() in cte_names:
+        if physical_t.casefold() in cte_names:
             continue
         if not policy.column_allowed(physical_t, c):
             raise PolicyViolationError(
@@ -513,8 +513,8 @@ def _validate_scope(query: StructuredQuery, policy: Policy, cte_names: Set[str])
         if column_ref.position is RefPosition.SELECT_PROJECTION_BARE:
             continue
         t, c = parse_column_ref(column_ref.ref)
-        physical_t = name_to_physical.get(t.lower(), t)
-        if physical_t.lower() in cte_names:
+        physical_t = name_to_physical.get(t.casefold(), t)
+        if physical_t.casefold() in cte_names:
             continue  # a cte output name, not a physical column — see above
         if policy.column_mask(physical_t, c) is not None:
             raise PolicyViolationError(
@@ -577,7 +577,7 @@ def _validate_subquery_constraints(scoped: List, policy: Policy) -> None:
             name_to_physical = effective_name_map(scope)
             for ref in select_item_column_refs(scope.select[0]):
                 t, c = parse_column_ref(ref)
-                physical_t = name_to_physical.get(t.lower(), t)
+                physical_t = name_to_physical.get(t.casefold(), t)
                 if policy.column_mask(physical_t, c) is not None:
                     raise PolicyViolationError(
                         f"Column {ref!r} is masked by policy and cannot be a subquery's "
@@ -629,7 +629,7 @@ def _validate_cte_constraints(
     #    and re-admitting it needs a hard iteration cap recorded separately.
     declared_so_far: Set[str] = set()
     for spec in query.ctes:
-        name = spec.name.lower()
+        name = spec.name.casefold()
         for source in sorted(cte_source_names(spec.query) & cte_names):
             if source not in declared_so_far:
                 raise PolicyViolationError(
@@ -660,15 +660,15 @@ def _validate_cte_constraints(
     #    use, which makes that phrasing circular (it silently never fires).
     #    `_apply_mandatory_row_filters` skips cte names too, as defence in depth.
     governed: Set[str] = {
-        *(row_filter.table.lower() for row_filter in policy.mandatory_row_filters),
-        *(table.lower() for table in policy.column_masks),
-        *(table.lower() for table in policy.denied_tables),
-        *(table.lower() for table in policy.allowed_tables),
-        *(table.lower() for table in policy.denied_columns),
-        *(table.lower() for table in policy.allowed_columns),
+        *(row_filter.table.casefold() for row_filter in policy.mandatory_row_filters),
+        *(table.casefold() for table in policy.column_masks),
+        *(table.casefold() for table in policy.denied_tables),
+        *(table.casefold() for table in policy.allowed_tables),
+        *(table.casefold() for table in policy.denied_columns),
+        *(table.casefold() for table in policy.allowed_columns),
     }
     for spec in query.ctes:
-        if spec.name.lower() in governed:
+        if spec.name.casefold() in governed:
             raise PolicyViolationError(
                 f"cte name {spec.name!r} is also the name of a table this connection's "
                 "policy has a rule for — a cte shadows that name, which would make the "
@@ -681,11 +681,11 @@ def _validate_cte_constraints(
     referenced: Set[str] = set()
     for _depth, scope in scoped:
         referenced |= {
-            scope.from_table.lower(),
-            *(join.table.lower() for join in scope.joins),
+            scope.from_table.casefold(),
+            *(join.table.casefold() for join in scope.joins),
         }
     for spec in query.ctes:
-        if spec.name.lower() not in referenced:
+        if spec.name.casefold() not in referenced:
             raise PolicyViolationError(
                 f"cte {spec.name!r} is declared but never referenced — reference it in "
                 "`from` or a join's `table`, or remove it."
@@ -701,7 +701,7 @@ def _validate_cte_constraints(
         for item in spec.query.select:
             for ref in select_item_column_refs(item):
                 t, c = parse_column_ref(ref)
-                physical_t = name_to_physical.get(t.lower(), t)
+                physical_t = name_to_physical.get(t.casefold(), t)
                 if policy.column_mask(physical_t, c) is not None:
                     raise PolicyViolationError(
                         f"Column {ref!r} is masked by policy and cannot be projected by "
@@ -752,8 +752,8 @@ def _validate_correlation(query: StructuredQuery, scoped: List, policy: Policy) 
     # rejects an unreferenced cte — the two containers should not disagree about
     # whether a declaration that does nothing is acceptable.
     for correlation in correlations:
-        used = {ref.ref.lower() for ref in iter_column_refs(correlation.child)}
-        if correlation.ref.lower() not in used:
+        used = {ref.ref.casefold() for ref in iter_column_refs(correlation.child)}
+        if correlation.ref.casefold() not in used:
             raise PolicyViolationError(
                 f"correlate {correlation.ref!r} is declared but never referenced by the "
                 "subquery — use it in the subquery, or remove it."
@@ -772,7 +772,7 @@ def _validate_correlation(query: StructuredQuery, scoped: List, policy: Policy) 
         # the child's, and only the parent's is correct for an aliased outer table.
         name_to_physical = effective_name_map(correlation.parent)
         table, column = parse_column_ref(correlation.ref)
-        physical = name_to_physical.get(table.lower(), table)
+        physical = name_to_physical.get(table.casefold(), table)
         if not policy.table_allowed(physical):
             raise PolicyViolationError(
                 f"Table {physical!r} is not accessible under the active policy"
