@@ -26,7 +26,7 @@ from querygate.audit.sinks import configure_audit_sink, reset_audit_sink
 from querygate.catalog.refresh import CatalogRefreshMonitor
 from querygate.catalog.usage import CatalogUsageLearningMonitor
 from querygate.core.auth import Principal
-from querygate.core.config import AppConfig, ConcurrencyBackend
+from querygate.core.config import AppConfig, AuditSinkBackend, ConcurrencyBackend
 from querygate.core.config import config as default_config
 from querygate.core.logging import ContextLogger, context_logger, get_logger
 from querygate.core.scopes import ADMIN_METRICS_READ_SCOPE
@@ -44,6 +44,24 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         log = get_logger()
         log.info("querygate.startup", environment=conf.environment)
         mcp_task: Optional[asyncio.Task] = None
+
+        # Started before configure_audit_sink() so the WORM sink's buffer
+        # singleton has a monitor actually draining it from the moment the
+        # sink can first receive an event — TODO.md item 134.
+        worm_flush_monitor: Optional["WormFlushMonitor"] = None
+        if conf.audit_sink_backend == AuditSinkBackend.JSONL_CHAINED_S3_WORM:
+            from querygate.audit.worm_sink import WormFlushMonitor
+
+            worm_flush_monitor = WormFlushMonitor(
+                bucket=conf.audit_worm_s3_bucket,
+                prefix=conf.audit_worm_s3_prefix,
+                region=conf.audit_worm_s3_region,
+                retention_mode=conf.audit_worm_retention_mode,
+                retention_days=conf.audit_worm_retention_days,
+                interval_seconds=conf.audit_worm_flush_interval_seconds,
+            )
+            await worm_flush_monitor.start()
+        app.state.worm_flush_monitor = worm_flush_monitor
 
         configure_audit_sink(
             backend=conf.audit_sink_backend.value,
@@ -125,6 +143,8 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 await catalog_usage_learning_monitor.stop()
             await health_monitor.stop()
             reset_audit_sink()
+            if worm_flush_monitor is not None:
+                await worm_flush_monitor.stop()
             if redis_client is not None:
                 clear_redis_limiter()
                 await redis_client.aclose()
