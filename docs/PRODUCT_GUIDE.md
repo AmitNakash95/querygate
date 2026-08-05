@@ -3366,6 +3366,25 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-05 — `_audit_page`'s `cursor` ceiling lowered from 1,000,000 to
+  5,000, not redesigned (TODO.md item 140).** `GET /api/v1/admin/ui/audit/events`
+  retains up to `cursor + limit` fully-parsed event dicts before slicing the
+  response page, so a `cursor` near the old ceiling let one admin-scoped
+  request allocate on the order of a gigabyte. The item offered two options:
+  lower the ceiling, or redesign pagination to an opaque cursor keyed to file
+  position (avoiding the need to re-derive `cursor` matches from the start on
+  every page). Chose the lower ceiling — it closes the actual resource-
+  exhaustion gap with a one-line change and no API/response-shape
+  change, versus a cursor-shape redesign that's real scope growth for a
+  marginal further improvement once the ceiling itself is no longer six
+  figures. 5,000 pages of the default `limit=50` is far past any real "load
+  more" admin session, while bounding worst-case retained dicts per request
+  to ~5,100 (cursor + limit), several orders of magnitude below the old
+  bound. A cursor-shape redesign remains available later if 5,000 pages ever
+  proves insufficient for a real deployment's audit-browsing needs.
+  Mutation-verified: restoring the old ceiling made the new regression test
+  (asserting `cursor=5001` returns `422`) fail for the expected reason.
+
 - **2026-08-05 — hard structural size caps on the read AST's list fields, and
   `audit/sinks.py`'s startup tail-read folded into the item-138 bounded
   reader (TODO.md item 139).** `execution/service.py`'s `normalize_query_shape`

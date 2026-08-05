@@ -9063,6 +9063,42 @@ final tree.
 sinks.py fold-in was S once item 138's primitive existed, as scoped).
 **Depends on:** 138.
 
+### 140. `_audit_page` pagination can still materialize ~1M dicts per request ✅ DONE
+
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138.**
+`GET /api/v1/admin/ui/audit/events`'s `cursor` query param was
+`Query(default=0, ge=0, le=1_000_000)`; `_audit_page` retains up to
+`cursor + limit` matched, fully-parsed event dicts before slicing the response
+page. A `cursor` near the ceiling therefore still allocated on the order of a
+gigabyte for one admin-scoped request. This bound predated item 138 unchanged
+(the old `deque(maxlen=cursor + limit + 1)` had the identical size), so item
+138 did not introduce it — but it was the same class of defect that item
+exists to fix, in the same function, and admin-scoped is not the same as
+unbounded-safe.
+
+**Decision (recorded in `docs/PRODUCT_GUIDE.md`'s Decision Log, 2026-08-05):
+lower the ceiling, not a cursor-shape redesign.** The item offered both; the
+lower ceiling closes the actual resource-exhaustion gap with a one-line
+change and no API/response-shape change, versus an opaque file-position
+cursor that's real scope growth for a marginal further improvement once the
+ceiling itself is no longer six figures. `cursor`'s `Query(..., le=...)`
+lowered from `1_000_000` to `5_000` — far past any real "load more" admin
+session at the default `limit=50`, while bounding worst-case retained dicts
+per request to ~5,100 (cursor + limit), several orders of magnitude below
+the old bound. A cursor-shape redesign remains available later if 5,000
+pages ever proves insufficient for a real deployment.
+
+**Coverage.** A new integration test
+(`test_admin_ui.py::test_audit_browser_rejects_a_cursor_past_the_lowered_ceiling`)
+asserts `cursor=5000` is accepted (`200`) and `cursor=5001` is rejected
+(`422`). **Mutation-verified:** restoring the old `1_000_000` ceiling made
+the new test fail for the expected reason (`200` where `422` was asserted);
+reverted, and the full admin UI integration suite (19 tests) passes on the
+final tree.
+
+**Effort:** S (lower the ceiling — the cursor-redesign alternative, M, was
+not chosen). **Depends on:** 138.
+
 ### 142. `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats ✅ DONE
 
 **Surfaced 2026-08-01/02 by the `claim-reviewer`/`security-invariant-reviewer`

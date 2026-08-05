@@ -486,7 +486,16 @@ def build_admin_ui_router(
 
     @router.get("/audit/events", response_model=AuditEventPage)
     async def browse_audit_events(
-        cursor: int = Query(default=0, ge=0, le=1_000_000),
+        # TODO.md item 140: the old ceiling (1_000_000) let one request
+        # allocate on the order of a gigabyte of fully-parsed event dicts
+        # before `_audit_page` ever slices its response page. Lowered rather
+        # than redesigning the pagination shape (recorded in
+        # docs/PRODUCT_GUIDE.md's Decision Log) — 5,000 pages of `limit=50`
+        # covers far deeper manual "load more" paging than any real admin UI
+        # session reaches, while bounding worst-case retained dicts per
+        # request to cursor + limit (~5,100), several orders of magnitude
+        # below the old bound.
+        cursor: int = Query(default=0, ge=0, le=5_000),
         limit: int = Query(default=50, ge=1, le=100),
         event_type: Optional[str] = Query(default=None),
         outcome: Optional[Literal["success", "rejected"]] = Query(default=None),
