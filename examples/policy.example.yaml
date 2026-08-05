@@ -231,13 +231,15 @@ connections:
     mandatory_row_filters: []
 
     # Purpose-bound access (item 145, feature F7) — off by default (empty
-    # list). Once populated, EVERY query on this connection must declare a
-    # `purpose` from the list, or it's rejected before any DB touch. A
-    # purpose can narrow the effective policy further via `purpose_policies`
-    # — additional denied_tables/denied_columns/mandatory_row_filters/
-    # column_masks unioned onto this policy's own; there is no "allow" field,
-    # so a purpose can only take away access, never grant more than this
-    # policy already does.
+    # list). Once populated, EVERY READ query on this connection must
+    # declare a `purpose` from the list, or it's rejected before any DB
+    # touch. Read-only: this gate does not extend to governed writes (item
+    # 93) — a write statement has no `purpose` field and is unaffected by
+    # this setting. A purpose can narrow the effective policy further via
+    # `purpose_policies` — additional denied_tables/denied_columns/
+    # mandatory_row_filters/column_masks unioned onto this policy's own;
+    # there is no "allow" field, so a purpose can only take away access,
+    # never grant more than this policy already does.
     # allowed_purposes: [fraud_review, customer_support]
     # purpose_policies:
     #   customer_support:

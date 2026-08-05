@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,8 @@ from scripts import generate_trust_page
 
 pytestmark = pytest.mark.unit
 
-_DOC = Path(__file__).resolve().parents[2] / "docs" / "TRUST_EVIDENCE.md"
+_ROOT = Path(__file__).resolve().parents[2]
+_DOC = _ROOT / "docs" / "TRUST_EVIDENCE.md"
 _GENERATED_LINE = re.compile(r"\*Generated (\S+) for QueryGate (\S+)\. ")
 
 
@@ -36,6 +38,24 @@ def test_committed_doc_matches_generator():
     assert (
         committed == regenerated
     ), "docs/TRUST_EVIDENCE.md is stale — regenerate with `make trust-page`"
+
+
+def test_committed_doc_claims_the_actual_pyproject_version():
+    """TODO.md item 147 test-contract gap (found by `test-contract-reviewer`,
+    2026-08-05): `test_committed_doc_matches_generator` extracts its
+    comparison version FROM the committed file itself, so a version bump in
+    `pyproject.toml` with nobody re-running `make trust-page` would pass that
+    test green while quietly stamping the wrong package version on a
+    customer-facing evidence page."""
+    committed = _DOC.read_text(encoding="utf-8")
+    match = _GENERATED_LINE.search(committed)
+    assert match
+    _generated_at, claimed_version = match.groups()
+    real_version = tomllib.loads((_ROOT / "pyproject.toml").read_text())["project"]["version"]
+    assert claimed_version == real_version, (
+        f"docs/TRUST_EVIDENCE.md claims QueryGate {claimed_version!r} but "
+        f"pyproject.toml's version is {real_version!r} — regenerate with `make trust-page`"
+    )
 
 
 def test_every_source_doc_exists():

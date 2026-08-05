@@ -23,7 +23,7 @@ from querygate.audit.file_reader import AuditFileReadBounded, iter_lines_reverse
 from querygate.audit.ledger import resolve_ledger_key, unwrap_envelope, verify_envelope_hash
 from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
-from querygate.core.config import AppConfig
+from querygate.core.config import AppConfig, AuditSinkBackend
 from querygate.core.exceptions import PolicyViolationError
 from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE, ADMIN_CONFIG_WRITE_SCOPE
 from querygate.policy.loader import PolicyStore, get_policy_store
@@ -371,6 +371,11 @@ def _audit_page(
     # page — but every match within the line-read bound is still counted
     # toward `total`.
     ledger_key = resolve_ledger_key(cfg.audit_ledger_hmac_key)
+    # TODO.md item 137: on jsonl_chained, every persisted line MUST be a
+    # chain envelope, so a bare (non-enveloped) line is itself evidence of
+    # tampering/corruption, not a legitimate plain-jsonl line (found by
+    # `security-invariant-reviewer`, 2026-08-05).
+    require_envelope = cfg.audit_sink_backend == AuditSinkBackend.JSONL_CHAINED
     matches: List[Dict[str, Any]] = []
     total = 0
     malformed = 0
@@ -384,9 +389,12 @@ def _audit_page(
             lines_read += 1
             try:
                 raw = json.loads(line)
-                if verify_envelope_hash(raw, key=ledger_key) is False:
+                verified = verify_envelope_hash(raw, key=ledger_key)
+                if verified is False or (verified is None and require_envelope):
                     # TODO.md item 137: a chain envelope whose own hash
-                    # doesn't match its contents — never display it as clean.
+                    # doesn't match its contents, or (require_envelope) a
+                    # bare line on a backend where every line must be
+                    # enveloped — never display either as clean.
                     malformed += 1
                     continue
                 raw = unwrap_envelope(raw)

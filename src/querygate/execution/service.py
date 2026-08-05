@@ -380,7 +380,7 @@ class StructuredQueryService:
 
     async def _validate_and_compile(
         self, query: StructuredQuery
-    ) -> Tuple[sa.Select, int, dict, str]:
+    ) -> Tuple[sa.Select, int, dict, str, Policy]:
         policy = self._get_policy()
         # TODO.md item 145: `validate_policy` returns the purpose-narrowed
         # effective Policy (unchanged if the query declares no purpose, or if
@@ -419,7 +419,14 @@ class StructuredQueryService:
         # named in the returned SQL but were missing from `tables`, so two fields of
         # one response contradicted each other (TODO.md item 121).
         touched = {name for scoped in scope_tables.values() for name in scoped}
-        return stmt, limit, touched or set(tables), dialect
+        # The purpose-narrowed `policy` (item 145) is returned too — not just
+        # used locally — so a caller auditing this query (e.g. `execute()`'s
+        # `applied_column_masks(query, policy)`) reports a purpose-added mask,
+        # not the un-narrowed base policy's view (found by
+        # `security-invariant-reviewer`, 2026-08-05: the mask was correctly
+        # APPLIED to the compiled SQL either way, but the audit event
+        # understated which columns were actually masked).
+        return stmt, limit, touched or set(tables), dialect, policy
 
     async def _estimate_cost(
         self, dialect: DatabaseDialect, session, stmt: sa.Select
@@ -658,6 +665,11 @@ class StructuredQueryService:
         policy_validated = False
         queue_wait_ms: Optional[int] = None
         quota_reservation = None
+        # None until `_get_policy()` succeeds below — the outer `except` (item
+        # 145) must not assume `policy` is bound, since a failure resolving the
+        # policy itself (e.g. an unknown connection) is exactly one of the
+        # exceptions that except clause catches.
+        policy: Optional[Policy] = None
         try:
             policy = self._get_policy()
             # Per-principal rate/byte quota (TODO.md item 50) — checked before
@@ -697,7 +709,13 @@ class StructuredQueryService:
                     queue_wait_ms = int((time.monotonic() - queue_start) * 1000)
                     if on_admitted is not None:
                         await on_admitted(queue_wait_ms)
-                    stmt, limit, _tables, dialect = await self._validate_and_compile(query)
+                    # TODO.md item 145: rebind the outer `policy` to the
+                    # purpose-narrowed effective policy too, so everything
+                    # downstream in this method (session guardrails, and
+                    # `applied_column_masks` at the audit call below) sees the
+                    # same narrowing the compiler already used — not just this
+                    # method's own now-stale un-narrowed local.
+                    stmt, limit, _tables, dialect, policy = await self._validate_and_compile(query)
                     policy_validated = True
                     sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
 
@@ -763,7 +781,11 @@ class StructuredQueryService:
                         sql=sql,
                         params=params,
                         intent=query.intent,
-                        purpose=query.purpose,
+                        purpose=(
+                            query.purpose
+                            if policy is not None and policy.allowed_purposes
+                            else None
+                        ),
                         row_count=len(rows),
                         duration_ms=int(elapsed_seconds * 1000),
                         principal=self._principal_subject,
@@ -833,7 +855,7 @@ class StructuredQueryService:
                 sql=sql,
                 params=params,
                 intent=query.intent,
-                purpose=query.purpose,
+                purpose=(query.purpose if policy is not None and policy.allowed_purposes else None),
                 duration_ms=int((time.monotonic() - start) * 1000),
                 principal=self._principal_subject,
                 principal_scopes=self._principal_scopes,
@@ -995,7 +1017,7 @@ class StructuredQueryService:
             max_queue_depth=policy.max_queue_depth,
             max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
         ):
-            stmt, limit, tables, _dialect = await self._validate_and_compile(query)
+            stmt, limit, tables, _dialect, _policy = await self._validate_and_compile(query)
             sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
             return ExplainResult(sql=sql, params=params, tables=sorted(tables), limit=limit)
 
@@ -1078,6 +1100,9 @@ class StructuredQueryService:
         start = time.monotonic()
         query_shape = normalize_query_shape(query)
         sql = ""
+        # None until `_get_policy()` succeeds below — see `execute()`'s
+        # identical guard; the outer `except` must not assume it's bound.
+        policy: Optional[Policy] = None
         try:
             policy = self._get_policy()
             # Reserving the unit is the point (this is the quota-metering
@@ -1095,13 +1120,19 @@ class StructuredQueryService:
                 max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
             ):
                 try:
-                    stmt, _limit, tables, _dialect = await self._validate_and_compile(query)
+                    stmt, _limit, tables, _dialect, _policy = await self._validate_and_compile(
+                        query
+                    )
                 except Exception as exc:
                     audit_query(
                         connection_id=self._connection_id,
                         sql=sql,
                         intent=query.intent,
-                        purpose=query.purpose,
+                        purpose=(
+                            query.purpose
+                            if policy is not None and policy.allowed_purposes
+                            else None
+                        ),
                         duration_ms=int((time.monotonic() - start) * 1000),
                         principal=self._principal_subject,
                         principal_scopes=self._principal_scopes,
@@ -1140,7 +1171,7 @@ class StructuredQueryService:
                 connection_id=self._connection_id,
                 sql=sql,
                 intent=query.intent,
-                purpose=query.purpose,
+                purpose=(query.purpose if policy is not None and policy.allowed_purposes else None),
                 duration_ms=int((time.monotonic() - start) * 1000),
                 principal=self._principal_subject,
                 principal_scopes=self._principal_scopes,
@@ -1158,7 +1189,7 @@ class StructuredQueryService:
                 connection_id=self._connection_id,
                 sql=sql,
                 intent=query.intent,
-                purpose=query.purpose,
+                purpose=(query.purpose if policy is not None and policy.allowed_purposes else None),
                 duration_ms=int((time.monotonic() - start) * 1000),
                 principal=self._principal_subject,
                 principal_scopes=self._principal_scopes,
