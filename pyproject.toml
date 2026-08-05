@@ -64,6 +64,7 @@ redis = "^8.0.1"
 hvac = "^2.4.0"
 defusedxml = "^0.7.1"
 asyncmy = "^0.2.11"
+boto3 = "^1.43.65"
 
 [tool.poetry.group.dev.dependencies]
 # Test stack floored at CVE-fixed versions (pytest PYSEC-2026-1845); pytest 9
@@ -86,6 +87,7 @@ bandit = "^1.8.0"
 # DAST runs it from its official Docker image instead — like Trivy/gitleaks/
 # Semgrep — so a dev testing tool never constrains the shipped dependency graph.
 # See scripts/run_dast.py and TODO item 89.
+moto = "^5.2.2"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

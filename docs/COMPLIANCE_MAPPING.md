@@ -104,7 +104,7 @@ certification effort starts from a mapped baseline rather than a blank page.
 | Criterion | QueryGate control | Evidence | Status |
 |---|---|---|---|
 | C1.1 Identify & protect confidential data | Column masking/tokenization, deny-by-default column policy, redaction-safe audit. | item 49; `audit/sinks.py` | Product-provided |
-| C1.2 Disposal / retention | Catalog retention/deletion + export (least-privilege scopes); audit retention is operator-configured storage. | items 32B-2 (`catalog:delete`/`catalog:export`); `deploy/HA_DR.md` (audit storage) | Product + Shared |
+| C1.2 Disposal / retention | Catalog retention/deletion + export (least-privilege scopes); audit retention has an opt-in native WORM path (S3 Object Lock COMPLIANCE mode) or remains operator-configured storage otherwise. | items 32B-2 (`catalog:delete`/`catalog:export`); item 134 (`AUDIT_SINK_BACKEND=jsonl_chained_s3_worm`); `deploy/HA_DR.md` (audit storage) | Product + Shared |
 
 ## Availability (A-series)
 
