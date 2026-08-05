@@ -170,7 +170,7 @@ order-of-magnitude, not commitments.
 | 137 | ✅ Audit read surfaces neither verify nor disclose hash-chain integrity | S–M | 91, 136 |
 | 138 | ✅ Audit read surfaces scan the entire persisted file on every request, unbounded by lines read | S–M | — |
 | 139 | ✅ Bound audit-line size at the source (AST list caps + audit/sinks.py's own unbounded-read defect) | M | 138 |
-| 140 | `_audit_page` pagination can still materialize ~1M dicts per request | S–M | 138 |
+| 140 | ✅ `_audit_page` pagination can still materialize ~1M dicts per request | S–M | 138 |
 | 141 | Convert audit-reader line caps into practically-tight window-based early exits | S | 138 |
 | 142 | ✅ `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats | XS | — |
 | 143 | ✅ `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step | XS–S | — |
@@ -2382,29 +2382,12 @@ tail-read folded into item 138's bounded `iter_lines_reverse`.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 139).
 
-### 140. `_audit_page` pagination can still materialize ~1M dicts per request
+### 140. `_audit_page` pagination can still materialize ~1M dicts per request ✅ DONE
 
-**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138.**
-`GET /api/v1/admin/ui/audit/events`'s `cursor` query param is
-`Query(default=0, ge=0, le=1_000_000)`; `_audit_page` retains up to
-`cursor + limit` matched, fully-parsed event dicts before slicing the response
-page. A `cursor` near the ceiling therefore still allocates on the order of a
-gigabyte for one admin-scoped request. This bound predates item 138 unchanged
-(the old `deque(maxlen=cursor + limit + 1)` had the identical size), so item
-138 did not introduce it — but it is the same class of defect that item
-exists to fix, in the same function, and admin-scoped is not the same as
-unbounded-safe.
+`cursor`'s query-param ceiling lowered from 1,000,000 to 5,000, bounding
+worst-case retained dicts per request to ~5,100 instead of ~1,000,050.
 
-**What to do:** lower the `cursor` ceiling to something a legitimate
-"load more" UI flow would actually reach (the admin UI pages 50 at a time —
-a few thousand covers deep manual paging without approaching six figures), or
-change the pagination shape entirely (e.g. an opaque cursor keyed to file
-position rather than a match-count offset, avoiding the need to re-derive
-`cursor` matches from the start on every page). Either is a product/API-shape
-decision, not a pure hardening — record the choice in the PRODUCT_GUIDE
-Decision Log before implementing.
-
-**Effort:** S (lower the ceiling) to M (cursor redesign). **Depends on:** 138.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 140).
 
 ### 141. Convert audit-reader line caps into practically-tight window-based early exits
 
