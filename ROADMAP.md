@@ -243,7 +243,7 @@ claim when the work ships or before explicitly handing the item back.
   board:** it converts the central claim from self-asserted to
   third-party-attested, which is the objection that actually closes a security
   review.
-- [ ] **147** — Self-serve procurement evidence page. *Added 2026-08-05 by
+- [x] **147** — Self-serve procurement evidence page. *Added 2026-08-05 by
   `product-scorecard`. Productizes the `trust-evidence` skill's ad hoc packet
   into a persistent, always-current `/trust` surface composed read-only from
   already-shipped artifacts (SBOM, item 54's compliance mapping, item 58's

@@ -3393,6 +3393,32 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-05 — the procurement evidence page is a checked-in generated doc,
+  not a live REST route (TODO.md item 147).** The item offered two shapes: "a
+  served page (candidate: a `/trust` REST route... or a static generator
+  invoked at release time)". A live route was the first instinct, but
+  `pyproject.toml`'s `packages` list and the `Dockerfile`'s `COPY` lines both
+  confirm `docs/` is **not** part of the installed package or the container
+  image — only `src/querygate` and `examples/` are. A runtime handler trying
+  to read `docs/SECURITY_POSTURE.md`/`docs/COMPLIANCE_MAPPING.md` etc. would
+  work in a dev checkout and 404/fail in the actually-shipped product, which
+  is exactly the kind of thing that must be reliable for a security-review
+  artifact. `scripts/generate_trust_page.py` (mirroring `scripts/
+  generate_sbom.py`'s shape) instead composes `docs/SECURITY_POSTURE.md`,
+  `docs/COMPLIANCE_MAPPING.md`, `docs/business/SECURITY_BENCHMARK.md`,
+  `SECURITY.md`'s disclosure section, and the live
+  `security/dependency-audit-allowlist.json` status into one generated,
+  git-committed `docs/TRUST_EVIDENCE.md` (`make trust-page`) — composes the
+  real docs **verbatim**, not a lossy summary, so no new evidence or claim is
+  introduced. A drift guard (`tests/unit/test_trust_page.py::
+  test_committed_doc_matches_generator`) fails if the checked-in file and the
+  generator disagree, so "always current" is enforced the same way item 95's
+  `docs/SCOPE_CATALOG.md` guard already is, not left as a habit to remember.
+  Deliberately no HTML/CSS page: the item's own scope explicitly rules out
+  this becoming a marketing page (that's `pitch-sync`/`GO_TO_MARKET.md`'s
+  job) — a generated Markdown doc is the evidentiary companion, not a
+  landing-page replacement for `landing/security.html`.
+
 - **2026-08-05 — purpose-bound access: declared, closed-set, narrows-only
   (TODO.md item 145, feature F7).** `StructuredQuery.intent` was free text,
   logged but never enforced; Immuta's purpose-based access — where a caller

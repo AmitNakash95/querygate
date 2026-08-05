@@ -9233,3 +9233,53 @@ All three reverted; full unit (1950), integration (344, excluding `real_db`),
 and security (463) suites pass on the final tree.
 
 **Effort:** M. **Depends on:** none.
+
+### 147. Self-serve procurement evidence page ✅ DONE
+
+**Surfaced 2026-08-05 by `product-scorecard`.** The `trust-evidence` skill
+already assembles a defensible security-posture packet — SBOM, item-54
+compliance mapping, item-58 benchmark results, threat-model coverage,
+credential-redaction evidence — but only ad hoc, hand-rebuilt per prospect
+engagement. `docs/business/NORTH_STAR.md`'s own stated posture is "we are
+not behind on capability, we are behind on evidence and market presence,"
+and the one defined success metric is a design partner's security team
+signing off; the artifact that shortens that review cycle doesn't persist
+anywhere a prospect can be pointed at today.
+
+**Why it matters.** Phase 2 (Enterprise procurement unlocks) already ships
+items 53/54/60/134 as procurement-facing controls; this is the missing
+"hand it to them" step. A live page beats a stale exported PDF because the
+artifacts it cites (current SBOM, latest benchmark pass/fail, the
+compliance-mapping table) drift as the codebase changes, and a hand-assembled
+packet goes stale between rebuilds.
+
+**Decision (recorded in `docs/PRODUCT_GUIDE.md`'s Decision Log, 2026-08-05):
+a checked-in generated doc, not a live REST route.** `pyproject.toml`'s
+`packages` list and the `Dockerfile`'s `COPY` lines both confirm `docs/` is
+**not** part of the installed package or the container image — a live route
+reading `docs/*.md` at request time would work in a dev checkout and fail in
+the actually-shipped product. `scripts/generate_trust_page.py` (mirroring
+`scripts/generate_sbom.py`'s shape) instead composes
+`docs/SECURITY_POSTURE.md`, `docs/COMPLIANCE_MAPPING.md`,
+`docs/business/SECURITY_BENCHMARK.md`, `SECURITY.md`'s disclosure section,
+and the live `security/dependency-audit-allowlist.json` status **verbatim**
+(no lossy summarization — no new evidence or claim) into one generated,
+git-committed `docs/TRUST_EVIDENCE.md`, regenerated with `make trust-page`.
+
+**Coverage.** `tests/unit/test_trust_page.py`: every named source doc exists,
+`build_document` embeds every section header and the dependency-audit
+summary, the empty-allowlist and populated-allowlist summary shapes, the
+GitHub-flavored-markdown anchor helper, and the drift guard
+(`test_committed_doc_matches_generator`) that fails if the checked-in file
+and the generator disagree — extracting the committed file's own
+version/date so the comparison isn't date-flaky. **Mutation-verified:**
+corrupting a section heading in the committed `docs/TRUST_EVIDENCE.md` made
+the drift-guard test fail for the expected reason; reverted (regenerated via
+`make trust-page`) and the full unit suite passes on the final tree.
+
+**Explicitly out of scope (per the item's own scope, honored as-is):** no
+HTML/CSS marketing page — that's `pitch-sync`/`GO_TO_MARKET.md`'s job, and
+`landing/security.html` already exists for that purpose; no unearned SOC 2 /
+ISO / third-party-pentest claims (nothing here asserts one).
+
+**Effort:** S. **Depends on:** 54, 58 (phase 1), 60 (all shipped).
