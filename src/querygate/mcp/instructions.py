@@ -1,4 +1,4 @@
-"""Strict MCP agent guidelines (served as FastMCP server instructions)."""
+"""Strict MCP agent guidelines (served as MCP server instructions)."""
 
 MCP_INSTRUCTIONS = """
 QueryGate MCP server — agent operating guidelines (STRICT).

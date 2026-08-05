@@ -48,8 +48,10 @@ fastapi = ">=0.119.0"
 starlette = ">=1.3.1"
 python-dotenv = ">=1.2.2"
 asyncpg = "^0.30.0"
-# mcp >=1.28.1 fixes CVE-2025-66416 / CVE-2026-52869 / CVE-2026-59950.
-mcp = ">=1.28.1"
+# mcp >=2.0.0 (TODO item 128): the `2026-07-28` protocol revision, `MCPServer`
+# (formerly `FastMCP`) SDK. Also carries forward the CVE-2025-66416 /
+# CVE-2026-52869 / CVE-2026-59950 fixes from the 1.28.1 floor it replaces.
+mcp = ">=2.0.0"
 httpx = "^0.28.1"
 loguru = "^0.7.3"
 PyYAML = "^6.0"

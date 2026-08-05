@@ -1,10 +1,19 @@
-"""MCP server factory and ASGI integration."""
+"""MCP server factory and ASGI integration.
+
+Built on `mcp` SDK v2 (TODO.md item 128 — the `2026-07-28` protocol
+revision). `MCPServer` (formerly `FastMCP`) no longer takes transport
+settings in its constructor — those move to `streamable_http_app()`/`run()`
+— and the low-level tool-registration decorator API `_install_scoped_tool_listing`
+used in v1 is gone; `list_tools` is now a plain overridable instance method
+(see that function's own docstring for why a direct attribute override is
+the correct v2-idiomatic replacement, not a hack).
+"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from querygate.core.logging import get_logger
@@ -25,22 +34,9 @@ _SCOPE_GATED_TOOLS: dict[str, str] = {
     "inspect_querygate_configuration": ADMIN_CONFIG_READ_SCOPE,
 }
 
-mcp_server: FastMCP = FastMCP(
+mcp_server: MCPServer = MCPServer(
     name="querygate",
     instructions=MCP_INSTRUCTIONS,
-    streamable_http_path="/",
-    stateless_http=True,
-    transport_security=TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=[
-            "localhost",
-            "localhost:*",
-            "127.0.0.1",
-            "127.0.0.1:*",
-            "[::1]",
-            "[::1]:*",
-        ],
-    ),
 )
 
 
@@ -56,7 +52,7 @@ def _current_principal_or_none() -> Optional["Principal"]:
         return None
 
 
-def _install_scoped_tool_listing(server: FastMCP) -> None:
+def _install_scoped_tool_listing(server: MCPServer) -> None:
     """Filter tools/list to what the caller's scopes can actually call.
 
     Token-savings/defense-in-depth only: an admin-only tool's ~6KB schema
@@ -64,6 +60,16 @@ def _install_scoped_tool_listing(server: FastMCP) -> None:
     authorization boundary stays each tool's own call-time scope check
     (e.g. help/service.py's redacted_configuration) — this must never be
     the only thing standing between a caller and a scope-gated tool.
+
+    v1's `FastMCP` exposed a decorator-based low-level registration
+    (`server._mcp_server.list_tools()(fn)`) to install this; v2's
+    `MCPServer.list_tools` is a plain overridable `async def` method — both
+    `MCPServer.list_tools()` (called by any direct API consumer) and the
+    dispatcher's own `_handle_list_tools` (`return ListToolsResult(tools=await
+    self.list_tools())`) read the SAME bound attribute, so a plain instance-
+    attribute assignment is the correct, minimal v2-idiomatic replacement —
+    verified directly against the installed SDK, not assumed: overriding
+    `server.list_tools` this way is observed by `_handle_list_tools` too.
     """
     unfiltered_list_tools = server.list_tools
 
@@ -79,15 +85,11 @@ def _install_scoped_tool_listing(server: FastMCP) -> None:
             or _SCOPE_GATED_TOOLS[tool.name] in principal.scopes
         ]
 
-    # Re-registering overwrites the low-level Server's ListToolsRequest
-    # handler (a plain dict assignment) — safe to call repeatedly, and
-    # `unfiltered_list_tools` above always closes over the true unfiltered
-    # FastMCP.list_tools, never a previously-installed wrapper.
-    server._mcp_server.list_tools()(scoped_list_tools)
+    server.list_tools = scoped_list_tools
 
 
-def create_mcp_server() -> FastMCP:
-    """Import tool modules and return the shared FastMCP instance."""
+def create_mcp_server() -> MCPServer:
+    """Import tool modules and return the shared MCPServer instance."""
     from querygate.mcp.tools import discover_and_register_tools
 
     discover_and_register_tools()
@@ -104,12 +106,17 @@ def setup_mcp(app: "FastAPI", cfg: "AppConfig") -> None:
     from querygate.mcp.transport_guard import MCPRequestGuardMiddleware
 
     server = create_mcp_server()
-    server.settings.transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=cfg.mcp_dns_rebinding_protection,
-        allowed_hosts=cfg.mcp_allowed_hosts,
-        allowed_origins=cfg.mcp_allowed_origins,
+    # Transport settings move to streamable_http_app() in v2 (no longer a
+    # constructor arg / server.settings.transport_security mutation).
+    mcp_asgi = server.streamable_http_app(
+        streamable_http_path="/",
+        stateless_http=True,
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=cfg.mcp_dns_rebinding_protection,
+            allowed_hosts=cfg.mcp_allowed_hosts,
+            allowed_origins=cfg.mcp_allowed_origins,
+        ),
     )
-    mcp_asgi = server.streamable_http_app()
     authed_mcp = MCPAuthMiddleware(app=mcp_asgi, settings=cfg)
     # Guard the body (size/depth) outermost, before auth and before the
     # transport's json.loads — TODO.md item 86.
@@ -120,7 +127,7 @@ def setup_mcp(app: "FastAPI", cfg: "AppConfig") -> None:
     logger.info(
         "mcp.server.mounted",
         mount_path=cfg.mcp_mount_path,
-        tool_count=len(server._tool_manager._tools),
+        tool_count=len(server._tool_manager.list_tools()),
         auth_mode="api_keys" if cfg.mcp_api_keys else "dev_bypass",
         oauth_resource_server=cfg.mcp_oauth_resource_server_enabled,
         dns_rebinding_protection=cfg.mcp_dns_rebinding_protection,

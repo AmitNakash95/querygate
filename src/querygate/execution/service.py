@@ -234,6 +234,15 @@ class BatchQueryItemResult(pyd.BaseModel):
     admission_state: Optional[str] = None
     queue_wait_ms: Optional[int] = None
     error: Optional[str] = None
+    # Populated only when `error` is specifically an ApprovalRequiredError
+    # (TODO.md item 92/128) — lets a caller distinguish "this item needs
+    # human approval" from any other rejection without parsing `error`'s
+    # free-text message, and carries what a caller needs to request it (the
+    # MCP MRTR port builds one InputRequiredResult input_request per item
+    # that sets these; REST's single-query path already surfaces the same
+    # two fields via ApprovalRequiredError's 428 response).
+    approval_fingerprint: Optional[str] = None
+    approval_reasons: Optional[List[str]] = None
 
 
 # An injected, transport-specific way to obtain an in-query approval token when
@@ -996,6 +1005,10 @@ class StructuredQueryService:
             admission_id=getattr(exc, "admission_id", None),
             admission_state=getattr(exc, "admission_state", None),
             queue_wait_ms=getattr(exc, "queue_wait_ms", None),
+            approval_fingerprint=(
+                exc.fingerprint if isinstance(exc, ApprovalRequiredError) else None
+            ),
+            approval_reasons=(exc.reasons if isinstance(exc, ApprovalRequiredError) else None),
         )
 
     @log_execution

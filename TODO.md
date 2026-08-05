@@ -158,7 +158,7 @@ order-of-magnitude, not commitments.
 | 125 | ✅ ★ A window function as an `Expression` operand (bar row 15 → 16/16) | XL | 100, 101 |
 | 126 | No per-caller rate limit on `GET /help/my-recent-denials` | S | 45 |
 | 127 | ✅ Reject an MCP request whose routing headers disagree with its body | S–M | 86 |
-| 128 | Conform to the final MCP `2026-07-28` protocol revision | L | 90, 92, 93 |
+| 128 | ✅ Conform to the final MCP `2026-07-28` protocol revision | L | 90, 92, 93 |
 | 129 | Never advertise a principal-varying MCP result as shared-cacheable | S | 128 |
 | 130 | Annotate `connection` with `x-mcp-header` for gateway-native authorization | S | 127, 128 |
 | 131 | Publish the StructuredQuery AST as a namespaced MCP extension | M | 128 |
@@ -1951,93 +1951,13 @@ before comparison. Validate-if-present, not required, since QueryGate speaks
 protocol `2025-11-25` (item 128) which doesn't yet define these headers.
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 127).
 
-### 128. Conform to the final MCP `2026-07-28` protocol revision
+### 128. Conform to the final MCP `2026-07-28` protocol revision ✅ DONE
 
-**Surfaced 2026-07-30 by `competitive-scan`.** The `2026-07-28` MCP
-specification [shipped final on 2026-07-28](https://blog.modelcontextprotocol.io/posts/2026-07-28/)
-— the 2026-07-22 scan saw only the release candidate, and `auth.py`'s module
-docstring was written against that RC. It is described by its maintainers as
-the largest revision since launch. QueryGate is pinned to `mcp = ">=1.28.1"`,
-whose `LATEST_PROTOCOL_VERSION` is **`2025-11-25`** — a full revision behind,
-and the gap is now load-bearing rather than cosmetic.
-
-**What changed that actually touches this codebase:**
-
-- **The protocol core is stateless.** `initialize`/`initialized` and the
-  `Mcp-Session-Id` header are gone; every request carries its own protocol
-  version, client info, and capabilities in `_meta`. The GET stream endpoint
-  and `Last-Event-ID` resumability are removed.
-- **Multi Round-Trip Requests (MRTR, SEP-2322) replace server-initiated
-  requests.** A server **MUST NOT** send JSON-RPC requests on an SSE stream
-  any more. Elicitation is now returned *inside* the result as
-  `resultType: "input_required"` with `inputRequests`, and the client retries
-  the call with `inputResponses` plus a server-issued opaque `requestState`.
-  **This is the mechanism items 92/93 use** (`mcp/elicitation.py` calls
-  `Context.elicit`) for in-session approval of a gated read/write.
-- **Required routing headers** `Mcp-Method` / `Mcp-Name` and header–body
-  agreement (item 127 covers the security half).
-- **Authorization hardening — mostly NOT ours.** RFC 9207 issuer validation,
-  `application_type` in DCR, credential-to-issuer binding, and the DCR →
-  Client ID Metadata Documents (CIMD) migration are **client-side and
-  authorization-server-side obligations**. QueryGate's MCP surface is a
-  *resource server* only (`mcp/oauth_metadata.py` publishes RFC 9728 metadata;
-  `mcp/auth.py` enforces RFC 8707 audience binding) and contains no OAuth
-  client or client-registration path. Listed for completeness — **do not build
-  a conformance surface for these, and do not read them as an open
-  authorization gap.** The resource-server-relevant work in this item is the
-  transport, MRTR, and the routing headers.
-- **Deprecations** (12-month minimum window): Roots, Sampling, Logging, and
-  the legacy HTTP+SSE transport.
-
-**Why it matters — this is a distribution risk, not just hygiene.** The spec
-instructs intermediaries that enforce policy on the mirrored headers to
-"verify that the `MCP-Protocol-Version` header indicates a version that
-requires header–body validation. If the version is older or the header is
-absent, the intermediary **SHOULD** reject the request rather than trusting
-unvalidated header values." A conforming MCP gateway therefore has a
-standards-blessed reason to **refuse to front a server on our revision** —
-which lands directly on the P4 "turn gateways into distribution" play. AWS's
-Bedrock AgentCore Gateway already advertises 2026-07-28 support, so this is
-live in the market, not theoretical.
-
-**Sequencing note:** this is gated on the Python SDK. `mcp` 1.28.1 reports
-`2025-11-25`; the new revision's SDKs were in beta at spec release. Track the
-SDK, don't hand-roll the transport.
-
-**The MRTR port of items 92/93 is the substantive work, and it has two traps.**
-
-1. **Integrity-protecting `requestState` is necessary but NOT sufficient.** The
-   spec requires servers to treat `requestState` as attacker-controlled and
-   protect its integrity (HMAC/AEAD). But an HMAC over an opaque request id
-   satisfies that while still letting a caller obtain approval for query A and
-   replay the state against query B. Under today's `Context.elicit` the token
-   never leaves the process and is minted from the *server's* fingerprint of the
-   *server's* validated AST; under MRTR the call **returns** and the retry
-   carries its own `queries` argument. So the real invariant is: reuse
-   `execution/approval.py`'s existing fingerprint-bound token **verbatim** as
-   `requestState`, and have the retry path **re-derive the fingerprint from the
-   resubmitted AST and compare**. That comparison is this item's
-   mutation-verified enforcement point.
-2. **`ApprovalResolver`'s shape cannot express return-and-retry.**
-   `execution/service.py`'s `ApprovalResolver` is a mid-pipeline
-   `await`-and-continue callback returning a token; MRTR has no suspend/resume —
-   the call must return. Implement the port **at the MCP tool layer**
-   (`mcp/tools/query.py`/`write.py`): catch `ApprovalRequiredError`, build the
-   `input_required` result there, and feed the token back on retry through the
-   existing `approval_tokens` map. **`execution/service.py` must not learn about
-   MRTR** — it is the transport-agnostic single pipeline that also serves REST,
-   and the comment above `ApprovalResolver` already records that it "never
-   imports MCP." Propagating an MCP-shaped terminal outcome up through it is a
-   layer inversion, and it is the tempting shortcut.
-
-Two smaller constraints in the same port: `execute_many` fires the resolver
-**per batch item**, so specify the batch → `inputRequests` (plural) mapping
-rather than leaving it to chance; and preserve the fail-closed opt-in gating
-(`mcp_elicitation_approval_enabled` + `approval_token_hmac_key`) — a rewrite
-that drops it silently enables an approval channel with no authenticated
-approver identity.
-
-**Effort:** L. **Depends on:** 90, 92, 93, and upstream SDK availability.
+Shipped 2026-08-06: full `mcp` SDK v1 → v2 migration (`FastMCP` → `MCPServer`,
+`mcp = ">=2.0.0"`) including the Multi Round-Trip Requests port of items
+92/93's approval/elicitation flow, mutation-verified against a
+fingerprint-swap replay attack.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 128).
 
 ### 129. Never advertise a principal-varying MCP result as shared-cacheable
 

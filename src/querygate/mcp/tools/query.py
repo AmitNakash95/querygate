@@ -6,13 +6,18 @@ mcp/tools/connections.py for why.
 
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
+from mcp.types import InputRequiredResult
 from pydantic import BaseModel, Field
 
 from querygate.execution.admission import QueueMode, reject_unsupported_async_queue_mode
+from querygate.execution.approval import query_fingerprint
 from querygate.execution.service import StructuredQueryService
 from querygate.mcp.auth import get_mcp_caller, get_mcp_config
-from querygate.mcp.elicitation import build_elicitation_resolver
+from querygate.mcp.elicitation import (
+    build_pending_input_required,
+    resolve_approval_tokens_from_retry,
+)
 from querygate.mcp.exceptions import MCPErrorResult, safe_mcp_tool
 from querygate.mcp.server import mcp_server
 from querygate.policy.loader import get_policy
@@ -56,6 +61,8 @@ class BatchQueryItemToolResult(BaseModel):
     admission_state: Optional[str] = None
     queue_wait_ms: Optional[int] = None
     error: Optional[str] = None
+    approval_fingerprint: Optional[str] = None
+    approval_reasons: Optional[List[str]] = None
 
 
 class BatchQueryToolResult(BaseModel):
@@ -153,7 +160,13 @@ async def run_structured_queries(
     queue_mode: Annotated[Optional[QueueMode], _QUEUE_MODE_FIELD] = None,
     wait_timeout_seconds: Annotated[Optional[float], _WAIT_TIMEOUT_FIELD] = None,
     ctx: Context = None,
-) -> Union[BatchQueryToolResult, BatchExplainToolResult, BatchVerdictToolResult, MCPErrorResult]:
+) -> Union[
+    BatchQueryToolResult,
+    BatchExplainToolResult,
+    BatchVerdictToolResult,
+    InputRequiredResult,
+    MCPErrorResult,
+]:
     reject_unsupported_async_queue_mode(queue_mode)
     caller = get_mcp_caller()
     validate_batch_size(len(queries), get_policy(connection, principal=caller))
@@ -168,18 +181,24 @@ async def run_structured_queries(
         return BatchVerdictToolResult(
             results=[BatchVerdictItemToolResult(**r.model_dump()) for r in verdict_results]
         )
-    # In-query human-in-the-loop approval (item 92): if a query trips the gate,
-    # ask the client's human to approve it in-session via elicitation instead of
-    # the out-of-band REST token flow. Opt-in and off by default (see
-    # AppConfig.mcp_elicitation_approval_enabled); when off, resolver is None and
-    # a gated query stays fail-closed as that item's error.
-    resolver = (
-        build_elicitation_resolver(ctx, caller, get_mcp_config()) if ctx is not None else None
-    )
+    # In-query human-in-the-loop approval (item 92, ported to MRTR by item
+    # 128): a gated query's fingerprint is keyed "q{i}" by its position in
+    # `queries` — stable across the retry, since the client resubmits the
+    # identical tool call. Opt-in and off by default (see
+    # AppConfig.mcp_elicitation_approval_enabled); when off (or ctx is None,
+    # e.g. a non-interactive/offline call), no tokens resolve and a gated
+    # query stays fail-closed as that item's error, exactly as before.
+    config = get_mcp_config()
+    approval_tokens: Dict[str, str] = {}
+    if ctx is not None:
+        fingerprints_by_key = {f"q{i}": query_fingerprint(q) for i, q in enumerate(queries)}
+        approval_tokens = resolve_approval_tokens_from_retry(
+            ctx=ctx, fingerprints_by_key=fingerprints_by_key, caller=caller, config=config
+        )
     # Progress notifications (TODO.md item 35 phase 3): MCP's standard
-    # notifications/progress message, via FastMCP's Context.report_progress —
-    # a no-op when the client sent no progressToken, so this is unconditional
-    # and purely additive. Two points per query (wait start, admitted), not a
+    # notifications/progress message, via Context.report_progress — a no-op
+    # when the client sent no progressToken, so this is unconditional and
+    # purely additive. Two points per query (wait start, admitted), not a
     # continuous tick during the wait — see execute()'s own docstring for why.
     on_wait_start = on_admitted = None
     if ctx is not None:
@@ -201,10 +220,19 @@ async def run_structured_queries(
         queries,
         queue_mode=queue_mode,
         wait_timeout_seconds=wait_timeout_seconds,
-        approval_resolver=resolver,
+        approval_tokens=approval_tokens,
         on_wait_start=on_wait_start,
         on_admitted=on_admitted,
     )
+    if ctx is not None:
+        pending = [
+            (f"q{i}", r.approval_fingerprint, r.approval_reasons or [])
+            for i, r in enumerate(results)
+            if r.approval_fingerprint is not None
+        ]
+        input_required = build_pending_input_required(items=pending, config=config)
+        if input_required is not None:
+            return input_required
     return BatchQueryToolResult(
         results=[BatchQueryItemToolResult(**r.model_dump()) for r in results]
     )

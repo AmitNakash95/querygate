@@ -509,12 +509,13 @@ without an estimator returns None (proceeds under the reactive guardrails).
 - To unit-test `schema_validation.validate_schema` without a real database,
   patch the module-level `_load_table` function (the one seam that touches a
   connection) rather than mocking SQLAlchemy internals.
-- `mcp/tools/{connections,schema,query}.py` deliberately do **not** use
-  `from __future__ import annotations`. FastMCP resolves each tool's forward
-  references against the *wrapping* function's `__globals__` (the
-  `safe_mcp_tool` decorator lives in `mcp/exceptions.py`), not the tool
-  module's — stringified annotations there fail to resolve at registration
-  time. Keep annotations as real objects in those three files.
+- `mcp/tools/{connections,schema,query,write,help,templates}.py` deliberately
+  do **not** use `from __future__ import annotations`. `MCPServer` (`mcp`
+  SDK v2, formerly `FastMCP`) resolves each tool's forward references
+  against the *wrapping* function's `__globals__` (the `safe_mcp_tool`
+  decorator lives in `mcp/exceptions.py`), not the tool module's —
+  stringified annotations there fail to resolve at registration time. Keep
+  annotations as real objects in all six files.
 - `ConnectionProfile.dialect` accepts `"postgresql"`, `"mssql"`, or `"mysql"`
   (item 19 phase 1) — SQLite is used internally for tests/examples by
   monkeypatching `connections.engine.get_engine`/`session_scope` directly

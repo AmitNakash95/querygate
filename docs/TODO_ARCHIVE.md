@@ -8498,6 +8498,104 @@ large batch from a real, conformant 2026-07-28 gateway once item 128 lands —
 a product tradeoff between pre-auth cost and future-client compatibility, not
 a small/safe fix, and left for a maintainer decision alongside item 128.
 
+### 128. Conform to the final MCP `2026-07-28` protocol revision ✅ DONE
+
+**Surfaced 2026-07-30 by `competitive-scan`** (see item 127's write-up for the
+full spec background and why the gap was a distribution risk, not hygiene).
+QueryGate was pinned to `mcp = ">=1.28.1"` (`LATEST_PROTOCOL_VERSION`
+`2025-11-25`), a full revision behind final. Shipped 2026-08-06 as a full
+`mcp` SDK v1 → v2 migration (`pyproject.toml`: `mcp = ">=2.0.0"`), not a
+scoped-down subset — the item's own sequencing note flagged this as gated on
+SDK availability, and by build time the v2 SDK was GA.
+
+**What shipped, by surface:**
+
+- **Transport/server.** `mcp/server.py`: `FastMCP` → `MCPServer` (no longer
+  takes transport settings in its constructor — those move to
+  `streamable_http_app()`); the v1 low-level `_install_scoped_tool_listing`
+  decorator registration is gone, replaced by overriding the plain
+  `async def list_tools()` instance method v2 exposes directly (both
+  `MCPServer.list_tools()` and the dispatcher's `_handle_list_tools` read the
+  same bound attribute, so a direct override is the v2-idiomatic
+  replacement, not a workaround).
+- **The MRTR port of items 92/93 — the substantive work.** The protocol core
+  going stateless removes server-initiated mid-call requests entirely;
+  `Context.elicit` (what `mcp/elicitation.py` used to gate an expensive/
+  sensitive read or write on human approval) no longer exists as a
+  send-and-suspend call. Ported at the MCP tool layer, per the item's own
+  design constraint that `execution/service.py` must never learn about MRTR
+  (it is the transport-agnostic single pipeline shared with REST):
+  `mcp/elicitation.py` was rewritten around two functions —
+  `build_pending_input_required()` (catches `ApprovalRequiredError` per
+  batch item and shapes an `InputRequiredResult` with one `inputRequest` per
+  gated item, reusing `execution/approval.py`'s existing HMAC-signed,
+  fingerprint-bound token verbatim as the opaque `requestState` — no new
+  token format) and `resolve_approval_tokens_from_retry()` (reads
+  `ctx.input_responses`/`ctx.request_state` on the retried call and mints
+  the final granted token per item). `mcp/tools/query.py` and
+  `mcp/tools/write.py` were rewritten to call these and return
+  `InputRequiredResult` instead of a synchronous elicitation `await`.
+  `execution/service.py`'s `BatchQueryItemResult` and
+  `execution/write_execution.py`'s `WriteBatchItemResult` each gained
+  `approval_fingerprint`/`approval_reasons` fields (populated by
+  `_batch_error_item`/`_batch_error`) so the tool layer can shape a
+  per-item `inputRequest` without the pipeline itself knowing what MRTR is;
+  `execute_many` gained an `approval_tokens` map parameter matching the
+  write path's existing per-batch-item shape.
+- **The anti-replay property, mutation-verified.** Signing `requestState`
+  satisfies the spec's "treat it as attacker-controlled" requirement but
+  does not by itself stop a caller from obtaining approval for query A and
+  replaying that `requestState` against a resubmitted query B — MRTR's
+  retry carries its own `queries` argument, unlike the old in-process
+  `Context.elicit` where the token was minted from the server's own
+  validated AST and never left the process. The fix: the retry path
+  re-derives each item's fingerprint from the *resubmitted* AST and compares
+  it against the fingerprint embedded in the pending token **before**
+  consulting the human's actual approve/decline response.
+  `test_resolve_rejects_a_fingerprint_swapped_at_retry`
+  (`tests/unit/test_mcp_elicitation_approval.py`) mutation-verified this —
+  disabling the comparison made this test (and no other) fail for the
+  expected reason.
+- **Routing headers (item 127) and the OAuth hardening items (RFC 9207
+  issuer validation, DCR → CIMD migration, etc.)** were confirmed, not
+  reworked: item 127 shipped independently of this item by design, and the
+  OAuth hardening items are client-side/authorization-server-side
+  obligations outside QueryGate's resource-server-only MCP surface
+  (`mcp/oauth_metadata.py`, `mcp/auth.py`) — listed in the original item
+  write-up for completeness, deliberately not built here.
+- **Mechanical v2 API fixes surfaced by the migration**, not incidental:
+  `tool.inputSchema` → `tool.input_schema` (the Python SDK object attribute
+  rename; raw JSON-RPC wire dicts stay camelCase via aliases and were left
+  alone — `examples/openai_function_calling_integration.py` and its
+  docstring), `streamablehttp_client` → `streamable_http_client` and its
+  2-tuple (was 3-tuple) return shape
+  (`tests/integration/test_integration_examples.py`), and the MCP token
+  budget's `_MAX_TOTAL_CHARS` bumped 123,000 → 124,000 to absorb the v2
+  tool-schema size delta (`tests/unit/test_mcp_token_budget.py`, with an
+  inline comment recording why).
+
+**Coverage.** `tests/unit/test_mcp_elicitation_approval.py` was rewritten in
+full (19 tests: pending-result shaping including the multi-item-batch case,
+resolve-on-approval/decline/not-yet-approved, the fingerprint-swap replay
+rejection, fail-closed on a malformed/forged/expired `requestState`,
+per-item grant attribution for a batch, and the tool-layer round trip from
+first gated call through a resolved retry); `tests/unit/test_mcp_write_tool.py`
+gained the same-shaped coverage for the write path (`w{i}` batch keys,
+atomic-mode exclusion from the approval channel). `tests/integration/
+test_integration_examples.py` and `docker`-free MCP transport tests exercise
+the real v2 `MCPServer` end to end (`streamable_http_app`, `tools/list`,
+`tools/call`) rather than only unit-level doubles.
+
+**Docs.** `CLAUDE.md`'s testing-gotcha note and file list (3 → 6 files:
+`connections, schema, query, write, help, templates`) updated for the v2
+forward-ref resolution mechanics; `docs/PRODUCT_GUIDE.md`'s architecture
+section, item-127/128 narrative, tools list, and Decision Log updated;
+`docs/business/NORTH_STAR.md`'s "MCP protocol currency" gap marked CLOSED
+2026-08-06.
+
+**Effort:** L (as scoped). **Depends on:** 90, 92, 93 (all shipped), and the
+`mcp` v2 SDK reaching GA — confirmed at build time.
+
 ### 132. Reconcile stale shipped-status claims left behind by items 90–93 ✅ DONE
 
 **Surfaced 2026-07-30 by the `auditors` claim review of the `competitive-scan`
