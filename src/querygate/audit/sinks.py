@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, Protocol
 
 from querygate.audit.events import PersistableEvent
+from querygate.audit.file_reader import AuditFileReadBounded, iter_lines_reverse
 from querygate.audit.ledger import (
     GENESIS_PREV_HASH,
     LedgerRecord,
@@ -72,33 +73,31 @@ def _read_last_line(path: Path) -> Optional[str]:
     """Return the last non-empty line of a file, reading only its tail.
 
     Used to recover a hash chain's head on startup without scanning the whole
-    (potentially large) ledger. Reads a bounded window from the end, expanding
-    only if no newline is found yet — chain records are a few hundred bytes, so
-    one window is effectively always enough.
+    (potentially large) ledger. Delegates to `audit.file_reader.iter_lines_reverse`
+    (TODO.md item 138) instead of a second hand-rolled tail reader — that
+    generator already yields tail-first with the same "expand toward the
+    start until a newline is found" shape this function used to duplicate,
+    plus the bound this one lacked: item 138's own reader still had an
+    unbounded expanding read for a trailing region with no newline at all
+    (`chunk = handle.read(size - pos)` re-reading and re-copying a growing
+    span, worst case the entire file, once per boot — TODO.md item 139).
     """
+    if not path.exists():
+        return None
     try:
-        size = path.stat().st_size
-    except OSError:
-        return None
-    if size == 0:
-        return None
-    window = 65536
-    with path.open("rb") as handle:
-        pos = size
-        chunk = b""
-        while pos > 0:
-            step = min(window, pos)
-            pos -= step
-            handle.seek(pos)
-            chunk = handle.read(size - pos)
-            # Need at least one newline *before* the trailing content to isolate
-            # a whole last line; keep expanding toward the start otherwise.
-            if chunk.strip(b"\n").count(b"\n") >= 1 or pos == 0:
-                break
-    text = chunk.decode("utf-8", errors="replace")
-    for line in reversed(text.splitlines()):
-        if line.strip():
+        for line in iter_lines_reverse(path):
             return line
+    except AuditFileReadBounded as exc:
+        # A trailing region this oversized/newline-free is corrupted or
+        # adversarial either way — silently treating it as "file empty,
+        # start at genesis" (the `None` case below) would restart the chain
+        # at seq 0 over real prior content. Fail loud instead, matching
+        # `_recover_head`'s own posture for an unparseable last line.
+        raise ValueError(
+            f"Cannot resume hash-chained audit ledger {path}: its last line "
+            f"could not be read within the bounded-read limits ({exc}). "
+            "Refusing to append and silently fork the chain."
+        ) from exc
     return None
 
 

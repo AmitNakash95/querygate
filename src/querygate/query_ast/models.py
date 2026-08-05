@@ -1442,6 +1442,7 @@ class SetOpSpec(pyd.BaseModel):
     )
     arms: List["StructuredQuery"] = pyd.Field(
         min_length=1,
+        max_length=50,  # TODO.md item 139: see StructuredQuery.select's field for the rationale.
         description="The further queries to combine with this one, in order.",
     )
 
@@ -1518,6 +1519,16 @@ class StructuredQuery(pyd.BaseModel):
     )
     select: List[SelectItem] = pyd.Field(
         min_length=1,
+        # TODO.md item 139: a hard structural ceiling, not the operator-tunable
+        # Policy.max_select_columns (default 30) checked later in
+        # validation/policy_validation.py. This exists so a pathologically
+        # large list (tens of thousands of items) is rejected at request-
+        # parsing time — before execution/service.py's normalize_query_shape
+        # ever serializes it into one oversized audit-log line, regardless of
+        # whether the query would go on to be policy-rejected anyway. Sized
+        # with generous headroom over any realistic operator-raised policy
+        # cap, not tuned to it.
+        max_length=1000,
         description=(
             'Each item is EITHER a bare "Table.Column" string, OR an object: '
             "{fn, col, as} for an aggregate, or {col, granularity, as} for a date_bucket."
@@ -1527,7 +1538,10 @@ class StructuredQuery(pyd.BaseModel):
         default=False,
         description="De-duplicate result rows (SELECT DISTINCT) across the full select list.",
     )
-    joins: List[JoinSpec] = pyd.Field(default_factory=list)
+    joins: List[JoinSpec] = pyd.Field(
+        default_factory=list,
+        max_length=200,  # TODO.md item 139: see `select`'s field for the rationale.
+    )
     where: Optional[WhereNode] = pyd.Field(
         default=None,
         description=(
@@ -1537,6 +1551,7 @@ class StructuredQuery(pyd.BaseModel):
     )
     group_by: List[str] = pyd.Field(
         default_factory=list,
+        max_length=500,  # TODO.md item 139: see `select`'s field for the rationale.
         description="Table.Column refs, or a date_bucket select item's alias.",
     )
     having: Optional[WhereNode] = pyd.Field(
@@ -1552,6 +1567,7 @@ class StructuredQuery(pyd.BaseModel):
     )
     order_by: List[OrderBySpec] = pyd.Field(
         default_factory=list,
+        max_length=500,  # TODO.md item 139: see `select`'s field for the rationale.
         description="May reference a Table.Column or a select item's alias.",
     )
     limit: Optional[int] = pyd.Field(default=None, ge=1)
@@ -1569,6 +1585,7 @@ class StructuredQuery(pyd.BaseModel):
     )
     correlate: List[str] = pyd.Field(
         default_factory=list,
+        max_length=50,  # TODO.md item 139: see `select`'s field for the rationale.
         description=(
             "ONLY on a subquery (an exists_subquery or value_subquery): the outer "
             "Table.Column references this subquery is permitted to read, e.g. "
@@ -1582,6 +1599,7 @@ class StructuredQuery(pyd.BaseModel):
     )
     ctes: List[CteSpec] = pyd.Field(
         default_factory=list,
+        max_length=50,  # TODO.md item 139: see `select`'s field for the rationale.
         description=(
             "Named WITH blocks computed before this query and referred to by name in "
             "`from`/`joins[].table`, for multi-stage analysis in one statement "
