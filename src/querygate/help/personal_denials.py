@@ -95,9 +95,11 @@ class DenialEvent(pyd.BaseModel):
 
 
 class RecentDenialsReport(pyd.BaseModel):
-    # "jsonl": read the persisted stream (0 denials is still "jsonl", not an
-    # error). "disabled": no persisted sink is configured, nothing to read.
-    source: Literal["jsonl", "disabled"] = "jsonl"
+    # "jsonl"/"jsonl_chained": read the persisted stream under the actually
+    # configured backend (0 denials is still a "jsonl*" source, not an error;
+    # TODO.md item 137 disclosed which backend, previously always "jsonl").
+    # "disabled": no persisted sink is configured, nothing to read.
+    source: Literal["jsonl", "jsonl_chained", "disabled"] = "jsonl"
     generated_at: str
     lookback_seconds: float
     # Deliberately scoped to the CALLER's own rejected requests found in the
@@ -184,9 +186,11 @@ def build_recent_denials_report(
     max_events_scanned: int = 50_000,
     max_lines_read: int = 50_000,
     limit: int = 20,
+    backend_label: Literal["jsonl", "jsonl_chained"] = "jsonl",
 ) -> RecentDenialsReport:
     """Assemble a full report from a source. `source=None` means the persisted
-    sink is disabled — reported honestly as `source="disabled"`, not an error."""
+    sink is disabled — reported honestly as `source="disabled"`, not an error.
+    `backend_label` (TODO.md item 137) is the actually configured backend."""
     now = now or datetime.now(timezone.utc)
     base = dict(generated_at=now.isoformat(), lookback_seconds=lookback_seconds)
     if source is None:
@@ -210,7 +214,7 @@ def build_recent_denials_report(
     denials = select_recent_denials(events, principal_id=principal_id, limit=limit)
     own_denials_found = sum(1 for e in events if _is_own_denial(e, principal_id))
     return RecentDenialsReport(
-        source="jsonl",
+        source=backend_label,
         own_denials_found=own_denials_found,
         malformed=malformed,
         truncated=truncated,

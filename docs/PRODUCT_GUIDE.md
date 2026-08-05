@@ -3366,6 +3366,49 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-05 — audit read surfaces both disclose the actual backend and
+  verify chain-envelope self-consistency (TODO.md item 137).** Item 136 made
+  the four durable read-only surfaces (`admin/anomaly.py`'s anomaly report,
+  `admin/config_trends.py`'s change-trend report, `/help/my-recent-denials`,
+  the admin UI `_audit_page` audit browser) accept `AUDIT_SINK_BACKEND=
+  jsonl_chained`, but they all still reported `source="jsonl"` regardless of
+  backend, and none of them checked whether a chain envelope's own `hash`
+  actually matched its contents — chain *linkage* was verify-only
+  (`querygate-audit verify`), so a forged record with a plausible `seq`/
+  `prev_hash` and an arbitrary `hash` would display as a genuine event.
+  Following the same precedent as items 100–106 (the Decision Log entry is
+  the item's own first step, not an external gate), the decision is **both**
+  options the item's TODO body offered, not one:
+  1. **Disclosure**: `source` on all four response models widens from
+     `Literal["jsonl", "disabled", ...]` to include `"jsonl_chained"`, and
+     each route now passes through the actually configured
+     `cfg.audit_sink_backend.value` instead of a hardcoded `"jsonl"` literal.
+  2. **Real per-record verification**: a new `audit/ledger.py` primitive,
+     `verify_envelope_hash(raw, key=...)`, recomputes `compute_record_hash`
+     over `{seq, prev_hash, event}` and compares in constant time against the
+     record's own `hash`. All three readers (`JsonlAuditEventSource`,
+     `JsonlChangeEventSource`, `_audit_page`) now call it before
+     `unwrap_envelope`, counting a self-inconsistent envelope as `malformed`
+     rather than displaying it — mirroring how item 136 itself consolidated
+     the envelope unwrap into one shared primitive. `resolve_ledger_key`
+     (also new, and now shared with `audit/sinks.py`'s write path) converts
+     the same `cfg.audit_ledger_hmac_key` string every route already reads.
+  **Stated honestly, not oversold**: this is self-consistency only, not full
+  chain-linkage verification — a windowed/reverse-order scan never walks the
+  whole file from genesis, so it cannot by itself prove no record was
+  *dropped*. It is real per-record forgery *detection* for the concrete
+  attack the item's report describes (`{"hash": "anything"}` with an
+  arbitrary `event` body), and — as `audit/ledger.py`'s own module docstring
+  already states for the write path — is only forgery-*infeasible* (not just
+  detectable) when `AUDIT_LEDGER_HMAC_KEY` is set; an unkeyed chain still
+  only detects tampering relative to a trusted external anchor. Full-file
+  chain-linkage verification remains `querygate-audit verify`'s job.
+  Regression: a genuine record followed by a hand-forged one (correct
+  `prev_hash`/`seq`, `hash: "anything"`) is counted `malformed` and excluded
+  from every one of the four surfaces, at both the unit (reader) and
+  integration (HTTP) level; mutation-verified — reverting the hash comparison
+  to an unconditional pass makes exactly those new tests fail.
+
 - **2026-07-28 — item 35 phase 3's four design-gated questions are resolved,
   maintainer-approved before build (TODO.md item 35).** Phases 1-2 shipped
   agent-visible admission (caller-tunable wait/fail-fast, `admission_id`/

@@ -178,7 +178,7 @@ async def test_config_changes_surface_a_real_trend_from_a_hash_chained_ledger(tm
     assert resp.status_code == 200
     body = resp.json()
 
-    assert body["source"] == "jsonl"
+    assert body["source"] == "jsonl_chained"
     assert body["events_scanned"] == 50
     assert body["config_recent"]["total"] == 40
     assert body["config_baseline"]["total"] == 10
