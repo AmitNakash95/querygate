@@ -61,9 +61,18 @@ async def list_live_tables(connection_id: str) -> list[str]:
     a connection's real tables (confirmed live against a real MySQL 8.4
     server, TODO.md item 19) — `sys` and `information_schema` themselves are
     already excluded above and happen to be spelled identically to MSSQL's.
-    """
-    from querygate.connections.engine import session_scope
 
+    `SessionDialectAdapter.list_live_tables_extra_filter_sql()` appends any
+    further dialect-specific restriction beyond the shared exclusion list —
+    MySQL's own `INFORMATION_SCHEMA.TABLES` is server-wide (spans every
+    database the connecting user can see), unlike Postgres's/MSSQL's, which
+    are already scoped to the connected database.
+    """
+    from querygate.connections.dialects import list_live_tables_extra_filter_sql
+    from querygate.connections.engine import session_scope
+    from querygate.connections.registry import get_registry
+
+    dialect = get_registry().get(connection_id).dialect
     async with session_scope(connection_id) as session:
         result = await session.execute(
             sa.text(
@@ -71,6 +80,7 @@ async def list_live_tables(connection_id: str) -> list[str]:
                 "WHERE TABLE_TYPE = 'BASE TABLE' "
                 "AND TABLE_SCHEMA NOT IN "
                 "('pg_catalog', 'information_schema', 'sys', 'mysql', 'performance_schema')"
+                + list_live_tables_extra_filter_sql(dialect)
             )
         )
         return [row[0] for row in result.all()]

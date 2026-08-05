@@ -125,7 +125,15 @@ async def run_structured_writes(
             ctx=ctx, fingerprints_by_key=fingerprints_by_key, caller=caller, config=config
         )
     results = await service.execute_many(writes, approval_tokens=approval_tokens, atomic=atomic)
-    if ctx is not None and not atomic:
+    # Only offer in-session approval when NOTHING in the batch has actually
+    # committed yet. Each non-atomic item is its own already-committed
+    # transaction; MRTR's retry necessarily resubmits the identical `writes`
+    # argument, so once any item has run, returning InputRequiredResult here
+    # would re-run (and re-commit) it a second time on retry. A gated item in
+    # a partially-executed batch instead stays fail-closed with its existing
+    # approval_fingerprint/approval_reasons error, the same as when the
+    # channel is disabled.
+    if ctx is not None and not atomic and not any(r.executed for r in results):
         pending = [
             (f"w{i}", r.approval_fingerprint, r.approval_reasons or [])
             for i, r in enumerate(results)

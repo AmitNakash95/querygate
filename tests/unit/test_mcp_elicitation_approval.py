@@ -269,6 +269,32 @@ def test_resolve_mints_separately_attributed_grants_for_a_multi_item_batch():
     assert fp0 in resolved and fp1 not in resolved
 
 
+def test_resolve_does_not_grant_a_declined_duplicate_slot():
+    """`resolved` is keyed by fingerprint, not by slot. If the same statement
+    appears twice in one batch (duplicate fingerprint at two keys) and the
+    human approves one occurrence but declines the other, the decline must
+    veto the fingerprint entirely — `resolved` is a fingerprint->token map
+    consumed by execute_many's per-statement lookup, so a grant surviving
+    here would let BOTH slots execute even though one was explicitly
+    declined."""
+    fp = query_fingerprint(_QUERY)
+    state = json.dumps(
+        {
+            "q0": issue_approval_token(
+                fingerprint=fp, approver_subject="mcp:pending-elicitation", key=_KEY
+            ),
+            "q1": issue_approval_token(
+                fingerprint=fp, approver_subject="mcp:pending-elicitation", key=_KEY
+            ),
+        }
+    )
+    ctx = _ctx(request_state=state, responses={"q0": _accept(True), "q1": _decline()})
+    resolved = resolve_approval_tokens_from_retry(
+        ctx=ctx, fingerprints_by_key={"q0": fp, "q1": fp}, caller=_CALLER, config=_config()
+    )
+    assert resolved == {}
+
+
 # --------------------------------------------------------------------------- #
 # The execute_many approval_tokens seam the resolved grants plug into
 # --------------------------------------------------------------------------- #
@@ -402,3 +428,41 @@ async def test_tool_stays_fail_closed_when_channel_disabled(monkeypatch):
     # through to the plain (fail-closed, still-erroring) batch result.
     assert not isinstance(result, InputRequiredResult)
     assert result.results[0].error is not None
+
+
+@pytest.mark.asyncio
+async def test_tool_never_discards_an_already_executed_item_for_input_required(monkeypatch):
+    """A batch where one item already ran for real (row_count set) and another
+    is gated must NOT return InputRequiredResult: since MRTR retries resubmit
+    the identical `queries` argument, treating a partially-executed batch as
+    'first gated call' would silently re-run (and, for writes, re-commit) the
+    item that already executed. The already-executed result must survive in
+    the returned batch instead."""
+    monkeypatch.setattr(qtool, "get_mcp_caller", lambda: _CALLER)
+    monkeypatch.setattr(qtool, "validate_batch_size", lambda *a, **k: None)
+    monkeypatch.setattr(qtool, "get_policy", lambda *a, **k: Policy())
+    monkeypatch.setattr(qtool, "get_mcp_config", _config)
+
+    other_query = StructuredQuery(from_table="orders", select=["orders.status"])
+    fp = query_fingerprint(other_query)
+    from querygate.execution.service import BatchQueryItemResult
+
+    executed = BatchQueryItemResult(
+        rows=[{"id": 1}], row_count=1, truncated=False, limit=10, offset=0
+    )
+    gated = BatchQueryItemResult(
+        error="approval required", approval_fingerprint=fp, approval_reasons=["big estimate"]
+    )
+
+    async def _fake_execute_many(queries, **kwargs):
+        return [executed, gated]
+
+    fake_service = MagicMock()
+    fake_service.execute_many = _fake_execute_many
+
+    with patch.object(qtool, "_service", return_value=fake_service):
+        result = await qtool.run_structured_queries("demo", [_QUERY, other_query], ctx=_ctx())
+
+    assert not isinstance(result, InputRequiredResult)
+    assert result.results[0].row_count == 1
+    assert result.results[1].approval_fingerprint == fp

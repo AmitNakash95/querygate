@@ -28,6 +28,7 @@ the database above exists.
 from __future__ import annotations
 
 import os
+import statistics
 
 import pytest
 import pytest_asyncio
@@ -68,6 +69,18 @@ async def mysql_app():
                     dialect="mysql",
                     connection_string=_DEMO_URL,
                     known_tables=["customers", "orders", "order_items", "products", "employees"],
+                ),
+                # No known_tables seed, unlike mysql_demo above: list_tables()
+                # (execution/service.py) only calls list_live_tables()'s real
+                # INFORMATION_SCHEMA query when a connection has no
+                # known_tables to short-circuit it — so THIS is the
+                # connection any test of list_live_tables() itself must use,
+                # or the assertion passes regardless of whether the live
+                # query logic is even reached.
+                "mysql_unseeded": ConnectionProfile(
+                    id="mysql_unseeded",
+                    dialect="mysql",
+                    connection_string=_DEMO_URL,
                 ),
             }
         )
@@ -186,8 +199,13 @@ async def test_window_function_end_to_end(mysql_app):
 
 @pytest.mark.asyncio
 async def test_extract_and_string_agg_end_to_end(mysql_app):
-    """DAYOFWEEK/WEEK-based extract and GROUP_CONCAT SEPARATOR — both
-    genuinely different generated SQL from every other supported dialect."""
+    """`year`-based extract and GROUP_CONCAT SEPARATOR — both genuinely
+    different generated SQL from every other supported dialect. The
+    DAYOFWEEK/WEEK-specific extract idioms this docstring used to claim are
+    covered by test_extract_dayofweek_and_week_match_known_values_end_to_end
+    instead — `part="year"` never reaches MySQLDialectAdapter.extract_part's
+    dayofweek/week special cases at all, just the generic EXTRACT(... FROM
+    ...) path (found by the item 19/128 `auditors` audit, 2026-08-06)."""
     async with AsyncClient(transport=ASGITransport(app=mysql_app), base_url=_BASE_URL) as client:
         resp = await client.post(
             "/api/v1/mysql_demo/query",
@@ -208,6 +226,75 @@ async def test_extract_and_string_agg_end_to_end(mysql_app):
     body = resp.json()
     assert body["row_count"] >= 1
     assert all(isinstance(row["names"], str) and row["names"] for row in body["rows"])
+
+
+@pytest.mark.asyncio
+async def test_extract_dayofweek_and_week_match_known_values_end_to_end(mysql_app):
+    """MySQLDialectAdapter.extract_part's dayofweek/week special cases
+    (DAYOFWEEK(x) - 1, WEEK(x, 3)) against a known date, not just "it
+    renders" — closes a real gap the item 19/128 `auditors` audit found:
+    the only prior live coverage exercised `part="year"`, which never
+    reaches either special case. Customer id 1 (Ada Lovelace)'s
+    `created_at` is 2025-01-05, a Sunday that falls in ISO week 1 —
+    independently computed via `datetime.date(2025, 1, 5).isocalendar()`
+    and Python's Monday=0 `.weekday()` convention (Sunday -> dayofweek 0 in
+    this codebase's published 0=Sunday..6=Saturday numbering, see
+    dialect_adapters.py's MySQL/Postgres extract_part docstrings)."""
+    async with AsyncClient(transport=ASGITransport(app=mysql_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/mysql_demo/query",
+            json={
+                "from": "customers",
+                "select": [
+                    {
+                        "expr": {"extract": {"col": "customers.created_at"}, "part": "dayofweek"},
+                        "as": "dow",
+                    },
+                    {
+                        "expr": {"extract": {"col": "customers.created_at"}, "part": "week"},
+                        "as": "iso_week",
+                    },
+                ],
+                "where": {"col": "customers.id", "op": "eq", "value": 1},
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    row = resp.json()["rows"][0]
+    assert row["dow"] == 0  # Sunday, 0=Sunday..6=Saturday
+    assert row["iso_week"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stddev_and_variance_match_known_sample_statistics_end_to_end(mysql_app):
+    """MySQLDialectAdapter.stat_fn's STDDEV_SAMP/VAR_SAMP against Python's own
+    sample statistics — closes a real gap the item 19/128 `auditors` audit
+    found: the only prior coverage asserted the rendered SQL *names* the
+    right function, which can't catch MySQL silently returning the
+    *population* statistic (bare STDDEV/VARIANCE, N not N-1) instead — the
+    exact regression the dialect adapter's own code comment warns against.
+    Customer id 1 (Ada Lovelace)'s three orders are ORDERS_DATA's own
+    source-of-truth seed values, not independently duplicated magic numbers."""
+    expected_totals = [float(o["total_amount"]) for o in ORDERS_DATA if o["customer_id"] == 1]
+    assert len(expected_totals) >= 2  # a sample statistic needs at least 2 points
+    expected_stddev = statistics.stdev(expected_totals)
+    expected_variance = statistics.variance(expected_totals)
+
+    async with AsyncClient(transport=ASGITransport(app=mysql_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/mysql_demo/query",
+            json={
+                "from": "orders",
+                "select": [
+                    {"fn": "stddev", "col": "orders.total_amount", "as": "sd"},
+                    {"fn": "variance", "col": "orders.total_amount", "as": "var"},
+                ],
+                "where": {"col": "orders.customer_id", "op": "eq", "value": 1},
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    row = resp.json()["rows"][0]
+    assert row["sd"] == pytest.approx(expected_stddev, rel=1e-6)
+    assert row["var"] == pytest.approx(expected_variance, rel=1e-6)
 
 
 @pytest.mark.asyncio
@@ -291,13 +378,59 @@ async def test_list_tables_excludes_mysql_system_schemas_end_to_end(mysql_app):
     schema/reflection.py's list_live_tables() excluded Postgres/MSSQL's
     system schemas but not MySQL's own two (`mysql`, `performance_schema`),
     so an unseeded known_tables connection would have leaked internal
-    server tables (`user`, `plugin`, `threads`, ...) into list_tables()."""
+    server tables (`user`, `plugin`, `threads`, ...) into list_tables().
+
+    Must use `mysql_unseeded`, not `mysql_demo`: `mysql_demo`'s known_tables
+    seed short-circuits `list_tables()` (execution/service.py) before it ever
+    calls `list_live_tables()`'s real INFORMATION_SCHEMA query, which would
+    make this assertion pass whether or not the underlying exclusion logic
+    is even reached — the exact false-positive an `auditors` audit found
+    this test originally had (2026-08-06)."""
     async with AsyncClient(transport=ASGITransport(app=mysql_app), base_url=_BASE_URL) as client:
-        resp = await client.get("/api/v1/mysql_demo/tables")
+        resp = await client.get("/api/v1/mysql_unseeded/tables")
     assert resp.status_code == 200
     tables = set(resp.json()["tables"])
     assert {"customers", "orders", "order_items"} <= tables
     assert not (tables & {"user", "plugin", "threads", "processlist", "innodb_table_stats"})
+
+
+@pytest.mark.asyncio
+async def test_list_tables_excludes_other_databases_on_the_same_server(mysql_app):
+    """Regression for a gap found in the item 19/128 `auditors` audit:
+    unlike Postgres's/MSSQL's INFORMATION_SCHEMA.TABLES (already scoped to
+    the connected database), MySQL's is server-wide — it spans every
+    database the connecting user has any privilege on. Without
+    SessionDialectAdapter.list_live_tables_extra_filter_sql()'s
+    `TABLE_SCHEMA = DATABASE()` restriction, a connection whose user can see
+    more than its own database (the test fixture connects as `root`, which
+    always can) would leak other databases' table names — a schema-shape
+    disclosure QueryGate works hard not to make elsewhere (QG-19/QG-24/QG-34).
+
+    Uses `mysql_unseeded`, not `mysql_demo` — see
+    test_list_tables_excludes_mysql_system_schemas_end_to_end's docstring for
+    why a known_tables-seeded connection would never reach the code under
+    test at all."""
+    engine = create_async_engine(_DEMO_URL.rsplit("/", 1)[0] + "/mysql")
+    async with engine.connect() as conn:
+        await conn.execute(sa.text("CREATE DATABASE IF NOT EXISTS querygate_other_db_test"))
+        await conn.execute(
+            sa.text("CREATE TABLE IF NOT EXISTS querygate_other_db_test.top_secret_table (id INT)")
+        )
+        await conn.commit()
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=mysql_app), base_url=_BASE_URL
+        ) as client:
+            resp = await client.get("/api/v1/mysql_unseeded/tables")
+        assert resp.status_code == 200
+        tables = set(resp.json()["tables"])
+        assert {"customers", "orders", "order_items"} <= tables
+        assert "top_secret_table" not in tables
+    finally:
+        async with engine.connect() as conn:
+            await conn.execute(sa.text("DROP DATABASE IF EXISTS querygate_other_db_test"))
+            await conn.commit()
+        await engine.dispose()
 
 
 def test_session_guardrail_lock_timeout_actually_takes_effect():

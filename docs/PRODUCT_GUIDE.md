@@ -1537,11 +1537,15 @@ The gates fall into three groups:
   history*, so we can affirmatively prove no credential was ever committed.
   Every one of these is deny-by-default: any finding fails the build. Where the
   dependency and image scans found real CVEs, they were **fixed by upgrading to
-  patched versions, not accepted** — the pip-audit allowlist and the Trivy
-  exception list (`.trivyignore`) are both **empty**, and `pip-audit` reports no
-  known vulnerabilities across the whole set. The only recorded exceptions are
-  dev-only secret-scan placeholders (`.gitleaks.toml`) and a few reviewed,
-  inline-justified SAST suppressions (`# nosec` / `# nosemgrep`) — never silent.
+  patched versions, not accepted** — the Trivy exception list (`.trivyignore`)
+  is **empty**, and the pip-audit allowlist (`security/dependency-audit-
+  allowlist.json`) holds exactly **one** reviewed entry (`PYSEC-2026-286`,
+  asyncmy — a SQL-injection CVE in a codepath SQLAlchemy's `mysql+asyncmy`
+  dialect never reaches, guarded by a regression test), with every other
+  previously-known CVE in the shipped set remediated by upgrade rather than
+  accepted. The only other recorded exceptions are dev-only secret-scan
+  placeholders (`.gitleaks.toml`) and a few reviewed, inline-justified SAST
+  suppressions (`# nosec` / `# nosemgrep`) — never silent.
 - **Reliability under real load.** Security guarantees must hold under
   concurrency, not just in isolation — so `make test-load`/`make test-soak` run
   the guardrails against a real Postgres and assert caps are never breached and

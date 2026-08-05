@@ -151,8 +151,15 @@ def test_upsert_compiles_on_conflict_for_postgres_and_rejects_mssql():
     assert "ON CONFLICT" in rendered and "DO UPDATE" in rendered
 
     # MSSQL has no ON CONFLICT — reject, don't emulate.
-    with pytest.raises(QueryValidationError):
+    with pytest.raises(QueryValidationError, match="no ON CONFLICT clause"):
         compile_write(stmt, table, "mssql")
+
+    # MySQL has ON DUPLICATE KEY UPDATE but it fires on ANY unique/PK
+    # collision, not a caller-named conflict target — reject with the
+    # dialect-specific message, not the generic "no ON CONFLICT" one (which
+    # would be factually wrong for MySQL).
+    with pytest.raises(QueryValidationError, match="ON DUPLICATE KEY UPDATE"):
+        compile_write(stmt, table, "mysql")
 
 
 def test_upsert_statement_rejects_update_column_that_is_a_conflict_column():

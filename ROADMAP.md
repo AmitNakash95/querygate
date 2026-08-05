@@ -248,7 +248,7 @@ claim when the work ships or before explicitly handing the item back.
   benchmark results, item 60's disclosure program) — the "hand it to them"
   step Phase 2's other items don't cover. No new evidence generated, no
   non-negotiable touched.* **Depends on 54, 58 (phase 1), 60.**
-- [x] **134** — Compliance-grade (WORM) audit retention + managed search.
+- [ ] **134** — Compliance-grade (WORM) audit retention + managed search.
   *Added 2026-07-30 by `competitive-scan`.* ✅ **Shipped (phase 1)** 2026-08-06:
   `AuditSinkBackend.JSONL_CHAINED_S3_WORM` composes S3 Object Lock archival
   with the existing hash-chained ledger via a new `CompositeAuditSink`;
@@ -311,6 +311,15 @@ claim when the work ships or before explicitly handing the item back.
   deferred from it — fixing it properly means switching a shared subsystem
   with several call sites, not a one-line change, so it deserves its own
   dedicated review rather than a same-session patch.*
+- [ ] **151** — Bind the in-query approval gate's token to a connection and
+  principal, not just an AST fingerprint. *Surfaced 2026-08-06 by
+  `security-invariant-reviewer` while auditing items 19/128 — a design
+  change needing an owner decision on where the binding lives, not a
+  same-session fix.*
+- [ ] **152** — Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM
+  retention) shipping. *Surfaced 2026-08-06 by `claim-reviewer` while
+  auditing items 19/128/134/144 — `GO_TO_MARKET.md` was updated correctly,
+  the public pages weren't; run `pitch-sync`.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 

@@ -34,8 +34,14 @@ signing primitives verbatim — no new crypto:**
 Off by default (`AppConfig.mcp_elicitation_approval_enabled`): an elicitation
 response has no authenticated approver identity, so treating it as an
 approval is an explicit operator decision that the client's human is a
-trusted approver. The querying/writing agent can never satisfy its own gate
-here — only a human answering the elicitation can.
+trusted approver. QueryGate has no way to verify a human was actually asked —
+`ctx.input_responses` is asserted by the client host, and a compromised or
+malicious client can complete this channel with no human involvement at all.
+Unlike the REST out-of-band flow (separation of duties by scope: the
+approving principal must hold a distinct scope from the querying one), this
+channel's only real guarantee is the fingerprint-binding above; it is off by
+default specifically because the "only a human can approve" property is the
+client's to honor, not something QueryGate can enforce server-side.
 """
 
 from __future__ import annotations
@@ -166,6 +172,7 @@ def resolve_approval_tokens_from_retry(
         return {}
 
     resolved: Dict[str, str] = {}
+    declined_fingerprints: set = set()
     for key, fingerprint in fingerprints_by_key.items():
         pending = pending_tokens.get(key)
         if not isinstance(pending, str):
@@ -187,10 +194,19 @@ def resolve_approval_tokens_from_retry(
             approved=approved,
         )
         if not approved:
+            # `resolved` is keyed by fingerprint, not by slot (execute_many
+            # looks a statement's token up by its own fingerprint) — a
+            # duplicate statement submitted twice in one batch shares a
+            # fingerprint across two keys. A decline at either slot must veto
+            # that fingerprint everywhere, or an approval minted for the
+            # other, identical slot would let the declined one execute too.
+            declined_fingerprints.add(fingerprint)
             continue
         resolved[fingerprint] = issue_approval_token(
             fingerprint=fingerprint,
             approver_subject=f"mcp-elicitation:{caller.subject}",
             key=config.approval_token_hmac_key,
         )
+    for fingerprint in declined_fingerprints:
+        resolved.pop(fingerprint, None)
     return resolved

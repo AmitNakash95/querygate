@@ -228,6 +228,42 @@ async def test_atomic_mode_never_builds_input_required(monkeypatch):
     assert not isinstance(result, InputRequiredResult)
 
 
+@pytest.mark.asyncio
+async def test_a_batch_with_one_committed_write_never_returns_input_required(monkeypatch):
+    """If one write in the batch already committed (its own transaction, non-
+    atomic mode) and another is gated, the tool must NOT return
+    InputRequiredResult: MRTR retries resubmit the identical `writes`
+    argument, so treating this as 'first gated call' would re-run execute_many
+    on retry and commit the already-committed write a second time. The
+    committed result must survive in the returned batch instead, and the
+    gated item stays fail-closed (its existing REST-compatible error) rather
+    than pausing for elicitation."""
+    monkeypatch.setattr(wtool, "get_mcp_caller", lambda: _CALLER)
+    fp = write_fingerprint(_delete(2))
+    committed = WriteBatchItemResult(
+        operation="delete", table="orders", affected_rows=1, executed=True
+    )
+    gated = WriteBatchItemResult(
+        error="needs approval", approval_fingerprint=fp, approval_reasons=["big write"]
+    )
+
+    async def _fake_execute_many(writes, **kwargs):
+        return [committed, gated]
+
+    exec_service = MagicMock()
+    exec_service.execute_many = _fake_execute_many
+
+    with patch.object(wtool, "WriteExecutionService", return_value=exec_service):
+        monkeypatch.setattr(wtool, "get_mcp_config", lambda: _config(True))
+        result = await wtool.run_structured_writes(
+            "demo", [_delete(1), _delete(2)], mode="execute", ctx=_ctx()
+        )
+
+    assert not isinstance(result, InputRequiredResult)
+    assert result.results[0].executed is True
+    assert result.results[1].approval_fingerprint == fp
+
+
 # --------------------------------------------------------------------------- #
 # The write CONTRACT (TODO.md item 114): the schema must advertise exactly what
 # a write accepts. Advertising a field the server refuses invites an agent to

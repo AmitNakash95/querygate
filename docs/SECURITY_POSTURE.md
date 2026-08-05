@@ -26,7 +26,7 @@ that weakened any of them would fail the build.
 |---|---|---|---|---|
 | **Core guarantee** | No raw-SQL path; validated-AST-only | Structured AST + Pydantic `forbid`; enforced by tests | ✅ Enforced | `make test-security` |
 | **SAST** | Static security analysis of source | **Bandit** + **Semgrep OSS** (`p/python`, `p/security-audit`, `p/owasp-top-ten`) | ✅ Clean (deny-by-default) | `make sast` + `make semgrep` |
-| **Dependencies** | Known-CVE audit of the exact shipped set | **pip-audit** against `poetry.lock` `main` group | ✅ Clean — **0 allowlisted** (all fixed) | `make sbom` |
+| **Dependencies** | Known-CVE audit of the exact shipped set | **pip-audit** against `poetry.lock` `main` group | ✅ Clean — **1 reviewed allowlist entry** (asyncmy, unreachable codepath) | `make sbom` |
 | **SBOM** | Software bill of materials | **CycloneDX** | ✅ Generated per release | `make sbom` |
 | **Container image** | OS + library CVEs, secrets, misconfig | **Trivy** on the shipped image | ✅ **0 HIGH/CRITICAL** (no exceptions) | `make scan-image` |
 | **Secrets** | No credential ever committed | **gitleaks** over full git history | ✅ Clean | `make scan-secrets` |
@@ -98,10 +98,15 @@ CI job: **SAST (Bandit + Semgrep OSS)**.
   the `main` group of `poetry.lock`, reproduced in a scratch venv — against the
   vulnerability database. The gate is **deny-by-default**: any known
   vulnerability without a reviewed entry in
-  `security/dependency-audit-allowlist.json` fails the build. That allowlist is
-  currently **empty**: every previously-known CVE in the shipped set was
-  *remediated by upgrading to a fixed version* (fastapi/starlette, mcp,
-  python-dotenv, click, idna), not accepted with a compensating control.
+  `security/dependency-audit-allowlist.json` fails the build. That allowlist
+  currently holds **one entry**: `PYSEC-2026-286` (asyncmy, the MySQL driver
+  added by item 19) — a SQL-injection CVE in a codepath (dict-keyed pyformat
+  parameters) SQLAlchemy's `mysql+asyncmy` dialect never reaches, since it
+  always hands the driver positional parameters; see the allowlist file's own
+  entry for the full reasoning and the regression test that guards it. Every
+  other previously-known CVE in the shipped set was *remediated by upgrading
+  to a fixed version* (fastapi/starlette, mcp, python-dotenv, click, idna),
+  not accepted with a compensating control.
 - **CycloneDX SBOM** is generated for that same set, alongside a SHA-256
   manifest of the built artifacts.
 
@@ -185,7 +190,7 @@ schema and MCP tool schemas**, so it catches drift, not just convention.
 
 ## Threat model
 
-[docs/THREAT_MODEL.md](THREAT_MODEL.md) enumerates 37 threats (QG-01…QG-37),
+[docs/THREAT_MODEL.md](THREAT_MODEL.md) enumerates 39 threats (QG-01…QG-39),
 each mapped to its compensating control and the test(s) that enforce it. The
 gates on this page are the automated, continuously-run backbone of that model.
 

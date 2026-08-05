@@ -216,7 +216,10 @@ class WormFlushMonitor:
         # Best-effort final flush so a clean shutdown doesn't leave up to one
         # full interval's worth of events sitting unarchived — failure here
         # is the same fail-open posture as every other flush.
-        await self.flush_once()
+        try:
+            await self.flush_once()
+        except Exception as exc:
+            self._log_unexpected_flush_error(exc)
 
     async def _run(self) -> None:
         while not self._stop.is_set():
@@ -224,7 +227,22 @@ class WormFlushMonitor:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._interval)
             except asyncio.TimeoutError:
                 pass
-            await self.flush_once()
+            try:
+                await self.flush_once()
+            except Exception as exc:
+                # flush_once()'s own try/except covers only the S3 PUT; an
+                # exception from draining the buffer or building the segment
+                # key must not kill this loop — the fail-open design (Decision
+                # Log) requires archival to keep retrying on the next
+                # interval, not stop permanently for the life of the process.
+                self._log_unexpected_flush_error(exc)
+
+    @staticmethod
+    def _log_unexpected_flush_error(exc: Exception) -> None:
+        AUDIT_WORM_FLUSH_FAILURES_TOTAL.inc()
+        get_logger().bind(func="worm_flush").error(
+            "audit.worm.flush_loop_error", error_type=type(exc).__name__
+        )
 
     async def flush_once(self) -> None:
         drained = self._buffer.drain()

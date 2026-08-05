@@ -70,7 +70,18 @@ def _install_scoped_tool_listing(server: MCPServer) -> None:
     attribute assignment is the correct, minimal v2-idiomatic replacement —
     verified directly against the installed SDK, not assumed: overriding
     `server.list_tools` this way is observed by `_handle_list_tools` too.
+
+    Idempotent by construction (guarded by `_scope_filter_installed`):
+    `create_mcp_server()` runs once per `setup_mcp()`/`create_app()` call,
+    and `create_app()` legitimately runs more than once in the same process
+    (every test in this suite; any production hot-reload/multi-instantiation
+    path). Without the guard, each call would close over the *current*
+    `server.list_tools` — already `scoped_list_tools` from a prior call, not
+    the original method — and wrap it again, growing an unbounded closure
+    chain and adding one extra async hop per `tools/list` request per call.
     """
+    if getattr(server, "_scope_filter_installed", False):
+        return
     unfiltered_list_tools = server.list_tools
 
     async def scoped_list_tools():
@@ -86,6 +97,7 @@ def _install_scoped_tool_listing(server: MCPServer) -> None:
         ]
 
     server.list_tools = scoped_list_tools
+    server._scope_filter_installed = True
 
 
 def create_mcp_server() -> MCPServer:

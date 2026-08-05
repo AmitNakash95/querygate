@@ -139,6 +139,30 @@ _UPSERT_COMPILERS = {
     "sqlite": lambda: _on_conflict_upsert(_sqlite_upsert_insert()),
 }
 
+# Per-dialect rejection messages for a dialect with no factory above — a
+# gap-message registry, not an inline `if dialect == ...` at the call site
+# (composable-interface doctrine). Only MySQL needs a message distinct from
+# the generic one below: it genuinely has an upsert idiom (INSERT ... ON
+# DUPLICATE KEY UPDATE), so "it has no ON CONFLICT clause" would be
+# factually wrong for it. The actual gap: ON DUPLICATE KEY UPDATE fires on a
+# collision with ANY unique/PK constraint on the table, with no way to name
+# a specific target the way conflict_columns declares one — so accepting it
+# would silently misrepresent which constraint triggered the update whenever
+# a table has more than one unique key. Reject rather than emulate, per item
+# 74's doctrine. A dialect absent from both this dict and _UPSERT_COMPILERS
+# (e.g. MSSQL) gets the generic message.
+_UPSERT_UNSUPPORTED_MESSAGES = {
+    "mysql": (
+        "upsert is not supported on MySQL: its ON DUPLICATE KEY UPDATE "
+        "fires on a collision with ANY unique/primary key on the table, "
+        "not a specific caller-named conflict target the way "
+        "conflict_columns declares one — accepting it here would "
+        "silently misrepresent which constraint triggered the update. "
+        "Use a separate governed update then insert, or preview which "
+        "rows exist first."
+    ),
+}
+
 
 def _compile_upsert(
     statement: UpsertStatement, table: sa.Table, dialect: str
@@ -148,29 +172,11 @@ def _compile_upsert(
     rejected."""
     factory = _UPSERT_COMPILERS.get(dialect)
     if factory is None:
-        if dialect == "mysql":
-            # MySQL genuinely has an upsert idiom (INSERT ... ON DUPLICATE KEY
-            # UPDATE), so the generic "no ON CONFLICT clause" message below
-            # would be factually wrong here — this is a real gap-message
-            # distinction, not the same reason MSSQL is rejected. The actual
-            # gap: ON DUPLICATE KEY UPDATE fires on a collision with ANY
-            # unique/PK constraint on the table, with no way to name a
-            # specific target the way conflict_columns declares one — so
-            # accepting it would silently misrepresent which constraint
-            # triggers the update whenever a table has more than one unique
-            # key. Reject rather than emulate, per item 74's doctrine.
-            raise QueryValidationError(
-                "upsert is not supported on MySQL: its ON DUPLICATE KEY UPDATE "
-                "fires on a collision with ANY unique/primary key on the table, "
-                "not a specific caller-named conflict target the way "
-                "conflict_columns declares one — accepting it here would "
-                "silently misrepresent which constraint triggered the update. "
-                "Use a separate governed update then insert, or preview which "
-                "rows exist first."
-            )
-        raise QueryValidationError(
+        message = _UPSERT_UNSUPPORTED_MESSAGES.get(
+            dialect,
             f"upsert (INSERT ON CONFLICT) is not supported on dialect {dialect!r} — it has no "
             "ON CONFLICT clause. Use a separate governed update then insert, or preview which "
-            "rows exist first."
+            "rows exist first.",
         )
+        raise QueryValidationError(message)
     return factory()(statement, table)
