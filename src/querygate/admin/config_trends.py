@@ -235,10 +235,13 @@ class JsonlChangeEventSource:
     audit sink's file. Same tail-first-scan + chain-envelope-unwrap shape as
     `admin.anomaly.JsonlAuditEventSource` (TODO.md item 138)."""
 
-    def __init__(self, path: str, *, ledger_key: Optional[bytes] = None) -> None:
+    def __init__(
+        self, path: str, *, ledger_key: Optional[bytes] = None, require_envelope: bool = False
+    ) -> None:
         self.path = Path(path)
         # TODO.md item 137: see `admin.anomaly.JsonlAuditEventSource.__init__`.
         self.ledger_key = ledger_key
+        self.require_envelope = require_envelope
 
     def load_change_events(
         self, *, now: datetime, thresholds: ChangeTrendThresholds
@@ -266,9 +269,12 @@ class JsonlChangeEventSource:
                 except json.JSONDecodeError:
                     malformed += 1
                     continue
-                if verify_envelope_hash(raw, key=self.ledger_key) is False:
+                verified = verify_envelope_hash(raw, key=self.ledger_key)
+                if verified is False or (verified is None and self.require_envelope):
                     # TODO.md item 137: a chain envelope whose own hash
-                    # doesn't match its contents — never display it as clean.
+                    # doesn't match its contents, or (require_envelope) a
+                    # bare line on a backend where every line must be
+                    # enveloped — never display either as clean.
                     malformed += 1
                     continue
                 raw = unwrap_envelope(raw)

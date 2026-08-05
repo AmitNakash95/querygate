@@ -1994,9 +1994,11 @@ free text like `intent` — a caller declares alongside a query (e.g.
 `"fraud_review"`). If `Policy.allowed_purposes` is empty (the default), a
 connection hasn't opted into purpose-gating and a declared purpose is
 accepted but inert, the same "empty allow-list = unrestricted" convention
-`allowed_tables` uses. Once `allowed_purposes` is non-empty, *every* query on
-that connection must declare a purpose from the set, or it's rejected before
-any DB touch — the same posture as an unresolvable claim.
+`allowed_tables` uses. Once `allowed_purposes` is non-empty, *every read
+query* on that connection must declare a purpose from the set, or it's
+rejected before any DB touch — the same posture as an unresolvable claim.
+Read-only: the gate runs in `policy_validation.py`, which the write pipeline
+never calls, so governed writes (item 93) are unaffected by this setting.
 
 A valid purpose narrows the effective policy via `Policy.purpose_policies`, a
 map from purpose token to a `PurposePolicyDelta`: additional
@@ -3393,6 +3395,98 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-05 — mandatory post-session audit of items 137/139/140/145/146/147
+  found 6 real, confirmed defects across security-invariant, architecture, and
+  test-contract review; all fixed same-day, each with a regression test that
+  fails without the fix (mutation-verified).** Auditors ran in parallel
+  (`security-invariant-reviewer`, `architecture-boundary-reviewer`,
+  `test-contract-reviewer`, `claim-reviewer`; `ui-a11y-reviewer` N/A — no UI
+  files touched) over the full `main..HEAD` range. Findings and fixes, most
+  severe first:
+  1. **Declared `purpose` was persisted to the audit event even when
+     `Policy.allowed_purposes` is empty (the default)** — reopening the exact
+     free-text-in-audit-log channel `intent`'s exclusion exists to close, just
+     under a different field name, on every connection that hasn't opted into
+     purpose-gating. Fixed: `execution/service.py`'s 5 `audit_query(...)`
+     call sites now gate `purpose` on `policy.allowed_purposes` being
+     non-empty (`purpose=(query.purpose if policy is not None and
+     policy.allowed_purposes else None)`); a pre-try `policy: Optional[Policy]
+     = None` guard avoids `UnboundLocalError` in the two outer `except`
+     blocks where `self._get_policy()` itself may have failed.
+  2. **`Policy.for_purpose`'s `denied_columns`/`column_masks` merge used
+     literal (case-sensitive) dict keys**, so a case-mismatched table name
+     between the base policy and a purpose delta (e.g. `"customers"` vs.
+     `"Customers"`) could make `_ci_lookup`'s first-match-wins read see only
+     ONE side's entries — for `column_masks` this silently **unmasked** a
+     column the base policy protected (a real "narrows never widens"
+     violation); for `denied_columns` a delta's own added deny silently
+     failed to apply. Fixed with a new `Policy._merge_table_keyed` helper
+     that resolves table names to one canonical key across both sides before
+     merging, the same case-insensitive resolution `_ci_lookup` already uses
+     for reads.
+  3. **`admin/access_diff.py` never diffed `allowed_purposes`/
+     `purpose_policies` at all** — an operator could delete a connection's
+     entire purpose gate in a candidate config version and the semantic
+     access diff would report no change, the exact "loosening reported as
+     no change" governance blind spot item 40 exists to prevent. Fixed: a new
+     `_diff_purposes` function (mirroring `_diff_mandatory_filters`'s shape)
+     and a new `SemanticChangeCategory` member, `"purpose_access"`. Investigating
+     this surfaced a second, **pre-existing** instance of the same gap —
+     `column_masks` has never been diffed by `access_diff.py` at all, despite
+     an inline comment claiming otherwise since item 49 — filed as TODO.md
+     item 148 rather than fixed here (out of this session's scope; it
+     predates every item shipped today).
+  4. **`admin/service.py`'s candidate-policy simulation discarded
+     `validate_policy`'s purpose-narrowed return value**, so a purpose
+     delta's own `mandatory_row_filters` entry never appeared in the
+     simulation's readiness report — an operator could be told a
+     purpose-declaring principal was fully `ready` when a missing claim
+     would actually refuse at real execution time. Fixed with the identical
+     one-line reassignment `execution/service.py` already uses.
+  5. **A bare (non-enveloped) forged line on a `jsonl_chained` backend
+     bypassed verification entirely** — `verify_envelope_hash` correctly
+     returns `None` (not `False`) for a line with no envelope shape at all,
+     since that's exactly what a legitimate plain-`jsonl` line looks like,
+     but item 137's own stated goal was that a forged event must never
+     display as clean, and an attacker forging a bare line rather than a
+     malformed envelope defeated that. Fixed: a new `require_envelope: bool`
+     flag on both `JsonlAuditEventSource`/`JsonlChangeEventSource` and a local
+     in `_audit_page`, set `True` only when `cfg.audit_sink_backend ==
+     AuditSinkBackend.JSONL_CHAINED`; when true, `verified is None` is ALSO
+     counted malformed, since every line on that backend must be enveloped.
+  6. **The persisted `masked_columns` audit field was computed from the
+     un-narrowed policy**, understating which columns a purpose-added mask
+     actually protected (the mask itself was correctly APPLIED to the
+     compiled SQL either way — this was an audit-fidelity gap, not an access
+     bypass). Fixed: `_validate_and_compile`'s return type widened to
+     include the effective `Policy` (`Tuple[sa.Select, int, dict, str,
+     Policy]`), and `execute()` rebinds its own outer `policy` to it, so
+     `applied_column_masks(query, policy)` at the audit call site sees the
+     same narrowing the compiler used.
+
+  Additionally: two wording clarifications (item 145's "every query" language
+  in `docs/PRODUCT_GUIDE.md`/`examples/policy.example.yaml` narrowed to
+  "every READ query", since the gate never reaches governed writes; item
+  146's "non-sensitive columns" language changed to "not labeled sensitive in
+  the catalog", since a connection with no catalog labels at all would
+  otherwise read as a stronger guarantee than it is); seven test-contract
+  gaps closed (a TS `.purpose()` test, a Python `.purpose()` value assertion,
+  a tightened `_read_last_line` bound-test match string, direct
+  `verify_envelope_hash` unit tests including its `ValidationError` branch, a
+  trust-page version-drift assertion, six "accepted at exactly the cap"
+  companion tests for item 139's AST size caps, and a same-table-different-
+  column `column_masks` merge test); and two stale-claim corrections
+  (`docs/SECURITY_POSTURE.md`'s adversarial-suite test count corrected from a
+  pre-existing stale 310 to the actual 463, propagated into a regenerated
+  `docs/TRUST_EVIDENCE.md`; `docs/business/PRODUCT_SCORECARD.md`/
+  `MARKET_DOMINATION_ANALYSIS.md` marked stale where they described items
+  137/145 as open gaps that shipped the same day, without attempting a full
+  re-score — that's `product-scorecard`'s job, not a side effect of an audit
+  response). Full unit (1994), integration (345, excluding `real_db`),
+  security (463), and TypeScript (43) suites pass on the final tree; every
+  fix above was independently mutation-verified (revert the fix, confirm the
+  new test fails for the stated reason, restore).
+
 - **2026-08-05 — the quickstart is a standalone `querygate-quickstart` CLI, not
   a `querygate quickstart` subcommand (TODO.md item 146).** The item's own
   prose showed the invocation `querygate quickstart <connection>`, but
@@ -3461,15 +3555,23 @@ reasoning behind them, newest first. Added to incrementally as work happens
      purpose-gating at all — a declared purpose is accepted but inert.**
      The same "empty allow-list = unrestricted" convention every other
      `Policy` list already uses (`allowed_tables`, `allowed_columns`).
-     **Once non-empty, EVERY query on that connection must declare a purpose
-     from the set** — not just queries touching some enumerated
+     **Once non-empty, EVERY READ query on that connection must declare a
+     purpose from the set** — not just queries touching some enumerated
      "purpose-gated" subset of tables/columns. The alternative (per-table
      purpose-gating) would need a second concept (which tables require a
      purpose) the item's own scope didn't ask for and that adds real
      complexity for a security feature; connection-wide is simpler, harder
      to misconfigure into a false sense of security, and matches how every
      other Policy allow-list already reads (a list-level switch, not a
-     row/column-level one).
+     row/column-level one). **Scoped to reads only** (matching `intent`'s own
+     read-AST-only precedent): the gate runs in `validation/
+     policy_validation.py`, which the write pipeline never calls, and the
+     write AST has no `purpose` field — a purpose-gated connection's
+     governed writes (item 93) are entirely unaffected by this setting.
+     Extending the gate to writes is real additional scope, not attempted
+     here (found and scoped correctly by `security-invariant-reviewer`,
+     2026-08-05; tracked as a candidate follow-up, not built under review
+     pressure).
   3. **`PurposePolicyDelta` has no "allow" field — only additional
      `denied_tables`/`denied_columns`/`mandatory_row_filters`/`column_masks`,
      unioned onto the base `Policy` (`Policy.for_purpose`).** This makes

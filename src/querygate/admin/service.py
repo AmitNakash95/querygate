@@ -301,7 +301,15 @@ def simulate_candidate_policy(
         requested_tables.update(referenced_tables_tree_wide(request.query))
         query_allowed = True
         try:
-            validate_policy(request.query, policy, connection_id=request.connection)
+            # TODO.md item 145: capture the purpose-narrowed effective Policy
+            # (unchanged if the query declares no purpose) so the readiness
+            # report below reflects a purpose delta's own mandatory_row_filters
+            # — mirroring execution/service.py's identical reassignment. Without
+            # it, a purpose-declaring query's readiness was simulated against
+            # the un-narrowed policy, silently omitting a filter real
+            # execution would apply (found by `security-invariant-reviewer`/
+            # `architecture-boundary-reviewer`, 2026-08-05).
+            policy = validate_policy(request.query, policy, connection_id=request.connection)
         except PolicyViolationError as exc:
             query_allowed = False
             reasons.append(CandidateSimulationReason(code="query_policy_denied", message=str(exc)))

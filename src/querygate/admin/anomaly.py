@@ -348,13 +348,24 @@ class JsonlAuditEventSource:
     fatal — the same tolerance as item 44's audit viewer.
     """
 
-    def __init__(self, path: str, *, ledger_key: Optional[bytes] = None) -> None:
+    def __init__(
+        self, path: str, *, ledger_key: Optional[bytes] = None, require_envelope: bool = False
+    ) -> None:
         self.path = Path(path)
         # TODO.md item 137: the hash-chained ledger's HMAC key, when the
         # configured backend is `jsonl_chained` with a key set — lets this
         # reader recompute each envelope's own hash rather than trusting it.
         # `None` on a plain `jsonl` backend, or an unkeyed chain.
         self.ledger_key = ledger_key
+        # True only when the configured backend is `jsonl_chained`: every
+        # persisted line MUST be a chain envelope, so a bare (non-enveloped)
+        # line is itself evidence of tampering or corruption, not a
+        # legitimate plain-`jsonl` line that happens to share this file
+        # (found by `security-invariant-reviewer`, 2026-08-05 — a forged
+        # line with no envelope at all previously passed through untouched,
+        # since `verify_envelope_hash` correctly returns `None`, not `False`,
+        # for "not shaped like an envelope").
+        self.require_envelope = require_envelope
 
     def load_query_events(
         self, *, now: datetime, thresholds: AnomalyThresholds
@@ -382,10 +393,14 @@ class JsonlAuditEventSource:
                 except json.JSONDecodeError:
                     malformed += 1
                     continue
-                if verify_envelope_hash(raw, key=self.ledger_key) is False:
-                    # A chain envelope whose own hash doesn't match its
+                verified = verify_envelope_hash(raw, key=self.ledger_key)
+                if verified is False or (verified is None and self.require_envelope):
+                    # False: a chain envelope whose own hash doesn't match its
                     # contents — chain linkage alone wouldn't catch this
-                    # (TODO.md item 137). Never display it as a clean event.
+                    # (TODO.md item 137). None-but-required: this backend is
+                    # jsonl_chained, so a line with no envelope at all is
+                    # itself the forgery/corruption signal. Never display
+                    # either as a clean event.
                     malformed += 1
                     continue
                 raw = unwrap_envelope(raw)

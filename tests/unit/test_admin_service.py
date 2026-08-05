@@ -348,6 +348,46 @@ default:
     assert "mandatory_claim_missing" in {reason.code for reason in result.reasons}
 
 
+def test_candidate_simulation_reflects_a_purpose_deltas_mandatory_filter(tmp_path, monkeypatch):
+    """TODO.md item 145 regression (found by `security-invariant-reviewer`/
+    `architecture-boundary-reviewer`, 2026-08-05): `simulate_candidate_policy`
+    discarded `validate_policy`'s purpose-narrowed effective Policy, so a
+    purpose delta's own `mandatory_row_filters` entry never showed up in the
+    readiness report at all — an operator was told a purpose-declaring
+    principal was fully `ready`, when a missing claim would actually refuse
+    at real execution time."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_policy = """
+default:
+  enabled: true
+  allowed_purposes: [support]
+  purpose_policies:
+    support:
+      mandatory_row_filters:
+        - table: orders
+          column: region
+          from_claim: region
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            # No `region` claim supplied — the purpose delta's filter can't resolve.
+            connection="fresh",
+            query={"from": "orders", "select": ["orders.id"], "purpose": "support"},
+        ),
+    )
+
+    assert [readiness.table for readiness in result.mandatory_filters] == ["orders"]
+    assert result.mandatory_filters[0].column == "region"
+    assert result.mandatory_filters[0].ready is False
+    assert "mandatory_claim_missing" in {reason.code for reason in result.reasons}
+
+
 @pytest.mark.security
 def test_candidate_simulation_does_not_reveal_filters_for_denied_table(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch)

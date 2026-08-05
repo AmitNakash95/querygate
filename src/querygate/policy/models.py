@@ -668,6 +668,41 @@ class Policy(pyd.BaseModel):
                     return mask
         return None
 
+    @staticmethod
+    def _merge_table_keyed(*mappings_in_order: dict, key_preference: "list[dict]") -> dict:
+        """Union table-keyed lists (`denied_columns`/`column_masks` shape)
+        across mappings, resolving table names the same case-insensitive way
+        `_ci_lookup` reads them back — so a base entry keyed `"customers"` and
+        a delta entry keyed `"Customers"` land under ONE key instead of two.
+
+        Without this, whichever differently-cased key a plain `dict` merge
+        happens to insert wins outright at read time (`_ci_lookup` returns on
+        its first case-insensitive match) — silently dropping the OTHER
+        side's entries for that table entirely. For `column_masks` that is a
+        real widening (a base mask vanishes); for `denied_columns` a delta's
+        added deny silently fails to apply. Both are the exact "narrows never
+        widens" failure item 145 exists to prevent (found by
+        `security-invariant-reviewer`, 2026-08-05).
+
+        `key_preference` is the mapping list (in priority order) whose casing
+        wins as the canonical key when the same table appears under two
+        different spellings — cosmetic only, since lookups are already
+        case-insensitive; it just keeps the merged dict's keys stable.
+        `mappings_in_order` is the order values are concatenated within one
+        table's list, which IS load-bearing for `column_masks`'s first-
+        column-match-wins rule.
+        """
+        canonical: dict[str, str] = {}
+        for mapping in key_preference:
+            for table in mapping:
+                canonical.setdefault(table.casefold(), table)
+        merged: dict[str, list] = {}
+        for mapping in mappings_in_order:
+            for table, values in mapping.items():
+                key = canonical[table.casefold()]
+                merged[key] = merged.get(key, []) + list(values)
+        return merged
+
     def for_purpose(self, purpose: Optional[str]) -> "Policy":
         """The effective `Policy` once `purpose` is applied (TODO.md item 145).
 
@@ -685,17 +720,22 @@ class Policy(pyd.BaseModel):
         delta = self.purpose_policies.get(purpose)
         if delta is None:
             return self
-        merged_columns = {table: list(cols) for table, cols in self.denied_columns.items()}
-        for table, cols in delta.denied_columns.items():
-            merged_columns[table] = merged_columns.get(table, []) + list(cols)
-        # The delta's own masks are checked FIRST (see `column_mask`'s
-        # first-match-wins rule) so a purpose that adds a stricter mask to an
-        # otherwise-unmasked column actually takes effect; a column the base
-        # policy already masks keeps that mask unless the delta names the
-        # identical column, in which case the purpose-specific one wins.
-        merged_masks = {table: list(masks) for table, masks in delta.column_masks.items()}
-        for table, masks in self.column_masks.items():
-            merged_masks[table] = merged_masks.get(table, []) + list(masks)
+        merged_columns = self._merge_table_keyed(
+            self.denied_columns,
+            delta.denied_columns,
+            key_preference=[self.denied_columns, delta.denied_columns],
+        )
+        # The delta's own masks are concatenated FIRST within each table's
+        # list (see `column_mask`'s first-match-wins rule on the COLUMN name)
+        # so a purpose that adds a stricter mask to an otherwise-unmasked
+        # column actually takes effect; a column the base policy already
+        # masks keeps that mask unless the delta names the identical column,
+        # in which case the purpose-specific one wins.
+        merged_masks = self._merge_table_keyed(
+            delta.column_masks,
+            self.column_masks,
+            key_preference=[self.column_masks, delta.column_masks],
+        )
         return self.model_copy(
             update={
                 "denied_tables": self.denied_tables + delta.denied_tables,
@@ -746,11 +786,14 @@ _NON_GUARDRAIL_POLICY_FIELDS = frozenset(
         "join_group",
         "write",
         "approval_sensitivities",
-        # TODO.md item 145 (F7): structural access rules, the same reason
+        # TODO.md item 145: structural access rules, the same reason
         # allowed_tables/denied_columns/mandatory_row_filters are excluded —
         # a list and a dict of narrowing deltas have no scalar permissiveness
         # to compare, and reporting them as opaque scalars would be worse
-        # than not reporting them at all.
+        # than not reporting them at all. Diffed field-by-field by
+        # `admin/access_diff.py::_diff_purposes` instead (found missing by
+        # `security-invariant-reviewer`/`architecture-boundary-reviewer`
+        # 2026-08-05, then added).
         "allowed_purposes",
         "purpose_policies",
     }

@@ -335,6 +335,28 @@ def test_jsonl_source_rejects_a_forged_chain_record(tmp_path):
     assert malformed == 1
 
 
+def test_jsonl_source_rejects_a_bare_envelope_less_line_when_backend_is_chained(tmp_path):
+    """TODO.md item 137 regression (found by `security-invariant-reviewer`,
+    2026-08-05): see the identical regression in test_anomaly.py — same
+    reader shape."""
+    from querygate.audit.sinks import HashChainedAuditSink
+
+    th = _thresholds()
+    path = tmp_path / "ledger.jsonl"
+    sink = HashChainedAuditSink(str(path), key=b"k")
+    genuine = _spread(1, start=_NOW - timedelta(seconds=900), span_seconds=1, kind="config")[0]
+    sink.emit(genuine)
+
+    bare_event = _spread(1, start=_NOW - timedelta(seconds=600), span_seconds=1, kind="config")[0]
+    with path.open("a") as f:
+        f.write(bare_event.model_dump_json(exclude_none=True) + "\n")
+
+    source = JsonlChangeEventSource(str(path), ledger_key=b"k", require_envelope=True)
+    loaded, malformed, _ = source.load_change_events(now=_NOW, thresholds=th)
+    assert len(loaded) == 1
+    assert malformed == 1
+
+
 # --- build_change_trend_report ----------------------------------------------
 
 

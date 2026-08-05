@@ -61,7 +61,7 @@ from querygate.admin.observability import ObservabilityOverview, build_overview
 from querygate.api._errors import require_scope
 from querygate.audit.ledger import resolve_ledger_key
 from querygate.core.auth import Principal
-from querygate.core.config import AppConfig, MetricsHistoryBackend
+from querygate.core.config import AppConfig, AuditSinkBackend, MetricsHistoryBackend
 from querygate.core.scopes import ADMIN_OBSERVABILITY_READ_SCOPE
 
 
@@ -81,7 +81,9 @@ def _change_trend_source(cfg: AppConfig) -> Optional[ChangeEventSource]:
     if not cfg.audit_sink_backend.is_locally_readable():
         return None
     return JsonlChangeEventSource(
-        cfg.audit_jsonl_path, ledger_key=resolve_ledger_key(cfg.audit_ledger_hmac_key)
+        cfg.audit_jsonl_path,
+        ledger_key=resolve_ledger_key(cfg.audit_ledger_hmac_key),
+        require_envelope=cfg.audit_sink_backend == AuditSinkBackend.JSONL_CHAINED,
     )
 
 
@@ -128,7 +130,9 @@ def _anomaly_source(cfg: AppConfig) -> Optional[AuditEventSource]:
     if not cfg.audit_sink_backend.is_locally_readable():
         return None
     return JsonlAuditEventSource(
-        cfg.audit_jsonl_path, ledger_key=resolve_ledger_key(cfg.audit_ledger_hmac_key)
+        cfg.audit_jsonl_path,
+        ledger_key=resolve_ledger_key(cfg.audit_ledger_hmac_key),
+        require_envelope=cfg.audit_sink_backend == AuditSinkBackend.JSONL_CHAINED,
     )
 
 

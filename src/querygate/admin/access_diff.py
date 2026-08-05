@@ -361,6 +361,133 @@ def _diff_mandatory_filters(diff: _Diff, connection: str, before: Policy, after:
                 )
 
 
+def _diff_purposes(diff: _Diff, connection: str, before: Policy, after: Policy) -> None:
+    """Purpose-bound access (item 145): `allowed_purposes` empty means the
+    gate itself is off for this connection — the same "empty allow-list =
+    unrestricted" convention `_diff_tables` already reports a toggle for — so
+    a transition to/from empty is reported as the loosest/tightest possible
+    change here, not left invisible (the exact gap `security-invariant-
+    reviewer` and `architecture-boundary-reviewer` found on 2026-08-05: an
+    operator could otherwise delete `allowed_purposes` and have the whole
+    purpose gate disappear with the diff reporting "no access change").
+
+    A `purpose_policies` entry that's added/removed is reported the same way
+    `_diff_mandatory_filters` reports a filter add/remove; one that's merely
+    MODIFIED is surfaced (never silently invisible) but not sub-field-diffed
+    — like `_diff_mandatory_filters`'s own "value_changed" case, direction is
+    reported `neutral` rather than guessed, since classifying a delta change
+    as tightening/loosening needs the same fine-grained tables/columns/masks
+    comparison `_diff_tables`/`_diff_columns` already give the BASE policy;
+    doing that for every purpose's delta too is tracked as a follow-up
+    (TODO.md item 148), not attempted here under review pressure.
+    """
+    before_purposes = set(before.allowed_purposes)
+    after_purposes = set(after.allowed_purposes)
+    if bool(before_purposes) != bool(after_purposes):
+        gate_now_on = bool(after_purposes)
+        diff.add(
+            SemanticAccessChange(
+                category="purpose_access",
+                connection=connection,
+                object=None,
+                change_type="modified",
+                direction="tightening" if gate_now_on else "loosening",
+                before="required" if before_purposes else "not required",
+                after="required" if after_purposes else "not required",
+                detail=(
+                    f"Connection {connection!r} now requires every query to declare a purpose."
+                    if gate_now_on
+                    else f"Connection {connection!r} no longer requires a declared purpose — "
+                    "every purpose-bound narrowing rule for this connection is now inert."
+                ),
+            )
+        )
+    for purpose in sorted(before_purposes - after_purposes):
+        diff.add(
+            SemanticAccessChange(
+                category="purpose_access",
+                connection=connection,
+                object=purpose,
+                change_type="removed",
+                direction="tightening",
+                before="allowed",
+                after="not permitted",
+                detail=f"Purpose {purpose!r} is no longer permitted on connection {connection!r}.",
+            )
+        )
+    for purpose in sorted(after_purposes - before_purposes):
+        diff.add(
+            SemanticAccessChange(
+                category="purpose_access",
+                connection=connection,
+                object=purpose,
+                change_type="added",
+                direction="loosening",
+                before="not permitted",
+                after="allowed",
+                detail=f"Purpose {purpose!r} is now permitted on connection {connection!r}.",
+            )
+        )
+
+    before_deltas = before.purpose_policies
+    after_deltas = after.purpose_policies
+    for purpose in sorted(set(before_deltas) | set(after_deltas)):
+        b = before_deltas.get(purpose)
+        a = after_deltas.get(purpose)
+        if b == a:
+            continue
+        if b is not None and a is None:
+            diff.add(
+                SemanticAccessChange(
+                    category="purpose_access",
+                    connection=connection,
+                    object=purpose,
+                    change_type="removed",
+                    direction="loosening",
+                    before="narrowing configured",
+                    after=None,
+                    detail=(
+                        f"The narrowing rules for purpose {purpose!r} on connection "
+                        f"{connection!r} were removed — declaring this purpose no longer "
+                        "narrows access beyond the base policy."
+                    ),
+                )
+            )
+        elif b is None and a is not None:
+            diff.add(
+                SemanticAccessChange(
+                    category="purpose_access",
+                    connection=connection,
+                    object=purpose,
+                    change_type="added",
+                    direction="tightening",
+                    before=None,
+                    after="narrowing configured",
+                    detail=(
+                        f"Purpose {purpose!r} on connection {connection!r} now narrows access "
+                        "beyond the base policy when declared."
+                    ),
+                )
+            )
+        else:
+            diff.add(
+                SemanticAccessChange(
+                    category="purpose_access",
+                    connection=connection,
+                    object=purpose,
+                    change_type="modified",
+                    direction="neutral",
+                    before="narrowing configured",
+                    after="narrowing configured",
+                    detail=(
+                        f"The narrowing rules for purpose {purpose!r} on connection "
+                        f"{connection!r} changed — review this connection's purpose_policies "
+                        "configuration for specifics."
+                    ),
+                )
+            )
+
+
 def _diff_join_group(
     diff: _Diff, connection: str, before: ConnectionProfile, after: ConnectionProfile
 ) -> None:
@@ -464,6 +591,7 @@ def _diff_connection(
         allowed_in_both = _diff_tables(diff, connection, a_profile, a_policy, c_profile, c_policy)
         _diff_columns(diff, connection, allowed_in_both, a_policy, c_policy)
         _diff_mandatory_filters(diff, connection, a_policy, c_policy)
+        _diff_purposes(diff, connection, a_policy, c_policy)
         _diff_join_group(diff, connection, a_profile, c_profile)
 
 
@@ -471,10 +599,11 @@ _DIRECTION_PRIORITY = {"loosening": 0, "tightening": 1, "neutral": 2}
 _CATEGORY_PRIORITY = {
     "connection_visibility": 0,
     "mandatory_filter": 1,
-    "table_access": 2,
-    "column_access": 3,
-    "guardrail": 4,
-    "join_group": 5,
+    "purpose_access": 2,
+    "table_access": 3,
+    "column_access": 4,
+    "guardrail": 5,
+    "join_group": 6,
 }
 
 

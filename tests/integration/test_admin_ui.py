@@ -532,6 +532,58 @@ async def test_audit_browser_rejects_a_forged_chain_record(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_audit_browser_rejects_a_bare_envelope_less_line_on_a_chained_backend(
+    tmp_path, monkeypatch
+):
+    """TODO.md item 137 regression (found by `security-invariant-reviewer`,
+    2026-08-05): `verify_envelope_hash` correctly returns `None` (not
+    `False`) for a line with no envelope shape at all, since that's exactly
+    what a legitimate plain-`jsonl` line looks like. On a `jsonl_chained`
+    backend every persisted line MUST be an envelope, so a bare line is
+    itself the forgery/corruption signal and must not pass through
+    unverified."""
+    from querygate.audit.ledger import GENESIS_PREV_HASH, make_record
+
+    audit_path = tmp_path / "audit.jsonl"
+    genuine = AuditEvent(
+        event_id="query-1",
+        connection_id="demo",
+        principal_id="agent-a",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "orders"},
+        duration_ms=4,
+    )
+    record = make_record(0, GENESIS_PREV_HASH, genuine.model_dump(mode="json", exclude_none=True))
+    bare_event = AuditEvent(
+        event_id="query-2",
+        connection_id="demo",
+        principal_id="agent-a",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "secret_table"},
+        duration_ms=4,
+    )
+    audit_path.write_text(
+        record.model_dump_json() + "\n" + bare_event.model_dump_json(exclude_none=True) + "\n"
+    )
+    app = create_app(
+        _settings(tmp_path, monkeypatch, audit_path=audit_path, audit_backend="jsonl_chained")
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        page = await client.get(
+            "/api/v1/admin/ui/audit/events?event_type=query.execution",
+            headers=_auth(),
+        )
+
+    assert page.status_code == 200
+    assert page.json()["total"] == 1
+    assert page.json()["malformed"] == 1
+    assert page.json()["events"][0]["event_id"] == "query-1"
+    assert all(e["event_id"] != "query-2" for e in page.json()["events"])
+
+
+@pytest.mark.asyncio
 async def test_audit_browser_reports_disabled_without_a_locally_readable_backend(
     tmp_path, monkeypatch
 ):

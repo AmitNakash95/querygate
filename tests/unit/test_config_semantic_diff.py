@@ -21,6 +21,7 @@ from querygate.policy.models import (
     CostEstimationMode,
     MandatoryRowFilter,
     Policy,
+    PurposePolicyDelta,
 )
 
 
@@ -344,3 +345,117 @@ def test_approval_sensitivities_change_is_reported():
     assert change.object == "approval_sensitivities"
     assert change.direction == "tightening"
     assert change.before == "none" and change.after == "pii"
+
+
+# --------------------------------------------------------------------------- #
+# Purpose-bound access (TODO.md item 145) — found missing entirely by
+# `security-invariant-reviewer`/`architecture-boundary-reviewer` (2026-08-05):
+# `allowed_purposes`/`purpose_policies` were excluded from GUARDRAIL_FIELDS
+# (correctly — they're structural, not scalar) but access_diff never actually
+# diffed them, so an operator disabling the whole purpose gate reported as
+# "no access change". These tests are the missing guard.
+# --------------------------------------------------------------------------- #
+
+
+def test_disabling_purpose_gate_entirely_is_reported_as_loosening():
+    diff = compute_access_diff(
+        _ctx(Policy(allowed_purposes=["fraud_review"])),
+        _ctx(Policy(allowed_purposes=[])),
+    )
+    changes = _changes_by(diff, "purpose_access")
+    (toggle,) = [c for c in changes if c.object is None]
+    assert toggle.direction == "loosening"
+    assert toggle.before == "required" and toggle.after == "not required"
+
+
+def test_enabling_purpose_gate_from_scratch_is_reported_as_tightening():
+    diff = compute_access_diff(
+        _ctx(Policy(allowed_purposes=[])),
+        _ctx(Policy(allowed_purposes=["fraud_review"])),
+    )
+    changes = _changes_by(diff, "purpose_access")
+    (toggle,) = [c for c in changes if c.object is None]
+    assert toggle.direction == "tightening"
+
+
+def test_adding_a_permitted_purpose_is_reported_as_loosening():
+    diff = compute_access_diff(
+        _ctx(Policy(allowed_purposes=["fraud_review"])),
+        _ctx(Policy(allowed_purposes=["fraud_review", "support"])),
+    )
+    changes = _changes_by(diff, "purpose_access")
+    added = [c for c in changes if c.change_type == "added" and c.object == "support"]
+    assert len(added) == 1
+    assert added[0].direction == "loosening"
+
+
+def test_removing_a_permitted_purpose_is_reported_as_tightening():
+    diff = compute_access_diff(
+        _ctx(Policy(allowed_purposes=["fraud_review", "support"])),
+        _ctx(Policy(allowed_purposes=["fraud_review"])),
+    )
+    changes = _changes_by(diff, "purpose_access")
+    removed = [c for c in changes if c.change_type == "removed" and c.object == "support"]
+    assert len(removed) == 1
+    assert removed[0].direction == "tightening"
+
+
+def test_removing_a_purposes_narrowing_delta_is_reported_as_loosening():
+    diff = compute_access_diff(
+        _ctx(
+            Policy(
+                allowed_purposes=["support"],
+                purpose_policies={"support": PurposePolicyDelta(denied_tables=["secrets"])},
+            )
+        ),
+        _ctx(Policy(allowed_purposes=["support"])),
+    )
+    changes = _changes_by(diff, "purpose_access")
+    removed = [c for c in changes if c.change_type == "removed" and c.object == "support"]
+    assert len(removed) == 1
+    assert removed[0].direction == "loosening"
+
+
+def test_adding_a_purposes_narrowing_delta_is_reported_as_tightening():
+    diff = compute_access_diff(
+        _ctx(Policy(allowed_purposes=["support"])),
+        _ctx(
+            Policy(
+                allowed_purposes=["support"],
+                purpose_policies={"support": PurposePolicyDelta(denied_tables=["secrets"])},
+            )
+        ),
+    )
+    changes = _changes_by(diff, "purpose_access")
+    added = [c for c in changes if c.change_type == "added" and c.object == "support"]
+    assert len(added) == 1
+    assert added[0].direction == "tightening"
+
+
+def test_modifying_a_purposes_narrowing_delta_is_reported_not_silently_dropped():
+    diff = compute_access_diff(
+        _ctx(
+            Policy(
+                allowed_purposes=["support"],
+                purpose_policies={"support": PurposePolicyDelta(denied_tables=["a"])},
+            )
+        ),
+        _ctx(
+            Policy(
+                allowed_purposes=["support"],
+                purpose_policies={"support": PurposePolicyDelta(denied_tables=["a", "b"])},
+            )
+        ),
+    )
+    changes = _changes_by(diff, "purpose_access")
+    modified = [c for c in changes if c.change_type == "modified" and c.object == "support"]
+    assert len(modified) == 1
+    assert modified[0].direction == "neutral"
+
+
+def test_no_purpose_change_reports_nothing():
+    diff = compute_access_diff(
+        _ctx(Policy(allowed_purposes=["support"])),
+        _ctx(Policy(allowed_purposes=["support"])),
+    )
+    assert _changes_by(diff, "purpose_access") == []

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Query
 from querygate.admin.anomaly import JsonlAuditEventSource
 from querygate.audit.ledger import resolve_ledger_key
 from querygate.core.auth import Principal
-from querygate.core.config import AppConfig
+from querygate.core.config import AppConfig, AuditSinkBackend
 from querygate.help.models import (
     AccessSummary,
     ConfigFieldExplanation,
@@ -73,7 +73,9 @@ def build_help_router(
         source = None
         if cfg.audit_sink_backend.is_locally_readable():
             source = JsonlAuditEventSource(
-                cfg.audit_jsonl_path, ledger_key=resolve_ledger_key(cfg.audit_ledger_hmac_key)
+                cfg.audit_jsonl_path,
+                ledger_key=resolve_ledger_key(cfg.audit_ledger_hmac_key),
+                require_envelope=cfg.audit_sink_backend == AuditSinkBackend.JSONL_CHAINED,
             )
         return build_recent_denials_report(
             source,

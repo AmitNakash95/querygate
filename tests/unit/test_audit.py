@@ -31,7 +31,7 @@ from querygate.execution import service as svc
 from querygate.execution.admission import QueueMode
 from querygate.execution.service import StructuredQueryService
 from querygate.policy.loader import PolicyStore, set_policy_store
-from querygate.policy.models import Policy
+from querygate.policy.models import ColumnMask, ColumnMaskKind, Policy, PurposePolicyDelta
 from querygate.query_ast.models import (
     ArrayAggSelectItem,
     CaseSelectItem,
@@ -788,6 +788,109 @@ async def test_execute_persists_the_declared_purpose_end_to_end(tmp_path):
 
     event = json.loads(path.read_text())
     assert event["purpose"] == "fraud_review"
+
+
+@pytest.mark.asyncio
+async def test_masked_columns_audit_field_reflects_a_purpose_added_mask(tmp_path):
+    """TODO.md item 145 regression (found by `security-invariant-reviewer`
+    2026-08-05): the compiler correctly applies a purpose delta's mask to
+    the compiled SQL either way, but `masked_columns` used to be computed
+    from the un-narrowed policy — understating which columns were actually
+    masked in the persisted audit trail."""
+    path = tmp_path / "masked_purpose.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    table = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("email", sa.String(200)),
+    )
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1, "email": "x@example.com"}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    query = StructuredQuery(
+        from_table="customers",
+        select=["customers.id", "customers.email"],
+        limit=10,
+        purpose="support",
+    )
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                allowed_purposes=["support"],
+                purpose_policies={
+                    "support": PurposePolicyDelta(
+                        column_masks={
+                            "customers": [ColumnMask(column="email", kind=ColumnMaskKind.NULL)]
+                        }
+                    )
+                },
+            ),
+            overrides={},
+        )
+    )
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query)
+
+    event = json.loads(path.read_text())
+    assert event["masked_columns"] == ["email"]
+
+
+@pytest.mark.asyncio
+async def test_declared_purpose_is_not_persisted_on_a_connection_without_purpose_gating(tmp_path):
+    """TODO.md item 145 redaction regression (found by `security-invariant-reviewer`
+    2026-08-05): `Policy.allowed_purposes` empty means purpose-gating is off for
+    this connection — a declared `purpose` must be INERT, not merely unenforced.
+    Persisting it anyway turns `purpose` into exactly the free-text-into-the-
+    audit-log channel `intent` was deliberately excluded to close, just under a
+    different field name, on every connection that hasn't opted into the gate
+    (the default)."""
+    path = tmp_path / "unrestricted_purpose.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    table = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("email", sa.String(200)),
+    )
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1, "email": "x@example.com"}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    query = StructuredQuery(
+        from_table="customers",
+        select=["customers.id"],
+        limit=10,
+        purpose="arbitrary caller-authored text, not from any allow-list",
+    )
+    # allowed_purposes is empty (the default) — this connection never opted
+    # into purpose-gating.
+    set_policy_store(PolicyStore(default=Policy(), overrides={}))
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query)
+
+    event = json.loads(path.read_text())
+    assert "purpose" not in event
+    assert "arbitrary caller-authored text" not in path.read_text()
 
 
 @pytest.mark.asyncio
