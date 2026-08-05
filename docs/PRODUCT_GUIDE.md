@@ -1367,9 +1367,9 @@ the *actual, live* interfaces a caller sees, not just the model definition:
   schema.
 
 Why check the live schema instead of just trusting the model split above?
-Because a schema is a *derived* artifact — FastAPI and FastMCP both generate
-it automatically from whatever models are wired into a route or tool
-signature. It's possible to define `PublicConnectionInfo` correctly and
+Because a schema is a *derived* artifact — FastAPI and `MCPServer` both
+generate it automatically from whatever models are wired into a route or
+tool signature. It's possible to define `PublicConnectionInfo` correctly and
 still, months later, accidentally wire a new endpoint's response type to
 `ConnectionProfile` instead (a typo, a copy-pasted signature, a "just for
 now" shortcut). A test that only checks the model definition wouldn't catch
@@ -2728,18 +2728,19 @@ model-free test (`tests/integration/test_integration_examples.py`) keeps them
 honest by asserting every tool each example wires up is still a tool the MCP
 server actually registers.
 
-`mcp/server.py` builds one shared `FastMCP` instance (`mcp_server`) and, on
-startup, calls `discover_and_register_tools()` (`mcp/tools/__init__.py`),
-which imports every non-underscore-prefixed module under `mcp/tools/` —
-so registering a new tool is just adding a file there, decorated with
-`@mcp_server.tool(...)`. That server is exposed as its own ASGI app
-(`streamable_http_app()`), wrapped in `MCPAuthMiddleware`, and mounted into
-the main FastAPI app at `cfg.mcp_mount_path` (default `/mcp`) by
-`setup_mcp()`.
+`mcp/server.py` builds one shared `MCPServer` instance (`mcp_server` — `mcp`
+SDK v2, formerly `FastMCP`; TODO.md item 128's `2026-07-28` protocol
+conformance) and, on startup, calls `discover_and_register_tools()`
+(`mcp/tools/__init__.py`), which imports every non-underscore-prefixed
+module under `mcp/tools/` — so registering a new tool is just adding a file
+there, decorated with `@mcp_server.tool(...)`. That server is exposed as its
+own ASGI app (`streamable_http_app()`), wrapped in `MCPAuthMiddleware`, and
+mounted into the main FastAPI app at `cfg.mcp_mount_path` (default `/mcp`)
+by `setup_mcp()`.
 
 **Auth works differently here than in REST**, because MCP tool functions
 aren't FastAPI route handlers with a `Depends()` mechanism — they're plain
-async functions FastMCP calls directly. So `mcp/auth.py` authenticates at
+async functions `MCPServer` calls directly. So `mcp/auth.py` authenticates at
 the ASGI layer instead: `MCPAuthMiddleware` builds the same
 `CompositeAuthenticator` chain (API key → JWT → anonymous-if-local) used by
 REST, and on every incoming request extracts the bearer token, authenticates
@@ -2777,11 +2778,15 @@ request where a present header disagrees with the body (`400` +
 `-32020 HeaderMismatch`), because otherwise a gateway authorizing on the
 header while QueryGate executes the body is a confused deputy (e.g. a
 gateway permits `Mcp-Name: list_tables` for a low-privilege caller while the
-body actually invokes `run_structured_writes`). QueryGate currently speaks
-protocol `2025-11-25` (item 128), which doesn't define these headers, so this
-validates **if present**, not required — it fails closed the moment a
-gateway starts sending them, run strictly after the depth scan above (so a
-hostile deep body can't reach this check's own `json.loads` first). Base64
+body actually invokes `run_structured_writes`). QueryGate now speaks the
+final `2026-07-28` protocol revision (item 128, `mcp` SDK v2) that defines
+these headers; the gate still validates **if present**, not required — a
+direct MCP client has no reason to send transport-routing headers meant for
+a fronting gateway, so requiring them from every caller would be a
+conformance requirement the spec doesn't make — but it fails closed the
+moment any caller (gateway or otherwise) does send them, run strictly after
+the depth scan above (so a hostile deep body can't reach this check's own
+`json.loads` first). Base64
 "sentinel"-encoded header values (`=?base64?...?=`, used when a name isn't
 safely ASCII) are decoded before comparison; a header wearing the sentinel's
 markers that doesn't actually decode is rejected as malformed rather than
@@ -2806,7 +2811,33 @@ The actual tools, one module per concern:
   with `surface="mcp"` (REST passes `surface="rest"`) purely so downstream
   logging/audit can tell which transport a request came from — the
   validation/compile/execute pipeline itself doesn't branch on it.
+- `mcp/tools/write.py` — `run_structured_writes`, the governed-writes
+  equivalent of the read tool above (preview/execute/atomic).
 - `mcp/tools/help.py` — the guide/diagnostics tools (see below).
+- `mcp/tools/templates.py` — query-template listing/invocation tools.
+
+**In-query human approval over MCP (`mcp/elicitation.py`, items 92/93/128).**
+When a gated read or write trips the approval gate, `run_structured_queries`/
+`run_structured_writes` don't block waiting for a human — the `2026-07-28`
+protocol removed server-initiated mid-call requests entirely (Multi
+Round-Trip Requests, MRTR). Instead the tool returns `InputRequiredResult`
+(one `input_request` per gated item in the batch, keyed `"q0"`/`"w0"` etc.
+by position) and the client retries the *identical* tool call carrying
+`input_responses`/`request_state`. Both phases reuse
+`execution/approval.py`'s existing HMAC-signed token verbatim — no new
+crypto: a *pending* token (bound to the item's fingerprint, short TTL)
+travels in `request_state`; on retry, the tool re-derives each item's
+fingerprint from the *resubmitted* AST and compares it against the pending
+token's before ever looking at `input_responses` — the mutation-verified
+enforcement point that stops a caller from obtaining approval for a cheap
+query and replaying the granted state against an expensive one in the same
+batch slot. Only once that comparison passes and the human's response says
+`approve: true` does a real grant get minted and handed to
+`execute_many`/write `execute_many`'s existing `approval_tokens` map (the
+same parameter REST's out-of-band token flow already used). Off by default
+(`AppConfig.mcp_elicitation_approval_enabled`) — an elicitation response
+carries no authenticated approver identity, so treating it as an approval
+is an explicit operator decision that the client's human is trusted.
 
 Every tool is wrapped in `@safe_mcp_tool` (`mcp/exceptions.py`). MCP tool
 calls don't have HTTP status codes to raise on failure — a tool has to
@@ -2818,28 +2849,29 @@ logs it, and returns that instead of raising. This mirrors the REST layer's
 outcomes, different shape, because that's what each transport's protocol
 expects.
 
-**A real gotcha worth knowing if you touch these files:** three tool
-modules — `mcp/tools/connections.py`, `mcp/tools/schema.py`, and
-`mcp/tools/query.py` — deliberately do **not** start with `from __future__
+**A real gotcha worth knowing if you touch these files:** every tool
+module that declares a typed parameter needing resolution — `mcp/tools/
+connections.py`, `schema.py`, `query.py`, `write.py`, `help.py`,
+`templates.py` — deliberately does **not** start with `from __future__
 import annotations`, even though most of the codebase does. Here's why.
 With that import, Python stores a function's type annotations as plain
 strings instead of live objects (e.g. the annotation `StructuredQuery`
 becomes the string `"StructuredQuery"`, to be resolved later, lazily).
-FastMCP needs to resolve those annotations into real types to build each
-tool's input schema, and it does that resolution against the *wrapping*
-function's `__globals__` — because `safe_mcp_tool` uses `functools.wraps`,
-the object FastMCP actually inspects is the wrapper defined in
-`mcp/exceptions.py`, not the original tool function defined in, say,
-`query.py`. So when FastMCP tries to look up the string `"StructuredQuery"`
-in that wrapper's global namespace, it's looking in `mcp/exceptions.py`'s
-namespace — which never imported `StructuredQuery` — and resolution fails
-at server-startup registration time, not at call time, which makes it a
-confusing failure to debug if you don't know this is why. Keeping
-annotations as real (unstringified) objects in these three files sidesteps
-the problem entirely, because then there's nothing to resolve. If you add a
-new tool module with type annotations that need resolving, either skip
-`from __future__ import annotations` there too, or confirm FastMCP can
-still resolve them.
+`MCPServer` needs to resolve those annotations into real types to build
+each tool's input schema, and it does that resolution against the
+*wrapping* function's `__globals__` — because `safe_mcp_tool` uses
+`functools.wraps`, the object `MCPServer` actually inspects is the wrapper
+defined in `mcp/exceptions.py`, not the original tool function defined in,
+say, `query.py`. So when `MCPServer` tries to look up the string
+`"StructuredQuery"` in that wrapper's global namespace, it's looking in
+`mcp/exceptions.py`'s namespace — which never imported `StructuredQuery` —
+and resolution fails at server-startup registration time, not at call
+time, which makes it a confusing failure to debug if you don't know this is
+why. Keeping annotations as real (unstringified) objects in these files
+sidesteps the problem entirely, because then there's nothing to resolve. If
+you add a new tool module with type annotations that need resolving, either
+skip `from __future__ import annotations` there too, or confirm `MCPServer`
+can still resolve them.
 
 ### The `help/` module — a queryable product guide
 
@@ -3394,6 +3426,88 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-08-06 — item 128 conformed the MCP surface to the final
+  `2026-07-28` protocol revision**, upgrading `mcp` 1.28.1 → 2.0.0 (the
+  Python SDK's own major rework for this revision). Scoped by reading the
+  installed v2 source directly, not the migration guide's prose alone —
+  several load-bearing details (below) only became clear that way, and each
+  was verified against the real SDK before being relied on.
+
+  **The security-critical boundary was already insulated.** `mcp/auth.py`
+  (RFC 8707 audience binding, RFC 6750 challenges) and
+  `mcp/oauth_metadata.py` (RFC 9728 metadata) import nothing from the `mcp`
+  package at all — QueryGate's MCP surface is a resource server only, and
+  those two files are pure Starlette/FastAPI built on `core.auth`. Same for
+  `mcp/transport_guard.py` (item 127's header-mismatch guard) and
+  `mcp/exceptions.py` (`safe_mcp_tool`). The actual code-change footprint
+  was three files: `mcp/server.py`, `mcp/tools/query.py`, `mcp/tools/write.py`,
+  plus a full rewrite of `mcp/elicitation.py` (below).
+
+  **`FastMCP` → `MCPServer`.** Transport settings (`streamable_http_path`,
+  `stateless_http`, `transport_security`) moved from the constructor to
+  `streamable_http_app()`. The v1 tool-listing filter
+  (`server._mcp_server.list_tools()(scoped_list_tools)`, a decorator-based
+  registration on the private low-level `Server`) no longer has an
+  equivalent — `_mcp_server` is gone. Verified directly (a throwaway script
+  against the real installed SDK, not assumed from the migration guide):
+  `MCPServer.list_tools` is a plain overridable `async def` method, and a
+  bare instance-attribute assignment (`server.list_tools = scoped_list_tools`)
+  is observed by the dispatcher's own `_handle_list_tools` too, so that's
+  the direct v2-idiomatic replacement — no decorator needed.
+
+  **The approval/elicitation port (items 92/93) was the one genuinely novel
+  design piece**, because `Context.elicit()` (the v1 blocking mid-call
+  round-trip) no longer exists in a form usable under the new Multi
+  Round-Trip Requests (MRTR) model — a server may no longer send a
+  JSON-RPC request mid-call at all. The SDK ships a sophisticated `Resolve`/
+  `Elicit` dependency-injection mechanism that handles MRTR pause/resume
+  automatically, but it fills *tool parameters* from a resolver run
+  *before* the tool body — QueryGate's approval trigger is decided
+  *mid-pipeline* (a cost estimate or sensitivity-label check inside
+  `execute()`), not from the raw arguments, so wiring it through that
+  mechanism would have meant either duplicating pipeline logic or teaching
+  `execution/service.py` about MRTR — both rejected. Verified directly that
+  a plain tool function CAN return `InputRequiredResult` on its own
+  (`mcp/server/mcpserver/tools/base.py` explicitly supports this path,
+  separate from `Resolve`), and that `Context.input_responses`/
+  `Context.request_state` (populated from `CallToolRequestParams` on a
+  retry) are readable from an ordinary `ctx: Context` tool parameter — so
+  the hand-rolled, tool-layer port the item's own write-up anticipated is
+  still the right shape in v2, just needed the exact mechanism confirmed
+  rather than assumed.
+
+  `mcp/elicitation.py`'s new two-phase design reuses
+  `execution/approval.py`'s existing HMAC token signing verbatim (no new
+  crypto): a *pending* token bound to each gated item's fingerprint travels
+  in `request_state`; on retry, the freshly re-derived fingerprint of the
+  *resubmitted* item is compared against it before `input_responses` is
+  even consulted (the mutation-verified enforcement point — confirmed a
+  naive implementation that skips this comparison lets a caller obtain
+  approval for one query and replay the granted state against a different
+  one in the same batch slot). `StructuredQueryService.execute_many`
+  already had a pre-supplied `approval_tokens` map (the REST out-of-band
+  flow's mechanism); `WriteExecutionService.execute_many` did not and
+  gained one, mirroring the read side exactly — both services also gained
+  typed `approval_fingerprint`/`approval_reasons` fields on their batch
+  item results (previously only visible in a free-text `error` string),
+  so the MCP layer can build `InputRequiredResult` without parsing
+  messages, and any other batch caller gets the same structured signal.
+
+  **Item 127's header-mismatch guard needed no code change** — it already
+  validated `Mcp-Method`/`Mcp-Name` "if present, not required" specifically
+  *because* the new headers weren't mandatory before 2026-07-28 shipped;
+  that posture is unchanged now that QueryGate speaks the revision that
+  defines them; only the doc explaining *why* needed updating.
+
+  **Scope, stated honestly:** no dual-path (old-protocol blocking `ctx.elicit()`
+  alongside the new MRTR path) was built — a client that negotiates an
+  older protocol revision loses the in-session elicitation channel and
+  falls back to the existing out-of-band REST token flow, the same
+  fail-closed default already documented for "client can't elicit." Given
+  the whole feature is opt-in and off by default, this was judged a
+  reasonable simplification rather than doubling the approval-flow surface
+  to support a deprecated transport.
 
 - **2026-08-06 — item 134 phase 1 added compliance-grade WORM audit
   retention**, composing (never replacing) the item-91 local hash-chained

@@ -493,7 +493,7 @@ position.
   engine — each new adapter must render every Phase 4 primitive.* **MySQL
   phase 1 shipped 2026-08-06** (live-verified against a real MySQL 8.4
   server); Snowflake/BigQuery remain open, each its own L–XL effort.
-- [ ] **128** — Conform to the final MCP `2026-07-28` protocol revision. *Added
+- [x] **128** — Conform to the final MCP `2026-07-28` protocol revision. *Added
   2026-07-30 by `competitive-scan`; the spec went final on 2026-07-28 (the
   2026-07-22 scan saw only the RC) and we are a full revision behind on
   `2025-11-25`. This sits in Adoption, not Moat, because the sharp edge is

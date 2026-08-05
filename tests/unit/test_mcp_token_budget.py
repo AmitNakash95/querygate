@@ -213,7 +213,13 @@ from querygate.mcp.server import create_mcp_server
 # maintainer rationale out of model docstrings into `#` comments first (a
 # Pydantic docstring becomes the agent-facing schema description and costs
 # tokens on every session; a `#` comment costs nothing).
-_MAX_TOTAL_CHARS = 123_000
+#
+# 2026-08-06 (TODO.md item 128): +412 chars from BatchQueryItemToolResult/
+# WriteBatchItemResult gaining approval_fingerprint/approval_reasons —
+# real new capability (the MCP MRTR approval port needs these visible in
+# the output schema so a client can tell "this item needs approval" apart
+# from any other error without parsing free text), not duplication.
+_MAX_TOTAL_CHARS = 124_000
 
 
 def _tool_schema_chars(tool: object) -> int:
