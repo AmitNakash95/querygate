@@ -36,6 +36,7 @@ def _event(
     outcome: str = "rejected",
     error_category: str | None = "policy",
     surface: str = "rest",
+    operation: str = "execute_structured_query",
 ) -> AuditEvent:
     return AuditEvent(
         occurred_at=at,
@@ -47,6 +48,7 @@ def _event(
         query_shape={"from": "customers", "select": [{"kind": "column", "column": "id"}]},
         error_category=error_category,
         duration_ms=3,
+        operation=operation,
     )
 
 
@@ -107,6 +109,43 @@ def test_known_categories_get_a_specific_explanation(category, expected_snippet)
     )
     assert denials[0].reason == category
     assert expected_snippet in denials[0].explanation
+
+
+def test_query_verdict_denials_are_excluded_entirely():
+    """Item 133's audit: `StructuredQueryService.verdict` collapses every
+    denial into one generic response specifically so a caller can't learn
+    whether policy or schema rejected their query. Before this fix, the same
+    caller could immediately read the real `error_category` back through
+    this endpoint for their own just-submitted verdict probe — completely
+    reconstructing the distinction `verdict()`'s response deliberately
+    withheld. A `query_verdict` event must not appear in the caller's own
+    denial list at all, even though it is that caller's own rejected event."""
+    events = [
+        _event(at=_NOW, principal="user-a", operation="query_verdict", error_category="policy"),
+        _event(at=_NOW, principal="user-a", operation="execute_structured_query"),
+    ]
+    denials = select_recent_denials(events, principal_id="user-a", limit=10)
+    assert len(denials) == 1
+    assert all(d.connection == "demo" for d in denials)
+
+
+def test_own_denials_found_also_excludes_query_verdict_events(tmp_path):
+    """`own_denials_found` is a separate count from `select_recent_denials`'s
+    output (see the fleet-wide-volume regression above) — it must exclude
+    `query_verdict` events too, not just omit them from the visible list."""
+    path = tmp_path / "audit.jsonl"
+    _write_jsonl(
+        path,
+        [
+            _event(at=_NOW, principal="user-a", operation="query_verdict"),
+            _event(at=_NOW, principal="user-a", operation="execute_structured_query"),
+        ],
+    )
+    report = build_recent_denials_report(
+        JsonlAuditEventSource(str(path)), principal_id="user-a", now=_NOW
+    )
+    assert report.own_denials_found == 1
+    assert len(report.denials) == 1
 
 
 def test_unknown_category_falls_back_to_generic_explanation():

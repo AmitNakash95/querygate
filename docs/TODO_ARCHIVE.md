@@ -8358,3 +8358,588 @@ the window computed nothing.
 
 **Effort: XL. Priority: high** (closes the ★ flagship pillar's success criterion).
 Depends on: items 100, 101.
+
+### 127. Reject an MCP request whose routing headers disagree with its body (gateway confused-deputy) ✅ DONE
+
+**Surfaced 2026-07-30 by `competitive-scan`.** The MCP `2026-07-28`
+specification (final — see item 128) mirrors `method` and `params.name` into
+required `Mcp-Method` / `Mcp-Name` HTTP headers so that intermediaries
+"(load balancers, gateways, observability tooling) can route and inspect
+requests without parsing the body." It therefore also mandates the matching
+server-side defense:
+
+> Servers that process the request body **MUST** reject requests where the
+> values specified in the headers do not match the corresponding values in the
+> request body. This prevents potential security vulnerabilities when different
+> components in the network rely on different sources of truth (e.g., a load
+> balancer routing on the header value while the MCP server executes based on
+> the body value).
+> — [Streamable HTTP § Server Validation](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+
+**Why it matters more for QueryGate than for a typical MCP server.** The P4
+leverage move (`docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) is to sit
+*behind* MCP gateways and proxies as the enforcement point they can't be. That
+is exactly the deployment where this mismatch is a real confused-deputy: a
+fronting gateway authorizes `Mcp-Name: list_tables` for a low-privilege
+identity, while the body it forwards calls `run_structured_writes`. The
+gateway's tool-level authorization is then silently void, and QueryGate — the
+component that *did* see the body — executed the privileged operation anyway.
+
+**Current state at build time (verified 2026-07-30, prospective not live):**
+QueryGate speaks protocol `2025-11-25` (item 128), which does not define these
+headers, so there was no live vulnerability — a conforming gateway would not
+yet rely on them. The exposure begins the moment either side moves: a gateway
+that trusts the headers, or QueryGate's own upgrade under item 128.
+
+**What shipped.** `mcp/transport_guard.py`'s `MCPRequestGuardMiddleware` — the
+same ASGI wrapper that pre-scans raw body bytes for item 86's size/depth
+guards, already the one place that sees headers and body together before the
+transport parses either — gained a header/body agreement check
+(`_header_body_mismatch`), run strictly *after* item 86's depth scan so a
+hostile deep body can't reach this check's own `json.loads` first. When
+present, `Mcp-Method` must equal the body's `method` and `Mcp-Name` must equal
+`params.name` / `params.uri`; a mismatch is rejected with HTTP `400` and
+JSON-RPC error code `-32020` (`HeaderMismatch`), reusing the existing
+`{"error": {"code", "message"}}` reject envelope rather than a second one.
+Validate-if-present, not require — shippable now, independent of item 128,
+and it fails closed the instant a gateway starts sending the headers.
+
+The spec's Base64 "sentinel" header-value encoding (`=?base64?...?=`, used
+when a name isn't safely representable as a plain ASCII header value) is
+decoded before comparison (`_decode_sentinel_value`); a header wearing the
+sentinel's markers that doesn't actually decode as base64/UTF-8 is rejected as
+malformed rather than compared as literal text — fail-closed, not a silent
+fallback to raw-string comparison. `Mcp-Name` is deliberately **not** checked
+against the set of registered tools here: this guard runs outside
+`MCPAuthMiddleware`, so that check would turn it into an unauthenticated
+tool-enumeration oracle — agreement with the body is the whole job.
+
+**Four defects found and fixed by the post-build `auditors` pass** (all four
+reviewers — security-invariant, architecture-boundary, test-contract, and
+claim — were run in parallel; each is recorded here with its finding ID):
+
+1. **Unhandled parser exception on a small, well-formed-looking body
+   (security-invariant QG-127-1).** `json.loads` can raise a bare `ValueError`
+   (CPython's integer-string-conversion guard trips on an ~5,000-digit numeric
+   literal, well under both the byte and depth caps) that the original
+   `except (json.JSONDecodeError, UnicodeDecodeError)` didn't catch, so it
+   propagated to an unhandled 500 pre-auth — exactly the "malformed input is a
+   client error, never a 5xx" regression item 86 exists to prevent. Widened to
+   `except (ValueError, UnicodeDecodeError, RecursionError)` (`JSONDecodeError`
+   is a `ValueError` subclass, so this only widens, never narrows).
+2. **First-match on a repeated routing header (security-invariant QG-127-2,
+   independently found by architecture-boundary Finding 1).** `Mcp-Method`/
+   `Mcp-Name` sent twice with disagreeing values has no single source of truth
+   for an intermediary to agree with QueryGate about; taking the first
+   occurrence let a caller satisfy this guard with one value while a
+   differently-configured gateway authorizes on a different occurrence of the
+   same header name — reproducing the exact confused-deputy shape this item
+   closes. A repeated routing header is now rejected outright.
+3. **`params.name`-only field selection (architecture-boundary Finding 3,
+   independently found by test-contract F2).** The original
+   `params.get("name", params.get("uri"))` always preferred `name`, so a
+   `resources/read`-shaped body (which mirrors `params.uri`, not `params.name`,
+   per the spec's own table) was never actually checked against the field the
+   header is supposed to agree with — and a body carrying *both* fields was
+   silently resolved by whichever key happened to be checked first. Selection
+   is now driven by `method` (`resources/*` prefers `uri`), and a body carrying
+   both `name` and `uri` is rejected as ambiguous rather than guessed at.
+4. **Ordering test asserted only "some non-null code" (test-contract F1).**
+   `test_mcp_deeply_nested_body_with_routing_header_hits_depth_guard_not_header_check`
+   would have stayed green even if a future change made the header check run
+   first and land on the same observable HTTP status by some other path.
+   Tightened to assert the depth guard's specific `MALFORMED_REQUEST` code.
+
+Claim-reviewer also caught this write-up's own test count drifting ("eight"
+vs. the seven tests that existed at that point) and flagged that the adjacent
+`docs/business/` strategy docs (`MARKET_DOMINATION_ANALYSIS.md`,
+`COMPETITOR_MCP_GATEWAYS.md`, `NORTH_STAR.md`) still described item 127 as
+unshipped — both corrected.
+
+**Coverage.** 13 test functions (14 test items — one is parametrized ×2) in
+`tests/security/test_malformed_input_fuzzing.py` (already the item-86 MCP
+transport-guard suite): the literal confused-deputy scenario on both
+`Mcp-Name` and `Mcp-Method`, matching headers passing through unaffected,
+sentinel-encoded names decoding correctly, a malformed sentinel failing
+closed, an unparseable body under a present header failing closed, a
+non-object JSON body (e.g. a bare array) failing closed, a deeply-nested body
+with a routing header present still hitting the depth guard specifically (not
+the header check, and not a `RecursionError`), the integer-conversion
+`ValueError` failing closed rather than 500ing, a repeated routing header
+being rejected (both header names, parametrized), a `resources/read`-shaped
+body matching correctly against `params.uri`, the mirror mismatch case, and a
+body carrying both `params.name` and `params.uri` being rejected as
+ambiguous. Every enforcement point — the original set plus all four
+post-audit fixes — was mutation-verified: flipping the method/name equality
+checks, letting a JSON-parse failure return "no mismatch", letting a
+malformed sentinel fall back to raw-string comparison, reordering the header
+check ahead of the depth scan (reproduces the exact `RecursionError` item 86
+exists to prevent), narrowing the exception clause back down, dropping the
+duplicate-header check, dropping the both-fields-ambiguous check, and
+reverting the `uri`-preference logic each made a distinct, targeted test fail
+for the expected reason. One mutation survived a first, weaker version of the
+malformed-sentinel test — the header and the body's `params.name` must be set
+to the *same* still-encoded sentinel text for the test to distinguish
+"decoded and rejected" from "coincidentally never equal as raw strings" —
+corrected before landing.
+
+**Effort:** S–M. **Depends on:** 86 (shipped). **Does not depend on 128** —
+deliberately.
+
+**Known residual, recorded rather than fixed (security-invariant QG-127-3):**
+the pre-auth `json.loads` this item adds is bounded only by the existing
+`mcp_max_request_bytes` (default 4 MiB), not a smaller dedicated cap — an
+unauthenticated caller can force a full parse of up to that size per request
+by adding one small header, at roughly 4x the CPU and 10x the memory of the
+byte/depth scan alone (measured: ~0.16s CPU / ~36MB peak heap for a 3.5MB
+body). A dedicated smaller cap would reduce this, but rejecting an
+over-threshold body under a present header would also reject a legitimate
+large batch from a real, conformant 2026-07-28 gateway once item 128 lands —
+a product tradeoff between pre-auth cost and future-client compatibility, not
+a small/safe fix, and left for a maintainer decision alongside item 128.
+
+### 132. Reconcile stale shipped-status claims left behind by items 90–93 ✅ DONE
+
+**Surfaced 2026-07-30 by the `auditors` claim review of the `competitive-scan`
+pass; pre-existing drift, not caused by that pass.** Items 90, 91, 92, and 93
+all shipped, but several surfaces still described them as open or partial.
+
+**What shipped — every claim verified against the code before editing:**
+
+- `docs/business/GO_TO_MARKET.md`'s "Safe to claim now" list gained four
+  bullets for items 90 (delegated agent identity, dual-identity audit, MCP
+  OAuth resource-server conformance RFC 9728/8707/6750), 91 (tamper-evident
+  hash-chained audit ledger + per-query receipts, `AUDIT_SINK_BACKEND=jsonl_chained`),
+  92 (in-query approval, both triggers), and 93 (governed writes — deny-by-default,
+  preview/diff, gated/audited execution; reversibility/undo explicitly named
+  as removed so it's never mis-claimed). The existing "do not claim yet →
+  compliance-grade/WORM audit retention" line was left as-is (still correct —
+  item 91 is chain-integrity detection, not WORM retention).
+- The same file's HA/DR quota bullet and "secrets-manager rotation" bullet
+  were corrected from unconditional/understated framing to the accurate
+  residual: quota sharing is real only when `RedisQuotaLimiter` is configured
+  (opt-in); credential rotation *without a process restart* already works
+  (`POST /api/v1/admin/reload-config`, in-flight-safe engine disposal — item
+  13) and the real gap is the refresh being operator-pull only, not automatic
+  (item 135, still open).
+- `README.md`'s "In-query human-in-the-loop approval (phase 1)" heading
+  dropped its stale phase suffix (the body already documented both shipped
+  triggers). Its `/access/` section's stale "personal-denial history not
+  included in this first pass" paragraph was rewritten to describe the
+  shipped `GET /api/v1/help/my-recent-denials` endpoint (authentication-only,
+  no admin scope, `principal_id`-filtered, configurable lookback).
+- `TODO.md`'s own quick-scan rows for items 45 and 93 were corrected (item 45's
+  "personal denial history not started" parenthetical; item 93's
+  "`release-smoke` write round-trip open" → shipped, verified directly against
+  `scripts/release_smoke.sh`'s real insert→verify→delete→verify round-trip
+  against real Postgres in the built image).
+- Item 93's own body: a "Phase 2b–3 (not started)" planning paragraph —
+  everything it listed had since shipped or been deliberately removed — was
+  replaced with a superseded/history note; the numbered design-plan's
+  `execution/compensation.py` entry (a file deleted 2026-07-23 with the
+  write-undo feature) was marked removed so it stops sending an implementer
+  hunting for nonexistent code; a now-meaningless "upsert-undo" deferral
+  (undo itself was removed entirely, so there's no mechanism left for upserts
+  to be a special case of) was dropped, leaving `approval-binds-to-diff-hash`
+  as the sole remaining reasoned deferral.
+- A benchmark-figure sweep (the original `14/14`→`16/16` fix already landed
+  2026-07-30) found no further stale hard-coded figures outside
+  `TECHNICAL_REVIEW.md`, which is a dated point-in-time snapshot correctly
+  left unedited — it reported what was true on 2026-07-23, not a living claim.
+
+**Post-build `claim-reviewer` audit (2026-08-01)** found three further stale
+spots surfaced by, but not part of, this same reconciliation pass — all fixed
+in the same commit: README's approval section still claimed MCP elicitation
+approval as "the one remaining piece" three lines below a heading this item
+had just marked complete, when `mcp/elicitation.py` had shipped it weeks
+earlier; GO_TO_MARKET's "do not claim yet" list still said "signed
+release/SBOM distribution" in blanket form when `sales/index.html` already
+carried the precise, reconciled framing (mechanism built and CI-tested,
+no release cut through it yet) — reused verbatim; and item 56's own HA/DR body
+carried the identical stale quota phrase GO_TO_MARKET's copy had just been
+corrected away from.
+
+**Effort:** S. **Depends on:** none.
+
+### 133. The verdict endpoint — expose the decision without the execution (play P4) ✅ DONE
+
+**Surfaced 2026-07-30 by `competitive-scan`.** `MARKET_DOMINATION_ANALYSIS.md`
+§7 names P4 as one of the two leverage moves, `NORTH_STAR.md` lists it under
+"the two leverage moves", `COMPETITORS.md` tells us to build it, and
+`COMPETITOR_MCP_GATEWAYS.md`'s Decision leads with it.
+
+**Correction (2026-07-30, `auditors`): a `StructuredQuery` allow/deny verdict
+already ships — twice** (item 39's admin config-simulation path and item 31's
+"test as principal" path), both gated on admin scope and answering about a
+*target* principal. What was genuinely unscoped was a **caller-facing,
+non-admin, quota-metered** verdict about the **calling** principal — "may
+**this** caller run **this** query, right now", inverted from the existing
+admin surfaces.
+
+**Shipped.** `POST /{connection}/query/verdict` (REST) and MCP
+`run_structured_queries(mode="verdict")` add
+`StructuredQueryService.verdict()`/`.verdict_many()`, reusing the same
+`_validate_and_compile` seam `execute`/`explain` already share (non-negotiable
+#4 — one path, not a second evaluator). A denial always reports the fixed
+`reason="not-available-to-you"`; the plan (compiled SQL + touched tables) is
+omitted by default (`Policy.verdict_include_plan`); the endpoint is
+quota-metered and audited unconditionally, including a quota/concurrency
+rejection.
+
+**Anti-oracle collapse — hardened across two audit rounds, not shipped
+type-by-type.** The first cut's inner except clause caught only
+`(PolicyViolationError, QueryValidationError)`. A first `auditors` pass found
+two more distinguishable outcomes escaping it: `NotFoundError` (a join's own
+`connection` field naming a connection the caller can't see) and
+`sa.exc.NoSuchTableError` (a wholly non-existent table, which reflection
+raises directly — this one escaped as an uncaught 500, a fourth
+distinguishable outcome alongside allowed/policy-denied/schema-denied). A
+**second** `auditors` pass on that same fix then found the four-type
+allow-list was itself still reachable-but-missed (a plain `ValueError` from
+an unresolved `${ENV_VAR}` connection-string secret was a concrete,
+non-hypothetical fifth gap). The except clause is now a deliberate
+`except Exception` catch-all, not an allow-list — safe because
+`_get_policy`/`enforce_query_quota`/`concurrency_slot` all run strictly
+before this inner block, so nothing reaching it is a quota/concurrency system
+failure, only a genuine query-shape rejection.
+
+**The combined-surface leak.** `help/personal_denials.py`'s
+`/help/my-recent-denials` persisted the real `policy`/`schema`
+`error_category` for every rejected event, including `query_verdict` ones —
+so the same caller who received a collapsed `verdict()` denial could
+immediately read the real category back for their own just-submitted probe.
+`_is_own_denial` now excludes `operation="query_verdict"` events entirely
+(both from the visible list and the separate `own_denials_found` count);
+every other operation's category is still surfaced there unchanged.
+
+**Audit-trail and admission-control gaps found by the architecture/security
+re-audits.** The first cut called `enforce_query_quota` outside any
+try/except leading to `audit_query`, so a quota-throttled probe left zero
+audit trace — fixed by wrapping quota reservation, connection resolution,
+and the concurrency admission in an outer handler that audits then
+re-raises, mirroring `execute`'s outer handler (its `NotFoundError` case is
+also classified `"not_found"`, matching `execute`, instead of falling
+through to the generic `"db_error"` label). `verdict` also now passes
+`principal_subject`/`max_queue_depth`/`max_queue_depth_per_principal` to
+`concurrency_slot`, the same caps `execute` already passes — the identical
+gap was then found still open in `explain()` (pre-existing, not introduced
+by this item, but fixed in the same pass for consistency once `verdict` no
+longer had it). The plan-compile-and-success-audit block was moved inside
+the outer `try` so a `_compile_to_text` failure is still audited and
+reported as a real error, rather than 500ing silently with the quota unit
+already spent and no trace left behind.
+
+**Deliberate scope limits, recorded rather than silently assumed:**
+- `explain` is left untouched (still echoes the real validation message) —
+  tightening it was named as this item's own open question and rejected as
+  unrelated scope creep. This also means `verdict` is response-shape
+  hygiene, not a privilege boundary: the same principal that can call
+  `verdict` can call `explain`/`query` and get the real message, since
+  QueryGate has no scope today separating "may see a verdict" from "may see
+  debug detail" — recorded as a residual in `docs/THREAT_MODEL.md` QG-34
+  rather than left as an implied, uncovered guarantee.
+- `verdict` answers policy-and-schema shape only — it does not evaluate the
+  approval gate (item 92) or the cost-estimation gate, so `allowed: true`
+  does not guarantee unattended execution would proceed.
+- Quota-metering applies only when the connection's policy configures a
+  window (`max_requests_per_window`/`max_response_bytes_per_window`, both
+  off by default) — under the default policy `verdict` is unmetered, same as
+  `execute` would be; the docs no longer state this unconditionally.
+- A residual timing side-channel (schema validation does strictly more work
+  than policy validation, so response *timing* can differ even though
+  response *bodies* are byte-identical) is recorded rather than left
+  implied-closed.
+
+**Coverage.** Unit (`tests/unit/test_service.py`, ~25 verdict/explain tests
+including the fail-closed collapse, the outer-handler category fix, the
+plan-compile-audit fix, and per-connection/per-principal queue-depth caps),
+real-SQLite end-to-end (`tests/integration/test_sqlite_end_to_end.py`,
+including a three-way policy/schema/non-existent-table indistinguishability
+proof and the `verdict_include_plan=True` × denied cross-product), MCP
+transport-level (`tests/integration/test_mcp_server.py`, both the allowed and
+denied paths through the real dispatch/serialization chain), REST
+(`tests/integration/test_rest_api.py`), the malformed-input adversarial suite
+(`tests/security/test_malformed_input_fuzzing.py`, `/query/verdict` added to
+every REST boundary parametrization), the DAST AST-route exclusion
+(`scripts/run_dast.py`, `tests/unit/test_run_dast.py`), and
+`tests/unit/test_personal_denials.py` for the combined-surface exclusion.
+
+**Follow-ups filed, not built here (each recorded as its own TODO item
+rather than silently expanded into this one's scope):**
+- Item 142 — `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated
+  threats (pre-existing, surfaced while adding QG-34).
+- Item 143 — `cryptography` 49.0.0 has an unreviewed CVE, blocking
+  `make release-check`'s SBOM step (pre-existing, unrelated, surfaced while
+  running the release gate).
+- Item 144 — `verdict()` emits no query metrics, and `/metrics` is
+  unauthenticated (the latter pre-existing).
+
+**Effort:** M–L. **Depends on:** 31 and 39 (the existing verdict logic
+reused), 26 (cost estimation, for the optional plan half), 45 + 121 (denial
+vocabulary; scope-completeness).
+
+### 136. The `jsonl_chained` audit backend silently disables four shipped read surfaces ✅ DONE
+
+**Surfaced 2026-07-30 by the `auditors` architecture review while scoping item
+134; pre-existing defect, not a regression from that pass.** Four route-level
+gates admitted only the *plain* backend:
+
+- `api/help_routes.py` — `if cfg.audit_sink_backend == AuditSinkBackend.JSONL`
+  (`GET /help/my-recent-denials`)
+- `api/admin_observability_routes.py` (two sites) — `!= AuditSinkBackend.JSONL:
+  return None` (`GET /admin/observability/anomalies`, the config change-trend
+  report)
+- `api/admin_ui_routes.py` — `!= AuditSinkBackend.JSONL` inside `_audit_page`
+  (`GET /api/v1/admin/ui/audit/events`, the admin UI audit browser)
+
+**Two different bugs, and conflating them would have made one surface worse.**
+For the first three, the reader already handled the format — `admin/anomaly.py`
+and `admin/config_trends.py` both transparently unwrapped the hash-chained
+envelope — so the capability existed and was refused at the door. `_audit_page`
+was different: it had no unwrap at all. It called
+`_AUDIT_EVENT_ADAPTER.validate_python(raw)` directly on the raw line, and a
+`LedgerRecord` (`{seq, prev_hash, event, hash}`) fails that discriminated union
+and is counted as `malformed`. So a gate-only fix applied uniformly would have
+turned that surface from honestly `source="disabled"` into silently empty with
+a rising malformed count — strictly worse than before. That surface needed the
+*reader* fix as well as the gate fix.
+
+**The failure:** a deployment running `AUDIT_SINK_BACKEND=jsonl_chained` — the
+tamper-evident configuration item 91 shipped and documents as opt-in, the one a
+regulated buyer would actually enable — lost all four surfaces. Choosing the
+stronger audit posture silently cost four observability features, which is
+precisely backwards.
+
+**What shipped:**
+
+1. `core/config.py`'s `AuditSinkBackend` gained a single capability lookup,
+   `is_locally_readable()` (`{JSONL, JSONL_CHAINED}`), replacing all four
+   scattered equality/inequality checks — a future backend (item 134)
+   declares its readability once here instead of repeating the check (and the
+   bug class) at a third and fourth call site.
+2. `_audit_page` gained the same envelope unwrap the other two readers had.
+   That unwrap itself was duplicated inline in two readers
+   (`admin/anomaly.py`, `admin/config_trends.py`); rather than adding a third
+   copy, it was extracted once as `audit.ledger.unwrap_envelope()` and all
+   three readers now call it. The extraction is not a pure move: the two
+   inline copies it replaced matched on only two of `LedgerRecord`'s four
+   keys (`event` + `hash`); the shared function requires all four
+   (`seq`/`prev_hash`/`event`/`hash`), a hardening caught by the
+   post-build `security-invariant-reviewer` audit that closes a latent path
+   for a plain event body carrying its own same-named fields to be misread
+   as a chain envelope.
+3. The missing `jsonl_chained` route-helper cell was added per surface
+   (`tests/unit/test_anomaly.py`, `tests/unit/test_config_trends.py`), plus
+   full HTTP-level regression tests for all four surfaces
+   (`tests/integration/test_admin_ui.py`,
+   `tests/integration/test_personal_denials_api.py`,
+   `tests/integration/test_anomaly_api.py`,
+   `tests/integration/test_config_trends_api.py`), each writing a real
+   `make_record`-built chained ledger and asserting the surface serves it.
+4. `README.md`'s admin UI audit-browser line and the admin UI's own two
+   "disabled" empty-state hint strings (`admin_ui/app.js`) were reconciled to
+   name both backends; `.env.example` and `docs/PRODUCT_GUIDE.md` already
+   named both correctly, which was independent corroboration the code (not
+   the docs) was the defect.
+
+**Post-build `auditors` audit (2026-08-01, all four reviewers run in
+parallel — security-invariant, architecture-boundary, test-contract,
+claim).** Architecture-boundary and claim came back clean bar nits (a stale
+"Requires audit_sink_backend=jsonl" comment repeated in three `AppConfig`
+field docstrings, fixed; a pre-existing, unrelated README claim about item 45
+phase 2 being unshipped, filed under item 132 rather than fixed inline since
+it's untouched by this diff). Test-contract found two real coverage gaps,
+both closed: no full HTTP-level `jsonl_chained` test for the anomaly/
+change-trend endpoints (only the unit-level route-helper call was tested) —
+added; no negative-path test proving the admin UI audit browser's gate still
+refuses `AuditSinkBackend.NONE` even when a file that would otherwise parse
+exists at the configured path — added. Security-invariant confirmed the fix
+introduces no bypass (envelope contents still pass through the pre-existing
+`extra="forbid"` event-schema validation before reaching any response; no
+`require_scope`/`Depends(get_principal)` line touched; `/help/my-recent-
+denials`'s cross-principal filter untouched) and found two real but
+deliberately out-of-scope gaps, filed as items 137 and 138 rather than folded
+in: the four surfaces neither verify the chain nor disclose which backend
+produced a `source="jsonl"` response (item 137, needs a maintainer decision on
+disclosure vs. verification posture/cost), and the underlying per-request file
+scan is unbounded by lines read — pre-existing for the default `jsonl` backend,
+which this item's fix also made reachable under `jsonl_chained` (item 138). It
+also flagged that `unwrap_envelope` duck-typed on only two of `LedgerRecord`'s
+four keys; tightened to require all four as part of this item (see point 2
+above), with a dedicated regression test
+(`tests/unit/test_audit_ledger.py::test_unwrap_envelope_does_not_unwrap_a_partial_envelope_only_event_and_hash`)
+and mutation verification recorded below.
+
+**Mutation-verified:** reverting `is_locally_readable()` to a plain `==
+AuditSinkBackend.JSONL` check made all new/extended `jsonl_chained` tests fail
+for the expected reason across every surface, including the two full
+HTTP-level tests added post-audit; reverting `_audit_page`'s new
+`unwrap_envelope` call made its dedicated integration test fail (`total` 1 ->
+0); reverting `unwrap_envelope`'s four-key check back to two keys made the
+dedicated partial-envelope regression test fail. All three reverted cleanly
+afterward and the full suite (1865 unit, 329 integration excluding real_db,
+424 security) passed on the final tree.
+
+**Effort:** S–M. **Depends on:** 91. **Blocks:** 134 (which must not
+replicate the pattern).
+
+### 138. Audit read surfaces scan the entire persisted file on every request, unbounded by lines read ✅ DONE
+
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 136.**
+`admin/anomaly.py`'s `JsonlAuditEventSource.load_query_events` and
+`admin/config_trends.py`'s `JsonlChangeEventSource.load_change_events` both
+streamed and `json.loads`/pydantic-validated **every line** of
+`AUDIT_JSONL_PATH` on every request; `max_events_scanned` bounded only the
+retained deque, not the read itself, so there was no early exit. The admin UI
+audit browser (`_audit_page`) had the same shape. `/help/my-recent-denials`
+reaches this path with authentication only, no admin scope, and no
+rate-limit/quota middleware — by design (the response is filtered to the
+caller's own `principal_id` before return) — so the least-privileged
+authenticated caller could trigger a full-file scan on demand. Pre-existing
+for the default `AUDIT_SINK_BACKEND=jsonl` backend; item 136 only made the
+identical, already-shipped behavior reachable under `jsonl_chained` too.
+
+**What shipped:**
+
+1. A new shared primitive, `audit/file_reader.py`'s `iter_lines_reverse()`,
+   reads the audit file backward from EOF in fixed byte chunks, yielding
+   complete lines newest-physical-line-first, without loading the file into
+   memory. Because the sink only ever appends, this means the data every
+   caller actually wants — the recent window, the newest page — is examined
+   first. **Why not just cap a forward scan:** capping lines read from the
+   *start* of a large file would silently return stale or empty results,
+   since the oldest lines are read first — worse than no bound at all for
+   exactly the surfaces this item exists to protect.
+2. All three readers (`admin/anomaly.py`, `admin/config_trends.py`,
+   `api/admin_ui_routes.py`'s `_audit_page`) switched from a forward scan +
+   bounded `collections.deque` to iterating `iter_lines_reverse`, each with a
+   new hard cap on lines *read* (`AnomalyThresholds.max_lines_read`,
+   `ChangeTrendThresholds.max_lines_read`, `AppConfig.audit_page_max_lines_read`,
+   `personal_denials_max_lines_read`) — independent of how many are retained.
+   The deques were removed entirely: reading tail-first, the first N matches
+   encountered already *are* the newest N by construction. `AuditEventPage`
+   (the admin UI audit browser's response model) gained a `truncated: bool`
+   field for the same reason the other two report models already had one.
+3. **Hardened same-day by a second `security-invariant-reviewer` pass**
+   before this item shipped, catching real defects in the first cut: the
+   `max_lines_read` fields existed on the thresholds models but were never
+   threaded from `AppConfig` for two of three surfaces (an
+   `architecture-boundary-reviewer` finding) — fixed. More seriously,
+   `iter_lines_reverse` itself was algorithmically unsound for a single
+   undelimited byte run: the carry-forward buffer is fully re-copied every
+   chunk, making an unterminated "line" cost O(length²) instead of
+   O(length), and nothing bounded that length since the line-count cap only
+   increments once a line is actually yielded. Measured at the originally
+   shipped 2,000,000-line default: ~1.6 GB read and 10-40s of blocking work
+   per request on `/help/my-recent-denials` at realistic audit-line sizes —
+   a bound in the formal sense, not the practical one. Fixed with two
+   independent bounds inside `iter_lines_reverse`, both raising a typed
+   `AuditFileReadBounded` rather than stopping silently (so `truncated`
+   stays accurate rather than looking identical to reaching the start of the
+   file): `max_line_bytes` (1 MiB default) aborts an undelimited run before
+   it can grow past a fixed size; `max_total_bytes` (256 MiB default) bounds
+   total bytes read regardless of line count, closing a companion gap where
+   a file padded with enormous numbers of blank lines was never counted
+   against the line cap (blank lines are filtered before a caller's own
+   counter sees them). The `max_lines_read` defaults were also lowered from
+   2,000,000 to 200,000 (50,000 for `personal_denials_max_lines_read`,
+   defaulted tighter than the admin-scoped surfaces since it's the one
+   reachable with authentication only) — now a real backstop under the
+   byte-level bounds rather than the sole line of defense. A fourth finding
+   — a short read during in-place file truncation could splice non-adjacent
+   byte ranges into a fabricated line while still reporting
+   `truncated=False` — is closed the same way: a short `handle.read` now
+   raises `AuditFileReadBounded` instead of being silently concatenated.
+4. Test-contract and claim-review findings from the same pass: added a
+   `truncated is False` regression on `_audit_page`'s ordinary (no-cap-hit)
+   path, since none of the existing tests asserted the field's default;
+   clarified a test comment that overclaimed what it alone proved (an exact
+   `max_events_scanned` boundary test, which cannot on its own distinguish a
+   `>` vs `>=` off-by-one — that variant is covered by a sibling over-cap
+   test); corrected the PRODUCT_GUIDE Decision Log entry, which had
+   originally named only two of the three readers whose deques were removed.
+
+**Deliberately not folded into this item**, filed as follow-ups instead:
+bounding audit-line size at the *source* (the read-query AST's unbounded
+`select`/`join`/`group_by` lists, and `audit/sinks.py`'s own
+`_read_last_line` startup-path reader, which shares the pre-fix
+unbounded-growth shape) — item 139; `_audit_page`'s pagination can still
+materialize up to `cursor + limit` ≈ 1,000,100 dicts given the existing
+`cursor` ceiling — item 140; converting the line-count cap into a
+practically-tight, window-based early exit — a real further tightening, but
+one that trades a small, bounded ordering-tolerance assumption for speed,
+which needs a maintainer decision rather than being built under review
+pressure — item 141.
+
+**Mutation-verified:** every new enforcement point was broken deliberately,
+confirmed to fail the specific test guarding it, and restored — the tail-first
+iteration direction (all three readers), each line-count cap's break
+condition (all three readers), `iter_lines_reverse`'s carry-forward logic,
+its `max_line_bytes`/`max_total_bytes`/short-read guards, and each reader's
+`AuditFileReadBounded` exception handling. Full suite (1898 unit, 333
+integration excluding real_db, 424 security) passed on the final tree.
+
+**Effort:** S–M (grew to M with the algorithmic hardening). **Depends on:**
+none (touches the already-shipped `jsonl` path, item 91 for the
+`jsonl_chained` share of it).
+
+### 142. `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats ✅ DONE
+
+**Surfaced 2026-08-01/02 by the `claim-reviewer`/`security-invariant-reviewer`
+audit of item 133; pre-existing, not introduced by that item.** `QG-32`
+labeled both the audit-ledger tamper-evidence threat (item 91) and the
+approval-token forgery threat (item 92) — `docs/THREAT_MODEL.md` had 35
+distinct threat rows across only 34 unique `QG-` IDs. `TECHNICAL_REVIEW.md`
+(a dated, point-in-time snapshot document, deliberately left unchanged) had
+already flagged a related "QG-31-vs-QG-32" stale-count inconsistency from an
+earlier pass, so this duplicate had survived at least one prior review.
+
+**Shipped.** Renamed the item-92 approval-token-forgery row's ID from
+`QG-32` to `QG-35` (the next unused ID), keeping the item-91 audit-ledger
+row's ID stable at `QG-32` so every existing correct reference to it (a
+second `docs/THREAT_MODEL.md` cross-reference and `docs/TODO_ARCHIVE.md`'s
+own item-91 write-up) stayed correct without further edits.
+`docs/SECURITY_POSTURE.md`'s summary line was simplified from item 133's
+transitional "35 threats across IDs QG-01…QG-34 (QG-32 is used for two
+unrelated threats...)" wording to the clean final form: "enumerates 35
+threats (QG-01…QG-35)". `docs/THREAT_MODEL.md`'s own "Last reviewed" date was
+bumped for the content edit.
+
+**Verified via `claim-reviewer`** (the only applicable reviewer for a
+doc-only ID rename — no code, test, or UI surface changed): row/ID counts
+independently re-derived as exactly 35/35 with no gap or duplicate; both the
+renamed and kept-stable rows confirmed intact (correct column count, no
+truncation from the ID-only edit); every one of the five "should stay
+untouched" references (the ledger cross-reference in THREAT_MODEL.md itself,
+the item-91 archive write-up, TECHNICAL_REVIEW.md's point-in-time snapshot,
+a historical already-completed ROADMAP.md entry, and the absence of any test
+referencing either ID) independently re-verified correct; a broader
+`QG-3[0-9]` sweep across README/PRODUCT_GUIDE/business docs found no missed
+reference. No blocking findings.
+
+**Effort:** XS. **Depends on:** none.
+
+### 143. `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step ✅ DONE
+
+**Surfaced 2026-08-02 while running the release gate for item 133; unrelated
+to that item — no dependency file was touched.** `make sbom`'s vulnerability
+audit failed closed on `cryptography 49.0.0`:
+`PYSEC-2026-3552`/`GHSA-g6cj-pr64-35w5`/`CVE-2026-69247`, a Bleichenbacher
+padding-oracle in `pkcs7_decrypt_der`/`pkcs7_decrypt_pem`/`pkcs7_decrypt_smime`
+(introduced in `cryptography` 44.0.0, fixed in 50.0.0). A quick check had
+found QueryGate's own code never calls any `pkcs7_decrypt_*` function,
+making a justified-allowlist entry look plausible, but the `dep-audit` skill's
+own priority order puts a real upgrade first.
+
+**Shipped.** `pyproject.toml`'s existing constraint (`cryptography >=44.0.1`)
+already permitted the fix — `poetry update cryptography` resolved cleanly to
+50.0.0 with zero other dependency changes, no lockfile drift
+(`poetry check` clean), and the full test suite (2708 tests) passed unchanged
+against the new version. `poetry run python scripts/generate_sbom.py`
+confirms zero unreviewed vulnerabilities (0 allowlisted — no allowlist entry
+was needed, since a real fix existed). `make release-check` now passes
+completely clean end to end, including the SBOM/dep-audit step that had been
+failing since item 133 surfaced this.
+
+**Effort:** XS–S (turned out to be XS — a clean upgrade was available, no
+allowlist judgment call needed). **Depends on:** none.

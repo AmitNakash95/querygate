@@ -280,7 +280,79 @@ def test_jsonl_source_bounds_and_reports_truncation(tmp_path):
     _write_jsonl(path, _spread(10, start=_NOW - timedelta(seconds=1800), span_seconds=1800))
     source = JsonlAuditEventSource(str(path))
     loaded, _, truncated = source.load_query_events(now=_NOW, thresholds=th)
-    assert len(loaded) == 3  # deque maxlen
+    assert len(loaded) == 3  # newest 3, found tail-first
+    assert truncated is True
+
+
+def test_jsonl_source_at_exact_cap_is_not_truncated(tmp_path):
+    # matched == max_events_scanned exactly: every in-window event fit, so
+    # nothing was actually dropped and truncated must be False, not True.
+    # Proves the cap check runs BEFORE appending (not after) — the file is
+    # exhausted right after the Nth match, so this alone can't distinguish a
+    # `>` vs `>=` comparison at the cap boundary; that variant is covered by
+    # the over-cap scenario in test_jsonl_source_bounds_and_reports_truncation.
+    th = _thresholds(max_events_scanned=10)
+    path = tmp_path / "audit.jsonl"
+    _write_jsonl(path, _spread(10, start=_NOW - timedelta(seconds=1800), span_seconds=1800))
+    source = JsonlAuditEventSource(str(path))
+    loaded, _, truncated = source.load_query_events(now=_NOW, thresholds=th)
+    assert len(loaded) == 10
+    assert truncated is False
+
+
+def test_jsonl_source_finds_recent_window_past_a_huge_prefix_of_old_lines(tmp_path):
+    # TODO.md item 138: a bound on lines read must never be able to miss the
+    # recent window just because a large volume of OLD data precedes it in
+    # the file — that would be worse than no bound at all (a busy, long-lived
+    # deployment's anomaly signal would silently go blind at the exact moment
+    # it matters most). Reading tail-first (audit.file_reader.iter_lines_reverse)
+    # means old data physically ahead of the window is never even touched.
+    th = _thresholds(max_events_scanned=10, max_lines_read=50)
+    path = tmp_path / "audit.jsonl"
+    ancient = _spread(10_000, start=_NOW - timedelta(days=365), span_seconds=3600)
+    recent = _spread(4, start=_NOW - timedelta(seconds=1800), span_seconds=1800)
+    _write_jsonl(path, ancient + recent)
+    source = JsonlAuditEventSource(str(path))
+    loaded, _, truncated = source.load_query_events(now=_NOW, thresholds=th)
+    # The whole point of reading tail-first: even with a line cap far smaller
+    # than the file (50 vs 10,004 total lines), the 4 real in-window events —
+    # physically the newest lines — are found completely. A forward-and-cap
+    # scan from the start of the file would have found none of them.
+    assert len(loaded) == 4
+    # `truncated` still reports True here: hitting the line cap can't tell
+    # "no more matches exist beyond this point" from "there might be more
+    # past the ancient prefix" without reading the whole file, so it reports
+    # conservatively rather than falsely claiming completeness.
+    assert truncated is True
+
+
+def test_jsonl_source_bounds_lines_read_not_just_events_retained(tmp_path):
+    # A file dominated by non-matching lines (here: events far outside the
+    # window) must still be bounded by max_lines_read, not scanned in full —
+    # this is the literal gap item 138 closes: max_events_scanned alone only
+    # bounded what was *retained*, never what was *read*.
+    th = _thresholds(max_events_scanned=1000, max_lines_read=25)
+    path = tmp_path / "audit.jsonl"
+    noise = _spread(10_000, start=_NOW - timedelta(days=30), span_seconds=3600)
+    _write_jsonl(path, noise)
+    source = JsonlAuditEventSource(str(path))
+    loaded, _, truncated = source.load_query_events(now=_NOW, thresholds=th)
+    assert len(loaded) == 0  # none of the noise is in-window
+    assert truncated is True  # stopped at the line cap, not because it finished
+
+
+def test_jsonl_source_reports_truncated_when_the_underlying_reader_bails(tmp_path):
+    # audit.file_reader.iter_lines_reverse raises AuditFileReadBounded on an
+    # internal safety bound (an oversized undelimited line, here) rather than
+    # silently stopping — this reader must catch it and report truncated=True,
+    # not let it propagate as an unhandled exception or, worse, look identical
+    # to naturally exhausting the file.
+    th = _thresholds()
+    path = tmp_path / "audit.jsonl"
+    path.write_bytes(b"x" * 2_000_000)  # one giant line, no newline anywhere
+    source = JsonlAuditEventSource(str(path))
+    loaded, malformed, truncated = source.load_query_events(now=_NOW, thresholds=th)
+    assert loaded == []
     assert truncated is True
 
 
@@ -476,6 +548,7 @@ def test_route_helpers_map_config_to_thresholds_and_source(tmp_path):
         anomaly_min_baseline_events=7,
         anomaly_volume_spike_ratio=4.5,
         anomaly_max_principals_reported=33,
+        anomaly_max_lines_read=77,
     )
     th = _anomaly_thresholds(cfg)
     assert th.recent_window_seconds == 1200.0
@@ -483,10 +556,26 @@ def test_route_helpers_map_config_to_thresholds_and_source(tmp_path):
     assert th.min_baseline_events == 7
     assert th.volume_spike_ratio == 4.5
     assert th.max_principals_reported == 33
+    # TODO.md item 138 (security-review follow-up): max_lines_read must be
+    # independently operator-configurable, not silently stuck at the
+    # pydantic-model class default.
+    assert th.max_lines_read == 77
 
     source = _anomaly_source(cfg)
     assert isinstance(source, JsonlAuditEventSource)
     assert str(source.path) == audit_path
+
+    # The tamper-evident backend shares the same on-disk format (item 91's
+    # envelope is transparently unwrapped by the reader) and must be equally
+    # readable here (item 136 — was silently gated out before the fix).
+    cfg_chained = AppConfig(
+        environment="localhost",
+        audit_sink_backend="jsonl_chained",
+        audit_jsonl_path=audit_path,
+    )
+    source_chained = _anomaly_source(cfg_chained)
+    assert isinstance(source_chained, JsonlAuditEventSource)
+    assert str(source_chained.path) == audit_path
 
     # No persisted sink → no source (endpoint reports "disabled").
     cfg_none = AppConfig(environment="localhost", audit_sink_backend="none")

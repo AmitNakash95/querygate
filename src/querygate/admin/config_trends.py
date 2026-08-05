@@ -26,9 +26,12 @@ already browsable through item 31's admin audit viewer — this module carries
 no version content, proposal text, or raw YAML beyond what those event
 schemas (themselves redaction-safe by construction) already hold.
 
-**Bounded by construction.** The file is streamed once into a bounded deque,
-so a long-running deployment's entire audit history can never make one
-request allocate unbounded memory; `truncated` flags when that cap was hit.
+**Bounded by construction.** The reader (`audit.file_reader.iter_lines_reverse`,
+TODO.md item 138) reads the file tail-first and stops once either the
+retained-event cap or a hard lines-read cap is hit, so a long-running
+deployment's entire audit history can never make one request allocate
+unbounded memory or do unbounded work; `truncated` flags when either cap was
+hit.
 
 Deliberately still deferred (item 44's remaining phase-2 scope, unchanged by
 this slice): time-window trend *charts* over stored history, and querying an
@@ -40,14 +43,15 @@ audit JSONL file already is durable history.
 from __future__ import annotations
 
 import json
-from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Deque, Dict, List, Literal, Optional, Protocol, Tuple, Union
+from typing import Dict, List, Literal, Optional, Protocol, Tuple, Union
 
 import pydantic as pyd
 
 from querygate.audit.events import CatalogGovernanceEvent, ConfigChangeEvent
+from querygate.audit.file_reader import AuditFileReadBounded, iter_lines_reverse
+from querygate.audit.ledger import unwrap_envelope
 
 ChangeEvent = Union[ConfigChangeEvent, CatalogGovernanceEvent]
 
@@ -68,6 +72,10 @@ class ChangeTrendThresholds(pyd.BaseModel):
     recent_window_seconds: float = pyd.Field(default=3600.0, gt=0)
     baseline_window_seconds: float = pyd.Field(default=86400.0, gt=0)
     max_events_scanned: int = pyd.Field(default=200_000, ge=1)
+    # TODO.md item 138: hard bound on total *lines read from disk*, independent
+    # of how many are retained — see `admin.anomaly.AnomalyThresholds.max_lines_read`
+    # for the full rationale (same reader shape, tail-first scan).
+    max_lines_read: int = pyd.Field(default=200_000, ge=1)
 
     model_config = pyd.ConfigDict(extra="forbid")
 
@@ -213,15 +221,17 @@ class ChangeEventSource(Protocol):
     def load_change_events(
         self, *, now: datetime, thresholds: ChangeTrendThresholds
     ) -> Tuple[List[ChangeEvent], int, bool]:
-        """Return (events, malformed_line_count, truncated). `truncated` is
-        True when more in-window events existed than `max_events_scanned`."""
+        """Return (events, malformed_line_count, truncated). `truncated` is True
+        when the scan stopped early — either `max_events_scanned` in-window
+        events were already found, or `max_lines_read` lines were read —
+        before it could be sure no more recent-window events remained."""
         ...
 
 
 class JsonlChangeEventSource:
     """Reads `config.governance`/`catalog.governance` events from the JSONL
-    audit sink's file. Same bounded-deque + chain-envelope-unwrap shape as
-    `admin.anomaly.JsonlAuditEventSource`."""
+    audit sink's file. Same tail-first-scan + chain-envelope-unwrap shape as
+    `admin.anomaly.JsonlAuditEventSource` (TODO.md item 138)."""
 
     def __init__(self, path: str) -> None:
         self.path = Path(path)
@@ -232,30 +242,27 @@ class JsonlChangeEventSource:
         window_start = now - timedelta(
             seconds=thresholds.recent_window_seconds + thresholds.baseline_window_seconds
         )
-        kept: Deque[ChangeEvent] = deque(maxlen=thresholds.max_events_scanned)
-        matched = 0
+        kept: List[ChangeEvent] = []
         malformed = 0
+        lines_read = 0
+        stopped_early = False
         if not self.path.exists():
             return [], 0, False
-        with self.path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
+        try:
+            for line in iter_lines_reverse(self.path):
+                if len(kept) >= thresholds.max_events_scanned:
+                    stopped_early = True
+                    break
+                if lines_read >= thresholds.max_lines_read:
+                    stopped_early = True
+                    break
+                lines_read += 1
                 try:
                     raw = json.loads(line)
                 except json.JSONDecodeError:
                     malformed += 1
                     continue
-                # Transparently unwrap a hash-chained ledger envelope (item 91),
-                # same as admin.anomaly.JsonlAuditEventSource.
-                if (
-                    isinstance(raw, dict)
-                    and "event" in raw
-                    and "hash" in raw
-                    and isinstance(raw["event"], dict)
-                ):
-                    raw = raw["event"]
+                raw = unwrap_envelope(raw)
                 if not isinstance(raw, dict):
                     continue
                 event_type = raw.get("event_type")
@@ -275,10 +282,10 @@ class JsonlChangeEventSource:
                     occurred = occurred.replace(tzinfo=timezone.utc)
                 if occurred <= window_start or occurred > now:
                     continue
-                matched += 1
                 kept.append(event)
-        truncated = matched > thresholds.max_events_scanned
-        return list(kept), malformed, truncated
+        except AuditFileReadBounded:
+            stopped_early = True
+        return kept, malformed, stopped_early
 
 
 def build_change_trend_report(

@@ -60,7 +60,7 @@ from querygate.admin.metrics_history import (
 from querygate.admin.observability import ObservabilityOverview, build_overview
 from querygate.api._errors import require_scope
 from querygate.core.auth import Principal
-from querygate.core.config import AppConfig, AuditSinkBackend, MetricsHistoryBackend
+from querygate.core.config import AppConfig, MetricsHistoryBackend
 from querygate.core.scopes import ADMIN_OBSERVABILITY_READ_SCOPE
 
 
@@ -69,14 +69,15 @@ def _change_trend_thresholds(cfg: AppConfig) -> ChangeTrendThresholds:
         recent_window_seconds=cfg.change_trend_recent_window_seconds,
         baseline_window_seconds=cfg.change_trend_baseline_window_seconds,
         max_events_scanned=cfg.change_trend_max_events_scanned,
+        max_lines_read=cfg.change_trend_max_lines_read,
     )
 
 
 def _change_trend_source(cfg: AppConfig) -> Optional[ChangeEventSource]:
-    # Change-trend surfacing reads the durable audit stream; without the
-    # JSONL sink there is nothing persisted to read, reported honestly as
-    # source="disabled".
-    if cfg.audit_sink_backend != AuditSinkBackend.JSONL:
+    # Change-trend surfacing reads the durable audit stream; without a
+    # locally-readable audit backend there is nothing persisted to read,
+    # reported honestly as source="disabled".
+    if not cfg.audit_sink_backend.is_locally_readable():
         return None
     return JsonlChangeEventSource(cfg.audit_jsonl_path)
 
@@ -112,14 +113,16 @@ def _anomaly_thresholds(cfg: AppConfig) -> AnomalyThresholds:
         volume_spike_ratio=cfg.anomaly_volume_spike_ratio,
         rejection_rate_delta=cfg.anomaly_rejection_rate_delta,
         max_events_scanned=cfg.anomaly_max_events_scanned,
+        max_lines_read=cfg.anomaly_max_lines_read,
         max_principals_reported=cfg.anomaly_max_principals_reported,
     )
 
 
 def _anomaly_source(cfg: AppConfig) -> Optional[AuditEventSource]:
-    # Anomaly surfacing reads the durable audit stream; without the JSONL sink
-    # there is nothing persisted to read, reported honestly as source="disabled".
-    if cfg.audit_sink_backend != AuditSinkBackend.JSONL:
+    # Anomaly surfacing reads the durable audit stream; without a
+    # locally-readable audit backend there is nothing persisted to read,
+    # reported honestly as source="disabled".
+    if not cfg.audit_sink_backend.is_locally_readable():
         return None
     return JsonlAuditEventSource(cfg.audit_jsonl_path)
 
