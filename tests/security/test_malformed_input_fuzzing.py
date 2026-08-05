@@ -239,6 +239,15 @@ def _patched_service() -> tuple:
     return execute, explain, execute_many, explain_many
 
 
+def _patched_service_with_verdict() -> tuple:
+    """Like `_patched_service`, plus `verdict` (item 133) — used by the REST
+    boundary tests below, which parametrize over `query/verdict` too since it
+    accepts the same `StructuredQuery` body as `query`/`query/explain`."""
+    execute, explain, execute_many, explain_many = _patched_service()
+    verdict = patch(f"{_SERVICE}.verdict", new_callable=AsyncMock)
+    return execute, explain, execute_many, explain_many, verdict
+
+
 # ---------------------------------------------------------------------------
 # REST boundary
 # ---------------------------------------------------------------------------
@@ -246,12 +255,18 @@ def _patched_service() -> tuple:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case_id", list(_MALFORMED_QUERIES))
-@pytest.mark.parametrize("path", ["query", "query/explain", "query/approve"])
+@pytest.mark.parametrize("path", ["query", "query/explain", "query/approve", "query/verdict"])
 async def test_rest_malformed_query_rejected_cleanly(case_id: str, path: str):
     payload = _MALFORMED_QUERIES[case_id]
     app = create_app(_settings())
-    execute, explain, execute_many, explain_many = _patched_service()
-    with execute as m_execute, explain as m_explain, execute_many, explain_many:
+    execute, explain, execute_many, explain_many, verdict = _patched_service_with_verdict()
+    with (
+        execute as m_execute,
+        explain as m_explain,
+        execute_many,
+        explain_many,
+        verdict as m_verdict,
+    ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
             resp = await client.post(f"/api/v1/demo/{path}", json=payload)
 
@@ -260,6 +275,7 @@ async def test_rest_malformed_query_rejected_cleanly(case_id: str, path: str):
     # Rejected at validation — execution never happened.
     m_execute.assert_not_awaited()
     m_explain.assert_not_awaited()
+    m_verdict.assert_not_awaited()
     # Parseable JSON body, no server-internal leak.
     resp.json()
     _assert_no_internal_leak(resp.text)
@@ -307,12 +323,20 @@ async def test_rest_malformed_batch_envelope_rejected_cleanly(payload: object):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case_id", list(_RAW_MALFORMED_BODIES))
-@pytest.mark.parametrize("path", ["query", "query/explain", "query/batch", "query/approve"])
+@pytest.mark.parametrize(
+    "path", ["query", "query/explain", "query/batch", "query/approve", "query/verdict"]
+)
 async def test_rest_raw_malformed_body_rejected_cleanly(case_id: str, path: str):
     body = _RAW_MALFORMED_BODIES[case_id]
     app = create_app(_settings())
-    execute, explain, execute_many, explain_many = _patched_service()
-    with execute as m_execute, explain as m_explain, execute_many as m_many, explain_many:
+    execute, explain, execute_many, explain_many, verdict = _patched_service_with_verdict()
+    with (
+        execute as m_execute,
+        explain as m_explain,
+        execute_many as m_many,
+        explain_many,
+        verdict as m_verdict,
+    ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
             resp = await client.post(
                 f"/api/v1/demo/{path}",
@@ -326,31 +350,39 @@ async def test_rest_raw_malformed_body_rejected_cleanly(case_id: str, path: str)
     m_execute.assert_not_awaited()
     m_explain.assert_not_awaited()
     m_many.assert_not_awaited()
+    m_verdict.assert_not_awaited()
     _assert_no_internal_leak(resp.text)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field", _RAW_SQL_SMUGGLE_FIELDS)
-@pytest.mark.parametrize("path", ["query", "query/explain", "query/approve"])
+@pytest.mark.parametrize("path", ["query", "query/explain", "query/approve", "query/verdict"])
 async def test_rest_raw_sql_field_is_rejected_not_ignored(field: str, path: str):
     """QG-01: there is no raw-SQL field. A smuggled `sql`/`query`/... field is
     rejected as an unpermitted extra field, never silently dropped, and never
     reaches execution."""
     app = create_app(_settings())
-    execute, explain, execute_many, explain_many = _patched_service()
-    with execute as m_execute, explain as m_explain, execute_many, explain_many:
+    execute, explain, execute_many, explain_many, verdict = _patched_service_with_verdict()
+    with (
+        execute as m_execute,
+        explain as m_explain,
+        execute_many,
+        explain_many,
+        verdict as m_verdict,
+    ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
             resp = await client.post(f"/api/v1/demo/{path}", json=_query_with_extra_field(field))
 
     assert resp.status_code == 422
     m_execute.assert_not_awaited()
     m_explain.assert_not_awaited()
+    m_verdict.assert_not_awaited()
     _assert_no_internal_leak(resp.text)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
-@pytest.mark.parametrize("path", ["query", "query/explain", "query/batch"])
+@pytest.mark.parametrize("path", ["query", "query/explain", "query/batch", "query/verdict"])
 async def test_rest_non_finite_number_is_a_clean_422_not_a_500(literal: str, path: str):
     """Regression for TODO.md item 36 phase 2a: `NaN`/`Infinity` (accepted by
     Python's json parser, not valid JSON) in a numeric field used to make the
@@ -361,8 +393,14 @@ async def test_rest_non_finite_number_is_a_clean_422_not_a_500(literal: str, pat
     inner = f'{{"from":"customers","select":["customers.id"],"limit":{literal}}}'
     body = f'{{"queries":[{inner}]}}' if path == "query/batch" else inner
     app = create_app(_settings())
-    execute, explain, execute_many, explain_many = _patched_service()
-    with execute as m_execute, explain as m_explain, execute_many as m_many, explain_many:
+    execute, explain, execute_many, explain_many, verdict = _patched_service_with_verdict()
+    with (
+        execute as m_execute,
+        explain as m_explain,
+        execute_many as m_many,
+        explain_many,
+        verdict as m_verdict,
+    ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
             resp = await client.post(
                 f"/api/v1/demo/{path}",
@@ -374,6 +412,7 @@ async def test_rest_non_finite_number_is_a_clean_422_not_a_500(literal: str, pat
     m_execute.assert_not_awaited()
     m_explain.assert_not_awaited()
     m_many.assert_not_awaited()
+    m_verdict.assert_not_awaited()
     resp.json()  # body encodes cleanly
     _assert_no_internal_leak(resp.text)
 

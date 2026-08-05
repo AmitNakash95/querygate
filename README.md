@@ -414,6 +414,63 @@ has silently stopped evaluating queries on that connection.
 `querygate_cost_estimation_attempts_total{connection}` is the matching
 denominator for computing a fail-open rate.
 
+### Caller-facing verdict — would this be allowed?
+
+`POST .../query/verdict` (REST) and `run_structured_queries(mode="verdict")`
+(MCP) answer one question — *"would this `StructuredQuery` be allowed for me,
+right now?"* — without executing it and without the debug-level detail
+`mode="explain"` gives. It's built for a low-trust caller that needs a yes/no,
+not a schema tour: an MCP gateway deciding whether to forward a request, a
+proxy, or a CI check validating a query before it ships (TODO.md item 133).
+
+```bash
+curl -X POST $HOST/api/v1/demo/query/verdict \
+  -H "Authorization: Bearer $KEY" \
+  -d '{"from": "customers", "select": ["customers.id"], "limit": 10}'
+# {"allowed": true, "reason": null, "message": null, "plan": null}
+```
+
+A denial always reports the same generic `reason: "not-available-to-you"` —
+it never distinguishes "on your policy's deny list" from "doesn't exist in
+the schema" from "references a join connection you can't see". Policy is
+checked before schema on every request, so returning either failure's real
+message (or even just which one fired) would let a caller enumerate
+identifiers and reconstruct both the schema and the policy boundary one query
+at a time, the same discovery-oracle class `docs/THREAT_MODEL.md` QG-19/QG-24
+already close on the admin simulation and "my access" surfaces.
+`mode="explain"` is deliberately left as-is (it still echoes the real
+validation message) — it's a debugging tool for a caller who already has
+identifier-level access, a different posture than this endpoint's "may I"
+question. The response *bodies* are identical across every denial cause;
+response *timing* is not — schema validation does strictly more work than
+policy validation, so a sophisticated caller could in principle time the
+difference. Closing that would need a constant-time response floor, which
+this endpoint doesn't implement.
+
+A verdict answers policy-and-schema shape only, up through the same
+`_validate_and_compile` seam `execute`/`explain` share — it does not evaluate
+the approval gate (item 92) or the cost-estimation gate. A query reported
+`allowed: true` can still be paused for human approval, or refused by a
+cost-estimate cap, when actually executed.
+
+The compiled plan (SQL + touched tables) is omitted by default for the same
+reason — set `verdict_include_plan: true` on a connection's policy to opt in:
+
+```yaml
+policy:
+  verdict_include_plan: true   # off by default — the plan itself is a discovery channel
+```
+
+Unlike `explain` (deliberately free — a pure, always-cheap compile preview),
+a verdict call still reflects the schema (a cold-cache reflection is a real DB
+round trip) and is audited unconditionally — never silently skipped, the same
+posture `execute` takes (the audit event just omits execution-only fields
+like row/byte counts, since no rows are ever returned). It also consumes one
+unit of the caller's query quota **when the connection's policy configures
+one** (`max_requests_per_window`/`max_response_bytes_per_window`, both off by
+default, same as every other read) — under the default policy it is not
+metered, the same as `execute` would be.
+
 ### In-query human-in-the-loop approval
 
 Some reads shouldn't run unattended just because they pass policy — a query

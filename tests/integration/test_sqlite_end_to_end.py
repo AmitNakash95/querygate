@@ -127,6 +127,112 @@ async def test_policy_denies_table_end_to_end(sqlite_app):
 
 
 @pytest.mark.asyncio
+async def test_query_verdict_allowed_end_to_end(sqlite_app):
+    """Real reflection + real policy check, no execution: a real allowed
+    query against the real seeded schema comes back allowed, with no rows
+    or plan (Policy.verdict_include_plan defaults to False)."""
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/demo/query/verdict",
+            json={"from": "orders", "select": ["orders.id", "orders.status"], "limit": 5},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"allowed": True, "reason": None, "message": None, "plan": None}
+
+
+@pytest.mark.asyncio
+async def test_query_verdict_denied_by_policy_and_by_schema_are_indistinguishable_end_to_end(
+    sqlite_app,
+):
+    """The anti-oracle guarantee (THREAT_MODEL QG-19/QG-24's class), proven
+    end-to-end against the real reflected schema: a table denied by policy
+    and a column that genuinely doesn't exist produce the exact same
+    response — a caller cannot use this endpoint to tell "on my deny list"
+    apart from "doesn't exist"."""
+    from querygate.policy.loader import PolicyStore, set_policy_store
+    from querygate.policy.models import Policy
+
+    set_policy_store(PolicyStore(default=Policy(denied_tables=["order_items"]), overrides={}))
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        policy_denied = await client.post(
+            "/api/v1/demo/query/verdict",
+            json={"from": "order_items", "select": ["order_items.id"]},
+        )
+        schema_denied = await client.post(
+            "/api/v1/demo/query/verdict",
+            json={"from": "orders", "select": ["orders.nonexistent_column"]},
+        )
+        # A wholly non-existent TABLE (as opposed to a missing column) is a
+        # third, distinct code path: reflection raises `sa.exc.NoSuchTableError`
+        # directly rather than `QueryValidationError` — a real gap caught in
+        # item 133's audit, since that exception type used to escape verdict()'s
+        # narrower except clause as an uncaught 500, giving a caller a fourth
+        # (existence) oracle alongside allowed/policy-denied/schema-denied.
+        table_denied = await client.post(
+            "/api/v1/demo/query/verdict",
+            json={"from": "no_such_table", "select": ["no_such_table.id"]},
+        )
+
+    assert policy_denied.status_code == 200
+    assert schema_denied.status_code == 200
+    assert table_denied.status_code == 200
+    assert policy_denied.json() == schema_denied.json() == table_denied.json()
+    assert policy_denied.json()["allowed"] is False
+    assert policy_denied.json()["reason"] == "not-available-to-you"
+    assert "order_items" not in policy_denied.json()["message"]
+    assert "nonexistent_column" not in schema_denied.json()["message"]
+    assert "no_such_table" not in table_denied.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_query_verdict_plan_included_only_when_policy_opts_in_end_to_end(sqlite_app):
+    from querygate.policy.loader import PolicyStore, set_policy_store
+    from querygate.policy.models import Policy
+
+    set_policy_store(PolicyStore(default=Policy(verdict_include_plan=True), overrides={}))
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/demo/query/verdict",
+            json={"from": "orders", "select": ["orders.id"], "limit": 5},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allowed"] is True
+    assert body["plan"] is not None
+    assert "orders" in body["plan"]["sql"]
+    assert body["plan"]["tables"] == ["orders"]
+
+
+@pytest.mark.asyncio
+async def test_query_verdict_plan_never_included_on_a_denial_even_when_opted_in_end_to_end(
+    sqlite_app,
+):
+    """The plan-gating check every other verdict test leaves untested: an
+    operator who opts into `verdict_include_plan` still never sees a plan on
+    a DENIED response — the plan block sits strictly after the early-return
+    denial path, and this is the one test that pins the cross-product rather
+    than exercising each flag/outcome combination in isolation."""
+    from querygate.policy.loader import PolicyStore, set_policy_store
+    from querygate.policy.models import Policy
+
+    set_policy_store(
+        PolicyStore(
+            default=Policy(verdict_include_plan=True, denied_tables=["order_items"]), overrides={}
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=sqlite_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/demo/query/verdict",
+            json={"from": "order_items", "select": ["order_items.id"]},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allowed"] is False
+    assert body["plan"] is None
+
+
+@pytest.mark.asyncio
 async def test_limit_is_clamped_end_to_end(sqlite_app):
     from querygate.policy.loader import PolicyStore, set_policy_store
     from querygate.policy.models import Policy

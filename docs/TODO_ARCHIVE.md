@@ -8561,6 +8561,123 @@ corrected away from.
 
 **Effort:** S. **Depends on:** none.
 
+### 133. The verdict endpoint — expose the decision without the execution (play P4) ✅ DONE
+
+**Surfaced 2026-07-30 by `competitive-scan`.** `MARKET_DOMINATION_ANALYSIS.md`
+§7 names P4 as one of the two leverage moves, `NORTH_STAR.md` lists it under
+"the two leverage moves", `COMPETITORS.md` tells us to build it, and
+`COMPETITOR_MCP_GATEWAYS.md`'s Decision leads with it.
+
+**Correction (2026-07-30, `auditors`): a `StructuredQuery` allow/deny verdict
+already ships — twice** (item 39's admin config-simulation path and item 31's
+"test as principal" path), both gated on admin scope and answering about a
+*target* principal. What was genuinely unscoped was a **caller-facing,
+non-admin, quota-metered** verdict about the **calling** principal — "may
+**this** caller run **this** query, right now", inverted from the existing
+admin surfaces.
+
+**Shipped.** `POST /{connection}/query/verdict` (REST) and MCP
+`run_structured_queries(mode="verdict")` add
+`StructuredQueryService.verdict()`/`.verdict_many()`, reusing the same
+`_validate_and_compile` seam `execute`/`explain` already share (non-negotiable
+#4 — one path, not a second evaluator). A denial always reports the fixed
+`reason="not-available-to-you"`; the plan (compiled SQL + touched tables) is
+omitted by default (`Policy.verdict_include_plan`); the endpoint is
+quota-metered and audited unconditionally, including a quota/concurrency
+rejection.
+
+**Anti-oracle collapse — hardened across two audit rounds, not shipped
+type-by-type.** The first cut's inner except clause caught only
+`(PolicyViolationError, QueryValidationError)`. A first `auditors` pass found
+two more distinguishable outcomes escaping it: `NotFoundError` (a join's own
+`connection` field naming a connection the caller can't see) and
+`sa.exc.NoSuchTableError` (a wholly non-existent table, which reflection
+raises directly — this one escaped as an uncaught 500, a fourth
+distinguishable outcome alongside allowed/policy-denied/schema-denied). A
+**second** `auditors` pass on that same fix then found the four-type
+allow-list was itself still reachable-but-missed (a plain `ValueError` from
+an unresolved `${ENV_VAR}` connection-string secret was a concrete,
+non-hypothetical fifth gap). The except clause is now a deliberate
+`except Exception` catch-all, not an allow-list — safe because
+`_get_policy`/`enforce_query_quota`/`concurrency_slot` all run strictly
+before this inner block, so nothing reaching it is a quota/concurrency system
+failure, only a genuine query-shape rejection.
+
+**The combined-surface leak.** `help/personal_denials.py`'s
+`/help/my-recent-denials` persisted the real `policy`/`schema`
+`error_category` for every rejected event, including `query_verdict` ones —
+so the same caller who received a collapsed `verdict()` denial could
+immediately read the real category back for their own just-submitted probe.
+`_is_own_denial` now excludes `operation="query_verdict"` events entirely
+(both from the visible list and the separate `own_denials_found` count);
+every other operation's category is still surfaced there unchanged.
+
+**Audit-trail and admission-control gaps found by the architecture/security
+re-audits.** The first cut called `enforce_query_quota` outside any
+try/except leading to `audit_query`, so a quota-throttled probe left zero
+audit trace — fixed by wrapping quota reservation, connection resolution,
+and the concurrency admission in an outer handler that audits then
+re-raises, mirroring `execute`'s outer handler (its `NotFoundError` case is
+also classified `"not_found"`, matching `execute`, instead of falling
+through to the generic `"db_error"` label). `verdict` also now passes
+`principal_subject`/`max_queue_depth`/`max_queue_depth_per_principal` to
+`concurrency_slot`, the same caps `execute` already passes — the identical
+gap was then found still open in `explain()` (pre-existing, not introduced
+by this item, but fixed in the same pass for consistency once `verdict` no
+longer had it). The plan-compile-and-success-audit block was moved inside
+the outer `try` so a `_compile_to_text` failure is still audited and
+reported as a real error, rather than 500ing silently with the quota unit
+already spent and no trace left behind.
+
+**Deliberate scope limits, recorded rather than silently assumed:**
+- `explain` is left untouched (still echoes the real validation message) —
+  tightening it was named as this item's own open question and rejected as
+  unrelated scope creep. This also means `verdict` is response-shape
+  hygiene, not a privilege boundary: the same principal that can call
+  `verdict` can call `explain`/`query` and get the real message, since
+  QueryGate has no scope today separating "may see a verdict" from "may see
+  debug detail" — recorded as a residual in `docs/THREAT_MODEL.md` QG-34
+  rather than left as an implied, uncovered guarantee.
+- `verdict` answers policy-and-schema shape only — it does not evaluate the
+  approval gate (item 92) or the cost-estimation gate, so `allowed: true`
+  does not guarantee unattended execution would proceed.
+- Quota-metering applies only when the connection's policy configures a
+  window (`max_requests_per_window`/`max_response_bytes_per_window`, both
+  off by default) — under the default policy `verdict` is unmetered, same as
+  `execute` would be; the docs no longer state this unconditionally.
+- A residual timing side-channel (schema validation does strictly more work
+  than policy validation, so response *timing* can differ even though
+  response *bodies* are byte-identical) is recorded rather than left
+  implied-closed.
+
+**Coverage.** Unit (`tests/unit/test_service.py`, ~25 verdict/explain tests
+including the fail-closed collapse, the outer-handler category fix, the
+plan-compile-audit fix, and per-connection/per-principal queue-depth caps),
+real-SQLite end-to-end (`tests/integration/test_sqlite_end_to_end.py`,
+including a three-way policy/schema/non-existent-table indistinguishability
+proof and the `verdict_include_plan=True` × denied cross-product), MCP
+transport-level (`tests/integration/test_mcp_server.py`, both the allowed and
+denied paths through the real dispatch/serialization chain), REST
+(`tests/integration/test_rest_api.py`), the malformed-input adversarial suite
+(`tests/security/test_malformed_input_fuzzing.py`, `/query/verdict` added to
+every REST boundary parametrization), the DAST AST-route exclusion
+(`scripts/run_dast.py`, `tests/unit/test_run_dast.py`), and
+`tests/unit/test_personal_denials.py` for the combined-surface exclusion.
+
+**Follow-ups filed, not built here (each recorded as its own TODO item
+rather than silently expanded into this one's scope):**
+- Item 142 — `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated
+  threats (pre-existing, surfaced while adding QG-34).
+- Item 143 — `cryptography` 49.0.0 has an unreviewed CVE, blocking
+  `make release-check`'s SBOM step (pre-existing, unrelated, surfaced while
+  running the release gate).
+- Item 144 — `verdict()` emits no query metrics, and `/metrics` is
+  unauthenticated (the latter pre-existing).
+
+**Effort:** M–L. **Depends on:** 31 and 39 (the existing verdict logic
+reused), 26 (cost estimation, for the optional plan half), 45 + 121 (denial
+vocabulary; scope-completeness).
+
 ### 136. The `jsonl_chained` audit backend silently disables four shipped read surfaces ✅ DONE
 
 **Surfaced 2026-07-30 by the `auditors` architecture review while scoping item

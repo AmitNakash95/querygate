@@ -262,6 +262,62 @@ async def test_query_validation_error_is_422(app):
 
 
 @pytest.mark.asyncio
+async def test_query_verdict_allowed(app):
+    from querygate.execution.service import VerdictResult
+
+    with patch(
+        f"{_SERVICE}.verdict",
+        new_callable=AsyncMock,
+        return_value=VerdictResult(allowed=True),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                "/api/v1/demo/query/verdict",
+                json={"from": "customers", "select": ["customers.id"], "limit": 5},
+            )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allowed"] is True
+    assert body["reason"] is None
+    assert body["plan"] is None
+
+
+@pytest.mark.asyncio
+async def test_query_verdict_denied(app):
+    from querygate.execution.service import VerdictResult
+
+    with patch(
+        f"{_SERVICE}.verdict",
+        new_callable=AsyncMock,
+        return_value=VerdictResult(
+            allowed=False,
+            reason="not-available-to-you",
+            message="This query is not available to you under your effective policy.",
+        ),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                "/api/v1/demo/query/verdict",
+                json={"from": "customers", "select": ["customers.id"], "limit": 5},
+            )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allowed"] is False
+    assert body["reason"] == "not-available-to-you"
+    assert body["plan"] is None
+
+
+@pytest.mark.asyncio
+async def test_query_verdict_unknown_connection_is_404(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/nonexistent/query/verdict",
+            json={"from": "customers", "select": ["customers.id"]},
+        )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_no_raw_sql_field_accepted(app):
     async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
         resp = await client.post("/api/v1/demo/query", json={"sql": "SELECT * FROM customers"})

@@ -74,6 +74,23 @@ class BatchExplainToolResult(BaseModel):
     results: List[BatchExplainItemToolResult]
 
 
+class VerdictPlanToolResult(BaseModel):
+    sql: str
+    tables: List[str]
+
+
+class BatchVerdictItemToolResult(BaseModel):
+    allowed: Optional[bool] = None
+    reason: Optional[Literal["not-available-to-you"]] = None
+    message: Optional[str] = None
+    plan: Optional[VerdictPlanToolResult] = None
+    error: Optional[str] = None
+
+
+class BatchVerdictToolResult(BaseModel):
+    results: List[BatchVerdictItemToolResult]
+
+
 @mcp_server.tool(
     description=(
         "Run or dry-run one or more read-only StructuredQuery objects against one "
@@ -84,7 +101,12 @@ class BatchExplainToolResult(BaseModel):
         "and compiles WITHOUT executing — returns the SQL (and bind params) that would "
         "run, with no database round trip and no concurrency-limiter interaction; use it "
         "before running an expensive-looking query (wide joins, weak filters) or to debug "
-        "a validation error. Supports multi-column select, inner/left/full/cross joins "
+        "a validation error. mode='verdict' answers only 'would this be allowed', without "
+        "executing and without revealing why not (a denial always reports the same generic "
+        "reason, deliberately, so this cannot be used to enumerate a schema or policy one "
+        "query at a time) — for a gateway or CI check that needs a yes/no, not debug detail; "
+        "unlike mode='explain' this consumes quota and is audited, since it still touches the "
+        "schema. Supports multi-column select, inner/left/full/cross joins "
         "(an equality `on` pair or a general `condition` predicate tree for range joins), nested "
         "and/or filters (eq, neq, lt, lte, gt, gte, in, not_in, like, between, is_null, "
         "is_not_null), group_by, having, order_by, limit/offset, aggregate and date_bucket "
@@ -120,13 +142,18 @@ async def run_structured_queries(
         Field(min_length=1, description="One or more structured query ASTs to run, in order."),
     ],
     mode: Annotated[
-        Literal["execute", "explain"],
-        Field(description="'execute' runs queries for real; 'explain' validates/compiles only."),
+        Literal["execute", "explain", "verdict"],
+        Field(
+            description=(
+                "'execute' runs queries for real; 'explain' validates/compiles only; "
+                "'verdict' reports allowed/denied only, with a deliberately generic reason."
+            )
+        ),
     ] = "execute",
     queue_mode: Annotated[Optional[QueueMode], _QUEUE_MODE_FIELD] = None,
     wait_timeout_seconds: Annotated[Optional[float], _WAIT_TIMEOUT_FIELD] = None,
     ctx: Context = None,
-) -> Union[BatchQueryToolResult, BatchExplainToolResult, MCPErrorResult]:
+) -> Union[BatchQueryToolResult, BatchExplainToolResult, BatchVerdictToolResult, MCPErrorResult]:
     reject_unsupported_async_queue_mode(queue_mode)
     caller = get_mcp_caller()
     validate_batch_size(len(queries), get_policy(connection, principal=caller))
@@ -135,6 +162,11 @@ async def run_structured_queries(
         explain_results = await service.explain_many(queries)
         return BatchExplainToolResult(
             results=[BatchExplainItemToolResult(**r.model_dump()) for r in explain_results]
+        )
+    if mode == "verdict":
+        verdict_results = await service.verdict_many(queries)
+        return BatchVerdictToolResult(
+            results=[BatchVerdictItemToolResult(**r.model_dump()) for r in verdict_results]
         )
     # In-query human-in-the-loop approval (item 92): if a query trips the gate,
     # ask the client's human to approve it in-session via elicitation instead of

@@ -601,6 +601,436 @@ async def test_explain_does_not_open_a_db_session():
 
 
 @pytest.mark.asyncio
+async def test_explain_enforces_max_queue_depth():
+    """item 133's audit found `verdict()` didn't pass queue-depth caps to
+    `concurrency_slot` and fixed it (see test_verdict_enforces_max_queue_depth
+    below) — a follow-up security-invariant-reviewer pass on that same fix
+    then found the identical gap still standing in `explain()`, one screen
+    away: it called `concurrency_slot` with only
+    `(connection_id, max_concurrency, wait_seconds)`, omitting
+    `principal_subject`/`max_queue_depth`/`max_queue_depth_per_principal` —
+    the same admission control `execute()` and (now) `verdict()` both apply."""
+    from querygate.core.exceptions import QueueDepthExceededError
+
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    set_policy_store(PolicyStore(default=Policy(max_queue_depth=0), overrides={}))
+    service = StructuredQueryService(connection_id="demo")
+    with pytest.raises(QueueDepthExceededError):
+        await service.explain(query)
+
+
+# --- verdict (TODO.md item 133) ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verdict_allowed_reports_allowed_true_with_no_plan_by_default():
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    with patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})):
+        service = StructuredQueryService(connection_id="demo")
+        result = await service.verdict(query)
+
+    assert result.allowed is True
+    assert result.reason is None
+    assert result.plan is None  # Policy.verdict_include_plan defaults to False
+
+
+@pytest.mark.asyncio
+async def test_verdict_plan_included_only_when_policy_opts_in():
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    set_policy_store(PolicyStore(default=Policy(verdict_include_plan=True), overrides={}))
+    with patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})):
+        service = StructuredQueryService(connection_id="demo")
+        result = await service.verdict(query)
+
+    assert result.allowed is True
+    assert result.plan is not None
+    assert "customers" in result.plan.sql
+    assert result.plan.tables == ["customers"]
+
+
+@pytest.mark.asyncio
+async def test_verdict_plan_compile_failure_is_still_audited():
+    """item 133's audit found the plan-compile-and-success-audit block sitting
+    outside every try/except: if `_compile_to_text` raised (or the audit call
+    itself did), the request would 500 with the quota unit already spent and
+    no audit trail at all — a real "attempt" that left zero trace. That block
+    now lives inside the outer `try`, so a failure there is caught by the
+    outer handler (audited, then re-raised as a real error) exactly like a
+    quota/concurrency failure is, rather than silently escaping every audit
+    call."""
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    set_policy_store(PolicyStore(default=Policy(verdict_include_plan=True), overrides={}))
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "_compile_to_text", side_effect=RuntimeError("compile blew up")),
+        patch.object(svc, "audit_query") as mock_audit,
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        with pytest.raises(RuntimeError):
+            await service.verdict(query)
+
+    mock_audit.assert_called_once()
+    assert mock_audit.call_args.kwargs["rejected"] is True
+    assert mock_audit.call_args.kwargs["operation"] == "query_verdict"
+
+
+@pytest.mark.asyncio
+async def test_verdict_denied_by_policy_never_distinguishes_from_denied_by_schema():
+    """The core anti-oracle guarantee (THREAT_MODEL QG-19/QG-24's class):
+    a caller must not be able to tell "on my policy's deny list" apart from
+    "doesn't exist in the schema" by watching this endpoint's response —
+    otherwise they can enumerate identifiers and reconstruct both the
+    schema and the policy boundary one query at a time."""
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+
+    set_policy_store(PolicyStore(default=Policy(denied_tables=["customers"]), overrides={}))
+    service = StructuredQueryService(connection_id="demo")
+    policy_denied = await service.verdict(query)
+
+    with patch.object(svc, "validate_schema", AsyncMock(side_effect=QueryValidationError("boom"))):
+        set_policy_store(PolicyStore(default=Policy(), overrides={}))
+        service = StructuredQueryService(connection_id="demo")
+        schema_denied = await service.verdict(query)
+
+    assert policy_denied.allowed is False
+    assert schema_denied.allowed is False
+    assert policy_denied.reason == "not-available-to-you"
+    assert schema_denied.reason == policy_denied.reason
+    assert schema_denied.message == policy_denied.message
+    assert policy_denied.plan is None
+    assert schema_denied.plan is None
+    # And never the raw exception text, from either path.
+    assert "boom" not in (policy_denied.message or "")
+    assert "boom" not in (schema_denied.message or "")
+    assert "customers" not in (schema_denied.message or "")
+
+
+@pytest.mark.asyncio
+async def test_verdict_nonexistent_table_collapses_into_the_same_generic_denial():
+    """The highest-severity finding in item 133's audit: a wholly non-existent
+    table makes `schema/reflection.py` raise `sa.exc.NoSuchTableError`
+    directly — not `QueryValidationError`, which every other "missing thing"
+    in the schema layer raises. Before this fix that exception type escaped
+    verdict()'s except clause entirely and surfaced as an uncaught 500,
+    giving a caller a distinct, unmasked-status-code existence oracle
+    alongside the collapsed allowed/denied responses."""
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    with patch.object(
+        svc, "validate_schema", AsyncMock(side_effect=sa.exc.NoSuchTableError("no_such_table"))
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        result = await service.verdict(query)
+
+    assert result.allowed is False
+    assert result.reason == "not-available-to-you"
+    assert "no_such_table" not in (result.message or "")
+
+
+@pytest.mark.asyncio
+async def test_verdict_join_to_invisible_connection_collapses_into_the_same_generic_denial():
+    """A fourth distinguishable outcome item 133's audit found: a join's own
+    `connection` field naming a connection the caller can't see (or that
+    doesn't exist) raises `NotFoundError` from `resolve_query_table_connections`,
+    which is not a `PolicyViolationError`/`QueryValidationError` — before this
+    fix it propagated past verdict()'s except clause as a distinct 404,
+    letting a caller learn "this join target isn't reachable" as its own
+    category alongside allowed/policy-denied/schema-denied."""
+    from querygate.core.exceptions import NotFoundError
+
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    with patch.object(
+        svc, "validate_schema", AsyncMock(side_effect=NotFoundError("Unknown connection: 'other'"))
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        result = await service.verdict(query)
+
+    assert result.allowed is False
+    assert result.reason == "not-available-to-you"
+    assert "other" not in (result.message or "")
+
+
+@pytest.mark.asyncio
+async def test_verdict_collapses_any_validation_failure_not_just_the_named_types():
+    """The anti-oracle collapse must be fail-closed, not an allow-list of
+    specific exception types — item 133's audit found the collapse had
+    already missed twice (first only PolicyViolationError/QueryValidationError,
+    then NotFoundError/NoSuchTableError were added after being found missing
+    in turn). A real, non-hypothetical example a type-by-type allow-list
+    would still miss: `connections/engine.py`'s `init_engine` raises a plain
+    `ValueError` when a connection string's `${ENV_VAR}` secret didn't
+    resolve — not one of the four previously-named types. `verdict()`'s
+    inner handler now catches `Exception` broadly (safe because
+    `_get_policy`/`enforce_query_quota`/`concurrency_slot` — the only
+    quota/concurrency-failure sources — all run in the outer try, strictly
+    before this inner block), so this arbitrary failure type collapses into
+    the same generic denial too, instead of surfacing as a distinguishing
+    500."""
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    with patch.object(
+        svc,
+        "validate_schema",
+        AsyncMock(side_effect=ValueError("Connection string for 'other' is not set.")),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        result = await service.verdict(query)
+
+    assert result.allowed is False
+    assert result.reason == "not-available-to-you"
+    assert "other" not in (result.message or "")
+
+
+@pytest.mark.asyncio
+async def test_verdict_outer_handler_labels_not_found_correctly():
+    """The outer handler (quota/concurrency/primary-connection-resolution
+    failures) must classify a `NotFoundError` the same way the inner handler
+    and `execute()`'s own outer handler both do — item 133's audit found it
+    falling through `classify_rejection` (which has no NotFoundError case,
+    since NotFoundError is a bare Exception, not a ValueError) to the
+    generic "db_error" label instead. Reachable in production via MCP, whose
+    `_service()` doesn't pre-resolve connection visibility the way REST's
+    does, so `_get_policy()` inside verdict()'s outer try raises NotFoundError
+    for an unknown connection. Mislabeling this degrades the operator-facing
+    rejection-reason signal (`admin/observability.py`'s `rejections_by_reason`),
+    not caller-visible behavior, but the fix is one line and directly mirrors
+    an existing, deliberate pattern in `execute()`."""
+    from querygate.core.exceptions import NotFoundError
+
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    with (
+        patch.object(
+            StructuredQueryService,
+            "_get_policy",
+            MagicMock(side_effect=NotFoundError("Unknown connection: 'demo'")),
+        ),
+        patch.object(svc, "audit_query") as mock_audit,
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        with pytest.raises(NotFoundError):
+            await service.verdict(query)
+
+    mock_audit.assert_called_once()
+    assert mock_audit.call_args.kwargs["error_category"] == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_verdict_enforces_max_queue_depth_per_principal():
+    """The sibling gap a test-contract review found in the first queue-depth
+    regression test: `test_verdict_enforces_max_queue_depth` (below) only
+    proves the GLOBAL `max_queue_depth` kwarg is now passed through, which
+    doesn't consult `principal_subject`/`max_queue_depth_per_principal` at
+    all — a future refactor could drop those two specific kwargs from
+    verdict()'s `concurrency_slot` call while leaving `max_queue_depth`
+    intact, and that test would stay green. `max_queue_depth_per_principal=0`
+    trips on the very first entrant that carries a `principal_subject`, the
+    same zero-depth trick, so this needs no real occupied-slot orchestration
+    either."""
+    from querygate.core.exceptions import QueueDepthExceededError
+
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    set_policy_store(PolicyStore(default=Policy(max_queue_depth_per_principal=0), overrides={}))
+    principal = Principal(subject="agent-a", scopes=frozenset())
+    service = StructuredQueryService(connection_id="demo", principal=principal)
+    with pytest.raises(QueueDepthExceededError):
+        await service.verdict(query)
+
+
+@pytest.mark.asyncio
+async def test_verdict_enforces_max_queue_depth():
+    """item 133's audit found `verdict()` called `concurrency_slot` with only
+    `(connection_id, max_concurrency, wait_seconds)`, omitting
+    `principal_subject`/`max_queue_depth`/`max_queue_depth_per_principal` —
+    the same admission control `execute()` already passes (service.py's
+    `execute` call site). Without them, an unbounded number of verdict
+    callers could queue for a connection's slot with no depth cap. With
+    `max_queue_depth=0` the very first entrant is already at the configured
+    depth, so this needs no real occupied slot to prove the cap now applies."""
+    from querygate.core.exceptions import QueueDepthExceededError
+
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    set_policy_store(PolicyStore(default=Policy(max_queue_depth=0), overrides={}))
+    service = StructuredQueryService(connection_id="demo")
+    with pytest.raises(QueueDepthExceededError):
+        await service.verdict(query)
+
+
+@pytest.mark.asyncio
+async def test_verdict_consumes_one_quota_unit():
+    table = _company_table()
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    principal = Principal(subject="agent-a", scopes=frozenset())
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "enforce_query_quota", AsyncMock(return_value=None)) as mock_quota,
+    ):
+        service = StructuredQueryService(connection_id="demo", principal=principal)
+        await service.verdict(query)
+
+    mock_quota.assert_awaited_once()
+    assert mock_quota.call_args.kwargs["connection_id"] == "demo"
+    assert mock_quota.call_args.kwargs["principal_subject"] == "agent-a"
+
+
+@pytest.mark.asyncio
+async def test_verdict_quota_exceeded_propagates_before_validation():
+    """Quota exhaustion is "the endpoint itself couldn't answer right now",
+    not a verdict about the query's shape — it must raise, not be smuggled
+    into an allowed=False response."""
+    from querygate.core.exceptions import QuotaExceededError
+
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    with patch.object(
+        svc,
+        "enforce_query_quota",
+        AsyncMock(
+            side_effect=QuotaExceededError(
+                "too many requests", quota_kind="requests", retry_after_seconds=1
+            )
+        ),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        with pytest.raises(QuotaExceededError):
+            await service.verdict(query)
+
+
+@pytest.mark.asyncio
+async def test_verdict_quota_exceeded_is_still_audited():
+    """A quota rejection is a real error (see the test above), but it must
+    still leave an audit trail for operator visibility — item 133's audit
+    found the original implementation called `enforce_query_quota` entirely
+    outside any try/except that led to `audit_query`, so a quota-throttled
+    verdict probe left zero trace, unlike `execute`'s equivalent rejection."""
+    from querygate.core.exceptions import QuotaExceededError
+
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    with (
+        patch.object(
+            svc,
+            "enforce_query_quota",
+            AsyncMock(
+                side_effect=QuotaExceededError(
+                    "too many requests", quota_kind="requests", retry_after_seconds=1
+                )
+            ),
+        ),
+        patch.object(svc, "audit_query") as mock_audit,
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        with pytest.raises(QuotaExceededError):
+            await service.verdict(query)
+
+    mock_audit.assert_called_once()
+    assert mock_audit.call_args.kwargs["operation"] == "query_verdict"
+    assert mock_audit.call_args.kwargs["rejected"] is True
+    assert mock_audit.call_args.kwargs["error_category"] == "quota"
+
+
+@pytest.mark.asyncio
+async def test_verdict_emits_a_redaction_safe_audit_event():
+    table = _company_table()
+    query = StructuredQuery(
+        from_table="customers",
+        select=["customers.id"],
+        where=Predicate(col="customers.name", op="eq", value="jane@example.com"),
+        limit=5,
+    )
+    principal = Principal(subject="agent-a", scopes=frozenset())
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "audit_query") as mock_audit,
+    ):
+        service = StructuredQueryService(connection_id="demo", principal=principal)
+        await service.verdict(query)
+
+    assert mock_audit.call_args.kwargs["operation"] == "query_verdict"
+    assert mock_audit.call_args.kwargs["policy_decision"] == "allowed"
+    assert mock_audit.call_args.kwargs["principal"] == "agent-a"
+    # Redaction-safe: the predicate value never reaches the audit call.
+    blob = str(mock_audit.call_args.kwargs)
+    assert "jane@example.com" not in blob
+
+
+@pytest.mark.asyncio
+async def test_verdict_denial_emits_a_redaction_safe_rejected_audit_event():
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    set_policy_store(PolicyStore(default=Policy(denied_tables=["customers"]), overrides={}))
+    with patch.object(svc, "audit_query") as mock_audit:
+        service = StructuredQueryService(connection_id="demo")
+        result = await service.verdict(query)
+
+    assert result.allowed is False
+    assert mock_audit.call_args.kwargs["operation"] == "query_verdict"
+    assert mock_audit.call_args.kwargs["policy_decision"] == "denied"
+    assert mock_audit.call_args.kwargs["rejected"] is True
+
+
+@pytest.mark.asyncio
+async def test_verdict_many_partial_failure():
+    """Mirrors test_explain_many_partial_failure: one query's system-level
+    failure (not a shape verdict) doesn't drop the rest of the batch.
+
+    The side effect is `QuotaExceededError` — a real "couldn't answer right
+    now" system failure, per `verdict_many`'s own docstring — not
+    `QueryValidationError`. `verdict()` never lets a `QueryValidationError`
+    escape it (it's always collapsed into the generic denial internally), so
+    using it here would assert, as expected/passing behavior, that the exact
+    identifier-leaking exception the anti-oracle design exists to hide reaches
+    `verdict_many`'s `error` field verbatim — see
+    test_verdict_many_never_leaks_a_validation_error_through_the_batch_wrapper
+    below for the regression that actually pins the boundary this test used
+    to (accidentally) contradict."""
+    from querygate.core.exceptions import QuotaExceededError
+    from querygate.execution.service import VerdictResult
+
+    query_ok = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    query_bad = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    ok_result = VerdictResult(allowed=True)
+    quota_error = QuotaExceededError(
+        "too many requests", quota_kind="requests", retry_after_seconds=1
+    )
+
+    service = StructuredQueryService(connection_id="demo")
+    with patch.object(
+        service,
+        "verdict",
+        AsyncMock(side_effect=[ok_result, quota_error]),
+    ):
+        results = await service.verdict_many([query_ok, query_bad])
+
+    assert len(results) == 2
+    assert results[0].error is None
+    assert results[0].allowed is True
+    assert results[1].error == "too many requests"
+    assert results[1].allowed is None
+
+
+@pytest.mark.asyncio
+async def test_verdict_many_never_leaks_a_validation_error_through_the_batch_wrapper():
+    """Defense-in-depth regression for item 133's audit: `verdict_many`'s own
+    `except Exception as exc: ... error=public_error_message(exc)` is a
+    second place the policy-vs-schema collapse could silently break — if a
+    future refactor ever let a `QueryValidationError`/`PolicyViolationError`
+    escape `verdict()`'s internal try/except, this wrapper would put the real
+    exception text straight into a caller-visible batch item. Exercised
+    through the real `verdict()`/`verdict_many()` call chain (only
+    `validate_schema` is mocked, the one seam CLAUDE.md's testing gotchas
+    document for this purpose) rather than through a mocked `.verdict()`, so
+    it actually proves the collapse holds through the batch wrapper too."""
+    query = StructuredQuery(from_table="customers", select=["customers.id"], limit=5)
+    with patch.object(svc, "validate_schema", AsyncMock(side_effect=QueryValidationError("boom"))):
+        service = StructuredQueryService(connection_id="demo")
+        results = await service.verdict_many([query])
+
+    assert len(results) == 1
+    assert results[0].error is None
+    assert results[0].allowed is False
+    assert results[0].reason == "not-available-to-you"
+    assert "boom" not in (results[0].message or "")
+
+
+@pytest.mark.asyncio
 async def test_list_tables_includes_known_tables():
     service = StructuredQueryService(connection_id="demo")
     with patch.object(svc, "get_metadata") as mock_meta:

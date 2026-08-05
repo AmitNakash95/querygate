@@ -135,6 +135,7 @@ def test_excluded_paths_match_the_ast_accepting_operations():
         "/api/v1/{connection}/query/approve",
         "/api/v1/{connection}/query/batch",
         "/api/v1/{connection}/query/explain",
+        "/api/v1/{connection}/query/verdict",
         "/api/v1/query-templates/{template_id}/run",
         "/api/v1/{connection}/write/approve",
         "/api/v1/{connection}/write/execute",

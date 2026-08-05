@@ -533,6 +533,15 @@ class Policy(pyd.BaseModel):
     # for deployments that intentionally want full literal SQL for debugging.
     log_query_literals: bool = pyd.Field(default=False)
 
+    # The caller-facing verdict endpoint (TODO.md item 133) reports
+    # allowed/denied without executing. Off by default: even parameterized SQL
+    # and the touched-table list are data-dependent enough (table cardinality,
+    # predicate selectivity via which tables end up referenced) to be a
+    # discovery channel for a caller who could not otherwise see this
+    # connection's schema. Set true only when that plan visibility is an
+    # accepted tradeoff for this connection's callers.
+    verdict_include_plan: bool = pyd.Field(default=False)
+
     # Cross-connection joins: two connections may be joined in one query only
     # when they resolve to the same join_group (defaults to the connection's
     # own id, i.e. no cross-connection joins unless explicitly configured).
@@ -714,5 +723,9 @@ _DIRECTION_REVIEWED_GUARDRAILS = frozenset(
         # which is the point of it.)
         "approval_max_estimated_rows",
         "approval_max_estimated_cost",
+        # Revealing the compiled plan on the verdict endpoint (item 133) is the
+        # looser posture — same "log_*"/"allow_*" reasoning as the two entries
+        # above this comment: the name doesn't read as a ceiling.
+        "verdict_include_plan",
     }
 )

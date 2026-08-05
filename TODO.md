@@ -163,7 +163,7 @@ order-of-magnitude, not commitments.
 | 130 | Annotate `connection` with `x-mcp-header` for gateway-native authorization | S | 127, 128 |
 | 131 | Publish the StructuredQuery AST as a namespaced MCP extension | M | 128 |
 | 132 | ✅ Reconcile stale shipped-status claims left behind by items 90–93 | S | — |
-| 133 | Caller-facing quota-metered verdict endpoint (play P4) — reuses 31/39's decision logic | M–L | 26, 31, 39, 45, 121 |
+| 133 | ✅ Caller-facing quota-metered verdict endpoint (play P4) — reuses 31/39's decision logic | M–L | 26, 31, 39, 45, 121 |
 | 134 | Compliance-grade (WORM) audit retention + managed search | L | 91, 136 |
 | 135 | Automatic (TTL/lease-driven) credential re-resolution, without an operator reload | M | 13 |
 | 136 | ✅ `jsonl_chained` audit backend silently disables four shipped read surfaces | S–M | 91 |
@@ -172,6 +172,9 @@ order-of-magnitude, not commitments.
 | 139 | Bound audit-line size at the source (AST list caps + audit/sinks.py's own unbounded-read defect) | M | 138 |
 | 140 | `_audit_page` pagination can still materialize ~1M dicts per request | S–M | 138 |
 | 141 | Convert audit-reader line caps into practically-tight window-based early exits | S | 138 |
+| 142 | `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats | XS | — |
+| 143 | `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step | XS–S | — |
+| 144 | `verdict()` emits no query metrics, and `/metrics` is unauthenticated | S | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2170,120 +2173,14 @@ audit caught three further stale spots in the same pass.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 132).
 
-### 133. The verdict endpoint — expose the decision without the execution (play P4)
+### 133. The verdict endpoint — expose the decision without the execution (play P4) ✅ DONE
 
-**Surfaced 2026-07-30 by `competitive-scan`.** `MARKET_DOMINATION_ANALYSIS.md`
-§7 names P4 as one of the two leverage moves, `NORTH_STAR.md` lists it under
-"the two leverage moves", `COMPETITORS.md` tells us to build it, and
-`COMPETITOR_MCP_GATEWAYS.md`'s Decision leads with it. Its sibling leverage move
-(the P6 safety benchmark) is item 58 — **phase 1 shipped and published**
-(corpus, `querygate-security-benchmark` CLI, `docs/business/SECURITY_BENCHMARK.md`);
-phase 2 is externally blocked on a model provider and a GCP/Toolbox environment.
-**Do not quote the benchmark figures from memory** — the report says so itself,
-and an earlier draft of this item quoted a stale 14/14 that item 58's own body
-still carries; read `docs/business/SECURITY_BENCHMARK.md` for the current
-numbers.
+Caller-facing `POST /{connection}/query/verdict` (REST) and MCP
+`run_structured_queries(mode="verdict")` answer "would this query be
+allowed?" without executing it, hardened across two `auditors` rounds into a
+fail-closed (not type-allow-listed) anti-oracle collapse.
 
-**Correction (2026-07-30, `auditors`): a `StructuredQuery` allow/deny verdict
-already ships — twice.** An earlier draft of this item claimed the verdict had
-"never been scoped." That is false, and an implementer must not build a third
-evaluator:
-
-- **Item 39 ✅** — `POST /api/v1/admin/config/simulate`
-  (`admin/models.py`'s `CandidatePolicySimulationRequest` carries
-  `query: Optional[StructuredQuery]`) returns a typed allow/deny decision,
-  per-column allow/deny, effective guardrails, and typed reason codes against
-  *candidate* config.
-- **Item 31 ✅** — `POST /admin/ui/policy/test`, the active-policy
-  "test as principal" path.
-
-**What is genuinely unscoped** is therefore narrower and is the whole point of
-this item: a **caller-facing, non-admin, quota-metered** verdict about the
-**calling** principal. Item 39 is gated on `admin:config:read` *and*
-`admin:config:write` together and answers about a *target* principal — exactly
-inverted from what a gateway needs, which is "may **this** caller run **this**
-query, right now." Build that on the existing decision logic; do not restate it.
-
-**What it is.** An authenticated endpoint that answers *"would this
-`StructuredQuery` be allowed for me, and if not, why?"* — returning the
-decision, a safe reason, and optionally the compiled plan, **without executing
-anything**. MCP gateways, proxies, and CI checks can then call QueryGate for the
-query-semantic verdict they structurally cannot compute themselves.
-
-**Why it matters — the market moved toward this on 2026-07-30.** The final MCP
-`2026-07-28` spec makes intermediaries route and authorize on the *tool name*
-in a header, explicitly without parsing the body (items 127/130). So a gateway
-can decide *which tool*, and by the protocol's own architecture cannot decide
-*which query shape*. That is precisely the decision this endpoint sells them.
-Every gateway that adopts it becomes a front door **to** QueryGate rather than
-a competitor.
-
-**Three design constraints, in priority order:**
-
-1. **Reuse the same *evaluator*; shape the *reason* at the transport
-   boundary.** Non-negotiable #4 requires one database path and one
-   `StructuredQueryService` — it does not require one method. Add a **new
-   service method** that calls the shared `_validate_and_compile`
-   (`validate_policy` → `validate_schema` → compile). **Do NOT "extend
-   `explain`"** (an earlier draft of this item said to, wrongly):
-   `execution/service.py`'s `explain` deliberately never opens a DB session —
-   documented in its docstring and enforced by
-   `tests/unit/test_service.py::test_explain_does_not_open_a_db_session` — so
-   the optional plan half (item 26) cannot be added there without breaking a
-   shipped invariant; and `explain` today takes a concurrency slot but consumes
-   **no quota** and emits **no audit event**, both of which constraint 3
-   requires. A new method satisfies #4 fully with zero second evaluator.
-2. **A verdict endpoint is a discovery oracle unless designed against it, and
-   the shipped denial messages are already one.** The pilot criterion is
-   "denied connections, tables, and columns remain *undiscoverable*", but
-   `validation/policy_validation.py` raises `PolicyViolationError(f"Column
-   {column_ref.ref!r} is not accessible under the active policy")` and
-   `core/exceptions.py`'s `public_error_message` returns `str(exc)` **verbatim**
-   for that type. So today's `explain`/`execute` already echo the caller's
-   identifier back with a confirm/deny bit. **This item owns the decision** of
-   whether the shipped messages are tightened too — a verdict endpoint that is
-   safer than `explain` is theatre while `explain` is open to the same caller.
-   Two leak channels to close, neither of which message-redaction alone fixes:
-   - **The category channel.** `validate_policy` runs strictly before
-     `validate_schema`, so `policy` vs. `schema` distinguishes "on your deny
-     surface" from "absent from the database" for any caller-supplied
-     identifier — a per-probe oracle. Collapse them into one
-     `not-available-to-you` category on this surface. **This is new work, not a
-     copy:** `help/personal_denials.py` takes only *half* the posture
-     deliberately — it never surfaces the identifier, and it hedges the `schema`
-     explanation with "or isn't visible to you" — but its `_DENIAL_GUIDANCE` map
-     still returns `policy` and `schema` as **distinct `reason` labels**, so that
-     module is itself an instance of the channel this constraint closes. (Whether
-     `/help/my-recent-denials` should collapse them too is a question this item
-     raises; it is retrospective and rate-capped, so its exposure differs.)
-   - **The cost-estimate channel.** `estimated_rows`/`estimated_total_cost` are
-     *data-dependent*: they leak table cardinality and, with a predicate, value
-     selectivity — strictly more than the allow/deny bit. Make the plan half
-     opt-in per policy, off by default.
-   **Precedents to reuse** (an earlier draft cited 45/121 loosely; 121 is about
-   scope-completeness, not redaction): item 45's
-   `help/personal_denials.py` categorical vocabulary (category, never the
-   identifier); `catalog/retrieval.py`'s `policy_hidden_identifier_tokens` /
-   `policy_safe_catalog_text`, which is the shipped mechanism for tiering text
-   against the caller's *own resolved policy*; item 121 for the separate
-   requirement that a report over a multi-scope query be **scope-complete**
-   (every set-op arm, every nested subquery). `docs/THREAT_MODEL.md` **QG-19**
-   and **QG-24** already threat-model this exact oracle class — extend them
-   rather than inventing a second redaction policy.
-3. **Rate-limit and audit it like execution.** It is cheaper than a query, so
-   it is *more* attractive to abuse. It must consume quota
-   (`execution/quota.py`) and emit a redaction-safe audit event; a caller must
-   not be able to probe policy for free. Note `explain` is session-free but not
-   DB-free — `validate_schema` reflects on a cold cache — so do not size the
-   limit as if the operation were free.
-
-**Non-goals for this item:** it does not execute, does not return rows, does
-not accept SQL, and does not become a second enforcement point — it *reports*
-the one pipeline's decision.
-
-**Effort:** M–L. **Depends on:** 31 and 39 (the existing verdict logic to reuse),
-26 (cost estimation, for the optional plan half), 45 + 121 (denial vocabulary;
-scope-completeness).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 133).
 
 ### 134. Compliance-grade (WORM) audit retention + managed search
 
@@ -2622,4 +2519,93 @@ working agreement reserves for the maintainer, not a default an agent should
 reach for under time pressure.
 
 **Effort:** S once approved. **Depends on:** 138.
+
+### 142. `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats
+
+**Surfaced 2026-08-01/02 by the `claim-reviewer`/`security-invariant-reviewer`
+audit of item 133; pre-existing, not introduced by that item.** `QG-32` labels
+both the audit-ledger tamper-evidence threat (item 91) and the approval-token
+forgery threat (item 92) — `docs/THREAT_MODEL.md` has 35 distinct threat rows
+across only 34 unique `QG-` IDs. `TECHNICAL_REVIEW.md` already flags a related
+"QG-31-vs-QG-32" stale-count inconsistency from an earlier pass, so this
+duplicate has survived at least one prior review. `docs/SECURITY_POSTURE.md`'s
+summary line has been corrected (item 133) to state the true row/ID counts
+rather than implying a clean 1-34 sequence, but the underlying duplicate ID
+itself is unresolved.
+
+**What to do:** renumber one of the two `QG-32` rows (the numerically-later
+content chronologically, i.e. the item-92 approval-token-forgery row, to keep
+the item-91 audit-ledger row's existing ID stable) to the next unused ID
+(`QG-35`), and update every cross-reference: the row itself, any other
+doc/test that names that specific ID (grep `QG-32` and the new `QG-35` after
+the rename), and `docs/SECURITY_POSTURE.md`'s summary line back to a clean
+`35 threats (QG-01…QG-35)`. Low risk, mechanical — flagged as a separate item
+rather than folded into item 133 because renumbering a threat-model ID that
+other docs may reference is the kind of identifier-stability change CLAUDE.md
+asks to make deliberately, not as a drive-by inside an unrelated item's diff.
+
+**Effort:** XS.
+
+### 143. `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step
+
+**Surfaced 2026-08-02 while running the release gate for item 133; unrelated
+to that item — no dependency file was touched.** `make sbom`'s vulnerability
+audit now fails closed on `cryptography 49.0.0`:
+`PYSEC-2026-3552`/`GHSA-g6cj-pr64-35w5`/`CVE-2026-69247`, a Bleichenbacher
+padding-oracle in `pkcs7_decrypt_der`/`pkcs7_decrypt_pem`/`pkcs7_decrypt_smime`
+(introduced in `cryptography` 44.0.0, fixed in 50.0.0). A quick check found
+QueryGate's own code never calls any `pkcs7_decrypt_*` function — the
+vulnerable path is S/MIME-gateway-shaped (auto-decrypting attacker-supplied
+`EnvelopedData` and reflecting the outcome), which this codebase doesn't do —
+so this is very likely a justified-allowlist case rather than an urgent
+upgrade, but that's the `dep-audit` skill's call to make properly (confirm no
+transitive caller either, e.g. inside `python-jose`/JWKS verification, before
+writing the allowlist justification), not a drive-by decision inside an
+unrelated item's diff.
+
+**What to do:** run the `dep-audit` skill: either bump `cryptography` to
+`>=50.0.0` (check for breaking changes in the 45–50 range first — this
+dependency has a history of removing deprecated APIs on major bumps) or add a
+justified entry to `security/dependency-audit-allowlist.json` citing the
+unreachable-code-path finding above. Until resolved, `make release-check`
+fails at its `make sbom` step for every future run, unrelated to whatever
+item is being shipped — every agent hitting this should recognize it as this
+pre-existing, tracked issue rather than re-diagnosing it.
+
+**Effort:** XS–S.
+
+### 144. `verdict()` emits no query metrics, and `/metrics` is unauthenticated
+
+**Surfaced 2026-08-02 by the `security-invariant-reviewer` re-audit of item
+133; two related, non-blocking observability gaps.**
+
+1. **`verdict()` emits no `QUERIES_TOTAL`/`QUERIES_REJECTED_TOTAL`/
+   `QUERY_QUOTA_REJECTIONS_TOTAL`/`QUERY_DURATION_SECONDS` metrics at all**
+   (`execution/service.py`), unlike `execute()`. It consumes the *same*
+   per-principal quota budget `execute()` does (keyed
+   `(connection_id, principal_subject)`), so a gateway doing verdict-then-
+   execute can exhaust that budget through verdict calls alone — and an
+   operator's metrics-based "why is this agent throttled" debugging has no
+   verdict-shaped signal to look at; only the `execute` calls that actually
+   ran after the budget was already spent show up.
+2. **`/metrics` (`api/app.py`) is unauthenticated**, and
+   `QUERIES_REJECTED_TOTAL{reason=...}` already labels rejections
+   `"policy"` vs `"schema"` for the *existing* `execute`/`explain` traffic —
+   pre-existing, unrelated to item 133, but it means QG-34's collapse is
+   bounded by network placement (whether `/metrics` is reachable by the
+   caller), not by application code, and the threat-model row doesn't say
+   so today.
+
+**What to do, if approved:** for (1), add verdict-specific counters —
+**but not** a `reason`-labeled rejection counter on the denied path, since
+`/metrics` being unauthenticated (2) means a policy-vs-schema label there
+would publish exactly the distinction QG-34 collapses; use a single fixed
+`reason="verdict_denied"` or a dedicated `querygate_verdicts_total
+{connection,outcome}` with `outcome` restricted to `{allowed, denied}` only.
+For (2), either add a residual sentence to `docs/THREAT_MODEL.md` QG-34
+acknowledging `/metrics`'s existing exposure, or gate `/metrics` behind an
+`AppConfig` option (bearer requirement or bind-address restriction) — the
+latter is a real infra decision, not a default an agent should reach for.
+
+**Effort:** S.
 
