@@ -63,6 +63,7 @@ cryptography = ">=44.0.1"
 redis = "^8.0.1"
 hvac = "^2.4.0"
 defusedxml = "^0.7.1"
+asyncmy = "^0.2.11"
 
 [tool.poetry.group.dev.dependencies]
 # Test stack floored at CVE-fixed versions (pytest PYSEC-2026-1845); pytest 9
@@ -109,6 +110,7 @@ markers = [
     "real_db: needs a real database running (see make compose-up) — excluded from the default run",
     "postgres_live: needs a real Postgres server (see TODO.md item 3) — also marked real_db",
     "mssql_live: needs a real MSSQL server (see TODO.md item 2) — also marked real_db",
+    "mysql_live: needs a real MySQL server (see TODO.md item 19) — also marked real_db",
     "load: concurrent load/soak verification against a real database (see docs/LOAD_TESTING.md)",
 ]
 

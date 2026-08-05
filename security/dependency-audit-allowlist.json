@@ -1,1 +1,9 @@
-[]
+[
+  {
+    "id": "PYSEC-2026-286",
+    "package": "asyncmy",
+    "reason": "SQL injection (CVE-2025-65896, GHSA-qhqw-rrw9-25rm, CVSS 9.8) in asyncmy's converters.pyx escape_dict(): only dict VALUES are escaped, not dict KEYS, so a caller that passes cursor.execute(query, {attacker_controlled_key: value}) with a pyformat/dict-shaped parameter mapping can inject via the key. No fixed version exists yet upstream. Measured, not assumed (2026-08-06, TODO.md item 19): QueryGate never calls asyncmy's cursor directly — every MySQL query goes through SQLAlchemy Core via the async engine, and SQLAlchemy's mysql+asyncmy dialect's own paramstyle is 'format' (positional %s), confirmed empirically by tracing MySQLDialect_asyncmy.do_execute against a live server — every call observed parameters arriving as a plain tuple, never a dict, for both sa.text() bind params and Core Select bind params. The vulnerable escape_dict() codepath is therefore never reached by this codebase's usage pattern, matching the same evidence bar item 143's cryptography CVE review used (verified QueryGate's own code never calls the vulnerable function, not assumed from the advisory text alone).",
+    "added": "2026-08-06",
+    "tracking": "TODO.md item 19 phase 1; re-review if asyncmy's paramstyle ever changes or a raw cursor call is ever introduced, and re-check on every dep-audit pass for an upstream fix version."
+  }
+]

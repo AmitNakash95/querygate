@@ -70,3 +70,13 @@ connections:
   #   description: "Reporting warehouse (MSSQL)"
   #   join_group: reporting_instance
   #   known_tables: [FactSales, DimCustomer]
+
+  # A third example showing a MySQL connection (TODO.md item 19) — uncomment
+  # and adapt once you have a real MySQL database. connection_string must use
+  # the mysql+asyncmy driver, e.g.
+  # mysql+asyncmy://user:pass@host:3306/dbname.
+  # - id: mysql_reporting
+  #   dialect: mysql
+  #   connection_string: ${QUERYGATE_MYSQL_REPORTING_DB_URL}
+  #   description: "Reporting warehouse (MySQL)"
+  #   known_tables: [orders, customers]

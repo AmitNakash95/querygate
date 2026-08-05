@@ -50,7 +50,7 @@ order-of-magnitude, not commitments.
 | 16 | ✅ Column policy case-sensitivity gap | XS | — |
 | 17 | ✅ No config validation CLI | S | — |
 | 18 | Stored-procedure catalog | XL | — |
-| 19 | Additional dialects | M–XL (per dialect) | 2 (do MSSQL first) |
+| 19 | Additional dialects (MySQL phase 1 shipped; Snowflake/BigQuery open) | L–XL (per remaining dialect) | 2 (do MSSQL first) |
 | 20 | ✅ Client SDK / integration examples | S | — |
 | 21 | ✅ Principal policy must apply to every MCP/config surface | S | 6, 8, 10 |
 | 22 | ✅ Principal-aware connection/tool visibility | S–M | 6, 8 |
@@ -560,24 +560,37 @@ parameters, whether it's confirmed read-only) rather than a generic
 pass-through, matching the "safe stored procedure/tool catalog pattern"
 called out as a goal but intentionally not attempted in v1.
 
-### 19. Additional dialects (MySQL, Snowflake, BigQuery, etc.)
+### 19. Additional dialects (MySQL phase 1 shipped 2026-08-06; Snowflake, BigQuery, etc. still open)
 
-**Effort: M–XL, per dialect.** MySQL is closest to Postgres/MSSQL's shape
-(mature async SQLAlchemy driver, standard `INFORMATION_SCHEMA`) — likely M
-(2–3 days). Snowflake/BigQuery are architecturally different (no native
-async driver in some cases, different auth models, different SQL dialects
-for date functions) and are realistically L–XL each, closer to "add a new
-connection type" than "extend an enum."
+**MySQL (phase 1) shipped 2026-08-06.** `MySQLDialectAdapter`
+(`compiler/dialect_adapters.py`) + `MySQLSessionAdapter`
+(`connections/dialects.py`), registered in the item-57 adapter registries —
+purely additive, no existing dispatch site touched. Verified against a real
+MySQL 8.4 server, not just rendering-only tests: `tests/integration/test_mysql_live.py`
+(`make test-mysql-live`), a dedicated CI job (`.github/workflows/ci.yml`'s
+`mysql-live`), and unit coverage in `test_dialect_adapters.py` +
+`test_date_primitives.py`'s exhaustive per-dialect suite. Two genuine
+capability gaps decided the reject-don't-emulate way: MySQL's bare
+`STDDEV`/`VARIANCE` are population statistics (mapped to `STDDEV_SAMP`/
+`VAR_SAMP` instead, to match Postgres's/MSSQL's sample-statistic semantics);
+`ON DUPLICATE KEY UPDATE` can't target a specific `conflict_columns` set
+(rejected, with its own accurate message — see the 2026-08-06 Decision Log
+entry for the full write-up, including the `list_live_tables()` system-schema
+gap this item's own live testing found and fixed). **Not done in this
+pass, honestly:** `test_compiler.py`/`test_cte.py`/`test_nonequi_joins.py`/
+`test_set_operations.py`/`test_column_masking.py` still parametrize only
+postgresql/mssql/sqlite — extending those is real, open follow-on work, not
+required to call MySQL phase 1 shipped. No MySQL cost estimator either (falls
+back to the existing "any other dialect proceeds under the reactive
+guardrails" behavior).
 
-**Why it matters:** goal 7 scoped this to "Postgres and MSSQL... if
-feasible." Broader dialect support is a natural expansion once those two are
-production-hardened (items 2–4), but adding a third dialect before the first
-two are fully proven would spread verification effort thin.
-
-**What to do (when prioritized):** Extend `connections/dialects.py` and the
-compiler's dialect dispatch (currently a 3-way branch in
-`_date_bucket_expr`) — the isolation pattern already supports this, it's
-additive work, not a redesign.
+**Remaining scope — Effort: L–XL, per dialect.** Snowflake/BigQuery are
+architecturally different from all three shipped dialects (no native async
+driver in some cases, different auth models, different SQL dialects for date
+functions) and are realistically L–XL each, closer to "add a new connection
+type" than "extend an enum." The item-57/item-19-phase-1 adapter pattern
+(one `DialectAdapter` + one `SessionDialectAdapter`, registered, no inline
+`if dialect == ...`) is the proven template to follow.
 
 ### 20. Client SDK / agent-framework integration examples ✅ DONE
 

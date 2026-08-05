@@ -26,7 +26,7 @@ from typing import Dict
 import pydantic
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.dialects import mssql, postgresql, sqlite
+from sqlalchemy.dialects import mssql, mysql, postgresql, sqlite
 
 from querygate.compiler.dialect_adapters import get_dialect_adapter
 from querygate.compiler.sqlalchemy_compiler import _compile_expression
@@ -48,6 +48,7 @@ pytestmark = pytest.mark.unit
 _DIALECTS = {
     "postgresql": postgresql.dialect(),
     "mssql": mssql.dialect(),
+    "mysql": mysql.dialect(),
     "sqlite": sqlite.dialect(),
 }
 
@@ -475,6 +476,7 @@ def test_no_date_part_map_is_dead_code():
     cases = [
         ("postgresql", da._PG_EXTRACT_FIELDS, "year", "_PG_EXTRACT_FIELDS"),
         ("mssql", da._MSSQL_DATEPART_FIELDS, "week", "_MSSQL_DATEPART_FIELDS"),
+        ("mysql", da._MYSQL_EXTRACT_FIELDS, "year", "_MYSQL_EXTRACT_FIELDS"),
         ("sqlite", da._SQLITE_STRFTIME_PARTS, "year", "_SQLITE_STRFTIME_PARTS"),
     ]
     for dialect, mapping, part, name in cases:
@@ -513,24 +515,25 @@ def test_no_date_part_map_is_dead_code():
     # assertion, and no live differential run, could ever tell the difference.
     # The only observable coupling is the rejection: remove a unit from the map
     # and the adapter must refuse it. If it still renders, the map is dead.
-    for dialect, mapping, unit in (
-        ("mssql", da._MSSQL_DATEADD_UNITS, "day"),
-        ("sqlite", da._SQLITE_DATEADD_UNITS, "hour"),
+    for dialect, target, unit in (
+        ("mssql", "_MSSQL_DATEADD_UNITS", "day"),
+        ("mysql", "_MYSQL_DATEADD_UNITS", "day"),
+        ("sqlite", "_SQLITE_DATEADD_UNITS", "hour"),
     ):
         adapter = da.get_dialect_adapter(dialect)
+        mapping = getattr(da, target)
         is_set = isinstance(mapping, frozenset)
         removed = mapping - {unit} if is_set else {k: v for k, v in mapping.items() if k != unit}
-        target = "_SQLITE_DATEADD_UNITS" if is_set else "_MSSQL_DATEADD_UNITS"
-        monkeypatch_target = getattr(da, target)
+        original = mapping
         setattr(da, target, removed)
         try:
             with pytest.raises(QueryValidationError, match="not supported"):
                 adapter.date_add(sa.column("c"), unit, 1)
         finally:
-            setattr(da, target, monkeypatch_target)
+            setattr(da, target, original)
 
 
-@pytest.mark.parametrize("dialect", ["postgresql", "mssql", "sqlite"])
+@pytest.mark.parametrize("dialect", ["postgresql", "mssql", "mysql", "sqlite"])
 def test_an_unknown_date_part_raises_a_typed_error_not_a_keyerror(dialect):
     """A future `DatePart` member added without teaching an adapter must surface
     as a clean 4xx naming the dialect, never a KeyError 500 and never a silent
@@ -542,7 +545,7 @@ def test_an_unknown_date_part_raises_a_typed_error_not_a_keyerror(dialect):
         adapter.extract_part("nanocentury", sa.column("c"))
 
 
-@pytest.mark.parametrize("dialect", ["postgresql", "mssql", "sqlite"])
+@pytest.mark.parametrize("dialect", ["postgresql", "mssql", "mysql", "sqlite"])
 def test_an_unknown_interval_unit_raises_a_typed_error_on_every_dialect(dialect):
     """The `date_add` half of the same rule, which the first version of the
     exhaustiveness refactor left out — it guarded `extract_part` on all three

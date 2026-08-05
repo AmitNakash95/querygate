@@ -141,8 +141,13 @@ test-mssql-live: compose-up compose-up-mssql ## Run tests needing a real MSSQL s
 	poetry run python tests/integration/setup_mssql_test_db.py
 	poetry run pytest -m mssql_live
 
+.PHONY: test-mysql-live
+test-mysql-live: compose-up-mysql ## Run tests needing a real MySQL server (starts + seeds the database for you)
+	poetry run python tests/integration/setup_mysql_test_db.py
+	poetry run pytest -m mysql_live
+
 .PHONY: test-real-db
-test-real-db: ## Run every test needing a real database (Postgres + MSSQL)
+test-real-db: ## Run every test needing a real database (Postgres + MSSQL + MySQL)
 	poetry run pytest -m real_db
 
 .PHONY: test-cov
@@ -284,9 +289,13 @@ compose-up: ## Start the local demo Postgres and Redis services (detached and he
 compose-up-mssql: ## Start the real SQL Server used by the mssql_live suite (profile-gated; amd64 emulation on Apple Silicon, allow ~1 min to boot)
 	docker compose --profile mssql up -d --wait querygate-mssql
 
+.PHONY: compose-up-mysql
+compose-up-mysql: ## Start the real MySQL server used by the mysql_live suite (profile-gated; multi-arch, no emulation needed)
+	docker compose --profile mysql up -d --wait querygate-mysql
+
 .PHONY: compose-down
-compose-down: ## Stop and remove the local demo infrastructure containers (including the mssql profile)
-	docker compose --profile mssql down
+compose-down: ## Stop and remove the local demo infrastructure containers (including the mssql/mysql profiles)
+	docker compose --profile mssql --profile mysql down
 
 .PHONY: compose-logs
 compose-logs: ## Tail logs from the local demo infrastructure

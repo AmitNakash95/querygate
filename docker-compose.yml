@@ -72,3 +72,27 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
+
+  # Real MySQL for the `mysql_live` suite (TODO.md item 19). Behind the
+  # `mysql` profile so a plain `docker compose up -d` does NOT start it,
+  # matching the `mssql` profile's reasoning — though unlike MSSQL's image,
+  # this one is multi-arch and runs natively on Apple Silicon, no emulation.
+  # Start it with `make compose-up-mysql`, which `make test-mysql-live` does
+  # for you.
+  #
+  # The credentials are throwaway and match `setup_mysql_test_db.py`'s
+  # defaults and the CI service definition — they are dev-only, never real.
+  querygate-mysql:
+    profiles: ["mysql"]
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: "QueryGate_Test_Pw1"
+      MYSQL_DATABASE: querygate_demo
+    ports:
+      - "127.0.0.1:${QUERYGATE_MYSQL_PORT:-13306}:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pQueryGate_Test_Pw1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s

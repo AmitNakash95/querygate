@@ -144,9 +144,30 @@ def _compile_upsert(
     statement: UpsertStatement, table: sa.Table, dialect: str
 ) -> sa.sql.expression.Executable:
     """INSERT ... ON CONFLICT DO UPDATE, dispatched by dialect through the
-    registry. A dialect without a native ON CONFLICT (MSSQL) is rejected."""
+    registry. A dialect without a native ON CONFLICT (MSSQL, MySQL) is
+    rejected."""
     factory = _UPSERT_COMPILERS.get(dialect)
     if factory is None:
+        if dialect == "mysql":
+            # MySQL genuinely has an upsert idiom (INSERT ... ON DUPLICATE KEY
+            # UPDATE), so the generic "no ON CONFLICT clause" message below
+            # would be factually wrong here — this is a real gap-message
+            # distinction, not the same reason MSSQL is rejected. The actual
+            # gap: ON DUPLICATE KEY UPDATE fires on a collision with ANY
+            # unique/PK constraint on the table, with no way to name a
+            # specific target the way conflict_columns declares one — so
+            # accepting it would silently misrepresent which constraint
+            # triggers the update whenever a table has more than one unique
+            # key. Reject rather than emulate, per item 74's doctrine.
+            raise QueryValidationError(
+                "upsert is not supported on MySQL: its ON DUPLICATE KEY UPDATE "
+                "fires on a collision with ANY unique/primary key on the table, "
+                "not a specific caller-named conflict target the way "
+                "conflict_columns declares one — accepting it here would "
+                "silently misrepresent which constraint triggered the update. "
+                "Use a separate governed update then insert, or preview which "
+                "rows exist first."
+            )
         raise QueryValidationError(
             f"upsert (INSERT ON CONFLICT) is not supported on dialect {dialect!r} — it has no "
             "ON CONFLICT clause. Use a separate governed update then insert, or preview which "
