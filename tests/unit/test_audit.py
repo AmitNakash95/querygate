@@ -504,10 +504,30 @@ def test_audit_sink_backend_locally_readable_is_exhaustively_classified():
         AuditSinkBackend.NONE: False,
         AuditSinkBackend.JSONL: True,
         AuditSinkBackend.JSONL_CHAINED: True,
+        AuditSinkBackend.JSONL_CHAINED_S3_WORM: True,
     }
     assert set(expected) == set(AuditSinkBackend)
     for backend, readable in expected.items():
         assert backend.is_locally_readable() is readable, backend
+
+
+def test_audit_sink_backend_envelope_wrapping_is_exhaustively_classified():
+    """The sibling capability lookup this item added alongside
+    is_locally_readable(): whether a backend's local file wraps events in a
+    hash-chain envelope readers must unwrap (TODO.md item 134's Decision
+    Log — every `require_envelope=...` call site must use this instead of
+    comparing against AuditSinkBackend.JSONL_CHAINED alone)."""
+    from querygate.core.config import AuditSinkBackend
+
+    expected = {
+        AuditSinkBackend.NONE: False,
+        AuditSinkBackend.JSONL: False,
+        AuditSinkBackend.JSONL_CHAINED: True,
+        AuditSinkBackend.JSONL_CHAINED_S3_WORM: True,
+    }
+    assert set(expected) == set(AuditSinkBackend)
+    for backend, wraps in expected.items():
+        assert backend.wraps_events_in_a_hash_chain_envelope() is wraps, backend
 
 
 def test_jsonl_sink_appends_versioned_events_with_private_file_mode(tmp_path):

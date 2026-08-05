@@ -248,14 +248,12 @@ claim when the work ships or before explicitly handing the item back.
   benchmark results, item 60's disclosure program) — the "hand it to them"
   step Phase 2's other items don't cover. No new evidence generated, no
   non-negotiable touched.* **Depends on 54, 58 (phase 1), 60.**
-- [ ] **134** — Compliance-grade (WORM) audit retention + managed search.
-  *Added 2026-07-30 by `competitive-scan`; scope corrected the same day by
-  `auditors`. Item 91's chain **does** detect in-ledger deletion; the residual
-  is prevention, availability, and whole-file loss — retention is a separate
-  control regulated buyers ask for by name. Note there is **no sink registry**
-  today (`configure_audit_sink` is an `if`-chain), so this item owns building
-  one, composing with the chain rather than replacing it, and getting a remote
-  PUT off the request path.* **Depends on 91, 136.**
+- [x] **134** — Compliance-grade (WORM) audit retention + managed search.
+  *Added 2026-07-30 by `competitive-scan`.* ✅ **Shipped (phase 1)** 2026-08-06:
+  `AuditSinkBackend.JSONL_CHAINED_S3_WORM` composes S3 Object Lock archival
+  with the existing hash-chained ledger via a new `CompositeAuditSink`;
+  `configure_audit_sink` converted to a real registry; buffered/batched,
+  fail-open flush off the request path. Phase 2 (managed search) not started.
 - [x] **60** — Bug bounty / responsible disclosure program. *Cheap, durable
   trust signal; stand up after 53 clears the obvious issues.* ✅ **Shipped**
   (coordinated-disclosure program in `SECURITY.md`: recognition-only structure +

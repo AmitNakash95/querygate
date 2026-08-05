@@ -23,7 +23,7 @@ from querygate.audit.file_reader import AuditFileReadBounded, iter_lines_reverse
 from querygate.audit.ledger import resolve_ledger_key, unwrap_envelope, verify_envelope_hash
 from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
-from querygate.core.config import AppConfig, AuditSinkBackend
+from querygate.core.config import AppConfig
 from querygate.core.exceptions import PolicyViolationError
 from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE, ADMIN_CONFIG_WRITE_SCOPE
 from querygate.policy.loader import PolicyStore, get_policy_store
@@ -379,7 +379,7 @@ def _audit_page(
     # chain envelope, so a bare (non-enveloped) line is itself evidence of
     # tampering/corruption, not a legitimate plain-jsonl line (found by
     # `security-invariant-reviewer`, 2026-08-05).
-    require_envelope = cfg.audit_sink_backend == AuditSinkBackend.JSONL_CHAINED
+    require_envelope = cfg.audit_sink_backend.wraps_events_in_a_hash_chain_envelope()
     matches: List[Dict[str, Any]] = []
     total = 0
     malformed = 0

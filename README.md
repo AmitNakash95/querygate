@@ -148,6 +148,31 @@ end). One logical writer owns the chain head, so run a single replica or give
 each replica its own ledger file. This complements — never replaces — shipping
 events to retained/WORM storage or a SIEM.
 
+### Compliance-grade WORM retention (S3 Object Lock)
+
+Set `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm` to additionally archive the
+same redaction-safe events to S3 Object Lock — genuinely undeletable for the
+configured retention window, including by the AWS account root under
+`AUDIT_WORM_RETENTION_MODE=COMPLIANCE` (the default). It **composes with**
+the hash-chained ledger above, never replaces it: the local file is
+unaffected, and the two controls answer different questions — the chain
+proves nobody edited what was kept, WORM proves you can *produce* it on
+demand for the retention window even if the local file is later rotated or
+lost. Requires `AUDIT_WORM_S3_BUCKET` (with Object Lock enabled on the
+bucket — an S3 prerequisite this feature can't turn on for you) and
+`AUDIT_WORM_S3_REGION`.
+
+Archival is buffered and flushed off the request path (`AUDIT_WORM_FLUSH_INTERVAL_SECONDS`,
+default 60s) as one batched object per flush, never one object per event.
+It fails open by design: a flush failure never blocks or fails the query
+that triggered the event — the local chain already captured it — but the
+batch is re-queued for retry (not dropped) and increments
+`querygate_audit_worm_flush_failures_total`, which you should alert on. Only
+a sustained outage past `AUDIT_WORM_MAX_BUFFERED_EVENTS` drops the oldest
+buffered events, visibly, via `querygate_audit_worm_buffer_dropped_total`.
+Managed search over the archive is not built yet (a later phase) — the
+archive is retrievable directly from S3 today.
+
 ### Prove the boundary: the adversarial security benchmark
 
 A fixed, versioned attack corpus, run against the real request-pipeline
@@ -1800,13 +1825,18 @@ Being upfront about what's not done yet:
 - **No stored-procedure catalog** — deliberately out of scope for this
   version; exposing stored procedures safely needs its own cataloging and
   policy-approval mechanism, not a generic pass-through.
-- **Audit retention is operator-managed** — QueryGate provides append-only
-  JSONL persistence and rotation-friendly writes, but not a WORM store,
-  retention scheduler, search UI, or built-in SIEM exporter yet.
-- **Config-governance has no approval workflow yet** — a caller with
-  `admin:config:write` can stage and immediately apply a version in one
-  session; there's no second-approver/four-eyes requirement or scheduled
-  apply. `POST /admin/config/diff` reports a resolved-access semantic diff
+- **Audit retention has an opt-in native WORM path, no built-in search yet**
+  — `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm` (item 134 phase 1) archives to
+  S3 Object Lock (COMPLIANCE mode) alongside the local hash-chained ledger,
+  but there's no managed search UI over the archive yet, and it's opt-in —
+  the default `jsonl_chained` sink is still local-file-only, not itself WORM.
+- **Config-governance's approval workflow is opt-in, not the default** — a
+  caller with `admin:config:write` can stage and immediately apply a version
+  in one session unless an operator sets `require_config_approvals` above 0
+  (item 42), which then requires that many distinct `admin:config:approve`
+  holders — never the author themselves — before an apply proceeds; there is
+  no scheduled/timed apply either way. `POST /admin/config/diff` reports a
+  resolved-access semantic diff
   (typed tightening/loosening/neutral changes, not just a YAML line diff) at
   the connection baseline, and `POST /admin/config/blast-radius` aggregates
   that same diff across every principal explicitly configured in

@@ -8678,6 +8678,76 @@ rather than silently expanded into this one's scope):**
 reused), 26 (cost estimation, for the optional plan half), 45 + 121 (denial
 vocabulary; scope-completeness).
 
+### 134. Compliance-grade (WORM) audit retention + managed search ✅ DONE
+
+**Surfaced 2026-07-30 by `competitive-scan`.** `GO_TO_MARKET.md`'s "Do not
+claim yet" list had named compliance-grade/WORM audit retention and managed
+search since early on. Item 91's hash-chained ledger detects tampering in
+what was kept; this item closes the other half a regulated (fintech/
+healthcare) buyer asks for by name: can you *produce* the records, not just
+prove nobody edited them.
+
+**Shipped (phase 1 — WORM retention).** `AuditSinkBackend.JSONL_CHAINED_S3_WORM`
+composes (never replaces) the existing local hash-chained sink with an
+additional `S3WormAuditSink` half, via a new `CompositeAuditSink`
+(`audit/sinks.py`) — the `CompositeAuthenticator` shape, fanning one event
+out to every composed sink and never letting one sink's failure suppress
+another's write. `configure_audit_sink` is now dispatched through a real
+`_SINK_FACTORIES` registry (mirroring `secrets/resolvers.py`'s
+`build_secret_resolver_registry`) instead of the inline `if backend ==
+...` chain non-negotiable #6 forbids.
+
+`audit/worm_sink.py` is the new module: `S3WormAuditSink.emit()` only ever
+appends to an in-process `InProcessWormEventBuffer` (bounded, drop-oldest,
+metered) — zero network I/O on the request path, mirroring
+`catalog/usage.py`'s buffered-signal/background-monitor split exactly, down
+to the module-level singleton buffer both the enqueue side and the drain
+side reach independently. A separate `WormFlushMonitor` background task
+(wired into `app.py`'s lifespan like `CatalogUsageLearningMonitor`) drains
+the buffer on a timer and `PUT`s one batched, Object-Lock-protected segment
+per flush — deliberately never one object per event, since Object Lock's
+retain-until timestamp is set per `PUT` and per-event objects would each
+expire at a slightly different moment as they age out, leaving the
+archive's shape incoherent.
+
+**Fails open, by deliberate decision:** a flush failure never blocks or
+fails the query that triggered the event (the local chain already captured
+it), but the failed batch is re-queued for retry rather than silently
+dropped, and `querygate_audit_worm_flush_failures_total` is a dedicated
+metric an operator is expected to alert on — only a *sustained* outage past
+`AUDIT_WORM_MAX_BUFFERED_EVENTS` drops the oldest events, visibly, via
+`querygate_audit_worm_buffer_dropped_total`.
+
+Item 136's capability-lookup pattern (already shipped) is what made adding
+a fourth backend safe: `AuditSinkBackend` gained
+`wraps_events_in_a_hash_chain_envelope()` alongside the existing
+`is_locally_readable()`, replacing the four scattered `==
+AuditSinkBackend.JSONL_CHAINED` equality checks in `help_routes.py`/
+`admin_observability_routes.py`/`admin_ui_routes.py` — the exact "new
+backend silently disables a shipped read surface" bug class item 136 exists
+to prevent, now guarded by the same exhaustiveness-test pattern.
+
+Redaction safety (non-negotiable #3) holds by construction: the WORM sink
+never builds its own event body, it serializes the exact same
+`PersistableEvent` the local sinks already write — proven byte-identical in
+tests, not just asserted.
+
+**Not shipped (phase 2 — managed search):** the item's own scope explicitly
+allowed this to be phased ("Managed search over retained events is the
+second half and can be phased"). The archive is retrievable directly from
+S3 today; a QueryGate-native search surface over it is a later phase.
+
+**Tested against `moto`'s S3 Object Lock emulation** (confirmed separately
+to accept the same `ObjectLockMode`/`ObjectLockRetainUntilDate` parameters a
+real bucket does), not a live AWS account — no real AWS credentials are
+available in this environment. Every enforcement point was mutation-verified:
+`CompositeAuditSink`'s "keep calling every sink even if one raises" (a naive
+un-guarded loop confirmed to fail the suppression test), and `app.py`'s
+lifespan actually calling `WormFlushMonitor.start()` (confirmed via a
+public `is_running` property, not by reaching into a private attribute).
+
+**Effort:** L (phase 1 shipped; phase 2 deferred). **Depends on:** 91, 136.
+
 ### 136. The `jsonl_chained` audit backend silently disables four shipped read surfaces ✅ DONE
 
 **Surfaced 2026-07-30 by the `auditors` architecture review while scoping item

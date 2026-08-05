@@ -194,6 +194,43 @@ LEARNED_PROPOSALS_GENERATED_TOTAL = Counter(
     registry=REGISTRY,
 )
 
+AUDIT_WORM_FLUSHES_TOTAL = Counter(
+    "querygate_audit_worm_flushes_total",
+    "WORM audit archival flush attempts (TODO.md item 134) — background "
+    "batches drained from the in-process buffer and PUT to S3 Object Lock, "
+    "whether the PUT itself succeeded or failed (see "
+    "querygate_audit_worm_flush_failures_total for the failure half).",
+    registry=REGISTRY,
+)
+
+AUDIT_WORM_FLUSH_FAILURES_TOTAL = Counter(
+    "querygate_audit_worm_flush_failures_total",
+    "WORM archival flushes whose S3 PUT failed — fails open (the query path "
+    "and the local hash-chained ledger are unaffected), but this is a real "
+    "compliance-retention degradation an operator is expected to alert on. "
+    "The failed batch is re-queued for a retry, not lost, unless the buffer "
+    "is also over capacity (see querygate_audit_worm_buffer_dropped_total).",
+    registry=REGISTRY,
+)
+
+AUDIT_WORM_EVENTS_ARCHIVED_TOTAL = Counter(
+    "querygate_audit_worm_events_archived_total",
+    "Individual audit events successfully archived to WORM storage (a "
+    "successful flush's batch size, summed).",
+    registry=REGISTRY,
+)
+
+AUDIT_WORM_BUFFER_DROPPED_TOTAL = Counter(
+    "querygate_audit_worm_buffer_dropped_total",
+    "Audit events evicted from the WORM in-process buffer before they could "
+    "be archived — the buffer filled faster than flushes (or retries after "
+    "a flush failure) could drain it. A sustained non-zero rate means "
+    "AUDIT_WORM_MAX_BUFFERED_EVENTS or AUDIT_WORM_FLUSH_INTERVAL_SECONDS "
+    "need retuning, or the S3 endpoint is down for longer than the buffer "
+    "can absorb.",
+    registry=REGISTRY,
+)
+
 VERDICTS_TOTAL = Counter(
     "querygate_verdicts_total",
     "Caller-facing verdict() calls (TODO.md item 133), by connection and "
@@ -262,6 +299,10 @@ __all__ = [
     "USAGE_SIGNAL_BUFFER_DROPPED_TOTAL",
     "USAGE_SIGNALS_RECORDED_TOTAL",
     "LEARNED_PROPOSALS_GENERATED_TOTAL",
+    "AUDIT_WORM_FLUSHES_TOTAL",
+    "AUDIT_WORM_FLUSH_FAILURES_TOTAL",
+    "AUDIT_WORM_EVENTS_ARCHIVED_TOTAL",
+    "AUDIT_WORM_BUFFER_DROPPED_TOTAL",
     "VERDICTS_TOTAL",
     "VERDICT_DURATION_SECONDS",
     "classify_rejection",

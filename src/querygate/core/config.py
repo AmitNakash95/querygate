@@ -40,20 +40,47 @@ class AuditSinkBackend(str, Enum):
     # bodies as JSONL, each wrapped in a chain envelope so edits/deletions/
     # reordering are detectable via `querygate-audit verify`.
     JSONL_CHAINED = "jsonl_chained"
+    # Composes the local hash-chained ledger above with an additional,
+    # asynchronously-flushed WORM (S3 Object Lock) archival copy for
+    # compliance-grade retention (TODO.md item 134). The local file is
+    # unchanged by this — every existing local reader keeps working exactly
+    # as it does for JSONL_CHAINED; WORM is a parallel durable copy, not a
+    # replacement (audit/sinks.py's CompositeAuditSink).
+    JSONL_CHAINED_S3_WORM = "jsonl_chained_s3_worm"
 
     def is_locally_readable(self) -> bool:
         """Whether QueryGate's own read surfaces (the personal-denials
         report, the anomaly report, the config/catalog change-trend report,
         and the admin UI audit browser — TODO.md item 136) can read this
         backend's persisted stream back off local disk. Both JSONL variants
-        share one underlying file format — `JSONL_CHAINED` wraps each event
-        in a hash-chain envelope that readers transparently unwrap via
-        `audit.ledger.unwrap_envelope` — so both are readable; `NONE` has
-        nothing persisted to read. The single capability lookup every such
-        gate must use instead of an equality/inequality check against one
-        member, so a future backend (TODO.md item 134) declares its
-        readability once here rather than at every call site."""
-        return self in (AuditSinkBackend.JSONL, AuditSinkBackend.JSONL_CHAINED)
+        and the WORM-composed variant share one underlying local file format
+        — `JSONL_CHAINED`/`JSONL_CHAINED_S3_WORM` wrap each event in a hash-
+        chain envelope that readers transparently unwrap via
+        `audit.ledger.unwrap_envelope` — so all three are readable; `NONE`
+        has nothing persisted to read. The single capability lookup every
+        such gate must use instead of an equality/inequality check against
+        one member, so a future backend declares its readability once here
+        rather than at every call site."""
+        return self in (
+            AuditSinkBackend.JSONL,
+            AuditSinkBackend.JSONL_CHAINED,
+            AuditSinkBackend.JSONL_CHAINED_S3_WORM,
+        )
+
+    def wraps_events_in_a_hash_chain_envelope(self) -> bool:
+        """Whether this backend's persisted local file wraps each event in a
+        `LedgerRecord` envelope (TODO.md item 91) that a reader must unwrap
+        before reading the event body — as opposed to plain JSONL, one event
+        object per line. The second single-capability lookup TODO.md item 136
+        introduced `is_locally_readable()` for: every `require_envelope=...`
+        call site must use this instead of comparing against
+        `AuditSinkBackend.JSONL_CHAINED` alone, so a future envelope-wrapping
+        backend (this item added `JSONL_CHAINED_S3_WORM`) doesn't silently
+        read as `require_envelope=False` and misreport every event's shape."""
+        return self in (
+            AuditSinkBackend.JSONL_CHAINED,
+            AuditSinkBackend.JSONL_CHAINED_S3_WORM,
+        )
 
 
 class MetricsHistoryBackend(str, Enum):
@@ -286,6 +313,31 @@ class AppConfig(BaseSettings):
     # (`audit.file_reader.iter_lines_reverse`), so this cap is hit only after
     # every genuinely recent line has already been seen.
     audit_page_max_lines_read: int = pyd.Field(default=200_000, ge=1)
+
+    # Compliance-grade WORM audit retention (TODO.md item 134), active only
+    # when audit_sink_backend=jsonl_chained_s3_worm. Composes with (never
+    # replaces) the local hash-chained ledger above: the local file is
+    # unchanged, and this configures the ADDITIONAL S3 Object Lock archival
+    # copy. Buffered/batched and flushed off the request path — see
+    # audit/worm_sink.py's module docstring for the fail-open rationale.
+    audit_worm_s3_bucket: str = pyd.Field(default="")
+    audit_worm_s3_prefix: str = pyd.Field(default="querygate-audit/")
+    audit_worm_s3_region: str = pyd.Field(default="")
+    # S3 Object Lock retention mode. COMPLIANCE cannot be shortened or
+    # removed by anyone, including the AWS account root — the stronger
+    # guarantee a regulated buyer's "prove nobody could have deleted this"
+    # question needs. GOVERNANCE allows a specifically-permissioned principal
+    # to override it, which weakens the "even we can't delete it" claim this
+    # feature exists to make, so COMPLIANCE is the default; GOVERNANCE is
+    # opt-in for an operator who has a documented, deliberate reason to want
+    # an escape hatch.
+    audit_worm_retention_mode: str = pyd.Field(default="COMPLIANCE")
+    audit_worm_retention_days: int = pyd.Field(default=180, ge=1)
+    # A batch (never a single event — see the Decision Log's object-
+    # granularity rationale) is flushed when either bound is hit, whichever
+    # comes first.
+    audit_worm_flush_interval_seconds: float = pyd.Field(default=60, gt=0)
+    audit_worm_max_buffered_events: int = pyd.Field(default=5000, ge=1)
 
     # HMAC key that signs in-query approval tokens (execution/approval.py,
     # TODO.md item 92). Empty (the default) means the approval gate cannot issue

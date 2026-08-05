@@ -729,6 +729,60 @@ async def test_health_endpoint_reports_degraded_when_connection_unreachable(app)
     assert "refused" not in resp.text
 
 
+@pytest.mark.asyncio
+async def test_worm_audit_backend_wires_the_flush_monitor_end_to_end(tmp_path):
+    """TODO.md item 134: the piece the unit tests (test_audit_worm_sink.py)
+    can't cover — that app.py's lifespan actually starts a WormFlushMonitor
+    reaching the SAME buffer singleton configure_audit_sink()'s
+    CompositeAuditSink writes into, not two independently-constructed
+    buffers that happen to share a class."""
+    import boto3
+    from moto import mock_aws
+
+    from querygate.audit.events import AuditEvent
+    from querygate.audit.sinks import get_audit_sink
+
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="qg-worm-it-test", ObjectLockEnabledForBucket=True)
+
+        settings = _settings(
+            audit_sink_backend="jsonl_chained_s3_worm",
+            audit_jsonl_path=str(tmp_path / "chain.jsonl"),
+            audit_worm_s3_bucket="qg-worm-it-test",
+            audit_worm_s3_region="us-east-1",
+        )
+        app = create_app(settings)
+        with patch("querygate.health._ping", new_callable=AsyncMock):
+            async with app.router.lifespan_context(app):
+                assert app.state.worm_flush_monitor is not None
+                assert app.state.worm_flush_monitor.is_running
+
+                get_audit_sink().emit(
+                    AuditEvent(
+                        connection_id="demo",
+                        policy_decision="allowed",
+                        outcome="success",
+                        query_shape={"from": "customers"},
+                        duration_ms=1,
+                    )
+                )
+                # Deterministic, rather than waiting out the real interval.
+                await app.state.worm_flush_monitor.flush_once()
+
+        listing = s3.list_objects_v2(Bucket="qg-worm-it-test")
+        assert listing["KeyCount"] == 1
+        body = s3.get_object(Bucket="qg-worm-it-test", Key=listing["Contents"][0]["Key"])[
+            "Body"
+        ].read()
+        assert b'"connection_id":"demo"' in body
+
+        # Local hash-chained ledger still got the same event — WORM composes,
+        # it doesn't replace.
+        assert (tmp_path / "chain.jsonl").exists()
+        assert "demo" in (tmp_path / "chain.jsonl").read_text()
+
+
 def _write_reload_config_files(tmp_path):
     connections_file = tmp_path / "connections.yaml"
     connections_file.write_text("""

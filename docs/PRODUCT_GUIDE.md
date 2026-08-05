@@ -3395,6 +3395,80 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-06 — item 134 phase 1 added compliance-grade WORM audit
+  retention**, composing (never replacing) the item-91 local hash-chained
+  ledger with an additional S3 Object Lock archival copy —
+  `AuditSinkBackend.JSONL_CHAINED_S3_WORM`. Four judgment calls the item's
+  own write-up flagged as needing an explicit decision, made and recorded
+  here: **(1) backend** — S3 Object Lock only for phase 1 (the most common
+  self-hosted/cloud pairing), with the `AuditSink` Protocol kept narrow so a
+  future Azure immutable-blob variant is an additive class + registry entry,
+  not a redesign; **(2) fail-open, not fail-closed** — a WORM archival
+  failure never blocks or fails the query that triggered the underlying
+  event (the local chain sink already captured it for tamper-evidence), but
+  the failed batch is re-queued for retry rather than silently dropped, and
+  a dedicated metric (`querygate_audit_worm_flush_failures_total`) exists
+  for an operator to alert on — only a *sustained* outage past the buffer's
+  bound drops the oldest events, visibly; **(3) object granularity is one
+  batch ("segment") per flush, never one object per event** — S3 Object
+  Lock's retain-until timestamp is set per PUT, so per-event objects would
+  each expire at a slightly different moment as they age out, leaving the
+  archive's shape incoherent; segments that were written (and will
+  therefore retire) together keep it coherent instead; **(4) compose, don't
+  replace** — `audit/sinks.py`'s single global `_sink` would have *lost*
+  the local chain's tamper-evidence if WORM simply replaced it, the exact
+  opposite of "buyers ask for both by name" (per the item's own framing);
+  `CompositeAuditSink` (the `CompositeAuthenticator` shape) fans one event
+  out to both, with a failure in one sink never suppressing the other
+  (proven by mutation: a naive un-guarded loop that stops at the first
+  raised exception fails the test suite).
+
+  **Off the request path, by construction, not by convention:** `emit()` —
+  the `AuditSink` Protocol method `audit/logger.py` calls synchronously from
+  inside `async def execute()` — only ever appends to an in-process buffer
+  (`InProcessWormEventBuffer`, mirroring `catalog/usage.py`'s buffered-signal
+  precedent exactly, down to the module-level-singleton enqueue/drain split
+  with zero explicit wiring between the two sides). All real network I/O
+  (the S3 `PUT`, run via `asyncio.to_thread` since boto3 has no native async
+  client) lives in a separate `WormFlushMonitor` background task with its
+  own `start()`/`stop()` lifecycle, wired into `app.py`'s lifespan exactly
+  like `CatalogUsageLearningMonitor`/`CatalogRefreshMonitor` — proven end to
+  end (not just at the unit level) by `test_worm_audit_backend_wires_the_flush_monitor_end_to_end`,
+  which mutation-verified that a `WormFlushMonitor.start()` that's never
+  called fails the test's `is_running` assertion.
+
+  **`configure_audit_sink` converted to a real registry** (`audit/sinks.py`'s
+  `_SINK_FACTORIES`, mirroring `secrets/resolvers.py`'s
+  `build_secret_resolver_registry`), replacing the inline `if backend ==
+  "none"/"jsonl"/"jsonl_chained"` chain the item's own write-up correctly
+  flagged as the exact shape non-negotiable #6 forbids. Landing item 136's
+  capability-lookup pattern first (already shipped) is what made this safe:
+  the new backend just needed one addition each to
+  `AuditSinkBackend.is_locally_readable()` and a new sibling
+  `wraps_events_in_a_hash_chain_envelope()` (replacing the four scattered
+  `== AuditSinkBackend.JSONL_CHAINED` call sites `help_routes.py`/
+  `admin_observability_routes.py`/`admin_ui_routes.py` had), rather than
+  four call sites each needing to learn about a new backend individually —
+  proven by the same exhaustiveness-test pattern item 136 established
+  (`test_audit_sink_backend_envelope_wrapping_is_exhaustively_classified`
+  fails until every enum member is deliberately classified).
+
+  **Redaction safety (non-negotiable #3) holds by construction, not by a
+  second implementation that could drift**: the WORM sink never builds its
+  own event body — it serializes the exact same `PersistableEvent` the local
+  sinks already write, proven byte-identical in
+  `test_flushed_event_body_is_byte_identical_to_the_local_sink`.
+
+  **Scope, stated honestly**: phase 2 (managed search over the WORM
+  archive) is not built — the archive is retrievable directly from S3
+  today, not through a QueryGate query surface. Tested against a real,
+  faithful S3 Object Lock emulation (`moto`'s `mock_aws`, confirmed
+  separately to accept the same `ObjectLockMode`/`ObjectLockRetainUntilDate`
+  parameters a real bucket does) rather than a live AWS account, since no
+  real AWS credentials are available in this environment — this is a
+  materially different verification bar than item 19's live MySQL server,
+  and is named here rather than left implicit.
+
 - **2026-08-06 — item 19 phase 1 added MySQL as a third registry dialect**,
   purely additive per the item-57 adapter architecture: `MySQLDialectAdapter`
   (`compiler/dialect_adapters.py`) and `MySQLSessionAdapter`

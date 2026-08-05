@@ -164,7 +164,7 @@ order-of-magnitude, not commitments.
 | 131 | Publish the StructuredQuery AST as a namespaced MCP extension | M | 128 |
 | 132 | ✅ Reconcile stale shipped-status claims left behind by items 90–93 | S | — |
 | 133 | ✅ Caller-facing quota-metered verdict endpoint (play P4) — reuses 31/39's decision logic | M–L | 26, 31, 39, 45, 121 |
-| 134 | Compliance-grade (WORM) audit retention + managed search | L | 91, 136 |
+| 134 | ✅ Compliance-grade (WORM) audit retention (phase 1: S3 Object Lock; phase 2: managed search not started) | L | 91, 136 |
 | 135 | Automatic (TTL/lease-driven) credential re-resolution, without an operator reload | M | 13 |
 | 136 | ✅ `jsonl_chained` audit backend silently disables four shipped read surfaces | S–M | 91 |
 | 137 | ✅ Audit read surfaces neither verify nor disclose hash-chain integrity | S–M | 91, 136 |
@@ -2201,87 +2201,17 @@ fail-closed (not type-allow-listed) anti-oracle collapse.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 133).
 
-### 134. Compliance-grade (WORM) audit retention + managed search
+### 134. Compliance-grade (WORM) audit retention + managed search ✅ DONE
 
-**Surfaced 2026-07-30 by `competitive-scan`.** `GO_TO_MARKET.md`'s "Do not
-claim yet" list has named compliance-grade/WORM audit retention and managed
-search since early on, and **no item has ever covered it** — verified across
-`TODO.md` *and* `docs/TODO_ARCHIVE.md`. Item 23's archived body explicitly
-scoped it *out*: "Retention, immutable/WORM storage, and SIEM shipping remain
-operator responsibilities." That is a deliberate deferral, and this item is
-where it comes due.
+`AuditSinkBackend.JSONL_CHAINED_S3_WORM` composes the existing hash-chained
+ledger with an additional S3 Object Lock (COMPLIANCE mode) archival copy —
+`CompositeAuditSink`, a buffered/batched `WormFlushMonitor` off the request
+path, fail-open with a re-queue-on-failure retry and a dedicated alerting
+metric. `configure_audit_sink` is now a real registry. Phase 2 (managed
+search over the archive) remains open, as the item's own scope always
+allowed.
 
-**State the gap precisely — item 91 detects more than an earlier draft of this
-item credited.** `verify_chain()` *does* detect in-ledger deletion (sequence
-gap / `prev_hash` linkage break), insertion, reordering, and — with
-`expected_head` — records dropped from the end. The residual, already written
-correctly in `docs/THREAT_MODEL.md`, is **prevention, availability, and
-whole-file loss**: the chain is detection-only, assumes a single logical
-writer, and tail truncation is detectable only against an externally anchored
-head. Retention is a *different control* from integrity, which is exactly why
-auditors ask for both by name. Reuse THREAT_MODEL.md's wording; do not
-understate item 91 to make this item look bigger.
-
-**Why it matters.** For the regulated ICP (fintech/healthcare — the buyers the
-whole Proof pillar targets), a chain proving nobody edited the records is only
-half the answer when the question is "can you produce them." EU AI Act Art.
-26(6) requires deployers **of high-risk AI systems** to keep automatically
-generated logs for at least six months. **Do not attach a timing argument to
-this:** Art. 26 is a Chapter III high-risk obligation, so its application date
-moved with the Digital Omnibus deferral (Annex III → 2 Dec 2027; Annex I → 2
-Aug 2028). §2.3's "survived intact" means *not amended in substance*, not
-"still lands in Aug 2026" — only Article 50 transparency was expressly
-confirmed on the original schedule. The retention-vs-integrity argument stands
-on its own without a deadline.
-
-**Shape — there is NO sink registry today; creating one is part of this item.**
-An earlier draft said "one more class plus one registry entry (the same
-doctrine as `SecretResolver`)." That is wrong: `audit/sinks.py`'s
-`configure_audit_sink` is an inline `if backend == "none"/"jsonl"/
-"jsonl_chained"` chain — the exact dispatch shape non-negotiable #6 forbids —
-whereas `secrets/resolvers.py`'s `build_secret_resolver_registry` is a real
-dict. So this item must:
-
-1. Add the WORM sink class, targeting object-lock storage (S3 Object Lock
-   compliance mode, Azure immutable blob) with retention period and legal hold.
-2. **Convert `configure_audit_sink` to a registry**, mirroring
-   `build_secret_resolver_registry` — do not add a fourth `if`.
-3. **Fix the reader-side gates first — see item 136, which this depends on.**
-   Four routes hard-code `AuditSinkBackend.JSONL` (`api/help_routes.py`,
-   `api/admin_observability_routes.py` ×2, `api/admin_ui_routes.py`), so any
-   non-plain backend makes `/help/my-recent-denials`, the anomaly report, the
-   config change-trend report, and the admin UI audit browser return
-   `source="disabled"`. Land item 136's capability lookup **before** adding a
-   backend here, or this item dark-fires four shipped surfaces — including the
-   one item 133 cites as a precedent.
-4. **Compose with the chain; do not replace it.** `audit/sinks.py` holds a
-   *single* global `_sink`, so as the code stands choosing WORM would **lose**
-   tamper-evidence — the opposite of this item's own "buyers ask for both"
-   rationale. Use a decorator/composite sink, the shape `CompositeAuthenticator`
-   already sets as precedent.
-5. **Decide object granularity — it is load-bearing.** `verify_chain` tolerates
-   whole-file rotation (a later starting `seq` is accepted) but fails
-   permanently on a `seq` gap. One object per event therefore guarantees a
-   broken `verify` at the first retention expiry. Use **per-segment objects
-   aligned with the rotation allowance**, never per-event.
-6. **Get the write path off the request path.** `AuditSink` is sync
-   `emit`/`close` with no batching and no read side, and `audit/logger.py`
-   calls `emit` synchronously from inside `async def execute`. A remote
-   object-lock PUT per event would block the event loop on every query. Phase 1
-   owns a buffered/batched or async-capable sink, an explicit fail-open vs.
-   fail-closed decision for a WORM write failure, and retention/legal-hold on a
-   **separate** Protocol rather than widening `AuditSink`.
-
-Managed search over retained events is the second half and can be phased.
-
-**The invariant that must not bend:** non-negotiable #3 — persisted audit
-events never include SQL, predicate values, rows, exceptions, or credentials.
-WORM makes retention *permanent*, which makes any redaction slip permanent
-too, and unlike a JSONL file it cannot be corrected afterward by design. Treat
-the redaction tests as a hard gate on this item, and mutation-verify them.
-
-**Effort:** L (phase 1: WORM sink; phase 2: managed search). **Depends on:** 91,
-136 (land the capability lookup before adding a fourth backend).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 134).
 
 ### 135. Automatic credential re-resolution (TTL/lease-driven), without an operator-triggered reload
 
