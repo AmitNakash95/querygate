@@ -48,6 +48,7 @@ scope, only a valid identity.
 |---|---|
 | `admin:observability:read` | Read aggregated query/rejection/pressure trends |
 | `admin:metrics:read` | Scrape the raw Prometheus /metrics endpoint |
+| `admin:audit:worm-search` | Search the durable WORM (S3 Object Lock) compliance audit archive |
 
 ### Catalog governance
 
@@ -147,3 +148,9 @@ Reviews and approves individual queries that trip the in-query human-in-the-loop
 Steps in to cancel another principal's stuck or runaway async query. A caller can always cancel their own query without this scope.
 
 - `query:cancel`
+
+### Compliance Auditor
+
+Searches the durable WORM audit archive for a security/compliance review. Kept separate from the Operator bundle: this reaches a long-retention copy an Operator's day-2 observability access does not need.
+
+- `admin:audit:worm-search`

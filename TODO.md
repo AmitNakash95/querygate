@@ -184,6 +184,7 @@ order-of-magnitude, not commitments.
 | 151 | Bind the in-query approval gate's token to a connection and principal, not just an AST fingerprint | M | 92, 128 |
 | 152 | ✅ Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM retention) shipping | S | 19, 134 |
 | 153 | `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention) | S | 19, 134 |
+| 154 | WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate | M | 91, 134 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2085,87 +2086,15 @@ fail-closed (not type-allow-listed) anti-oracle collapse.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 133).
 
-### 134. Compliance-grade (WORM) audit retention + managed search ✅ DONE (phase 1)
+### 134. Compliance-grade (WORM) audit retention + managed search ✅ DONE
 
-**Surfaced 2026-07-30 by `competitive-scan`.** `GO_TO_MARKET.md`'s "Do not
-claim yet" list had named compliance-grade/WORM audit retention and managed
-search since early on. Item 91's hash-chained ledger detects tampering in
-what was kept; this item closes the other half a regulated (fintech/
-healthcare) buyer asks for by name: can you *produce* the records, not just
-prove nobody edited them.
+Phase 1 archives redaction-safe audit events to S3 Object Lock alongside the
+local hash-chained ledger (`AuditSinkBackend.JSONL_CHAINED_S3_WORM`); phase 2
+adds `GET /api/v1/admin/observability/worm-search`, a bounded/filtered/
+paginated search directly over that archive, gated by its own
+`admin:audit:worm-search` scope.
 
-**Shipped (phase 1 — WORM retention).** `AuditSinkBackend.JSONL_CHAINED_S3_WORM`
-composes (never replaces) the existing local hash-chained sink with an
-additional `S3WormAuditSink` half, via a new `CompositeAuditSink`
-(`audit/sinks.py`) — the `CompositeAuthenticator` shape, fanning one event
-out to every composed sink and never letting one sink's failure suppress
-another's write. `configure_audit_sink` is now dispatched through a real
-`_SINK_FACTORIES` registry (mirroring `secrets/resolvers.py`'s
-`build_secret_resolver_registry`) instead of the inline `if backend ==
-...` chain non-negotiable #6 forbids.
-
-`audit/worm_sink.py` is the new module: `S3WormAuditSink.emit()` only ever
-appends to an in-process `InProcessWormEventBuffer` (bounded, drop-oldest,
-metered) — zero network I/O on the request path, mirroring
-`catalog/usage.py`'s buffered-signal/background-monitor split exactly, down
-to the module-level singleton buffer both the enqueue side and the drain
-side reach independently. A separate `WormFlushMonitor` background task
-(wired into `app.py`'s lifespan like `CatalogUsageLearningMonitor`) drains
-the buffer on a timer and `PUT`s one batched, Object-Lock-protected segment
-per flush — deliberately never one object per event, since Object Lock's
-retain-until timestamp is set per `PUT` and per-event objects would each
-expire at a slightly different moment as they age out, leaving the
-archive's shape incoherent.
-
-**Fails open, by deliberate decision:** a flush failure never blocks or
-fails the query that triggered the event (the local chain already captured
-it), but the failed batch is re-queued for retry rather than silently
-dropped, and `querygate_audit_worm_flush_failures_total` is a dedicated
-metric an operator is expected to alert on — only a *sustained* outage past
-`AUDIT_WORM_MAX_BUFFERED_EVENTS` drops the oldest events, visibly, via
-`querygate_audit_worm_buffer_dropped_total`.
-
-Item 136's capability-lookup pattern (already shipped) is what made adding
-a fourth backend safe: `AuditSinkBackend` gained
-`wraps_events_in_a_hash_chain_envelope()` alongside the existing
-`is_locally_readable()`, replacing the four scattered `==
-AuditSinkBackend.JSONL_CHAINED` equality checks in `help_routes.py`/
-`admin_observability_routes.py`/`admin_ui_routes.py` — the exact "new
-backend silently disables a shipped read surface" bug class item 136 exists
-to prevent, now guarded by the same exhaustiveness-test pattern.
-
-Redaction safety (non-negotiable #3) holds by construction: the WORM sink
-never builds its own event body, it serializes the exact same
-`PersistableEvent` the local sinks already write — proven byte-identical in
-tests, not just asserted.
-
-**Not shipped (phase 2 — managed search):** the item's own scope explicitly
-allowed this to be phased ("Managed search over retained events is the
-second half and can be phased"). The archive is retrievable directly from
-S3 today; a QueryGate-native search surface over it is a later phase.
-
-**Fixed by the 2026-08-06 `auditors` pass:** `WormFlushMonitor._run`'s loop
-originally guarded only the S3 `PUT` itself — an exception from draining the
-buffer or building the segment key propagated out of the loop uncaught,
-permanently stopping WORM archival for the process (the local hash-chained
-ledger still captured every event; only the S3 copy would have stopped).
-Now wraps the whole per-iteration `flush_once()` call (and the final flush
-in `stop()`) in a catch-all, mirroring `catalog/usage.py`'s
-`CatalogUsageLearningMonitor`/`catalog/refresh.py`'s monitors, matching what
-this module's docstring already claimed. Mutation-verified:
-`test_a_flush_error_outside_the_put_does_not_kill_the_loop`
-(`tests/unit/test_audit_worm_sink.py`) fails without the fix.
-
-**Tested against `moto`'s S3 Object Lock emulation** (confirmed separately
-to accept the same `ObjectLockMode`/`ObjectLockRetainUntilDate` parameters a
-real bucket does), not a live AWS account — no real AWS credentials are
-available in this environment. Every enforcement point was mutation-verified:
-`CompositeAuditSink`'s "keep calling every sink even if one raises" (a naive
-un-guarded loop confirmed to fail the suppression test), and `app.py`'s
-lifespan actually calling `WormFlushMonitor.start()` (confirmed via a
-public `is_running` property, not by reaching into a private attribute).
-
-**Effort:** L (phase 1 shipped; phase 2 deferred). **Depends on:** 91, 136.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 134).
 
 ### 135. Automatic credential re-resolution (TTL/lease-driven), without an operator-triggered reload ✅ DONE
 
@@ -2421,4 +2350,46 @@ for a deployment that doesn't set it) but should document the fail-open
 buffering caveat for anyone who does.
 
 **Effort:** S. **Depends on:** 19 (phase 1 shipped), 134 (phase 1 shipped).
+
+### 154. WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate
+
+**Surfaced 2026-08-06 by `security-invariant-reviewer` auditing item 134
+phase 2's managed search.** The LOCAL hash-chained sink
+(`audit/sinks.py`'s `HashChainedAuditSink`) wraps every persisted event in a
+`LedgerRecord` envelope a reader can verify (`audit/ledger.py`'s
+`verify_envelope_hash`). The WORM sink (`audit/worm_sink.py`'s
+`WormFlushMonitor.flush_once`) writes the bare `PersistableEvent` body
+instead — deliberate for phase 1 (the archive's job was durability/
+retrievability, not tamper-evidence; the local chain already owns that
+question) but it means phase 2's `audit/worm_search.py` has no hash-chain to
+check a line against. S3 Object Lock (COMPLIANCE mode) stops an existing
+object from being deleted or overwritten before its retention date — it does
+**not** stop a NEW, schema-valid object from being added to the archive
+prefix. Any principal holding `s3:PutObject` on that prefix — necessarily
+including QueryGate's own AWS role, since `WormFlushMonitor` needs the same
+permission to archive at all — could plant a fabricated segment that passes
+every check `worm_search.py` runs (redaction-safe schema, no forbidden
+`query_shape` content) and is returned by a search indistinguishably from a
+genuine one.
+
+**What to do (when prioritized):** envelope/hash-chain WORM segments the way
+the local sink already does — e.g. wrap each flushed batch (or each event
+within it) in a `LedgerRecord`-shaped structure with its own chain, and have
+`worm_search.py` verify it the same way `admin_ui_routes.py`'s local reader
+already does (`verify_envelope_hash` → `unwrap_envelope`, counting an
+unverifiable line as `malformed`). This is a **phase-1 write-format change**,
+not a phase-2 read-side fix: it needs an explicit decision on (a) whether the
+chain is per-segment or spans segments (a per-segment chain is simpler and
+matches "one batch, one flush" semantics but means chain continuity resets on
+every flush; a cross-segment chain needs the flush monitor to carry state
+across restarts) and (b) what happens to already-archived, unenveloped
+segments under retention today (they cannot be rewritten — Object Lock — so
+either the reader must support BOTH shapes indefinitely, or existing archives
+are accepted as a permanently weaker-verified tail). Until this ships,
+`audit/worm_search.py`'s module docstring and `docs/THREAT_MODEL.md`'s QG-40
+row carry this residual explicitly rather than overclaiming parity with the
+local reader.
+
+**Effort:** M. **Depends on:** 91 (the local chain this mirrors), 134 (phase
+1's WORM sink, phase 2's search surface).
 
