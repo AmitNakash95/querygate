@@ -82,6 +82,18 @@ class AuditSinkBackend(str, Enum):
             AuditSinkBackend.JSONL_CHAINED_S3_WORM,
         )
 
+    def is_s3_worm_archived(self) -> bool:
+        """Whether this backend archives events to the S3 WORM copy
+        (TODO.md item 134 phase 2, `audit/worm_search.py`) — the capability
+        gate the managed-search endpoint uses to decide whether there is an
+        archive to search at all, instead of comparing against
+        `JSONL_CHAINED_S3_WORM` inline at the route. Only one backend has
+        this today, but the named method keeps the call site future-proof
+        the same way `is_locally_readable()`/`wraps_events_in_a_hash_chain_
+        envelope()` already do for the other two capabilities this enum
+        publishes."""
+        return self == AuditSinkBackend.JSONL_CHAINED_S3_WORM
+
 
 class MetricsHistoryBackend(str, Enum):
     """Time-windowed metrics history source for the observability dashboard
@@ -338,6 +350,32 @@ class AppConfig(BaseSettings):
     # comes first.
     audit_worm_flush_interval_seconds: float = pyd.Field(default=60, gt=0)
     audit_worm_max_buffered_events: int = pyd.Field(default=5000, ge=1)
+
+    # Managed search over the WORM archive (TODO.md item 134 phase 2,
+    # audit/worm_search.py). Reads the same bucket/prefix/region the flush
+    # monitor writes to, above — a search request never touches a second
+    # store. All bounds below exist so a caller cannot make one request scan
+    # an unbounded slice of a potentially years-long compliance archive; a
+    # request outside them is rejected (4xx), never silently served slow.
+    #
+    # Max width of one requested [start, end) window. Default (~2 years)
+    # deliberately covers the "18 months back" compliance-review scenario
+    # this feature exists for, while still being a real, enforced ceiling.
+    audit_worm_search_max_window_days: int = pyd.Field(default=730, ge=1)
+    # Hard per-request cap on S3 objects (segments) fetched — the real cost
+    # driver of a scan, since each is a network round trip. Hit mid-scan, the
+    # response is truncated (not an error) with a cursor to resume, the same
+    # "stop and disclose honestly" posture admin/anomaly.py's max_lines_read
+    # uses for its own bounded reader.
+    audit_worm_search_max_objects_scanned: int = pyd.Field(default=2000, ge=1)
+    # Page size bounds. `limit` on a request is clamped to this ceiling by
+    # the route/tool layer, never silently raised.
+    audit_worm_search_default_limit: int = pyd.Field(default=50, ge=1)
+    audit_worm_search_max_limit: int = pyd.Field(default=500, ge=1)
+    # Wall-clock budget for one request's S3 work. Checked between object
+    # fetches (never mid-fetch), so a request degrades to a truncated,
+    # resumable page rather than hanging past this bound.
+    audit_worm_search_request_timeout_seconds: float = pyd.Field(default=20.0, gt=0)
 
     # HMAC key that signs in-query approval tokens (execution/approval.py,
     # TODO.md item 92). Empty (the default) means the approval gate cannot issue

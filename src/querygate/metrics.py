@@ -231,6 +231,29 @@ AUDIT_WORM_BUFFER_DROPPED_TOTAL = Counter(
     registry=REGISTRY,
 )
 
+# Managed search over the WORM archive (TODO.md item 134 phase 2,
+# audit/worm_search.py). `outcome` is one of "ok" | "rejected" | "error" —
+# "rejected" means a bound was violated (missing/over-wide time range,
+# limit out of range, a cursor that doesn't match the current filters) and
+# no S3 call was made at all; "error" means S3 itself failed mid-scan
+# (unreachable, misconfigured bucket); "ok" covers every genuinely served
+# request, complete or truncated.
+AUDIT_WORM_SEARCH_REQUESTS_TOTAL = Counter(
+    "querygate_audit_worm_search_requests_total",
+    "Managed search requests against the WORM S3 archive, by outcome.",
+    ["outcome"],
+    registry=REGISTRY,
+)
+
+AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL = Counter(
+    "querygate_audit_worm_search_objects_scanned_total",
+    "S3 segment objects fetched and parsed while serving WORM search "
+    "requests — the real cost driver of a search; watch this alongside "
+    "querygate_audit_worm_search_requests_total for a caller repeatedly "
+    "paging a wide window.",
+    registry=REGISTRY,
+)
+
 VERDICTS_TOTAL = Counter(
     "querygate_verdicts_total",
     "Caller-facing verdict() calls (TODO.md item 133), by connection and "
@@ -303,6 +326,8 @@ __all__ = [
     "AUDIT_WORM_FLUSH_FAILURES_TOTAL",
     "AUDIT_WORM_EVENTS_ARCHIVED_TOTAL",
     "AUDIT_WORM_BUFFER_DROPPED_TOTAL",
+    "AUDIT_WORM_SEARCH_REQUESTS_TOTAL",
+    "AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL",
     "VERDICTS_TOTAL",
     "VERDICT_DURATION_SECONDS",
     "classify_rejection",

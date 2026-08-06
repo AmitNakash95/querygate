@@ -1084,6 +1084,25 @@ logical writer owns the chain head, so it assumes a single replica (or a
 per-replica ledger file); see the [Decision Log](#decision-log) for why chaining
 lives at the sink/envelope layer rather than on the event model.
 
+**Compliance-grade WORM retention + managed search (opt-in).** The local
+hash-chained ledger proves nobody edited what was kept — it doesn't promise
+the file itself survives log rotation, disk loss, or years of retention.
+Set `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm` and the same redaction-safe
+events are *additionally* archived to S3 Object Lock (`audit/worm_sink.py`),
+genuinely undeletable for the configured window under `COMPLIANCE` mode —
+this composes with, never replaces, the local chain above, so both
+questions ("was it edited?" and "can you still produce it?") stay answered.
+`GET /api/v1/admin/observability/worm-search`
+(`admin:audit:worm-search` scope — deliberately its own, not implied by
+`admin:observability:read`) is the QueryGate-native way to search that
+archive: a required, capped time range plus `event_type`/`connection_id`/
+`principal_id` filters and cursor-based pagination, so "every query against
+`pii_customers` in the last 18 months" is answerable even once the local
+file has long since rotated that window out. Every bound (window width,
+objects scanned, wall-clock timeout, page size) is enforced server-side —
+an over-wide or missing range is rejected outright, a bound hit mid-scan
+degrades to a truncated, resumable page rather than an unbounded scan.
+
 **MCP as an OAuth 2.0 resource server (opt-in).** For deployments that put the
 MCP surface behind a real authorization server, QueryGate can run it as a
 conformant OAuth 2.0 *resource server* per the MCP `2026-07-28` spec (off by
@@ -3817,15 +3836,109 @@ reasoning behind them, newest first. Added to incrementally as work happens
   sinks already write, proven byte-identical in
   `test_flushed_event_body_is_byte_identical_to_the_local_sink`.
 
-  **Scope, stated honestly**: phase 2 (managed search over the WORM
-  archive) is not built — the archive is retrievable directly from S3
-  today, not through a QueryGate query surface. Tested against a real,
+  **Scope, stated honestly (as of phase 1):** phase 2 (managed search over
+  the WORM archive) is not built — the archive is retrievable directly from
+  S3 today, not through a QueryGate query surface. Tested against a real,
   faithful S3 Object Lock emulation (`moto`'s `mock_aws`, confirmed
   separately to accept the same `ObjectLockMode`/`ObjectLockRetainUntilDate`
   parameters a real bucket does) rather than a live AWS account, since no
   real AWS credentials are available in this environment — this is a
   materially different verification bar than item 19's live MySQL server,
   and is named here rather than left implicit.
+
+- **2026-08-06 — item 134 phase 2 added managed search over the WORM
+  archive** (`audit/worm_search.py`), closing the gap phase 1 left open
+  above. `GET /api/v1/admin/observability/worm-search` answers the
+  compliance-review question phase 1's archive alone couldn't: "every query
+  against `pii_customers` in the last 18 months" — a window the *local*
+  hash-chained file (`admin/anomaly.py`'s reader and friends) has typically
+  long since rotated out, but the S3 archive still holds. Three judgment
+  calls made and recorded here: **(1) its own scope, not
+  `admin:observability:read`** — `ADMIN_AUDIT_WORM_SEARCH_SCOPE`
+  (`admin:audit:worm-search`) gates it, deliberately not implied by the
+  existing observability-read scope: the WORM archive is the durable,
+  potentially multi-year compliance copy, so a principal that can read
+  today's in-process trend aggregates should not automatically be able to
+  search years of retained history — proven by
+  `test_the_observability_read_scope_alone_is_not_sufficient`
+  (`tests/integration/test_worm_search_api.py`), not just asserted in the
+  scope's own comment; **(2) bounded, not unbounded, by construction** —
+  `start_time`/`end_time` are required on every request (no "search
+  everything" mode) and capped at `AUDIT_WORM_SEARCH_MAX_WINDOW_DAYS`
+  (default 730 days — wide enough for the 18-month scenario the feature
+  exists for, still a real enforced ceiling), and one request's actual S3
+  work is separately bounded by `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
+  `AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS` — a bound hit mid-scan
+  degrades to a truncated, resumable page (an opaque cursor encoding
+  `day`/`key`/`line` plus a fingerprint of the request's own filters, so
+  replaying a cursor against different filters is rejected rather than
+  silently returning a mismatched page) instead of continuing an
+  expensive/slow scan; **(3) exploits the archive's own key structure
+  instead of a full-bucket scan** — `WormFlushMonitor`'s segment keys
+  (`audit/worm_sink.py`'s `_segment_key`) are `<prefix>/YYYY/MM/DD/<ts>.jsonl`,
+  timestamp-first, so the search issues one `ListObjectsV2` per calendar day
+  in the (flush-interval-padded) requested window rather than one unbounded
+  listing over the whole prefix — the padding only widens which day
+  directories get listed, since every individual event is still filtered
+  against the caller's exact window by its own `occurred_at`, so it cannot
+  leak an out-of-window event into a result.
+
+  **Redaction safety holds the same way phase 1's did — by construction, not
+  a second implementation that could drift**: this module never constructs
+  its own event body, it validates each archived line against the identical
+  `extra="forbid"` `PersistableEvent` union (`AuditEvent`/`ConfigChangeEvent`/
+  `CatalogGovernanceEvent`/`ConnectionProbeEvent`) the local sinks already
+  write and `admin_ui_routes.py`'s own local reader already reuses for the
+  identical reason — one union deciding which event shapes exist, never two
+  that could drift (the module's first draft hand-duplicated this union;
+  `architecture-boundary-reviewer`'s 2026-08-06 pass caught it and it was
+  switched to direct reuse the same day). A returned event's TOP-LEVEL shape
+  can never carry more than a local audit-browser read already could; the one
+  field `extra="forbid"` cannot reach — `query_shape`, a plain
+  `Dict[str, Any]` — is separately screened for the same denylisted content
+  nested at any depth. Proven, not just asserted, by
+  `tests/security/test_worm_search_redaction.py`: a legitimate event with a
+  predicate referencing a sensitive value never surfaces that value (only
+  its structural shape does, matching `audit/events.py`'s existing
+  `_predicate_shape` posture); an S3 object tampered to carry a forbidden
+  `sql`/`row_data`/`connection_string` field alongside otherwise-valid fields
+  is rejected outright (counted as `malformed`, zero events returned) rather
+  than the extra field being silently dropped and the rest let through,
+  which would have been a different, still-bad failure mode; and the same
+  forgery nested two levels inside `query_shape` is rejected identically.
+
+  **Deliberately REST-only, not also an MCP tool**: no sibling read on
+  `admin_observability_routes.py` (overview/anomalies/config-changes/
+  history) has an MCP counterpart either, so adding one here would have
+  introduced a new REST/MCP asymmetry among admin observability reads
+  rather than following an existing pattern — left REST-only to stay
+  consistent with the surface as it already exists, not out of an oversight.
+
+  **Hardened by the same-day `security-invariant-reviewer` pass** beyond the
+  redaction/query_shape point above: a per-object size probe (`_MAX_OBJECT_
+  BYTES`, checked via a lightweight HEAD before the body is ever read into
+  memory) guards against a corrupted or adversarially oversized archive
+  object; the per-object line-count cap now TRUNCATES (discloses) rather than
+  silently drops content past it; `_list_day_keys`'s own S3 pagination is
+  bounded by the same deadline and by `MaxKeys`, so neither an unusually
+  large day directory nor a single oversized listing page can escape the
+  request's bounds; `WormSearchBounds` rejects a misconfigured `default_limit`
+  above `max_limit` at construction rather than silently exceeding the
+  documented page-size ceiling; and the route wraps its S3 call in
+  `mask_unexpected()` so a raw backend failure (bucket/endpoint/driver text)
+  can never leak to the client, matching every other REST route's posture.
+  **Recorded, not fixed here (TODO.md item 154):** unlike the local
+  hash-chained sink, WORM segments are written unenveloped, so this reader
+  can confirm a line matches a known redaction-safe SHAPE but not that
+  QueryGate itself wrote it — a principal holding `s3:PutObject` on the
+  archive prefix could plant a fabricated, schema-valid segment this reader
+  would return indistinguishably from a genuine one. Closing that needs
+  enveloping/hash-chaining WORM segments the way the local sink already
+  does — a phase-1 WRITE-FORMAT change with a migration question for
+  already-archived segments, an explicit design decision rather than
+  something a read-side module can decide unilaterally, tracked as its own
+  item instead of folded into this one. See `docs/THREAT_MODEL.md` QG-40 for
+  the full mitigation/residual statement.
 
 - **2026-08-06 — item 19 phase 1 added MySQL as a third registry dialect**,
   purely additive per the item-57 adapter architecture: `MySQLDialectAdapter`

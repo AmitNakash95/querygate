@@ -8982,6 +8982,140 @@ rather than silently expanded into this one's scope):**
 reused), 26 (cost estimation, for the optional plan half), 45 + 121 (denial
 vocabulary; scope-completeness).
 
+### 134. Compliance-grade (WORM) audit retention + managed search ✅ DONE
+
+**Surfaced 2026-07-30 by `competitive-scan`.** `GO_TO_MARKET.md`'s "Do not
+claim yet" list had named compliance-grade/WORM audit retention and managed
+search since early on. Item 91's hash-chained ledger detects tampering in
+what was kept; this item closes the other half a regulated (fintech/
+healthcare) buyer asks for by name: can you *produce* the records, not just
+prove nobody edited them.
+
+**Shipped (phase 1 — WORM retention).** `AuditSinkBackend.JSONL_CHAINED_S3_WORM`
+composes (never replaces) the existing local hash-chained sink with an
+additional `S3WormAuditSink` half, via a new `CompositeAuditSink`
+(`audit/sinks.py`) — the `CompositeAuthenticator` shape, fanning one event
+out to every composed sink and never letting one sink's failure suppress
+another's write. `configure_audit_sink` is now dispatched through a real
+`_SINK_FACTORIES` registry (mirroring `secrets/resolvers.py`'s
+`build_secret_resolver_registry`) instead of the inline `if backend ==
+...` chain non-negotiable #6 forbids.
+
+`audit/worm_sink.py` is the new module: `S3WormAuditSink.emit()` only ever
+appends to an in-process `InProcessWormEventBuffer` (bounded, drop-oldest,
+metered) — zero network I/O on the request path, mirroring
+`catalog/usage.py`'s buffered-signal/background-monitor split exactly, down
+to the module-level singleton buffer both the enqueue side and the drain
+side reach independently. A separate `WormFlushMonitor` background task
+(wired into `app.py`'s lifespan like `CatalogUsageLearningMonitor`) drains
+the buffer on a timer and `PUT`s one batched, Object-Lock-protected segment
+per flush — deliberately never one object per event, since Object Lock's
+retain-until timestamp is set per `PUT` and per-event objects would each
+expire at a slightly different moment as they age out, leaving the
+archive's shape incoherent.
+
+**Fails open, by deliberate decision:** a flush failure never blocks or
+fails the query that triggered the event (the local chain already captured
+it), but the failed batch is re-queued for retry rather than silently
+dropped, and `querygate_audit_worm_flush_failures_total` is a dedicated
+metric an operator is expected to alert on — only a *sustained* outage past
+`AUDIT_WORM_MAX_BUFFERED_EVENTS` drops the oldest events, visibly, via
+`querygate_audit_worm_buffer_dropped_total`.
+
+Item 136's capability-lookup pattern (already shipped) is what made adding
+a fourth backend safe: `AuditSinkBackend` gained
+`wraps_events_in_a_hash_chain_envelope()` alongside the existing
+`is_locally_readable()`, replacing the four scattered `==
+AuditSinkBackend.JSONL_CHAINED` equality checks in `help_routes.py`/
+`admin_observability_routes.py`/`admin_ui_routes.py` — the exact "new
+backend silently disables a shipped read surface" bug class item 136 exists
+to prevent, now guarded by the same exhaustiveness-test pattern.
+
+Redaction safety (non-negotiable #3) holds by construction: the WORM sink
+never builds its own event body, it serializes the exact same
+`PersistableEvent` the local sinks already write — proven byte-identical in
+tests, not just asserted.
+
+**Shipped (phase 2 — managed search, 2026-08-06).** `audit/worm_search.py`
+adds `GET /api/v1/admin/observability/worm-search` — a bounded, filtered,
+paginated search directly over the S3 WORM archive, closing the "search the
+records" half phase 1 deliberately deferred. Gated by its own scope,
+`admin:audit:worm-search` (`ADMIN_AUDIT_WORM_SEARCH_SCOPE`), NOT implied by
+`admin:observability:read`: the WORM archive is the durable, potentially
+multi-year compliance copy, so a principal that can read today's in-process
+trend aggregates should not automatically gain search access to years of
+retained history — proven by
+`test_the_observability_read_scope_alone_is_not_sufficient`.
+
+Every request requires an explicit `start_time`/`end_time` (no "search
+everything" mode) capped at `AUDIT_WORM_SEARCH_MAX_WINDOW_DAYS` (default 730
+days — wide enough for an "18 months back" compliance review, still a real
+enforced ceiling); the actual S3 work is separately bounded per request by
+`AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
+`AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS`. An out-of-bound request is
+rejected with a 422 before any S3 call is made; a bound hit mid-scan
+degrades to a truncated page with a resumable, opaque cursor (encoding
+`day`/`key`/`line` plus a fingerprint of the request's own filters, so
+replaying a cursor against different filters is rejected rather than
+silently returning a mismatched page) rather than continuing an
+expensive/slow scan.
+
+The scan itself stays bounded without a full-bucket listing by exploiting
+`WormFlushMonitor`'s own segment-key structure
+(`<prefix>/YYYY/MM/DD/<timestamp>.jsonl`, timestamp-first): one
+`ListObjectsV2` per calendar day in the (flush-interval-padded) requested
+window, not one unbounded listing over the whole prefix. Padding only
+widens which day directories get listed — every individual event is still
+filtered against the caller's exact window by its own `occurred_at`, so
+padding cannot leak an out-of-window event into a result.
+
+Redaction safety holds the same way phase 1's does: this module never
+constructs its own event body, it validates each archived line against the
+identical `extra="forbid"` `AuditEvent`/`ConfigChangeEvent`/
+`CatalogGovernanceEvent`/`ConnectionProbeEvent` schemas the local sinks
+already write (discriminated on `event_type`). Proven, not just asserted,
+by `tests/security/test_worm_search_redaction.py`: a legitimate predicate
+referencing a sensitive value never surfaces that value, and — the sharper
+test — an S3 object tampered to carry a forbidden `sql`/`row_data`/
+`connection_string` field alongside otherwise-valid fields is rejected
+outright (counted as `malformed`, zero events returned), not silently
+passed through with the extra field dropped.
+
+Deliberately REST-only, not also an MCP tool: no sibling read on
+`admin_observability_routes.py` (overview/anomalies/config-changes/history)
+has an MCP counterpart either, so this stays consistent with the existing
+surface rather than introducing a new REST/MCP asymmetry.
+
+**Scope, stated honestly:** no browser UI over the search endpoint yet
+(REST only); a search made during a sustained S3 outage won't find events
+still sitting unflushed in the in-process buffer (the same fail-open
+posture phase 1 already documents). Tested against `moto`'s S3 Object Lock
+emulation, matching phase 1's own testing approach — no real AWS
+credentials are available in this environment.
+
+**Fixed by the 2026-08-06 `auditors` pass:** `WormFlushMonitor._run`'s loop
+originally guarded only the S3 `PUT` itself — an exception from draining the
+buffer or building the segment key propagated out of the loop uncaught,
+permanently stopping WORM archival for the process (the local hash-chained
+ledger still captured every event; only the S3 copy would have stopped).
+Now wraps the whole per-iteration `flush_once()` call (and the final flush
+in `stop()`) in a catch-all, mirroring `catalog/usage.py`'s
+`CatalogUsageLearningMonitor`/`catalog/refresh.py`'s monitors, matching what
+this module's docstring already claimed. Mutation-verified:
+`test_a_flush_error_outside_the_put_does_not_kill_the_loop`
+(`tests/unit/test_audit_worm_sink.py`) fails without the fix.
+
+**Tested against `moto`'s S3 Object Lock emulation** (confirmed separately
+to accept the same `ObjectLockMode`/`ObjectLockRetainUntilDate` parameters a
+real bucket does), not a live AWS account — no real AWS credentials are
+available in this environment. Every enforcement point was mutation-verified:
+`CompositeAuditSink`'s "keep calling every sink even if one raises" (a naive
+un-guarded loop confirmed to fail the suppression test), and `app.py`'s
+lifespan actually calling `WormFlushMonitor.start()` (confirmed via a
+public `is_running` property, not by reaching into a private attribute).
+
+**Effort:** L (both phases shipped). **Depends on:** 91, 136.
+
 ### 135. Automatic credential re-resolution (TTL/lease-driven), without an operator-triggered reload ✅ DONE
 
 **Surfaced 2026-07-30 by `competitive-scan`; scope corrected the same day by
