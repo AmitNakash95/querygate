@@ -937,9 +937,14 @@ def resolve_scope_connections(
     connection's, the same way item 155 fixed the catalog sensitivity-label
     trigger to do. Deliberately a SEPARATE walk from `validate_schema`'s
     (rather than a shared one both call): that one also threads each scope's
-    RAW, un-casefolded `table_connection` mapping into `_reflect_and_validate_
-    scope`'s `_load_table` schema argument, where exact casing matters; this
-    one only ever feeds a case-insensitive lookup, the same contract
+    `table_connection` mapping into `_reflect_and_validate_scope`'s
+    `_load_table` schema argument. Both consumers ultimately need a
+    case-insensitive lookup — `_reflect_and_validate_scope` case-folds its own
+    copy internally before using it (item 159; a raw, case-sensitive lookup
+    there let a joined table's own `Table.Column` ref, spelled with different
+    casing than the join's declared alias, silently reflect against the
+    PRIMARY connection instead) — so this function case-folds up front instead
+    of leaving each consumer to do it separately, the same contract
     `sensitivity_approval_reasons` already relies on for its own copy.
     """
     cte_names = declared_cte_names(query)
@@ -1453,11 +1458,29 @@ async def _reflect_and_validate_scope(
     `validate_schema` always compute and pass it, since the caller needs that same
     value to populate `scope_connections` for the approval gate — but stays
     optional (recomputed here when omitted) so this private helper still works
-    standalone, e.g. from a future test that doesn't want to duplicate the call."""
+    standalone, e.g. from a future test that doesn't want to duplicate the call.
+    Its keys preserve a join's own DECLARED alias/table casing; this function
+    case-folds its own copy before ever looking a name up in it (item 159),
+    because `needed` (below) can legitimately contain a differently-cased
+    spelling of the same table via a column ref."""
     if table_connection is None:
         table_connection = resolve_query_table_connections(
             query, connection_id, principal=principal, cte_names=set(cte_tables or {})
         )
+    # Case-folded once, up front, and used for every lookup below (item 159).
+    # `table_connection`'s keys preserve a join's own DECLARED alias/table
+    # casing (see `resolve_query_table_connections`), but `needed` (below) is
+    # unioned from that same declared spelling AND every column ref's own
+    # table token — which a caller may spell differently ("O" declared,
+    # "o.id" referenced). A raw `table_connection.get(name, ...)` lookup only
+    # matches when `name` happens to be the declared spelling; when a
+    # differently-cased ref's spelling is the one actually used for a given
+    # table's `_load_table` call, the lookup silently misses and falls back
+    # to the PRIMARY connection, reflecting (and, per item 156, applying
+    # masks/filters/deny-list for) the wrong connection. Mirrors
+    # `resolve_scope_connections`, which already case-folds for exactly this
+    # reason.
+    table_connection_cf = {name.casefold(): cx for name, cx in table_connection.items()}
     _validate_join_graph(query)
     name_to_physical = effective_name_map(query)
 
@@ -1502,7 +1525,9 @@ async def _reflect_and_validate_scope(
         if source is None:
             if physical_key not in physical_tables:
                 physical_tables[physical_key] = await _load_table(
-                    connection_id, physical_name, table_connection.get(name, connection_id)
+                    connection_id,
+                    physical_name,
+                    table_connection_cf.get(name.casefold(), connection_id),
                 )
             source = physical_tables[physical_key]
         tables[name] = source if name.casefold() == physical_key else source.alias(name)
