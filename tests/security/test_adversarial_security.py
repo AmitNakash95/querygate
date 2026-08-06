@@ -58,7 +58,11 @@ from querygate.audit.events import normalize_query_shape
 from querygate.mcp.exceptions import _error_code_from_exception
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import ColumnMask, ColumnMaskKind, MandatoryRowFilter, Policy
-from querygate.secrets.resolvers import VaultSecretResolver
+from querygate.secrets.resolvers import (
+    EnvSecretResolver,
+    SecretResolverRegistry,
+    VaultSecretResolver,
+)
 from querygate.query_ast.models import (
     AggregateSelectItem,
     CaseSelectItem,
@@ -815,6 +819,79 @@ connections:
     assert marker not in reload_resp.text
     assert marker not in list_resp.text
     assert marker not in missing_table_resp.text
+    assert get_registry().get("vault-demo").connection_string == (
+        f"postgresql+asyncpg://{marker}@host/db"
+    )
+
+
+@pytest.mark.asyncio
+async def test_lease_driven_proactive_refresh_never_logs_the_resolved_secret(tmp_path, capsys):
+    """TODO.md item 135: automatic re-resolution moves credential handling
+    from once-at-startup (under an operator's eye, exercised by the test
+    above) to routine and request-time, across a new background-monitor code
+    path -- CredentialLeaseMonitor. Non-negotiable #2/#3 must hold there too:
+    the resolved secret must appear in neither the reload result nor any
+    emitted log record, on a real end-to-end proactive trigger (not just the
+    operator-triggered /admin/reload-config path).
+    """
+    from querygate.config_reload import CredentialLeaseMonitor
+    from querygate.connections.engine import reset_engines
+
+    marker = "lease-monitor-super-secret-password-marker"
+    connections_file = tmp_path / "connections.yaml"
+    connections_file.write_text("""
+connections:
+  - id: vault-demo
+    dialect: postgresql
+    connection_string: ${vault:querygate/demo#connection_string}
+""")
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("default:\n  enabled: true\n")
+
+    fake_client = MagicMock()
+    fake_client.secrets.kv.v2.read_secret_version.return_value = {
+        "data": {"data": {"connection_string": f"postgresql+asyncpg://{marker}@host/db"}},
+        # A short lease so the monitor's margin check treats it as due --
+        # this is what actually distinguishes the proactive path from the
+        # operator-pull path under test above.
+        "lease_duration": 30,
+    }
+    resolver_registry = SecretResolverRegistry(
+        {
+            "env": EnvSecretResolver({}),
+            "vault": VaultSecretResolver(
+                url="http://vault.internal:8200", token="t", client=fake_client
+            ),
+        }
+    )
+    cfg = AppConfig(
+        environment="localhost",
+        mcp_enabled=False,
+        api_keys=["admin-key"],
+        connections_file=str(connections_file),
+        policy_file=str(policy_file),
+        vault_enabled=True,
+        vault_addr="http://vault.internal:8200",
+        vault_token="t",
+    )
+    monitor = CredentialLeaseMonitor(
+        cfg=cfg,
+        poll_interval_seconds=0.01,
+        refresh_margin_seconds=3600,  # 30s lease is always "due" against this
+        resolver_registry_factory=lambda: resolver_registry,
+    )
+
+    capsys.readouterr()  # discard anything buffered before this test
+    try:
+        await monitor.start()
+        await asyncio.sleep(0.05)
+        await monitor.stop()
+    finally:
+        reset_engines()
+
+    captured = capsys.readouterr()
+    assert marker not in captured.out
+    assert marker not in captured.err
     assert get_registry().get("vault-demo").connection_string == (
         f"postgresql+asyncpg://{marker}@host/db"
     )
