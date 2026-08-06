@@ -96,6 +96,7 @@ from querygate.validation.policy_validation import validate_policy
 from querygate.validation.schema_validation import (
     declared_cte_names,
     iter_query_scopes,
+    resolve_scope_connections,
     validate_schema,
 )
 
@@ -394,13 +395,35 @@ class StructuredQueryService:
         self, query: StructuredQuery
     ) -> Tuple[sa.Select, int, dict, str, Policy, Dict[int, Dict[str, str]]]:
         policy = self._get_policy()
+        # TODO.md item 156: the same per-scope table-to-connection map item 155
+        # threads through the approval gate, computed HERE — before policy
+        # validation, and therefore before schema validation ever reflects
+        # anything — because `resolve_query_table_connections` (which this
+        # calls, once per scope) touches only the in-memory connection
+        # registry/policy store, never a database, so computing it this early
+        # doesn't weaken validation/policy_validation.py's documented "runs
+        # BEFORE schema_validation.py reflects anything" ordering. Lets
+        # `validate_policy` consult a cross-connection join's table's own
+        # connection's Policy (column masks, mandatory row filters, table/
+        # column deny-lists) alongside the primary connection's, instead of
+        # only ever seeing `policy` — closing the gap item 155's own follow-up
+        # recorded as item 156.
+        early_scope_connections = resolve_scope_connections(
+            query, self._connection_id, principal=self._principal
+        )
         # TODO.md item 145: `validate_policy` returns the purpose-narrowed
         # effective Policy (unchanged if the query declares no purpose, or if
         # this connection hasn't configured any). Rebinding `policy` here is
         # what makes that narrowing actually reach the compiler below — its
         # `mandatory_row_filters`/`column_masks` are read from this same
         # local, not re-resolved from `self._get_policy()`.
-        policy = validate_policy(query, policy, connection_id=self._connection_id)
+        policy = validate_policy(
+            query,
+            policy,
+            connection_id=self._connection_id,
+            principal=self._principal,
+            scope_connections=early_scope_connections,
+        )
         # scope_tables collects each nested value_subquery's reflected tables
         # (item 97), keyed by node id, so the compiler can render IN (subquery).
         # Empty for a non-nested query.
@@ -410,7 +433,13 @@ class StructuredQueryService:
         # connection a cross-connection join's table reflects against — so the
         # approval gate's catalog sensitivity-label trigger can look a joined
         # table up in the connection it actually resolved to, not just this
-        # query's top-level `self._connection_id`.
+        # query's top-level `self._connection_id`. Recomputed here (rather than
+        # reusing `early_scope_connections` above) because `validate_schema` is
+        # the authority that pairs this map with the reflected `sa.Table`
+        # objects it also produces; the two calls are deterministic pure
+        # resolutions over the same AST and registry state, so they always
+        # agree — `test_schema_validation.py`/`test_policy_validation.py`
+        # exercise each independently.
         scope_connections: Dict[int, Dict[str, str]] = {}
         tables = await validate_schema(
             query,
@@ -432,6 +461,8 @@ class StructuredQueryService:
             dialect=dialect,
             principal=self._principal,
             subquery_tables=scope_tables,
+            connection_id=self._connection_id,
+            scope_connections=scope_connections,
         )
         # Every scope's effective table names, not just the outer scope's — the
         # explain response reports what the statement will READ, and since item 104
@@ -855,7 +886,13 @@ class StructuredQueryService:
                         operation=self._audit_operation,
                         template_id=self._template_id,
                         template_param_shape=self._template_param_shape,
-                        masked_columns=applied_column_masks(query, policy),
+                        masked_columns=applied_column_masks(
+                            query,
+                            policy,
+                            connection_id=self._connection_id,
+                            scope_connections=scope_connections,
+                            principal=self._principal,
+                        ),
                     )
                     self._emit_usage_signals(query, admission_id=admission_id)
                     QUERIES_TOTAL.labels(connection=self._connection_id, status="success").inc()

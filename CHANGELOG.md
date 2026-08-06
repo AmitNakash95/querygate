@@ -535,6 +535,19 @@ All notable changes to QueryGate are documented here.
   be redeemed against a different connection or handed off to a different
   principal. A previously-issued (unbound) token keeps verifying exactly
   as before.
+- **A cross-connection join's joined-in table was governed only by the
+  primary connection's catalog labels and `Policy` — never its own
+  connection's** (TODO.md items 155 and 156). A `StructuredQuery` joining
+  connection A (primary) to connection B (`JoinSpec.connection`, gated by
+  policy's `join_group` rule) resolved a joined table's catalog
+  `sensitivity: pii` label, column masks, mandatory row filters, and
+  table/column deny-list entirely against A — so a rule an operator
+  configured only on B's own catalog/Policy never took effect for a query
+  reaching that table through A. Both are now resolved against BOTH
+  connections when they differ (never a replacement of one for the other —
+  an operator's rule on the primary connection keeps applying exactly as
+  before). No caller-visible API change; this is a pure tightening of
+  existing enforcement, not a new capability.
 - Audit read surfaces (the admin UI audit browser, the anomaly report, the
   config/catalog change-trend report, personal denial history) now verify
   each record's hash-chain envelope and disclose which audit backend
