@@ -356,7 +356,7 @@ claim when the work ships or before explicitly handing the item back.
   dialect-agnostic (affects Postgres/MSSQL/MySQL identically), not a
   Snowflake-specific gap; small, self-contained validator fix, buildable
   independently of item 157.*
-- [ ] **159** — cross-connection schema reflection can pick the wrong
+- [x] **159** — cross-connection schema reflection can pick the wrong
   connection when a join's alias casing differs from a column ref's casing
   (a hash-order-dependent bug in the raw, case-sensitive `table_connection`
   lookup). *Surfaced 2026-08-06 by `security-invariant-reviewer` while

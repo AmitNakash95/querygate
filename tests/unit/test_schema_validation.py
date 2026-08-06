@@ -523,6 +523,89 @@ class TestCrossConnectionJoins:
                 principal=Principal(subject="agent-a"),
             )
 
+    async def test_reflection_lookup_case_folds_table_connection_key(self, monkeypatch):
+        """Regression for item 159. `_reflect_and_validate_scope`'s `_load_table`
+        lookup used to be `table_connection.get(name, connection_id)` —
+        case-SENSITIVE — while `table_connection`'s keys preserve a join's own
+        DECLARED alias/table casing and `needed` (the set of names to reflect) is
+        unioned from that declared spelling AND every column ref's own table
+        token. A join declared `alias="O"` but referenced as `"o.id"` put BOTH
+        `"O"` and `"o"` into `needed`; whichever spelling happened to win
+        Python's hash-randomized `set` iteration order for that table decided
+        whether the lookup hit (correct) or missed and silently fell back to the
+        PRIMARY connection (wrong) — the same query could reflect against the
+        right or wrong connection depending on the process's hash seed.
+
+        Deliberately NOT testing this via the natural `needed`-set race (which
+        `test_natural_casing_mismatch_resolves_to_the_joined_connection` below
+        also exercises, but whose *pre-fix* failure depends on which of "O"/"o"
+        the set happens to yield first). Instead this calls
+        `_reflect_and_validate_scope` directly with a hand-supplied
+        `table_connection` map whose only relevant key ("O") deliberately does
+        NOT match the casing the query itself uses for that join everywhere
+        (alias "o", ref "o.id") — so `needed` contains exactly ONE name for the
+        joined table ("o"), no race, and the lookup either matches
+        case-insensitively (fixed) or misses every single time (bug), with no
+        dependency on set ordering or PYTHONHASHSEED at all.
+        """
+        self._two_connections(group_a="shared", group_b="shared")
+        tables = _make_tables()
+        calls = _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="customers",
+            select=["customers.id", "o.id"],
+            joins=[
+                JoinSpec(
+                    table="orders",
+                    alias="o",
+                    on=["customers.id", "o.customer_id"],
+                    connection="other",
+                )
+            ],
+            limit=5,
+        )
+        # A hand-supplied map, standing in for `resolve_query_table_connections`'s
+        # real output but deliberately keyed with different casing ("O") than the
+        # query's own declared alias ("o") — the map's key casing is exactly what
+        # the fix must not depend on matching `needed`'s spelling exactly.
+        table_connection = {"customers": "primary", "O": "other"}
+        await sv._reflect_and_validate_scope(query, "primary", table_connection=table_connection)
+        table_connection_map = {name: table_conn for _, name, table_conn in calls}
+        assert table_connection_map["orders"] == "other"
+
+    async def test_natural_casing_mismatch_resolves_to_the_joined_connection(self, monkeypatch):
+        """The same bug (item 159), exercised through the real pipeline: a join
+        declared with alias `"O"` but referenced in the projection as `"o.id"`.
+        `resolve_query_table_connections` (unpatched) produces the real,
+        declared-casing-keyed map here, so `needed`'s two spellings ("O" from the
+        join, "o" from the ref) genuinely race for which one triggers the single
+        memoized `_load_table` call — this test does not control that race. What
+        it DOES assert holds regardless of the race: after the fix, the lookup is
+        case-folded, so BOTH spellings resolve identically and the outcome no
+        longer depends on which one wins. This test therefore passes
+        deterministically post-fix; the fully order-independent proof of the bug
+        itself is the previous test, which sidesteps the race entirely.
+        """
+        self._two_connections(group_a="shared", group_b="shared")
+        tables = _make_tables()
+        calls = _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="customers",
+            select=["customers.id", "o.id"],
+            joins=[
+                JoinSpec(
+                    table="orders",
+                    alias="O",
+                    on=["customers.id", "O.customer_id"],
+                    connection="other",
+                )
+            ],
+            limit=5,
+        )
+        await sv.validate_schema(query, connection_id="primary")
+        table_connection_map = {name: table_conn for _, name, table_conn in calls}
+        assert table_connection_map["orders"] == "other"
+
 
 def test_aggregate_default_alias_matches_the_compilers_for_an_unaliased_column_aggregate():
     """`top_n` resolves its refs against the names `_aggregate_alias` returns,
