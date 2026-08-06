@@ -190,7 +190,7 @@ order-of-magnitude, not commitments.
 | 157 | Snowflake live-server verification and deeper feature parity (item 19 phase 2 residual) | L–XL | 19 |
 | 158 | `ConnectionProfile` never validates `dialect` agrees with `connection_string`'s actual backend | S–M | — |
 | 159 | Cross-connection schema reflection can pick the wrong connection when a join's alias casing differs from a column ref's casing | S | — |
-| 160 | Item 156 follow-up: harden the connection-resolution edge cases a full security-invariant audit surfaced | M | 156 |
+| 160 | ✅ Item 156 follow-up: harden the connection-resolution edge cases a full security-invariant audit surfaced (findings 1, 2, 4 fixed; finding 3 open — needs a maintainer decision) | M | 156 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2627,7 +2627,7 @@ only observable under set-iteration-order variance.
 
 **Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped).
 
-### 160. Item 156 follow-up: harden the connection-resolution edge cases a full security-invariant audit surfaced
+### 160. Item 156 follow-up: harden the connection-resolution edge cases a full security-invariant audit surfaced ✅ DONE (findings 1, 2, 4 addressed; finding 3 remains an open design decision)
 
 **Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item
 156 itself** (distinct from item 159, which is an unrelated pre-existing
@@ -2698,4 +2698,45 @@ others:
 finding 4 is scope confirmation only, no code change, unless later
 prioritized). **Depends on:** 156 (shipped — this is entirely about hardening
 its own edges).
+
+**Status (2026-08-07): findings 1, 2, and 4 shipped; finding 3 deliberately
+left open.** Finding 1 — `execution/service.py` gained `StructuredQueryService.
+_snapshot_connection_resolver`: `_validate_and_compile` now resolves each
+distinct non-primary connection's Policy exactly once and threads the same
+`ConnectionResolver` snapshot into `validate_policy`, `compile_structured_query`,
+and the `applied_column_masks` audit call, so all three agree even under a
+concurrent `/admin/reload-config`. Finding 2 — the cheap `max_cte_count`/
+`max_subquery_depth` checks were extracted into `validation/policy_validation.
+validate_structural_caps` and are now called directly from `_validate_and_
+compile` BEFORE `resolve_scope_connections` (the `PolicyStore.get()`-touching
+step), restoring cheap-bound-first ordering; `validate_policy` still calls the
+same extracted function internally afterward for every other caller. Both
+mutation-verified — see `tests/unit/test_service.py`'s
+`test_audit_masked_columns_reflects_the_snapshot_compiled_against_not_a_late_reload`
+and `test_structural_caps_reject_before_any_per_scope_policy_lookup`. Finding 4
+— confirmed `docs/THREAT_MODEL.md` QG-09 and the item-156 Decision Log entry
+already scope the fix accurately (no doc drift); left as a documented residual.
+**Finding 3 is still OPEN** — whether `validate_policy` should self-derive
+`scope_connections` when given a `connection_resolver`/`principal` but no
+explicit map remains an unmade maintainer decision (full reasoning in
+`docs/PRODUCT_GUIDE.md`'s Decision Log, 2026-08-07 entry). This item stays
+inline (not archived) until that decision is made and finding 3 is resolved
+one way or the other.
+
+**Same-day audit correction (`security-invariant-reviewer`, 2026-08-07):**
+the redundant second `validate_structural_caps` call inside `validate_policy`
+is NOT a provably-safe no-op the way an earlier version of this note (and of
+the function's own docstring) claimed — `max_cte_count`/`max_subquery_depth`
+never move under purpose narrowing, but the same function also runs
+`_validate_cte_constraints`'s deny-list/mask-aware cte-shadowing rules, which
+DO. The two calls can legitimately disagree (the un-narrowed pre-check can
+under-reject a purpose-narrowed case the internal, narrowed call still
+correctly rejects); this is safe only because `Policy.for_purpose` is
+additive-only, never subtractive. Pinned by a new test in
+`tests/unit/test_policy_validation.py` and corrected in both the function's
+own docstring and this item's PRODUCT_GUIDE.md Decision Log entry. A second,
+unrelated finding in the same pass — `_snapshot_connection_resolver`'s
+closure silently discarding its own `principal` argument — was also fixed and
+pinned with its own regression test; see the PRODUCT_GUIDE.md entry for full
+detail on both.
 

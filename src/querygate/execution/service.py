@@ -39,7 +39,7 @@ from querygate.catalog.retrieval import (
 from querygate.catalog.usage import build_usage_signal, enqueue_usage_signal, should_emit_signal
 from querygate.compiler.sqlalchemy_compiler import applied_column_masks, compile_structured_query
 from querygate.connections.engine import get_engine, get_metadata, session_scope
-from querygate.connections.models import DatabaseDialect
+from querygate.connections.models import ConnectionProfile, DatabaseDialect
 from querygate.connections.registry import get_registry
 from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.auth import Principal
@@ -92,8 +92,9 @@ from querygate.metrics import (
 from querygate.policy.models import CostEstimationMode, Policy
 from querygate.query_ast.models import JoinSpec, Predicate, StructuredQuery
 from querygate.schema.reflection import get_table_schema, list_live_tables, sanitize_table_name
-from querygate.validation.policy_validation import validate_policy
+from querygate.validation.policy_validation import validate_policy, validate_structural_caps
 from querygate.validation.schema_validation import (
+    ConnectionResolver,
     declared_cte_names,
     iter_query_scopes,
     resolve_scope_connections,
@@ -391,10 +392,101 @@ class StructuredQueryService:
         )
         return policy
 
+    def _snapshot_connection_resolver(
+        self, scope_connections: Dict[int, Dict[str, str]]
+    ) -> ConnectionResolver:
+        """TODO.md item 160 finding 1: resolve each distinct NON-primary
+        connection `scope_connections` names, exactly ONCE, and return a
+        `ConnectionResolver` closure over that fixed snapshot.
+
+        Before this, `resolve_table_policies`'s default resolver (the
+        `connection_resolver=None` fallback) re-read the joined connection's
+        Policy from the live `PolicyStore` at every call site: once inside
+        `validate_policy`, again inside `compile_structured_query`, and again
+        at `execute()`'s post-execution `applied_column_masks` audit call —
+        three live reads of what should be one fact. An authorized
+        `/admin/reload-config` landing between the compile and the audit call
+        could make the persisted `masked_columns` describe a Policy the
+        compiled statement was never actually built against — the primary
+        connection's own Policy has never had this problem, because
+        `_get_policy()` resolves it once and every downstream step reuses
+        that same local.
+
+        `scope_connections` is intentionally the caller's, not re-derived
+        here — this method only decides how many times each distinct
+        connection is *read*, never which connections are relevant; that is
+        `resolve_scope_connections`'s job alone (see its own docstring).
+        Every table already resolved to `self._connection_id` needs no entry
+        at all: `resolve_table_policies` returns `[policy]` for those without
+        ever calling this resolver, exactly as it always has.
+
+        The closure DOES honor its own `principal` argument, the way the
+        `ConnectionResolver` contract (`Callable[[str, Optional[Principal]],
+        Tuple[ConnectionProfile, Policy]]`) requires — it only serves the
+        snapshot when the caller's `principal` is `self._principal` (identity
+        comparison, since a `Principal` is the same object throughout one
+        `_validate_and_compile` call), which is true for every actual call
+        site in this pipeline today (`validate_policy`,
+        `compile_structured_query`, `applied_column_masks` are all invoked
+        with `self._principal`). For any OTHER principal — a future caller
+        threading a delegated/on-behalf-of principal, an admin dry-run reusing
+        this service, or a per-scope principal — it falls through to a live
+        `resolve_visible_connection` resolved against THAT principal, never
+        the cached one: a security-invariant-reviewer finding (item 160,
+        2026-08-07) on an earlier version of this method that silently used
+        `self._principal` regardless of the argument, which would have handed
+        a stranger's per-principal policy override to the wrong principal the
+        moment any future caller relied on the contract this method's own
+        type signature promises. `test_snapshot_connection_resolver_honors_a_
+        different_principal_argument` (`tests/unit/test_service.py`) pins
+        this. A connection id the snapshot never saw (impossible on the
+        current call graph, since `scope_connections`'s values are exactly
+        what this snapshot is built from, but kept as a safety net rather
+        than a `KeyError`) resolves live too, against whichever principal was
+        actually passed in.
+        """
+        distinct_connection_ids = {
+            table_connection_id
+            for table_map in scope_connections.values()
+            for table_connection_id in table_map.values()
+            if table_connection_id != self._connection_id
+        }
+        snapshot = {
+            connection_id: resolve_visible_connection(connection_id, principal=self._principal)
+            for connection_id in distinct_connection_ids
+        }
+
+        def _resolver(
+            target_connection_id: str, principal: Optional[Principal]
+        ) -> Tuple[ConnectionProfile, Policy]:
+            if principal is self._principal:
+                cached = snapshot.get(target_connection_id)
+                if cached is not None:
+                    return cached
+            return resolve_visible_connection(target_connection_id, principal=principal)
+
+        return _resolver
+
     async def _validate_and_compile(
         self, query: StructuredQuery
-    ) -> Tuple[sa.Select, int, dict, str, Policy, Dict[int, Dict[str, str]]]:
+    ) -> Tuple[sa.Select, int, dict, str, Policy, Dict[int, Dict[str, str]], ConnectionResolver]:
         policy = self._get_policy()
+        # TODO.md item 160 finding 2: the cheap, connection-registry-free caps
+        # (max_cte_count, max_subquery_depth) run FIRST, before
+        # `resolve_scope_connections` below ever calls `PolicyStore.get()` —
+        # restoring the "cheap bound before O(N x tree) work" ordering
+        # `validate_structural_caps`'s own docstring documents as deliberate.
+        # `validate_policy` also runs this same check again, internally,
+        # further down (it must, to stay correct for every OTHER caller that
+        # doesn't go through this pre-check) — this call here, against the
+        # UN-narrowed `policy`, is a cheap early-exit optimization ONLY, not
+        # a substitute for that internal call: `validate_structural_caps`
+        # also runs `_validate_cte_constraints`'s purpose-narrowable
+        # deny-list/mask rules, so this pre-check and `validate_policy`'s own
+        # (purpose-narrowed) call CAN legitimately disagree — see that
+        # function's docstring for why that's safe (under-reject only, never
+        # a missed enforcement) rather than a bug.
+        validate_structural_caps(query, policy)
         # TODO.md item 156: the same per-scope table-to-connection map item 155
         # threads through the approval gate, computed HERE — before policy
         # validation, and therefore before schema validation ever reflects
@@ -411,6 +503,15 @@ class StructuredQueryService:
         early_scope_connections = resolve_scope_connections(
             query, self._connection_id, principal=self._principal
         )
+        # TODO.md item 160 finding 1: resolve every distinct non-primary
+        # connection's Policy ONCE here, and thread the same fixed snapshot
+        # (as a `connection_resolver` closure) through policy validation,
+        # compilation, and — via this method's return value — the
+        # post-execution audit call, so all three agree with each other and
+        # with what was actually compiled, even if a concurrent
+        # `/admin/reload-config` changes the joined connection's Policy in
+        # between.
+        connection_resolver = self._snapshot_connection_resolver(early_scope_connections)
         # TODO.md item 145: `validate_policy` returns the purpose-narrowed
         # effective Policy (unchanged if the query declares no purpose, or if
         # this connection hasn't configured any). Rebinding `policy` here is
@@ -423,6 +524,7 @@ class StructuredQueryService:
             connection_id=self._connection_id,
             principal=self._principal,
             scope_connections=early_scope_connections,
+            connection_resolver=connection_resolver,
         )
         # scope_tables collects each nested value_subquery's reflected tables
         # (item 97), keyed by node id, so the compiler can render IN (subquery).
@@ -439,7 +541,11 @@ class StructuredQueryService:
         # objects it also produces; the two calls are deterministic pure
         # resolutions over the same AST and registry state, so they always
         # agree — `test_schema_validation.py`/`test_policy_validation.py`
-        # exercise each independently.
+        # exercise each independently. `connection_resolver` (item 160) is
+        # NOT rebuilt from this second map: it is already a complete snapshot
+        # of every non-primary connection this query can possibly touch,
+        # built above from `early_scope_connections`, which agrees with this
+        # one for the same reason.
         scope_connections: Dict[int, Dict[str, str]] = {}
         tables = await validate_schema(
             query,
@@ -463,6 +569,7 @@ class StructuredQueryService:
             subquery_tables=scope_tables,
             connection_id=self._connection_id,
             scope_connections=scope_connections,
+            connection_resolver=connection_resolver,
         )
         # Every scope's effective table names, not just the outer scope's — the
         # explain response reports what the statement will READ, and since item 104
@@ -476,8 +583,19 @@ class StructuredQueryService:
         # not the un-narrowed base policy's view (found by
         # `security-invariant-reviewer`, 2026-08-05: the mask was correctly
         # APPLIED to the compiled SQL either way, but the audit event
-        # understated which columns were actually masked).
-        return stmt, limit, touched or set(tables), dialect, policy, scope_connections
+        # understated which columns were actually masked). `connection_resolver`
+        # (item 160) is returned too, so that same audit call resolves a
+        # cross-connection join's Policy from the identical snapshot the
+        # compiled statement was built against, not a fresh live read.
+        return (
+            stmt,
+            limit,
+            touched or set(tables),
+            dialect,
+            policy,
+            scope_connections,
+            connection_resolver,
+        )
 
     async def _estimate_cost(
         self, dialect: DatabaseDialect, session, stmt: sa.Select
@@ -793,9 +911,15 @@ class StructuredQueryService:
                     # `applied_column_masks` at the audit call below) sees the
                     # same narrowing the compiler already used — not just this
                     # method's own now-stale un-narrowed local.
-                    stmt, limit, _tables, dialect, policy, scope_connections = (
-                        await self._validate_and_compile(query)
-                    )
+                    (
+                        stmt,
+                        limit,
+                        _tables,
+                        dialect,
+                        policy,
+                        scope_connections,
+                        connection_resolver,
+                    ) = await self._validate_and_compile(query)
                     policy_validated = True
                     sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
 
@@ -892,6 +1016,16 @@ class StructuredQueryService:
                             connection_id=self._connection_id,
                             scope_connections=scope_connections,
                             principal=self._principal,
+                            # TODO.md item 160 finding 1: the same fixed
+                            # Policy snapshot `_validate_and_compile` built
+                            # BEFORE this query executed — not a fresh
+                            # `PolicyStore.get()` — so this audit event
+                            # always describes the Policy the statement was
+                            # actually compiled against, even if an
+                            # authorized `/admin/reload-config` changed the
+                            # joined connection's Policy while this query
+                            # was running.
+                            connection_resolver=connection_resolver,
                         ),
                     )
                     self._emit_usage_signals(query, admission_id=admission_id)
@@ -1109,7 +1243,7 @@ class StructuredQueryService:
             max_queue_depth=policy.max_queue_depth,
             max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
         ):
-            stmt, limit, tables, _dialect, _policy, _scope_connections = (
+            stmt, limit, tables, _dialect, _policy, _scope_connections, _connection_resolver = (
                 await self._validate_and_compile(query)
             )
             sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
@@ -1214,9 +1348,15 @@ class StructuredQueryService:
                 max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
             ):
                 try:
-                    stmt, _limit, tables, _dialect, _policy, _scope_connections = (
-                        await self._validate_and_compile(query)
-                    )
+                    (
+                        stmt,
+                        _limit,
+                        tables,
+                        _dialect,
+                        _policy,
+                        _scope_connections,
+                        _connection_resolver,
+                    ) = await self._validate_and_compile(query)
                 except Exception as exc:
                     audit_query(
                         connection_id=self._connection_id,

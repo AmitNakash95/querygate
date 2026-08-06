@@ -11,6 +11,7 @@ from querygate.validation.policy_validation import (
     resolve_purpose_policy,
     validate_batch_size,
     validate_policy,
+    validate_structural_caps,
 )
 
 # --------------------------------------------------------------------------- #
@@ -1473,3 +1474,57 @@ def test_resolve_purpose_policy_is_the_shared_primitive_validate_policy_uses():
     )
     resolved = resolve_purpose_policy(_simple_query(purpose="support"), policy)
     assert "orders" in resolved.denied_tables
+
+
+def test_structural_caps_pre_check_can_under_reject_a_purpose_narrowed_cte_shadow_but_validate_policy_still_catches_it():
+    """TODO.md item 160 finding 2 follow-up (`security-invariant-reviewer`,
+    2026-08-07): `validate_structural_caps` is NOT purpose-narrowing-invariant
+    end to end, even though its two eponymous caps (`max_cte_count`/
+    `max_subquery_depth`) are. It also runs `_validate_cte_constraints`'s
+    "no cte name shadows a table the Policy has a rule for" check, which reads
+    `denied_tables` (among other fields) — a field `Policy.for_purpose` DOES
+    narrow. `execution/service.py`'s `_validate_and_compile` calls
+    `validate_structural_caps` once, early, against the UN-narrowed Policy (a
+    cheap, connection-registry-free pre-check, before `resolve_scope_
+    connections` or schema validation ever run); `validate_policy` calls the
+    same function again, internally, AFTER `resolve_purpose_policy` has
+    narrowed the Policy.
+
+    This pins that the two calls CAN legitimately disagree — proving the
+    (corrected) claim in this function's own docstring and `execution/
+    service.py`'s comment: the pre-check alone does NOT reject a cte named
+    after a table only a purpose delta denies (it under-rejects — a missed
+    early exit, not a missed enforcement), but the full `validate_policy`
+    pipeline still correctly rejects it. This is safe only because
+    `Policy.for_purpose` is additive-only (verified separately by
+    `test_purpose_cannot_widen_a_base_deny` above): it can only ADD to
+    `denied_tables`/`denied_columns`/`mandatory_row_filters`/`column_masks`,
+    never remove from them, so the un-narrowed pre-check's governed-name set
+    is always a SUBSET of the narrowed one's — under-rejection only, never
+    over-rejection, and never a missed enforcement, because `validate_
+    policy`'s own internal call is the one that actually enforces it and runs
+    on every code path regardless of whether `_validate_and_compile`'s
+    pre-check also ran. If `PurposePolicyDelta` ever gains a subtractive
+    field, this monotonicity argument — and the safety of the redundant
+    pre-check — breaks.
+    """
+    policy = Policy(
+        allowed_purposes=["support"],
+        purpose_policies={"support": PurposePolicyDelta(denied_tables=["totals"])},
+    )
+    query = StructuredQuery(
+        ctes=[{"name": "totals", "query": {"from": "orders", "select": ["orders.id"]}}],
+        from_table="totals",
+        select=["totals.id"],
+        purpose="support",
+    )
+
+    # The pre-check, run against the UN-narrowed Policy exactly as
+    # `_validate_and_compile` runs it, cannot see the purpose-only deny —
+    # "totals" isn't in the un-narrowed Policy's `denied_tables` yet.
+    validate_structural_caps(query, policy)  # must not raise
+
+    # The full pipeline, which purpose-narrows FIRST, still correctly
+    # rejects — proving the pre-check's silence above was never a bypass.
+    with pytest.raises(PolicyViolationError, match="also the name of a table"):
+        validate_policy(query, policy, connection_id="demo")
