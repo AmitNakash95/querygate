@@ -219,7 +219,13 @@ from querygate.mcp.server import create_mcp_server
 # real new capability (the MCP MRTR approval port needs these visible in
 # the output schema so a client can tell "this item needs approval" apart
 # from any other error without parsing free text), not duplication.
-_MAX_TOTAL_CHARS = 124_000
+#
+# 2026-08-06 (TODO.md item 19 phase 2): +648 chars in `list_connections` and
+# `describe_my_querygate_access` — `DatabaseDialect` gained a `snowflake`
+# member (each tool's output schema embeds the enum once), real new
+# capability (a caller can now see/reason about a Snowflake connection at
+# all), not duplication.
+_MAX_TOTAL_CHARS = 125_000
 
 
 def _tool_schema_chars(tool: object) -> int:

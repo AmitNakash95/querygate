@@ -90,6 +90,19 @@ bandit = "^1.8.0"
 # Semgrep — so a dev testing tool never constrains the shipped dependency graph.
 # See scripts/run_dast.py and TODO item 89.
 moto = "^5.2.2"
+# Dev-only, unlike pymysql/aiomysql/pyodbc above (2026-08-06
+# security-invariant-reviewer finding, TODO item 19 phase 2): no module under
+# src/querygate/ imports snowflake.sqlalchemy or snowflake.connector —
+# SnowflakeDialectAdapter builds only generic sqlalchemy.func expressions, and
+# connections/engine.py's init_engine refuses to open a Snowflake connection
+# at all (SessionDialectAdapter.is_connectable() returns False for it), so
+# create_async_engine never resolves the "snowflake" dialect entry point in
+# production. Only tests/unit/test_dialect_adapters.py imports it, to compile
+# against the real dialect object. Shipping snowflake-connector-python's own
+# TLS/crypto stack (pyopenssl, asn1crypto) in the release container/package
+# for a code path that cannot execute would be unnecessary attack surface and
+# an unnecessary CVE-tracking obligation for a self-hosted security gateway.
+snowflake-sqlalchemy = "^1.11.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
