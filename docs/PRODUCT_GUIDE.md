@@ -254,9 +254,10 @@ result size even if the caller asked for something larger.
 
 **Dialect-specific logic lives behind one interface.**
 (`compiler/dialect_adapters.py`, TODO.md item 73, a compiler-scoped slice
-of item 57's "pluggable dialect adapter" plan.) QueryGate supports Postgres
-and MSSQL (SQLite is used only internally, for tests/examples — see
-`connections/models.py`'s `DatabaseDialect`). Almost the entire compiler is
+of item 57's "pluggable dialect adapter" plan.) QueryGate supports Postgres,
+MSSQL, and MySQL (item 19 phase 1; SQLite is used only internally, for
+tests/examples — see `connections/models.py`'s `DatabaseDialect`). Almost
+the entire compiler is
 dialect-agnostic SQLAlchemy Core; the things that genuinely differ per
 database are each one method on a small `DialectAdapter` interface, with
 one concrete adapter class per dialect (`PostgresDialectAdapter`,
