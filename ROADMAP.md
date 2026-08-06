@@ -248,12 +248,14 @@ claim when the work ships or before explicitly handing the item back.
   benchmark results, item 60's disclosure program) — the "hand it to them"
   step Phase 2's other items don't cover. No new evidence generated, no
   non-negotiable touched.* **Depends on 54, 58 (phase 1), 60.**
-- [ ] **134** — Compliance-grade (WORM) audit retention + managed search.
-  *Added 2026-07-30 by `competitive-scan`.* ✅ **Shipped (phase 1)** 2026-08-06:
-  `AuditSinkBackend.JSONL_CHAINED_S3_WORM` composes S3 Object Lock archival
-  with the existing hash-chained ledger via a new `CompositeAuditSink`;
-  `configure_audit_sink` converted to a real registry; buffered/batched,
-  fail-open flush off the request path. Phase 2 (managed search) not started.
+- [x] **134** — Compliance-grade (WORM) audit retention + managed search.
+  *Added 2026-07-30 by `competitive-scan`.* ✅ **Shipped** 2026-08-06 (both
+  phases): phase 1 — `AuditSinkBackend.JSONL_CHAINED_S3_WORM` composes S3
+  Object Lock archival with the existing hash-chained ledger via a new
+  `CompositeAuditSink`; `configure_audit_sink` converted to a real registry;
+  buffered/batched, fail-open flush off the request path. Phase 2 —
+  `GET /api/v1/admin/observability/worm-search` (`admin:audit:worm-search`
+  scope), a bounded/filtered/paginated search directly over the archive.
 - [x] **60** — Bug bounty / responsible disclosure program. *Cheap, durable
   trust signal; stand up after 53 clears the obvious issues.* ✅ **Shipped**
   (coordinated-disclosure program in `SECURITY.md`: recognition-only structure +
@@ -324,6 +326,13 @@ claim when the work ships or before explicitly handing the item back.
   (MySQL) or 134 (WORM retention). *Surfaced 2026-08-06 by `claim-reviewer`
   while auditing item 152 — a documentation gap, not a claim-accuracy defect;
   deliberately left out of item 152's own scope.*
+- [ ] **154** — WORM archive segments are unenveloped, so managed search
+  (item 134 phase 2) cannot verify a segment was actually written by
+  QueryGate. *Surfaced 2026-08-06 by `security-invariant-reviewer` auditing
+  item 134 phase 2 — a phase-1 write-format change with a migration question
+  for already-archived segments, an explicit design decision, not a
+  same-session fix; the residual is recorded in `audit/worm_search.py`'s
+  module docstring and `docs/THREAT_MODEL.md` QG-40 in the meantime.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
