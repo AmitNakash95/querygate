@@ -158,17 +158,27 @@ def sensitivity_approval_reasons(
     `scope_connections` (item 155) is `validate_schema`'s per-scope table-to-
     connection map — `resolve_query_table_connections`'s output for each scope,
     keyed by `id(scope)`, with each scope's own map case-folded onto its
-    effective table names. Without it, every table's catalog lookup used
-    `connection_id` (the query's single top-level connection) regardless of where
-    the table actually lived, so a cross-connection join (`JoinSpec.connection`,
-    gated by policy's `join_group` rule) to a table whose `pii` label lives ONLY
-    in the *joined* connection's catalog never tripped the gate:
-    `store.get_table(connection_id, physical)` looked in the wrong connection's
-    catalog, found no entry, and silently treated the column as unlabelled. When
-    a table is absent from the map — the outer FROM table, a cte reference, or
-    any call site that has no map to hand (every pre-155 caller, via the `None`
-    default) — this falls back to `connection_id`, which is exactly the old,
-    correct behavior for a single-connection query.
+    effective table names. Before this map existed, every table's catalog
+    lookup used only `connection_id` (the query's single top-level connection)
+    regardless of where the table actually lived, so a cross-connection join
+    (`JoinSpec.connection`, gated by policy's `join_group` rule) to a table
+    whose `pii` label lives ONLY in the *joined* connection's catalog never
+    tripped the gate: `store.get_table(connection_id, physical)` looked in the
+    wrong connection's catalog, found no entry, and silently treated the
+    column as unlabelled.
+
+    A lookup now consults BOTH `connection_id` and the table's own resolved
+    connection (`table_connection.get(table.casefold(), connection_id)`) when
+    the two differ, and triggers on either — see the inline comment below for
+    why a strict replacement of one with the other would have reopened a
+    mirror-image gap. `table.casefold()` missing from the map (a call site
+    that passes no map at all, via the `None` default — every pre-155 caller)
+    simply makes `table_connection_id` equal `connection_id`, which collapses
+    to a single lookup: the outer FROM table and a cte reference are never
+    genuinely "absent" from a real map either, since `resolve_query_table_
+    connections` always seeds the FROM table's own entry, and a cte reference
+    is skipped earlier by the `cte_names` check above and never reaches this
+    lookup at all.
     """
     triggers = set(policy.approval_sensitivities)
     if not triggers:
@@ -192,20 +202,61 @@ def sensitivity_approval_reasons(
             if physical.casefold() in cte_names:
                 continue
             table_connection_id = table_connection.get(table.casefold(), connection_id)
-            entry = store.get_table(table_connection_id, physical)
-            if entry is None:
-                continue
-            col_entry = entry.column(column)
-            label = (
-                col_entry.sensitivity
-                if col_entry is not None and col_entry.sensitivity != SensitivityClass.NONE
-                else entry.sensitivity
+            # Consult BOTH the table's resolved connection and the query's
+            # top-level connection when they differ, rather than replacing one
+            # with the other (security-invariant-reviewer, 2026-08-06, on this
+            # same item). Catalogs are maintained independently per connection
+            # (item 32's per-connection scoping — `import_connection` exists
+            # specifically because labels do not propagate automatically), so
+            # an operator may have labelled a table sensitive under only ONE
+            # side of a cross-connection join_group — the connection they
+            # curated first, or the one they registered the physical database
+            # under — without yet duplicating that label into the other. A
+            # strict replacement would silently stop catching that label the
+            # moment a query reaches the same physical table through its other
+            # registered connection. This module's own posture is fail-closed
+            # ("denies rather than admits on any ambiguity") — over-triggering
+            # on an unrelated same-named table in the other catalog is the
+            # safe direction; under-triggering on a genuinely sensitive one is
+            # not.
+            candidate_connection_ids = (
+                [table_connection_id, connection_id]
+                if table_connection_id != connection_id
+                else [connection_id]
             )
-            if label in triggers:
+            label = None
+            label_connection_id = None
+            for candidate_connection_id in candidate_connection_ids:
+                entry = store.get_table(candidate_connection_id, physical)
+                if entry is None:
+                    continue
+                col_entry = entry.column(column)
+                candidate_label = (
+                    col_entry.sensitivity
+                    if col_entry is not None and col_entry.sensitivity != SensitivityClass.NONE
+                    else entry.sensitivity
+                )
+                if candidate_label in triggers:
+                    label = candidate_label
+                    label_connection_id = candidate_connection_id
+                    break
+            if label is not None:
                 key = f"{physical}.{column}"
                 if key not in seen:
                     seen.add(key)
-                    hits.append(f"references {label}-labelled column {key}")
+                    # Name which connection's catalog actually produced the hit,
+                    # but only when there were two genuinely different candidates
+                    # to choose between (architecture-boundary-reviewer,
+                    # 2026-08-06, on this same item) — with a single-connection
+                    # query the connection is always self-evident from context,
+                    # so leaving the reason string unchanged there keeps every
+                    # pre-155 caller's reason text stable.
+                    suffix = (
+                        f" (connection {label_connection_id!r})"
+                        if len(candidate_connection_ids) > 1
+                        else ""
+                    )
+                    hits.append(f"references {label}-labelled column {key}{suffix}")
     return hits
 
 
