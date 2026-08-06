@@ -16,7 +16,11 @@ from mcp.types import ElicitResult, InputRequiredResult
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import ApprovalRequiredError
-from querygate.execution.approval import issue_approval_token, write_fingerprint
+from querygate.execution.approval import (
+    TOKEN_KIND_PENDING,
+    issue_approval_token,
+    write_fingerprint,
+)
 from querygate.execution.write_execution import (
     WriteBatchItemResult,
     WriteExecutionService,
@@ -154,7 +158,12 @@ async def test_tool_admits_the_write_on_a_resolved_retry(monkeypatch):
     pending = json.dumps(
         {
             "w0": issue_approval_token(
-                fingerprint=fp, approver_subject="mcp:pending-elicitation", key="k"
+                fingerprint=fp,
+                approver_subject="mcp:pending-elicitation",
+                key="k",
+                connection_id=None,
+                principal_subject=None,
+                kind=TOKEN_KIND_PENDING,
             )
         }
     )
