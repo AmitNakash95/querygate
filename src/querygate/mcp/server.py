@@ -9,6 +9,10 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from querygate.core.logging import get_logger
 from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE
+from querygate.mcp.caching import (
+    assert_private_cache_scope_installed,
+    install_private_cache_scope,
+)
 from querygate.mcp.instructions import MCP_INSTRUCTIONS
 
 if TYPE_CHECKING:
@@ -92,6 +96,16 @@ def create_mcp_server() -> FastMCP:
 
     discover_and_register_tools()
     _install_scoped_tool_listing(mcp_server)
+    # TODO.md item 129: tools/list, prompts/list, resources/list, and
+    # resources/read all vary by caller (scoped tool visibility today; any
+    # future resource/prompt tomorrow). Installs a self-enforcing handler
+    # dict (`_PrivateCacheScopeHandlers`), so — unlike a one-shot wrap of
+    # whatever's currently registered — this is NOT order-dependent on
+    # running after `_install_scoped_tool_listing`: any handler installed
+    # for these four request types, now or later, gets wrapped at write
+    # time regardless of call order. `setup_mcp` below asserts this is
+    # actually installed before the app is ever mounted.
+    install_private_cache_scope(mcp_server)
     return mcp_server
 
 
@@ -109,6 +123,10 @@ def setup_mcp(app: "FastAPI", cfg: "AppConfig") -> None:
         allowed_hosts=cfg.mcp_allowed_hosts,
         allowed_origins=cfg.mcp_allowed_origins,
     )
+    # TODO.md item 129: fail loudly here rather than silently serving a
+    # tools/list (etc.) response with no cacheScope, if a future refactor
+    # ever skips or breaks install_private_cache_scope upstream.
+    assert_private_cache_scope_installed(server)
     mcp_asgi = server.streamable_http_app()
     authed_mcp = MCPAuthMiddleware(app=mcp_asgi, settings=cfg)
     # Guard the body (size/depth) outermost, before auth and before the
