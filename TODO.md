@@ -50,7 +50,7 @@ order-of-magnitude, not commitments.
 | 16 | ✅ Column policy case-sensitivity gap | XS | — |
 | 17 | ✅ No config validation CLI | S | — |
 | 18 | Stored-procedure catalog | XL | — |
-| 19 | Additional dialects (MySQL phase 1 shipped; Snowflake/BigQuery open) | L–XL (per remaining dialect) | 2 (do MSSQL first) |
+| 19 | Additional dialects (MySQL phase 1 shipped; Snowflake phase 1 — rendering-only, not live-verified — shipped; BigQuery open) | L–XL (per remaining dialect) | 2 (do MSSQL first) |
 | 20 | ✅ Client SDK / integration examples | S | — |
 | 21 | ✅ Principal policy must apply to every MCP/config surface | S | 6, 8, 10 |
 | 22 | ✅ Principal-aware connection/tool visibility | S–M | 6, 8 |
@@ -187,6 +187,8 @@ order-of-magnitude, not commitments.
 | 154 | WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate | M | 91, 134 |
 | 155 | ✅ `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection | M | 151 |
 | 156 | A cross-connection join's joined table is governed only by the primary connection's Policy — masks/row filters/deny-lists never apply from the joined connection's own Policy | M/L | 155 |
+| 157 | Snowflake live-server verification and deeper feature parity (item 19 phase 2 residual) | L–XL | 19 |
+| 158 | `ConnectionProfile` never validates `dialect` agrees with `connection_string`'s actual backend | S–M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -566,7 +568,7 @@ parameters, whether it's confirmed read-only) rather than a generic
 pass-through, matching the "safe stored procedure/tool catalog pattern"
 called out as a goal but intentionally not attempted in v1.
 
-### 19. Additional dialects (MySQL phase 1 shipped 2026-08-06; Snowflake, BigQuery, etc. still open)
+### 19. Additional dialects (MySQL phase 1 shipped 2026-08-06; Snowflake phase 1 — rendering-only, NOT live-verified — shipped 2026-08-06; BigQuery still open)
 
 **MySQL (phase 1) shipped 2026-08-06.** `MySQLDialectAdapter`
 (`compiler/dialect_adapters.py`) + `MySQLSessionAdapter`
@@ -590,13 +592,62 @@ required to call MySQL phase 1 shipped. No MySQL cost estimator either (falls
 back to the existing "any other dialect proceeds under the reactive
 guardrails" behavior).
 
-**Remaining scope — Effort: L–XL, per dialect.** Snowflake/BigQuery are
-architecturally different from all three shipped dialects (no native async
-driver in some cases, different auth models, different SQL dialects for date
-functions) and are realistically L–XL each, closer to "add a new connection
-type" than "extend an enum." The item-57/item-19-phase-1 adapter pattern
-(one `DialectAdapter` + one `SessionDialectAdapter`, registered, no inline
-`if dialect == ...`) is the proven template to follow.
+**Snowflake (phase 1 — rendering-only, NOT live-verified) shipped 2026-08-06.**
+`DatabaseDialect` gained a `snowflake` member with a real
+`SnowflakeDialectAdapter` (`compiler/dialect_adapters.py`) +
+`SnowflakeSessionAdapter` (`connections/dialects.py`), registered in the
+item-57 adapter registries — purely additive. Covers the same primitive
+surface as the other three dialects: `DATE_TRUNC`-based date bucketing
+(`week` computed explicitly via `DAYOFWEEKISO` rather than the
+`WEEK_START`-session-dependent `DATE_TRUNC('week', ...)`), native `NULLS
+FIRST/LAST`, sample-statistic `STDDEV`/`VARIANCE` (matches Postgres, unlike
+MySQL's population-default bare names), `LISTAGG`, a genuine `ARRAY_AGG`
+(real ARRAY type), `PERCENTILE_CONT ... WITHIN GROUP` as a plain aggregate,
+full ROWS/RANGE window frames, distinct-only `INTERSECT`/`EXCEPT`. Upsert is
+rejected, not emulated: Snowflake's idiom is `MERGE`, with no
+single-target-constraint model the way `conflict_columns`/`update_columns`
+express one (see the 2026-08-06 Decision Log entry for the full write-up).
+
+**Deliberately incomplete, and load-bearing:** `connections/engine.py`'s
+`init_engine` refuses to actually open a Snowflake connection, dispatched
+through `SessionDialectAdapter.is_connectable()` (a registered capability
+method, not an inline dialect comparison — 2026-08-06
+`architecture-boundary-reviewer` finding) rather than a literal
+`profile.dialect == DatabaseDialect.SNOWFLAKE` check. `snowflake-sqlalchemy`'s
+driver has no async SQLAlchemy engine support, and this codebase's whole
+execution pipeline is built on `AsyncSession`/`AsyncEngine`. A Snowflake
+`ConnectionProfile` fails cleanly with an explained, client-actionable
+`ConfigValidationError` (not a masked 500 — 2026-08-06
+`security-invariant-reviewer` finding: an earlier version raised a bare
+`ValueError`, which REST/MCP's error masking treats as an opaque internal
+error rather than the explained rejection this guard was written to give)
+the first time it's used, rather than connecting. **Nothing about
+Snowflake's SQL rendering is live-verified** — there is no Snowflake
+instance available in this project's environment (unlike Postgres/MySQL/MSSQL,
+which run in Docker) and no real account credentials; every claim is backed by
+Snowflake's public SQL reference docs. The two adapters are tested two
+different ways, not both against the real dialect object (2026-08-06
+`claim-reviewer` finding): `SnowflakeDialectAdapter`'s output is compiled
+against a real, installed `snowflake.sqlalchemy` dialect object
+(`tests/unit/test_dialect_adapters.py`'s `TestSnowflake*` classes);
+`SnowflakeSessionAdapter` is tested against recording fakes asserting the
+exact SQL text/params it builds (`tests/unit/test_dialects.py`'s Snowflake
+session-adapter section) — its statements are built with `sa.text(...)`
+directly, never compiled through any dialect object. Neither reaches a
+live server (`tests/unit/test_connections_engine.py`'s engine-guard test
+proves the connection attempt itself never happens). Do not treat this the
+way MySQL phase 1's live-tested status is treated. See item 157 for the
+live-verification/deeper-parity follow-up, and item 158 for a related,
+dialect-agnostic gap this item's own audit also surfaced (`dialect` is never
+validated against `connection_string`'s actual backend, for any dialect).
+
+**Remaining scope — Effort: L–XL.** BigQuery is architecturally different
+from all four shipped/attempted dialects (no native async driver, a
+different auth model, a different SQL dialect for date functions) and is
+realistically L–XL, closer to "add a new connection type" than "extend an
+enum." The item-57/item-19-phase-1 adapter pattern (one `DialectAdapter` +
+one `SessionDialectAdapter`, registered, no inline `if dialect == ...`) is
+the proven template to follow.
 
 ### 20. Client SDK / agent-framework integration examples ✅ DONE
 
@@ -2446,4 +2497,119 @@ than once for the whole query).
 chosen — touches policy validation and compilation, not just approval).
 **Depends on:** cross-connection joins/`join_group` (shipped), 155 (shipped —
 same map this would reuse if the per-connection path is chosen).
+
+### 157. Snowflake live-server verification and deeper feature parity (item 19 phase 2 residual)
+
+Item 19 phase 2 (2026-08-06) shipped `SnowflakeDialectAdapter`/
+`SnowflakeSessionAdapter` as **rendering-level only** — every SQL idiom is
+backed by Snowflake's public docs. `SnowflakeDialectAdapter` is checked by
+compiling against a real, installed `snowflake.sqlalchemy` dialect object;
+`SnowflakeSessionAdapter` is checked against recording fakes asserting the
+exact SQL text/params it builds, not against that real dialect object (its
+statements are `sa.text(...)` directly, not compiled Core expressions).
+**None of it has run against a live Snowflake account**, and
+`connections/engine.py` deliberately refuses to open a Snowflake connection
+at all today (`SessionDialectAdapter.is_connectable()` returns `False` for
+it — `snowflake-sqlalchemy`'s driver has no async SQLAlchemy engine support
+— see the 2026-08-06 Decision Log entry). This item is the honest residual
+so that gap isn't silently lost.
+
+**What to do (when prioritized), roughly in dependency order:**
+
+1. **Async execution path.** Decide and build how Snowflake actually
+   executes a query through this pipeline. `snowflake-sqlalchemy` is
+   sync-only, and the pipeline (`execution/service.py`, `schema/
+   reflection.py`, `execution/cost_estimation.py`, ...) is built on
+   `AsyncSession`/`AsyncEngine` throughout — this needs either (a) a real
+   `asyncio.to_thread`-wrapped facade that satisfies enough of the
+   `AsyncSession`/`AsyncEngine` surface for every existing call site to keep
+   working unchanged, or (b) confirming whether a genuinely async Snowflake
+   SQLAlchemy dialect has shipped since 2026-08-06. As of this writing there
+   is an open `snowflakedb/snowflake-sqlalchemy` feature request tracking
+   async support (unverified at time of writing — no internet access from
+   this environment to confirm the current issue number/status; re-check on
+   GitHub directly before committing to either (a) or (b), don't trust this
+   line). Once async support exists, remove `is_connectable`'s
+   Snowflake guard.
+2. **Live verification.** Once (1) lands and a real Snowflake account/
+   warehouse is available (trial account or a design-partner's own),
+   add `tests/integration/test_snowflake_live.py` mirroring
+   `test_mysql_live.py`'s shape, and a `make test-snowflake-live` target —
+   deliberately NOT added in phase 1 per this item's own scoping (no way to
+   stand up a Snowflake instance in this sandboxed environment or in CI).
+   Confirm each documented-but-unverified claim against real data,
+   especially: `DAYOFWEEKISO`/`WEEKISO` session-independence, the explicit
+   `date_bucket('week', ...)` computation actually landing on the same Monday
+   `date_trunc('week', ...)` would with default `WEEK_START`, `SYSDATE()`'s
+   UTC guarantee, and the RANGE-with-numeric-offset window frame support
+   (GA'd 2024-08-08 — confirm the target account/edition actually has it).
+3. **Cost estimation.** No Snowflake cost estimator exists (falls back to
+   "any other dialect proceeds under the reactive guardrails", the same as
+   MySQL). Snowflake's `EXPLAIN`/query profile API would need its own
+   `execution/cost_estimation.py` function, dispatched the same way
+   `estimate_postgres_query_cost`/`estimate_mssql_query_cost` are.
+4. **Test-suite integration gaps**, mirroring MySQL phase 1's own honestly-
+   flagged gap: `test_compiler.py`/`test_cte.py`/`test_nonequi_joins.py`/
+   `test_set_operations.py`/`test_column_masking.py`/`test_date_primitives.py`
+   still don't parametrize Snowflake at all (deliberately kept out of
+   `test_date_primitives.py`'s shared suite in phase 1, since that file is
+   coupled to the live PG/MSSQL differential infrastructure — see
+   `tests/unit/test_dialect_adapters.py`'s dedicated `TestSnowflake*` classes
+   for where phase 1's coverage actually lives instead).
+5. **Session-parameter/auth model.** Snowflake's connection shape (account
+   identifier, warehouse, role, key-pair or OAuth auth beyond a plain
+   password) is more elaborate than the other three dialects' — confirm
+   `examples/connections.example.yaml`'s Snowflake example URL shape and
+   `secrets/resolvers.py` cover what a real deployment needs (e.g. key-pair
+   auth, which doesn't fit a single `${ENV_VAR}` connection-string secret the
+   way a password does).
+
+**Effort:** L–XL (async execution path is the load-bearing unknown; the rest
+is incremental once that exists). **Depends on:** item 19 phase 2 (shipped);
+a real Snowflake account/credentials becoming available to this project.
+
+### 158. `ConnectionProfile` never validates that `dialect` agrees with `connection_string`'s actual backend
+
+Surfaced 2026-08-06 by the `security-invariant-reviewer` audit of item 19
+phase 2 (Snowflake), but the gap is pre-existing and dialect-agnostic — it
+predates Snowflake and affects Postgres/MSSQL/MySQL exactly the same way.
+
+**The gap.** Nothing anywhere validates that `ConnectionProfile.dialect`
+(the declared enum value) matches the actual backend named in
+`connection_string`'s URL scheme. A profile with `dialect: postgresql` and
+`connection_string: mysql+asyncmy://user:pass@host/db` (or any other
+mismatched pair) is accepted by Pydantic and reaches
+`connections/engine.py`'s `init_engine` untouched — `session_scope`
+(`engine.py`) then dispatches `apply_session_guardrails` on the *declared*
+`profile.dialect`, so a Postgres-declared profile pointed at a real MySQL
+server would send `SET LOCAL statement_timeout` to a MySQL connection, which
+does not understand that statement — the session guardrail silently fails to
+apply (a config error masquerading as one dialect's own gap, not a security
+bypass: `create_async_engine` itself resolves the driver from the URL, not
+the declared `dialect`, so the actual DBAPI/wire protocol used is always
+correct — only the *guardrail SQL text chosen* can be wrong).
+
+**Why item 19 phase 2 surfaced it.** Its own Snowflake `init_engine` guard
+(`SessionDialectAdapter.is_connectable()`) keys on `profile.dialect`, not on
+parsing `connection_string`'s URL — so today, a profile misconfigured as
+`dialect: postgresql` over a real `snowflake://...` URL would not be caught
+by that guard either, and would instead fail deeper inside SQLAlchemy with a
+less-clear `InvalidRequestError`. Because the async-driver check is
+currently the load-bearing barrier for Snowflake specifically (not this
+gap), there is no live bypass today — but the moment item 157 ever adds a
+usable async path for Snowflake, `is_connectable()`'s declared-dialect check
+becomes the *only* barrier, and inherits this same weakness.
+
+**What to do (when prioritized):** add a `ConnectionProfile` model validator
+(alongside `_valid_id` in `connections/models.py`) that parses
+`connection_string` with `sa.engine.url.make_url(...).get_backend_name()`
+and rejects a mismatch against `dialect`, with a clear config-validation
+error (not a raw SQLAlchemy exception) — closing both the general
+session-guardrail-mismatch case and the Snowflake `is_connectable()` case in
+one place, rather than teaching `init_engine` a second, narrower parse-based
+check.
+
+**Effort:** S–M (one validator + tests across all four dialects' URL
+schemes; no runtime architecture change). **Depends on:** none — buildable
+independently of item 157.
 

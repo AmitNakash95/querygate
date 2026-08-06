@@ -347,6 +347,19 @@ claim when the work ships or before explicitly handing the item back.
   needs an explicit decision (document `join_group` as a mutual-trust
   boundary, or extend per-connection resolution from the catalog lookup to
   policy enforcement too).*
+- [ ] **157** — Snowflake live-server verification and deeper feature parity
+  (item 19 phase 2 residual). *Filed 2026-08-06 alongside item 19 phase 2
+  (Snowflake `DialectAdapter`/`SessionDialectAdapter`, rendering-only, not
+  live-verified — no Snowflake instance or credentials available in this
+  environment). Blocked on deciding/building an async execution path for
+  `snowflake-sqlalchemy`'s sync-only driver before a live connection can even
+  be attempted; not eligible for pickup until that's a live-buildable slice.*
+- [ ] **158** — `ConnectionProfile` never validates `dialect` agrees with
+  `connection_string`'s actual backend. *Surfaced 2026-08-06 by the
+  `security-invariant-reviewer` audit of item 19 phase 2 — pre-existing and
+  dialect-agnostic (affects Postgres/MSSQL/MySQL identically), not a
+  Snowflake-specific gap; small, self-contained validator fix, buildable
+  independently of item 157.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
@@ -528,7 +541,9 @@ position.
   "QueryGate is narrow" objection. **Depends on 57**; also downstream of the
   engine — each new adapter must render every Phase 4 primitive.* **MySQL
   phase 1 shipped 2026-08-06** (live-verified against a real MySQL 8.4
-  server); Snowflake/BigQuery remain open, each its own L–XL effort.
+  server). **Snowflake phase 1 shipped 2026-08-06** (rendering-only, NOT
+  live-verified — no Snowflake instance available in this environment; see
+  item 157). BigQuery remains open, its own L–XL effort.
 - [x] **128** — Conform to the final MCP `2026-07-28` protocol revision. *Added
   2026-07-30 by `competitive-scan`; the spec went final on 2026-07-28 (the
   2026-07-22 scan saw only the RC) and we are a full revision behind on

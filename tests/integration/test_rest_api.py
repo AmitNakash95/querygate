@@ -13,7 +13,12 @@ from querygate.catalog.retrieval import CatalogCitation
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, get_registry, set_registry
 from querygate.core.config import AppConfig
-from querygate.core.exceptions import CapacityTimeoutError, QueryValidationError, QueueFullError
+from querygate.core.exceptions import (
+    CapacityTimeoutError,
+    ConfigValidationError,
+    QueryValidationError,
+    QueueFullError,
+)
 from querygate.execution.service import (
     BatchQueryItemResult,
     ColumnCatalogInfo,
@@ -259,6 +264,38 @@ async def test_query_validation_error_is_422(app):
                 "/api/v1/demo/query", json={"from": "customers", "select": ["customers.x"]}
             )
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_query_against_a_not_yet_connectable_dialect_is_422_not_500(app):
+    """TODO.md item 19 phase 2 — 2026-08-06 `security-invariant-reviewer`
+    finding: `connections/engine.py`'s Snowflake guard used to raise a bare
+    `ValueError`, which is NOT in `api/_errors.py`'s `_ACTIONABLE` tuple, so
+    `mask_unexpected()` was silently converting the guard's explained
+    rejection into an opaque REST 500 — defeating the guard's whole point.
+    It now raises `ConfigValidationError`, which has its own dedicated
+    `@app.exception_handler` mapping to 422 with the message intact
+    (`api/_errors.py`). This proves that mapping holds through the real
+    ASGI app for the exact exception `init_engine`'s guard raises, not just
+    that the exception TYPE is correct in isolation
+    (`tests/unit/test_connections_engine.py` proves that half)."""
+    with patch(
+        f"{_SERVICE}.execute",
+        new_callable=AsyncMock,
+        side_effect=ConfigValidationError(
+            "Connection 'demo' is dialect 'snowflake', which QueryGate cannot yet open a "
+            "live connection for"
+        ),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                "/api/v1/demo/query", json={"from": "customers", "select": ["customers.id"]}
+            )
+    assert resp.status_code == 422
+    assert "cannot yet open a live connection" in resp.text
+    from querygate.core.exceptions import PUBLIC_INTERNAL_ERROR
+
+    assert PUBLIC_INTERNAL_ERROR not in resp.text
 
 
 @pytest.mark.asyncio

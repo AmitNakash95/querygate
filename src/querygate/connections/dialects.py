@@ -107,6 +107,25 @@ class SessionDialectAdapter(ABC):
         no-op; MySQLSessionAdapter overrides it."""
         return ""
 
+    def is_connectable(self) -> bool:
+        """Whether `connections/engine.py`'s `init_engine` may proceed to
+        `create_async_engine` for this dialect at all (TODO.md item 19 phase
+        2). Default `True` — every dialect with a real async SQLAlchemy
+        driver (Postgres/MSSQL/MySQL) is connectable and never overrides
+        this. `SnowflakeSessionAdapter` overrides it to `False`:
+        `snowflake-sqlalchemy`'s DBAPI has no async driver, so attempting
+        `create_async_engine` for it fails inside SQLAlchemy itself with a
+        confusing library-internal error rather than a QueryGate-owned one.
+
+        This is a capability check on the REGISTERED interface, not an
+        inline `if profile.dialect == ...` at the `init_engine` call site
+        (2026-08-06 `architecture-boundary-reviewer` finding on this same
+        item): a future dialect with a similar "registered but not yet
+        connectable" gap overrides this one method instead of `init_engine`
+        growing a second bespoke dialect comparison beside the first.
+        """
+        return True
+
 
 class PostgresSessionAdapter(SessionDialectAdapter):
     def build_engine_url(self, profile: ConnectionProfile) -> str:
@@ -300,10 +319,119 @@ class MySQLSessionAdapter(SessionDialectAdapter):
         return " AND TABLE_SCHEMA = DATABASE()"
 
 
+class SnowflakeSessionAdapter(SessionDialectAdapter):
+    """TODO.md item 19 phase 2 — implemented for real (correct per Snowflake's
+    public docs) but **never actually exercised**: `connections/engine.py`'s
+    `init_engine` refuses to open a Snowflake connection before any of these
+    methods can run, because `snowflake-sqlalchemy`'s DBAPI has no async
+    driver and `create_async_engine` requires one (confirmed directly:
+    constructing one raises `sqlalchemy.exc.InvalidRequestError: The asyncio
+    extension requires an async driver to be used. The loaded 'snowflake' is
+    not async.`). This class exists so the URL/connect-arg building is real
+    and ready, and so the session-guardrail SQL this dialect will need is
+    written down and reviewable now rather than invented later — not because
+    it has been proven against a live session. See the Snowflake
+    live-verification follow-up item in TODO.md.
+    """
+
+    def is_connectable(self) -> bool:
+        # The one override of the base class's `True` default — this is
+        # exactly what makes `connections/engine.py`'s `init_engine` refuse a
+        # Snowflake profile before `create_async_engine`, via the registered
+        # interface rather than a bespoke dialect comparison at the call
+        # site. See the base method's docstring for the full rationale.
+        return False
+
+    def build_engine_url(self, profile: ConnectionProfile) -> str:
+        # Passthrough, like Postgres/MySQL: the operator's YAML already
+        # supplies a complete `snowflake://user:pass@account/db/schema?...`
+        # URL (see examples/connections.example.yaml) — there is no
+        # ODBC-driver-name construct to append the way MSSQL's adapter has.
+        return profile.connection_string
+
+    def build_connect_args(self, profile: ConnectionProfile, timeout_seconds: int) -> dict:
+        # snowflake-connector-python accepts BOTH a connection-attempt
+        # timeout (`login_timeout`, the same login-timeout role MSSQL's
+        # pyodbc `timeout` kwarg and MySQL's `connect_timeout` play) and a
+        # genuine per-request timeout (`network_timeout`, which also bounds
+        # query execution) as plain connect() keyword arguments — unlike
+        # pyodbc, there is no separate post-connect attribute to register,
+        # which is why register_query_timeout below is a no-op here.
+        return {"login_timeout": timeout_seconds, "network_timeout": timeout_seconds}
+
+    def register_query_timeout(self, engine: AsyncEngine, timeout_seconds: int) -> None:
+        # No post-connect attribute to set — network_timeout above already
+        # covers the query-execution-timeout role register_query_timeout
+        # exists for on MSSQL's pyodbc driver.
+        return None
+
+    async def apply_session_guardrails(
+        self,
+        session: AsyncSession,
+        *,
+        lock_timeout_seconds: int,
+        statement_timeout_seconds: int,
+    ) -> None:
+        # ALTER SESSION SET, Snowflake's own session-parameter idiom — both
+        # STATEMENT_TIMEOUT_IN_SECONDS and LOCK_TIMEOUT are already
+        # documented in whole seconds (unlike Postgres's ms-as-string
+        # interval literal or MSSQL's milliseconds), so no unit conversion
+        # is needed here. See PostgresSessionAdapter for the interpolation/
+        # nosemgrep rationale — both values are Pydantic-validated ints from
+        # Policy, never caller input, and ALTER SESSION SET takes no bind
+        # parameter.
+        # fmt: off
+        await session.execute(sa.text(f"ALTER SESSION SET LOCK_TIMEOUT = {lock_timeout_seconds}"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        await session.execute(sa.text(f"ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = {statement_timeout_seconds}"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        # fmt: on
+        # No time zone pin: `SnowflakeDialectAdapter.current_timestamp` uses
+        # SYSDATE(), which is UTC by construction (like MSSQL's
+        # SYSUTCDATETIME()) rather than depending on a session TIMEZONE
+        # parameter the way Postgres's now() does.
+
+    async def capture_session_identifier(self, session: AsyncSession) -> str:
+        result = await session.execute(sa.text("SELECT CURRENT_SESSION()"))
+        return str(result.scalar_one())
+
+    async def cancel_session(self, engine: AsyncEngine, identifier: str) -> None:
+        # SYSTEM$CANCEL_ALL_QUERIES(session_id) cancels every query currently
+        # running in that session and leaves the session itself alive — the
+        # same "soft cancel" semantics as Postgres's pg_cancel_backend/
+        # MySQL's KILL QUERY, not the whole-session-terminating SYSTEM$
+        # ABORT_SESSION (the KILL/MSSQL-equivalent primitive). A bind
+        # parameter, like Postgres's pg_cancel_backend — Snowflake's
+        # SYSTEM$ functions are ordinary function calls, not a literal-only
+        # DDL-style statement the way MSSQL's KILL is.
+        async with engine.connect() as conn:
+            await conn.execute(
+                sa.text("SELECT SYSTEM$CANCEL_ALL_QUERIES(:session_id)"),
+                {"session_id": identifier},
+            )
+
+    def list_live_tables_extra_filter_sql(self) -> str:
+        # Deliberately inherits the base class's "" no-op default (2026-08-06
+        # security-invariant-reviewer finding — recorded explicitly here
+        # rather than left as a silent inheritance, per QG-39's own lesson:
+        # this exact default was silently WRONG once, for MySQL). Snowflake's
+        # INFORMATION_SCHEMA is scoped per-database like Postgres's/MSSQL's,
+        # not server-wide like MySQL's, so no extra restriction should be
+        # needed — but this is a documentation-derived claim, unverified
+        # against a live account (like everything else on this adapter), and
+        # `schema/reflection.py`'s exclusion list (`information_schema`,
+        # `pg_catalog`, ...) is lowercase while Snowflake's own default
+        # identifier casing is uppercase, so if this method is ever reached
+        # (today it cannot be — see the class docstring), the exclusion may
+        # silently no-op rather than silently over- or under-restrict.
+        # Verify both claims against a real account before item 157 lifts
+        # `init_engine`'s guard, rather than trusting this comment.
+        return ""
+
+
 _SESSION_ADAPTERS: Dict[DatabaseDialect, SessionDialectAdapter] = {
     DatabaseDialect.POSTGRESQL: PostgresSessionAdapter(),
     DatabaseDialect.MSSQL: MSSQLSessionAdapter(),
     DatabaseDialect.MYSQL: MySQLSessionAdapter(),
+    DatabaseDialect.SNOWFLAKE: SnowflakeSessionAdapter(),
 }
 
 
