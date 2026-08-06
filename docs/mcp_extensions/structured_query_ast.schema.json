@@ -1,0 +1,2416 @@
+{
+  "$id": "https://github.com/AGitmit/QueryGate/blob/main/docs/mcp_extensions/structured_query_ast.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The read (StructuredQuery) and write (Insert/Update/Delete/Upsert) AST shapes QueryGate validates every request against. Declares a contract only \u2014 see docs/mcp_extensions/structured_query_ast.md's Non-goals section. Generated from querygate.query_ast.models and querygate.write_ast.models; do not hand-edit.",
+  "extension": "io.github.agitmit/structured-query-ast",
+  "read": {
+    "$defs": {
+      "AggregateSelectItem": {
+        "additionalProperties": false,
+        "description": "Aggregate projection, e.g. COUNT(*) AS order_count, or an aggregate over\na computed expression: SUM(quantity * unit_price), or the conditional\naggregation SUM(CASE WHEN status='paid' THEN amount ELSE 0 END).",
+        "properties": {
+          "arg": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The scalar expression to aggregate \u2014 a column, arithmetic, a nested function, or a CASE. Mutually exclusive with col.",
+            "title": "Arg"
+          },
+          "as": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "As"
+          },
+          "col": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Sugar for arg={'col': ...}: a Table.Col ref, or '*' for count(*). Mutually exclusive with arg; `arg` is the canonical form.",
+            "title": "Col"
+          },
+          "distinct": {
+            "default": false,
+            "description": "Aggregate only over distinct values, e.g. COUNT(DISTINCT col).",
+            "title": "Distinct",
+            "type": "boolean"
+          },
+          "fn": {
+            "enum": [
+              "count",
+              "sum",
+              "avg",
+              "min",
+              "max",
+              "stddev",
+              "variance"
+            ],
+            "title": "Fn",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fn"
+        ],
+        "title": "AggregateSelectItem",
+        "type": "object"
+      },
+      "ArrayAggSelectItem": {
+        "additionalProperties": false,
+        "description": "GROUP BY aggregate collecting col's grouped values into a real array,\ne.g. ARRAY_AGG(OrderItem.Sku). Its own sibling shape (not a field on\nAggregateSelectItem), matching StringAggSelectItem/DateBucketSelectItem\n\u2014 but unlike string_agg there's no delimiter, since an array result\ndoesn't need one. Deliberately no ORDER BY-within-the-call and no\n`distinct`, same v1 bound string_agg used (TODO.md item 81).",
+        "properties": {
+          "as": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "As"
+          },
+          "col": {
+            "description": "Column ref (Table.Col) to collect.",
+            "title": "Col",
+            "type": "string"
+          }
+        },
+        "required": [
+          "col"
+        ],
+        "title": "ArrayAggSelectItem",
+        "type": "object"
+      },
+      "BinaryOpExpr": {
+        "additionalProperties": false,
+        "description": "Arithmetic (+ - * /) over two expressions. Division by zero yields NULL.",
+        "properties": {
+          "left": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              }
+            ],
+            "title": "Left"
+          },
+          "op": {
+            "enum": [
+              "+",
+              "-",
+              "*",
+              "/"
+            ],
+            "title": "Op",
+            "type": "string"
+          },
+          "right": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              }
+            ],
+            "title": "Right"
+          }
+        },
+        "required": [
+          "op",
+          "left",
+          "right"
+        ],
+        "title": "BinaryOpExpr",
+        "type": "object"
+      },
+      "CaseExpr": {
+        "additionalProperties": false,
+        "description": "Searched CASE usable anywhere a scalar is expected \u2014 inside an aggregate\nargument, arithmetic, or another function. This is what makes conditional\naggregation expressible.",
+        "properties": {
+          "else": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Else"
+          },
+          "when": {
+            "items": {
+              "$ref": "#/$defs/CaseWhen"
+            },
+            "minItems": 1,
+            "title": "When",
+            "type": "array"
+          }
+        },
+        "required": [
+          "when"
+        ],
+        "title": "CaseExpr",
+        "type": "object"
+      },
+      "CaseSelectItem": {
+        "additionalProperties": false,
+        "description": "CASE WHEN ... THEN ... [ELSE ...] END, evaluated top-to-bottom \u2014\nthe first matching `when` wins. `alias` is REQUIRED (unlike aggregates/\ndate_bucket) since there's no sensible default output name for a\nconditional expression.\n\nSince item 100 this is exactly a `CaseExpr` plus a required alias \u2014 it is\nthe top-level-projection SPELLING of that expression node, not a second\nstructural shape. `as_expression()` is the single conversion every walker,\ncap, and compile path goes through, so CASE logic is implemented once.",
+        "properties": {
+          "as": {
+            "title": "As",
+            "type": "string"
+          },
+          "else": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Else"
+          },
+          "when": {
+            "items": {
+              "$ref": "#/$defs/CaseWhen"
+            },
+            "minItems": 1,
+            "title": "When",
+            "type": "array"
+          }
+        },
+        "required": [
+          "when",
+          "as"
+        ],
+        "title": "CaseSelectItem",
+        "type": "object"
+      },
+      "CaseWhen": {
+        "additionalProperties": false,
+        "description": "One CASE WHEN branch: a `when` condition and the value to project when\nit's true. `when` is a full `WhereNode` (a single Predicate OR a boolean\n`and`/`or`/`not` group \u2014 a *searched* CASE, `CASE WHEN a > 0 AND b < 5\nTHEN ...`), reusing the exact same predicate machinery, visitor, and caps\nas `where`/`having` (TODO.md item 99). Bounded by `max_where_depth` /\n`max_where_predicates` / `max_case_branches` like any other predicate tree.\n\n`then` is a full `Expression` (item 100), widened from the old\ncolumn-or-literal argument shape \u2014 a wire-compatible superset.",
+        "properties": {
+          "then": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              }
+            ],
+            "title": "Then"
+          },
+          "when": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Predicate"
+              },
+              {
+                "$ref": "#/$defs/WhereGroup"
+              }
+            ],
+            "title": "When"
+          }
+        },
+        "required": [
+          "when",
+          "then"
+        ],
+        "title": "CaseWhen",
+        "type": "object"
+      },
+      "CastExpr": {
+        "additionalProperties": false,
+        "description": "CAST(expr AS type) over a closed set of target types.",
+        "properties": {
+          "cast": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              }
+            ],
+            "title": "Cast"
+          },
+          "to": {
+            "enum": [
+              "text",
+              "integer",
+              "numeric",
+              "boolean",
+              "date",
+              "timestamp"
+            ],
+            "title": "To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cast",
+          "to"
+        ],
+        "title": "CastExpr",
+        "type": "object"
+      },
+      "ColumnExpr": {
+        "additionalProperties": false,
+        "description": "A column reference.",
+        "properties": {
+          "col": {
+            "description": "Table.Column (or Alias.Column) ref.",
+            "title": "Col",
+            "type": "string"
+          }
+        },
+        "required": [
+          "col"
+        ],
+        "title": "ColumnExpr",
+        "type": "object"
+      },
+      "CteSpec": {
+        "additionalProperties": false,
+        "description": "One named `WITH` block: a complete query that later stages refer to by name.\n\nReference it exactly like a table \u2014 put its `name` in `from`/`joins[].table`.\nBecause it is referenced by name rather than inlined, one CTE can feed the FROM\nclause and several joins without being written (or planned) more than once.",
+        "properties": {
+          "name": {
+            "description": "Name later stages refer to this block by, used in `from` or a join's `table` exactly like a physical table name. Must not be the name of a real table used anywhere in the query.",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "title": "Name",
+            "type": "string"
+          },
+          "query": {
+            "$ref": "#/$defs/StructuredQuery",
+            "description": "The query this block computes. It is a full scope in its own right: its tables get the same allow/deny, mandatory row filters, column masking and k-anonymity floor as any other query. It may reference an EARLIER cte by name, never a later one and never itself."
+          }
+        },
+        "required": [
+          "name",
+          "query"
+        ],
+        "title": "CteSpec",
+        "type": "object"
+      },
+      "DateAddExpr": {
+        "additionalProperties": false,
+        "description": "Shift a date/timestamp by a whole number of units \u2014 negative goes back in\ntime, so {\"date_add\": {\"now\": \"timestamp\"}, \"unit\": \"day\", \"amount\": -7} is\n\"7 days ago\". The magnitude is bounded by the policy's max_interval_days.",
+        "properties": {
+          "amount": {
+            "maximum": 2147483647,
+            "minimum": -2147483648,
+            "title": "Amount",
+            "type": "integer"
+          },
+          "date_add": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              }
+            ],
+            "title": "Date Add"
+          },
+          "unit": {
+            "enum": [
+              "year",
+              "month",
+              "week",
+              "day",
+              "hour",
+              "minute",
+              "second"
+            ],
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date_add",
+          "unit",
+          "amount"
+        ],
+        "title": "DateAddExpr",
+        "type": "object"
+      },
+      "DateBucketSelectItem": {
+        "additionalProperties": false,
+        "description": "Date-truncation projection, e.g. month bucket of Order.CreatedAt.",
+        "properties": {
+          "as": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "As"
+          },
+          "col": {
+            "description": "Datetime column ref (Table.Col)",
+            "title": "Col",
+            "type": "string"
+          },
+          "granularity": {
+            "enum": [
+              "day",
+              "week",
+              "month",
+              "quarter",
+              "year"
+            ],
+            "title": "Granularity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "col",
+          "granularity"
+        ],
+        "title": "DateBucketSelectItem",
+        "type": "object"
+      },
+      "ExpressionSelectItem": {
+        "additionalProperties": false,
+        "description": "Project a computed scalar expression, e.g. quantity * unit_price. GROUP BY\nmay reference this item's alias, which is how a computed group key (such as a\nCASE bucket) is expressed.",
+        "properties": {
+          "as": {
+            "title": "As",
+            "type": "string"
+          },
+          "expr": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              }
+            ],
+            "title": "Expr"
+          }
+        },
+        "required": [
+          "expr",
+          "as"
+        ],
+        "title": "ExpressionSelectItem",
+        "type": "object"
+      },
+      "ExtractExpr": {
+        "additionalProperties": false,
+        "description": "EXTRACT one integer field from a date/timestamp expression, e.g. the hour\nof Order.CreatedAt. Evaluated in UTC. `dayofweek` is 0=Sunday..6=Saturday\nand `week` is the ISO-8601 week number, on every dialect.",
+        "properties": {
+          "extract": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              }
+            ],
+            "title": "Extract"
+          },
+          "part": {
+            "enum": [
+              "year",
+              "quarter",
+              "month",
+              "week",
+              "day",
+              "dayofweek",
+              "dayofyear",
+              "hour",
+              "minute",
+              "second"
+            ],
+            "title": "Part",
+            "type": "string"
+          }
+        },
+        "required": [
+          "extract",
+          "part"
+        ],
+        "title": "ExtractExpr",
+        "type": "object"
+      },
+      "FunctionExpr": {
+        "additionalProperties": false,
+        "description": "A whitelisted scalar function whose arguments may nest, e.g. lower(trim(x)).",
+        "properties": {
+          "args": {
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ColumnExpr"
+                },
+                {
+                  "$ref": "#/$defs/LiteralExpr"
+                },
+                {
+                  "$ref": "#/$defs/BinaryOpExpr"
+                },
+                {
+                  "$ref": "#/$defs/FunctionExpr"
+                },
+                {
+                  "$ref": "#/$defs/CastExpr"
+                },
+                {
+                  "$ref": "#/$defs/CaseExpr"
+                },
+                {
+                  "$ref": "#/$defs/ExtractExpr"
+                },
+                {
+                  "$ref": "#/$defs/NowExpr"
+                },
+                {
+                  "$ref": "#/$defs/DateAddExpr"
+                },
+                {
+                  "$ref": "#/$defs/WindowExpr"
+                }
+              ]
+            },
+            "minItems": 1,
+            "title": "Args",
+            "type": "array"
+          },
+          "fn": {
+            "enum": [
+              "coalesce",
+              "lower",
+              "upper",
+              "trim",
+              "concat",
+              "abs",
+              "ceil",
+              "floor",
+              "round",
+              "length",
+              "nullif",
+              "replace",
+              "substring"
+            ],
+            "title": "Fn",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fn",
+          "args"
+        ],
+        "title": "FunctionExpr",
+        "type": "object"
+      },
+      "JoinSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "alias": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional name this occurrence of `table` is referred to by everywhere else in the query (on/select/where/group_by/having/order_by/top_n use Alias.Column instead of Table.Column once set). REQUIRED when the same physical table appears more than once in one query (a self-join) \u2014 every occurrence of a repeated table must carry its own alias, e.g. joining Employee to itself as `m` to look up each row's manager.",
+            "title": "Alias"
+          },
+          "condition": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Predicate"
+              },
+              {
+                "$ref": "#/$defs/WhereGroup"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "General join condition \u2014 the same predicate tree `where` uses, so a join can be a range/temporal one, e.g. ON Sale.Price BETWEEN Band.Lo AND Band.Hi (gte + lte ANDed). Must reference the table this join adds, and may only reference tables ALREADY in the graph (the from table or an EARLIER join). No IN (subquery) here \u2014 that is WHERE-only.",
+            "title": "Condition"
+          },
+          "connection": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only set when this join's table lives in a DIFFERENT connection than the query's primary connection \u2014 e.g. a same-instance cross-database join. Omit for joins within the primary connection. Only permitted when both connections share the same policy-declared join_group; see list_connections.",
+            "title": "Connection"
+          },
+          "extra_on": {
+            "description": "Additional equality pairs ANDed with `on`, for composite/multi-column join keys \u2014 each entry is a two-element [LeftTable.Col, RightTable.Col] pair referencing the SAME two tables/aliases as `on` (a join's condition is always about the one pair of tables it joins, never a third). Only valid with `on`.",
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": "Extra On",
+            "type": "array"
+          },
+          "on": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 2,
+                "minItems": 2,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Equality join: [LeftTable.Col, RightTable.Col] \u2014 the common-case sugar; use `condition` for a range/inequality join. Exactly one of on/condition is required; a `cross` join takes neither.",
+            "title": "On"
+          },
+          "table": {
+            "title": "Table",
+            "type": "string"
+          },
+          "type": {
+            "default": "inner",
+            "enum": [
+              "inner",
+              "left",
+              "full",
+              "cross"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "table"
+        ],
+        "title": "JoinSpec",
+        "type": "object"
+      },
+      "LiteralExpr": {
+        "additionalProperties": false,
+        "description": "A literal scalar value.",
+        "properties": {
+          "literal": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A literal scalar value (string/number/bool/null).",
+            "title": "Literal"
+          }
+        },
+        "required": [
+          "literal"
+        ],
+        "title": "LiteralExpr",
+        "type": "object"
+      },
+      "NowExpr": {
+        "additionalProperties": false,
+        "description": "The current UTC time \u2014 \"timestamp\" for the full clock reading, \"date\" for\nmidnight UTC today. Use it with date_add to filter relative to now instead of\ncomputing a timestamp literal caller-side.",
+        "properties": {
+          "now": {
+            "enum": [
+              "timestamp",
+              "date"
+            ],
+            "title": "Now",
+            "type": "string"
+          }
+        },
+        "required": [
+          "now"
+        ],
+        "title": "NowExpr",
+        "type": "object"
+      },
+      "OrderBySpec": {
+        "additionalProperties": false,
+        "description": "Sort key. dir must be the exact string \"asc\" or \"desc\" \u2014 other spellings\n(e.g. \"direction\", \"sort\", a boolean desc flag) are rejected, not silently\ndefaulted to ascending.",
+        "properties": {
+          "col": {
+            "title": "Col",
+            "type": "string"
+          },
+          "dir": {
+            "default": "asc",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "title": "Dir",
+            "type": "string"
+          },
+          "nulls": {
+            "anyOf": [
+              {
+                "enum": [
+                  "first",
+                  "last"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Where NULLs sort relative to non-NULL values \u2014 omit for each dialect's own default ordering. Not supported on MSSQL (T-SQL has no NULLS FIRST/LAST syntax); order by a CASE 0/1 'is null' bucket first instead.",
+            "title": "Nulls"
+          }
+        },
+        "required": [
+          "col"
+        ],
+        "title": "OrderBySpec",
+        "type": "object"
+      },
+      "PercentileContSelectItem": {
+        "additionalProperties": false,
+        "description": "GROUP BY ordered-set aggregate computing a continuous-interpolation\npercentile of col's grouped values, e.g.\nPERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY Order.TotalAmount) for the\nmedian. Its own sibling shape (not a field on AggregateSelectItem)\nsince WITHIN GROUP (ORDER BY ...) is a structurally different aggregate\nform entirely, not an {fn, col} variant. Deliberately single-column/\nsingle-fraction/always-ascending for v1 \u2014 no descending option, no\nPostgres's multi-fraction array form, no PARTITION BY \u2014 same\n\"separate future item, not an oversight\" reasoning as string_agg/\narray_agg's deferred features (TODO.md item 82).",
+        "properties": {
+          "as": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "As"
+          },
+          "col": {
+            "description": "Column ref (Table.Col) to compute the percentile of.",
+            "title": "Col",
+            "type": "string"
+          },
+          "fraction": {
+            "description": "Percentile as a fraction in [0.0, 1.0], e.g. 0.5 for the median.",
+            "title": "Fraction",
+            "type": "number"
+          }
+        },
+        "required": [
+          "col",
+          "fraction"
+        ],
+        "title": "PercentileContSelectItem",
+        "type": "object"
+      },
+      "Predicate": {
+        "additionalProperties": false,
+        "properties": {
+          "col": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Table.Column being compared. Exactly one of col/col_fn/expr is required.",
+            "title": "Col"
+          },
+          "col_fn": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScalarFunctionCall"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A whitelisted scalar function applied to a column instead of a bare Table.Column, e.g. {fn: lower, args: [{col: Customer.Name}]} for lower(Customer.Name) = ... \u2014 same fn/args shape as a select item's scalar function. Mutually exclusive with col. No function nesting (see ScalarFunctionCall)."
+          },
+          "exists_subquery": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/StructuredQuery"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "For op exists/not_exists ONLY: test whether the nested StructuredQuery returns any row (item 106). Unlike every other predicate this one has no left-hand side \u2014 omit col/col_fn/expr and value \u2014 because the subquery is the whole operand, the same way is_null takes no value. Usually correlated: the subquery names the outer columns it may read in its own `correlate` list, e.g. EXISTS (SELECT 1 FROM Orders WHERE Orders.CustomerId = Customer.Id) with correlate: [\"Customer.Id\"]."
+          },
+          "expr": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Compare a computed scalar expression instead of a bare column, e.g. OrderItem.Qty * OrderItem.Price > 100. The general form of col_fn. Mutually exclusive with col/col_fn.",
+            "title": "Expr"
+          },
+          "op": {
+            "enum": [
+              "eq",
+              "neq",
+              "lt",
+              "lte",
+              "gt",
+              "gte",
+              "in",
+              "not_in",
+              "like",
+              "between",
+              "is_null",
+              "is_not_null",
+              "exists",
+              "not_exists"
+            ],
+            "title": "Op",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A literal to compare col against. Exactly one of value/value_col is required for every op except is_null/is_not_null (omit both for those two). between: two-element [low, high] list. in/not_in: non-empty list. Everything else: a single scalar. Mutually exclusive with value_col.",
+            "title": "Value"
+          },
+          "value_col": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Compare col against another Table.Column instead of a literal, e.g. OrderItem.Price > OrderItem.Cost. Only valid for eq/neq/lt/lte/gt/gte \u2014 in/not_in/between/like need a literal list/pattern, not a column. Mutually exclusive with value.",
+            "title": "Value Col"
+          },
+          "value_expr": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Compare against a computed scalar expression, e.g. OrderItem.Price > OrderItem.Cost * 1.2. Only valid for eq/neq/lt/lte/gt/gte. Mutually exclusive with the other value sources.",
+            "title": "Value Expr"
+          },
+          "value_subquery": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/StructuredQuery"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Compare col against the result of a nested StructuredQuery instead of a literal. Two shapes: with in/not_in it is a value SET (item 97's IN (subquery) \u2014 one column, any number of rows); with eq/neq/lt/lte/gt/gte it is a SCALAR (item 106, e.g. amount > (SELECT AVG(...))) and must be an aggregate with no group_by so it returns exactly one row by construction. The subquery is a fully validated AST \u2014 never raw SQL \u2014 selects exactly one column, stays on the same connection, and resolves against its own from/join tables plus any outer column it names in its own `correlate` list. Mutually exclusive with value/value_col. All policy caps apply summed across the whole query tree; nesting is bounded by Policy.max_subquery_depth."
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "title": "Predicate",
+        "type": "object"
+      },
+      "ScalarFunctionCall": {
+        "additionalProperties": false,
+        "description": "A whitelisted scalar function call: fn + args. lower/upper/trim take\nexactly one column argument ({\"col\": \"Table.Column\"}); coalesce/concat\ntake 2+ arguments, each either {\"col\": ...} or {\"literal\": ...}.\n**No nesting** \u2014 args are always ColArg/LiteralArg, never another\nScalarFunctionCall \u2014 a deliberate bound keeping this from becoming an\nopen-ended expression grammar. Used both as a SELECT projection\n(`ScalarFunctionSelectItem`, which adds an alias) and as a WHERE/HAVING\npredicate target (`Predicate.col_fn`, which has none).",
+        "properties": {
+          "args": {
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ColumnExpr"
+                },
+                {
+                  "$ref": "#/$defs/LiteralExpr"
+                }
+              ]
+            },
+            "minItems": 1,
+            "title": "Args",
+            "type": "array"
+          },
+          "fn": {
+            "enum": [
+              "coalesce",
+              "lower",
+              "upper",
+              "trim",
+              "concat"
+            ],
+            "title": "Fn",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fn",
+          "args"
+        ],
+        "title": "ScalarFunctionCall",
+        "type": "object"
+      },
+      "ScalarFunctionSelectItem": {
+        "additionalProperties": false,
+        "description": "SELECT-projection use of a `ScalarFunctionCall` \u2014 see that class for\nthe fn/args shape.",
+        "properties": {
+          "args": {
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ColumnExpr"
+                },
+                {
+                  "$ref": "#/$defs/LiteralExpr"
+                }
+              ]
+            },
+            "minItems": 1,
+            "title": "Args",
+            "type": "array"
+          },
+          "as": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "As"
+          },
+          "fn": {
+            "enum": [
+              "coalesce",
+              "lower",
+              "upper",
+              "trim",
+              "concat"
+            ],
+            "title": "Fn",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fn",
+          "args"
+        ],
+        "title": "ScalarFunctionSelectItem",
+        "type": "object"
+      },
+      "SetOpSpec": {
+        "additionalProperties": false,
+        "description": "Combine this query's rows with further queries: UNION / INTERSECT / EXCEPT.\n\nThe query carrying `set_op` is the FIRST arm \u2014 its from/joins/where/group_by/\nhaving describe arm 1, while its order_by/limit/offset apply to the combined\nresult (exactly as in SQL, where they are written once after the last arm).\nEvery arm must project the same number of select items, and an arm may not\ncarry its own order_by/limit/offset/top_n/set_op.",
+        "properties": {
+          "all": {
+            "default": false,
+            "description": "Keep duplicate rows (UNION ALL). Default false de-duplicates. Only valid with 'union' outside Postgres.",
+            "title": "All",
+            "type": "boolean"
+          },
+          "arms": {
+            "description": "The further queries to combine with this one, in order.",
+            "items": {
+              "$ref": "#/$defs/StructuredQuery"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Arms",
+            "type": "array"
+          },
+          "op": {
+            "description": "union = rows in either side; intersect = rows in both; except = rows in this query but not in the arms.",
+            "enum": [
+              "union",
+              "intersect",
+              "except"
+            ],
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "arms"
+        ],
+        "title": "SetOpSpec",
+        "type": "object"
+      },
+      "StringAggSelectItem": {
+        "additionalProperties": false,
+        "description": "GROUP BY aggregate concatenating col's grouped values into one\ndelimiter-separated string, e.g. STRING_AGG(Customer.Email, ', ').\nIts own shape (not a distinct field on AggregateSelectItem) since it\nneeds a delimiter that {fn, col} has no room for \u2014 see\nDateBucketSelectItem/ScalarFunctionSelectItem for the same \"sibling\ntype\" pattern. Deliberately no ORDER BY-within-the-call (real on\nPostgres, absent from MSSQL 2017+'s STRING_AGG) and no `distinct`\n(Postgres supports it, T-SQL's STRING_AGG does not) \u2014 a v1 bound, not\nan oversight (TODO.md item 80).",
+        "properties": {
+          "as": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "As"
+          },
+          "col": {
+            "description": "Column ref (Table.Col) to concatenate.",
+            "title": "Col",
+            "type": "string"
+          },
+          "delimiter": {
+            "description": "Separator string between concatenated values.",
+            "title": "Delimiter",
+            "type": "string"
+          }
+        },
+        "required": [
+          "col",
+          "delimiter"
+        ],
+        "title": "StringAggSelectItem",
+        "type": "object"
+      },
+      "StructuredQuery": {
+        "additionalProperties": false,
+        "description": "Read-only structured query. No raw SQL \u2014 every field is a validated,\nschema-checked identifier or literal. Every column reference anywhere in\nthis AST (select strings, where/having col, group_by, order_by, joins.on,\ntop_n.partition_by) must be \"Table.Column\" (e.g. \"Customer.Name\") \u2014 or\n\"Alias.Column\" once from_alias/JoinSpec.alias is set for that table \u2014 or\na select item's own alias where noted below \u2014 never a bare column name.",
+        "properties": {
+          "correlate": {
+            "description": "ONLY on a subquery (an exists_subquery or value_subquery): the outer Table.Column references this subquery is permitted to read, e.g. [\"Customer.Id\"] so its WHERE can say Orders.CustomerId = Customer.Id. SQL makes every enclosing column implicitly visible; QueryGate requires each one to be declared here, so policy and masking are enforced on it against the ENCLOSING query. An outer column not listed here is rejected, exactly as it is today. Names resolve one level up, to the query that contains this subquery. Capped by Policy.max_correlated_refs.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Correlate",
+            "type": "array"
+          },
+          "ctes": {
+            "description": "Named WITH blocks computed before this query and referred to by name in `from`/`joins[].table`, for multi-stage analysis in one statement (aggregate-then-join, dedup-then-rank). Only the top-level query may declare these \u2014 not a set_op arm, an IN (subquery), or another cte's query. Each may reference an EARLIER cte, never a later one or itself (so a recursive cte is not expressible).",
+            "items": {
+              "$ref": "#/$defs/CteSpec"
+            },
+            "maxItems": 50,
+            "title": "Ctes",
+            "type": "array"
+          },
+          "distinct": {
+            "default": false,
+            "description": "De-duplicate result rows (SELECT DISTINCT) across the full select list.",
+            "title": "Distinct",
+            "type": "boolean"
+          },
+          "from": {
+            "description": "Root table name (not Table.Column) \u2014 e.g. \"Customer\".",
+            "title": "From",
+            "type": "string"
+          },
+          "from_alias": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional name the root table is referred to by everywhere else in the query, in place of from_table \u2014 same rule as JoinSpec.alias, including being required if from_table is also used as a join table (self-join).",
+            "title": "From Alias"
+          },
+          "group_by": {
+            "description": "Table.Column refs, or a date_bucket select item's alias.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 500,
+            "title": "Group By",
+            "type": "array"
+          },
+          "having": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Predicate"
+              },
+              {
+                "$ref": "#/$defs/WhereGroup"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Filter on grouped/aggregated results \u2014 the same shape as `where`: a single Predicate ({col, op, value}) or a WhereGroup for boolean nesting (and/or/not), so OR-logic over aggregate conditions (HAVING SUM(x) > 10 OR COUNT(*) < 3) is expressible. A `having` Predicate may reference a select item's alias (e.g. an aggregate's `as`) in its `col`, unlike `where`. Requires group_by or aggregate select items.",
+            "title": "Having"
+          },
+          "intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Brief natural-language summary of the ask that led to this query \u2014 logged with the compiled SQL for audit/debugging, never returned to the caller.",
+            "title": "Intent"
+          },
+          "joins": {
+            "items": {
+              "$ref": "#/$defs/JoinSpec"
+            },
+            "maxItems": 200,
+            "title": "Joins",
+            "type": "array"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Limit"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "order_by": {
+            "description": "May reference a Table.Column or a select item's alias.",
+            "items": {
+              "$ref": "#/$defs/OrderBySpec"
+            },
+            "maxItems": 500,
+            "title": "Order By",
+            "type": "array"
+          },
+          "purpose": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Closed-set purpose token this query is declared for (TODO.md item 145, feature F7 \u2014 purpose-bound access), e.g. 'fraud_review'. Checked against the connection's Policy.allowed_purposes and, if valid, narrows the effective policy via Policy.purpose_policies \u2014 never widens it. Only the TOP-LEVEL query's purpose is consulted; one set on a cte body, a set_op arm, or a subquery is inert, the same as `intent`. Unlike `intent` (free text, logged but never enforced), this is a fixed token from an operator-configured allow-list, so it IS persisted in the audit event.",
+            "title": "Purpose"
+          },
+          "select": {
+            "description": "Each item is EITHER a bare \"Table.Column\" string, OR an object: {fn, col, as} for an aggregate, or {col, granularity, as} for a date_bucket.",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/AggregateSelectItem"
+                },
+                {
+                  "$ref": "#/$defs/DateBucketSelectItem"
+                },
+                {
+                  "$ref": "#/$defs/StringAggSelectItem"
+                },
+                {
+                  "$ref": "#/$defs/ArrayAggSelectItem"
+                },
+                {
+                  "$ref": "#/$defs/PercentileContSelectItem"
+                },
+                {
+                  "$ref": "#/$defs/ScalarFunctionSelectItem"
+                },
+                {
+                  "$ref": "#/$defs/CaseSelectItem"
+                },
+                {
+                  "$ref": "#/$defs/ExpressionSelectItem"
+                },
+                {
+                  "$ref": "#/$defs/WindowSelectItem"
+                }
+              ]
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Select",
+            "type": "array"
+          },
+          "set_op": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SetOpSpec"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Combine this query with further queries via UNION/INTERSECT/EXCEPT. This query is the first arm \u2014 see SetOpSpec's own fields."
+          },
+          "top_n": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TopNSpec"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Top/bottom N rows per partition \u2014 see TopNSpec's own fields."
+          },
+          "where": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Predicate"
+              },
+              {
+                "$ref": "#/$defs/WhereGroup"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A single Predicate ({col, op, value}), or a WhereGroup for boolean nesting \u2014 see each type's own fields for its exact shape.",
+            "title": "Where"
+          }
+        },
+        "required": [
+          "from",
+          "select"
+        ],
+        "title": "StructuredQuery",
+        "type": "object"
+      },
+      "TopNSpec": {
+        "additionalProperties": false,
+        "description": "Rank rows within partitions and keep the top n per partition.\n\npartition_by may be empty \u2014 this ranks across all rows/groups as one\npartition (i.e. an overall top-N, not a per-group top-N).\n\nWithout group_by/aggregates: partition_by/order_by may reference any\nTable.Col in the query graph, or a date_bucket select alias.\nWITH group_by/aggregates: ranking runs over the grouped result (one row\nper group), so partition_by/order_by must reference a group_by column or\na select alias (aggregate or date_bucket) \u2014 not a raw table column.",
+        "properties": {
+          "fn": {
+            "default": "row_number",
+            "enum": [
+              "row_number",
+              "rank",
+              "dense_rank"
+            ],
+            "title": "Fn",
+            "type": "string"
+          },
+          "n": {
+            "minimum": 1,
+            "title": "N",
+            "type": "integer"
+          },
+          "order_by": {
+            "items": {
+              "$ref": "#/$defs/OrderBySpec"
+            },
+            "minItems": 1,
+            "title": "Order By",
+            "type": "array"
+          },
+          "partition_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Partition By",
+            "type": "array"
+          }
+        },
+        "required": [
+          "order_by",
+          "n"
+        ],
+        "title": "TopNSpec",
+        "type": "object"
+      },
+      "WhereGroup": {
+        "additionalProperties": false,
+        "description": "Boolean group: set exactly one of `and`/`or`/`not`. `and`/`or` take a list\nof terms (each a Predicate or nested WhereGroup) \u2014 nest freely to express\narbitrary boolean logic. `not` takes a SINGLE term (a Predicate or a nested\nWhereGroup) to negate, e.g. {\"not\": {\"and\": [...]}} for NOT (A AND B).",
+        "properties": {
+          "and": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Predicate"
+                    },
+                    {
+                      "$ref": "#/$defs/WhereGroup"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "And"
+          },
+          "not": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Predicate"
+              },
+              {
+                "$ref": "#/$defs/WhereGroup"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Not"
+          },
+          "or": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Predicate"
+                    },
+                    {
+                      "$ref": "#/$defs/WhereGroup"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Or"
+          }
+        },
+        "title": "WhereGroup",
+        "type": "object"
+      },
+      "WindowBound": {
+        "additionalProperties": false,
+        "description": "One end of a window frame, e.g. {\"bound\": \"preceding\", \"offset\": 6}.",
+        "properties": {
+          "bound": {
+            "enum": [
+              "unbounded_preceding",
+              "preceding",
+              "current_row",
+              "following",
+              "unbounded_following"
+            ],
+            "title": "Bound",
+            "type": "string"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Distance from the current row \u2014 required for preceding/following, forbidden for the unbounded/current_row kinds. Capped by Policy.max_window_frame_offset.",
+            "title": "Offset"
+          }
+        },
+        "required": [
+          "bound"
+        ],
+        "title": "WindowBound",
+        "type": "object"
+      },
+      "WindowExpr": {
+        "additionalProperties": false,
+        "description": "A window function used as an operand, e.g. `amount / SUM(amount) OVER ()`.\nSame shape as a window select item without the output name \u2014 the surrounding\nexpression carries the alias. Allowed only in a projection: not in\nwhere/having, a join condition, a group key, an aggregate's argument, or\nanother window's `arg`.",
+        "properties": {
+          "arg": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The scalar expression the function reads \u2014 required for sum/avg/min/max/lag/lead/first_value/last_value, optional for count (omit for COUNT(*)), and forbidden for row_number/rank/dense_rank/ntile.",
+            "title": "Arg"
+          },
+          "buckets": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ntile only: how many buckets to split each partition into.",
+            "title": "Buckets"
+          },
+          "fn": {
+            "enum": [
+              "sum",
+              "avg",
+              "min",
+              "max",
+              "count",
+              "row_number",
+              "rank",
+              "dense_rank",
+              "ntile",
+              "lag",
+              "lead",
+              "first_value",
+              "last_value"
+            ],
+            "title": "Fn",
+            "type": "string"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "lag/lead only: how many rows back/forward to read (default 1).",
+            "title": "Offset"
+          },
+          "over": {
+            "$ref": "#/$defs/WindowSpec",
+            "description": "The OVER (...) clause \u2014 {} for OVER (), i.e. one partition of all rows."
+          }
+        },
+        "required": [
+          "fn",
+          "over"
+        ],
+        "title": "WindowExpr",
+        "type": "object"
+      },
+      "WindowFrame": {
+        "additionalProperties": false,
+        "description": "Which rows around the current one the window covers, e.g. the last 7 rows:\n{\"mode\": \"rows\", \"start\": {\"bound\": \"preceding\", \"offset\": 6},\n \"end\": {\"bound\": \"current_row\"}}. Omit `frame` entirely for the SQL default.\n`mode` \"range\" only accepts unbounded/current_row bounds on MSSQL (T-SQL has\nno numeric RANGE offsets) \u2014 use \"rows\" for an N-row window.",
+        "properties": {
+          "end": {
+            "$ref": "#/$defs/WindowBound"
+          },
+          "mode": {
+            "enum": [
+              "rows",
+              "range"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "start": {
+            "$ref": "#/$defs/WindowBound"
+          }
+        },
+        "required": [
+          "mode",
+          "start",
+          "end"
+        ],
+        "title": "WindowFrame",
+        "type": "object"
+      },
+      "WindowSelectItem": {
+        "additionalProperties": false,
+        "description": "A window function projection \u2014 fn(arg) OVER (partition/order/frame) \u2014 for\nrunning totals, moving averages, rank-in-place, and lag/lead comparisons.\nUnlike an aggregate it does NOT collapse rows, and unlike `top_n` it does not\nfilter them. `over` is required (use {} for OVER ()); `as` names the output.\nCannot be combined with group_by or aggregate select items.\n\nUse this when the window value IS the projected column. To divide by it, or\notherwise use it inside arithmetic, use `WindowExpr` inside an\n`ExpressionSelectItem` instead (item 125).",
+        "properties": {
+          "arg": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ColumnExpr"
+              },
+              {
+                "$ref": "#/$defs/LiteralExpr"
+              },
+              {
+                "$ref": "#/$defs/BinaryOpExpr"
+              },
+              {
+                "$ref": "#/$defs/FunctionExpr"
+              },
+              {
+                "$ref": "#/$defs/CastExpr"
+              },
+              {
+                "$ref": "#/$defs/CaseExpr"
+              },
+              {
+                "$ref": "#/$defs/ExtractExpr"
+              },
+              {
+                "$ref": "#/$defs/NowExpr"
+              },
+              {
+                "$ref": "#/$defs/DateAddExpr"
+              },
+              {
+                "$ref": "#/$defs/WindowExpr"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The scalar expression the function reads \u2014 required for sum/avg/min/max/lag/lead/first_value/last_value, optional for count (omit for COUNT(*)), and forbidden for row_number/rank/dense_rank/ntile.",
+            "title": "Arg"
+          },
+          "as": {
+            "title": "As",
+            "type": "string"
+          },
+          "buckets": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ntile only: how many buckets to split each partition into.",
+            "title": "Buckets"
+          },
+          "fn": {
+            "enum": [
+              "sum",
+              "avg",
+              "min",
+              "max",
+              "count",
+              "row_number",
+              "rank",
+              "dense_rank",
+              "ntile",
+              "lag",
+              "lead",
+              "first_value",
+              "last_value"
+            ],
+            "title": "Fn",
+            "type": "string"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "lag/lead only: how many rows back/forward to read (default 1).",
+            "title": "Offset"
+          },
+          "over": {
+            "$ref": "#/$defs/WindowSpec",
+            "description": "The OVER (...) clause \u2014 {} for OVER (), i.e. one partition of all rows."
+          }
+        },
+        "required": [
+          "fn",
+          "over",
+          "as"
+        ],
+        "title": "WindowSelectItem",
+        "type": "object"
+      },
+      "WindowSpec": {
+        "additionalProperties": false,
+        "description": "The OVER (...) clause: which rows the window covers and in what order.\nEvery column ref here must be a real Table.Column \u2014 no dialect allows an\nOVER clause to reference another select item's alias.",
+        "properties": {
+          "frame": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WindowFrame"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ROWS/RANGE frame. Omit for the dialect's SQL-standard default frame (with order_by: everything up to the current row's peers; without it: the whole partition). Only valid for sum/avg/min/max/count/first_value/last_value."
+          },
+          "order_by": {
+            "description": "Ordering inside each partition; each col must be a Table.Column, never a select alias. Required for the ranking/offset functions and whenever `frame` is set.",
+            "items": {
+              "$ref": "#/$defs/OrderBySpec"
+            },
+            "title": "Order By",
+            "type": "array"
+          },
+          "partition_by": {
+            "description": "Table.Column refs to compute the window within (omit for one partition over all rows). Counted against Policy.max_partition_by.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Partition By",
+            "type": "array"
+          }
+        },
+        "title": "WindowSpec",
+        "type": "object"
+      }
+    },
+    "$ref": "#/$defs/StructuredQuery"
+  },
+  "title": "QueryGate StructuredQuery AST",
+  "version": "1.0.0",
+  "write": {
+    "$defs": {
+      "ColumnExpr": {
+        "additionalProperties": false,
+        "description": "A column reference.",
+        "properties": {
+          "col": {
+            "description": "Table.Column (or Alias.Column) ref.",
+            "title": "Col",
+            "type": "string"
+          }
+        },
+        "required": [
+          "col"
+        ],
+        "title": "ColumnExpr",
+        "type": "object"
+      },
+      "DeleteStatement": {
+        "additionalProperties": false,
+        "description": "DELETE rows matching `where` from a single table. `where` is REQUIRED \u2014\nan unqualified DELETE cannot be expressed.",
+        "properties": {
+          "op": {
+            "const": "delete",
+            "default": "delete",
+            "title": "Op",
+            "type": "string"
+          },
+          "table": {
+            "description": "Target table name (not Table.Column).",
+            "title": "Table",
+            "type": "string"
+          },
+          "where": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WritePredicate"
+              },
+              {
+                "$ref": "#/$defs/WriteWhereGroup"
+              }
+            ],
+            "description": "Required filter (a predicate or and/or/not group) \u2014 no unqualified DELETE.",
+            "title": "Where"
+          }
+        },
+        "required": [
+          "table",
+          "where"
+        ],
+        "title": "DeleteStatement",
+        "type": "object"
+      },
+      "InsertStatement": {
+        "additionalProperties": false,
+        "description": "INSERT one or more typed rows into a single table. Each row is a mapping\nof bare column name -> literal scalar value (no expressions in Phase 1).",
+        "properties": {
+          "op": {
+            "const": "insert",
+            "default": "insert",
+            "title": "Op",
+            "type": "string"
+          },
+          "rows": {
+            "description": "Rows to insert; each maps column name -> literal value.",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "minItems": 1,
+            "title": "Rows",
+            "type": "array"
+          },
+          "table": {
+            "description": "Target table name (not Table.Column).",
+            "title": "Table",
+            "type": "string"
+          }
+        },
+        "required": [
+          "table",
+          "rows"
+        ],
+        "title": "InsertStatement",
+        "type": "object"
+      },
+      "LiteralExpr": {
+        "additionalProperties": false,
+        "description": "A literal scalar value.",
+        "properties": {
+          "literal": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A literal scalar value (string/number/bool/null).",
+            "title": "Literal"
+          }
+        },
+        "required": [
+          "literal"
+        ],
+        "title": "LiteralExpr",
+        "type": "object"
+      },
+      "ScalarFunctionCall": {
+        "additionalProperties": false,
+        "description": "A whitelisted scalar function call: fn + args. lower/upper/trim take\nexactly one column argument ({\"col\": \"Table.Column\"}); coalesce/concat\ntake 2+ arguments, each either {\"col\": ...} or {\"literal\": ...}.\n**No nesting** \u2014 args are always ColArg/LiteralArg, never another\nScalarFunctionCall \u2014 a deliberate bound keeping this from becoming an\nopen-ended expression grammar. Used both as a SELECT projection\n(`ScalarFunctionSelectItem`, which adds an alias) and as a WHERE/HAVING\npredicate target (`Predicate.col_fn`, which has none).",
+        "properties": {
+          "args": {
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ColumnExpr"
+                },
+                {
+                  "$ref": "#/$defs/LiteralExpr"
+                }
+              ]
+            },
+            "minItems": 1,
+            "title": "Args",
+            "type": "array"
+          },
+          "fn": {
+            "enum": [
+              "coalesce",
+              "lower",
+              "upper",
+              "trim",
+              "concat"
+            ],
+            "title": "Fn",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fn",
+          "args"
+        ],
+        "title": "ScalarFunctionCall",
+        "type": "object"
+      },
+      "UpdateStatement": {
+        "additionalProperties": false,
+        "description": "UPDATE a single table's `set` columns for rows matching `where`. `where`\nis REQUIRED \u2014 an unqualified UPDATE cannot be expressed.",
+        "properties": {
+          "op": {
+            "const": "update",
+            "default": "update",
+            "title": "Op",
+            "type": "string"
+          },
+          "set": {
+            "additionalProperties": true,
+            "description": "Column name -> new literal value. At least one.",
+            "minProperties": 1,
+            "title": "Set",
+            "type": "object"
+          },
+          "table": {
+            "description": "Target table name (not Table.Column).",
+            "title": "Table",
+            "type": "string"
+          },
+          "where": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WritePredicate"
+              },
+              {
+                "$ref": "#/$defs/WriteWhereGroup"
+              }
+            ],
+            "description": "Required filter (a predicate or and/or/not group) \u2014 no unqualified UPDATE.",
+            "title": "Where"
+          }
+        },
+        "required": [
+          "table",
+          "set",
+          "where"
+        ],
+        "title": "UpdateStatement",
+        "type": "object"
+      },
+      "UpsertStatement": {
+        "additionalProperties": false,
+        "description": "INSERT rows, but on a unique/primary-key conflict on `conflict_columns`,\nUPDATE `update_columns` instead of failing (Postgres `ON CONFLICT DO UPDATE`\n/ SQLite's equivalent). MSSQL has no `ON CONFLICT` and is **rejected** (per\nthe reject-not-emulate doctrine \u2014 use a separate insert/update there). No raw\nDML: the conflict target and the updated columns are validated identifiers.",
+        "properties": {
+          "conflict_columns": {
+            "description": "The unique/PK column(s) whose collision triggers an update instead of insert.",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Conflict Columns",
+            "type": "array"
+          },
+          "op": {
+            "const": "upsert",
+            "default": "upsert",
+            "title": "Op",
+            "type": "string"
+          },
+          "rows": {
+            "description": "Rows to insert-or-update; each maps column -> literal value.",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "minItems": 1,
+            "title": "Rows",
+            "type": "array"
+          },
+          "table": {
+            "description": "Target table name (not Table.Column).",
+            "title": "Table",
+            "type": "string"
+          },
+          "update_columns": {
+            "description": "Which columns to overwrite on conflict \u2014 a subset of the row's columns, excluding the conflict columns.",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Update Columns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "table",
+          "rows",
+          "conflict_columns",
+          "update_columns"
+        ],
+        "title": "UpsertStatement",
+        "type": "object"
+      },
+      "WritePredicate": {
+        "additionalProperties": false,
+        "description": "One filter condition on a write's target rows: a column compared against a\nliteral, a list, or another column. Deliberately narrower than the read\npredicate \u2014 no computed expressions and no subqueries in a write filter.",
+        "properties": {
+          "col": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Table.Column being compared. Exactly one of col/col_fn is required.",
+            "title": "Col"
+          },
+          "col_fn": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScalarFunctionCall"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A whitelisted scalar function applied to a column instead of a bare Table.Column, e.g. {fn: lower, args: [{col: Customer.Name}]}. Mutually exclusive with col."
+          },
+          "op": {
+            "enum": [
+              "eq",
+              "neq",
+              "lt",
+              "lte",
+              "gt",
+              "gte",
+              "in",
+              "not_in",
+              "like",
+              "between",
+              "is_null",
+              "is_not_null"
+            ],
+            "title": "Op",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A literal to compare against. Required for every op except is_null/is_not_null. between: two-element [low, high]. in/not_in: non-empty list. Everything else: a single scalar. Mutually exclusive with value_col.",
+            "title": "Value"
+          },
+          "value_col": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Compare against another Table.Column instead of a literal. Only valid for eq/neq/lt/lte/gt/gte. Mutually exclusive with value.",
+            "title": "Value Col"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "title": "WritePredicate",
+        "type": "object"
+      },
+      "WriteWhereGroup": {
+        "additionalProperties": false,
+        "description": "Boolean group over write predicates: set exactly one of `and`/`or`/`not`,\nthe same shape as a read query's WhereGroup.",
+        "properties": {
+          "and": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/WritePredicate"
+                    },
+                    {
+                      "$ref": "#/$defs/WriteWhereGroup"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "And"
+          },
+          "not": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WritePredicate"
+              },
+              {
+                "$ref": "#/$defs/WriteWhereGroup"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Not"
+          },
+          "or": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/WritePredicate"
+                    },
+                    {
+                      "$ref": "#/$defs/WriteWhereGroup"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Or"
+          }
+        },
+        "title": "WriteWhereGroup",
+        "type": "object"
+      }
+    },
+    "anyOf": [
+      {
+        "$ref": "#/$defs/InsertStatement"
+      },
+      {
+        "$ref": "#/$defs/UpdateStatement"
+      },
+      {
+        "$ref": "#/$defs/DeleteStatement"
+      },
+      {
+        "$ref": "#/$defs/UpsertStatement"
+      }
+    ]
+  }
+}
