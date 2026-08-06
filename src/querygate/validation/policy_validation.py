@@ -6,7 +6,7 @@ disabled connection or an over-cap query never even touches the database.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from querygate.core.auth import Principal
 from querygate.core.exceptions import PolicyViolationError
@@ -940,6 +940,74 @@ def resolve_purpose_policy(query: StructuredQuery, policy: Policy) -> Policy:
     return policy.for_purpose(query.purpose)
 
 
+def validate_structural_caps(
+    query: StructuredQuery, policy: Policy
+) -> Tuple[List[Tuple[int, StructuredQuery]], Set[str]]:
+    """The cheap, connection-registry-free caps this module's docstring
+    promises run FIRST: `max_cte_count` (via `_validate_cte_constraints`) and
+    `max_subquery_depth`. Neither touches `PolicyStore`/the connection
+    registry — both are pure AST-and-`Policy` arithmetic — which is exactly
+    why they must run before anything that does (TODO.md item 160 finding 2).
+
+    Extracted out of `validate_policy` so `execution/service.py`'s
+    `_validate_and_compile` can call this FIRST, before it computes the
+    per-scope table-to-connection map (`resolve_scope_connections`, which
+    calls `PolicyStore.get()` once per cross-connection join) — restoring the
+    "cheap bound before O(N x tree) work" ordering `_validate_cte_constraints`
+    already documents as deliberate for its own two checks. `validate_policy`
+    below also calls this (it must, to stay correct for every OTHER caller
+    that never runs `_validate_and_compile`'s pre-check), so on the
+    `_validate_and_compile` path these two caps are checked twice.
+
+    **The two calls are NOT guaranteed to agree, and that is safe rather than
+    a bug — correcting an earlier version of this docstring
+    (`security-invariant-reviewer`, 2026-08-07).** `max_cte_count`/
+    `max_subquery_depth` themselves genuinely never move under purpose
+    narrowing (they are pure counts with no field `Policy.for_purpose` ever
+    touches), but `_validate_cte_constraints` — which this function also
+    calls — has two rules that DO read purpose-narrowable fields: a cte name
+    may not shadow a table `denied_tables`/`denied_columns`/
+    `mandatory_row_filters`/`column_masks` has a rule for, and a masked
+    column may not be a cte's projection. `execution/service.py`'s
+    `_validate_and_compile` calls this function once against the UN-narrowed
+    Policy (before `resolve_purpose_policy` ever runs); `validate_policy`
+    calls it again, internally, AFTER narrowing. A purpose delta that adds a
+    NEW `denied_tables`/`column_masks` entry can therefore make the pre-check
+    pass a query the internal, narrowed call correctly rejects —
+    `test_structural_caps_pre_check_can_under_reject_a_purpose_narrowed_cte_
+    shadow_but_validate_policy_still_catches_it` (`tests/unit/
+    test_policy_validation.py`) pins exactly this. This is safe ONLY because
+    `Policy.for_purpose` is additive-only — every field it touches is unioned
+    or concatenated onto the base `Policy`, never replaced or removed (see
+    its own docstring and `test_purpose_cannot_widen_a_base_deny`) — so the
+    un-narrowed pre-check's governed-name set is always a SUBSET of the
+    narrowed one's: the pre-check can under-reject (miss an early exit it
+    could have taken) but never over-reject, and it can never cause a missed
+    enforcement, because `validate_policy`'s own internal call to this
+    function is the actual authority and runs unconditionally on every code
+    path, whether or not `_validate_and_compile`'s pre-check also ran. If
+    `PurposePolicyDelta` ever gains a subtractive field, this monotonicity
+    argument breaks and the pre-check's presence would need re-examining —
+    it must never be treated as making `validate_policy`'s own call
+    redundant enough to remove.
+
+    Returns `(scoped, cte_names)` — the same `iter_query_scopes`/
+    `declared_cte_names` outputs `validate_policy` needs next — so a caller
+    that also wants them (namely `validate_policy` itself) doesn't pay for a
+    second AST walk just to get back what this one already computed.
+    """
+    cte_names = declared_cte_names(query)
+    scoped = list(iter_query_scopes(query))
+    _validate_cte_constraints(query, scoped, policy, cte_names)
+    max_depth = max(depth for depth, _ in scoped)
+    if max_depth > policy.max_subquery_depth:
+        raise PolicyViolationError(
+            f"subquery nesting depth {max_depth} exceeds max_subquery_depth of "
+            f"{policy.max_subquery_depth}"
+        )
+    return scoped, cte_names
+
+
 def validate_policy(
     query: StructuredQuery,
     policy: Policy,
@@ -978,16 +1046,10 @@ def validate_policy(
 
     # Enumerate the query, every cte body (item 105) and every nested
     # value_subquery (item 97) as independent scopes. For a plain query this is
-    # just [query].
-    cte_names = declared_cte_names(query)
-    scoped = list(iter_query_scopes(query))
-    _validate_cte_constraints(query, scoped, policy, cte_names)
-    max_depth = max(depth for depth, _ in scoped)
-    if max_depth > policy.max_subquery_depth:
-        raise PolicyViolationError(
-            f"subquery nesting depth {max_depth} exceeds max_subquery_depth of "
-            f"{policy.max_subquery_depth}"
-        )
+    # just [query]. `validate_structural_caps` is the cheap, registry-free
+    # pass (max_cte_count, max_subquery_depth) — see its own docstring for why
+    # `_validate_and_compile` also calls it, earlier, on its own.
+    scoped, cte_names = validate_structural_caps(query, policy)
     _validate_subquery_constraints(scoped, policy)
     _validate_correlation(
         query,

@@ -2421,3 +2421,164 @@ async def test_execute_masks_a_cross_connection_column_masked_only_by_the_joined
 
     compiled = str(captured_stmt["stmt"].compile(compile_kwargs={"literal_binds": True}))
     assert "NULL AS name" in compiled
+
+
+# --------------------------------------------------------------------------- #
+# TODO.md item 160 finding 1 — connection Policy snapshot consistency         #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_audit_masked_columns_reflects_the_snapshot_compiled_against_not_a_late_reload():
+    """`resolve_table_policies`'s `connection_resolver` must be a FIXED
+    snapshot, resolved once per `execute()` call in `_validate_and_compile`,
+    not a live `PolicyStore.get()` re-read at every call site (item 160,
+    finding 1). Simulates an authorized `/admin/reload-config` landing on the
+    joined ('other') connection's Policy WHILE this query's database round
+    trip is in flight — inside `session.execute()`, strictly between
+    `_validate_and_compile`'s compile (which already applied the mask to the
+    statement) and the post-execution `applied_column_masks` audit call. The
+    reload drops the mask that was actually compiled in.
+
+    Before the fix, `applied_column_masks`'s default resolver re-read
+    `PolicyStore` live at audit time, so the reload would make the persisted
+    `masked_columns` silently under-report protection the compiled statement
+    truly applied (`NULL AS name` is still in the SQL — this is a reporting
+    bug, not an enforcement bypass, but a real one: an auditor reading the
+    event back would see no mask was ever applied). After the fix, the audit
+    call reuses the same snapshot the statement was compiled against, so it
+    still names the mask.
+    """
+    from querygate.policy.models import ColumnMask
+
+    _cross_connection_registry()
+    set_policy_store(
+        PolicyStore(
+            default=Policy(),
+            overrides={
+                "other": Policy(
+                    column_masks={"customers": [ColumnMask(column="name", kind="null")]}
+                )
+            },
+        )
+    )
+    query = _cross_connection_join_query()
+    tables = _cross_connection_tables()
+
+    async def fake_validate_schema(*args, **kwargs):
+        scope_connections = kwargs.get("scope_connections")
+        if scope_connections is not None:
+            scope_connections[id(query)] = {"customers": "other"}
+        return tables
+
+    async def _capturing_execute(stmt):
+        # The concurrent, authorized reload: by the time this "database round
+        # trip" happens, the statement (built above, against the masking
+        # Policy) is already fixed. Dropping the mask here, mid-flight, is
+        # what a stale/live re-read at audit time would wrongly pick up.
+        set_policy_store(PolicyStore(default=Policy(), overrides={"other": Policy()}))
+        mock_result = MagicMock()
+        mock_result.mappings.return_value.all.return_value = [{"id": 1, "name": None}]
+        return mock_result
+
+    class _CapturingSession:
+        execute = staticmethod(_capturing_execute)
+
+    @asynccontextmanager
+    async def _capturing_scope(*args, **kwargs):
+        yield _CapturingSession()
+
+    captured_audit_kwargs: dict = {}
+
+    def _capturing_audit(**kwargs):
+        captured_audit_kwargs.update(kwargs)
+
+    with (
+        patch.object(svc, "validate_schema", fake_validate_schema),
+        patch.object(svc, "session_scope", _capturing_scope),
+        patch.object(svc, "audit_query", _capturing_audit),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query)
+
+    assert captured_audit_kwargs["masked_columns"] == ["name"]
+
+
+def test_snapshot_connection_resolver_honors_a_different_principal_argument():
+    """Follow-up to finding 1 (`security-invariant-reviewer`, 2026-08-07):
+    `_snapshot_connection_resolver`'s closure must honor its own `principal`
+    argument, per the `ConnectionResolver` contract
+    (`Callable[[str, Optional[Principal]], Tuple[ConnectionProfile, Policy]]`)
+    — not silently answer from the snapshot resolved against
+    `self._principal` regardless of who actually calls it.
+
+    Not reachable through today's production call graph (every in-pipeline
+    caller — `validate_policy`, `compile_structured_query`,
+    `applied_column_masks` — passes `self._principal`), but the resolver this
+    method builds REPLACES a default resolver
+    (`resolve_query_table_connections`'s own `lambda target, actor:
+    resolve_visible_connection(target, principal=actor)`) that DID honor its
+    `principal` argument. A future caller threading a different principal
+    (item 90's delegated/on-behalf-of resolution, an admin dry-run reusing
+    this service, a per-scope principal) must still get THAT principal's own
+    per-principal Policy override, never a different principal's cached one.
+    """
+    _cross_connection_registry()
+    principal_a = Principal(subject="alice")
+    principal_b = Principal(subject="bob")
+    set_policy_store(
+        PolicyStore(
+            default=Policy(),
+            overrides={"other": Policy()},
+            principal_overrides={"bob": {"other": {"denied_tables": ["customers"]}}},
+        )
+    )
+    query = _cross_connection_join_query()
+    # Built by hand rather than via `resolve_scope_connections` — the method
+    # under test only cares about the map's shape, and this keeps the test
+    # from depending on that separate function's own behavior.
+    scope_connections = {id(query): {"customers": "other"}}
+
+    service = StructuredQueryService(connection_id="demo", principal=principal_a)
+    resolver = service._snapshot_connection_resolver(scope_connections)
+
+    _, policy_for_a = resolver("other", principal_a)
+    _, policy_for_b = resolver("other", principal_b)
+
+    assert policy_for_a.table_allowed("customers") is True
+    assert policy_for_b.table_allowed("customers") is False
+
+
+# --------------------------------------------------------------------------- #
+# TODO.md item 160 finding 2 — cheap structural caps run before any          #
+# per-scope Policy lookup                                                     #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_structural_caps_reject_before_any_per_scope_policy_lookup():
+    """`_validate_and_compile` must check the cheap, connection-registry-free
+    caps (`max_cte_count`/`max_subquery_depth`, via `validate_structural_caps`)
+    BEFORE `resolve_scope_connections` ever runs — the one step in this
+    pipeline that calls `PolicyStore.get()` once per scope's cross-connection
+    join. Restores the "cheap bound before O(N x tree) work" ordering
+    `_validate_cte_constraints` itself documents as deliberate for its own
+    two checks (item 160, finding 2).
+
+    Pinned with a call-count assertion rather than timing: a query over
+    `max_cte_count` must be rejected WITHOUT `resolve_scope_connections` ever
+    being called at all, not merely "called quickly".
+    """
+    set_policy_store(PolicyStore(default=Policy(max_cte_count=0), overrides={}))
+    query = StructuredQuery(
+        ctes=[{"name": "totals", "query": {"from": "orders", "select": ["orders.id"]}}],
+        from_table="totals",
+        select=["totals.id"],
+    )
+    service = StructuredQueryService(connection_id="demo")
+
+    with patch.object(svc, "resolve_scope_connections", MagicMock()) as mock_resolve:
+        with pytest.raises(PolicyViolationError, match="ctes exceeds max of 0"):
+            await service.execute(query)
+
+    mock_resolve.assert_not_called()
