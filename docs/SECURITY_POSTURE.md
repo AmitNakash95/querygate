@@ -190,7 +190,7 @@ schema and MCP tool schemas**, so it catches drift, not just convention.
 
 ## Threat model
 
-[docs/THREAT_MODEL.md](THREAT_MODEL.md) enumerates 39 threats (QG-01…QG-39),
+[docs/THREAT_MODEL.md](THREAT_MODEL.md) enumerates 40 threats (QG-01…QG-40),
 each mapped to its compensating control and the test(s) that enforce it. The
 gates on this page are the automated, continuously-run backbone of that model.
 
