@@ -388,6 +388,201 @@ default:
     assert "mandatory_claim_missing" in {reason.code for reason in result.reasons}
 
 
+_TWO_CONNECTIONS = """
+connections:
+  - id: fresh
+    dialect: postgresql
+    connection_string: ${TEST_ADMIN_URL}
+  - id: other
+    dialect: postgresql
+    connection_string: ${TEST_ADMIN_URL}
+"""
+
+
+def _cross_connection_join_query() -> dict:
+    return {
+        "from": "orders",
+        "select": ["orders.id", "customers.name"],
+        "joins": [
+            {
+                "table": "customers",
+                "on": ["orders.customer_id", "customers.id"],
+                "connection": "other",
+            }
+        ],
+    }
+
+
+def test_candidate_simulation_denies_a_cross_connection_query_the_joined_policy_denies(
+    tmp_path, monkeypatch
+):
+    """TODO.md item 156 follow-up (found by `architecture-boundary-reviewer`/
+    `security-invariant-reviewer`, 2026-08-06): before this fix,
+    `simulate_candidate_policy` called `validate_policy` without the
+    per-scope connection map, so a deny rule that exists ONLY on a
+    cross-connection join's JOINED connection's own candidate Policy was
+    invisible to the simulator — an operator previewing a candidate config
+    change would be told `allow` for a query real execution (which DOES
+    consult the joined connection's own Policy, since item 156) would refuse.
+    """
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_policy = """
+default:
+  enabled: true
+connections:
+  fresh:
+    join_group: shared
+  other:
+    join_group: shared
+    denied_tables: [customers]
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            connections_yaml=_TWO_CONNECTIONS,
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            connection="fresh",
+            query=_cross_connection_join_query(),
+        ),
+    )
+
+    assert result.decision == "deny"
+    assert result.query_allowed is False
+    assert "query_policy_denied" in {reason.code for reason in result.reasons}
+
+
+def test_candidate_simulation_allows_a_cross_connection_query_neither_policy_denies(
+    tmp_path, monkeypatch
+):
+    """Mutation guard / regression: with no deny rule on either connection's
+    candidate Policy, the same cross-connection join must still simulate as
+    `allow` — the item-156 wiring must not turn every cross-connection join
+    into a false-positive denial."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_policy = """
+default:
+  enabled: true
+connections:
+  fresh:
+    join_group: shared
+  other:
+    join_group: shared
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            connections_yaml=_TWO_CONNECTIONS,
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            connection="fresh",
+            query=_cross_connection_join_query(),
+        ),
+    )
+
+    assert result.decision == "allow"
+    assert result.query_allowed is True
+
+
+def test_candidate_simulation_reports_a_mandatory_filter_declared_only_on_the_joined_connection(
+    tmp_path, monkeypatch
+):
+    """TODO.md item 156 follow-up: the mandatory-filter readiness report must
+    also walk a cross-connection join's table's OWN resolved connection's
+    filters, not just the request's own (`fresh`) connection's — otherwise an
+    operator is told a principal is fully `ready` when a missing claim on the
+    JOINED connection's own filter would actually refuse at real execution
+    time."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_policy = """
+default:
+  enabled: true
+connections:
+  fresh:
+    join_group: shared
+  other:
+    join_group: shared
+    mandatory_row_filters:
+      - table: customers
+        column: tenant_id
+        from_claim: tenant_id
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            connections_yaml=_TWO_CONNECTIONS,
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            # No `tenant_id` claim supplied — the joined connection's filter
+            # can't resolve.
+            connection="fresh",
+            query=_cross_connection_join_query(),
+        ),
+    )
+
+    assert {(item.table, item.column) for item in result.mandatory_filters} == {
+        ("customers", "tenant_id")
+    }
+    assert result.mandatory_filters[0].ready is False
+    assert "mandatory_claim_missing" in {reason.code for reason in result.reasons}
+
+
+@pytest.mark.security
+def test_candidate_simulation_does_not_reveal_a_joined_connections_filter_for_a_table_it_denies(
+    tmp_path, monkeypatch
+):
+    """The pre-existing single-connection guarantee (`test_candidate_
+    simulation_does_not_reveal_filters_for_denied_table`, below) extended to
+    a cross-connection join: a table denied ONLY by the joined connection's
+    own candidate Policy must not leak that same connection's mandatory-
+    filter column name into the readiness report either — a principal
+    already told `deny` for `customers` should not additionally learn there
+    is a `tenant_id` mandatory filter on it."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    hidden_column = "hidden_cross_connection_tenant_column"
+    candidate_policy = f"""
+default:
+  enabled: true
+connections:
+  fresh:
+    join_group: shared
+  other:
+    join_group: shared
+    denied_tables: [customers]
+    mandatory_row_filters:
+      - table: customers
+        column: {hidden_column}
+        value: some-value
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            connections_yaml=_TWO_CONNECTIONS,
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            connection="fresh",
+            query=_cross_connection_join_query(),
+        ),
+    )
+
+    assert result.decision == "deny"
+    assert result.mandatory_filters == []
+    serialized = result.model_dump_json()
+    assert hidden_column not in serialized
+
+
 @pytest.mark.security
 def test_candidate_simulation_does_not_reveal_filters_for_denied_table(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch)

@@ -186,9 +186,11 @@ order-of-magnitude, not commitments.
 | 153 | ✅ `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention) | S | 19, 134 |
 | 154 | WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate | M | 91, 134 |
 | 155 | ✅ `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection | M | 151 |
-| 156 | A cross-connection join's joined table is governed only by the primary connection's Policy — masks/row filters/deny-lists never apply from the joined connection's own Policy | M/L | 155 |
+| 156 | ✅ A cross-connection join's joined table is governed only by the primary connection's Policy — masks/row filters/deny-lists never apply from the joined connection's own Policy | M/L | 155 |
 | 157 | Snowflake live-server verification and deeper feature parity (item 19 phase 2 residual) | L–XL | 19 |
 | 158 | `ConnectionProfile` never validates `dialect` agrees with `connection_string`'s actual backend | S–M | — |
+| 159 | Cross-connection schema reflection can pick the wrong connection when a join's alias casing differs from a column ref's casing | S | — |
+| 160 | Item 156 follow-up: harden the connection-resolution edge cases a full security-invariant audit surfaced | M | 156 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2458,45 +2460,18 @@ either — a strict swap of one for the other reopened a mirror-image gap,
 caught same-day and fixed).
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 155).
 
-### 156. A cross-connection join's joined table is governed only by the primary connection's Policy — column masks, mandatory row filters, and deny-lists never apply from the joined connection's own Policy
+### 156. A cross-connection join's joined table is governed only by the primary connection's Policy — column masks, mandatory row filters, and deny-lists never apply from the joined connection's own Policy ✅ DONE
 
-**Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item
-155 (pre-existing, not introduced by that item).** `validation/policy_validation.py`'s
-`validate_policy` and `compiler/sqlalchemy_compiler.py`'s `compile_structured_query`
-each take a single `Policy` — the primary connection's (or the principal's
-override of it) — and apply it uniformly to every table in the query,
-including a table reached through a cross-connection join
-(`JoinSpec.connection`, gated by policy's shared `join_group` rule,
-`docs/THREAT_MODEL.md` QG-09). Item 155 fixed the catalog sensitivity-label
-*approval trigger* to consult a joined table's own connection's catalog, but
-`column_masks`, `mandatory_row_filters`, and the table/column allow-deny list
-are a different enforcement path (policy validation + compilation, not the
-approval gate) and were not in that item's scope. So today: a column masked
-under connection B's own `Policy` is NOT masked when that column is read via
-a query whose primary connection is A joined to B, unless A's `Policy`
-happens to declare the identical mask/filter for B's table. `join_group` is
-therefore a mutual-trust boundary in practice (matching QG-09's stated
-mitigation of visibility + shared `join_group`, not per-connection masking),
-but item 155 has now made the *sensitivity-label trigger* asymmetric relative
-to this (per-connection) while masks/filters/deny-lists stay primary-only —
-worth an explicit decision on whether that asymmetry is intended, and if not,
-whether joined-table masks/filters should also resolve per-connection the way
-the item-155 catalog lookup now does.
-
-**What to do (when prioritized):** decide (record in `docs/PRODUCT_GUIDE.md`'s
-Decision Log) whether `join_group` is deliberately a mutual-trust boundary
-(document it as such in `docs/THREAT_MODEL.md` QG-09, no code change) or
-whether column masks/mandatory row filters/deny-lists should also resolve
-per the table's own connection's `Policy` the way item 155's sensitivity
-lookup now does (a materially larger change: `validate_policy`/
-`compile_structured_query` would need the same per-table connection map
-item 155 already threads through `validate_schema`, applied per-table rather
-than once for the whole query).
-
-**Effort:** M (design decision) or L (if the per-connection-policy path is
-chosen — touches policy validation and compilation, not just approval).
-**Depends on:** cross-connection joins/`join_group` (shipped), 155 (shipped —
-same map this would reuse if the per-connection path is chosen).
+Threaded a reflection-free sibling of item 155's per-scope table-to-connection
+map (`resolve_scope_connections`, computed before policy validation so the
+"policy validation runs before any DB touch" ordering is preserved) through
+`validate_policy`'s table/column allow-deny and masked-column-position checks,
+and through `compile_structured_query`'s column-mask and mandatory-row-filter
+application. A cross-connection join's table now resolves against BOTH its
+own connection's Policy and the primary connection's — never a replacement of
+one for the other, the same union direction (and the same hard-won lesson)
+item 155's follow-up fixed for the catalog sensitivity trigger.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 156).
 
 ### 157. Snowflake live-server verification and deeper feature parity (item 19 phase 2 residual)
 
@@ -2612,4 +2587,115 @@ check.
 **Effort:** S–M (one validator + tests across all four dialects' URL
 schemes; no runtime architecture change). **Depends on:** none — buildable
 independently of item 157.
+
+### 159. Cross-connection schema reflection can pick the wrong connection when a join's alias casing differs from a column ref's casing
+
+**Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item 156
+(pre-existing, not introduced by that item — item 156 never touches this
+code path).** `validation/schema_validation.py`'s `_reflect_and_validate_scope`
+reflects each table via `_load_table(connection_id, physical_name,
+table_connection.get(name, connection_id))` where `table_connection` is
+`resolve_query_table_connections`'s output, keyed by the EXACT (not
+case-folded) alias/table spelling a join declared. The set of names it looks
+up (`needed`) is built by unioning the declared alias with every column ref's
+own table token, so for `joins: [{"table": "orders", "alias": "O",
+"connection": "b"}]` with refs written `"o.id"` (lower-case), `needed`
+contains both `"O"` and `"o"` — and `table_connection` only has an entry for
+`"O"` (the map's key preserves the join's own declared casing). If `"o"` (the
+ref's own casing) happens to be the specific spelling used for the reflection
+lookup, `table_connection.get("o", connection_id)` misses and silently falls
+back to `connection_id` — the PRIMARY connection — so the table is reflected
+(and, per item 156, its column masks/mandatory row filters/deny-list
+resolved) against the wrong connection. `needed` is built from an unordered
+`set`, so which spelling "wins" is Python's hash-randomized set iteration
+order — the same query can reflect correctly on one process and incorrectly
+on another. Contrast `resolve_scope_connections`/`scope_connections` (item
+155/156), which deliberately case-folds every key for exactly this reason —
+this is the one remaining raw, case-sensitive lookup against the same kind of
+map.
+
+**What to do:** case-fold the lookup — either
+`table_connection.get(name, table_connection.get(name.casefold(),
+connection_id))`, or (cleaner) build one case-folded copy of `table_connection`
+once at the top of `_reflect_and_validate_scope` and use it for every lookup
+in that function, mirroring what `resolve_scope_connections` already does.
+Add a regression test with a cross-connection join whose alias casing differs
+from the casing used in its own column refs, patching `_load_table` and
+asserting the connection argument it receives — assert directly on the
+recorded call rather than relying on `PYTHONHASHSEED`, since today's bug is
+only observable under set-iteration-order variance.
+
+**Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped).
+
+### 160. Item 156 follow-up: harden the connection-resolution edge cases a full security-invariant audit surfaced
+
+**Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item
+156 itself** (distinct from item 159, which is an unrelated pre-existing
+schema-reflection bug the same audit pass happened to find). Four smaller,
+lower-severity gaps in item 156's own design, none a live bypass, each cheap
+individually but grouped here since a real fix to any one likely touches the
+same `_validate_and_compile`/`resolve_table_policies` call sites as the
+others:
+
+1. **Audit-vs-compiled-SQL snapshot consistency.** `resolve_table_policies`'s
+   default resolver re-reads the joined connection's Policy from the live
+   `PolicyStore` at every call site (`policy_validation.py`,
+   `sqlalchemy_compiler.py`, and again at the post-execution
+   `applied_column_masks` audit call in `execution/service.py`) rather than
+   resolving it once and threading the same snapshot through, the way the
+   PRIMARY policy already is (`self._get_policy()`, read once in
+   `_validate_and_compile`). An authorized `/admin/reload-config` landing
+   between compile and the audit call could make `masked_columns` describe a
+   Policy the compiled statement wasn't actually built against. Narrow
+   (requires an authorized actor's concurrent action) but real. Fix: resolve
+   each distinct non-primary connection's Policy once in
+   `_validate_and_compile`, return the map alongside `scope_connections`, and
+   thread a `connection_resolver` closure over that fixed snapshot into both
+   `compile_structured_query` and the `applied_column_masks` audit call.
+2. **Cap-ordering inversion.** `_validate_and_compile` now computes
+   `early_scope_connections` (which walks every scope and does a
+   `PolicyStore.get()` per scope) before `validate_policy` runs at all — ahead
+   of `_validate_cte_constraints`'s cheap `max_cte_count` check and
+   `max_subquery_depth`, inverting the "cheap bound first" ordering that
+   function's own docstring documents as deliberate (chosen so a malformed
+   AST can't make the validator do O(N × tree) work before being told a cap
+   exists). Bounded by `concurrency_slot`, so Low severity, but worth
+   restoring: either move the map computation inside `validate_policy` itself
+   (after the structural caps, before `_validate_scope`), or accept the
+   current ordering explicitly with a one-line Decision Log note.
+3. **Fail-open-by-default design question.** Every new `scope_connections`/
+   `connection_resolver` parameter (on `validate_policy`,
+   `compile_structured_query`, `applied_column_masks`) defaults to `None` —
+   i.e., the SAFE (per-connection) behavior is opt-in and the pre-156
+   (primary-only) behavior is what a forgetful call site silently gets, with
+   no type error or warning. This is exactly the shape that let
+   `admin/service.py`'s `simulate_candidate_policy` (fixed same-day, see item
+   156's archive entry) drift onto the weaker path in the first place, and
+   nothing stops a FUTURE call site from making the identical mistake. Needs
+   an explicit decision (record in this guide's Decision Log): should
+   `validate_policy` self-derive the map when given a `principal`/
+   `connection_resolver` but no explicit `scope_connections`, closing the
+   footgun structurally? That's a real design change (and interacts with
+   finding 2's ordering question), not a mechanical fix — hence recorded here
+   rather than done under this item's own time-boxed audit-response pass.
+4. **Purpose narrowing, `min_group_size`, and row limits are not
+   cross-connection-resolved.** Item 156's scope, both as filed and as
+   shipped, is explicitly column masks, mandatory row filters, and the
+   table/column deny-list — `resolve_table_policies` returns the joined
+   connection's Policy un-narrowed by the query's declared `purpose` (so a
+   `purpose_policies` delta configured on the JOINED connection never
+   applies), and the k-anonymity floor (`min_group_size`) and row limits
+   (`max_limit`/`default_limit`) are read from the primary Policy only,
+   never the joined connection's. This was never claimed otherwise in the
+   shipped docs (`docs/THREAT_MODEL.md` QG-09 and this guide's item-156
+   entry both say "column masks, mandatory row filters, and the table/column
+   deny-list", not "all policy enforcement") — recorded here so a future
+   reader doesn't assume silently the residual doesn't exist, and as a
+   candidate for a follow-up item if per-connection purpose/k-anonymity/limit
+   resolution is ever prioritized.
+
+**Effort:** M (findings 1–2 are mechanical; finding 3 is a design decision;
+finding 4 is scope confirmation only, no code change, unless later
+prioritized). **Depends on:** 156 (shipped — this is entirely about hardening
+its own edges).
 

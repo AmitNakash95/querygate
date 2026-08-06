@@ -6,10 +6,11 @@ disabled connection or an over-cap query never even touches the database.
 
 from __future__ import annotations
 
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
+from querygate.core.auth import Principal
 from querygate.core.exceptions import PolicyViolationError
-from querygate.policy.models import Policy
+from querygate.policy.models import ColumnMask, Policy
 from querygate.query_ast.models import (
     CaseExpr,
     DateAddExpr,
@@ -22,6 +23,7 @@ from querygate.query_ast.models import (
     _AGGREGATE_SELECT_ITEM_TYPES,
 )
 from querygate.validation.schema_validation import (
+    ConnectionResolver,
     RefPosition,
     cte_source_names,
     iter_correlations,
@@ -38,6 +40,7 @@ from querygate.validation.schema_validation import (
     iter_scope_expressions_by_position,
     iter_where_predicates,
     parse_column_ref,
+    resolve_table_policies,
     select_item_column_refs,
     where_depth,
 )
@@ -356,7 +359,69 @@ def enforce_predicate_shape_caps(node: WhereNode, policy: Policy, *, label: str)
         _check_in_list_size(pred, policy)
 
 
-def _validate_scope(query: StructuredQuery, policy: Policy, cte_names: Set[str]) -> None:
+def _table_connection_id(
+    table_connection: Dict[str, str], effective_name: str, connection_id: str
+) -> str:
+    """The connection one effective (alias-or-table) name resolves to in a
+    given scope's table_connection map, falling back to the query's primary
+    connection when the map is empty (no `scope_connections` was threaded in
+    at all — every pre-item-156 caller) or the name isn't a key in it (a
+    same-connection table always seeds its own entry — see
+    `resolve_scope_connections` — so "absent" only ever means the caller
+    passed no map)."""
+    return table_connection.get(effective_name.casefold(), connection_id)
+
+
+def _table_allowed_everywhere(table: str, candidates: List[Policy]) -> bool:
+    """A table is accessible only if EVERY candidate Policy allows it (item
+    156): denied under either connection's Policy denies the query — the
+    fail-closed direction, matching `sensitivity_approval_reasons`'s posture
+    of "over-triggering ... is the safe direction; under-triggering ... is
+    not." For a single-connection table `candidates` is `[policy]`, so this
+    collapses to the original one-Policy check exactly."""
+    return all(candidate.table_allowed(table) for candidate in candidates)
+
+
+def _column_allowed_everywhere(table: str, column: str, candidates: List[Policy]) -> bool:
+    """Column-level sibling of `_table_allowed_everywhere` — see its docstring."""
+    return all(candidate.column_allowed(table, column) for candidate in candidates)
+
+
+def _column_mask_anywhere(
+    table: str, column: str, candidates: List[Policy]
+) -> Optional[ColumnMask]:
+    """The first configured `ColumnMask` across `candidates`, or None if none of
+    them mask this column (item 156). Governed under EITHER connection's Policy
+    means the mask applies — inverted from `_table_allowed_everywhere`'s AND: a
+    mask is something that activates when any policy says so, not something
+    every policy must agree on to avoid.
+
+    `candidates` is ordered PRIMARY-connection-first (see
+    `resolve_table_policies`'s docstring for why this order is load-bearing,
+    not cosmetic) — so a mask configured only on the joined connection's own
+    Policy is still found (the primary's `column_mask` returns `None`, so the
+    walk falls through), but when BOTH connections configure a DIFFERENT mask
+    on the same column, the PRIMARY connection's own mask is the one applied —
+    matching the pre-item-156 default (which only ever consulted the primary)
+    rather than letting a cross-connection join silently weaken an
+    already-masked column's protection."""
+    for candidate in candidates:
+        mask = candidate.column_mask(table, column)
+        if mask is not None:
+            return mask
+    return None
+
+
+def _validate_scope(
+    query: StructuredQuery,
+    policy: Policy,
+    cte_names: Set[str],
+    *,
+    connection_id: str,
+    principal: Optional[Principal] = None,
+    scope_connections: Optional[Dict[int, Dict[str, str]]] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
+) -> None:
     """Per-scope checks (applied to the outer query AND each subquery
     independently): the non-summable caps and the column allow/deny + masked-
     column rule against THIS scope's own tables (item 97 — a subquery's base
@@ -478,10 +543,37 @@ def _validate_scope(query: StructuredQuery, policy: Policy, cte_names: Set[str])
     all_refs = list(iter_column_refs(query))
     tables = referenced_tables(query, cte_names)
     name_to_physical = effective_name_map(query)
+    # This scope's own table-to-connection map (item 156) — empty for every
+    # pre-item-156 caller (no `scope_connections` threaded in), which makes
+    # every `_table_connection_id` lookup below fall back to `connection_id`
+    # and every `resolve_table_policies` call below collapse to `[policy]`,
+    # so this whole block is byte-identical to the pre-156 shape unless a
+    # caller opts in.
+    table_connection = (scope_connections or {}).get(id(query), {})
+    # A physical table can be reached through more than one effective name in
+    # this scope (most commonly one; a self-join across two connections of a
+    # same-named table is the one case it's more than one), and — since item
+    # 156 — those names can resolve to DIFFERENT connections. Built from the
+    # from/join structure (`name_to_physical`) so a bogus/undeclared alias
+    # `referenced_tables` may have pulled in via a stray column ref (never a
+    # real from/join name) simply isn't in this map and falls back to
+    # `connection_id` alone below — the same single-connection check as
+    # before item 156.
+    physical_connections: Dict[str, Set[str]] = {}
+    for alias_key, physical in name_to_physical.items():
+        physical_connections.setdefault(physical, set()).add(
+            _table_connection_id(table_connection, alias_key, connection_id)
+        )
 
     for table in tables:
-        if not policy.table_allowed(table):
-            raise PolicyViolationError(f"Table {table!r} is not accessible under the active policy")
+        for table_cx in physical_connections.get(table, {connection_id}):
+            candidates = resolve_table_policies(
+                table_cx, connection_id, policy, principal, connection_resolver
+            )
+            if not _table_allowed_everywhere(table, candidates):
+                raise PolicyViolationError(
+                    f"Table {table!r} is not accessible under the active policy"
+                )
 
     for column_ref in all_refs:
         t, c = parse_column_ref(column_ref.ref)
@@ -499,7 +591,11 @@ def _validate_scope(query: StructuredQuery, policy: Policy, cte_names: Set[str])
         # another scope rather than a result handed to the caller.
         if physical_t.casefold() in cte_names:
             continue
-        if not policy.column_allowed(physical_t, c):
+        column_cx = _table_connection_id(table_connection, t, connection_id)
+        candidates = resolve_table_policies(
+            column_cx, connection_id, policy, principal, connection_resolver
+        )
+        if not _column_allowed_everywhere(physical_t, c, candidates):
             raise PolicyViolationError(
                 f"Column {column_ref.ref!r} is not accessible under the active policy"
             )
@@ -516,7 +612,11 @@ def _validate_scope(query: StructuredQuery, policy: Policy, cte_names: Set[str])
         physical_t = name_to_physical.get(t.casefold(), t)
         if physical_t.casefold() in cte_names:
             continue  # a cte output name, not a physical column — see above
-        if policy.column_mask(physical_t, c) is not None:
+        column_cx = _table_connection_id(table_connection, t, connection_id)
+        candidates = resolve_table_policies(
+            column_cx, connection_id, policy, principal, connection_resolver
+        )
+        if _column_mask_anywhere(physical_t, c, candidates) is not None:
             raise PolicyViolationError(
                 f"Column {column_ref.ref!r} is masked by policy and can only appear in the select "
                 "projection, not in filters, joins, ordering, grouping, or nested in a function"
@@ -710,7 +810,16 @@ def _validate_cte_constraints(
                     )
 
 
-def _validate_correlation(query: StructuredQuery, scoped: List, policy: Policy) -> None:
+def _validate_correlation(
+    query: StructuredQuery,
+    scoped: List,
+    policy: Policy,
+    *,
+    connection_id: str,
+    principal: Optional[Principal] = None,
+    scope_connections: Optional[Dict[int, Dict[str, str]]] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
+) -> None:
     """Enforce item 106's correlation model: declared, capped, and checked against
     the ENCLOSING scope.
 
@@ -773,11 +882,19 @@ def _validate_correlation(query: StructuredQuery, scoped: List, policy: Policy) 
         name_to_physical = effective_name_map(correlation.parent)
         table, column = parse_column_ref(correlation.ref)
         physical = name_to_physical.get(table.casefold(), table)
-        if not policy.table_allowed(physical):
+        # The PARENT scope's own table-to-connection map (item 156) — a
+        # correlated ref names one of the parent's from/join tables, which may
+        # itself have been reached through a cross-connection join.
+        table_connection = (scope_connections or {}).get(id(correlation.parent), {})
+        table_cx = _table_connection_id(table_connection, table, connection_id)
+        candidates = resolve_table_policies(
+            table_cx, connection_id, policy, principal, connection_resolver
+        )
+        if not _table_allowed_everywhere(physical, candidates):
             raise PolicyViolationError(
                 f"Table {physical!r} is not accessible under the active policy"
             )
-        if not policy.column_allowed(physical, column):
+        if not _column_allowed_everywhere(physical, column, candidates):
             raise PolicyViolationError(
                 f"Column {correlation.ref!r} is not accessible under the active policy"
             )
@@ -785,7 +902,7 @@ def _validate_correlation(query: StructuredQuery, scoped: List, policy: Policy) 
         # compared inside the subquery — so item 49's rule applies with no position
         # test: a masked column may only surface as a bare top-level projection, and
         # this is never that.
-        if policy.column_mask(physical, column) is not None:
+        if _column_mask_anywhere(physical, column, candidates) is not None:
             raise PolicyViolationError(
                 f"Column {correlation.ref!r} is masked by policy and cannot be used as a "
                 "correlated reference — its raw value would be compared inside the subquery"
@@ -823,7 +940,31 @@ def resolve_purpose_policy(query: StructuredQuery, policy: Policy) -> Policy:
     return policy.for_purpose(query.purpose)
 
 
-def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) -> Policy:
+def validate_policy(
+    query: StructuredQuery,
+    policy: Policy,
+    connection_id: str,
+    *,
+    principal: Optional[Principal] = None,
+    scope_connections: Optional[Dict[int, Dict[str, str]]] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
+) -> Policy:
+    """`scope_connections` (TODO.md item 156) is the same per-scope table-to-
+    connection map `validation/schema_validation.py`'s `resolve_scope_connections`
+    (or `validate_schema`'s own identically-shaped output) produces — one entry
+    per scope, keyed by `id(scope)`, mapping that scope's own effective table
+    names to the connection they resolve to. When given, a cross-connection
+    join's table is checked against BOTH its own resolved connection's Policy
+    and this `policy` (never a replacement of one for the other — see
+    `resolve_table_policies`'s docstring), closing the gap where a column mask,
+    mandatory row filter, or deny-list rule that exists only on the joined-in
+    connection's own Policy was silently never consulted. `None` (every
+    pre-item-156 caller, and every caller that never resolves a table outside
+    `connection_id`) makes every check below behave exactly as it did before —
+    `resolve_table_policies` collapses to `[policy]` whenever a table's
+    resolved connection equals `connection_id`, which is what an empty/absent
+    map always reports.
+    """
     if not policy.enabled:
         raise PolicyViolationError(f"Connection {connection_id!r} is disabled by policy")
 
@@ -848,13 +989,29 @@ def validate_policy(query: StructuredQuery, policy: Policy, connection_id: str) 
             f"{policy.max_subquery_depth}"
         )
     _validate_subquery_constraints(scoped, policy)
-    _validate_correlation(query, scoped, policy)
+    _validate_correlation(
+        query,
+        scoped,
+        policy,
+        connection_id=connection_id,
+        principal=principal,
+        scope_connections=scope_connections,
+        connection_resolver=connection_resolver,
+    )
     scopes = [q for _, q in scoped]
 
     # Count caps summed tree-wide, then per-scope semantics for each scope.
     _enforce_tree_wide_caps(scopes, policy)
     for scope in scopes:
-        _validate_scope(scope, policy, cte_names)
+        _validate_scope(
+            scope,
+            policy,
+            cte_names,
+            connection_id=connection_id,
+            principal=principal,
+            scope_connections=scope_connections,
+            connection_resolver=connection_resolver,
+        )
 
     return policy
 
