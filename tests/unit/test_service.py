@@ -2247,3 +2247,177 @@ async def test_an_equality_condition_join_emits_the_same_relationship_as_the_on_
     assert relationship.target.column == "customer_id"
     assert relationship.target.to_table == "customers"
     assert relationship.target.to_column == "id"
+
+
+# --------------------------------------------------------------------------- #
+# Cross-connection join policy enforcement wiring (TODO.md item 156)          #
+# --------------------------------------------------------------------------- #
+
+
+def _cross_connection_tables() -> dict:
+    metadata = sa.MetaData()
+    orders = sa.Table(
+        "orders",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("customer_id", sa.Integer),
+    )
+    customers = sa.Table(
+        "customers",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("name", sa.String(50)),
+    )
+    return {"orders": orders, "customers": customers}
+
+
+def _cross_connection_registry():
+    """`demo` (the primary connection) joined to `other`, both in the same
+    join_group — the real production wiring `resolve_visible_connection`
+    resolves, as opposed to a hand-built fake resolver. Mirrors
+    `test_approval.py`'s identically-purposed `_cross_connection_setup` for
+    item 155's sensitivity trigger, applied here to `validate_policy`/
+    `compile_structured_query`."""
+    from querygate.connections.models import ConnectionProfile
+    from querygate.connections.registry import ConnectionRegistry, set_registry
+
+    demo = ConnectionProfile(
+        id="demo",
+        dialect="postgresql",
+        connection_string="postgresql+asyncpg://user:pass@host/demo",
+        join_group="shared",
+    )
+    other = ConnectionProfile(
+        id="other",
+        dialect="postgresql",
+        connection_string="postgresql+asyncpg://user:pass@host/other",
+        join_group="shared",
+    )
+    set_registry(ConnectionRegistry({"demo": demo, "other": other}))
+
+
+def _cross_connection_join_query() -> StructuredQuery:
+    from querygate.query_ast.models import JoinSpec
+
+    return StructuredQuery(
+        from_table="orders",
+        select=["orders.id", "customers.name"],
+        joins=[
+            JoinSpec(
+                table="customers",
+                on=["orders.customer_id", "customers.id"],
+                connection="other",
+            )
+        ],
+        limit=5,
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_a_cross_connection_join_denied_only_by_the_joined_policy():
+    """The real production entry point (`execute()` -> `_validate_and_compile()`
+    -> `validate_policy()`), not the validator called by hand: a deny rule that
+    exists ONLY on the joined-in connection's ('other') own Policy must still
+    reject the query, even though the primary connection's ('demo') Policy has
+    no opinion on `customers` at all. Uses the REAL `resolve_visible_connection`
+    resolver (via the registry/policy store), not a fake one, so this also
+    pins the default-resolver wiring in `_validate_and_compile`."""
+    _cross_connection_registry()
+    set_policy_store(
+        PolicyStore(default=Policy(), overrides={"other": Policy(denied_tables=["customers"])})
+    )
+    query = _cross_connection_join_query()
+    service = StructuredQueryService(connection_id="demo")
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        await service.execute(query)
+
+
+@pytest.mark.asyncio
+async def test_execute_allows_a_cross_connection_join_when_neither_policy_objects():
+    """Regression / mutation guard: with NO deny rule on either connection's
+    Policy the same cross-connection join must proceed normally — the item-156
+    wiring must not turn every cross-connection join into a rejection."""
+    _cross_connection_registry()
+    set_policy_store(PolicyStore(default=Policy(), overrides={"other": Policy()}))
+    query = _cross_connection_join_query()
+    tables = _cross_connection_tables()
+
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1, "name": "Ada"}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value=tables)),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        result = await service.execute(query)
+    assert result.row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_masks_a_cross_connection_column_masked_only_by_the_joined_policy():
+    """Full wiring through the compiler, not just `validate_policy`: a mask
+    configured ONLY on the joined connection's ('other') Policy must be
+    applied to the compiled SQL `execute()` actually runs — pins that
+    `_validate_and_compile`'s real `scope_connections` (from `validate_schema`,
+    not the policy-only pre-schema map) reaches `compile_structured_query`.
+    `validate_schema` is patched (no real reflection), but its `scope_
+    connections` OUTPUT parameter is populated by the fake exactly as the real
+    one would for this join, so the compiler sees the same map production
+    code produces."""
+    from querygate.policy.models import ColumnMask
+
+    _cross_connection_registry()
+    set_policy_store(
+        PolicyStore(
+            default=Policy(),
+            overrides={
+                "other": Policy(
+                    column_masks={"customers": [ColumnMask(column="name", kind="null")]}
+                )
+            },
+        )
+    )
+    query = _cross_connection_join_query()
+    tables = _cross_connection_tables()
+
+    async def fake_validate_schema(*args, **kwargs):
+        scope_connections = kwargs.get("scope_connections")
+        if scope_connections is not None:
+            scope_connections[id(query)] = {"customers": "other"}
+        return tables
+
+    captured_stmt = {}
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield AsyncMock()
+
+    async def _capturing_execute(stmt):
+        captured_stmt["stmt"] = stmt
+        mock_result = MagicMock()
+        mock_result.mappings.return_value.all.return_value = [{"id": 1, "name": None}]
+        return mock_result
+
+    class _CapturingSession:
+        execute = staticmethod(_capturing_execute)
+
+    @asynccontextmanager
+    async def _capturing_scope(*args, **kwargs):
+        yield _CapturingSession()
+
+    with (
+        patch.object(svc, "validate_schema", fake_validate_schema),
+        patch.object(svc, "session_scope", _capturing_scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query)
+
+    compiled = str(captured_stmt["stmt"].compile(compile_kwargs={"literal_binds": True}))
+    assert "NULL AS name" in compiled
