@@ -25,6 +25,7 @@ from querygate.api.routes import build_router
 from querygate.audit.sinks import configure_audit_sink, reset_audit_sink
 from querygate.catalog.refresh import CatalogRefreshMonitor
 from querygate.catalog.usage import CatalogUsageLearningMonitor
+from querygate.config_reload import CredentialLeaseMonitor
 from querygate.core.config import AppConfig, ConcurrencyBackend
 from querygate.core.config import config as default_config
 from querygate.core.logging import ContextLogger, context_logger, get_logger
@@ -72,6 +73,16 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             )
             await catalog_usage_learning_monitor.start()
         app.state.catalog_usage_learning_monitor = catalog_usage_learning_monitor
+
+        credential_lease_monitor: Optional[CredentialLeaseMonitor] = None
+        if conf.credential_lease_refresh_enabled:
+            credential_lease_monitor = CredentialLeaseMonitor(
+                cfg=conf,
+                poll_interval_seconds=conf.credential_lease_check_interval_seconds,
+                refresh_margin_seconds=conf.credential_lease_refresh_margin_seconds,
+            )
+            await credential_lease_monitor.start()
+        app.state.credential_lease_monitor = credential_lease_monitor
 
         redis_client = None
         if conf.concurrency_backend == ConcurrencyBackend.REDIS:
@@ -121,6 +132,8 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 await catalog_refresh_monitor.stop()
             if catalog_usage_learning_monitor is not None:
                 await catalog_usage_learning_monitor.stop()
+            if credential_lease_monitor is not None:
+                await credential_lease_monitor.stop()
             await health_monitor.stop()
             reset_audit_sink()
             if redis_client is not None:

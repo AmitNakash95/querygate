@@ -188,7 +188,7 @@ claim when the work ships or before explicitly handing the item back.
   consumer `cosign verify`/`gh attestation verify` docs). Box stays `[ ]` until
   the two maintainer-gated bits — the *first* executed signed release (a
   deliberate tag push) and a chosen Python package-index — are done.
-- [ ] **135** — Automatic (TTL/lease-driven) credential re-resolution, without
+- [x] **135** — Automatic (TTL/lease-driven) credential re-resolution, without
   an operator-triggered reload. *Added 2026-07-30 by `competitive-scan`; scope
   corrected the same day by `auditors` — an earlier draft wrongly claimed
   rotation requires a process restart. It does not: item 13 shipped
