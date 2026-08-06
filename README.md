@@ -170,8 +170,20 @@ batch is re-queued for retry (not dropped) and increments
 `querygate_audit_worm_flush_failures_total`, which you should alert on. Only
 a sustained outage past `AUDIT_WORM_MAX_BUFFERED_EVENTS` drops the oldest
 buffered events, visibly, via `querygate_audit_worm_buffer_dropped_total`.
-Managed search over the archive is not built yet (a later phase) — the
-archive is retrievable directly from S3 today.
+
+`GET /api/v1/admin/observability/worm-search` (`admin:audit:worm-search`
+scope — deliberately separate from `admin:observability:read`) is the
+QueryGate-native managed search over that archive: bounded time-range,
+`event_type`/`connection_id`/`principal_id` filters, and cursor-based
+pagination, so "every query against `pii_customers` in the last 18 months"
+is answerable even after the local hash-chained file has long since rotated
+that window out. `start_time`/`end_time` are required on every request (no
+"search everything" mode), the window is capped
+(`AUDIT_WORM_SEARCH_MAX_WINDOW_DAYS`, default 730), and one request's S3
+scan is bounded by `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
+`AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS` — an over-wide/missing range is
+rejected outright, a bound hit mid-scan degrades to a truncated, resumable
+page rather than a slow or unbounded scan.
 
 ### Prove the boundary: the adversarial security benchmark
 
@@ -1834,11 +1846,14 @@ Being upfront about what's not done yet:
 - **No stored-procedure catalog** — deliberately out of scope for this
   version; exposing stored procedures safely needs its own cataloging and
   policy-approval mechanism, not a generic pass-through.
-- **Audit retention has an opt-in native WORM path, no built-in search yet**
-  — `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm` (item 134 phase 1) archives to
-  S3 Object Lock (COMPLIANCE mode) alongside the local hash-chained ledger,
-  but there's no managed search UI over the archive yet, and it's opt-in —
-  the default `jsonl_chained` sink is still local-file-only, not itself WORM.
+- **Audit retention has an opt-in native WORM path with managed search** —
+  `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm` (item 134) archives to S3
+  Object Lock (COMPLIANCE mode) alongside the local hash-chained ledger, and
+  `GET /api/v1/admin/observability/worm-search` (item 134 phase 2) searches
+  that archive directly — bounded time-range, filtered, paginated — but it's
+  still opt-in: the default `jsonl_chained` sink is local-file-only, not
+  itself WORM, and there's no browser UI over the search endpoint yet, REST
+  only.
 - **Config-governance's approval workflow is opt-in, not the default** — a
   caller with `admin:config:write` can stage and immediately apply a version
   in one session unless an operator sets `require_config_approvals` above 0
