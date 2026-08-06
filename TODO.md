@@ -183,7 +183,7 @@ order-of-magnitude, not commitments.
 | 150 | ✅ `compiler/sqlalchemy_compiler.py`'s `mandatory_row_filters` matching uses `.lower()` vs `schema_validation.py`'s consistent subsystem | M | — |
 | 151 | ✅ Bind the in-query approval gate's token to a connection and principal, not just an AST fingerprint | M | 92, 128 |
 | 152 | ✅ Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM retention) shipping | S | 19, 134 |
-| 153 | `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention) | S | 19, 134 |
+| 153 | ✅ `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention) | S | 19, 134 |
 | 154 | WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate | M | 91, 134 |
 | 155 | `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection | M | 151 |
 
@@ -2346,26 +2346,13 @@ shipped (MySQL support; S3 Object Lock WORM retention with the phase-2
 managed-search caveat kept explicit). **Full write-up:**
 [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 152).
 
-### 153. `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention)
+### 153. `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention) ✅ DONE
 
-**Surfaced 2026-08-06 by `claim-reviewer` while auditing item 152's
-landing/sales-copy reconciliation.** Both items shipped real, upgrade-relevant
-capability (a third registry dialect; an opt-in compliance-grade audit
-archival backend) but neither has an `[Unreleased]` entry in `CHANGELOG.md`,
-unlike every other item of comparable weight (e.g. items 35 phase 3, 102,
-136). This is a documentation gap, not a claim-accuracy defect — item 152
-itself was scoped to landing/sales copy and README, not the changelog, so this
-was deliberately left for its own item rather than folded in.
-
-**What to do (when prioritized):** run the `release-notes` skill (or write by
-hand, matching the file's existing entry format/depth) to add `[Unreleased]`
-entries for items 19 and 134 phase 1, including upgrade impact — MySQL is
-purely additive (no existing dialect's behavior changes), while the WORM
-backend is opt-in via `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm` (no impact
-for a deployment that doesn't set it) but should document the fail-open
-buffering caveat for anyone who does.
-
-**Effort:** S. **Depends on:** 19 (phase 1 shipped), 134 (phase 1 shipped).
+Added 17 `[Unreleased]` entries to `CHANGELOG.md` covering items 19, 134
+(both phases), 128, 129, 135–140, 143–151 (the full gap back through item
+128, not just the item's own 19/134 ask); items 89–127 and 131/133 remain a
+separate, larger follow-up. **Full write-up:**
+[docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 153).
 
 ### 154. WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate
 
