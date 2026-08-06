@@ -3479,6 +3479,104 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-06 — the approval gate's token binds to connection + principal via
+  additive claims, not by folding either into the fingerprint hash; MCP's own
+  `RequestStateSecurity(bind_principal=...)` is deliberately not wired
+  (TODO.md item 151).** Surfaced by the `security-invariant-reviewer` audit of
+  items 19/128: `execution/approval.py`'s `query_fingerprint`/`write_fingerprint`
+  hash the AST alone, so a token approved for query `Q` on connection `staging`
+  verified unchanged for the byte-identical `Q` on `prod` — realistic, since
+  `prod` normally carries the catalog `sensitivity: pii` labels or row volumes
+  that actually trip the gate, while `staging` never does. Separately, neither
+  the REST token nor the MCP MRTR pending state (`mcp/elicitation.py`) was
+  bound to a principal at all, so a `request_state` handed from one agent
+  session to another was honored for the second principal's identical retry.
+  Four decisions:
+
+  **(1) `issue_approval_token`/`verify_approval_token` (`execution/approval.py`)
+  gained two new claims, `"cx"` (connection id) and `"sub_bind"` (bound
+  principal subject) — required keyword arguments (no default; pass `None`
+  explicitly to opt out), additive alongside the existing `fp`/`sub`/`exp` —
+  not absorbed into the fingerprint hash.** This keeps every already-issued
+  token's shape and any doc describing "the fingerprint is a hash of the AST"
+  stable; the fingerprint computation itself is untouched. Verification only
+  enforces a claim the token actually carries: a token minted with `cx`/
+  `sub_bind` is rejected unless the caller supplies a matching value (including
+  when the caller omits it), fail-closed the same way a fingerprint mismatch
+  is; a token minted without them (the pre-item-151 shape, still exercised by
+  low-level fingerprint-only tests, both explicitly passed as `None`) verifies
+  exactly as before. `"sub_bind"` binds to `Principal.subject` — the calling
+  principal's own identity, not a session id and not an agent-delegation
+  `actor`; two delegated sessions acting for the same human subject are not
+  distinguished, a deliberate, narrower scope than session-binding. `"sub_bind"`
+  is a field distinct from the pre-existing `"sub"` claim (the *approver's*
+  subject, recorded for audit only, unchanged) — reusing `"sub"` for
+  enforcement would have collided with MCP's real-grant minting, which already
+  writes an audit-distinctive `f"mcp-elicitation:{caller.subject}"` into
+  `"sub"` and would break an equality check against the raw subject. The
+  parameters were made required (not optional-with-`None`-default) after a
+  same-day `security-invariant-reviewer` follow-up pass on this same item
+  pointed out that an optional default is exactly the shape a *future* call
+  site could silently omit, reopening the unbound-token gap this item exists
+  to close — a `TypeError` on omission forces a deliberate choice instead.
+
+  **(2) The connection binding is always the query/write's own top-level
+  `connection_id`, never a cross-connection join's own `connection`
+  (`JoinSpec.connection`)** — item 130 (not yet implemented on this branch)
+  proposes a `Mcp-Param-Connection` gateway header that would need the same
+  scoping for its own reasons; this decision reaches that conclusion
+  independently, on its own merits, rather than by citing item 130 as
+  precedent. `StructuredQueryService`/
+  `WriteExecutionService` already carry `self._connection_id` as the top-level
+  connection, so no new parameter threading was needed at that layer; `_enforce_approval_gate`/
+  `_enforce_write_approval_gate` just pass it (and `self._principal_subject`)
+  into `verify_approval_token`. REST's `approve_query`/`approve_write`
+  (`api/routes.py`) mint with `connection_id=<path param>`,
+  `principal_subject=<the approver's own subject>` — meaning, after this
+  change, **the same principal that calls `POST /{connection}/query/approve`
+  must be the one that redeems the resulting token** via
+  `POST /{connection}/query`; a token handed to a different principal to
+  redeem is now rejected. This is a deliberate tightening of the REST
+  out-of-band flow: `/query/approve` has no way to know "the original
+  requester's" identity (only the query AST and the approver's own
+  credentials), so the only principal a REST-issued token can be soundly
+  bound to is the one that actually reviewed and approved it — the approver.
+  MCP's flow binds to a different, well-defined identity instead: the
+  *original calling* principal whose tool call tripped the pending
+  elicitation (`build_pending_input_required`'s new `caller`/`connection_id`
+  params), verified again when `resolve_approval_tokens_from_retry` resolves
+  the retry and mints the real grant — both ends of one MRTR round trip
+  necessarily share that same principal, so this closes the session-handoff
+  gap without changing legitimate usage.
+
+  **(3) MCP's own `RequestStateSecurity(bind_principal=...)`
+  (`mcp/server/request_state.py`, shipped in the v2 SDK) is deliberately NOT
+  wired into `mcp/server.py`'s `MCPServer` construction.** It reads
+  `mcp.server.auth.middleware.auth_context.get_access_token()` — the SDK's own
+  auth layer — but QueryGate authenticates independently in its own
+  `MCPAuthMiddleware` on top of `core/auth.py` and never populates that
+  context, so wiring the SDK mechanism would be dead code that appears to
+  enforce something it structurally cannot see. The claim-based check in (1)/(2),
+  sitting below the transport layer where QueryGate's own `Principal` is
+  actually available, is the correct enforcement point instead.
+
+  **(4) A same-day mandatory review found the shipped `cx`/`sub_bind` binding
+  closed the *connection/principal* replay but left two adjacent gaps in the
+  same token format — both closed with two more claims, additive again, not
+  a further redesign.** A pending MRTR elicitation token
+  (`build_pending_input_required`) carries a genuine `fp`/`cx`/`sub_bind` —
+  it is only ever an integrity-protected "this was asked about" marker, but
+  nothing stopped it being presented directly as a real grant. Fixed with a
+  `"k"` claim (`kind="grant"` default; the elicitation pending-mint site is
+  the only caller that passes `"pending"`; `verify_approval_token`'s
+  `expected_kind` parameter, default `"grant"`, is checked unconditionally —
+  not opt-in like `cx`/`sub_bind` — since a *missing* kind claim must fail
+  the same as a wrong one). Separately, an unconditional `"v"` (format
+  version) claim closes a rolling-deploy race: a token minted by a pod
+  running a pre-item-151 build (predating `cx`/`sub_bind`/`k`/`v` entirely)
+  must not be honored by a newer pod as "carries no binding claims, therefore
+  unbound and permissive" — `"v"` is checked first and rejects outright.
+
 - **2026-08-06 — proactive lease-driven credential re-resolution composes a
   new optional protocol rather than widening `SecretResolver`, and a
   same-day post-ship security review found one HIGH-severity gap before it

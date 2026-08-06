@@ -382,11 +382,18 @@ def build_router(
     ):
         """Grant an approval token for a query that tripped the in-query
         human-in-the-loop gate (TODO.md item 92). Requires the `query:approve`
-        scope — deliberately distinct from query execution, so an agent cannot
-        approve its own sensitive/expensive read. Returns a short-lived,
-        HMAC-signed token bound to this exact query's fingerprint; the requester
-        re-submits the identical query with it in the `X-QueryGate-Approval`
-        header. Stateless: no approval is stored server-side.
+        scope — deliberately a distinct scope from query execution, so a
+        principal that only ever holds an execution-capable scope can never
+        mint its own approval. Returns a short-lived, HMAC-signed token bound
+        to this exact query's fingerprint, connection, and this call's own
+        principal (TODO.md item 151); **that same principal** — not a
+        different requester — is the only one who can redeem it, by
+        re-submitting the identical query against this same connection with it
+        in the `X-QueryGate-Approval` header. This means the only configuration
+        that can self-approve is one principal deliberately granted both
+        `query:approve` and execution scope — a deployment choice, not a gap
+        this endpoint can close on its own. Stateless: no approval is stored
+        server-side.
         """
         require_scope(principal, QUERY_APPROVE_SCOPE)
         _require_connection(connection, principal)
@@ -404,6 +411,8 @@ def build_router(
             fingerprint=fingerprint,
             approver_subject=principal.subject,
             key=app_config.approval_token_hmac_key,
+            connection_id=connection,
+            principal_subject=principal.subject,
         )
         return ApprovalGrant(fingerprint=fingerprint, approval_token=token)
 
@@ -477,11 +486,17 @@ def build_router(
     ):
         """Grant an approval token for a write that tripped the governed-writes
         approval gate (TODO.md item 93 phase 2). Requires the `query:approve`
-        scope — the same separation of duties as read approval, so an agent
-        cannot approve its own sensitive/large write. Returns a short-lived,
-        HMAC-signed token bound to this exact write's fingerprint; resubmit the
-        identical write with it in the `X-QueryGate-Approval` header. Stateless:
-        no approval is stored server-side."""
+        scope — the same scope split as read approval, so a principal that
+        only ever holds an execution-capable scope can never mint its own
+        approval. Returns a short-lived, HMAC-signed token bound to this exact
+        write's fingerprint, connection, and this call's own principal
+        (TODO.md item 151); **that same principal** redeems it by resubmitting
+        the identical write against this same connection with it in the
+        `X-QueryGate-Approval` header. The only configuration that can
+        self-approve is one principal deliberately granted both
+        `query:approve` and execution scope — a deployment choice, not a gap
+        this endpoint can close on its own. Stateless: no approval is stored
+        server-side."""
         require_scope(principal, QUERY_APPROVE_SCOPE)
         _require_connection(connection, principal)
         if not app_config.approval_token_hmac_key:
@@ -494,6 +509,8 @@ def build_router(
             fingerprint=fingerprint,
             approver_subject=principal.subject,
             key=app_config.approval_token_hmac_key,
+            connection_id=connection,
+            principal_subject=principal.subject,
         )
         return ApprovalGrant(fingerprint=fingerprint, approval_token=token)
 

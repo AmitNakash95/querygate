@@ -193,7 +193,11 @@ async def run_structured_queries(
     if ctx is not None:
         fingerprints_by_key = {f"q{i}": query_fingerprint(q) for i, q in enumerate(queries)}
         approval_tokens = resolve_approval_tokens_from_retry(
-            ctx=ctx, fingerprints_by_key=fingerprints_by_key, caller=caller, config=config
+            ctx=ctx,
+            fingerprints_by_key=fingerprints_by_key,
+            caller=caller,
+            config=config,
+            connection_id=connection,
         )
     # Progress notifications (TODO.md item 35 phase 3): MCP's standard
     # notifications/progress message, via Context.report_progress — a no-op
@@ -237,7 +241,9 @@ async def run_structured_queries(
             for i, r in enumerate(results)
             if r.approval_fingerprint is not None
         ]
-        input_required = build_pending_input_required(items=pending, config=config)
+        input_required = build_pending_input_required(
+            items=pending, config=config, caller=caller, connection_id=connection
+        )
         if input_required is not None:
             return input_required
     return BatchQueryToolResult(
