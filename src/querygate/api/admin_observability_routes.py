@@ -28,13 +28,26 @@ Item 44 phase 2's remainder adds a fourth read: time-windowed metrics
 *history* (real trend charts, not point-in-time cards) from an
 operator-configured external metrics backend. The aggregation and its
 honest-disabled-by-default posture live in `querygate/admin/metrics_history.py`.
+
+TODO.md item 134 phase 2 adds a fifth read: managed search over the durable
+WORM (S3 Object Lock) audit archive — a distinct, long-retention copy from
+the persisted audit stream every read above uses. The scan, its bounds, and
+its honest-disabled posture live in `querygate/audit/worm_search.py`; this
+stays a thin, scope-gated wrapper, gated by its OWN scope
+(`ADMIN_AUDIT_WORM_SEARCH_SCOPE`) rather than `ADMIN_OBSERVABILITY_READ_SCOPE`
+— see that module's docstring for why. Deliberately REST-only: no sibling
+read on this router (overview/anomalies/config-changes/history) has an MCP
+tool counterpart either, so this stays consistent with the existing surface
+rather than introducing a new REST/MCP asymmetry among admin observability
+reads.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Callable, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from querygate.admin.anomaly import (
     AnomalyReport,
@@ -58,11 +71,16 @@ from querygate.admin.metrics_history import (
     build_metrics_history_report,
 )
 from querygate.admin.observability import ObservabilityOverview, build_overview
-from querygate.api._errors import require_scope
+from querygate.api._errors import mask_unexpected, require_scope
 from querygate.audit.ledger import resolve_ledger_key
+from querygate.audit.worm_search import (
+    WormSearchEventType,
+    WormSearchResult,
+    build_worm_search_result,
+)
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig, MetricsHistoryBackend
-from querygate.core.scopes import ADMIN_OBSERVABILITY_READ_SCOPE
+from querygate.core.scopes import ADMIN_AUDIT_WORM_SEARCH_SCOPE, ADMIN_OBSERVABILITY_READ_SCOPE
 
 
 def _change_trend_thresholds(cfg: AppConfig) -> ChangeTrendThresholds:
@@ -170,5 +188,51 @@ def build_admin_observability_router(
         return await build_metrics_history_report(
             _metrics_history_source(cfg), thresholds=_metrics_history_thresholds(cfg)
         )
+
+    @router.get("/worm-search", response_model=WormSearchResult)
+    async def observability_worm_search(
+        start_time: Optional[datetime] = Query(
+            default=None, description="Inclusive start of the search window. Required."
+        ),
+        end_time: Optional[datetime] = Query(
+            default=None, description="Inclusive end of the search window. Required."
+        ),
+        event_type: Optional[WormSearchEventType] = Query(default=None),
+        connection_id: Optional[str] = Query(default=None),
+        principal_id: Optional[str] = Query(default=None),
+        limit: Optional[int] = Query(default=None, ge=1),
+        cursor: Optional[str] = Query(
+            default=None, description="Opaque resumption token from a previous page."
+        ),
+        principal: Principal = Depends(get_principal),
+    ):
+        # A dedicated scope, deliberately not ADMIN_OBSERVABILITY_READ_SCOPE
+        # — see audit/worm_search.py's module docstring for why the WORM
+        # archive is gated more strictly than the in-process reads above.
+        require_scope(principal, ADMIN_AUDIT_WORM_SEARCH_SCOPE)
+        # start_time/end_time stay optional at the FastAPI layer (rather than
+        # Query(...)) so the "both required" contract is enforced once, in
+        # audit/worm_search.py's own domain validation (QueryValidationError
+        # -> 422), the same place every other bound on this search is
+        # enforced — not duplicated as a second, framework-level rule here.
+        #
+        # Unlike the other four reads on this router, this one makes a real
+        # network call (S3) that can fail with a raw botocore exception —
+        # mask_unexpected() keeps that failure from leaking the bucket name/
+        # endpoint/driver text to the client, in-process rather than as an
+        # app-level 500 handler, so it still applies under debug=True (see
+        # mask_unexpected's own docstring — security-invariant-reviewer,
+        # 2026-08-06, WS-7).
+        with mask_unexpected():
+            return await build_worm_search_result(
+                cfg,
+                start_time=start_time,
+                end_time=end_time,
+                event_type=event_type,
+                connection_id=connection_id,
+                principal_id=principal_id,
+                limit=limit,
+                cursor=cursor,
+            )
 
     return router
