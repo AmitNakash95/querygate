@@ -10,8 +10,8 @@ responsibilities.
 ## What QueryGate is
 
 QueryGate is a self-hosted access gateway that lets AI agents and applications
-read from PostgreSQL and Microsoft SQL Server through MCP or REST without giving
-them a raw-SQL tool.
+read from PostgreSQL, Microsoft SQL Server, and MySQL through MCP or REST
+without giving them a raw-SQL tool.
 
 Callers submit a constrained JSON query object called a `StructuredQuery`.
 QueryGate checks that object against the authenticated caller's policy and the
@@ -31,7 +31,7 @@ prompt-injected.
 | Area | Product behavior |
 |---|---|
 | Deployment | Runs inside infrastructure controlled by the customer |
-| Supported databases | PostgreSQL and Microsoft SQL Server |
+| Supported databases | PostgreSQL, Microsoft SQL Server, and MySQL |
 | Client interfaces | MCP over Streamable HTTP and versioned REST endpoints |
 | Query input | Validated `StructuredQuery` JSON; no raw-SQL input |
 | Data operations | Read-only by default; opt-in, deny-by-default governed writes (typed INSERT/UPDATE/DELETE — previewed with a diff and approval-gated) when a table/operation is explicitly enabled. No DDL or stored-procedure passthrough in either mode. |
@@ -62,7 +62,7 @@ Reverse proxy / ingress
         |                         |
         | parameterized read     +--> metrics, logs, audit events
         v
-Customer-managed PostgreSQL or Microsoft SQL Server
+Customer-managed PostgreSQL, Microsoft SQL Server, or MySQL
 ```
 
 QueryGate does not call an LLM or require a model provider. It returns permitted
@@ -343,7 +343,7 @@ Helm](deploy/README.md).
 
 A production deployment should provide:
 
-- an existing PostgreSQL or Microsoft SQL Server database;
+- an existing PostgreSQL, Microsoft SQL Server, or MySQL database;
 - a least-privileged, read-only database account for each connection;
 - TLS termination at a trusted reverse proxy, ingress, or service boundary;
 - API-key or JWT authentication for every exposed interface;
@@ -387,11 +387,18 @@ Operational stdout logs are more sensitive than persisted audit events: they
 may contain diagnostic exception details, intent text, and SQL rendered
 according to policy. Protect and retain them accordingly.
 
-The built-in JSONL sink is rotation-friendly but is not a WORM archive, SIEM,
-retention service, or search interface. A sink-write failure is reported in
-operational logs and does not retroactively fail a database query that already
-succeeded. Customers with audit-durability requirements should collect and
-monitor the audit stream externally.
+The default JSONL sink is rotation-friendly and local-file-only — it is not
+itself a WORM archive, SIEM, or search interface. Customers with a compliance
+retention requirement can additionally enable
+`AUDIT_SINK_BACKEND=jsonl_chained_s3_worm`, which archives a batched copy to
+S3 under Object Lock COMPLIANCE mode — composed with, not replacing, the
+existing hash-chained ledger — genuinely undeletable for the configured
+retention window. That archival path is buffered and fail-open by design: a
+flush failure never blocks the triggering query, and only a sustained outage
+past the buffer's bound can drop the oldest buffered events, visibly metered.
+There is still no managed search interface over either sink; customers with
+audit-durability or search requirements should collect and monitor the audit
+stream externally.
 
 ## Configuration lifecycle
 
