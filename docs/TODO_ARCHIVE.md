@@ -10597,3 +10597,73 @@ fixed every hit above. Left the HA/Kubernetes "do not claim yet" line in
 of this item's scope.
 
 **Effort:** S. **Depends on:** 19 (phase 1 shipped), 134 (phase 1 shipped).
+
+### 153. `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention) ✅ DONE
+
+**Surfaced 2026-08-06 by `claim-reviewer` while auditing item 152's
+landing/sales-copy reconciliation.** Both items shipped real, upgrade-relevant
+capability (a third registry dialect; an opt-in compliance-grade audit
+archival backend) but neither has an `[Unreleased]` entry in `CHANGELOG.md`,
+unlike every other item of comparable weight (e.g. items 35 phase 3, 102,
+136). This is a documentation gap, not a claim-accuracy defect — item 152
+itself was scoped to landing/sales copy and README, not the changelog, so this
+was deliberately left for its own item rather than folded in.
+
+**Shipped.** Ran the `release-notes` skill's procedure by hand (source of
+truth: `docs/TODO_ARCHIVE.md`'s full write-ups, cross-checked against actual
+code and tests). Before writing anything, re-checked how far `CHANGELOG.md`'s
+existing `[Unreleased]` section actually reached — it already covered
+roughly item 88 and separately items 102/117, but nothing from item 89
+onward otherwise, and specifically nothing from items 128–152. Rather than
+stopping at the item's own literal item-19/134 ask, swept
+`docs/TODO_ARCHIVE.md` item-by-item from 128 through 151 (the range the
+gap actually spans) and added a customer-facing entry for every item with
+genuine external-behavior impact:
+
+- **Added:** 19 (MySQL dialect), 134 (WORM retention, both phases), 145
+  (purpose-bound access), 146 (quickstart CLI), 147 (procurement evidence
+  page), 135 (lease-driven credential re-resolution).
+- **Changed:** 128 (MCP SDK v2 / `2026-07-28` protocol revision), 144
+  (`/metrics` auth-required by default + `verdict()` metrics), 140 (admin
+  audit-browser cursor ceiling lowered 1,000,000 → 5,000) — each with an
+  explicit **Upgrade impact** callout, since all three are breaking for
+  some caller.
+- **Fixed:** 136 (chained/WORM audit backends silently disabled four read
+  surfaces), 148 (`access_diff` never diffed `column_masks`).
+- **Security:** 149+150 (casefold/lower policy-enforcement disagreements,
+  including a real "denied-write-column silently inert for a non-lowercase
+  table key" bug), 151 (approval token not bound to connection/principal),
+  137 (audit read surfaces now verify + disclose hash-chain integrity),
+  138+139 (bounded audit-log reads + AST list-size caps), 143
+  (`cryptography` CVE upgrade), 129 (MCP `tools/list` caching marked
+  non-shared-cacheable).
+
+17 entries total, in customer-facing language (no internal item-N-only
+shorthand as the lead sentence), each still citing `TODO.md item N` for
+traceability per the file's existing convention. Item 142 (a
+threat-model doc-only ID rename) and item 130 (not merged — still open in
+`TODO.md`) were checked and correctly excluded.
+
+**Spot-checked against real code and tests before writing**, per this
+item's own "be honest" requirement, specifically for items 19 and 134 (the
+item's own named ask): confirmed `MySQLDialectAdapter`
+(`compiler/dialect_adapters.py`), `ConnectionProfile`'s `mysql` dialect
+literal, `AuditSinkBackend.JSONL_CHAINED_S3_WORM`
+(`core/config.py`), the `GET /api/v1/admin/observability/worm-search`
+route (`api/admin_observability_routes.py`), and every cited test file
+(`test_mysql_live.py`, `test_audit_worm_sink.py`, `test_worm_search.py`,
+`test_worm_search_api.py`, `test_worm_search_redaction.py`) actually exist
+in the shipped tree.
+
+**Deliberately left out, and stated as such rather than silently
+expanded:** items 89–127 (including the flagship engine-expressiveness
+items 99–106 — window functions, non-equi joins, set operations, CTEs,
+subqueries) and items 131/133 are also not yet reflected in
+`CHANGELOG.md`. Backfilling that range is a materially larger effort than
+this item's own "S" scope and this item's specific 19/134 ask — a
+dedicated follow-up, not something to fold in under this item's own
+low-risk-docs-task framing.
+
+**Effort:** S (grew to M once the 128–151 sweep was included, per the
+task's own instruction to check for other genuinely-missing entries).
+**Depends on:** 19 (phase 1 shipped), 134 (phase 1 and 2 shipped).

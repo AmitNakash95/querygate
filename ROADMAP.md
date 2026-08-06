@@ -322,7 +322,7 @@ claim when the work ships or before explicitly handing the item back.
   retention) shipping. *Surfaced 2026-08-06 by `claim-reviewer` while
   auditing items 19/128/134/144 — `GO_TO_MARKET.md` was updated correctly,
   the public pages weren't; run `pitch-sync`.*
-- [ ] **153** — `CHANGELOG.md` has no `[Unreleased]` entry for items 19
+- [x] **153** — `CHANGELOG.md` has no `[Unreleased]` entry for items 19
   (MySQL) or 134 (WORM retention). *Surfaced 2026-08-06 by `claim-reviewer`
   while auditing item 152 — a documentation gap, not a claim-accuracy defect;
   deliberately left out of item 152's own scope.*
