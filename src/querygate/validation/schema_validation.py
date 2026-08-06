@@ -984,6 +984,7 @@ async def validate_schema(
     principal: Optional[Principal] = None,
     *,
     scope_tables: Optional[Dict[int, Dict[str, sa.Table]]] = None,
+    scope_connections: Optional[Dict[int, Dict[str, str]]] = None,
 ) -> Dict[str, sa.Table]:
     """Reflect + verify every table/column the query — every nested
     value_subquery (item 97) and every set-operation arm (item 104) — references
@@ -997,7 +998,21 @@ async def validate_schema(
     independent scope (its refs resolve to its own tables — undeclared-table
     rejection is exactly what makes a correlated reference to an outer table fail),
     and a subquery is required to stay single-connection (cross-connection nesting
-    is rejected, per item 97's minimal-safe subset)."""
+    is rejected, per item 97's minimal-safe subset).
+
+    If `scope_connections` is provided (item 155), it is populated the same way as
+    `scope_tables`: one entry per scope, keyed by that scope query's `id`, whose
+    value is `resolve_query_table_connections`'s per-table connection map for that
+    scope — case-folded onto each table's effective name, so a later case-
+    insensitive lookup (`sensitivity_approval_reasons` resolves a column ref's
+    table token, which may differ in case from the alias as declared) matches the
+    same way `effective_name_map` already does. This is the SAME map schema
+    validation itself uses to decide which connection's schema to reflect a
+    cross-connection join's table against (`_load_table`'s `table_connection`
+    argument below) — threaded out here rather than recomputed later so the
+    approval gate's view of "which connection does this table actually live in"
+    can never drift from the one schema validation already enforced the
+    `join_group` rule against."""
     outer_tables: Optional[Dict[str, sa.Table]] = None
     # Always collected, even when the caller passes no `scope_tables`: the
     # cross-arm type check below compares scopes against EACH OTHER, so it needs
@@ -1013,8 +1028,15 @@ async def validate_schema(
     cte_tables: Dict[str, sa.Table] = {}
     for spec in query.ctes:
         _reject_cross_connection_nesting(spec.query, connection_id, f"cte {spec.name!r}")
+        table_connection = resolve_query_table_connections(
+            spec.query, connection_id, principal=principal, cte_names=set(cte_tables)
+        )
+        if scope_connections is not None:
+            scope_connections[id(spec.query)] = {
+                name.casefold(): cx for name, cx in table_connection.items()
+            }
         body_tables = await _reflect_and_validate_scope(
-            spec.query, connection_id, principal, cte_tables
+            spec.query, connection_id, principal, cte_tables, table_connection=table_connection
         )
         reflected[id(spec.query)] = body_tables
         if scope_tables is not None:
@@ -1039,8 +1061,20 @@ async def validate_schema(
                 connection_id,
                 "a nested scope (an IN (subquery), or a set-operation arm within one)",
             )
+        table_connection = resolve_query_table_connections(
+            scope, connection_id, principal=principal, cte_names=set(cte_tables)
+        )
+        if scope_connections is not None:
+            scope_connections[id(scope)] = {
+                name.casefold(): cx for name, cx in table_connection.items()
+            }
         scoped_tables = await _reflect_and_validate_scope(
-            scope, connection_id, principal, cte_tables, correlated.get(id(scope))
+            scope,
+            connection_id,
+            principal,
+            cte_tables,
+            correlated.get(id(scope)),
+            table_connection=table_connection,
         )
         reflected[id(scope)] = scoped_tables
         if scope_tables is not None:
@@ -1283,6 +1317,8 @@ async def _reflect_and_validate_scope(
     principal: Optional[Principal] = None,
     cte_tables: Optional[Dict[str, sa.Table]] = None,
     correlated_tables: Optional[Dict[str, sa.Table]] = None,
+    *,
+    table_connection: Optional[Dict[str, str]] = None,
 ) -> Dict[str, sa.Table]:
     """Reflect + verify one query scope (the outer query, a cte body, or a single
     subquery), independent of any other scope — its column refs resolve only
@@ -1293,10 +1329,18 @@ async def _reflect_and_validate_scope(
     DECLARED it may read, already resolved by the caller against the parent's name
     map. They are added to the resolvable set here and nowhere else, so a scope that
     declared nothing keeps the pre-106 behavior exactly: an outer reference is an
-    undeclared table, and undeclared tables are rejected below."""
-    table_connection = resolve_query_table_connections(
-        query, connection_id, principal=principal, cte_names=set(cte_tables or {})
-    )
+    undeclared table, and undeclared tables are rejected below.
+
+    ``table_connection`` (item 155) is this scope's own `resolve_query_table_
+    connections` result. It is a required keyword in practice — both call sites in
+    `validate_schema` always compute and pass it, since the caller needs that same
+    value to populate `scope_connections` for the approval gate — but stays
+    optional (recomputed here when omitted) so this private helper still works
+    standalone, e.g. from a future test that doesn't want to duplicate the call."""
+    if table_connection is None:
+        table_connection = resolve_query_table_connections(
+            query, connection_id, principal=principal, cte_names=set(cte_tables or {})
+        )
     _validate_join_graph(query)
     name_to_physical = effective_name_map(query)
 

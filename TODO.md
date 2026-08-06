@@ -185,7 +185,8 @@ order-of-magnitude, not commitments.
 | 152 | ✅ Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM retention) shipping | S | 19, 134 |
 | 153 | ✅ `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention) | S | 19, 134 |
 | 154 | WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate | M | 91, 134 |
-| 155 | `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection | M | 151 |
+| 155 | ✅ `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection | M | 151 |
+| 156 | A cross-connection join's joined table is governed only by the primary connection's Policy — masks/row filters/deny-lists never apply from the joined connection's own Policy | M/L | 155 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2396,37 +2397,53 @@ local reader.
 **Effort:** M. **Depends on:** 91 (the local chain this mirrors), 134 (phase
 1's WORM sink, phase 2's search surface).
 
-### 155. `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection
+### 155. `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection ✅ DONE
+
+Threaded schema validation's per-scope table-to-connection map through to the
+catalog sensitivity-label approval trigger, so a cross-connection join's
+table is now looked up in the catalog of the connection it actually resolved
+to as well as the query's top-level connection (consults both, triggers on
+either — a strict swap of one for the other reopened a mirror-image gap,
+caught same-day and fixed).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 155).
+
+### 156. A cross-connection join's joined table is governed only by the primary connection's Policy — column masks, mandatory row filters, and deny-lists never apply from the joined connection's own Policy
 
 **Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item
-151.** `execution/approval.py`'s `sensitivity_approval_reasons` (the catalog
-`sensitivity: pii` approval trigger, item 92 phase 2) resolves every column it
-walks via `store.get_table(connection_id, physical)` using a single
-`connection_id` argument — the query's own top-level connection. For a
-cross-connection join (`JoinSpec.connection`, gated by policy's `join_group`
-rule and already shipped — see `validation/schema_validation.py`'s
-`resolve_query_table_connections`), a joined table actually lives in a
-*different* connection's catalog. A query joining connection `analytics`'s
-`orders` to connection `crm`'s `customers`, where `customers.email` is
-labelled `pii` only in `crm`'s catalog, never trips the approval gate:
-`store.get_table("analytics", "customers")` looks in the wrong connection's
-catalog, finds no entry, and `sensitivity_approval_reasons` silently treats
-the joined column as unlabelled. This is real and pre-existing (not
-introduced by item 151), and separate in scope from it — item 151 stops an
-*already-minted* token from being redeemed against the wrong connection; this
-item stops the *trigger itself* from being blind to a joined connection's
-labels in the first place, so the gate may never even ask for a token when it
-should.
+155 (pre-existing, not introduced by that item).** `validation/policy_validation.py`'s
+`validate_policy` and `compiler/sqlalchemy_compiler.py`'s `compile_structured_query`
+each take a single `Policy` — the primary connection's (or the principal's
+override of it) — and apply it uniformly to every table in the query,
+including a table reached through a cross-connection join
+(`JoinSpec.connection`, gated by policy's shared `join_group` rule,
+`docs/THREAT_MODEL.md` QG-09). Item 155 fixed the catalog sensitivity-label
+*approval trigger* to consult a joined table's own connection's catalog, but
+`column_masks`, `mandatory_row_filters`, and the table/column allow-deny list
+are a different enforcement path (policy validation + compilation, not the
+approval gate) and were not in that item's scope. So today: a column masked
+under connection B's own `Policy` is NOT masked when that column is read via
+a query whose primary connection is A joined to B, unless A's `Policy`
+happens to declare the identical mask/filter for B's table. `join_group` is
+therefore a mutual-trust boundary in practice (matching QG-09's stated
+mitigation of visibility + shared `join_group`, not per-connection masking),
+but item 155 has now made the *sensitivity-label trigger* asymmetric relative
+to this (per-connection) while masks/filters/deny-lists stay primary-only —
+worth an explicit decision on whether that asymmetry is intended, and if not,
+whether joined-table masks/filters should also resolve per-connection the way
+the item-155 catalog lookup now does.
 
-**What to do (when prioritized):** thread `resolve_query_table_connections`'s
-per-table connection map (already computed during schema validation for
-cross-connection join resolution) into `sensitivity_approval_reasons`, so each
-column's catalog lookup uses the connection the table actually resolved to,
-not the query's single top-level `connection_id`. Needs new test coverage for
-a cross-connection join where the label lives only on the joined side.
+**What to do (when prioritized):** decide (record in `docs/PRODUCT_GUIDE.md`'s
+Decision Log) whether `join_group` is deliberately a mutual-trust boundary
+(document it as such in `docs/THREAT_MODEL.md` QG-09, no code change) or
+whether column masks/mandatory row filters/deny-lists should also resolve
+per the table's own connection's `Policy` the way item 155's sensitivity
+lookup now does (a materially larger change: `validate_policy`/
+`compile_structured_query` would need the same per-table connection map
+item 155 already threads through `validate_schema`, applied per-table rather
+than once for the whole query).
 
-**Effort:** M (a currently connection-unaware function needs the per-table
-map threaded through it, plus new join-crossing regression coverage).
-**Depends on:** 151 (shipped — same module), cross-connection joins/
-`join_group` (shipped).
+**Effort:** M (design decision) or L (if the per-connection-policy path is
+chosen — touches policy validation and compilation, not just approval).
+**Depends on:** cross-connection joins/`join_group` (shipped), 155 (shipped —
+same map this would reuse if the per-connection path is chosen).
 

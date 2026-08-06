@@ -17,6 +17,8 @@ import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
 
 from querygate.api.app import create_app
+from querygate.connections.models import ConnectionProfile
+from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import ApprovalRequiredError
@@ -35,7 +37,8 @@ from querygate.execution.cost_estimation import QueryCostEstimate
 from querygate.execution.service import StructuredQueryService
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
-from querygate.query_ast.models import StructuredQuery
+from querygate.query_ast.models import JoinSpec, StructuredQuery
+from querygate.validation.schema_validation import validate_schema
 from querygate.write_ast.models import DeleteStatement
 
 _KEY = "test-approval-hmac-key"
@@ -545,6 +548,403 @@ def test_sensitivity_gate_admits_with_a_valid_token(monkeypatch):
         principal_subject=None,
     )
     _gate_service()._enforce_approval_gate(None, policy, q, token)  # no raise
+
+
+# --------------------------------------------------------------------------- #
+# Cross-connection join sensitivity trigger (TODO.md item 155)                #
+# --------------------------------------------------------------------------- #
+
+
+def _cross_connection_setup(monkeypatch) -> StructuredQuery:
+    """Two connections in the same join_group: `orders` lives on `primary`,
+    `customers` lives on `other` (joined via `JoinSpec.connection`). Mirrors
+    `test_schema_validation.py::TestCrossConnectionJoins._two_connections` —
+    this is exactly the shape `resolve_query_table_connections` (schema
+    validation, already shipped) enforces the `join_group` rule against.
+    `customers.email` is labelled `pii` ONLY in `other`'s catalog; `primary`'s
+    catalog has no `customers` entry at all, so a lookup that (incorrectly)
+    used `primary` for every table would find nothing."""
+    primary = ConnectionProfile(
+        id="primary",
+        dialect="postgresql",
+        connection_string="postgresql+asyncpg://user:pass@host/primary_db",
+        join_group="shared",
+    )
+    other = ConnectionProfile(
+        id="other",
+        dialect="postgresql",
+        connection_string="postgresql+asyncpg://user:pass@host/other_db",
+        join_group="shared",
+    )
+    set_registry(ConnectionRegistry({"primary": primary, "other": other}))
+    set_policy_store(PolicyStore(default=Policy(), overrides={}))
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "connections": {
+                    "other": {
+                        "tables": {
+                            "customers": {
+                                "provenance": {"created_by": "admin"},
+                                "columns": {"email": {"sensitivity": "pii"}},
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+
+    tables = {
+        "orders": sa.Table(
+            "orders",
+            sa.MetaData(),
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("customer_id", sa.Integer),
+        ),
+        "customers": sa.Table(
+            "customers",
+            sa.MetaData(),
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("email", sa.String(100)),
+        ),
+    }
+
+    async def fake_load_table(connection_id, table_name, table_connection):
+        return tables[table_name]
+
+    monkeypatch.setattr("querygate.validation.schema_validation._load_table", fake_load_table)
+
+    return StructuredQuery(
+        from_table="orders",
+        select=["orders.id", "customers.email"],
+        joins=[
+            JoinSpec(
+                table="customers",
+                on=["orders.customer_id", "customers.id"],
+                connection="other",
+            )
+        ],
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_cross_connection_join_trips_sensitivity_gate_when_scope_connections_threaded(
+    monkeypatch,
+):
+    """TODO.md item 155's exact scenario, using the REAL schema-validation
+    output (not a hand-built map): `resolve_query_table_connections` resolves
+    `customers` to connection `other`, `validate_schema` threads that into
+    `scope_connections`, and `sensitivity_approval_reasons` must use it to find
+    `customers.email`'s `pii` label in `other`'s catalog rather than looking
+    (and finding nothing) in `primary`'s."""
+    query = _cross_connection_setup(monkeypatch)
+    policy = Policy(approval_sensitivities=[SensitivityClass.PII])
+
+    scope_connections: dict = {}
+    await validate_schema(query, connection_id="primary", scope_connections=scope_connections)
+
+    reasons = sensitivity_approval_reasons(query, policy, "primary", scope_connections)
+    assert len(reasons) == 1 and "customers.email" in reasons[0]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_cross_connection_join_trips_the_gate_through_an_aliased_mixed_case_ref(
+    monkeypatch,
+):
+    """test-contract-reviewer, 2026-08-06, on this same item: every one of the
+    other cross-connection tests joins `customers` with NO alias, so `table`
+    (the raw token in a column ref) and `physical` (the reflected table name)
+    are identical strings throughout — a mutation swapping the lookup key in
+    `sensitivity_approval_reasons` from `table.casefold()` to
+    `physical.casefold()` would leave every one of them green, and so would
+    dropping the `.casefold()` calls where `scope_connections` is populated in
+    `validate_schema`, since every name in those tests is already lowercase.
+    This test joins `customers` under alias `Cust` and references it in
+    mixed case (`Cust.email`, `cust.id`) — since `resolve_query_table_
+    connections`'s map is keyed by alias-or-table (never physical name), only
+    the alias-keyed, case-folded lookup path can find the label here."""
+    primary = ConnectionProfile(
+        id="primary",
+        dialect="postgresql",
+        connection_string="postgresql+asyncpg://user:pass@host/primary_db",
+        join_group="shared",
+    )
+    other = ConnectionProfile(
+        id="other",
+        dialect="postgresql",
+        connection_string="postgresql+asyncpg://user:pass@host/other_db",
+        join_group="shared",
+    )
+    set_registry(ConnectionRegistry({"primary": primary, "other": other}))
+    set_policy_store(PolicyStore(default=Policy(), overrides={}))
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "connections": {
+                    "other": {
+                        "tables": {
+                            "customers": {
+                                "provenance": {"created_by": "admin"},
+                                "columns": {"email": {"sensitivity": "pii"}},
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+    tables = {
+        "orders": sa.Table(
+            "orders",
+            sa.MetaData(),
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("customer_id", sa.Integer),
+        ),
+        "customers": sa.Table(
+            "customers",
+            sa.MetaData(),
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("email", sa.String(100)),
+        ),
+    }
+
+    async def fake_load_table(connection_id, table_name, table_connection):
+        return tables[table_name]
+
+    monkeypatch.setattr("querygate.validation.schema_validation._load_table", fake_load_table)
+
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id", "Cust.email"],
+        joins=[
+            JoinSpec(
+                table="customers",
+                alias="Cust",
+                on=["orders.customer_id", "cust.id"],
+                connection="other",
+            )
+        ],
+    )
+    policy = Policy(approval_sensitivities=[SensitivityClass.PII])
+
+    scope_connections: dict = {}
+    await validate_schema(query, connection_id="primary", scope_connections=scope_connections)
+
+    reasons = sensitivity_approval_reasons(query, policy, "primary", scope_connections)
+    assert len(reasons) == 1 and "customers.email" in reasons[0]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_cross_connection_join_still_trips_when_the_label_lives_only_on_the_primary_side(
+    monkeypatch,
+):
+    """security-invariant-reviewer, 2026-08-06, on this same item: the fix must
+    not merely REPLACE the top-level connection's catalog with the joined
+    connection's — that would silently stop catching a label that lives only
+    on the PRIMARY side once a same-named table is joined in from elsewhere.
+    Catalogs are curated independently per connection (item 32), so an
+    operator may label `customers.email` under `primary` and never get around
+    to duplicating that label under `other`. This is the mirror image of
+    `_cross_connection_setup` (which labels only `other`): here the label
+    lives ONLY on `primary`'s own `customers` catalog entry, and the query
+    still joins `customers` from `other` — the gate must still fire by
+    consulting `primary` too, not just the table's resolved connection."""
+    primary = ConnectionProfile(
+        id="primary",
+        dialect="postgresql",
+        connection_string="postgresql+asyncpg://user:pass@host/primary_db",
+        join_group="shared",
+    )
+    other = ConnectionProfile(
+        id="other",
+        dialect="postgresql",
+        connection_string="postgresql+asyncpg://user:pass@host/other_db",
+        join_group="shared",
+    )
+    set_registry(ConnectionRegistry({"primary": primary, "other": other}))
+    set_policy_store(PolicyStore(default=Policy(), overrides={}))
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "connections": {
+                    "primary": {
+                        "tables": {
+                            "customers": {
+                                "provenance": {"created_by": "admin"},
+                                "columns": {"email": {"sensitivity": "pii"}},
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+    tables = {
+        "orders": sa.Table(
+            "orders",
+            sa.MetaData(),
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("customer_id", sa.Integer),
+        ),
+        "customers": sa.Table(
+            "customers",
+            sa.MetaData(),
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("email", sa.String(100)),
+        ),
+    }
+
+    async def fake_load_table(connection_id, table_name, table_connection):
+        return tables[table_name]
+
+    monkeypatch.setattr("querygate.validation.schema_validation._load_table", fake_load_table)
+
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id", "customers.email"],
+        joins=[
+            JoinSpec(
+                table="customers",
+                on=["orders.customer_id", "customers.id"],
+                connection="other",
+            )
+        ],
+    )
+    policy = Policy(approval_sensitivities=[SensitivityClass.PII])
+
+    scope_connections: dict = {}
+    await validate_schema(query, connection_id="primary", scope_connections=scope_connections)
+
+    reasons = sensitivity_approval_reasons(query, policy, "primary", scope_connections)
+    assert len(reasons) == 1 and "customers.email" in reasons[0]
+    # architecture-boundary-reviewer, 2026-08-06, on this same item: since the
+    # label came from `primary`'s own catalog entry rather than the table's
+    # resolved connection (`other`), the reason string must say so — otherwise
+    # an approver reading "references pii-labelled column customers.email"
+    # could reasonably assume the label describes the physical table the query
+    # actually reads (`other`'s), when it names an unrelated same-named entry.
+    assert "connection 'primary'" in reasons[0]
+
+
+@pytest.mark.unit
+def test_cross_connection_join_never_trips_the_gate_without_the_map():
+    """Pins the exact pre-155 bug as a permanent regression: omitting the
+    scope_connections map — the shape of every call site before this item, and
+    still the default for any caller that doesn't pass one — resolves every
+    table against the query's own top-level connection, so a label that lives
+    only on the JOINED connection's catalog is never found and the gate never
+    fires."""
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "connections": {
+                    "other": {
+                        "tables": {
+                            "customers": {
+                                "provenance": {"created_by": "admin"},
+                                "columns": {"email": {"sensitivity": "pii"}},
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+    policy = Policy(approval_sensitivities=[SensitivityClass.PII])
+    query = StructuredQuery(
+        from_table="orders",
+        select=["orders.id", "customers.email"],
+        joins=[
+            JoinSpec(
+                table="customers",
+                on=["orders.customer_id", "customers.id"],
+                connection="other",
+            )
+        ],
+    )
+    assert sensitivity_approval_reasons(query, policy, "primary") == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_enforce_approval_gate_uses_the_real_cross_connection_map(monkeypatch):
+    """Service-level wiring, not just the two functions cooperating in
+    isolation: `_validate_and_compile`'s real `scope_connections` output must
+    reach `_enforce_approval_gate`, which must forward it to
+    `sensitivity_approval_reasons`. Mirrors
+    `test_sensitivity_trigger_fires_in_a_where_clause_too`'s direct-gate-call
+    pattern, using a real cross-connection `validate_schema` map instead of a
+    single-connection one — and pins that omitting the map (the old call
+    shape) does NOT raise, so the map argument is what changes the outcome."""
+    query = _cross_connection_setup(monkeypatch)
+    monkeypatch.setattr(svc.app_config, "approval_token_hmac_key", _KEY)
+    policy = Policy(approval_sensitivities=[SensitivityClass.PII])
+
+    scope_connections: dict = {}
+    await validate_schema(query, connection_id="primary", scope_connections=scope_connections)
+
+    service = StructuredQueryService(connection_id="primary")
+    with pytest.raises(ApprovalRequiredError):
+        service._enforce_approval_gate(None, policy, query, None, scope_connections)
+    service._enforce_approval_gate(None, policy, query, None)  # no map -> no raise
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_execute_trips_the_gate_for_a_cross_connection_join_end_to_end(monkeypatch):
+    """The full production path — `execute()` -> `_validate_and_compile()`
+    (real `validate_schema`, only `_load_table` patched) -> `_enforce_approval_
+    gate()` — must raise for the cross-connection scenario, not just the two
+    helper functions when driven by hand. This is the call site the two tests
+    above cannot see: a wiring break at `execute()`'s own call to
+    `_enforce_approval_gate` (e.g. dropping the `scope_connections` argument
+    it now passes) is invisible to any test that calls `_enforce_approval_
+    gate` directly, so this one goes through the real public entry point."""
+    query = _cross_connection_setup(monkeypatch)
+    monkeypatch.setattr(svc.app_config, "approval_token_hmac_key", _KEY)
+    set_policy_store(
+        PolicyStore(default=Policy(approval_sensitivities=[SensitivityClass.PII]), overrides={})
+    )
+
+    mock_engine = MagicMock()
+    mock_engine.dialect.name = "postgresql"
+    mock_session = AsyncMock()
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    with (
+        patch.object(svc, "get_engine", return_value=mock_engine),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="primary")
+        with pytest.raises(ApprovalRequiredError) as ei:
+            await service.execute(query)
+    assert any("customers.email" in reason for reason in ei.value.reasons)
+    # The session was never used to run the statement — the gate stops
+    # execution before the query touches the database.
+    mock_session.execute.assert_not_awaited()
+
+
+@pytest.mark.unit
+def test_single_connection_sensitivity_gate_unaffected_by_scope_connections_param():
+    """No-regression check: a single-connection query's existing behavior is
+    unchanged whether `scope_connections` is omitted, `None`, or an explicit
+    map that happens not to cover the referenced table — every table falls
+    back to the top-level connection_id exactly as before item 155."""
+    _catalog_with_pii()
+    policy = Policy(approval_sensitivities=[SensitivityClass.PII])
+    q = StructuredQuery(from_table="customers", select=["customers.email"])
+    baseline = sensitivity_approval_reasons(q, policy, "demo")
+    assert len(baseline) == 1 and "customers.email" in baseline[0]
+    assert sensitivity_approval_reasons(q, policy, "demo", None) == baseline
+    assert sensitivity_approval_reasons(q, policy, "demo", {}) == baseline
+    assert sensitivity_approval_reasons(q, policy, "demo", {id(q): {}}) == baseline
 
 
 # --------------------------------------------------------------------------- #
