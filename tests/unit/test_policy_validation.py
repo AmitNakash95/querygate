@@ -13,6 +13,296 @@ from querygate.validation.policy_validation import (
     validate_policy,
 )
 
+# --------------------------------------------------------------------------- #
+# Cross-connection join allow-deny / mask enforcement (TODO.md item 156)      #
+# --------------------------------------------------------------------------- #
+
+
+def _cross_connection_query(where_customers_email: bool = False) -> StructuredQuery:
+    """`orders` on the primary connection, `customers` joined in from
+    connection `other` — the exact shape `resolve_query_table_connections`
+    (schema validation, item 155's own precedent) resolves and enforces the
+    `join_group` rule against. `customers` carries no alias, so the effective
+    name used in `scope_connections` is the table name itself."""
+    return StructuredQuery(
+        from_table="orders",
+        select=["orders.id", "customers.email"],
+        where=(
+            WhereGroup(and_terms=[Predicate(col="customers.email", op="eq", value="a@b.com")])
+            if where_customers_email
+            else None
+        ),
+        joins=[
+            JoinSpec(
+                table="customers",
+                on=["orders.customer_id", "customers.id"],
+                connection="other",
+            )
+        ],
+    )
+
+
+def _connection_resolver(policies: dict):
+    """A minimal `ConnectionResolver` (see `schema_validation.ConnectionResolver`)
+    for tests that don't need a real `ConnectionRegistry`/`PolicyStore` — just a
+    fixed connection_id -> Policy mapping. The profile half of the return tuple
+    is never read by `resolve_table_policies`."""
+
+    def resolve(connection_id, principal=None):
+        return None, policies[connection_id]
+
+    return resolve
+
+
+def test_cross_connection_join_denied_table_enforced_from_joined_connection_only():
+    """The item's own headline scenario: `customers` is denied ONLY by the
+    JOINED connection's ('other') Policy — the primary connection's Policy has
+    no opinion on it at all. Must still be rejected once the per-scope
+    connection map is threaded in."""
+    query = _cross_connection_query()
+    primary_policy = Policy()
+    scope_connections = {id(query): {"customers": "other"}}
+    resolver = _connection_resolver({"other": Policy(denied_tables=["customers"])})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(
+            query,
+            primary_policy,
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=resolver,
+        )
+
+
+def test_cross_connection_join_denied_table_never_enforced_without_the_map():
+    """Pins the exact pre-156 bug as a permanent regression, mirroring item
+    155's identical pin for the sensitivity trigger: omitting `scope_
+    connections` — the shape of every call site before this item, and still
+    the default for a caller that doesn't pass one — resolves every table
+    against the query's own top-level connection, so a deny rule that lives
+    only on the JOINED connection's Policy is never consulted and the query
+    passes."""
+    query = _cross_connection_query()
+    primary_policy = Policy()
+    validate_policy(query, primary_policy, connection_id="primary")  # no raise
+
+
+def test_cross_connection_join_denied_table_still_enforced_from_primary_connection():
+    """The mirror case, and the mutation guard against item 155's own
+    hard-won lesson: a REPLACE of the primary policy with the joined
+    connection's (instead of consulting BOTH) would silently stop enforcing a
+    primary-side deny rule the moment the same table is reached through a
+    cross-connection join. Here 'other' has no opinion at all — only the
+    primary connection denies `customers` — so this must still raise."""
+    query = _cross_connection_query()
+    primary_policy = Policy(denied_tables=["customers"])
+    scope_connections = {id(query): {"customers": "other"}}
+    resolver = _connection_resolver({"other": Policy()})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(
+            query,
+            primary_policy,
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=resolver,
+        )
+
+
+def test_cross_connection_join_denied_column_from_each_connection_independently():
+    """Both connections have DIFFERENT rules — primary denies `orders.id`,
+    'other' denies `customers.email` — and both must be enforced independently
+    against the table each rule's own connection actually governs."""
+    only_primary_denies = _cross_connection_query()
+    scope_connections = {id(only_primary_denies): {"customers": "other"}}
+    resolver = _connection_resolver({"other": Policy(denied_columns={"customers": ["email"]})})
+    with pytest.raises(PolicyViolationError, match=r"customers\.email.*not accessible"):
+        validate_policy(
+            only_primary_denies,
+            Policy(),
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=resolver,
+        )
+
+    only_other_denies = _cross_connection_query()
+    scope_connections = {id(only_other_denies): {"customers": "other"}}
+    resolver = _connection_resolver({"other": Policy()})
+    with pytest.raises(PolicyViolationError, match=r"orders\.id.*not accessible"):
+        validate_policy(
+            only_other_denies,
+            Policy(denied_columns={"orders": ["id"]}),
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=resolver,
+        )
+
+
+def test_cross_connection_join_masked_column_position_rule_from_joined_connection_only():
+    """The item-49 masked-column-position rule (a masked column may only
+    appear as a bare SELECT projection, never in a filter) must also consult
+    the joined connection's own mask configuration — `customers.email` is
+    masked ONLY on 'other', used here in a WHERE predicate."""
+    query = _cross_connection_query(where_customers_email=True)
+    scope_connections = {id(query): {"customers": "other"}}
+    resolver = _connection_resolver(
+        {"other": Policy(column_masks={"customers": [ColumnMask(column="email", kind="null")]})}
+    )
+    with pytest.raises(PolicyViolationError, match="masked by policy"):
+        validate_policy(
+            query,
+            Policy(),
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=resolver,
+        )
+    # Without the map, the pre-156 shape: the joined-only mask is invisible,
+    # so the WHERE-clause use of a "masked" column is never caught.
+    validate_policy(query, Policy(), connection_id="primary")  # no raise
+
+
+def test_cross_connection_join_masked_column_position_rule_still_enforced_from_primary_connection():
+    """Mutation guard, mirroring the deny-list case: the joined connection has
+    no opinion at all — only the PRIMARY connection's Policy masks
+    `customers.email` — so a candidate-ordering bug that only ever checks the
+    table's own (joined) connection and never the primary one (e.g. reading
+    just `candidates[0]`, where item 155's own precedent orders the table's
+    own connection first) would miss this and must not."""
+    query = _cross_connection_query(where_customers_email=True)
+    scope_connections = {id(query): {"customers": "other"}}
+    resolver = _connection_resolver({"other": Policy()})
+    primary_policy = Policy(column_masks={"customers": [ColumnMask(column="email", kind="null")]})
+    with pytest.raises(PolicyViolationError, match="masked by policy"):
+        validate_policy(
+            query,
+            primary_policy,
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=resolver,
+        )
+
+
+def test_single_connection_query_unaffected_by_scope_connections_threading():
+    """A single-connection query must behave identically whether or not
+    `scope_connections`/`connection_resolver` are supplied — every table
+    resolves to `connection_id` either way, which `resolve_table_policies`
+    collapses to `[policy]` alone."""
+    query = StructuredQuery(from_table="orders", select=["orders.id"])
+    policy = Policy(denied_columns={"orders": ["id"]})
+    scope_connections = {id(query): {"orders": "primary"}}
+    resolver = _connection_resolver({"primary": policy})
+    for kwargs in ({}, {"scope_connections": scope_connections, "connection_resolver": resolver}):
+        with pytest.raises(PolicyViolationError, match="not accessible"):
+            validate_policy(query, policy, connection_id="primary", **kwargs)
+
+
+# --------------------------------------------------------------------------- #
+# Cross-connection CORRELATED reference (TODO.md item 156 follow-up finding,   #
+# test-contract-reviewer 2026-08-06): `_validate_correlation` resolves a       #
+# correlated ref against the PARENT scope's own table_connection map — the    #
+# generic per-scope check in `_validate_scope` (run on the CHILD/subquery     #
+# scope) is NOT a genuine backstop for the cross-connection case, because the #
+# outer alias is never declared in the child's OWN from/join, so the child's  #
+# own `table_connection` lookup always falls back to `connection_id` (the     #
+# primary connection) regardless of where the table actually lives.           #
+# `_validate_correlation`'s own per-connection resolution is therefore the    #
+# SOLE enforcement point for a correlated reference into a cross-connection-  #
+# joined outer table, and needs its own direct coverage rather than relying   #
+# on `_validate_scope`'s tests to exercise it incidentally.                   #
+# --------------------------------------------------------------------------- #
+
+
+def _cross_connection_correlation_query() -> StructuredQuery:
+    """`orders` (primary) joined to `customers` (connection `other`), with an
+    EXISTS subquery correlating on `customers.email` — the cross-connection-
+    joined table's column, referenced only via `correlate`, never directly in
+    the outer scope's own select/where."""
+    return StructuredQuery(
+        from_table="orders",
+        select=["orders.id"],
+        joins=[
+            JoinSpec(
+                table="customers",
+                on=["orders.customer_id", "customers.id"],
+                connection="other",
+            )
+        ],
+        where=WhereGroup(
+            and_terms=[
+                Predicate(
+                    op="exists",
+                    exists_subquery=StructuredQuery(
+                        from_table="orders",
+                        select=["orders.id"],
+                        correlate=["customers.email"],
+                        where=Predicate(col="orders.status", op="eq", value_col="customers.email"),
+                    ),
+                )
+            ]
+        ),
+    )
+
+
+def test_cross_connection_correlated_ref_denied_only_by_the_joined_connection():
+    """The headline scenario: `customers` is denied ONLY by the JOINED
+    connection's ('other') Policy. `_validate_correlation` must still reject
+    the query even though the ref reaches `customers` only through
+    `correlate`, never a direct column ref in the outer scope."""
+    query = _cross_connection_correlation_query()
+    scope_connections = {id(query): {"customers": "other"}}
+    resolver = _connection_resolver({"other": Policy(denied_tables=["customers"])})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(
+            query,
+            Policy(max_subquery_depth=2),
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=resolver,
+        )
+
+
+def test_cross_connection_correlated_ref_never_denied_without_the_map():
+    """Regression pin: omitting the map (every pre-156 caller) reproduces the
+    exact gap this finding describes — a joined-only deny rule is invisible
+    to a correlated reference."""
+    query = _cross_connection_correlation_query()
+    validate_policy(query, Policy(max_subquery_depth=2), connection_id="primary")  # no raise
+
+
+def test_cross_connection_correlated_ref_masked_only_by_the_joined_connection():
+    """Same scenario for the masked-reference rule: `customers.email` is
+    masked ONLY on 'other'. A correlated ref is a non-projection use by
+    construction, so item 49's rule applies with no position test."""
+    query = _cross_connection_correlation_query()
+    scope_connections = {id(query): {"customers": "other"}}
+    resolver = _connection_resolver(
+        {"other": Policy(column_masks={"customers": [ColumnMask(column="email", kind="null")]})}
+    )
+    with pytest.raises(PolicyViolationError, match="cannot be used as a correlated reference"):
+        validate_policy(
+            query,
+            Policy(max_subquery_depth=2),
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=resolver,
+        )
+
+
+def test_cross_connection_correlated_ref_still_denied_from_the_primary_connection():
+    """Mutation guard: the joined connection has no opinion at all — only the
+    PRIMARY connection's Policy denies `customers` — so a candidate-ordering
+    bug that only ever checks the table's own (joined) connection would miss
+    this and must not."""
+    query = _cross_connection_correlation_query()
+    scope_connections = {id(query): {"customers": "other"}}
+    resolver = _connection_resolver({"other": Policy()})
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(
+            query,
+            Policy(max_subquery_depth=2, denied_tables=["customers"]),
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=resolver,
+        )
+
 
 def test_disabled_connection_rejected():
     with pytest.raises(PolicyViolationError, match="disabled"):

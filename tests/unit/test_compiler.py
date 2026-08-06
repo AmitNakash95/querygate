@@ -1019,6 +1019,141 @@ class TestCompiler:
         assert limit == 500
 
 
+class TestCrossConnectionMandatoryRowFilters:
+    """A cross-connection join's table's mandatory row filters must be drawn
+    from ITS OWN resolved connection's Policy too, not just the primary
+    connection's (TODO.md item 156) — the same gap item 155 closed for the
+    catalog sensitivity-label trigger, applied here to
+    `_apply_mandatory_row_filters`. `orders` lives on the primary connection;
+    `customers` is joined in from connection `other`."""
+
+    def _query(self) -> StructuredQuery:
+        return StructuredQuery(
+            from_table="orders",
+            select=["orders.id", "customers.name"],
+            joins=[
+                JoinSpec(
+                    table="customers",
+                    on=["orders.customer_id", "customers.id"],
+                    connection="other",
+                )
+            ],
+            limit=5,
+        )
+
+    def _resolver(self, other_policy: Policy):
+        def resolve(connection_id, principal=None):
+            return None, other_policy
+
+        return resolve
+
+    def test_filter_configured_only_on_joined_connection_is_applied(self):
+        tables = _make_tables()
+        query = self._query()
+        scope_connections = {id(query): {"customers": "other"}}
+        other_policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="customers", column="country", value="US")
+            ]
+        )
+        stmt, _ = compile_structured_query(
+            query,
+            tables,
+            Policy(),  # the primary policy has no filter for `customers`
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=self._resolver(other_policy),
+        )
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "customers.country = 'US'" in compiled
+
+    def test_filter_configured_only_on_joined_connection_is_never_applied_without_the_map(self):
+        """Pins the pre-156 bug: omitting `connection_id`/`scope_connections`
+        (every call site before this item) resolves `mandatory_row_filters`
+        from the primary policy alone, so a joined-only filter never reaches
+        the compiled statement."""
+        tables = _make_tables()
+        query = self._query()
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "customers.country" not in compiled
+
+    def test_filter_configured_only_on_primary_connection_still_applies(self):
+        """Mutation guard against a REPLACE-not-union mistake: the joined
+        connection has no filter at all, only the primary policy filters
+        `customers` — must still apply exactly as before item 156."""
+        tables = _make_tables()
+        query = self._query()
+        scope_connections = {id(query): {"customers": "other"}}
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="customers", column="country", value="US")
+            ]
+        )
+        stmt, _ = compile_structured_query(
+            query,
+            tables,
+            policy,
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=self._resolver(Policy()),
+        )
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "customers.country = 'US'" in compiled
+
+    def test_both_connections_apply_their_own_different_filters(self):
+        """Each connection filters a DIFFERENT table by its own rule, and
+        both must land in the compiled statement — the primary connection's
+        filter on `orders` and the joined connection's filter on `customers`,
+        independently."""
+        tables = _make_tables()
+        query = self._query()
+        scope_connections = {id(query): {"customers": "other"}}
+        primary_policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="orders", column="status", value="open")
+            ]
+        )
+        other_policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="customers", column="country", value="US")
+            ]
+        )
+        stmt, _ = compile_structured_query(
+            query,
+            tables,
+            primary_policy,
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=self._resolver(other_policy),
+        )
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "orders.status = 'open'" in compiled
+        assert "customers.country = 'US'" in compiled
+
+    def test_single_connection_filtering_unaffected_by_the_new_parameters(self):
+        """Regression: a plain single-connection query must filter identically
+        whether or not `connection_id`/`scope_connections` are supplied."""
+        tables = _make_tables()
+        query = StructuredQuery(from_table="orders", select=["orders.id"], limit=5)
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="orders", column="status", value="open")
+            ]
+        )
+        stmt_old, _ = compile_structured_query(query, tables, policy)
+        stmt_new, _ = compile_structured_query(
+            query,
+            tables,
+            policy,
+            connection_id="demo",
+            scope_connections={id(query): {"orders": "demo"}},
+        )
+        compiled_old = str(stmt_old.compile(compile_kwargs={"literal_binds": True}))
+        compiled_new = str(stmt_new.compile(compile_kwargs={"literal_binds": True}))
+        assert compiled_old == compiled_new
+
+
 class TestCrossDialectRendering:
     """TODO.md item 78 — every item-68-77 compiler code path that previously
     only had a Postgres-default (or single-dialect) render test also gets a
