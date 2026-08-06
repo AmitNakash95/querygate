@@ -407,6 +407,18 @@ class AppConfig(BaseSettings):
     vault_kv_mount: str = pyd.Field(default="secret")
     vault_namespace: str = pyd.Field(default="")
 
+    # TODO item 135: proactive, TTL/lease-driven credential re-resolution.
+    # Item 13 already made a rotated `${vault:...}` value take effect on the
+    # next reload without a restart; this closes the remaining gap that the
+    # refresh was operator-pull only. Off by default and additive — it only
+    # ever *triggers* the existing reload_config()/dispose_engine() path
+    # earlier, proactively, for a reference whose resolver reports a lease
+    # (secrets/resolvers.py's LeasedSecretResolver); a deployment with no
+    # leased resolver registered behaves identically to today.
+    credential_lease_refresh_enabled: bool = pyd.Field(default=False)
+    credential_lease_check_interval_seconds: float = pyd.Field(default=60, gt=0)
+    credential_lease_refresh_margin_seconds: float = pyd.Field(default=300, gt=0)
+
     # Engine pool defaults, shared across connections (per-connection timeout /
     # concurrency guardrails live in policy, not here).
     pool_size: int = pyd.Field(default=20)
@@ -470,6 +482,30 @@ class AppConfig(BaseSettings):
             raise ValueError("VAULT_ADDR must be set when VAULT_ENABLED=true")
         if self.vault_enabled and not self.vault_token:
             raise ValueError("VAULT_TOKEN must be set when VAULT_ENABLED=true")
+        if self.credential_lease_refresh_enabled and not self.vault_enabled:
+            # `VaultSecretResolver` is the only registered LeasedSecretResolver
+            # implementation today — enabling this without Vault would start
+            # a background loop with zero registered resolvers capable of
+            # reporting a lease, a misconfiguration worth failing loudly on
+            # rather than silently doing nothing. This does not guarantee a
+            # *nonzero* lease will ever be reported (the shipped Vault
+            # integration reads KV v2 static secrets, whose lease_duration is
+            # genuinely 0) — only that at least one resolver capable of
+            # reporting one in principle is registered.
+            raise ValueError(
+                "VAULT_ENABLED must be true when CREDENTIAL_LEASE_REFRESH_ENABLED=true "
+                "(no other registered secret resolver currently reports a lease)"
+            )
+        if (
+            self.credential_lease_refresh_enabled
+            and self.credential_lease_check_interval_seconds
+            >= self.credential_lease_refresh_margin_seconds
+        ):
+            raise ValueError(
+                "CREDENTIAL_LEASE_CHECK_INTERVAL_SECONDS must be smaller than "
+                "CREDENTIAL_LEASE_REFRESH_MARGIN_SECONDS, or a lease could come due and expire "
+                "between polls without the monitor ever seeing it inside the margin window"
+            )
         if self.semantic_memory_refresh_enabled and not self.catalog_file:
             raise ValueError("CATALOG_FILE must be set when SEMANTIC_MEMORY_REFRESH_ENABLED=true")
         if self.semantic_memory_usage_signals_enabled and not self.catalog_file:

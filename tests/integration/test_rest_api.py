@@ -833,5 +833,5 @@ connections:
         == "postgresql+asyncpg://vault-resolved/db"
     )
     mock_hvac_client.assert_called_once_with(
-        url="http://vault.internal:8200", token="test-vault-token", namespace=None
+        url="http://vault.internal:8200", token="test-vault-token", namespace=None, timeout=10.0
     )
