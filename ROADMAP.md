@@ -511,7 +511,7 @@ position.
   infer a conforming gateway gains a defensible reason not to front us —
   directly against the P4 play.* **Gated on Python SDK availability — track
   upstream, do not hand-roll the transport.**
-- [ ] **129** — Never advertise a principal-varying MCP result as
+- [x] **129** — Never advertise a principal-varying MCP result as
   shared-cacheable. *The new revision's `cacheScope` lets shared intermediaries
   reuse a `tools/list`/`resources/read` response across callers; our MCP surface
   is per-principal by construction, so `"public"` on such a result would leak
