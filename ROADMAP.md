@@ -549,7 +549,11 @@ position.
   adopted our messaging. Internal half (author the spec, reserve the namespace,
   declare + test it) is safe to build; **external publication is decision-gated**
   — a standing commitment and an outward-facing act, maintainer's call.*
-  **Depends on 128.**
+  ✅ **Shipped (internal half)** 2026-08-06: namespace reserved
+  (`io.github.agitmit/structured-query-ast`), spec + generated schema +
+  real-server capability declaration + conformance test all in place.
+  Checkbox stays unchecked — external publication (the decision-gated half)
+  is still open. **Depends on 128.**
 
 ### Phase 6 — Catalog & observability depth (lowest marginal ROI — opportunistic)
 

@@ -161,7 +161,7 @@ order-of-magnitude, not commitments.
 | 128 | ✅ Conform to the final MCP `2026-07-28` protocol revision | L | 90, 92, 93 |
 | 129 | ✅ Never advertise a principal-varying MCP result as shared-cacheable | S | 128 |
 | 130 | Annotate `connection` with `x-mcp-header` for gateway-native authorization | S | 127, 128 |
-| 131 | Publish the StructuredQuery AST as a namespaced MCP extension | M | 128 |
+| 131 | ✅ Publish the StructuredQuery AST as a namespaced MCP extension | M | 128 |
 | 132 | ✅ Reconcile stale shipped-status claims left behind by items 90–93 | S | — |
 | 133 | ✅ Caller-facing quota-metered verdict endpoint (play P4) — reuses 31/39's decision logic | M–L | 26, 31, 39, 45, 121 |
 | 134 | ✅ Compliance-grade (WORM) audit retention (phase 1: S3 Object Lock; phase 2: managed search not started) | L | 91, 136 |
@@ -2018,7 +2018,33 @@ intermediaries and invert the confidentiality posture.
 
 **Effort:** S. **Depends on:** 128, 127.
 
-### 131. Publish the StructuredQuery AST as a namespaced MCP extension
+### 131. Publish the StructuredQuery AST as a namespaced MCP extension ✅ DONE (internal half)
+
+**Shipped (internal half) 2026-08-06.** The namespace is reserved
+(`io.github.agitmit/structured-query-ast`, matching this project's actual
+GitHub location rather than presupposing a domain QueryGate doesn't own), the
+spec is written (`docs/mcp_extensions/structured_query_ast.md`, with an
+explicit Non-goals section stating the hard boundary below), the schema is
+generated — never hand-written — from the live Pydantic AST models
+(`mcp/extensions.py`'s `generate_structured_query_ast_schema()`, covering
+both the read `StructuredQuery` and the write
+`Insert`/`Update`/`Delete`/`Upsert` union) into a committed, versioned file
+(`docs/mcp_extensions/structured_query_ast.schema.json`, regenerated via
+`make mcp-extension-schema`), and the extension is declared from the real
+`MCPServer` instance's capabilities (`mcp/server.py`'s `mcp_server =
+MCPServer(..., extensions=[StructuredQueryAstExtension()])`). A conformance
+test (`tests/unit/test_mcp_extensions.py`) asserts all three plus the hard
+boundary structurally: the committed schema matches a fresh generation
+byte-for-byte (drift guard, same technique `test_credential_redaction.py`
+uses), the extension is genuinely present in a real server's emitted
+`ServerCapabilities.extensions`, and no JSON-RPC method is registered
+anywhere under the extension's namespace. **Not done, and deliberately
+gated on a maintainer decision:** actually publishing this as an adopted
+external standard (registering the namespace with any outside body,
+announcing it, or committing to cross-version compatibility for third
+parties) — no network call or external registration was made implementing
+this. See `docs/mcp_extensions/structured_query_ast.md`'s "Publication
+status" section.
 
 **Surfaced 2026-07-30 by `competitive-scan`.** The `2026-07-28` revision adds a
 formal **extensions framework** with reverse-DNS namespacing — the tasks

@@ -2868,6 +2868,23 @@ The actual tools, one module per concern:
 - `mcp/tools/help.py` — the guide/diagnostics tools (see below).
 - `mcp/tools/templates.py` — query-template listing/invocation tools.
 
+**The `io.github.agitmit/structured-query-ast` extension (`mcp/extensions.py`,
+TODO.md item 131, internal half).** The `2026-07-28` revision's SEP-2133
+extensions framework lets a server advertise a reverse-DNS-namespaced,
+versioned capability under `ServerCapabilities.extensions`. `mcp/server.py`
+passes a `StructuredQueryAstExtension` instance to `MCPServer(extensions=...)`,
+which declares the read `StructuredQuery` AST and the write
+`Insert`/`Update`/`Delete`/`Upsert` union as a citable JSON-Schema contract —
+generated from the live Pydantic models (never hand-written) into
+`docs/mcp_extensions/structured_query_ast.schema.json`, regenerated with
+`make mcp-extension-schema`. It is purely descriptive: the extension
+contributes no tool, resource, or JSON-RPC method, so `tools/call` against
+the tools above remains the only way to submit a query or write — see the
+Decision Log and `docs/mcp_extensions/structured_query_ast.md`'s "Non-goals"
+section for why a namespaced method here would be the same rejection class
+as `execute_sql`. External publication of the namespace is a separate,
+maintainer-gated decision not made as part of this.
+
 **In-query human approval over MCP (`mcp/elicitation.py`, items 92/93/128).**
 When a gated read or write trips the approval gate, `run_structured_queries`/
 `run_structured_writes` don't block waiting for a human — the `2026-07-28`
@@ -3478,6 +3495,105 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-08-06 — the StructuredQuery AST is published as a namespaced MCP
+  extension declaring a contract, never a method, and the namespace is
+  `io.github.agitmit/structured-query-ast` rather than a not-yet-owned domain
+  (TODO.md item 131, internal half).** The `2026-07-28` protocol revision's
+  SEP-2133 extensions framework gives strategic play P2 ("open the contract",
+  `docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) a standards-blessed
+  vehicle: the read `StructuredQuery` AST and the write
+  `Insert`/`Update`/`Delete`/`Upsert` union can be declared as a named,
+  versioned artifact instead of just a product-specific JSON schema no one
+  outside QueryGate can cite. Four decisions:
+
+  **(1) Namespace: `io.github.agitmit/structured-query-ast`, not a branded
+  domain.** SEP-2133 requires a reverse-DNS-shaped prefix
+  (`mcp.shared.extension.validate_extension_identifier`); QueryGate does not
+  own a registered domain, and inventing one to *look* standards-grade would
+  misrepresent what's actually been reserved. `io.github.<owner>` mirrors the
+  real, verifiable location of this project (github.com/AGitmit/QueryGate) —
+  citable today, not aspirational.
+
+  **(2) The extension declares a contract, never a JSON-RPC method or a
+  `tools/call` interceptor — the identical rejection class as the GraphQL
+  decision below and as the permanent absence of `execute_sql`.** The
+  precedent this item's own scan cites, `io.modelcontextprotocol/tasks`,
+  *does* define request methods (`tasks/get`, etc.) — which makes it exactly
+  the wrong shape to imitate here: a namespaced method, or an interceptor
+  that answers a `tools/call` without reaching the real handler, would each
+  be a second query-execution path beside `tools/call` and the single
+  `StructuredQueryService` pipeline. `mcp/extensions.py`'s
+  `StructuredQueryAstExtension` overrides only `Extension.settings()` —
+  never `methods()`, `tools()`, `resources()`, or `intercept_tool_call()`
+  (the SDK's fourth contribution point) — so there is structurally nothing
+  for `MCPServer._apply_extension`/`_install_extension_interceptor` to
+  register or wrap beyond the settings dict.
+  `tests/unit/test_mcp_extensions.py::test_no_jsonrpc_method_registered_under_the_extension_namespace`
+  and `::test_extension_does_not_intercept_tool_calls` enforce this against a
+  real server's registered request handlers and installed extensions, not
+  just the module docstring's say-so — the latter was added after a
+  security review flagged that the first three tests covered three of the
+  SDK's four contribution points but not the interceptor, the one kind that
+  actually touches execution.
+
+  **(3) The published schema is generated from the live Pydantic AST models,
+  never hand-written — with the drift-guard test running the generator in a
+  fresh subprocess, not in-process.** `clients/typescript/src/types.ts` is
+  already a hand-mirrored second copy of the AST carrying known drift; a
+  hand-authored spec would be a third, and drift in a *published* standard is
+  a compatibility break, not just a local bug. `generate_structured_query_ast_schema()`
+  (`mcp/extensions.py`) calls `model_json_schema()`/`TypeAdapter(...).json_schema()`
+  directly on `query_ast.models.StructuredQuery` and the write union. Building
+  it surfaced a pydantic non-determinism worth recording, though not
+  independently root-caused against an upstream pydantic issue: `StructuredQuery`'s
+  recursive AST cycle (`CteSpec.query`, `SetOpSpec.arms`, `Predicate.value_subquery`,
+  ... all forward-referencing `StructuredQuery` itself — items 97/99/100/103/104/105)
+  has *multiple* fields that resolve to the same `$ref` target, and repeated
+  full-suite runs (2,100+ tests, many constructing their own
+  schemas/`TypeAdapter`s over the same model graph) during development showed
+  pydantic's JSON-schema generator occasionally misattaching a `$ref`'s
+  sibling `description` between two such occurrences — never reproduced in an
+  isolated interpreter across the same number of repeated runs. Rather than
+  chase that internal further, the fix matches how the schema is actually
+  produced in practice: `scripts/generate_mcp_extension_schema.py` always
+  runs as a standalone process (`make mcp-extension-schema`), so the
+  conformance test's drift guard now generates in a fresh subprocess too
+  (`test_mcp_extensions.py::_generate_schema_in_fresh_interpreter`), matching
+  that real invocation instead of trusting a shared process's ambient
+  pydantic schema-cache state. `generate_structured_query_ast_schema()`
+  itself force-rebuilds nothing — that would have made a general-purpose
+  library function mutate live, process-global pydantic state on every call,
+  a hazard flagged by the same security review, one feature (e.g. serving
+  the schema from a route) away from racing real request validation.
+  `query_ast/models.py`'s own recursive-cycle rebuild block was extracted
+  into a reusable, named `rebuild_recursive_ast_cycle()` function (previously
+  inline statements) precisely so the one place a *forced* rebuild is
+  actually needed — decision (4) below — doesn't have to hand-duplicate the
+  cycle's member list.
+
+  **(4) Tool registration also force-rebuilds the same recursive cycle, and
+  this one runs in the real server process, deliberately.** MCP tool schemas
+  (`run_structured_queries`'s `List[StructuredQuery]` argument,
+  `run_structured_writes`'s write-AST union) are built from the identical
+  model graph, by `Tool.from_function` at registration time inside
+  `discover_and_register_tools()` — and `create_app()`/`create_mcp_server()`
+  "legitimately runs more than once in the same process" (every test in this
+  suite; any production hot-reload/multi-instantiation path — see
+  `mcp/server.py`'s own `_install_scoped_tool_listing` docstring), which is
+  exactly the shared-process condition that produces the symptom in (3). Left
+  unguarded, the real `tools/list` schema served to MCP clients could
+  silently lose a description the same way. `discover_and_register_tools()`
+  (`mcp/tools/__init__.py`) now calls `rebuild_recursive_ast_cycle(force=True)`
+  once, before importing any tool module — at registration time only, never
+  per query — closing that gap without reintroducing the process-global
+  hazard decision (3) deliberately avoided in the schema generator itself.
+
+  **Explicitly not done, gated on the maintainer:** actually publishing this
+  as an adopted external standard — registering the namespace with any
+  outside body, announcing it, or committing to cross-version compatibility
+  for third parties. See `docs/mcp_extensions/structured_query_ast.md`'s
+  "Publication status" section and TODO.md item 131.
 
 - **2026-08-06 — proactive lease-driven credential re-resolution composes a
   new optional protocol rather than widening `SecretResolver`, and a
