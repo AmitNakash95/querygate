@@ -323,6 +323,15 @@ load — including a hot reload via `POST /api/v1/admin/reload-config` — so a
 rotated Vault secret takes effect on the next reload without a restart, no
 env var/process restart required the way a bare `${VAR}` reference does.
 
+That reload is normally operator-triggered. Set
+`CREDENTIAL_LEASE_REFRESH_ENABLED=true` (requires `VAULT_ENABLED=true`) to
+make it automatic instead: a background monitor polls every `${vault:...}`
+reference for a reported lease expiry and proactively reloads before it runs
+out, closing the outage window a short-TTL dynamic credential would
+otherwise fall into between reloads. It only ever triggers the same
+reload/dispose path above, earlier — see `CREDENTIAL_LEASE_CHECK_INTERVAL_SECONDS`
+and `CREDENTIAL_LEASE_REFRESH_MARGIN_SECONDS` in `.env.example`.
+
 ## Example policy config
 
 ```yaml

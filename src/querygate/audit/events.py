@@ -57,6 +57,10 @@ ConfigChangeAction = Literal[
     "save_draft",
     "load_draft",
     "delete_draft",
+    # A background monitor's own automatic trigger (TODO.md item 135's
+    # CredentialLeaseMonitor), distinct from "apply"/"rollback" which are
+    # always a human/API-key principal's explicit action.
+    "lease_refresh",
 ]
 CatalogGovernanceAction = Literal[
     "generate",

@@ -61,9 +61,12 @@ Customer database (read-only account recommended)
         +-----> structured result caps
         +-----> stdout logs / persisted audit JSONL
 
-Config load/reload (operator-triggered)
+Config load/reload (operator-triggered via /admin/reload-config, or
+proactively via config_reload.CredentialLeaseMonitor — item 135)
         |
-        +-----> secrets/resolvers.py (env, optionally Vault KV v2)
+        +-----> secrets/resolvers.py (env, optionally Vault KV v2;
+                LeasedSecretResolver reports a lease expiry when the
+                backend has one)
 
 Admin caller (admin:config:read / admin:config:write)
         |
@@ -230,7 +233,15 @@ defaults.
   only the secret paths QueryGate needs (read-only), and rotate it through
   the deployment's normal secret-rotation process — QueryGate re-resolves
   every `${...}` reference on each config load/reload, so a rotated token or
-  secret value takes effect on the next reload without a restart.
+  secret value takes effect on the next reload without a restart. Set
+  `CREDENTIAL_LEASE_REFRESH_ENABLED=true` (item 135) to make that reload
+  happen automatically, ahead of a leased reference's expiry, instead of
+  only when an operator calls `/admin/reload-config` — closes the outage
+  window a short-TTL dynamic credential would otherwise fall into between
+  reloads. It only ever *triggers* the same reload/dispose path earlier; a
+  reference whose resolver reports no lease (env, or Vault's current KV v2
+  integration reading a static secret) is unaffected and stays reachable
+  only through the operator-pull path.
 - Use private, authenticated, TLS-protected Redis in multi-instance setups.
   Consider `CONCURRENCY_REDIS_FAIL_OPEN=false` when database protection is more
   important than availability during a Redis outage.
@@ -325,7 +336,32 @@ defaults.
   it is an operator responsibility, same as any other credential. Other
   secret-manager backends (AWS/GCP Secrets Manager) remain unimplemented,
   though the `SecretResolver` interface is designed to add them without a
-  breaking change.
+  breaking change. Item 135 added an optional, separate
+  `LeasedSecretResolver` protocol and a `CredentialLeaseMonitor` background
+  task that proactively triggers the existing reload before a leased
+  reference's TTL expires — the trigger only, reusing item 13's
+  reload/dispose machinery unchanged. The probing method
+  (`lease_expiry`) deliberately returns no secret value, only an optional
+  expiry — probing an expiry must never itself resolve/mint a credential,
+  which matters for a future backend where reading is issuing (a Vault
+  dynamic secrets engine). `VaultSecretResolver.lease_expiry` honestly
+  reports Vault's own `lease_duration` field rather than synthesizing one;
+  since the current Vault integration reads KV v2 (static secrets) only,
+  that duration is typically `0` (no lease) in production today, so the
+  monitor is real, tested infrastructure that activates automatically the
+  day a registered resolver reads a path that genuinely carries a lease
+  (e.g. a future dynamic-secrets-engine resolver) — it does not itself add
+  dynamic-secrets Vault support, which was out of this item's scope. The
+  monitor's source-file resolution is config-governance-aware (it prefers
+  an active governed version's own files over the plain
+  `connections.yaml`/`policy.yaml` paths, matching what
+  `admin/service.py`'s `apply()` already does), each automatic trigger is
+  offloaded off the event loop and records an `audit_config_change` event,
+  and a hysteresis guard prevents a lease shorter than the refresh margin
+  from retriggering on every poll — a post-ship security review caught the
+  first two of these (the config-governance gap in particular, item
+  QG135-01, could otherwise have silently reverted an approved policy
+  change) before this item shipped.
 - **Static-key identity:** every key in one configured API-key list shares one
   subject and scopes. Use JWT for per-human/per-agent identity and expiry.
 - **Concurrency fail-open:** Redis-backed concurrency can intentionally fail
