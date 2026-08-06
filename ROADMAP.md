@@ -313,7 +313,7 @@ claim when the work ships or before explicitly handing the item back.
   deferred from it — fixing it properly means switching a shared subsystem
   with several call sites, not a one-line change, so it deserves its own
   dedicated review rather than a same-session patch.*
-- [ ] **151** — Bind the in-query approval gate's token to a connection and
+- [x] **151** — Bind the in-query approval gate's token to a connection and
   principal, not just an AST fingerprint. *Surfaced 2026-08-06 by
   `security-invariant-reviewer` while auditing items 19/128 — a design
   change needing an owner decision on where the binding lives, not a
@@ -333,6 +333,13 @@ claim when the work ships or before explicitly handing the item back.
   for already-archived segments, an explicit design decision, not a
   same-session fix; the residual is recorded in `audit/worm_search.py`'s
   module docstring and `docs/THREAT_MODEL.md` QG-40 in the meantime.*
+- [ ] **155** — `sensitivity_approval_reasons` looks up every table in the
+  query's top-level connection's catalog, never a cross-connection join's own
+  connection, so a joined-in `pii`-labelled column can miss the approval
+  gate. *Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing
+  item 151 — real and pre-existing, but a separate, non-trivial fix (needs
+  `resolve_query_table_connections`'s per-table connection map threaded into
+  the sensitivity check); deliberately left out of item 151's own scope.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 

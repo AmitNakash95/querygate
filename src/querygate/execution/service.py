@@ -59,6 +59,7 @@ from querygate.core.exceptions import (
 from querygate.core.logging import get_logger, log_execution
 from querygate.execution.admission import QueueMode, new_admission_id, resolve_wait_seconds
 from querygate.execution.approval import (
+    TOKEN_KIND_GRANT,
     approval_required_reasons,
     query_fingerprint,
     sensitivity_approval_reasons,
@@ -490,6 +491,15 @@ class StructuredQueryService:
         query; otherwise raise `ApprovalRequiredError` so the caller can obtain
         one from a `query:approve` holder and re-submit. No-op when the gate is
         disabled or nothing triggers.
+
+        The token is verified against this connection/principal (TODO.md item
+        151), not just the fingerprint: `self._connection_id` is set once, in
+        `__init__`, from this service's own top-level connection — `JoinSpec.
+        connection` (a cross-connection join's own, separate field) is read
+        only locally inside `validation/schema_validation.py`'s resolution and
+        never assigned to `self._connection_id`, so a token minted for the
+        byte-identical AST on a different connection is rejected, and a token
+        bound to a different principal at issue time is rejected too.
         """
         if not policy.approval_gate_enabled:
             return
@@ -500,7 +510,14 @@ class StructuredQueryService:
             return
         fingerprint = query_fingerprint(query)
         key = app_config.approval_token_hmac_key
-        if verify_approval_token(approval_token or "", fingerprint=fingerprint, key=key):
+        if verify_approval_token(
+            approval_token or "",
+            fingerprint=fingerprint,
+            key=key,
+            connection_id=self._connection_id,
+            principal_subject=self._principal_subject,
+            expected_kind=TOKEN_KIND_GRANT,
+        ):
             # Approved: the normal success audit records the execution; this
             # structured line ties the approval grant to the query in the log.
             get_logger().bind(func="execute").info(

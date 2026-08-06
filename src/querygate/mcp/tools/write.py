@@ -122,7 +122,11 @@ async def run_structured_writes(
     if ctx is not None and not atomic:
         fingerprints_by_key = {f"w{i}": write_fingerprint(w) for i, w in enumerate(writes)}
         approval_tokens = resolve_approval_tokens_from_retry(
-            ctx=ctx, fingerprints_by_key=fingerprints_by_key, caller=caller, config=config
+            ctx=ctx,
+            fingerprints_by_key=fingerprints_by_key,
+            caller=caller,
+            config=config,
+            connection_id=connection,
         )
     results = await service.execute_many(writes, approval_tokens=approval_tokens, atomic=atomic)
     # Only offer in-session approval when NOTHING in the batch has actually
@@ -139,7 +143,9 @@ async def run_structured_writes(
             for i, r in enumerate(results)
             if r.approval_fingerprint is not None
         ]
-        input_required = build_pending_input_required(items=pending, config=config)
+        input_required = build_pending_input_required(
+            items=pending, config=config, caller=caller, connection_id=connection
+        )
         if input_required is not None:
             return input_required
     return WriteExecuteBatchResult(results=results)
