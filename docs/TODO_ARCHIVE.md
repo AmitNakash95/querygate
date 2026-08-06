@@ -9815,3 +9815,76 @@ final tree.
 **Effort:** M as scoped; grew similarly to items 148/149 once this item's own
 mandatory review found the AST-layer precondition gap and two further
 leftover sites. **Depends on:** none.
+
+### 152. Sales/landing pages don't reflect items 19 (MySQL) / 134 (WORM retention) shipping ✅ DONE
+
+**Surfaced 2026-08-06 by the `claim-reviewer` audit of items 19/128/134/144.**
+`sales/index.html`'s "Do not claim yet" list still named compliance-grade
+WORM audit retention and "additional database dialects beyond Postgres/
+MSSQL" as not-yet-available, and `landing/security.html` still asserted the
+audit sink "is not WORM storage and does not provide built-in retention,
+managed search" and listed only Postgres/SQL Server as supported dialects —
+both false as of items 19 phase 1 and 134 phase 1. Ran the `pitch-sync`
+skill to reconcile every dialect/WORM mention across `sales/index.html`,
+`landing/security.html`, `landing/index.html`, and `landing/sandbox.html`
+against `docs/business/GO_TO_MARKET.md`'s framing.
+
+**Correction to the item's own premise:** `GO_TO_MARKET.md` was *not*
+fully correct going in — item 134's commit had updated its WORM claim
+correctly, but item 19's commit never touched it, so its "safe to claim
+now" list still read "Postgres and SQL Server support" with no MySQL
+mention. Fixed that line too (with the Snowflake/BigQuery-still-open
+caveat kept explicit) before treating it as the source of truth. Also
+found and fixed the same drift in `README.md`'s opening pitch line
+("Postgres or MSSQL database" — item 19's own commit had updated the
+architecture-diagram mention further down but missed this one) since it's
+a public-facing claim of the same kind, per the item's own instruction to
+bounded-grep for it.
+
+**What changed, precisely:**
+
+- `sales/index.html`: qualification "strong fit" list, the "safe to claim
+  now" / "do not claim yet" claim-guardrail lists — added MySQL to the
+  dialect claim and the disqualifier list (`Postgres/MSSQL` →
+  `Postgres/MSSQL/MySQL`), moved WORM retention from "do not claim" to
+  "safe to claim now" with the S3 Object Lock mechanism, fail-open
+  buffering, and no-managed-search caveat spelled out; "do not claim yet"
+  now names only managed search over the WORM archive, not retention
+  itself.
+- `landing/security.html`: the "Writes are governed" limitation now lists
+  Postgres/SQL Server/MySQL; the "Audit durability and search" limitation
+  now describes the real `jsonl_chained_s3_worm` backend (Object Lock
+  COMPLIANCE mode, composed with the hash-chained ledger, fail-open
+  buffering) instead of flatly denying WORM storage exists, while still
+  disclaiming managed search and a SIEM UI.
+- `landing/index.html`: meta description/og tags, the JSON-LD feature
+  list, the hero lede, architecture note, demo-request database dropdown
+  (added a MySQL option), FAQ answer, and the alternate JSON copy variant
+  block (`hero-lede`, `arch-db-title`, `outcome-work-copy`,
+  `footer-copy`) — all updated to name MySQL alongside Postgres/SQL
+  Server.
+- `landing/sandbox.html`: the demo-to-real handoff line.
+- `README.md`: the opening one-line pitch ("Postgres or MSSQL database" →
+  "Postgres, MSSQL, or MySQL database").
+- `docs/business/GO_TO_MARKET.md`: "safe to claim now" dialect line fixed
+  to include MySQL (was missed by item 19's own commit).
+
+**Verified against real code, not just plausible wording**, before
+landing any claim: MySQL — `MySQLDialectAdapter`
+(`compiler/dialect_adapters.py`), `MySQLSessionAdapter`
+(`connections/dialects.py`), `DialectEnum.MYSQL` on `ConnectionProfile`,
+`tests/integration/test_mysql_live.py` (real MySQL 8.4). WORM —
+`audit/worm_sink.py`'s `S3WormAuditSink`/`WormFlushMonitor`, the
+`jsonl_chained_s3_worm` backend registered in `audit/sinks.py`,
+`tests/unit/test_audit_worm_sink.py`. The WORM copy keeps the phase-2
+caveat explicit everywhere it appears rather than claiming the bare
+capability.
+
+**Bounded-grep sweep, not an unbounded hunt** (per the item's own scoping
+instruction): searched `sales/`, `landing/`, and `README.md` for
+"Postgres"+"SQL Server" co-occurrences and "WORM" mentions; found and
+fixed every hit above. Left the HA/Kubernetes "do not claim yet" line in
+`sales/index.html` untouched — that's a different item's (56's) drift, out
+of this item's scope.
+
+**Effort:** S. **Depends on:** 19 (phase 1 shipped), 134 (phase 1 shipped).
