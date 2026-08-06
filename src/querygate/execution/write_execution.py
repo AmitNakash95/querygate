@@ -50,7 +50,7 @@ from querygate.core.exceptions import (
     QueryValidationError,
     public_error_message,
 )
-from querygate.execution.approval import verify_approval_token, write_fingerprint
+from querygate.execution.approval import TOKEN_KIND_GRANT, verify_approval_token, write_fingerprint
 from querygate.execution.concurrency import concurrency_slot
 from querygate.policy.loader import get_policy
 from querygate.policy.models import WritePolicy
@@ -425,8 +425,17 @@ class WriteExecutionService:
         if threshold is None or affected <= threshold:
             return
         fingerprint = write_fingerprint(statement)
+        # TODO.md item 151: bound to this connection/principal, the write-side
+        # sibling of StructuredQueryService._enforce_approval_gate's binding —
+        # a token approved for this write on a different connection, or by/for
+        # a different principal, is rejected even though the fingerprint matches.
         if approval_token and verify_approval_token(
-            approval_token, fingerprint=fingerprint, key=app_config.approval_token_hmac_key
+            approval_token,
+            fingerprint=fingerprint,
+            key=app_config.approval_token_hmac_key,
+            connection_id=self._connection_id,
+            principal_subject=self._principal_subject,
+            expected_kind=TOKEN_KIND_GRANT,
         ):
             return
         raise ApprovalRequiredError(
