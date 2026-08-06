@@ -1418,6 +1418,53 @@ not cached forever after the first read — rotating a credential (a new
 Vault token, an updated environment variable) takes effect on the next
 config reload, without restarting QueryGate.
 
+That reload was, until item 135, always operator-pull: something had to call
+`POST /admin/reload-config` (or apply a config-governance version) after a
+credential rotated. For a short-TTL dynamic secret — the actual value
+proposition of Vault's dynamic secrets engines — that gap between "rotated"
+and "someone reloads" is a real outage window. `CredentialLeaseMonitor`
+(`src/querygate/config_reload.py`) closes it with a separate, optional
+`LeasedSecretResolver` protocol (`lease_expiry(reference) ->
+Optional[datetime]`) that a resolver backend implements only if it actually
+has a lease to report — `SecretResolver` itself is deliberately *not*
+widened with this, the same "compose, don't widen" shape
+`core/auth.py`'s `CompositeAuthenticator` already uses. `lease_expiry`
+deliberately never returns the resolved value itself: for a backend where
+"reading is issuing" (a Vault *dynamic* secrets engine, as opposed to the
+static KV v2 secrets this module implements today), fetching the value just
+to check its expiry would mint and immediately orphan a fresh privileged
+credential on every poll — an early draft of this item did exactly that,
+caught and fixed by a post-ship security review before it shipped.
+
+A background task (disabled by default; `CREDENTIAL_LEASE_REFRESH_ENABLED=true`)
+polls, on each iteration and offloaded via `asyncio.to_thread` (probing a
+leased resolver can be a real, slow network call — running it inline would
+stall the whole process, not just the poll), every currently-live
+connection's `connection_string` field for a `${scheme:reference}` whose
+resolver implements `LeasedSecretResolver`, and — when the soonest reported
+expiry falls inside `CREDENTIAL_LEASE_REFRESH_MARGIN_SECONDS` and hasn't
+already been acted on (hysteresis — otherwise a lease shorter than the
+margin, the normal case for a real dynamic credential, would trigger a
+reload on every single poll forever) — calls the exact same
+`reload_config()` the operator-triggered path already uses, so the same
+registry/policy swap and the same `_dispose_stale_engines` in-flight-safe
+disposal apply either way, and records an `audit_config_change` event so an
+automatic trigger is attributable like any other config change. "Currently
+live" is governance-aware: it prefers an active config-governance version's
+own files over the plain `connections.yaml`/`policy.yaml` paths, since
+governance's `apply()`/rollback never write an approved version's content
+back to those plain files — a monitor that ignored this would, the moment a
+lease came due, silently revert a four-eyes-approved policy tightening back
+to stale disk content. `VaultSecretResolver` implements the protocol by
+honestly reporting Vault's own `lease_duration` response field (rather than
+inventing a TTL) — since the shipped Vault integration reads KV v2 (static
+secrets) only, that value is typically `0` (no lease) today, so in practice
+the monitor currently activates once a registered resolver reads a path
+that genuinely carries a lease. A resolver with nothing to report (env, or a
+static Vault secret) is simply skipped every poll and stays reachable only
+through the existing `/admin/reload-config` path — this is strictly
+additive.
+
 ### 4. The threat model: what QueryGate defends against
 
 The full reasoning lives in `docs/THREAT_MODEL.md`; here's the plain-language
@@ -3431,6 +3478,82 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-08-06 — proactive lease-driven credential re-resolution composes a
+  new optional protocol rather than widening `SecretResolver`, and a
+  same-day post-ship security review found one HIGH-severity gap before it
+  shipped (TODO.md item 135).** Item 13 already made a rotated
+  `${vault:...}` value take effect on the next `reload_config()` without a
+  restart; the residual gap was that the refresh was operator-pull only, so
+  a short-TTL dynamic credential could expire into failures between reloads
+  with nobody scheduling a reload. Three decisions:
+
+  **(1) `LeasedSecretResolver` (`secrets/resolvers.py`) is a separate,
+  `@runtime_checkable` Protocol with one method
+  (`lease_expiry(reference) -> Optional[datetime]`), probed via
+  `isinstance` — not an addition to `SecretResolver` itself.**
+  `SecretResolver`'s module docstring is explicit that its one-method shape
+  is deliberate; adding lease/TTL methods there would force every backend
+  (starting with `EnvSecretResolver`, which is genuinely leaseless — it
+  re-reads the environment on every `resolve()` instead) to answer a
+  question that doesn't apply to it. `CredentialLeaseMonitor`
+  (`config_reload.py`) composes the capability instead, mirroring
+  `core/auth.py`'s `CompositeAuthenticator` precedent for this repo's
+  "Protocol + one class per variant + registry, composition over widening"
+  rule. `lease_expiry` deliberately returns no value at all (an earlier
+  draft, `resolve_with_lease(reference) -> (value, expires_at)`, did) — for
+  a backend where "reading is issuing" (a Vault *dynamic* secrets engine,
+  this feature's actual motivation), fetching the value on every poll just
+  to check its expiry would mint and immediately orphan a fresh privileged
+  credential, a real design flaw the same review caught before shipping.
+
+  **(2) `VaultSecretResolver.lease_expiry` reports Vault's own
+  `lease_duration` response field verbatim (capped at a sane bound), never a
+  synthesized TTL.** An earlier draft of item 135 considered forcing every
+  Vault reference to report *some* expiry; that would have been exactly the
+  kind of invented structure this repo's engine-philosophy doctrine already
+  rejects for dialect adapters (see the MSSQL `nulls` precedent above),
+  applied here to secrets instead of SQL. The shipped Vault integration
+  reads KV v2 (static secrets) only, whose `lease_duration` is genuinely
+  `0` — so `lease_expiry` reports `None` for those today, and the monitor
+  correctly never fires for them. The trigger machinery is real and tested;
+  it activates automatically, with no further change, the moment a
+  registered resolver reads a path that actually carries a lease (a
+  dynamic-secrets-engine resolver was explicitly out of this item's scope).
+
+  **(3) The monitor resolves its source files through the same
+  governance-aware precedence `admin/service.py`'s `apply()` already uses,
+  not the plain `AppConfig` paths — found by the mandatory post-ship
+  `security-invariant-reviewer` audit, not self-review.** Config governance
+  (`admin/service.py`'s `apply()`/rollback) makes a staged, four-eyes-approved
+  version's own on-disk files the live truth and never writes that content
+  back to `cfg.connections_file` et al. The first cut of `CredentialLeaseMonitor`
+  always reloaded from the plain `cfg.*` paths — correct for the
+  operator-triggered `/admin/reload-config` endpoint, which behaves the same
+  way, but wrong for an *unattended* trigger: the moment a lease came due in
+  any deployment using config governance, it would have silently reverted
+  the live registry/policy back to stale disk content, discarding an
+  approved policy tightening with zero audit trail. Fixed before shipping by
+  preferring the active governed version's files
+  (`ConfigVersionStore.file_paths`) when one exists, and by recording an
+  `audit_config_change(action="lease_refresh", ...)` event on every
+  automatic trigger so it's attributable like any other config change.
+
+  The same review also found (and this item fixed pre-ship): unbounded
+  synchronous Vault I/O on the event loop (now `asyncio.to_thread` plus an
+  explicit 10s client timeout), no hysteresis (a lease shorter than the
+  refresh margin — the normal case for a real dynamic credential — would
+  have retriggered on every single poll forever), a resolver registry
+  pinned for the monitor's whole lifetime (a rotated `VAULT_TOKEN` would
+  never be picked up), and scanning the whole raw connections file instead
+  of just the `connection_string` field a reload actually resolves.
+  Mutation-verified: every one of these guards, plus the `isinstance` probe
+  and the monitor's per-iteration catch-all, was broken in turn and made a
+  specific test fail for that reason before being reverted. The
+  `isinstance` guard mutation initially passed silently (a surrounding
+  broad `except Exception` swallowed the resulting `AttributeError`) — a
+  genuine gap this process caught, closed by narrowing that except to
+  `ValueError` (matching `lease_expiry`'s documented contract).
 
 - **2026-08-06 — item 128 conformed the MCP surface to the final
   `2026-07-28` protocol revision**, upgrading `mcp` 1.28.1 → 2.0.0 (the
