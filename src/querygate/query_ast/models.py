@@ -1775,28 +1775,59 @@ class StructuredQuery(pyd.BaseModel):
 # CaseWhen -> WhereNode -> Predicate -> Expression). Rebuild every model in both
 # cycles once all names are defined so the forward refs resolve. Order matters
 # least once all names exist, but do the leaf types first.
-BinaryOpExpr.model_rebuild()
-FunctionExpr.model_rebuild()
-CastExpr.model_rebuild()
-ExtractExpr.model_rebuild()
-DateAddExpr.model_rebuild()
-CaseExpr.model_rebuild()
-AggregateSelectItem.model_rebuild()
-ExpressionSelectItem.model_rebuild()
-WindowCall.model_rebuild()
-WindowSelectItem.model_rebuild()
-WindowExpr.model_rebuild()
-Predicate.model_rebuild()
-WhereGroup.model_rebuild()
-CaseWhen.model_rebuild()
-CaseSelectItem.model_rebuild()
-# JoinSpec.condition is a WhereNode (item 103), so JoinSpec joins the cycle too —
-# it is declared before Predicate/WhereGroup and would otherwise keep an
-# unresolved forward ref, making every `condition` fail to validate at request time.
-JoinSpec.model_rebuild()
-# SetOpSpec.arms is a forward ref to StructuredQuery, which is declared after it
-# (item 104) — a third cycle into the same knot, resolved the same way.
-SetOpSpec.model_rebuild()
-# CteSpec.query is a forward ref to StructuredQuery for the same reason (item 105).
-CteSpec.model_rebuild()
-StructuredQuery.model_rebuild()
+#
+# Exposed as a named, re-callable function (not just inline statements) so a
+# consumer that generates a schema from these models in a shared process — the
+# `io.github.agitmit/structured-query-ast` MCP extension's schema generator
+# (`mcp/extensions.py`, TODO.md item 131) — can force a clean re-derivation of
+# every core schema in the cycle immediately before generating, rather than
+# trusting whatever schema-cache state these classes happen to hold at that
+# moment. `model_rebuild(force=True)` re-derives a class's core schema from its
+# own `model_fields`, so re-running this is always safe and idempotent.
+RECURSIVE_AST_CYCLE_MODELS: tuple[type[pyd.BaseModel], ...] = (
+    BinaryOpExpr,
+    FunctionExpr,
+    CastExpr,
+    ExtractExpr,
+    DateAddExpr,
+    CaseExpr,
+    AggregateSelectItem,
+    ExpressionSelectItem,
+    WindowCall,
+    WindowSelectItem,
+    WindowExpr,
+    Predicate,
+    WhereGroup,
+    CaseWhen,
+    CaseSelectItem,
+    # JoinSpec.condition is a WhereNode (item 103), so JoinSpec joins the cycle
+    # too — it is declared before Predicate/WhereGroup and would otherwise keep
+    # an unresolved forward ref, making every `condition` fail to validate at
+    # request time.
+    JoinSpec,
+    # SetOpSpec.arms is a forward ref to StructuredQuery, declared after it
+    # (item 104) — a third cycle into the same knot, resolved the same way.
+    SetOpSpec,
+    # CteSpec.query is a forward ref to StructuredQuery for the same reason
+    # (item 105).
+    CteSpec,
+    StructuredQuery,
+)
+
+
+def rebuild_recursive_ast_cycle(*, force: bool = False) -> None:
+    """(Re)resolve every forward ref in the recursive AST cycle above.
+
+    Called once, unforced, at import time (below) so the module always
+    imports with every forward ref already resolved. `force=True` re-derives
+    each class's core schema from its current `model_fields` regardless of
+    whether pydantic considers it already built — the generator this module
+    docstring's cycle note points at uses that to guarantee a canonical
+    schema regardless of other schema-generation activity elsewhere in a
+    shared process.
+    """
+    for model in RECURSIVE_AST_CYCLE_MODELS:
+        model.model_rebuild(force=force)
+
+
+rebuild_recursive_ast_cycle()

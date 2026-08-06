@@ -22,6 +22,7 @@ from querygate.mcp.caching import (
     assert_private_cache_scope_installed,
     install_private_cache_scope,
 )
+from querygate.mcp.extensions import StructuredQueryAstExtension
 from querygate.mcp.instructions import MCP_INSTRUCTIONS
 
 if TYPE_CHECKING:
@@ -41,6 +42,14 @@ _SCOPE_GATED_TOOLS: dict[str, str] = {
 mcp_server: MCPServer = MCPServer(
     name="querygate",
     instructions=MCP_INSTRUCTIONS,
+    # TODO.md item 131: advertises the StructuredQuery/write AST as a named,
+    # versioned JSON-Schema contract under SEP-2133 — see
+    # docs/mcp_extensions/structured_query_ast.md. Purely descriptive: it
+    # contributes no tool, resource, or JSON-RPC method (see
+    # mcp/extensions.py's module docstring for why that boundary is load-
+    # bearing). Extensions are fixed at MCPServer construction time, so this
+    # must be passed here rather than applied later.
+    extensions=[StructuredQueryAstExtension()],
 )
 
 

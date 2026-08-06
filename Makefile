@@ -252,6 +252,10 @@ product-guide-html: ## Render docs/PRODUCT_GUIDE.md into the browsable docs/prod
 trust-page: ## Regenerate docs/TRUST_EVIDENCE.md, the composed procurement evidence page (item 147)
 	poetry run python scripts/generate_trust_page.py
 
+.PHONY: mcp-extension-schema
+mcp-extension-schema: ## Regenerate the io.github.agitmit/structured-query-ast MCP extension schema (item 131)
+	poetry run python scripts/generate_mcp_extension_schema.py
+
 # ─── Release ──────────────────────────────────────────────────────────────────
 .PHONY: sbom
 sbom: ## Generate a CycloneDX SBOM, dependency vulnerability report, and SHA256SUMS from dist/ (run `poetry build` first)
