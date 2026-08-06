@@ -159,7 +159,7 @@ order-of-magnitude, not commitments.
 | 126 | No per-caller rate limit on `GET /help/my-recent-denials` | S | 45 |
 | 127 | ✅ Reject an MCP request whose routing headers disagree with its body | S–M | 86 |
 | 128 | Conform to the final MCP `2026-07-28` protocol revision | L | 90, 92, 93 |
-| 129 | Never advertise a principal-varying MCP result as shared-cacheable | S | 128 |
+| 129 | ✅ Never advertise a principal-varying MCP result as shared-cacheable | S | 128 |
 | 130 | Annotate `connection` with `x-mcp-header` for gateway-native authorization | S | 127, 128 |
 | 131 | Publish the StructuredQuery AST as a namespaced MCP extension | M | 128 |
 | 132 | ✅ Reconcile stale shipped-status claims left behind by items 90–93 | S | — |
@@ -2020,52 +2020,13 @@ approver identity.
 
 **Effort:** L. **Depends on:** 90, 92, 93, and upstream SDK availability.
 
-### 129. Never advertise a principal-varying MCP result as shared-cacheable
+### 129. Never advertise a principal-varying MCP result as shared-cacheable ✅ DONE
 
-**Surfaced 2026-07-30 by `competitive-scan`.** The `2026-07-28` revision adds
-caching metadata (SEP-2549) to `tools/list`, `prompts/list`, `resources/list`,
-and `resources/read`: a `ttlMs` freshness hint and a `cacheScope` of `"public"`
-or `"private"`, modelled on HTTP `Cache-Control`, where `public` permits
-**shared intermediaries** to cache and reuse the response across callers.
-
-**Aim this at `tools/list`, not at tool results.** The caching metadata attaches
-to `tools/list` / `prompts/list` / `resources/list` / `resources/read` — *not*
-to `tools/call` results, so `list_connections`'s per-caller output is not the
-exposed surface (an easy mis-aim: it is a tool whose *result* varies, which the
-spec does not make cacheable). The genuinely principal-varying **list** surface
-is `tools/list`, filtered by `_install_scoped_tool_listing` in `mcp/server.py`
-via `_SCOPE_GATED_TOOLS`. Note QueryGate currently registers **zero** resources
-and **zero** prompts, so a test written only against those is close to vacuous —
-the test must therefore also fail if a resource or prompt is ever registered
-without an explicit `cacheScope`.
-
-**Why this is a security rule for QueryGate specifically.** Our MCP surface is
-per-principal by construction, and the spec explicitly blesses this ("the set
-**MAY** vary by the authorization presented on the request"). But a
-principal-varying result marked `cacheScope: "public"` and cached by a shared
-gateway — the very intermediary the P4 play courts — would serve one
-principal's visible tool surface to another, eroding the deny-by-default
-posture without a single line of policy code being wrong.
-
-**Honest severity:** this is defense-in-depth, not an authorization bypass.
-`mcp/server.py` already records that scoped tool listing is
-"token-savings/defense-in-depth only" and that the real boundary is each tool's
-call-time scope check. Keep that framing — do not let this item's write-up imply
-the tool list is a security boundary.
-
-The failure mode is a *default*, not a decision: whichever value the SDK or a
-future refactor emits when nobody thought about it. So encode it as an
-invariant with a test, in the manner of `tests/unit/test_credential_redaction.py`
-(which asserts the no-credential invariant against the live schemas rather
-than trusting convention): **every MCP result whose content depends on the
-caller must carry `cacheScope: "private"`**, asserted against the actual
-emitted payloads, so adding a new per-principal tool cannot silently regress
-it.
-
-**Current state:** no `cacheScope`/`ttlMs` handling exists (verified
-2026-07-30); this is prospective, and lands with item 128.
-
-**Effort:** S. **Depends on:** 128.
+`mcp/caching.py`'s `install_private_cache_scope` forces `cacheScope: "private"`
+(SEP-2549) onto `tools/list`/`prompts/list`/`resources/list`/`resources/read`
+unconditionally and structurally (not a per-registration opt-in), landing
+ahead of item 128 rather than on top of it since 128 hasn't shipped on this
+branch. **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 129).
 
 ### 130. Annotate `connection` with `x-mcp-header` so a fronting gateway can authorize per-connection without parsing the body
 
