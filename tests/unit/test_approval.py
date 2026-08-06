@@ -17,6 +17,7 @@ import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
 
 from querygate.api.app import create_app
+from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import ApprovalRequiredError
 from querygate.execution import service as svc
@@ -28,12 +29,14 @@ from querygate.execution.approval import (
     query_fingerprint,
     sensitivity_approval_reasons,
     verify_approval_token,
+    write_fingerprint,
 )
 from querygate.execution.cost_estimation import QueryCostEstimate
 from querygate.execution.service import StructuredQueryService
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
 from querygate.query_ast.models import StructuredQuery
+from querygate.write_ast.models import DeleteStatement
 
 _KEY = "test-approval-hmac-key"
 
@@ -45,54 +48,373 @@ _KEY = "test-approval-hmac-key"
 
 @pytest.mark.unit
 def test_token_round_trips_for_the_same_fingerprint():
-    token = issue_approval_token(fingerprint="fp1", approver_subject="approver", key=_KEY)
-    assert verify_approval_token(token, fingerprint="fp1", key=_KEY) is True
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="approver",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
+    )
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp1", key=_KEY, connection_id=None, principal_subject=None
+        )
+        is True
+    )
 
 
 @pytest.mark.unit
 def test_token_is_rejected_for_a_different_query_fingerprint():
     # Replay against a DIFFERENT query must fail — an approval authorizes one
     # specific query, not a class of them.
-    token = issue_approval_token(fingerprint="fp1", approver_subject="a", key=_KEY)
-    assert verify_approval_token(token, fingerprint="fp2", key=_KEY) is False
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="a",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
+    )
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp2", key=_KEY, connection_id=None, principal_subject=None
+        )
+        is False
+    )
 
 
 @pytest.mark.unit
 def test_token_is_rejected_under_a_different_key():
-    token = issue_approval_token(fingerprint="fp1", approver_subject="a", key=_KEY)
-    assert verify_approval_token(token, fingerprint="fp1", key="other-key") is False
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="a",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
+    )
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp1", key="other-key", connection_id=None, principal_subject=None
+        )
+        is False
+    )
 
 
 @pytest.mark.unit
 def test_forged_signature_is_rejected():
-    token = issue_approval_token(fingerprint="fp1", approver_subject="a", key=_KEY)
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="a",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
+    )
     payload, _sig = token.rsplit(".", 1)
     forged = f"{payload}.{'0' * 64}"
-    assert verify_approval_token(forged, fingerprint="fp1", key=_KEY) is False
+    assert (
+        verify_approval_token(
+            forged, fingerprint="fp1", key=_KEY, connection_id=None, principal_subject=None
+        )
+        is False
+    )
 
 
 @pytest.mark.unit
 def test_expired_token_is_rejected():
-    token = issue_approval_token(fingerprint="fp1", approver_subject="a", key=_KEY, ttl_seconds=-1)
-    assert verify_approval_token(token, fingerprint="fp1", key=_KEY) is False
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="a",
+        key=_KEY,
+        ttl_seconds=-1,
+        connection_id=None,
+        principal_subject=None,
+    )
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp1", key=_KEY, connection_id=None, principal_subject=None
+        )
+        is False
+    )
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("bad", ["", "not-a-token", "a.b.c", "@@@.###"])
 def test_malformed_tokens_fail_closed(bad):
-    assert verify_approval_token(bad, fingerprint="fp1", key=_KEY) is False
+    assert (
+        verify_approval_token(
+            bad, fingerprint="fp1", key=_KEY, connection_id=None, principal_subject=None
+        )
+        is False
+    )
 
 
 @pytest.mark.unit
 def test_verification_without_a_key_fails_closed():
-    token = issue_approval_token(fingerprint="fp1", approver_subject="a", key=_KEY)
-    assert verify_approval_token(token, fingerprint="fp1", key="") is False
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="a",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
+    )
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp1", key="", connection_id=None, principal_subject=None
+        )
+        is False
+    )
 
 
 @pytest.mark.unit
 def test_issuing_without_a_key_raises():
     with pytest.raises(ValueError):
-        issue_approval_token(fingerprint="fp1", approver_subject="a", key="")
+        issue_approval_token(
+            fingerprint="fp1",
+            approver_subject="a",
+            key="",
+            connection_id=None,
+            principal_subject=None,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Token kind + format version (TODO.md item 151, F1/F2)                        #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_pending_kind_token_is_rejected_where_a_grant_is_expected():
+    # A pending elicitation token carries a genuine fingerprint/expiry, but is
+    # never itself redeemable — only a "grant"-kind token verifies where the
+    # gate expects one (the default `expected_kind`).
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="a",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
+        kind="pending",
+    )
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp1", key=_KEY, connection_id=None, principal_subject=None
+        )
+        is False
+    )
+    assert (
+        verify_approval_token(
+            token,
+            fingerprint="fp1",
+            key=_KEY,
+            connection_id=None,
+            principal_subject=None,
+            expected_kind="pending",
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
+def test_grant_kind_token_is_rejected_where_a_pending_marker_is_expected():
+    # The reverse direction: a real grant must not satisfy a check that
+    # specifically wants a pending marker (defense in depth for the MCP
+    # elicitation resolver's own pending-state verification).
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="a",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
+    )
+    assert (
+        verify_approval_token(
+            token,
+            fingerprint="fp1",
+            key=_KEY,
+            connection_id=None,
+            principal_subject=None,
+            expected_kind="pending",
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+def test_token_missing_the_format_version_claim_is_rejected():
+    # Simulates a token minted by a pod running a pre-item-151 build mid
+    # rolling-deploy: a payload lacking "v" entirely (the pre-item-151 shape
+    # for the WHOLE claim, not just cx/sub_bind) must be rejected outright by
+    # a pod that understands "v", not silently treated as unbound-and-
+    # therefore-permissive.
+    import base64
+    import hashlib
+    import hmac
+    import json
+    import time
+
+    payload = {"fp": "fp1", "sub": "a", "k": "grant", "exp": int(time.time() + 300)}
+    payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(_KEY.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
+    encoded = base64.urlsafe_b64encode(payload_bytes).decode("ascii").rstrip("=")
+    token = f"{encoded}.{signature}"
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp1", key=_KEY, connection_id=None, principal_subject=None
+        )
+        is False
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Connection/principal binding (TODO.md item 151)                              #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_token_bound_to_a_connection_is_rejected_for_a_different_connection():
+    # The item's exact motivating scenario: the byte-identical fingerprint,
+    # minted for "staging", must not verify against "prod".
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="a",
+        key=_KEY,
+        connection_id="staging",
+        principal_subject=None,
+    )
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp1", key=_KEY, connection_id="prod", principal_subject=None
+        )
+        is False
+    )
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp1", key=_KEY, connection_id="staging", principal_subject=None
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
+def test_token_bound_to_a_connection_is_rejected_when_connection_omitted_at_verify():
+    # Omitting the binding at verification time must not be treated as "no
+    # opinion" and pass — a bound token demands a matching value, not silence.
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="a",
+        key=_KEY,
+        connection_id="staging",
+        principal_subject=None,
+    )
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp1", key=_KEY, connection_id=None, principal_subject=None
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+def test_token_bound_to_a_principal_is_rejected_for_a_different_principal():
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="a",
+        key=_KEY,
+        principal_subject="alice",
+        connection_id=None,
+    )
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp1", key=_KEY, principal_subject="bob", connection_id=None
+        )
+        is False
+    )
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp1", key=_KEY, principal_subject="alice", connection_id=None
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
+def test_token_bound_to_a_principal_is_rejected_when_principal_omitted_at_verify():
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="a",
+        key=_KEY,
+        principal_subject="alice",
+        connection_id=None,
+    )
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp1", key=_KEY, connection_id=None, principal_subject=None
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+def test_unbound_token_verifies_regardless_of_connection_or_principal_supplied():
+    # A token minted without connection_id/principal_subject (the pre-item-151
+    # shape) carries no cx/sub_bind claim, so it verifies on fingerprint/expiry
+    # alone — unchanged behavior for callers that don't opt into binding.
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="a",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
+    )
+    assert (
+        verify_approval_token(
+            token, fingerprint="fp1", key=_KEY, connection_id="anything", principal_subject="anyone"
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
+def test_token_bound_to_both_connection_and_principal_requires_both_to_match():
+    token = issue_approval_token(
+        fingerprint="fp1",
+        approver_subject="a",
+        key=_KEY,
+        connection_id="staging",
+        principal_subject="alice",
+    )
+    # Right connection, wrong principal.
+    assert (
+        verify_approval_token(
+            token,
+            fingerprint="fp1",
+            key=_KEY,
+            connection_id="staging",
+            principal_subject="bob",
+        )
+        is False
+    )
+    # Right principal, wrong connection.
+    assert (
+        verify_approval_token(
+            token,
+            fingerprint="fp1",
+            key=_KEY,
+            connection_id="prod",
+            principal_subject="alice",
+        )
+        is False
+    )
+    # Both right.
+    assert (
+        verify_approval_token(
+            token,
+            fingerprint="fp1",
+            key=_KEY,
+            connection_id="staging",
+            principal_subject="alice",
+        )
+        is True
+    )
 
 
 @pytest.mark.unit
@@ -215,7 +537,13 @@ def test_sensitivity_gate_admits_with_a_valid_token(monkeypatch):
     monkeypatch.setattr(svc.app_config, "approval_token_hmac_key", _KEY)
     policy = Policy(approval_sensitivities=[SensitivityClass.PII])
     q = StructuredQuery(from_table="customers", select=["customers.email"])
-    token = issue_approval_token(fingerprint=query_fingerprint(q), approver_subject="a", key=_KEY)
+    token = issue_approval_token(
+        fingerprint=query_fingerprint(q),
+        approver_subject="a",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
+    )
     _gate_service()._enforce_approval_gate(None, policy, q, token)  # no raise
 
 
@@ -247,7 +575,11 @@ def test_gate_admits_with_a_valid_token(monkeypatch):
     query = StructuredQuery(from_table="orders", select=["orders.id"])
     estimate = QueryCostEstimate(estimated_rows=500, estimated_total_cost=None)
     token = issue_approval_token(
-        fingerprint=query_fingerprint(query), approver_subject="approver", key=_KEY
+        fingerprint=query_fingerprint(query),
+        approver_subject="approver",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
     )
     # Should not raise.
     _gate_service()._enforce_approval_gate(estimate, policy, query, token)
@@ -270,10 +602,68 @@ def test_gate_admits_a_token_for_a_different_query_never(monkeypatch):
     other = StructuredQuery(from_table="orders", select=["orders.total"])
     estimate = QueryCostEstimate(estimated_rows=500, estimated_total_cost=None)
     token = issue_approval_token(
-        fingerprint=query_fingerprint(approved), approver_subject="a", key=_KEY
+        fingerprint=query_fingerprint(approved),
+        approver_subject="a",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
     )
     with pytest.raises(ApprovalRequiredError):
         _gate_service()._enforce_approval_gate(estimate, policy, other, token)
+
+
+@pytest.mark.unit
+def test_gate_rejects_a_token_minted_for_a_different_connection(monkeypatch):
+    """TODO.md item 151's exact scenario: a token approved for the
+    byte-identical query on connection A must not admit it on connection B —
+    e.g. `staging` never trips the gate, `prod` does; a `query:approve` holder
+    approving what they believe is the `staging` query must not thereby
+    approve it on `prod` too."""
+    monkeypatch.setattr(svc.app_config, "approval_token_hmac_key", _KEY)
+    policy = Policy(approval_max_estimated_rows=100)
+    query = StructuredQuery(from_table="orders", select=["orders.id"])
+    estimate = QueryCostEstimate(estimated_rows=500, estimated_total_cost=None)
+    token = issue_approval_token(
+        fingerprint=query_fingerprint(query),
+        approver_subject="approver",
+        key=_KEY,
+        connection_id="staging",
+        principal_subject=None,
+    )
+    service_on_prod = StructuredQueryService(connection_id="prod")
+    with pytest.raises(ApprovalRequiredError):
+        service_on_prod._enforce_approval_gate(estimate, policy, query, token)
+    # ...but it does admit on the connection it was actually minted for.
+    service_on_staging = StructuredQueryService(connection_id="staging")
+    service_on_staging._enforce_approval_gate(estimate, policy, query, token)  # no raise
+
+
+@pytest.mark.unit
+def test_gate_rejects_a_token_minted_for_a_different_principal(monkeypatch):
+    """The principal-binding sibling of the connection test above: a token
+    bound to principal X at issue time must not admit principal Y's identical
+    retry, even on the same connection with the same query."""
+    monkeypatch.setattr(svc.app_config, "approval_token_hmac_key", _KEY)
+    policy = Policy(approval_max_estimated_rows=100)
+    query = StructuredQuery(from_table="orders", select=["orders.id"])
+    estimate = QueryCostEstimate(estimated_rows=500, estimated_total_cost=None)
+    token = issue_approval_token(
+        fingerprint=query_fingerprint(query),
+        approver_subject="alice",
+        key=_KEY,
+        connection_id="demo",
+        principal_subject="alice",
+    )
+    service_as_bob = StructuredQueryService(
+        connection_id="demo", principal=Principal(subject="bob")
+    )
+    with pytest.raises(ApprovalRequiredError):
+        service_as_bob._enforce_approval_gate(estimate, policy, query, token)
+    # ...but it does admit when redeemed by the principal it was bound to.
+    service_as_alice = StructuredQueryService(
+        connection_id="demo", principal=Principal(subject="alice")
+    )
+    service_as_alice._enforce_approval_gate(estimate, policy, query, token)  # no raise
 
 
 # --------------------------------------------------------------------------- #
@@ -308,7 +698,11 @@ async def test_execute_pauses_then_admits_after_approval(monkeypatch):
             await service.execute(query)
 
         token = issue_approval_token(
-            fingerprint=query_fingerprint(query), approver_subject="a", key=_KEY
+            fingerprint=query_fingerprint(query),
+            approver_subject="a",
+            key=_KEY,
+            connection_id=None,
+            principal_subject=None,
         )
         result = await service.execute(query, approval_token=token)
     assert result.row_count == 1
@@ -335,7 +729,11 @@ async def test_execute_many_admits_only_the_query_its_token_matches(monkeypatch)
 
     estimate = QueryCostEstimate(estimated_rows=500, estimated_total_cost=None)
     token = issue_approval_token(
-        fingerprint=query_fingerprint(approved), approver_subject="a", key=_KEY
+        fingerprint=query_fingerprint(approved),
+        approver_subject="a",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
     )
     with (
         patch.object(svc, "validate_schema", AsyncMock(return_value={"orders": table})),
@@ -370,7 +768,11 @@ async def test_execute_many_rejects_a_token_replayed_onto_another_query(monkeypa
 
     estimate = QueryCostEstimate(estimated_rows=500, estimated_total_cost=None)
     token = issue_approval_token(
-        fingerprint=query_fingerprint(approved), approver_subject="a", key=_KEY
+        fingerprint=query_fingerprint(approved),
+        approver_subject="a",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
     )
     with (
         patch.object(svc, "validate_schema", AsyncMock(return_value={"orders": table})),
@@ -442,4 +844,180 @@ async def test_approve_endpoint_issues_verifiable_token(monkeypatch):
     body = resp.json()
     expected_fp = query_fingerprint(StructuredQuery(**query))
     assert body["fingerprint"] == expected_fp
-    assert verify_approval_token(body["approval_token"], fingerprint=expected_fp, key=_KEY)
+    # The token is bound to this connection and to the approving principal
+    # (TODO.md item 151) — the default API-key subject configured by _rest_app.
+    assert verify_approval_token(
+        body["approval_token"],
+        fingerprint=expected_fp,
+        key=_KEY,
+        connection_id="demo",
+        principal_subject="api-key-client",
+    )
+    # Negative counterparts (test-contract review): a positive check alone
+    # can't distinguish "genuinely bound to demo/api-key-client" from "not
+    # bound to anything, so it matches whatever I asked for" — an /approve
+    # regression that silently drops connection_id/principal_subject from its
+    # issue_approval_token call would still pass the assertion above.
+    assert not verify_approval_token(
+        body["approval_token"],
+        fingerprint=expected_fp,
+        key=_KEY,
+        connection_id="some-other-connection",
+        principal_subject="api-key-client",
+    )
+    assert not verify_approval_token(
+        body["approval_token"],
+        fingerprint=expected_fp,
+        key=_KEY,
+        connection_id="demo",
+        principal_subject="some-other-principal",
+    )
+
+
+@pytest.mark.asyncio
+async def test_approve_write_endpoint_issues_verifiable_token(monkeypatch):
+    """Write-side sibling of `test_approve_endpoint_issues_verifiable_token`
+    (test-contract review, item 151): `POST /{connection}/write/approve` had
+    zero test coverage before this — a regression here (a dropped connection/
+    principal binding, a wrong scope check) would not have failed any test."""
+    monkeypatch.setattr(svc.app_config, "approval_token_hmac_key", _KEY)
+    app = create_app(_rest_app(scopes=("query:approve",)))
+    transport = ASGITransport(app=app)
+    statement = {
+        "op": "delete",
+        "table": "orders",
+        "where": {"col": "orders.id", "op": "eq", "value": 1},
+    }
+    async with AsyncClient(transport=transport, base_url="http://localhost") as client:
+        resp = await client.post(
+            "/api/v1/demo/write/approve",
+            headers={"Authorization": f"Bearer {_KEY_APIKEY}"},
+            json=statement,
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    expected_fp = write_fingerprint(DeleteStatement(**statement))
+    assert body["fingerprint"] == expected_fp
+    assert verify_approval_token(
+        body["approval_token"],
+        fingerprint=expected_fp,
+        key=_KEY,
+        connection_id="demo",
+        principal_subject="api-key-client",
+    )
+    assert not verify_approval_token(
+        body["approval_token"],
+        fingerprint=expected_fp,
+        key=_KEY,
+        connection_id="some-other-connection",
+        principal_subject="api-key-client",
+    )
+    assert not verify_approval_token(
+        body["approval_token"],
+        fingerprint=expected_fp,
+        key=_KEY,
+        connection_id="demo",
+        principal_subject="some-other-principal",
+    )
+
+
+@pytest.mark.asyncio
+async def test_approve_endpoint_only_the_approving_principal_can_redeem_the_token(monkeypatch):
+    """Full REST round trip (test-contract review, item 151): approve as one
+    principal, attempt to redeem as a genuinely DIFFERENT principal — must
+    stay fail-closed with a fresh 428, even though the token is otherwise
+    valid; the SAME principal redeeming it succeeds. Exercises the real
+    transport/auth/service wiring end to end (two distinct JWT `sub` claims,
+    not two API keys — `ApiKeyAuthenticator` maps every configured key to one
+    shared `api_key_subject`, so it can't produce two different principals on
+    its own), not just `_enforce_approval_gate` called directly.
+    """
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    monkeypatch.setattr(svc.app_config, "approval_token_hmac_key", _KEY)
+    set_policy_store(PolicyStore(default=Policy(approval_max_estimated_rows=100), overrides={}))
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key = private_key.public_key()
+    app = create_app(
+        AppConfig(
+            environment="staging",
+            mcp_enabled=False,
+            audit_sink_backend="none",
+            jwt_enabled=True,
+            jwt_jwks_url="https://idp.example.com/.well-known/jwks.json",
+            jwt_issuer="https://idp.example.com/",
+            jwt_audience="querygate",
+        )
+    )
+    transport = ASGITransport(app=app)
+
+    token_approver = jwt.encode(
+        {
+            "sub": "principal-approver",
+            "iss": "https://idp.example.com/",
+            "aud": "querygate",
+            "scope": "query:approve",
+        },
+        private_key,
+        algorithm="RS256",
+    )
+    token_other = jwt.encode(
+        {"sub": "principal-different", "iss": "https://idp.example.com/", "aud": "querygate"},
+        private_key,
+        algorithm="RS256",
+    )
+
+    query = {"from_table": "orders", "select": ["orders.id"]}
+    table = sa.Table("orders", sa.MetaData(), sa.Column("id", sa.Integer, primary_key=True))
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    estimate = QueryCostEstimate(estimated_rows=500, estimated_total_cost=None)
+    with (
+        patch(
+            "jwt.PyJWKClient.get_signing_key_from_jwt",
+            lambda self, tok: type("K", (), {"key": public_key})(),
+        ),
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"orders": table})),
+        patch.object(svc, "session_scope", _scope),
+        patch.object(svc, "estimate_postgres_query_cost", AsyncMock(return_value=estimate)),
+    ):
+        async with AsyncClient(transport=transport, base_url="http://localhost") as client:
+            approve_resp = await client.post(
+                "/api/v1/demo/query/approve",
+                headers={"Authorization": f"Bearer {token_approver}"},
+                json=query,
+            )
+            assert approve_resp.status_code == 200
+            token = approve_resp.json()["approval_token"]
+
+            # A different principal presenting the SAME token stays fail-closed.
+            other_resp = await client.post(
+                "/api/v1/demo/query",
+                headers={
+                    "Authorization": f"Bearer {token_other}",
+                    "X-QueryGate-Approval": token,
+                },
+                json=query,
+            )
+            assert other_resp.status_code == 428
+
+            # The approving principal redeeming it themselves succeeds.
+            same_resp = await client.post(
+                "/api/v1/demo/query",
+                headers={
+                    "Authorization": f"Bearer {token_approver}",
+                    "X-QueryGate-Approval": token,
+                },
+                json=query,
+            )
+    assert same_resp.status_code == 200
+    assert same_resp.json()["row_count"] == 1

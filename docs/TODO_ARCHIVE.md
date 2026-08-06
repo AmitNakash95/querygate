@@ -10321,6 +10321,210 @@ final tree.
 mandatory review found the AST-layer precondition gap and two further
 leftover sites. **Depends on:** none.
 
+### 151. Bind the in-query approval gate's token to a connection and principal, not just an AST fingerprint ✅ DONE
+
+**Surfaced 2026-08-06 by the `security-invariant-reviewer` audit of items
+19/128.** `execution/approval.py`'s `query_fingerprint`/`write_fingerprint`
+hash the AST alone. An approval token minted for query `Q` on connection
+`staging` verified unchanged for the byte-identical `Q` on connection
+`prod` — a realistic scenario, since staging and prod normally share
+table/column names while only prod carries the catalog `sensitivity: pii`
+labels or the row volumes that trip the gate. A `query:approve` holder who
+reads and approves what they believe is a staging query had, in fact,
+approved it everywhere the same AST is submitted. The MCP MRTR channel
+(item 128's `mcp/elicitation.py`) inherited this unchanged, since it reuses
+`execution/approval.py`'s token verbatim. Separately, neither the REST token
+nor the MRTR pending state was bound to a QueryGate principal at all: a
+`request_state` handed from one agent session to another was honored for the
+second principal's identical tool call.
+
+**Shipped: additive `"cx"`/`"sub_bind"` claims, not a fingerprint-absorbing
+redesign.** `issue_approval_token`/`verify_approval_token`
+(`execution/approval.py`) gained optional `connection_id`/`principal_subject`
+parameters, carried as new `"cx"`/`"sub_bind"` claims in the signed payload
+**alongside** the existing `fp`/`sub`/`exp` — the fingerprint computation
+itself is untouched, and a token minted without the new parameters (the
+pre-item-151 shape) verifies exactly as before, so every already-issued
+token's shape and any doc describing "the fingerprint is a hash of the AST"
+stay stable. `verify_approval_token` only enforces a claim the token actually
+carries: a token minted with `cx`/`sub_bind` is rejected — fail-closed, the
+same posture as a fingerprint mismatch — unless the caller supplies a
+matching value (including when the caller omits it entirely). `"sub_bind"` is
+a field distinct from the pre-existing `"sub"` claim (the approver's subject,
+recorded for audit only, unchanged): reusing `"sub"` for enforcement would
+have collided with MCP's real-grant minting, which writes an audit-distinctive
+`f"mcp-elicitation:{caller.subject}"` into `"sub"` and would break an equality
+check against the raw subject.
+
+**Wired through every issue/verify call site.** `StructuredQueryService.
+_enforce_approval_gate` (`execution/service.py`) and `WriteExecutionService.
+_enforce_write_approval_gate` (`execution/write_execution.py`) pass their own
+`self._connection_id`/`self._principal_subject` into `verify_approval_token` —
+no new parameter threading needed at that layer, since both were already
+instance state. The connection bound is always the query/write's own
+top-level `connection_id`, never a cross-connection join's own `connection`
+(`JoinSpec.connection`) — the same scoping item 130 (not yet implemented on
+this branch) proposes for its own `Mcp-Param-Connection` gateway header, though
+this decision was reached independently of that item. REST's `approve_query`/
+`approve_write` (`api/routes.py`) mint with `connection_id=<path param>`,
+`principal_subject=<the approver's own subject>` — meaning the same principal
+that calls `POST /{connection}/query/approve` must be the one that redeems
+the resulting token via `POST /{connection}/query`; a token handed to a
+different principal to redeem is now rejected. MCP's `build_pending_input_required`/
+`resolve_approval_tokens_from_retry` (`mcp/elicitation.py`) gained `caller`/
+`connection_id` parameters and bind both the pending state and the resulting
+real grant to the *original calling* principal's subject — the principal
+whose tool call tripped the pending elicitation — closing the request_state
+session-handoff gap without changing legitimate usage, since both ends of one
+MRTR round trip necessarily share that principal. `mcp/tools/query.py` and
+`mcp/tools/write.py` thread `caller`/`connection` into both calls.
+
+**Deliberately not wired: MCP's own `RequestStateSecurity(bind_principal=...)`**
+(`mcp/server/request_state.py`, shipped in the v2 SDK). It reads
+`mcp.server.auth.middleware.auth_context.get_access_token()` — the SDK's own
+auth layer — but QueryGate authenticates independently in its own
+`MCPAuthMiddleware` on top of `core/auth.py` and never populates that
+context, so wiring the SDK mechanism would be dead code that appears to
+enforce something it structurally cannot see. The claim-based check above,
+sitting below the transport layer where QueryGate's own `Principal` is
+actually available, is the enforcement point instead. See the Decision Log
+for the full reasoning.
+
+**Post-implementation `auditors` review found two real, additional gaps in
+the same module — both closed in the same commit, not deferred:**
+
+**F1 (Medium): a pending MRTR elicitation token was itself a valid grant.**
+`build_pending_input_required` minted a token carrying a genuine `fp`/`cx`/
+`sub_bind`, but nothing distinguished "this was asked about" from "this was
+approved" — `verify_approval_token` had no way to reject a pending token
+presented directly as `X-QueryGate-Approval` or in a batch's
+`approval_tokens` map, so a principal could pull it straight off
+`request_state` and have it execute without ever answering the elicitation
+prompt or holding `query:approve`. Fixed with a new `"k"` claim
+(`TOKEN_KIND_GRANT`/`TOKEN_KIND_PENDING`): `issue_approval_token(..., kind=)`
+defaults to `"grant"`; the elicitation pending-mint site is the only caller
+that passes `"pending"`; `verify_approval_token(..., expected_kind=)` defaults
+to `"grant"` and rejects any mismatch unconditionally (not just when the
+claim is present, unlike `cx`/`sub_bind`'s opt-in binding). The elicitation
+resolver's own pending-state check now passes `expected_kind=TOKEN_KIND_PENDING`.
+
+**F2 (Low/Medium): `connection_id`/`principal_subject` were optional-with-
+`None`-default, reopenable by a future call site simply forgetting them.**
+Dropped the defaults — both are now required keyword arguments on
+`issue_approval_token`/`verify_approval_token` (`TypeError` if omitted; a
+call site must still explicitly pass `None` to opt out, a deliberate choice
+visible at the call site rather than a silent gap). Also added an
+unconditional `"v"` (format-version) claim, checked at verify time
+regardless of what else the token carries — closes a rolling-deploy race
+where a token minted by a pod running an older build (predating these
+claims entirely) could otherwise be treated as unbound-and-therefore-
+permissive by a newer pod that understands them.
+
+Also fixed from the same review: **F4/citation** — the connection-scoping
+rationale no longer cites `mcp/transport_guard.py`'s `Mcp-Param-Connection`
+check as existing precedent (item 130 proposes it; it is not implemented on
+this branch), stating the actual code fact instead (`self._connection_id` is
+set once in `__init__`; `JoinSpec.connection` is read only locally in schema
+validation). **F5** — `mcp/elicitation.py`'s `_PENDING_SUBJECT` comment
+updated to point at the `"k"` claim as the real enforcement mechanism, not
+the audit-only `"sub"` field. **F6** — every "session" reference in the
+connection/principal-binding docs and code comments corrected to "the
+calling principal's own `Principal.subject`" — `sub_bind` does not
+distinguish two delegated sessions acting for the same human subject, which
+is a real, narrower scope than session-binding, not what the original
+wording implied. **F7** — `approve_query`/`approve_write`'s docstrings
+restated accurately: since only the approving principal can redeem the
+token, the only configuration that can self-approve is one principal
+deliberately granted both `query:approve` and execution scope — a
+deployment choice, not something these endpoints can prevent on their own.
+
+**One finding filed as its own item, not fixed here:** the sensitivity
+trigger (`sensitivity_approval_reasons`) resolves every table against the
+query's single top-level `connection_id`, so a cross-connection join can
+pull in a `pii`-labelled column from the *joined* connection's catalog
+without tripping the gate — real, pre-existing, and out of this item's scope
+(a currently connection-unaware function needs a per-table connection map
+threaded through it). Filed as TODO.md item 155.
+
+A separate `test-contract-reviewer` pass found three test-quality gaps, also
+closed in the same commit: (1) every mint-site test asserted only the
+positive "this token verifies with the right binding" case, which can't
+distinguish a genuinely bound token from an unbound one matching by
+coincidence — added the negative counterpart at each of the four production
+mint call sites; (2) `POST /{connection}/write/approve` had zero test
+coverage of any kind — added
+`test_approve_write_endpoint_issues_verifiable_token`; (3) the security-suite
+tests called `_enforce_approval_gate` directly, bypassing the REST transport/
+auth layer entirely — added
+`test_approve_endpoint_only_the_approving_principal_can_redeem_the_token`, a
+full HTTP round trip using two genuinely distinct JWT principals (API keys
+can't produce two different principals in one `AppConfig`, since
+`ApiKeyAuthenticator` maps every configured key to one shared
+`api_key_subject`) that approves as one principal and asserts a fresh `428`
+when a different principal presents the same token, then success when the
+approving principal redeems it themselves.
+
+**Coverage.** `tests/unit/test_approval.py`: low-level `cx`/`sub_bind`/`k`/`v`
+mismatch/omission round-trips on `issue_approval_token`/`verify_approval_token`
+directly (`test_token_bound_to_a_connection_is_rejected_for_a_different_connection`,
+`test_token_bound_to_a_connection_is_rejected_when_connection_omitted_at_verify`,
+`test_token_bound_to_a_principal_is_rejected_for_a_different_principal`,
+`test_token_bound_to_a_principal_is_rejected_when_principal_omitted_at_verify`,
+`test_unbound_token_verifies_regardless_of_connection_or_principal_supplied`,
+`test_token_bound_to_both_connection_and_principal_requires_both_to_match`,
+`test_pending_kind_token_is_rejected_where_a_grant_is_expected`,
+`test_grant_kind_token_is_rejected_where_a_pending_marker_is_expected`,
+`test_token_missing_the_format_version_claim_is_rejected`); the service-gate
+seam (`test_gate_rejects_a_token_minted_for_a_different_connection`,
+`test_gate_rejects_a_token_minted_for_a_different_principal`); and the REST
+mint paths, both directions
+(`test_approve_endpoint_issues_verifiable_token`,
+`test_approve_write_endpoint_issues_verifiable_token`, both asserting a
+matching-binding pass AND a mismatched-binding fail), plus the full HTTP
+round trip (`test_approve_endpoint_only_the_approving_principal_can_redeem_the_token`).
+`tests/unit/test_write_execution.py`: the write-gate siblings
+(`test_write_approval_gate_rejects_a_token_minted_for_a_different_connection`,
+`test_write_approval_gate_rejects_a_token_minted_for_a_different_principal`).
+`tests/unit/test_mcp_elicitation_approval.py`: every existing
+`build_pending_input_required`/`resolve_approval_tokens_from_retry` call site
+updated to thread `caller`/`connection_id`/`kind`, plus new siblings to the
+existing fingerprint-swap-replay test
+(`test_resolve_rejects_a_request_state_handed_to_a_different_agent_session`,
+`test_resolve_rejects_a_request_state_replayed_against_a_different_connection`,
+`test_pending_token_cannot_be_redeemed_directly_as_a_grant` — F1's dedicated
+regression, feeding a pending token straight into
+`StructuredQueryService._enforce_approval_gate`). `tests/unit/
+test_mcp_write_tool.py`: its own pending-state fixture updated for the new
+`kind` claim. `tests/security/test_adversarial_security.py`: the item's exact
+motivating scenario end to end
+(`test_approval_token_minted_on_a_low_sensitivity_connection_cannot_redeem_on_a_high_one` —
+mints on an unlabelled `staging`-like connection, redeems against a `prod`-like
+connection whose catalog carries a `pii` label on the same query, asserts
+`ApprovalRequiredError`) and the REST-flow principal-swap sibling
+(`test_approval_token_cannot_be_redeemed_by_a_different_principal`).
+
+**Mutation-verified**, on the final tree: the `"k"`-claim check
+(F1) and the `"v"`-claim check (F2) were each independently disabled and
+re-verified to fail exactly the tests naming them
+(`test_pending_kind_token_is_rejected_where_a_grant_is_expected`/
+`test_pending_token_cannot_be_redeemed_directly_as_a_grant`/
+`test_build_pending_shapes_one_input_request_per_item` for `"k"`;
+`test_token_missing_the_format_version_claim_is_rejected` for `"v"`) before
+being restored. The `cx`/`sub_bind` checks were re-verified the same way
+against the FINAL test set (larger than the first pass, after the
+test-contract fixes above): disabling `cx` fails exactly 9 tests, disabling
+`sub_bind` fails exactly 10 — both counts and every failing test name
+confirmed by re-running, not estimated (an earlier draft of this entry stated
+7/6 from a narrower, `-k`-filtered first pass and undercounted by one test
+each; a `claim-reviewer` pass caught the discrepancy before this landed).
+Every mutation restored and the affected files re-verified green (253 tests
+across the seven affected files) before commit. Full unit (2145) + security
+(466) suites green on the final tree.
+
+**Effort:** M, grew during self-review (F1/F2/test-contract fixes) similarly
+to items 148–150's precedent of a mandatory review finding sibling gaps in
+the same module. **Depends on:** 92 (shipped), 128 (shipped).
+
 ### 152. Sales/landing pages don't reflect items 19 (MySQL) / 134 (WORM retention) shipping ✅ DONE
 
 **Surfaced 2026-08-06 by the `claim-reviewer` audit of items 19/128/134/144.**

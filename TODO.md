@@ -181,10 +181,11 @@ order-of-magnitude, not commitments.
 | 148 | ✅ `admin/access_diff.py` never diffs `column_masks` at all | S | — |
 | 149 | ✅ `Policy`'s case-insensitive table-key lookups disagree on `casefold()` vs `lower()` | S–M | — |
 | 150 | ✅ `compiler/sqlalchemy_compiler.py`'s `mandatory_row_filters` matching uses `.lower()` vs `schema_validation.py`'s consistent subsystem | M | — |
-| 151 | Bind the in-query approval gate's token to a connection and principal, not just an AST fingerprint | M | 92, 128 |
+| 151 | ✅ Bind the in-query approval gate's token to a connection and principal, not just an AST fingerprint | M | 92, 128 |
 | 152 | ✅ Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM retention) shipping | S | 19, 134 |
 | 153 | `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention) | S | 19, 134 |
 | 154 | WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate | M | 91, 134 |
+| 155 | `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection | M | 151 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2309,43 +2310,32 @@ from `.lower()` to `.casefold()`, closing the tenant-scoping gap
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 150).
 
-### 151. Bind the in-query approval gate's token to a connection and principal, not just an AST fingerprint
+### 151. Bind the in-query approval gate's token to a connection and principal, not just an AST fingerprint ✅ DONE
 
-**Surfaced 2026-08-06 by the `security-invariant-reviewer` audit of items
-19/128.** `execution/approval.py`'s `query_fingerprint`/`write_fingerprint`
-hash the AST alone. An approval token minted for query `Q` on connection
-`staging` verifies unchanged for the byte-identical `Q` on connection
-`prod` — a realistic scenario, since staging and prod normally share
-table/column names while only prod carries the catalog `sensitivity: pii`
-labels or the row volumes that trip the gate. A `query:approve` holder who
-reads and approves what they believe is a staging query has, in fact,
-approved it everywhere the same AST is submitted. The MCP MRTR channel
-(item 128's `mcp/elicitation.py`) inherits this unchanged, since it reuses
-`execution/approval.py`'s token verbatim.
+`issue_approval_token`/`verify_approval_token` (`execution/approval.py`) gained
+additive `"cx"` (connection id) / `"sub_bind"` (bound principal subject)
+claims — now required keyword arguments, not optional — alongside the
+existing `fp`/`sub`/`exp`, plus an unconditional `"k"` (grant vs. pending)
+and `"v"` (format version) claim, never folded into the fingerprint hash. A
+token minted for connection A or principal X is now rejected (fail-closed)
+when redeemed against a different connection or by a different principal,
+closing the staging/prod cross-connection replay and the MCP MRTR
+request_state session-handoff gap the `security-invariant-reviewer` audit of
+items 19/128 surfaced; a *pending* MRTR elicitation token can no longer be
+redeemed directly as a real grant (the `"k"` claim), and a token predating
+these claims entirely can't be honored as unbound-and-permissive by a newer
+pod mid rolling-deploy (the `"v"` claim) — both closed by the same review's
+own follow-up findings before this landed. Wired through
+`_enforce_approval_gate`/`_enforce_write_approval_gate`, REST's
+`approve_query`/`approve_write`, and MCP's `build_pending_input_required`/
+`resolve_approval_tokens_from_retry`. A related gap — the sensitivity
+trigger resolving every table against the query's top-level connection only,
+missing a joined-in connection's own `pii` labels — was filed separately as
+item 155, not fixed here. See the Decision Log for the binding design
+(additive claims, REST binds to the approving principal, MCP binds to the
+original calling principal, no SDK `RequestStateSecurity` wiring) and why.
 
-Separately, neither the REST token nor the MRTR pending state is bound to a
-QueryGate principal. The `mcp` v2 SDK ships a binding for this
-(`RequestStateSecurity.bind_principal`, `mcp/server/request_state.py`), but
-it reads `mcp.server.auth.middleware.auth_context.get_access_token()`, which
-QueryGate never populates — QueryGate authenticates in its own
-`MCPAuthMiddleware` on top of `core/auth.py`, not the SDK's own auth layer.
-A `request_state` handed from one agent session to another is honored for
-the second principal's identical tool call.
-
-**This is a design change, not a small/safe fix** — it needs a decision on
-where the binding lives (mixed into the signed token payload alongside the
-fingerprint, e.g. new `"cx"`/`"sub_bind"` claims in `issue_approval_token`/
-`verify_approval_token`, threading `connection_id` through
-`execution/service.py`'s `_enforce_approval_gate`,
-`execution/write_execution.py`'s `_enforce_write_approval_gate`, and
-`api/routes.py`'s `approve_query`; and for principal binding, whether to
-wire `RequestStateSecurity(bind_principal=...)` into `mcp/server.py`'s
-`MCPServer` construction using QueryGate's own `Principal.subject`) versus
-whether the fingerprint itself should absorb it — the former keeps existing
-fingerprints stable, the latter is simpler but is a breaking change to every
-already-issued token's shape.
-
-**Effort:** M. **Depends on:** 92 (shipped), 128 (shipped).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 151).
 
 ### 152. Sales/landing pages don't reflect items 19 (MySQL) / 134 (WORM retention) shipping ✅ DONE
 
@@ -2418,4 +2408,38 @@ local reader.
 
 **Effort:** M. **Depends on:** 91 (the local chain this mirrors), 134 (phase
 1's WORM sink, phase 2's search surface).
+
+### 155. `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection
+
+**Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item
+151.** `execution/approval.py`'s `sensitivity_approval_reasons` (the catalog
+`sensitivity: pii` approval trigger, item 92 phase 2) resolves every column it
+walks via `store.get_table(connection_id, physical)` using a single
+`connection_id` argument — the query's own top-level connection. For a
+cross-connection join (`JoinSpec.connection`, gated by policy's `join_group`
+rule and already shipped — see `validation/schema_validation.py`'s
+`resolve_query_table_connections`), a joined table actually lives in a
+*different* connection's catalog. A query joining connection `analytics`'s
+`orders` to connection `crm`'s `customers`, where `customers.email` is
+labelled `pii` only in `crm`'s catalog, never trips the approval gate:
+`store.get_table("analytics", "customers")` looks in the wrong connection's
+catalog, finds no entry, and `sensitivity_approval_reasons` silently treats
+the joined column as unlabelled. This is real and pre-existing (not
+introduced by item 151), and separate in scope from it — item 151 stops an
+*already-minted* token from being redeemed against the wrong connection; this
+item stops the *trigger itself* from being blind to a joined connection's
+labels in the first place, so the gate may never even ask for a token when it
+should.
+
+**What to do (when prioritized):** thread `resolve_query_table_connections`'s
+per-table connection map (already computed during schema validation for
+cross-connection join resolution) into `sensitivity_approval_reasons`, so each
+column's catalog lookup uses the connection the table actually resolved to,
+not the query's single top-level `connection_id`. Needs new test coverage for
+a cross-connection join where the label lives only on the joined side.
+
+**Effort:** M (a currently connection-unaware function needs the per-table
+map threaded through it, plus new join-crossing regression coverage).
+**Depends on:** 151 (shipped — same module), cross-connection joins/
+`join_group` (shipped).
 

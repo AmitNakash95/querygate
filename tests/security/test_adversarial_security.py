@@ -45,6 +45,7 @@ from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import (
     PUBLIC_INTERNAL_ERROR,
+    ApprovalRequiredError,
     CapacityTimeoutError,
     PolicyViolationError,
     QueryValidationError,
@@ -53,6 +54,8 @@ from querygate.core.exceptions import (
 from querygate.execution import concurrency as cc
 from querygate.execution import service as svc
 from querygate.execution.admission import QueueMode
+from querygate.execution.approval import issue_approval_token, query_fingerprint
+from querygate.execution.cost_estimation import QueryCostEstimate
 from querygate.execution.service import StructuredQueryService, _cap_response_bytes
 from querygate.audit.events import normalize_query_shape
 from querygate.mcp.exceptions import _error_code_from_exception
@@ -2587,3 +2590,83 @@ def test_now_is_not_a_channel_for_reading_server_configuration():
                 "select": [{"expr": {"now": "%Y-%m-%d %Z%z"}, "as": "v"}],
             }
         )
+
+
+def test_approval_token_minted_on_a_low_sensitivity_connection_cannot_redeem_on_a_high_one():
+    """TODO.md item 151's exact motivating scenario: `staging` and `prod` share
+    table/column names, but only `prod`'s catalog carries the `sensitivity: pii`
+    label that trips the approval gate. A `query:approve` holder who reads and
+    approves the byte-identical query believing it targets `staging` (unlabelled,
+    never actually gates) must not have thereby approved it against `prod` too —
+    the token's `cx` claim must bind it to the connection it was minted for."""
+    set_catalog_store(
+        CatalogStore.from_dict(
+            {
+                "connections": {
+                    "prod": {
+                        "tables": {
+                            "customers": {
+                                "provenance": {"created_by": "admin"},
+                                "columns": {"email": {"sensitivity": "pii"}},
+                            }
+                        }
+                    }
+                    # `staging` deliberately has no catalog entry at all: the same
+                    # AST never trips the gate there, exactly the asymmetry the
+                    # item describes.
+                }
+            }
+        )
+    )
+    policy = Policy(approval_sensitivities=["pii"])
+    query = StructuredQuery(from_table="customers", select=["customers.email"])
+    fingerprint = query_fingerprint(query)
+
+    # An approver reviews and grants approval believing this is the `staging`
+    # query (mirrors POST /staging/query/approve — bound to staging + the
+    # approver's own principal).
+    approver = Principal(subject="alice-approver")
+    token = issue_approval_token(
+        fingerprint=fingerprint,
+        approver_subject=approver.subject,
+        key="test-hmac-key",
+        connection_id="staging",
+        principal_subject=approver.subject,
+    )
+
+    # The identical query, and the identical token, redeemed against `prod`
+    # instead — by the same principal, so only the connection binding is under
+    # test here. Must stay fail-closed even though the fingerprint matches.
+    prod_service = StructuredQueryService(connection_id="prod", principal=approver)
+    with (
+        patch.object(svc.app_config, "approval_token_hmac_key", "test-hmac-key"),
+        pytest.raises(ApprovalRequiredError),
+    ):
+        prod_service._enforce_approval_gate(None, policy, query, token)
+
+
+def test_approval_token_cannot_be_redeemed_by_a_different_principal():
+    """The REST out-of-band flow's counterpart of the MRTR session-hijack
+    scenario in TODO.md item 151: a token minted for one principal (the
+    approver who called POST /{connection}/query/approve) must not verify for
+    a different principal presenting it, even against the same connection with
+    the byte-identical query — the token's `sub_bind` claim closes this."""
+    query = StructuredQuery(from_table="orders", select=["orders.id"], limit=10)
+    fingerprint = query_fingerprint(query)
+    policy = Policy(approval_max_estimated_rows=100)
+    estimate = QueryCostEstimate(estimated_rows=500, estimated_total_cost=None)
+
+    token = issue_approval_token(
+        fingerprint=fingerprint,
+        approver_subject="approver-alice",
+        key="test-hmac-key",
+        connection_id="demo",
+        principal_subject="approver-alice",
+    )
+
+    with patch.object(svc.app_config, "approval_token_hmac_key", "test-hmac-key"):
+        other_service = StructuredQueryService(
+            connection_id="demo", principal=Principal(subject="bob-different-agent")
+        )
+        with pytest.raises(ApprovalRequiredError):
+            other_service._enforce_approval_gate(estimate, policy, query, token)
