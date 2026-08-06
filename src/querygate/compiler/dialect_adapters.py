@@ -1004,10 +1004,211 @@ class MySQLDialectAdapter(DialectAdapter):
         return sa.func.sha2(sa.cast(col_expr, sa.Text), 256)
 
 
+_SNOWFLAKE_EXTRACT_FIELDS: Dict[str, str] = {
+    "year": "year",
+    "quarter": "quarter",
+    "month": "month",
+    "day": "day",
+    "dayofyear": "dayofyear",
+    "hour": "hour",
+    "minute": "minute",
+    "second": "second",
+    # `week`/`dayofweek` are absent deliberately — both need the ISO-fixed
+    # function form, not a DATE_PART keyword; see extract_part below.
+}
+
+# DATEADD's unit keyword per IntervalUnit — exhaustive for the same reason
+# every other per-dialect unit map in this module is.
+_SNOWFLAKE_DATEADD_UNITS: Dict[str, str] = {
+    "year": "year",
+    "month": "month",
+    "week": "week",
+    "day": "day",
+    "hour": "hour",
+    "minute": "minute",
+    "second": "second",
+}
+
+
+class SnowflakeDialectAdapter(DialectAdapter):
+    """TODO.md item 19 phase 2 — rendering-level only, NOT live-verified
+    against a real Snowflake account (no Snowflake instance is available in
+    this sandboxed/CI environment, unlike Postgres/MySQL/MSSQL which run in
+    Docker). Every idiom below is backed by Snowflake's public SQL reference
+    docs and, where noted, checked by rendering the expression against a real
+    `snowflake.sqlalchemy` dialect object (the package IS installed — see
+    pyproject.toml — so this is at least "renders against the real compiler",
+    just never executed against a live server). See TODO.md's Snowflake
+    live-verification follow-up item for what closing that gap requires.
+    """
+
+    def date_bucket(self, col: Any, granularity: str) -> Any:
+        # Snowflake's DATE_TRUNC covers day/month/quarter/year directly and
+        # is session-independent for these — only its 'week' granularity is
+        # governed by the WEEK_START session parameter (Snowflake docs), so
+        # 'week' is computed explicitly below instead of trusting session
+        # config QueryGate doesn't control here (register_query_timeout/
+        # apply_session_guardrails cannot run for Snowflake in this phase —
+        # see connections/engine.py's init_engine guard).
+        if granularity in ("day", "month", "quarter", "year"):
+            return sa.func.date_trunc(granularity, col)
+        if granularity == "week":
+            # DAYOFWEEKISO is fixed ISO (1=Monday..7=Sunday) regardless of
+            # session parameters, unlike WEEK/WEEKOFYEAR — the same
+            # session-independence reasoning as extract_part's dayofweek
+            # below. Step back to the Monday of the current ISO week, then
+            # truncate to midnight the same way the other granularities do.
+            monday = sa.func.dateadd(
+                sa.literal_column("day"),
+                -(sa.func.dayofweekiso(col) - 1),
+                col,
+            )
+            return sa.func.date_trunc("day", monday)
+        raise QueryValidationError(f"Unsupported date_bucket granularity: {granularity!r}")
+
+    def order_by_terms(
+        self,
+        col_expr: Any,
+        direction: Literal["asc", "desc"],
+        nulls: Optional[Literal["first", "last"]],
+    ) -> List[Any]:
+        # Snowflake supports NULLS FIRST/LAST natively (verified: Snowflake's
+        # ORDER BY reference documents it, and it was rendered against the
+        # real snowflake.sqlalchemy dialect object during development of
+        # this adapter) — the Postgres/SQLite shape, not MSSQL/MySQL's gap.
+        expr = _direction_expr(col_expr, direction)
+        if nulls is None:
+            return [expr]
+        return [expr.nulls_first() if nulls == "first" else expr.nulls_last()]
+
+    def stat_fn(self, name: Literal["stddev", "variance"]) -> Callable[..., Any]:
+        # Unlike MySQL's bare STDDEV()/VARIANCE() (population statistic),
+        # Snowflake's bare STDDEV is documented as an alias for STDDEV_SAMP
+        # and bare VARIANCE as an alias for VAR_SAMP — the sample statistic,
+        # matching Postgres's/MSSQL's semantics exactly. Same names as
+        # Postgres, no _SAMP suffix needed.
+        return {"stddev": sa.func.stddev, "variance": sa.func.variance}[name]
+
+    def string_agg(self, col_expr: Any, delimiter: str) -> Any:
+        # LISTAGG(expr, delimiter) — the identical 2-argument comma shape as
+        # Postgres's string_agg, unlike MySQL's SEPARATOR-keyword form.
+        return sa.func.listagg(col_expr, delimiter)
+
+    def array_agg(self, col_expr: Any) -> Any:
+        # Unlike MySQL's/SQLite's JSON-string-returning array functions,
+        # Snowflake's ARRAY_AGG returns a genuine native ARRAY type — a real
+        # equivalent, not a forced-parity emulation.
+        return sa.func.array_agg(col_expr)
+
+    def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
+        # PERCENTILE_CONT(fraction) WITHIN GROUP (ORDER BY expr) works as a
+        # plain GROUP BY aggregate on Snowflake — the OVER(...) clause is
+        # optional, only needed for the window-function form — so this is
+        # the same shape as Postgres's, unlike MSSQL's analytic-only gap.
+        return sa.within_group(sa.func.percentile_cont(fraction), col_expr)
+
+    def scalar_function(self, name: str, args: List[Any]) -> Any:
+        if name == "ceil":
+            return sa.func.ceil(args[0])
+        if name == "length":
+            return sa.func.length(args[0])
+        if name == "substring":
+            # Snowflake's SUBSTRING/SUBSTR accepts the plain comma form
+            # SUBSTRING(base, start, len), the same shape MSSQL/MySQL use.
+            return sa.func.substring(*args)
+        if name == "round":
+            # ROUND(x, [scale]) works natively for any numeric type on
+            # Snowflake (including FLOAT) — no Postgres-style numeric-cast
+            # trap.
+            return sa.func.round(args[0], args[1]) if len(args) == 2 else sa.func.round(args[0])
+        raise QueryValidationError(f"Unsupported scalar function {name!r} on Snowflake")
+
+    def window_frame(
+        self, mode: Literal["rows", "range"], start: Optional[int], end: Optional[int]
+    ) -> Dict[str, Any]:
+        # Snowflake supports the full ROWS/RANGE frame grammar, including a
+        # numeric RANGE offset (RANGE BETWEEN <n> PRECEDING/FOLLOWING reached
+        # General Availability 2024-08-08 per Snowflake's release notes) —
+        # verified by rendering, not live execution; an account still on an
+        # older Snowflake release could genuinely lack it, which no
+        # rendering-only test can catch (the honest limitation this whole
+        # adapter carries).
+        return _frame_kwargs(mode, start, end)
+
+    def set_operation(self, op: str, all_rows: bool, selects: List[Any]) -> Any:
+        # Snowflake's INTERSECT and EXCEPT/MINUS are distinct-only — no ALL
+        # form of either — the same gap as MSSQL/MySQL. UNION ALL is fully
+        # supported.
+        if all_rows and op != "union":
+            raise _no_all_variant(op, "Snowflake")
+        return _compound(op, all_rows, selects)
+
+    def extract_part(self, part: str, expr: Any) -> Any:
+        if part == "dayofweek":
+            # Snowflake's plain DAYOFWEEK is governed by the WEEK_START
+            # session parameter (Snowflake docs) — a live server-config
+            # dependency QueryGate cannot pin for Snowflake in this phase
+            # (see date_bucket's 'week' comment above for why). DAYOFWEEKISO
+            # is fixed ISO numbering (1=Monday..7=Sunday) regardless of
+            # session parameters; `% 7` maps it onto the contract this
+            # primitive publishes (0=Sunday..6=Saturday): Monday 1->1 ...
+            # Saturday 6->6, Sunday 7->0 — the identical numbering
+            # Postgres's `dow` and MySQL's `DAYOFWEEK() - 1` return.
+            return sa.func.dayofweekiso(expr) % 7
+        if part == "week":
+            # WEEKISO, not WEEK: WEEK is WEEK_START-session-dependent (see
+            # date_bucket above); WEEKISO always returns the ISO-8601 week
+            # number regardless of session config, the same contract
+            # Postgres's plain `week`/MSSQL's `iso_week` publish.
+            return sa.func.weekiso(expr)
+        field = _SNOWFLAKE_EXTRACT_FIELDS.get(part)
+        if field is None:
+            raise _missing_part(part, "Snowflake")
+        # Snowflake's EXTRACT(part FROM expr) is documented as an alias for
+        # DATE_PART and returns a plain integer already for every field in
+        # this map — no Postgres-style numeric-cast/floor needed.
+        return sa.extract(field, expr)
+
+    def current_timestamp(self, kind: Literal["timestamp", "date"]) -> Any:
+        # SYSDATE(), not CURRENT_TIMESTAMP()/CURRENT_TIMESTAMP: those return
+        # TIMESTAMP_LTZ in the SESSION's time zone (Snowflake docs).
+        # SYSDATE() always returns the current time in UTC as TIMESTAMP_NTZ —
+        # the same UTC-always posture as MSSQL's SYSUTCDATETIME()/MySQL's
+        # UTC_TIMESTAMP(), and here it's load-bearing in a way it isn't for
+        # Postgres: there is no session guardrail step that can run for
+        # Snowflake in this phase to pin a session time zone even if one
+        # existed.
+        if kind == "date":
+            return sa.cast(sa.func.sysdate(), sa.Date)
+        return sa.func.sysdate()
+
+    def date_add(self, expr: Any, unit: str, amount: int) -> Any:
+        # DATEADD(unit, amount, expr) takes the unit as a keyword, the same
+        # shape as MSSQL's DATEADD — the keyword comes from an exhaustive
+        # map, never caller text; only `amount` is caller-supplied, and it
+        # binds as a real parameter.
+        keyword = _SNOWFLAKE_DATEADD_UNITS.get(unit)
+        if keyword is None:
+            raise _missing_unit(unit, "Snowflake")
+        return sa.func.dateadd(sa.literal_column(keyword), sa.literal(amount), expr)
+
+    def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
+        if mask.kind is ColumnMaskKind.NULL:
+            return sa.null()
+        if mask.kind is ColumnMaskKind.BUCKET:
+            return _bucket_mask(col_expr, mask)
+        if mask.kind is ColumnMaskKind.LAST:
+            return sa.func.right(sa.cast(col_expr, sa.Text), mask.length)
+        # HASH — SHA2 requires an explicit bit length; 256 matches the
+        # Postgres/MySQL adapters' choice of a SHA-256-class digest.
+        return sa.func.sha2(sa.cast(col_expr, sa.Text), 256)
+
+
 _ADAPTERS: Dict[str, DialectAdapter] = {
     DatabaseDialect.POSTGRESQL: PostgresDialectAdapter(),
     DatabaseDialect.MSSQL: MSSQLDialectAdapter(),
     DatabaseDialect.MYSQL: MySQLDialectAdapter(),
+    DatabaseDialect.SNOWFLAKE: SnowflakeDialectAdapter(),
 }
 _FALLBACK = SQLiteDialectAdapter()
 

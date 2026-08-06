@@ -141,12 +141,13 @@ _UPSERT_COMPILERS = {
 
 # Per-dialect rejection messages for a dialect with no factory above — a
 # gap-message registry, not an inline `if dialect == ...` at the call site
-# (composable-interface doctrine). Only MySQL needs a message distinct from
-# the generic one below: it genuinely has an upsert idiom (INSERT ... ON
-# DUPLICATE KEY UPDATE), so "it has no ON CONFLICT clause" would be
-# factually wrong for it. The actual gap: ON DUPLICATE KEY UPDATE fires on a
-# collision with ANY unique/PK constraint on the table, with no way to name
-# a specific target the way conflict_columns declares one — so accepting it
+# (composable-interface doctrine). MySQL and Snowflake each need a message
+# distinct from the generic one below: both genuinely have an upsert idiom
+# (MySQL's INSERT ... ON DUPLICATE KEY UPDATE, Snowflake's MERGE), so "it has
+# no ON CONFLICT clause" would be factually wrong for either. MySQL's actual
+# gap: ON DUPLICATE KEY UPDATE fires on a collision with ANY unique/PK
+# constraint on the table, with no way to name a specific target the way
+# conflict_columns declares one — so accepting it
 # would silently misrepresent which constraint triggered the update whenever
 # a table has more than one unique key. Reject rather than emulate, per item
 # 74's doctrine. A dialect absent from both this dict and _UPSERT_COMPILERS
@@ -160,6 +161,17 @@ _UPSERT_UNSUPPORTED_MESSAGES = {
         "silently misrepresent which constraint triggered the update. "
         "Use a separate governed update then insert, or preview which "
         "rows exist first."
+    ),
+    "snowflake": (
+        "upsert is not supported on Snowflake: its upsert idiom is MERGE, a "
+        "multi-clause statement (MERGE INTO ... USING ... ON ... WHEN "
+        "MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...) with no "
+        "single-target-constraint model the way conflict_columns/"
+        "update_columns express one — synthesizing a MERGE from those two "
+        "fields would be the engine inventing statement structure the AST "
+        "never asked for, not a mechanical translation of it. Use a "
+        "separate governed update then insert, or preview which rows exist "
+        "first."
     ),
 }
 

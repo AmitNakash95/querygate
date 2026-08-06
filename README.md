@@ -1909,7 +1909,21 @@ MSSQL support (including the query-execution-timeout guardrail), MySQL
 support (item 19 phase 1), and the Postgres statement-timeout guardrail are
 all verified against real servers, not just unit-tested SQL text — see
 `tests/integration/test_mssql_live.py`, `tests/integration/test_mysql_live.py`,
-and `tests/integration/test_postgres_timeout.py`. The real-Postgres load/soak
+and `tests/integration/test_postgres_timeout.py`. **Snowflake support (item 19
+phase 2) is compiler/rendering-level only and is NOT live-verified**: the
+`DialectAdapter` is unit-tested by compiling its output against a real
+`snowflake.sqlalchemy` dialect object; the `SessionDialectAdapter` is
+unit-tested against recording fakes that assert the exact SQL text/params it
+builds, not against that real dialect object (its statements are built
+directly with `sa.text(...)` rather than compiled expressions). Neither is
+tested against a live Snowflake instance — there is none available in this
+project's environment (a proprietary cloud service, unlike Postgres/MySQL/MSSQL
+which run in Docker), and
+`snowflake-sqlalchemy`'s driver has no async SQLAlchemy engine support, so
+`connections/engine.py` refuses to actually open a Snowflake connection today
+— registering one fails with a clear, explained error rather than connecting.
+Do not treat Snowflake as production-ready the way the other three dialects
+are; see TODO.md item 19's Snowflake live-verification follow-up. The real-Postgres load/soak
 harness also proves the observed database concurrency cap, overflow rejection,
 queued completion, timeout cancellation, `queue_mode=fail_fast` never
 waiting, and a caller-shortened `wait_timeout_seconds` being honored under

@@ -205,6 +205,13 @@ def test_upsert_compiles_on_conflict_for_postgres_and_rejects_mssql():
     with pytest.raises(QueryValidationError, match="ON DUPLICATE KEY UPDATE"):
         compile_write(stmt, table, "mysql")
 
+    # Snowflake has a real upsert idiom (MERGE), but it's a multi-clause
+    # statement with no single-target-constraint model the way
+    # conflict_columns/update_columns express one — reject rather than
+    # synthesize a MERGE the AST never asked for (TODO.md item 19 phase 2).
+    with pytest.raises(QueryValidationError, match="MERGE"):
+        compile_write(stmt, table, "snowflake")
+
 
 def test_upsert_statement_rejects_update_column_that_is_a_conflict_column():
     from querygate.write_ast.models import UpsertStatement

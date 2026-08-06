@@ -255,13 +255,17 @@ result size even if the caller asked for something larger.
 **Dialect-specific logic lives behind one interface.**
 (`compiler/dialect_adapters.py`, TODO.md item 73, a compiler-scoped slice
 of item 57's "pluggable dialect adapter" plan.) QueryGate supports Postgres,
-MSSQL, and MySQL (item 19 phase 1; SQLite is used only internally, for
-tests/examples — see `connections/models.py`'s `DatabaseDialect`). Almost
-the entire compiler is
+MSSQL, and MySQL in production, live-verified (item 19 phase 1), plus
+Snowflake at a rendering/compilation-only level that is **not** live-verified
+(item 19 phase 2 — see the "What databases does it support?" FAQ entry above
+and the 2026-08-06 Decision Log entry for the honest caveat; SQLite is used
+only internally, for tests/examples — see `connections/models.py`'s
+`DatabaseDialect`). Almost the entire compiler is
 dialect-agnostic SQLAlchemy Core; the things that genuinely differ per
 database are each one method on a small `DialectAdapter` interface, with
 one concrete adapter class per dialect (`PostgresDialectAdapter`,
-`MSSQLDialectAdapter`, `SQLiteDialectAdapter`) rather than an `if dialect
+`MSSQLDialectAdapter`, `MySQLDialectAdapter`, `SnowflakeDialectAdapter`,
+`SQLiteDialectAdapter`) rather than an `if dialect
 == ...` branch scattered at each call site. Today that's date bucketing
 (`date_bucket`) — a day/week/month/quarter/year truncation: Postgres has a
 native `date_trunc()` that handles every granularity directly, MSSQL has
@@ -3428,9 +3432,21 @@ only used in a `where` clause, not just in `select`. See
 [Core Request Pipeline](#the-core-request-pipeline).
 
 **"What databases does it support?"**
-Postgres, MSSQL, and MySQL in production (item 19 phase 1). SQLite is used
-only internally for tests and examples — it's never a supported registry
-dialect for a real deployment. See [Core Request Pipeline](#the-core-request-pipeline).
+Postgres, MSSQL, and MySQL in production, verified against real servers
+(item 19 phase 1). Snowflake (item 19 phase 2) has a real `DialectAdapter`
+(compiling its output against a real, installed `snowflake.sqlalchemy`
+dialect object) and a `SessionDialectAdapter` (tested against recording
+fakes that assert the exact SQL it builds, not the real dialect compiler —
+its statements are built directly with `sa.text(...)`), but is **not**
+production-ready the same way: there is no Snowflake instance to test
+against in this project's environment, and `snowflake-sqlalchemy`'s driver
+has no async SQLAlchemy
+engine support, so `connections/engine.py` deliberately refuses to open a
+live Snowflake connection today rather than connecting unverified — see the
+Decision Log entry below and TODO.md item 19's live-verification follow-up.
+BigQuery remains unimplemented. SQLite is used only internally for tests and
+examples — it's never a supported registry dialect for a real deployment.
+See [Core Request Pipeline](#the-core-request-pipeline).
 
 **"How does an agent connect — does it need a special client?"**
 Two transports, both backed by the exact same validation/execution pipeline
@@ -3514,6 +3530,67 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-08-06 — Snowflake ships as a rendering-level-only phase 1 (TODO.md
+  item 19 phase 2); `connections/engine.py` refuses to actually open a
+  Snowflake connection.** `DatabaseDialect` gained a `snowflake` member with a
+  real `SnowflakeDialectAdapter` (`compiler/dialect_adapters.py`) and
+  `SnowflakeSessionAdapter` (`connections/dialects.py`), covering the same
+  primitive surface the other three dialects do — date bucketing/EXTRACT
+  (`DATE_TRUNC`, with `week` computed explicitly via `DAYOFWEEKISO` rather
+  than trusting the `WEEK_START`-session-dependent `DATE_TRUNC('week', ...)`),
+  native `NULLS FIRST/LAST` (unlike MSSQL/MySQL, Snowflake has it), sample-
+  statistic `STDDEV`/`VARIANCE` (matching Postgres, unlike MySQL's population-
+  default bare names), `LISTAGG`, a genuine `ARRAY_AGG` (real native ARRAY
+  type), `PERCENTILE_CONT ... WITHIN GROUP` as a plain aggregate (Snowflake's
+  `OVER(...)` is optional, unlike MSSQL's analytic-only restriction), full
+  ROWS/RANGE window frames, and distinct-only `INTERSECT`/`EXCEPT` (rejected
+  with `ALL`, the MSSQL/MySQL posture). Upsert is rejected, not emulated:
+  Snowflake's idiom is `MERGE`, a multi-clause statement with no single-
+  target-constraint model the way `conflict_columns`/`update_columns`
+  express one — synthesizing a `MERGE` from those two fields would be the
+  engine inventing statement structure the AST never asked for, the same
+  reject-don't-emulate posture as MySQL's `ON DUPLICATE KEY UPDATE` gap.
+
+  **The deliberate exception to "add a dialect, register it, done": engine
+  wiring stops short of a live connection.** `snowflake-sqlalchemy`'s DBAPI
+  has no async SQLAlchemy engine support (confirmed directly:
+  `create_async_engine("snowflake://...")` raises `sqlalchemy.exc.
+  InvalidRequestError: The asyncio extension requires an async driver to be
+  used. The loaded 'snowflake' is not async.`), and this codebase's entire
+  session/execution pipeline is built on `AsyncSession`/`AsyncEngine`
+  throughout (`execution/service.py`, `schema/reflection.py`,
+  `execution/cost_estimation.py`, ...) — there is no small patch for that.
+  Rather than let a Snowflake `ConnectionProfile` reach `create_async_engine`
+  and fail with a confusing library-internal error, `connections/engine.py`'s
+  `init_engine` checks for `DatabaseDialect.SNOWFLAKE` first and raises a
+  clear, explained `ValueError` naming the gap. This also means none of
+  `SnowflakeSessionAdapter`'s session-guardrail/cancel methods are reachable
+  in production yet — they're implemented for real, against Snowflake's
+  public SQL reference (`ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS`/
+  `LOCK_TIMEOUT`, `SYSTEM$CANCEL_ALL_QUERIES`), so the shape is reviewed and
+  ready, not invented later, but unverified against a live session.
+
+  **Nothing here is live-verified, unlike MySQL's item-19-phase-1 precedent.**
+  There is no Snowflake instance available in this project's environment (a
+  proprietary cloud service, unlike Postgres/MySQL/MSSQL, which run in
+  Docker) and no real account credentials — every Snowflake claim in this
+  change is backed by Snowflake's public SQL documentation, and the two
+  adapters are tested two different ways (2026-08-06 `claim-reviewer`
+  finding — an earlier draft of this entry described both as tested "against
+  a real, installed `snowflake.sqlalchemy` dialect object," which is true
+  only for one of them): `SnowflakeDialectAdapter`'s output is compiled
+  against that real, installed dialect object
+  (`tests/unit/test_dialect_adapters.py`'s `TestSnowflake*` classes);
+  `SnowflakeSessionAdapter` is tested against recording fakes that assert
+  the exact SQL text/params it builds (`tests/unit/test_dialects.py`'s
+  Snowflake session-adapter section), not compiled through any dialect
+  object, since its statements are built directly with `sa.text(...)`
+  rather than as SQLAlchemy Core expressions. Neither path is ever run
+  against a live server. Treat every Snowflake behavior claim in this
+  codebase as "renders/compiles as documented", not "confirmed correct
+  against a real account", until the live-verification follow-up item
+  ships. BigQuery remains unimplemented.
 
 - **2026-08-06 — the catalog sensitivity-label approval trigger consults both
   a joined table's own connection AND the query's top-level connection, not

@@ -95,6 +95,22 @@ All notable changes to QueryGate are documented here.
   explanatory error rather than silently ignoring the requested columns.
   Snowflake/BigQuery and a MySQL query-cost estimator remain open follow-on
   work.
+- **Snowflake as a connection dialect — rendering/compilation only, NOT
+  live-verified** (TODO.md item 19 phase 2). A real `DialectAdapter`/
+  `SessionDialectAdapter` cover the same primitive surface Postgres/MSSQL/
+  MySQL do (date bucketing, native `NULLS FIRST/LAST`, statistical
+  aggregates, `LISTAGG`, a genuine `ARRAY_AGG`, `PERCENTILE_CONT`, window
+  frames, set operations), backed by Snowflake's public SQL docs and checked
+  against a real installed `snowflake.sqlalchemy` dialect object — but there
+  is no Snowflake instance or account available to this project to actually
+  connect to, and `snowflake-sqlalchemy`'s driver has no async SQLAlchemy
+  engine support, so QueryGate deliberately refuses to open a live Snowflake
+  connection today (a clear, explained error, not a silent failure or a
+  confusing library-internal one). **Do not treat this the way MySQL's
+  live-tested phase 1 is treated** — see TODO.md item 19 and its item 157
+  live-verification follow-up before relying on it for a real deployment.
+  Upsert (`MERGE`) is rejected rather than emulated, the same
+  reject-don't-emulate posture as MySQL's `ON DUPLICATE KEY UPDATE` gap.
 - **Compliance-grade WORM (write-once-read-many) audit archival, with
   managed search over it** (TODO.md item 134, both phases). A new opt-in
   audit sink backend (`AUDIT_SINK_BACKEND=jsonl_chained_s3_worm`) composes

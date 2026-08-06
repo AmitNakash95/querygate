@@ -30,11 +30,22 @@ class DatabaseDialect(StrEnum):
     `execution/service.py`'s `dialect` (derived from the live SQLAlchemy
     engine, not `ConnectionProfile.dialect`) for where that string can still
     legitimately be `"sqlite"` and stays a plain `str`.
+
+    `SNOWFLAKE` (TODO.md item 19 phase 2) is accepted here and has a real
+    `SnowflakeDialectAdapter`/`SnowflakeSessionAdapter`, but — unlike the other
+    three members — `connections/engine.py`'s `init_engine` refuses to actually
+    open a connection for it: `snowflake-sqlalchemy`'s DBAPI has no async
+    driver, so `create_async_engine` cannot be used the way it is for every
+    other dialect here. This member exists so the compiler/session adapters
+    can be built and rendering-tested now; see `init_engine`'s docstring and
+    TODO.md item 19 for the live-async-execution gap that blocks actually
+    running a query against Snowflake.
     """
 
     POSTGRESQL = "postgresql"
     MSSQL = "mssql"
     MYSQL = "mysql"
+    SNOWFLAKE = "snowflake"
 
 
 _VALID_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]*$")
