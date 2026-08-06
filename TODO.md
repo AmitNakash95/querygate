@@ -182,7 +182,8 @@ order-of-magnitude, not commitments.
 | 149 | ✅ `Policy`'s case-insensitive table-key lookups disagree on `casefold()` vs `lower()` | S–M | — |
 | 150 | ✅ `compiler/sqlalchemy_compiler.py`'s `mandatory_row_filters` matching uses `.lower()` vs `schema_validation.py`'s consistent subsystem | M | — |
 | 151 | Bind the in-query approval gate's token to a connection and principal, not just an AST fingerprint | M | 92, 128 |
-| 152 | Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM retention) shipping | S | 19, 134 |
+| 152 | ✅ Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM retention) shipping | S | 19, 134 |
+| 153 | `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention) | S | 19, 134 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2455,21 +2456,33 @@ already-issued token's shape.
 
 **Effort:** M. **Depends on:** 92 (shipped), 128 (shipped).
 
-### 152. Sales/landing pages don't reflect items 19 (MySQL) / 134 (WORM retention) shipping
+### 152. Sales/landing pages don't reflect items 19 (MySQL) / 134 (WORM retention) shipping ✅ DONE
 
-**Surfaced 2026-08-06 by the `claim-reviewer` audit of items 19/128/134/144.**
-`sales/index.html`'s "Do not claim yet" list still names compliance-grade
-WORM audit retention and "additional database dialects beyond Postgres/
-MSSQL" as not-yet-available, and `landing/security.html` still asserts the
-audit sink "is not WORM storage and does not provide built-in retention,
-managed search" and lists only Postgres/SQL Server as supported dialects —
-both now false as of items 19 phase 1 and 134 phase 1.
-`docs/business/GO_TO_MARKET.md` (the source-of-truth "safe to claim now"
-list) was updated correctly in the same commits; the public-facing pages
-were not. Run the `pitch-sync` skill to reconcile `sales/index.html` and
-`landing/security.html`'s claim lists (and `landing/index.html`'s dialect
-mentions) against `GO_TO_MARKET.md`'s current framing — including the WORM
-fail-open/no-managed-search caveat, not just the bare capability claim.
+Reconciled `sales/index.html`, `landing/security.html`, `landing/index.html`,
+`landing/sandbox.html`, `README.md`, and `docs/business/GO_TO_MARKET.md`'s
+dialect and WORM-retention claims against what items 19/134 phase 1 actually
+shipped (MySQL support; S3 Object Lock WORM retention with the phase-2
+managed-search caveat kept explicit). **Full write-up:**
+[docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 152).
+
+### 153. `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention)
+
+**Surfaced 2026-08-06 by `claim-reviewer` while auditing item 152's
+landing/sales-copy reconciliation.** Both items shipped real, upgrade-relevant
+capability (a third registry dialect; an opt-in compliance-grade audit
+archival backend) but neither has an `[Unreleased]` entry in `CHANGELOG.md`,
+unlike every other item of comparable weight (e.g. items 35 phase 3, 102,
+136). This is a documentation gap, not a claim-accuracy defect — item 152
+itself was scoped to landing/sales copy and README, not the changelog, so this
+was deliberately left for its own item rather than folded in.
+
+**What to do (when prioritized):** run the `release-notes` skill (or write by
+hand, matching the file's existing entry format/depth) to add `[Unreleased]`
+entries for items 19 and 134 phase 1, including upgrade impact — MySQL is
+purely additive (no existing dialect's behavior changes), while the WORM
+backend is opt-in via `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm` (no impact
+for a deployment that doesn't set it) but should document the fail-open
+buffering caveat for anyone who does.
 
 **Effort:** S. **Depends on:** 19 (phase 1 shipped), 134 (phase 1 shipped).
 

@@ -23,8 +23,8 @@ Please include:
 - A description of the issue and the impact you believe it has.
 - Steps to reproduce (a minimal `StructuredQuery` AST, request, or config that
   triggers it is ideal).
-- The QueryGate version / image digest, dialect (Postgres or MSSQL), and any
-  relevant policy configuration.
+- The QueryGate version / image digest, dialect (Postgres, MSSQL, or MySQL),
+  and any relevant policy configuration.
 
 ### What to expect
 

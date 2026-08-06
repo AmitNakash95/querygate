@@ -3,8 +3,8 @@
 </p>
 
 **QueryGate is an agent-safe database access gateway.** It lets you expose a
-Postgres or MSSQL database to AI agents over MCP and REST — without ever
-letting them run raw SQL.
+Postgres, MSSQL, or MySQL database to AI agents over MCP and REST — without
+ever letting them run raw SQL.
 
 > **QueryGate runs inside your infrastructure.** It dynamically discovers
 > your schema, exposes policy-controlled MCP and REST tools, limits query
