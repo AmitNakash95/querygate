@@ -340,13 +340,27 @@ claim when the work ships or before explicitly handing the item back.
   item 151 — real and pre-existing, but a separate, non-trivial fix (needs
   `resolve_query_table_connections`'s per-table connection map threaded into
   the sensitivity check); deliberately left out of item 151's own scope.*
-- [ ] **156** — a cross-connection join's joined table is governed only by
+- [x] **156** — a cross-connection join's joined table is governed only by
   the primary connection's `Policy` — masks/mandatory row filters/deny-lists
   never apply from the joined connection's own `Policy`. *Surfaced 2026-08-06
   by `security-invariant-reviewer` while auditing item 155 — pre-existing,
-  needs an explicit decision (document `join_group` as a mutual-trust
-  boundary, or extend per-connection resolution from the catalog lookup to
-  policy enforcement too).*
+  fixed by threading a reflection-free sibling of item 155's per-scope
+  connection map through policy validation and compilation, unioned (never
+  replaced) with the primary connection's Policy.*
+- [ ] **157** — cross-connection schema reflection can pick the wrong
+  connection when a join's alias casing differs from a column ref's casing
+  (a hash-order-dependent bug in the raw, case-sensitive `table_connection`
+  lookup). *Surfaced 2026-08-06 by `security-invariant-reviewer` while
+  auditing item 156 — pre-existing and unrelated to that item's own change;
+  small, mechanical fix (case-fold the lookup, mirroring `resolve_scope_
+  connections`).*
+- [ ] **158** — item 156 follow-up: harden four smaller connection-resolution
+  edge cases (audit-vs-compiled-SQL snapshot consistency under a concurrent
+  reload, a cap-ordering inversion, a fail-open-by-default parameter shape,
+  and a purpose/k-anonymity/limit scope clarification). *Surfaced 2026-08-06
+  by `security-invariant-reviewer` while auditing item 156 itself — none is a
+  live bypass; grouped since a real fix to any one likely touches the same
+  call sites as the others.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 

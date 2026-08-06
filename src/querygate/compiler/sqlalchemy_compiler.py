@@ -8,7 +8,7 @@ known to exist and be policy-permitted.
 from __future__ import annotations
 
 import operator
-from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple, get_args
+from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Set, Tuple, get_args
 
 import sqlalchemy as sa
 
@@ -49,10 +49,12 @@ from querygate.query_ast.models import (
     _AGGREGATE_SELECT_ITEM_TYPES,
 )
 from querygate.validation.schema_validation import (
+    ConnectionResolver,
     effective_name_map,
     iter_set_op_arms,
     parse_column_ref,
     resolve_column,
+    resolve_table_policies,
 )
 
 _AGG_FNS = {
@@ -341,6 +343,17 @@ class _WhereCtx(NamedTuple):
     # WHERE-only rule. HAVING now needs a ctx, so the backstop is expressed as this
     # flag instead of being lost — policy validation is still the primary check.
     allow_value_set_subquery: bool = True
+    # Item 156 — carried so a nested value_subquery/exists_subquery compiles
+    # through the identical connection-aware path `_compile_scope_body` uses,
+    # rather than one recursive call site silently dropping the map. A nested
+    # scope can never itself cross-connection join (`_reject_cross_connection_
+    # nesting` in schema validation), so these are always a no-op in practice —
+    # kept for the same reason `cte_objects` is threaded everywhere rather than
+    # only where it currently matters: a second compile path where a map can be
+    # forgotten is exactly the drift class this item exists to close.
+    connection_id: Optional[str] = None
+    scope_connections: Optional[Dict[int, Dict[str, str]]] = None
+    connection_resolver: Optional[ConnectionResolver] = None
 
 
 # The scalar comparison operators, as callables, so the scalar-subquery branch
@@ -378,6 +391,9 @@ def _compile_in_subquery(pred: Predicate, ctx: Optional["_WhereCtx"]) -> sa.Sele
         principal=ctx.principal,
         subquery_tables=ctx.subquery_tables,
         cte_objects=ctx.cte_objects,
+        connection_id=ctx.connection_id,
+        scope_connections=ctx.scope_connections,
+        connection_resolver=ctx.connection_resolver,
     )
     return stmt.limit(None)
 
@@ -406,6 +422,9 @@ def _compile_exists(pred: Predicate, ctx: Optional["_WhereCtx"]) -> Any:
         principal=ctx.principal,
         subquery_tables=ctx.subquery_tables,
         cte_objects=ctx.cte_objects,
+        connection_id=ctx.connection_id,
+        scope_connections=ctx.scope_connections,
+        connection_resolver=ctx.connection_resolver,
     )
     exists_clause = stmt.limit(None).exists()
     return ~exists_clause if pred.op == "not_exists" else exists_clause
@@ -518,13 +537,37 @@ def _compile_where(
 
 
 def _mask_for_select_ref(
-    ref: str, policy: Policy, name_to_physical: Dict[str, str]
+    ref: str,
+    policy: Policy,
+    name_to_physical: Dict[str, str],
+    *,
+    connection_id: Optional[str] = None,
+    table_connection: Optional[Dict[str, str]] = None,
+    principal: Optional[Principal] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
 ) -> Optional[Any]:
     """The ColumnMask configured for a bare projection ref, resolved against
-    the physical table (an alias can never dodge a mask), or None."""
+    the physical table (an alias can never dodge a mask), or None.
+
+    `connection_id`/`table_connection` (TODO.md item 156) let this consult a
+    cross-connection join's table's OWN resolved connection's Policy alongside
+    the primary `policy` — see `resolve_table_policies`. Every caller that
+    omits them (every caller before item 156) gets exactly the old single-
+    Policy lookup: `table_connection.get(..., connection_id)` with
+    `connection_id=None` always answers `None`, which equals the default
+    `connection_id`, so `resolve_table_policies` collapses to `[policy]`.
+    """
     table, column = parse_column_ref(ref)
     physical = name_to_physical.get(table.casefold(), table)
-    return policy.column_mask(physical, column)
+    table_cx = (table_connection or {}).get(table.casefold(), connection_id)
+    candidates = resolve_table_policies(
+        table_cx, connection_id, policy, principal, connection_resolver
+    )
+    for candidate in candidates:
+        mask = candidate.column_mask(physical, column)
+        if mask is not None:
+            return mask
+    return None
 
 
 def _build_select_columns(
@@ -533,6 +576,11 @@ def _build_select_columns(
     dialect: str,
     policy: Policy,
     name_to_physical: Dict[str, str],
+    *,
+    connection_id: Optional[str] = None,
+    table_connection: Optional[Dict[str, str]] = None,
+    principal: Optional[Principal] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
 ) -> Tuple[List[Any], Dict[str, Any]]:
     columns: List[Any] = []
     alias_map: Dict[str, Any] = {}
@@ -540,7 +588,15 @@ def _build_select_columns(
     for item in query.select:
         if isinstance(item, str):
             col = _column(tables, item)
-            mask = _mask_for_select_ref(item, policy, name_to_physical)
+            mask = _mask_for_select_ref(
+                item,
+                policy,
+                name_to_physical,
+                connection_id=connection_id,
+                table_connection=table_connection,
+                principal=principal,
+                connection_resolver=connection_resolver,
+            )
             if mask is not None:
                 # Masked in the compiled Select (validation guarantees this is
                 # the only place a masked column can appear). Keep the original
@@ -780,6 +836,10 @@ def _apply_mandatory_row_filters(
     name_to_physical: Dict[str, str],
     principal: Optional[Principal],
     cte_names: FrozenSet[str],
+    *,
+    connection_id: Optional[str] = None,
+    table_connection: Optional[Dict[str, str]] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
 ) -> sa.Select:
     """AND in every policy-declared mandatory filter whose table is actually
     part of this query's graph — silently skipped for tables outside the
@@ -804,27 +864,62 @@ def _apply_mandatory_row_filters(
     filtered table, so this is defence in depth on the compile side rather than the
     only guard. The filter is NOT lost: the block's body is compiled through this
     same function against its own real tables, which is where those rows are read.
+
+    `connection_id`/`table_connection` (TODO.md item 156): for EACH table
+    occurrence, not just once per filter, the candidate Policies are resolved
+    via `resolve_table_policies` and EVERY matching `mandatory_row_filter` on
+    EVERY candidate is applied — a cross-connection join's table gets both its
+    own connection's mandatory filters and the primary connection's, unioned,
+    never one replacing the other. Omitting them (every pre-156 caller)
+    collapses every table's candidate list to `[policy]` alone, so the walk
+    below applies exactly `policy.mandatory_row_filters` as before — the loop
+    is restructured (per table, not per filter) to make that per-table
+    resolution possible, but is not a behavior change for a single-connection
+    caller: the same filters, resolved from the same one `policy`, get applied
+    to the same occurrences, in a WHERE clause where AND is commutative.
     """
-    for row_filter in policy.mandatory_row_filters:
-        matches = [
-            key
-            for key in tables
-            if name_to_physical.get(key.casefold(), key).casefold() == row_filter.table.casefold()
-            and name_to_physical.get(key.casefold(), key).casefold() not in cte_names
-        ]
-        if not matches:
+    table_connection = table_connection or {}
+    for key in tables:
+        physical = name_to_physical.get(key.casefold(), key)
+        if physical.casefold() in cte_names:
             continue
-        value = row_filter.resolve(principal)
-        for key in matches:
-            col = resolve_column(tables[key], row_filter.column)
-            stmt = stmt.where(col == value)
+        table_cx = table_connection.get(key.casefold(), connection_id)
+        candidates = resolve_table_policies(
+            table_cx, connection_id, policy, principal, connection_resolver
+        )
+        applied: Set[int] = set()
+        for candidate in candidates:
+            for row_filter in candidate.mandatory_row_filters:
+                if row_filter.table.casefold() != physical.casefold():
+                    continue
+                if id(row_filter) in applied:
+                    continue  # same object seen via more than one candidate
+                applied.add(id(row_filter))
+                value = row_filter.resolve(principal)
+                col = resolve_column(tables[key], row_filter.column)
+                stmt = stmt.where(col == value)
     return stmt
 
 
-def applied_column_masks(query: StructuredQuery, policy: Policy) -> List[str]:
+def applied_column_masks(
+    query: StructuredQuery,
+    policy: Policy,
+    *,
+    connection_id: Optional[str] = None,
+    scope_connections: Optional[Dict[int, Dict[str, str]]] = None,
+    principal: Optional[Principal] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
+) -> List[str]:
     """The output column names that would be masked when this query is compiled
     for this policy — bare projection columns whose physical column has a mask.
     Shares `policy.column_mask` with the compiler, so the two can't drift.
+
+    `connection_id`/`scope_connections` (TODO.md item 156) let this agree with
+    the compiler's own per-arm, per-table connection resolution — see
+    `resolve_table_policies` — so a mask configured only on a cross-connection
+    join's joined-in connection's own Policy is reported here too, not just
+    silently applied. Omitted (every pre-156 caller), this reports exactly what
+    it always did: masks from `policy` alone.
 
     Used by the audit trail to distinguish "masked" from "denied" access
     (never the pre-mask value). Names, not `table.column` refs, so it matches
@@ -868,10 +963,20 @@ def applied_column_masks(query: StructuredQuery, policy: Policy) -> List[str]:
     masked: List[str] = []
     for arm in arms:
         name_to_physical = effective_name_map(arm)
+        table_connection = (scope_connections or {}).get(id(arm), {})
         for index, item in enumerate(arm.select):
             if not isinstance(item, str):
                 continue
-            if _mask_for_select_ref(item, policy, name_to_physical) is None:
+            mask = _mask_for_select_ref(
+                item,
+                policy,
+                name_to_physical,
+                connection_id=connection_id,
+                table_connection=table_connection,
+                principal=principal,
+                connection_resolver=connection_resolver,
+            )
+            if mask is None:
                 continue
             # Falls back to this arm's own name only when arm 1 projects something
             # with no statically-known output name at that position (an unaliased
@@ -984,6 +1089,9 @@ def compile_structured_query(
     principal: Optional[Principal] = None,
     subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]] = None,
     cte_objects: Optional[Dict[str, Any]] = None,
+    connection_id: Optional[str] = None,
+    scope_connections: Optional[Dict[int, Dict[str, str]]] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
 ) -> Tuple[sa.Select, int]:
     """Compile AST + reflected tables + policy into a Select.
 
@@ -996,6 +1104,15 @@ def compile_structured_query(
     block, so a scope referencing one by name binds to the real construct rather
     than to the typeless placeholder schema validation resolved its columns
     against. It is built here on the way in and threaded down, never rebuilt.
+
+    `connection_id`/`scope_connections` (TODO.md item 156) are the query's
+    primary connection and `validate_schema`'s per-scope table-to-connection
+    map (the same one `execution/approval.py`'s `sensitivity_approval_reasons`
+    consumes for item 155) — threaded to every recursive compile call below so
+    a cross-connection join's table's mandatory row filters and column masks
+    are drawn from its OWN resolved connection's Policy too, not just the
+    primary `policy`. `None` (every pre-156 caller) reproduces the exact
+    pre-156 single-Policy behavior throughout.
     """
     if cte_objects is None and query.ctes:
         cte_objects = {}
@@ -1004,15 +1121,41 @@ def compile_structured_query(
             # makes dependency order, so a block reading an earlier block finds it
             # already in `cte_objects` below.
             cte_objects[spec.name.casefold()] = _compile_cte(
-                spec, policy, dialect, principal, subquery_tables, cte_objects
+                spec,
+                policy,
+                dialect,
+                principal,
+                subquery_tables,
+                cte_objects,
+                connection_id=connection_id,
+                scope_connections=scope_connections,
+                connection_resolver=connection_resolver,
             )
 
     if query.set_op is not None:
         return _compile_set_operation(
-            query, tables, policy, dialect, principal, subquery_tables, cte_objects
+            query,
+            tables,
+            policy,
+            dialect,
+            principal,
+            subquery_tables,
+            cte_objects,
+            connection_id=connection_id,
+            scope_connections=scope_connections,
+            connection_resolver=connection_resolver,
         )
     stmt, alias_map, is_aggregate = _compile_scope_body(
-        query, tables, policy, dialect, principal, subquery_tables, cte_objects
+        query,
+        tables,
+        policy,
+        dialect,
+        principal,
+        subquery_tables,
+        cte_objects,
+        connection_id=connection_id,
+        scope_connections=scope_connections,
+        connection_resolver=connection_resolver,
     )
 
     allow_table_fallback = True
@@ -1040,6 +1183,10 @@ def _compile_cte(
     principal: Optional[Principal],
     subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]],
     cte_objects: Dict[str, Any],
+    *,
+    connection_id: Optional[str] = None,
+    scope_connections: Optional[Dict[int, Dict[str, str]]] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
 ) -> Any:
     """Compile one named `WITH` block (item 105) through the SAME
     `compile_structured_query` path any query takes — so the block inherits its
@@ -1072,6 +1219,9 @@ def _compile_cte(
         principal=principal,
         subquery_tables=subquery_tables,
         cte_objects=cte_objects,
+        connection_id=connection_id,
+        scope_connections=scope_connections,
+        connection_resolver=connection_resolver,
     )
     if spec.query.limit is None:
         stmt = stmt.limit(None)
@@ -1127,6 +1277,10 @@ def _compile_set_operation(
     principal: Optional[Principal],
     subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]],
     cte_objects: Optional[Dict[str, Any]] = None,
+    *,
+    connection_id: Optional[str] = None,
+    scope_connections: Optional[Dict[int, Dict[str, str]]] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
 ) -> Tuple[sa.Select, int]:
     """Compile one item-104 set operation: every arm through the SAME
     `_compile_scope_body` any single query uses, combined by the dialect adapter,
@@ -1168,6 +1322,9 @@ def _compile_set_operation(
             principal,
             subquery_tables,
             cte_objects,
+            connection_id=connection_id,
+            scope_connections=scope_connections,
+            connection_resolver=connection_resolver,
         )
         arm_aggregates.append(arm_is_aggregate)
         arm_statements.append(arm_stmt)
@@ -1218,6 +1375,10 @@ def _compile_scope_body(
     principal: Optional[Principal],
     subquery_tables: Optional[Dict[int, Dict[str, sa.Table]]],
     cte_objects: Optional[Dict[str, Any]] = None,
+    *,
+    connection_id: Optional[str] = None,
+    scope_connections: Optional[Dict[int, Dict[str, str]]] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
 ) -> Tuple[sa.Select, Dict[str, Any], bool]:
     """Everything a single SELECT is made of — projection, FROM, joins, mandatory
     row filters, WHERE, GROUP BY, HAVING and the k-anonymity floor — with no
@@ -1234,12 +1395,39 @@ def _compile_scope_body(
         principal=principal,
         subquery_tables=subquery_tables,
         cte_objects=cte_objects,
+        connection_id=connection_id,
+        scope_connections=scope_connections,
+        connection_resolver=connection_resolver,
     )
+    # This scope's own table-to-connection map (item 156) — `query` here is
+    # THIS scope (the outer query, a cte body, a set-op arm, or — reached via
+    # `_compile_in_subquery`/`_compile_exists` recursing back into
+    # `compile_structured_query` — a nested value_subquery/exists_subquery
+    # too; there is no separate compile path for a nested scope, it is this
+    # same function called again), the same identity `resolve_scope_connections`
+    # and `validate_schema` key their own per-scope maps by. In practice a
+    # nested scope's own map entry always resolves every table back to the
+    # primary connection, because `_reject_cross_connection_nesting` (schema
+    # validation) forbids a join inside one from naming a different
+    # connection — but this lookup makes no assumption of that; it would
+    # simply consult both Policies correctly if that restriction were ever
+    # relaxed.
+    table_connection = (scope_connections or {}).get(id(query), {})
     # One substitution point for the whole scope (item 105) — every use of
     # `tables` below is a cte reference or a real table without needing to know.
     tables = _resolve_cte_references(query, tables, cte_objects)
     name_to_physical = effective_name_map(query)
-    select_cols, alias_map = _build_select_columns(query, tables, dialect, policy, name_to_physical)
+    select_cols, alias_map = _build_select_columns(
+        query,
+        tables,
+        dialect,
+        policy,
+        name_to_physical,
+        connection_id=connection_id,
+        table_connection=table_connection,
+        principal=principal,
+        connection_resolver=connection_resolver,
+    )
     base = _table_by_name(tables, query.from_alias or query.from_table)
     stmt = sa.select(*select_cols).select_from(base)
     if query.distinct:
@@ -1275,7 +1463,15 @@ def _compile_scope_body(
         stmt = stmt.join(right, condition, isouter=join.type == "left", full=join.type == "full")
 
     stmt = _apply_mandatory_row_filters(
-        stmt, policy, tables, name_to_physical, principal, frozenset(cte_objects or {})
+        stmt,
+        policy,
+        tables,
+        name_to_physical,
+        principal,
+        frozenset(cte_objects or {}),
+        connection_id=connection_id,
+        table_connection=table_connection,
+        connection_resolver=connection_resolver,
     )
 
     if query.where is not None:
