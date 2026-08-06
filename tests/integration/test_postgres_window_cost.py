@@ -356,8 +356,8 @@ async def test_the_cost_gate_cannot_distinguish_a_cheap_frame_from_an_expensive_
     service = StructuredQueryService(connection_id="stress")
     estimates = []
     for offset in (10, 10_000):
-        stmt, _limit, _tables, _dialect, _policy = await service._validate_and_compile(
-            _window_query(offset=offset)
+        stmt, _limit, _tables, _dialect, _policy, _scope_connections, _connection_resolver = (
+            await service._validate_and_compile(_window_query(offset=offset))
         )
         async with session_scope("stress") as session:
             estimates.append(

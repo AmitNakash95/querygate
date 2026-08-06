@@ -3537,6 +3537,135 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-07 — TODO.md item 160 (item 156's own follow-up audit): two of
+  its four findings fixed, one left OPEN as an explicit maintainer decision,
+  one confirmed as already-accurate scope documentation. Item 160 is
+  therefore `✅ DONE (findings 1, 2, 4 addressed; finding 3 remains an open
+  design decision)`, not archived — see TODO.md's "partially-done items stay
+  inline" rule.**
+
+  **Finding 1 (fixed) — audit-vs-compiled-SQL Policy snapshot consistency.**
+  `resolve_table_policies`'s default resolver used to re-read the joined
+  connection's Policy from the live `PolicyStore` at every call site
+  (`validate_policy`, `compile_structured_query`, and again at `execute()`'s
+  post-execution `applied_column_masks` audit call) instead of resolving it
+  once and threading the same snapshot through, the way the primary Policy
+  already did via `_get_policy()`. `execution/service.py` gained
+  `StructuredQueryService._snapshot_connection_resolver`: given
+  `_validate_and_compile`'s already-computed `scope_connections` map, it
+  resolves each DISTINCT non-primary connection's Policy exactly once and
+  returns a `ConnectionResolver` closure over that fixed dict, threaded into
+  `validate_policy`, `compile_structured_query`, and the `applied_column_masks`
+  audit call — all three now agree with each other and with what was
+  actually compiled, even if an authorized `/admin/reload-config` changes the
+  joined connection's Policy while the query is executing. Mutation-verified:
+  dropping the audit call's `connection_resolver=connection_resolver` makes
+  `test_audit_masked_columns_reflects_the_snapshot_compiled_against_not_a_late_reload`
+  (`tests/unit/test_service.py`) fail exactly as expected — the audit event's
+  `masked_columns` reports the post-reload (unmasked) view instead of the
+  compiled one.
+
+  **Finding 2 (fixed, via extraction rather than relocation) — cap-ordering
+  restored.** `_validate_and_compile` used to compute `early_scope_connections`
+  (one `PolicyStore.get()` per cross-connection scope) BEFORE `validate_policy`
+  ran at all, ahead of the cheap `max_cte_count`/`max_subquery_depth` checks
+  the item's own docstring documents as deliberately cheap-bound-first. Fixed
+  by extracting those two checks into a new `validate_structural_caps(query,
+  policy)` in `validation/policy_validation.py`, called directly from
+  `_validate_and_compile` BEFORE `resolve_scope_connections` runs; `validate_
+  policy` also calls it internally afterward (unchanged behavior for every
+  OTHER caller). The item offered two options — move the map computation
+  inside `validate_policy` itself, or extract-and-call-early — and this
+  chose extraction deliberately over literally moving `resolve_scope_
+  connections`'s call inside `validate_policy`: doing that would have meant
+  `validate_policy` unconditionally self-deriving `scope_connections`
+  whenever a caller passes `connection_resolver`/`principal` but no explicit
+  map, which is finding 3's exact open question — extraction achieves the
+  same cap-before-lookup ordering without deciding it. Mutation-verified:
+  reordering the extracted call to run AFTER `resolve_scope_connections`
+  again makes `test_structural_caps_reject_before_any_per_scope_policy_lookup`
+  (`tests/unit/test_service.py`) fail — the test asserts, via a patched
+  `resolve_scope_connections` spy, that it is never called at all when the
+  cheap cap alone is enough to reject.
+
+  **Same-day correction (`security-invariant-reviewer`, 2026-08-07): the
+  redundant second structural-caps check is NOT guaranteed to agree with the
+  first, and an earlier version of this entry (and of `validate_
+  structural_caps`'s own docstring) claimed otherwise.** `max_cte_count`/
+  `max_subquery_depth` themselves genuinely never move under purpose
+  narrowing, but `validate_structural_caps` also runs `_validate_cte_
+  constraints`'s cte-name-shadowing and masked-cte-projection rules, which
+  DO read `denied_tables`/`denied_columns`/`mandatory_row_filters`/
+  `column_masks` — fields `Policy.for_purpose` narrows. Since `_validate_
+  and_compile`'s pre-check runs against the UN-narrowed Policy and `validate_
+  policy`'s own internal call runs AFTER narrowing, a purpose delta that adds
+  a new denied-table/mask entry can make the pre-check pass a query the
+  narrowed internal call correctly rejects. This is safe, not a bypass,
+  ONLY because `Policy.for_purpose` is additive-only (verified: every field
+  it touches is unioned/concatenated onto the base `Policy`, never replaced
+  or removed) — the un-narrowed pre-check's governed-name set is therefore
+  always a SUBSET of the narrowed one's, so the two calls can under-reject
+  relative to each other but never over-reject, and `validate_policy`'s own
+  call (the actual authority, run unconditionally on every code path) never
+  misses an enforcement because of it. Pinned by a new test,
+  `test_structural_caps_pre_check_can_under_reject_a_purpose_narrowed_cte_
+  shadow_but_validate_policy_still_catches_it`
+  (`tests/unit/test_policy_validation.py`), which constructs exactly that
+  disagreement (a cte named after a table only a purpose delta denies) and
+  asserts the pre-check alone passes while `validate_policy` still rejects.
+  If `PurposePolicyDelta` ever gains a subtractive field this monotonicity
+  argument breaks, and the redundant internal call in `validate_policy` must
+  never be removed on the assumption the pre-check makes it redundant.
+
+  **Second same-day correction (`security-invariant-reviewer`, 2026-08-07):
+  `_snapshot_connection_resolver`'s closure silently discarded its own
+  `principal` argument.** An earlier version always answered from the
+  snapshot resolved against `self._principal`, regardless of what `principal`
+  the `ConnectionResolver` contract's caller actually passed in — not
+  reachable through today's production call graph (every in-pipeline caller
+  passes `self._principal`), but this REPLACED a default resolver that DID
+  honor its `principal` argument, so a future caller threading a different
+  principal (item 90's delegated/on-behalf-of resolution, an admin dry-run
+  reusing the service, a per-scope principal) would have silently received a
+  stranger's cached per-principal Policy override with no error. Fixed: the
+  closure now serves the snapshot only when the caller's `principal` is
+  identical to `self._principal`; any other principal falls through to a
+  live `resolve_visible_connection` resolved against that actual principal.
+  Pinned by `test_snapshot_connection_resolver_honors_a_different_principal_
+  argument` (`tests/unit/test_service.py`), mutation-verified against the
+  prior (unconditional-cache) version.
+
+  **Finding 3 (left OPEN — a maintainer decision, not resolved here).**
+  Every `scope_connections`/`connection_resolver` parameter still defaults to
+  `None`, so a future call site that passes a `principal`/`connection_
+  resolver` but forgets `scope_connections` silently gets the weaker
+  pre-156 (primary-only) behavior rather than an error — the same shape that
+  let `admin/service.py`'s `simulate_candidate_policy` drift onto the weak
+  path before item 156 caught it. The open question — should `validate_
+  policy` self-derive the map in that situation, closing the footgun
+  structurally — was deliberately NOT decided under this item's own
+  time-boxed audit-response pass: it is a real design change to the shared
+  validation-layer contract (every caller of `validate_policy`, including
+  `admin/service.py`'s dry-run simulator and `security_benchmark.py`, would
+  need to be re-examined against a new default), not a mechanical fix, and
+  CLAUDE.md's working agreement reserves exactly this kind of judgment call
+  for an explicit decision rather than a default reached for under time
+  pressure. Recorded here so it stays visible rather than silently dropped
+  when item 160 is eventually closed; whoever makes the call should record
+  the outcome as its own Decision Log entry.
+
+  **Finding 4 (confirmed, no code change) — purpose narrowing/`min_group_
+  size`/row limits were never claimed to be cross-connection-resolved.**
+  `resolve_table_policies` returns the joined connection's Policy un-narrowed
+  by the query's declared `purpose`, and `min_group_size`/`max_limit`/
+  `default_limit` are read from the primary Policy only. Checked against both
+  `docs/THREAT_MODEL.md` QG-09 and this log's own item-156 entry above — both
+  already say "column masks, mandatory row filters, and the table/column
+  deny-list", never "all policy enforcement" — so no doc drift exists to fix.
+  Left as a documented residual and a candidate for its own future TODO.md
+  item if per-connection purpose/k-anonymity/limit resolution is ever
+  prioritized.
+
 - **2026-08-06 — column masks, mandatory row filters, and the table/column
   deny-list now consult a cross-connection join's table's OWN connection's
   `Policy` too, not just the primary connection's (TODO.md item 156).**
