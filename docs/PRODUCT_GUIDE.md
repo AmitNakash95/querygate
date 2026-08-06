@@ -3515,6 +3515,32 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-06 — the catalog sensitivity-label approval trigger resolves each
+  table against the connection it actually joined from, not always the
+  query's top-level connection (TODO.md item 155).** Surfaced by the
+  `security-invariant-reviewer` audit of item 151: `execution/approval.py`'s
+  `sensitivity_approval_reasons` looked up every column's table via
+  `store.get_table(connection_id, physical)` using a single top-level
+  `connection_id`, even for a table reached through a cross-connection join
+  (`JoinSpec.connection`, gated by policy's `join_group` rule). A query
+  joining connection `analytics`'s `orders` to connection `crm`'s `customers`,
+  where `customers.email` is labelled `pii` only in `crm`'s catalog, never
+  tripped the gate: the lookup searched `analytics`'s catalog for a
+  `customers` entry, found none, and silently treated the joined column as
+  unlabelled. Pre-existing and separate in scope from item 151 (which stops an
+  already-minted token from being redeemed against the wrong connection; this
+  stops the trigger itself from ever asking for one). Fixed by threading
+  `validation/schema_validation.py`'s `resolve_query_table_connections` output
+  — the same per-scope table-to-connection map schema validation already
+  computes to decide which connection's schema to reflect a joined table
+  against — out of `validate_schema` (a new optional `scope_connections`
+  keyword, populated the same way the existing `scope_tables` out-param is)
+  and into `sensitivity_approval_reasons` (a new optional parameter, keyed by
+  `id(scope)`, each scope's map case-folded onto its effective table names).
+  A table absent from the map — the outer FROM table, a cte reference, or any
+  pre-155 call site with no map to hand — still falls back to the top-level
+  `connection_id`, so single-connection queries are unaffected.
+
 - **2026-08-06 — the approval gate's token binds to connection + principal via
   additive claims, not by folding either into the fingerprint hash; MCP's own
   `RequestStateSecurity(bind_principal=...)` is deliberately not wired

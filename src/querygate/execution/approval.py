@@ -79,7 +79,7 @@ import hashlib
 import hmac
 import json
 import time
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from querygate.catalog.loader import get_catalog_store
 from querygate.catalog.models import SensitivityClass
@@ -133,7 +133,10 @@ def approval_required_reasons(estimate: QueryCostEstimate, policy: Policy) -> Li
 
 
 def sensitivity_approval_reasons(
-    query: StructuredQuery, policy: Policy, connection_id: str
+    query: StructuredQuery,
+    policy: Policy,
+    connection_id: str,
+    scope_connections: Optional[Dict[int, Dict[str, str]]] = None,
 ) -> List[str]:
     """Reasons the query touches a catalog-labelled sensitive column/table whose
     label is in `policy.approval_sensitivities` (item 92 phase 2). Enumerates
@@ -151,6 +154,21 @@ def sensitivity_approval_reasons(
     declares it. Reading the outer scope alone would have let a labelled column be
     reached from an arm or a subquery with the approval gate never firing; that
     hole was live for `value_subquery` from item 97 until item 104 closed it.
+
+    `scope_connections` (item 155) is `validate_schema`'s per-scope table-to-
+    connection map — `resolve_query_table_connections`'s output for each scope,
+    keyed by `id(scope)`, with each scope's own map case-folded onto its
+    effective table names. Without it, every table's catalog lookup used
+    `connection_id` (the query's single top-level connection) regardless of where
+    the table actually lived, so a cross-connection join (`JoinSpec.connection`,
+    gated by policy's `join_group` rule) to a table whose `pii` label lives ONLY
+    in the *joined* connection's catalog never tripped the gate:
+    `store.get_table(connection_id, physical)` looked in the wrong connection's
+    catalog, found no entry, and silently treated the column as unlabelled. When
+    a table is absent from the map — the outer FROM table, a cte reference, or
+    any call site that has no map to hand (every pre-155 caller, via the `None`
+    default) — this falls back to `connection_id`, which is exactly the old,
+    correct behavior for a single-connection query.
     """
     triggers = set(policy.approval_sensitivities)
     if not triggers:
@@ -161,6 +179,7 @@ def sensitivity_approval_reasons(
     seen: set = set()
     for _depth, scope in iter_query_scopes(query):
         name_to_physical = effective_name_map(scope)
+        table_connection = (scope_connections or {}).get(id(scope), {})
         for column_ref in iter_column_refs(scope):
             table, column = parse_column_ref(column_ref.ref)
             physical = name_to_physical.get(table.casefold(), table)
@@ -172,7 +191,8 @@ def sensitivity_approval_reasons(
             # this same walk, and that is where its real columns are labelled.
             if physical.casefold() in cte_names:
                 continue
-            entry = store.get_table(connection_id, physical)
+            table_connection_id = table_connection.get(table.casefold(), connection_id)
+            entry = store.get_table(table_connection_id, physical)
             if entry is None:
                 continue
             col_entry = entry.column(column)
