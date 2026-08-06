@@ -159,6 +159,7 @@ Prefer these skills over improvising the workflow; they encode the repo's rules.
 | Updating landing page / sales copy after a capability ships | `pitch-sync` |
 | Periodic market check / competitor comparison | `competitive-scan` |
 | Rating the product itself 1-10, standalone and vs. the competition | `product-scorecard` |
+| Getting a bias-free outside opinion on market viability (no repo context given to the reviewer) | `fresh-eyes` |
 | Supply-chain / CVE / lockfile audit | `dep-audit` |
 | Whole-repo invariant-drift sweep | `repo-audit` |
 | Assembling a security-review evidence packet | `trust-evidence` |
