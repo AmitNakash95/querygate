@@ -316,10 +316,14 @@ claim when the work ships or before explicitly handing the item back.
   `security-invariant-reviewer` while auditing items 19/128 — a design
   change needing an owner decision on where the binding lives, not a
   same-session fix.*
-- [ ] **152** — Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM
+- [x] **152** — Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM
   retention) shipping. *Surfaced 2026-08-06 by `claim-reviewer` while
   auditing items 19/128/134/144 — `GO_TO_MARKET.md` was updated correctly,
   the public pages weren't; run `pitch-sync`.*
+- [ ] **153** — `CHANGELOG.md` has no `[Unreleased]` entry for items 19
+  (MySQL) or 134 (WORM retention). *Surfaced 2026-08-06 by `claim-reviewer`
+  while auditing item 152 — a documentation gap, not a claim-accuracy defect;
+  deliberately left out of item 152's own scope.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
