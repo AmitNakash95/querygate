@@ -165,7 +165,7 @@ order-of-magnitude, not commitments.
 | 132 | ✅ Reconcile stale shipped-status claims left behind by items 90–93 | S | — |
 | 133 | ✅ Caller-facing quota-metered verdict endpoint (play P4) — reuses 31/39's decision logic | M–L | 26, 31, 39, 45, 121 |
 | 134 | ✅ Compliance-grade (WORM) audit retention (phase 1: S3 Object Lock; phase 2: managed search not started) | L | 91, 136 |
-| 135 | Automatic (TTL/lease-driven) credential re-resolution, without an operator reload | M | 13 |
+| 135 | ✅ Automatic (TTL/lease-driven) credential re-resolution, without an operator reload | M | 13 |
 | 136 | ✅ `jsonl_chained` audit backend silently disables four shipped read surfaces | S–M | 91 |
 | 137 | ✅ Audit read surfaces neither verify nor disclose hash-chain integrity | S–M | 91, 136 |
 | 138 | ✅ Audit read surfaces scan the entire persisted file on every request, unbounded by lines read | S–M | — |
@@ -2167,82 +2167,18 @@ public `is_running` property, not by reaching into a private attribute).
 
 **Effort:** L (phase 1 shipped; phase 2 deferred). **Depends on:** 91, 136.
 
-### 135. Automatic credential re-resolution (TTL/lease-driven), without an operator-triggered reload
+### 135. Automatic credential re-resolution (TTL/lease-driven), without an operator-triggered reload ✅ DONE
 
-**Surfaced 2026-07-30 by `competitive-scan`; scope corrected the same day by
-`auditors` after an earlier draft got the current behavior wrong.** Read the
-correction first — it is most of this item.
+Closed the genuine gap left after item 13 (which already made a rotated
+`${vault:...}` value take effect on the next reload without a restart): the
+refresh was operator-pull only, so a short-TTL leased credential could expire
+into failures between reloads. `CredentialLeaseMonitor`
+(`config_reload.py`) now proactively triggers the existing reload/dispose
+machinery ahead of a reported lease expiry, via a new optional
+`LeasedSecretResolver` protocol composed alongside (never widening)
+`SecretResolver`.
 
-**What already ships (item 13 — do NOT rebuild it).** Rotation without a
-process restart **works today**: `config_reload.py` re-runs
-`ConnectionRegistry.from_file(..., resolver_registry=...)`, which re-resolves
-every `${vault:…}` reference; `_dispose_stale_engines` diffs
-`old_profile.connection_string != new_profile.connection_string` and disposes
-exactly the affected engines; and `connections/engine.py`'s `dispose_engine`
-already documents the in-flight-safe property ("a connection currently checked
-out finishes its work normally and is then discarded"). It is reachable via
-`POST /api/v1/admin/reload-config`. `README.md`, `docs/PRODUCT_GUIDE.md`, and
-`docs/THREAT_MODEL.md` all state this correctly, and item 13's archived body
-says it closed "the rotation gap this item's own 'why it matters' called out."
-An earlier draft of this item claimed "every query fails until someone restarts
-the process" — **that is false**, and reconciling those three accurate docs down
-to it would have manufactured the exact drift item 132 exists to fix.
-
-**The genuine, narrower gap.** The refresh is **operator-pull only**. There is
-no TTL, no lease awareness, and no automatic trigger, so a rotation that nobody
-follows with a reload still opens an outage window — and short-TTL dynamic
-credentials (Vault's main value proposition) expire into failures between
-reloads. For a product whose flagship deployment has QueryGate holding the
-**only** database credential, "your credential rotation requires a coordinated
-admin call" is the operational objection a security reviewer raises.
-
-**Shape.** Add the *trigger*, not the plumbing:
-
-- A **separate optional Protocol** (e.g. `LeasedSecretResolver` with
-  `resolve_with_lease(reference) -> (value, expires_at)`), implemented only by
-  backends that actually have leases, probed at the one refresh call site. Do
-  **not** widen `SecretResolver` — its module docstring states the narrow
-  one-method design on purpose, and adding `ttl()`/`invalidate()` forces
-  lifecycle onto backends that have none. Compose, don't widen
-  (`CompositeAuthenticator` is the precedent).
-- Reuse `_dispose_stale_engines` / `dispose_engine` verbatim for the recycle
-  half. It is already correct and already in-flight-safe.
-- On env: `EnvSecretResolver._runtime_environment()` rebuilds
-  `{**dotenv_values(".env"), **os.environ}` on **every** `resolve()`, so env is
-  already re-resolvable — it is **leaseless**, not un-refreshable. It supports
-  invalidate-and-refetch; it cannot support TTL-driven proactive refresh. (An
-  earlier draft invoked reject-don't-emulate here; that was wrong twice — the
-  capability exists, and that doctrine is a compiler/dialect rule about not
-  synthesizing query structure, not a secrets rule.)
-
-**Invariant guard:** non-negotiable #2 — no credential on any returned model.
-The *compare* path is already safe (`config_reload.py` compares in memory and
-logs ids only).
-
-**Measured, not assumed** (an earlier draft asserted a leak mechanism that does
-not exist in the pinned version — the repo's "measure the shape the product
-actually emits" rule applies here): against **SQLAlchemy 2.0.41**,
-`make_url("<garbage>")` raises `ArgumentError: Could not parse SQLAlchemy URL
-from given URL string` with **no URL and no password**; a bad port raises
-`ValueError` carrying only the offending fragment; a bad driver raises
-`NoSuchModuleError`; and `str(URL)` renders the password as `***`. SQLAlchemy
-1.x *did* echo the full string; 2.x does not. **So the URL-parse path is not
-itself the leak** — do not write a test against that mechanism and declare the
-guard shipped when it passes trivially.
-
-**The residual is real but structural, not mechanism-specific:** automatic
-refresh moves credential handling from once-at-startup (under an operator's eye)
-to **routine and request-time**, across new code paths. So the test this item
-needs is broad, not targeted: when re-resolution yields a malformed or rotated
-value, the resolved secret appears in neither the response body nor **any**
-emitted log record, anywhere on the refresh path — asserted without assuming a
-particular driver exception carries it. Note
-`tests/unit/test_credential_redaction.py` is essentially a *schema-shape* test
-(Pydantic models, OpenAPI, MCP tool schemas) and is the wrong home for a runtime
-string assertion.
-
-**Effort:** M. **Depends on:** 13 (which shipped the re-resolution this builds a
-trigger for).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 135).
 
 ### 136. The `jsonl_chained` audit backend silently disables four shipped read surfaces ✅ DONE
 
