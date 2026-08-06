@@ -333,13 +333,20 @@ claim when the work ships or before explicitly handing the item back.
   for already-archived segments, an explicit design decision, not a
   same-session fix; the residual is recorded in `audit/worm_search.py`'s
   module docstring and `docs/THREAT_MODEL.md` QG-40 in the meantime.*
-- [ ] **155** — `sensitivity_approval_reasons` looks up every table in the
+- [x] **155** — `sensitivity_approval_reasons` looks up every table in the
   query's top-level connection's catalog, never a cross-connection join's own
   connection, so a joined-in `pii`-labelled column can miss the approval
   gate. *Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing
   item 151 — real and pre-existing, but a separate, non-trivial fix (needs
   `resolve_query_table_connections`'s per-table connection map threaded into
   the sensitivity check); deliberately left out of item 151's own scope.*
+- [ ] **156** — a cross-connection join's joined table is governed only by
+  the primary connection's `Policy` — masks/mandatory row filters/deny-lists
+  never apply from the joined connection's own `Policy`. *Surfaced 2026-08-06
+  by `security-invariant-reviewer` while auditing item 155 — pre-existing,
+  needs an explicit decision (document `join_group` as a mutual-trust
+  boundary, or extend per-connection resolution from the catalog lookup to
+  policy enforcement too).*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 

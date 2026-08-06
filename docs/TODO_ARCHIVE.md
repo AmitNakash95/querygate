@@ -10667,3 +10667,158 @@ low-risk-docs-task framing.
 **Effort:** S (grew to M once the 128–151 sweep was included, per the
 task's own instruction to check for other genuinely-missing entries).
 **Depends on:** 19 (phase 1 shipped), 134 (phase 1 and 2 shipped).
+
+### 155. `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection ✅ DONE
+
+**Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item
+151.** `execution/approval.py`'s `sensitivity_approval_reasons` (the catalog
+`sensitivity: pii` approval trigger, item 92 phase 2) resolved every column it
+walks via `store.get_table(connection_id, physical)` using a single
+`connection_id` argument — the query's own top-level connection. For a
+cross-connection join (`JoinSpec.connection`, gated by policy's `join_group`
+rule and already shipped — see `validation/schema_validation.py`'s
+`resolve_query_table_connections`), a joined table actually lives in a
+*different* connection's catalog. A query joining connection `analytics`'s
+`orders` to connection `crm`'s `customers`, where `customers.email` is
+labelled `pii` only in `crm`'s catalog, never tripped the approval gate:
+`store.get_table("analytics", "customers")` looked in the wrong connection's
+catalog, found no entry, and `sensitivity_approval_reasons` silently treated
+the joined column as unlabelled. Real and pre-existing (not introduced by
+item 151), and separate in scope from it — item 151 stops an *already-minted*
+token from being redeemed against the wrong connection; this item stops the
+*trigger itself* from being blind to a joined connection's labels in the
+first place, so the gate could never even ask for a token when it should
+have.
+
+**Shipped: thread schema validation's per-scope connection map through, don't
+recompute it.** `validation/schema_validation.py`'s `validate_schema` gained
+an optional `scope_connections: Optional[Dict[int, Dict[str, str]]]` keyword,
+populated exactly like the existing `scope_tables` out-param: one entry per
+scope (the outer query, every set-operation arm, every cte body, every nested
+subquery), keyed by `id(scope)`, whose value is that scope's own
+`resolve_query_table_connections` result — case-folded onto each table's
+effective name so a later case-insensitive lookup matches the way
+`effective_name_map` already does. This is the SAME map schema validation
+already computed to decide which connection's schema `_load_table` reflects a
+cross-connection join's table against (previously computed and discarded
+inside the private `_reflect_and_validate_scope` helper on every call); the
+call itself was hoisted up into `validate_schema`'s two loops (the cte loop
+and the main scope loop) so the result can be captured once and handed to
+both `_reflect_and_validate_scope` (as a new `table_connection` keyword,
+still falls back to computing it itself when omitted, for callers that don't
+need the map) and `scope_connections`, rather than the approval gate
+recomputing the same resolution a second time and risking it drifting from
+what schema validation actually enforced the `join_group` rule against.
+
+`execution/approval.py`'s `sensitivity_approval_reasons` gained a matching
+optional `scope_connections` parameter. For each scope it walks (via the
+existing `iter_query_scopes`), it resolves a column's table to
+`table_connection.get(table.casefold(), connection_id)` and then — this is the
+second-pass fix below — consults that connection AND `connection_id` when
+they differ, rather than replacing one with the other. `execution/service.py`'s
+`_validate_and_compile` now returns a sixth tuple element (`scope_connections`,
+built alongside the existing `scope_tables` local) and `_enforce_approval_gate`
+gained a matching optional parameter that it forwards into
+`sensitivity_approval_reasons` — wired at `execute()`'s real call site;
+`explain()`/`verdict()` (which don't run the approval gate) just discard the
+extra tuple element.
+
+**Second pass, same day: replacing the lookup reopened a mirror-image gap.**
+A same-day `security-invariant-reviewer` follow-up pass caught that the first
+version of this fix simply replaced `connection_id` with the table's resolved
+connection — correct for the reported direction (a label living only on the
+*joined* connection), but wrong in the opposite direction: connection catalogs
+are curated independently (item 32's per-connection scoping —
+`import_connection` exists specifically because labels do not propagate
+automatically between connections), so an operator may have labelled a table
+sensitive under only the connection they curated *first*. Once a query reaches
+that same physical table through a different, cross-joined connection, a
+strict replacement stops finding that label — the same shape of bug, just on
+the other side. Fixed by consulting **both** candidate connections when they
+differ and triggering on either hit, matching this module's own documented
+fail-closed posture ("denies rather than admits on any ambiguity"): a false
+positive against an unrelated same-named table in the other catalog is the
+safe direction; a false negative against a genuinely sensitive column is not.
+The docstring's original "absent from the map" framing was also imprecise
+(caught by `claim-reviewer`) — the outer FROM table is always present in a
+real map (seeded with its own connection by `resolve_query_table_connections`)
+and a cte reference never reaches the lookup at all (skipped earlier by the
+`cte_names` check); only a call site that passes no map (every pre-155 caller)
+genuinely collapses to a single lookup. Reworded in the docstring and here.
+
+**Coverage (`tests/unit/test_approval.py`):** a real cross-connection-join
+scenario (two `ConnectionProfile`s sharing a `join_group`, `orders` on
+`primary` joined to `customers` on `other`, `customers.email` labelled `pii`
+ONLY in `other`'s catalog) run through the REAL `validate_schema` (only
+`_load_table` patched, per the standard schema-validation test seam) —
+`test_cross_connection_join_trips_sensitivity_gate_when_scope_connections_threaded`
+asserts the gate now finds the label;
+`test_cross_connection_join_never_trips_the_gate_without_the_map` pins the
+pre-155 fallback behavior for a call site that passes no map at all (the shape
+of every call site before this item);
+`test_enforce_approval_gate_uses_the_real_cross_connection_map` proves the
+`_enforce_approval_gate` wiring specifically, and that omitting the map does
+NOT raise; `test_execute_trips_the_gate_for_a_cross_connection_join_end_to_end`
+drives the real public `execute()` entry point end to end (real
+`validate_schema`, mocked engine/session only) so a wiring break at
+`execute()`'s own call site — invisible to any test that calls
+`_enforce_approval_gate` directly — is still caught;
+`test_single_connection_sensitivity_gate_unaffected_by_scope_connections_param`
+confirms the existing single-connection behavior is byte-identical whether
+`scope_connections` is omitted, `None`, or an explicit map that doesn't cover
+the table. Two more tests closed gaps a `test-contract-reviewer` pass found in
+the first four: every one of them joined `customers` unaliased and all
+lowercase, so a mutation swapping the lookup key from the alias/table token to
+the physical name, or dropping either `.casefold()` call at the
+`scope_connections` population sites, left all of them green.
+`test_cross_connection_join_trips_the_gate_through_an_aliased_mixed_case_ref`
+joins under alias `Cust` and references it in mixed case, closing that gap; and
+`test_cross_connection_join_still_trips_when_the_label_lives_only_on_the_primary_side`
+mirrors the original scenario with the label on `primary` instead of `other`,
+covering the union-check fix.
+
+**Mutation-verified, both passes, against the FULL test set above (an initial
+narrower pass under-counted this before the alias/end-to-end tests existed —
+corrected here rather than left stale):** reverting the `approval.py` lookup
+to ignore the map entirely, and separately reverting `schema_validation.py`'s
+main-loop map population to an empty dict, each independently fail exactly
+the same four tests —
+`test_cross_connection_join_trips_sensitivity_gate_when_scope_connections_threaded`,
+`test_cross_connection_join_trips_the_gate_through_an_aliased_mixed_case_ref`,
+`test_enforce_approval_gate_uses_the_real_cross_connection_map`,
+`test_execute_trips_the_gate_for_a_cross_connection_join_end_to_end`. Reverting
+the union check back to a strict replacement fails exactly
+`test_cross_connection_join_still_trips_when_the_label_lives_only_on_the_primary_side`.
+Swapping the lookup key from the alias/table token to the physical name, and
+separately dropping either `.casefold()` call at the population sites, each
+fail exactly `test_cross_connection_join_trips_the_gate_through_an_aliased_
+mixed_case_ref`. Every mutation was reverted after confirming the expected
+failure.
+
+**Third pass, same day: name which connection actually produced the hit.**
+An `architecture-boundary-reviewer` pass on the union-check fix pointed out
+that "references pii-labelled column customers.email" reads as if it
+describes the physical table the query actually reads, even when the union
+check found the label on the OTHER candidate connection — misleading for an
+approver reading the reason, or an auditor reading the persisted
+`approval.required`/`approval.granted` log line. The reason string now
+appends `(connection '<id>')` naming the connection whose catalog entry
+produced the hit, but only when there were genuinely two different candidates
+— a single-connection query's reason text is unchanged. Mutation-verified:
+dropping the suffix unconditionally fails exactly
+`test_cross_connection_join_still_trips_when_the_label_lives_only_on_the_primary_side`'s
+added assertion (`"connection 'primary'" in reasons[0]`), and no other test.
+
+**Known residual, not closed by this item:** the map lookup is keyed by
+`id(scope)` on the assumption that the same `StructuredQuery` object instance
+flows unmutated from `_validate_and_compile` (where the map is built) to
+`_enforce_approval_gate` (where it's consumed) within one `execute()` call —
+true today (verified by reading the call chain), but a future change that
+re-parses or deep-copies the AST between those two points would make every
+lookup miss silently, collapsing back to single-connection-only behavior
+rather than raising. Low severity — no current call site does this — left
+unfixed rather than adding a speculative guard against a change that hasn't
+happened.
+
+**Effort:** M. **Depends on:** 151 (shipped — same module), cross-connection
+joins/`join_group` (shipped).

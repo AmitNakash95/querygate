@@ -392,7 +392,7 @@ class StructuredQueryService:
 
     async def _validate_and_compile(
         self, query: StructuredQuery
-    ) -> Tuple[sa.Select, int, dict, str, Policy]:
+    ) -> Tuple[sa.Select, int, dict, str, Policy, Dict[int, Dict[str, str]]]:
         policy = self._get_policy()
         # TODO.md item 145: `validate_policy` returns the purpose-narrowed
         # effective Policy (unchanged if the query declares no purpose, or if
@@ -405,11 +405,19 @@ class StructuredQueryService:
         # (item 97), keyed by node id, so the compiler can render IN (subquery).
         # Empty for a non-nested query.
         scope_tables: dict = {}
+        # scope_connections (item 155) collects each scope's own table-to-
+        # connection map — the same map schema validation used to pick which
+        # connection a cross-connection join's table reflects against — so the
+        # approval gate's catalog sensitivity-label trigger can look a joined
+        # table up in the connection it actually resolved to, not just this
+        # query's top-level `self._connection_id`.
+        scope_connections: Dict[int, Dict[str, str]] = {}
         tables = await validate_schema(
             query,
             connection_id=self._connection_id,
             principal=self._principal,
             scope_tables=scope_tables,
+            scope_connections=scope_connections,
         )
         # Derived from the live engine, not ConnectionProfile.dialect — the
         # engine's own dialect is what actually executes the compiled SQL,
@@ -438,7 +446,7 @@ class StructuredQueryService:
         # `security-invariant-reviewer`, 2026-08-05: the mask was correctly
         # APPLIED to the compiled SQL either way, but the audit event
         # understated which columns were actually masked).
-        return stmt, limit, touched or set(tables), dialect, policy
+        return stmt, limit, touched or set(tables), dialect, policy, scope_connections
 
     async def _estimate_cost(
         self, dialect: DatabaseDialect, session, stmt: sa.Select
@@ -483,6 +491,7 @@ class StructuredQueryService:
         policy: Policy,
         query: StructuredQuery,
         approval_token: Optional[str],
+        scope_connections: Optional[Dict[int, Dict[str, str]]] = None,
     ) -> None:
         """In-query human-in-the-loop gate (TODO.md item 92). If the query trips a
         policy approval trigger — a catalog sensitivity label (phase 2, dialect-
@@ -500,10 +509,20 @@ class StructuredQueryService:
         never assigned to `self._connection_id`, so a token minted for the
         byte-identical AST on a different connection is rejected, and a token
         bound to a different principal at issue time is rejected too.
+
+        `scope_connections` (TODO.md item 155) is `_validate_and_compile`'s
+        per-scope table-to-connection map, passed straight through to
+        `sensitivity_approval_reasons` so a cross-connection join's table is
+        looked up in the catalog of the connection it actually resolved to,
+        not always `self._connection_id`. `None` (the default, for any future
+        caller that hasn't run schema validation first) falls back to the
+        pre-155 behavior of resolving every table against `self._connection_id`.
         """
         if not policy.approval_gate_enabled:
             return
-        reasons = sensitivity_approval_reasons(query, policy, self._connection_id)
+        reasons = sensitivity_approval_reasons(
+            query, policy, self._connection_id, scope_connections
+        )
         if estimate is not None:
             reasons += approval_required_reasons(estimate, policy)
         if not reasons:
@@ -743,7 +762,9 @@ class StructuredQueryService:
                     # `applied_column_masks` at the audit call below) sees the
                     # same narrowing the compiler already used — not just this
                     # method's own now-stale un-narrowed local.
-                    stmt, limit, _tables, dialect, policy = await self._validate_and_compile(query)
+                    stmt, limit, _tables, dialect, policy, scope_connections = (
+                        await self._validate_and_compile(query)
+                    )
                     policy_validated = True
                     sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
 
@@ -767,7 +788,9 @@ class StructuredQueryService:
                         # agnostic catalog sensitivity-label trigger, so a single
                         # approval token covers whatever tripped it.
                         if policy.approval_gate_enabled:
-                            self._enforce_approval_gate(estimate, policy, query, approval_token)
+                            self._enforce_approval_gate(
+                                estimate, policy, query, approval_token, scope_connections
+                            )
                         try:
                             result = await session.execute(stmt)
                         except (DataError, ProgrammingError) as exc:
@@ -1049,7 +1072,9 @@ class StructuredQueryService:
             max_queue_depth=policy.max_queue_depth,
             max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
         ):
-            stmt, limit, tables, _dialect, _policy = await self._validate_and_compile(query)
+            stmt, limit, tables, _dialect, _policy, _scope_connections = (
+                await self._validate_and_compile(query)
+            )
             sql, params = _compile_to_text(stmt, include_literals=policy.log_query_literals)
             return ExplainResult(sql=sql, params=params, tables=sorted(tables), limit=limit)
 
@@ -1152,8 +1177,8 @@ class StructuredQueryService:
                 max_queue_depth_per_principal=policy.max_queue_depth_per_principal,
             ):
                 try:
-                    stmt, _limit, tables, _dialect, _policy = await self._validate_and_compile(
-                        query
+                    stmt, _limit, tables, _dialect, _policy, _scope_connections = (
+                        await self._validate_and_compile(query)
                     )
                 except Exception as exc:
                     audit_query(
