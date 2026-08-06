@@ -255,6 +255,157 @@ class TestCompilerMasking:
 
 
 # --------------------------------------------------------------------------- #
+# Cross-connection join masking (TODO.md item 156)
+# --------------------------------------------------------------------------- #
+class TestCrossConnectionMasking:
+    """`orders` on the primary connection, `customers` joined in from
+    connection `other` (`JoinSpec.connection`) — the same shape item 155 fixed
+    for the catalog sensitivity-label trigger. Here the mask itself, not the
+    approval trigger, must resolve against the joined table's own connection's
+    Policy too."""
+
+    def _tables(self) -> Dict[str, sa.Table]:
+        return _make_tables()  # already has both "customers" and "orders"
+
+    def _query(self) -> StructuredQuery:
+        return StructuredQuery(
+            from_table="orders",
+            select=["orders.id", "customers.phone"],
+            joins=[
+                JoinSpec(
+                    table="customers",
+                    on=["orders.customer_id", "customers.id"],
+                    connection="other",
+                )
+            ],
+        )
+
+    def _resolver(self, other_policy: Policy):
+        def resolve(connection_id, principal=None):
+            return None, other_policy
+
+        return resolve
+
+    def test_mask_configured_only_on_joined_connection_is_applied(self):
+        query = self._query()
+        scope_connections = {id(query): {"customers": "other"}}
+        other_policy = Policy(column_masks={"customers": [ColumnMask(column="phone", kind="null")]})
+        stmt, _ = compile_structured_query(
+            query,
+            self._tables(),
+            Policy(),  # primary policy has NO opinion on `customers.phone`
+            dialect="postgresql",
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=self._resolver(other_policy),
+        )
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "NULL AS phone" in compiled
+
+    def test_mask_configured_only_on_joined_connection_is_never_applied_without_the_map(self):
+        """Pins the pre-156 bug: omitting `connection_id`/`scope_connections`
+        (every call site before this item) resolves every table's mask
+        against the primary policy alone, so a joined-only mask is silently
+        never applied — `customers.phone` comes back raw."""
+        query = self._query()
+        other_policy = Policy(column_masks={"customers": [ColumnMask(column="phone", kind="null")]})
+        stmt, _ = compile_structured_query(query, self._tables(), Policy(), dialect="postgresql")
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "NULL AS phone" not in compiled
+        # Distinguishes raw from masked for real (a masked bare projection
+        # renders as `NULL AS phone` with no `customers.phone` reference left
+        # anywhere in the statement — the previous version of this assertion
+        # accepted `"phone" in [c.name for c in stmt.selected_columns]`, which
+        # is true for BOTH the raw and the masked rendering since the output
+        # column is still named "phone" either way, so it caught nothing a
+        # mutation could actually fail).
+        assert "customers.phone" in compiled
+
+    def test_mask_configured_only_on_primary_connection_still_applies(self):
+        """Mutation guard against a REPLACE-not-union mistake: the joined
+        connection has no opinion at all, only the primary policy masks
+        `customers.phone` — must still be applied exactly as before item 156."""
+        query = self._query()
+        scope_connections = {id(query): {"customers": "other"}}
+        stmt, _ = compile_structured_query(
+            query,
+            self._tables(),
+            Policy(column_masks={"customers": [ColumnMask(column="phone", kind="null")]}),
+            dialect="postgresql",
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=self._resolver(Policy()),
+        )
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "NULL AS phone" in compiled
+
+    def test_when_both_connections_mask_the_same_column_differently_the_primary_wins(self):
+        """security-invariant-reviewer, 2026-08-06, on this same item: an
+        earlier version of `resolve_table_policies` ordered the JOINED
+        connection's Policy first, which is a genuine security regression in
+        exactly this one case (both connections configure a DIFFERENT mask on
+        the same column) — the joined connection's mask would win even when
+        it is WEAKER than the primary's, which is strictly worse protection
+        than pre-item-156 querying ever gave (the primary's mask was the only
+        one that ever applied). The primary connection's own mask must win
+        when both have an opinion — matching the pre-156 default exactly —
+        and only fall through to the joined connection's mask when the
+        primary has none (the scenario the tests above already cover)."""
+        query = self._query()
+        scope_connections = {id(query): {"customers": "other"}}
+        primary_policy = Policy(
+            column_masks={"customers": [ColumnMask(column="phone", kind="null")]}
+        )
+        other_policy = Policy(
+            column_masks={"customers": [ColumnMask(column="phone", kind="last", length=4)]}
+        )
+        stmt, _ = compile_structured_query(
+            query,
+            self._tables(),
+            primary_policy,
+            dialect="postgresql",
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=self._resolver(other_policy),
+        )
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "NULL AS phone" in compiled
+        assert "right(" not in compiled.lower()
+
+    def test_applied_column_masks_reports_the_joined_connection_only_mask(self):
+        query = self._query()
+        scope_connections = {id(query): {"customers": "other"}}
+        other_policy = Policy(column_masks={"customers": [ColumnMask(column="phone", kind="null")]})
+        assert applied_column_masks(
+            query,
+            Policy(),
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=self._resolver(other_policy),
+        ) == ["phone"]
+        # Omitting the map reproduces the pre-156 shape: nothing reported.
+        assert applied_column_masks(query, Policy()) == []
+
+    def test_single_connection_masking_unaffected_by_the_new_parameters(self):
+        """Regression: a plain single-connection query must mask identically
+        whether or not `connection_id`/`scope_connections` are supplied."""
+        query = StructuredQuery(from_table="customers", select=["customers.id", "customers.phone"])
+        tables = self._tables()
+        stmt_old, _ = compile_structured_query(query, tables, _mask_policy(), dialect="postgresql")
+        stmt_new, _ = compile_structured_query(
+            query,
+            tables,
+            _mask_policy(),
+            dialect="postgresql",
+            connection_id="demo",
+            scope_connections={id(query): {"customers": "demo"}},
+        )
+        compiled_old = str(stmt_old.compile(compile_kwargs={"literal_binds": True}))
+        compiled_new = str(stmt_new.compile(compile_kwargs={"literal_binds": True}))
+        assert compiled_old == compiled_new
+
+
+# --------------------------------------------------------------------------- #
 # Dialect rendering
 # --------------------------------------------------------------------------- #
 class TestDialectRendering:

@@ -15,6 +15,7 @@ from typing import (
     Dict,
     FrozenSet,
     Iterator,
+    List,
     Literal,
     NamedTuple,
     Optional,
@@ -903,6 +904,122 @@ def resolve_query_table_connections(
                 )
         table_connection[join.alias or join.table] = join_connection_id
     return table_connection
+
+
+def resolve_scope_connections(
+    query: StructuredQuery,
+    connection_id: str,
+    principal: Optional[Principal] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
+) -> Dict[int, Dict[str, str]]:
+    """The reflection-free sibling of `validate_schema`'s own `scope_connections`
+    output (TODO.md item 155): one per-table connection map per scope — the outer
+    query, every cte body, every set-operation arm, every nested `value_subquery`
+    — keyed by `id(scope)`, each scope's own map case-folded onto its effective
+    table names.
+
+    `validate_schema` cannot run before `validation/policy_validation.py`, by
+    that module's own documented contract ("This runs BEFORE
+    validation/schema_validation.py reflects anything, so a disabled connection
+    or an over-cap query never even touches the database") — so policy
+    validation cannot simply reuse `validate_schema`'s map to learn which
+    connection each table resolves to. `resolve_query_table_connections`
+    itself touches no database (only the in-memory connection registry/policy
+    store), so calling it here, before reflection, is safe and keeps that
+    ordering guarantee intact — a rejected cross-connection join now surfaces
+    slightly earlier (during policy validation) rather than during schema
+    validation, never differently.
+
+    Used by `validate_policy` and threaded through to `compiler.
+    compile_structured_query` (TODO.md item 156) so a cross-connection join's
+    table's own connection's Policy — its column masks, mandatory row filters,
+    and table/column deny-list — is consulted alongside the primary
+    connection's, the same way item 155 fixed the catalog sensitivity-label
+    trigger to do. Deliberately a SEPARATE walk from `validate_schema`'s
+    (rather than a shared one both call): that one also threads each scope's
+    RAW, un-casefolded `table_connection` mapping into `_reflect_and_validate_
+    scope`'s `_load_table` schema argument, where exact casing matters; this
+    one only ever feeds a case-insensitive lookup, the same contract
+    `sensitivity_approval_reasons` already relies on for its own copy.
+    """
+    cte_names = declared_cte_names(query)
+    result: Dict[int, Dict[str, str]] = {}
+    for _depth, scope in iter_query_scopes(query):
+        table_connection = resolve_query_table_connections(
+            scope,
+            connection_id,
+            principal=principal,
+            connection_resolver=connection_resolver,
+            cte_names=cte_names,
+        )
+        result[id(scope)] = {name.casefold(): cx for name, cx in table_connection.items()}
+    return result
+
+
+def resolve_table_policies(
+    table_connection_id: str,
+    connection_id: str,
+    policy: Policy,
+    principal: Optional[Principal] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
+) -> List[Policy]:
+    """The Policy (or policies) that must ALL be consulted for one physical table
+    resolved to `table_connection_id`, inside a query whose primary/top-level
+    connection is `connection_id` (TODO.md item 156).
+
+    Shared by `validation/policy_validation.py`'s table/column allow-deny and
+    masked-column-position checks and `compiler/sqlalchemy_compiler.py`'s mask
+    and mandatory-row-filter application, so the two enforcement paths — policy
+    validation and compilation — can never drift onto two different answers for
+    "which Policy governs this table".
+
+    A same-connection table — every table in a single-connection query, and the
+    overwhelmingly common case even in a cross-connection one — returns
+    `[policy]` alone: byte-identical to the pre-item-156 shape, so a caller that
+    never resolves `table_connection_id != connection_id` sees no behavior
+    change at all.
+
+    A cross-connection join's table (`table_connection_id != connection_id`)
+    returns BOTH the primary `policy` and the table's own resolved connection's
+    Policy — the PRIMARY connection first, never a replacement of one for the
+    other. This mirrors `sensitivity_approval_reasons`'s own hard-won lesson
+    (item 155's follow-up correction, `execution/approval.py`): Policy
+    documents, like catalogs, are curated PER CONNECTION independently, so a
+    rule an operator wrote against the PRIMARY connection naming a joined-in
+    table must keep applying exactly as before, even once that table's own
+    connection also gets an equal say — a strict replacement would silently stop
+    enforcing a primary-side rule the moment the same physical table is instead
+    reached through a cross-connection join.
+
+    **The order is load-bearing, not cosmetic — deliberately primary-first, not
+    joined-first** (a security-invariant-reviewer finding, 2026-08-06, on this
+    same item; an earlier version of this function put the joined connection
+    first, mirroring `sensitivity_approval_reasons`'s own ordering, but that
+    function's OR/trigger semantics make its order cosmetic — either candidate
+    matching fires the same outcome — while a mask/filter caller PICKS one
+    concrete answer from the first candidate that has one). For an allow check,
+    order never matters (`all()` across candidates). For a mandatory row
+    filter, order never matters either (every matching filter on every
+    candidate is applied — a union, not a pick-one). For a MASK, order decides
+    which transform is actually applied when both connections configure a
+    DIFFERENT mask on the same (table, column) — a real, previously untested
+    case. Primary-first means: the primary connection's own mask always wins
+    when it has one (byte-identical to the pre-156 default, which only ever
+    consulted the primary), and only falls through to the joined connection's
+    own mask when the primary has none — never the reverse, which would let a
+    cross-connection join make an already-masked column's protection WEAKER
+    than what querying the primary connection directly would apply. The caller
+    composes the two candidates with whichever direction its own rule needs:
+    AND across candidates for an allow check, first-match (primary-first) for
+    a mask, or an apply-every-match union for a mandatory row filter.
+    """
+    if table_connection_id == connection_id:
+        return [policy]
+    resolver = connection_resolver or (
+        lambda target, actor: resolve_visible_connection(target, principal=actor)
+    )
+    _profile, other_policy = resolver(table_connection_id, principal)
+    return [policy, other_policy]
 
 
 def _validate_join_graph(query: StructuredQuery) -> None:

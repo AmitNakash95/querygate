@@ -71,6 +71,7 @@ from querygate.validation.policy_validation import (
 )
 from querygate.validation.schema_validation import (
     resolve_query_table_connections,
+    resolve_scope_connections,
     validate_schema,
 )
 
@@ -294,12 +295,36 @@ def simulate_candidate_policy(
 
     query_allowed: Optional[bool] = None
     requested_tables = {request.table} if request.table is not None else set()
+    # TODO.md item 156: the same per-scope table-to-connection map
+    # `execution/service.py`'s `_validate_and_compile` computes before calling
+    # `validate_policy` in production, computed here with the CANDIDATE
+    # resolver so the simulator's verdict can't drift from what a real
+    # cross-connection query against this candidate config would actually
+    # enforce. Best-effort: a connection-resolution failure here is swallowed
+    # and reported properly by the dedicated `resolve_query_table_connections`
+    # check below (`query_connection_denied`), which already owns that error
+    # shape — this local variable only needs to exist so `validate_policy`
+    # gets a real map on the success path.
+    scope_connections: Dict[int, Dict[str, str]] = {}
     if request.query is not None:
         # Tree-wide (item 121): a mandatory filter whose table appears only in a
         # set-op arm or a subquery must still show up in the readiness report,
         # or an operator is told `allow` for a request execution will refuse.
         requested_tables.update(referenced_tables_tree_wide(request.query))
         query_allowed = True
+        try:
+            scope_connections = resolve_scope_connections(
+                request.query,
+                request.connection,
+                principal=target,
+                connection_resolver=candidate_resolver,
+            )
+        except (NotFoundError, QueryValidationError):
+            # A bad cross-connection reference — the dedicated check below
+            # reports this properly; validate_policy still runs (against no
+            # map, i.e. primary-only) so an unrelated policy violation is not
+            # masked by a connection problem it didn't cause.
+            scope_connections = {}
         try:
             # TODO.md item 145: capture the purpose-narrowed effective Policy
             # (unchanged if the query declares no purpose) so the readiness
@@ -309,7 +334,25 @@ def simulate_candidate_policy(
             # the un-narrowed policy, silently omitting a filter real
             # execution would apply (found by `security-invariant-reviewer`/
             # `architecture-boundary-reviewer`, 2026-08-05).
-            policy = validate_policy(request.query, policy, connection_id=request.connection)
+            #
+            # TODO.md item 156: `principal`/`scope_connections`/
+            # `connection_resolver` let this consult a cross-connection join's
+            # table's OWN connection's Policy too — the same union this
+            # module's own `resolve_query_table_connections` check just below
+            # already gates the join's mere existence on — so the simulator's
+            # `allow`/`deny` verdict agrees with what `execution/service.py`
+            # would actually enforce (found by `architecture-boundary-
+            # reviewer`/`security-invariant-reviewer`, 2026-08-06: this call
+            # site was the one place still stuck on primary-Policy-only after
+            # item 156 fixed every other enforcement path).
+            policy = validate_policy(
+                request.query,
+                policy,
+                connection_id=request.connection,
+                principal=target,
+                scope_connections=scope_connections,
+                connection_resolver=candidate_resolver,
+            )
         except PolicyViolationError as exc:
             query_allowed = False
             reasons.append(CandidateSimulationReason(code="query_policy_denied", message=str(exc)))
@@ -333,37 +376,78 @@ def simulate_candidate_policy(
                     )
                 )
 
+    # TODO.md item 156: gather every connection's candidate Policy the query
+    # actually touches (the primary plus every distinct connection any scope's
+    # own map resolves to) BEFORE deciding which tables/filters are visible —
+    # both the visibility check just below and the filter-readiness walk
+    # after it need the same list, and computing it once keeps them from
+    # silently disagreeing on which connections are in play.
+    candidate_filter_policies: list[Policy] = [policy]
+    seen_connections = {request.connection}
+    for table_connection in scope_connections.values():
+        for cx in table_connection.values():
+            if cx in seen_connections:
+                continue
+            seen_connections.add(cx)
+            try:
+                _profile, other_policy = candidate_resolver(cx, target)
+            except NotFoundError:
+                continue
+            candidate_filter_policies.append(other_policy)
+
     # Do not enumerate mandatory-filter identifiers for a table the target
     # policy itself hides. Requested names may still receive a table-denied
     # decision, but no additional hidden policy metadata rides with it.
+    #
+    # TODO.md item 156: checked against EVERY candidate policy in play, not
+    # just the primary connection's — a table denied only by a cross-
+    # connection join's joined connection's own Policy must be hidden from
+    # this report too, or a principal already told `deny` for that table
+    # would still learn a mandatory-filter column name for it. Coarser than
+    # attributing each table to its own precise connection (a table reached
+    # through more than one connection in a multi-way join is hidden if ANY
+    # candidate denies it, not only the one that actually governs that
+    # occurrence) — the safe direction, matching this module's existing
+    # fail-closed posture for the identical single-connection case.
     requested_table_keys = {
-        table.casefold() for table in requested_tables if policy.table_allowed(table)
+        table.casefold()
+        for table in requested_tables
+        if all(candidate.table_allowed(table) for candidate in candidate_filter_policies)
     }
+
     filter_readiness: list[MandatoryFilterReadiness] = []
-    for row_filter in policy.mandatory_row_filters:
-        if row_filter.table.casefold() not in requested_table_keys:
-            continue
-        ready = True
-        if row_filter.from_claim is not None:
-            try:
-                row_filter.resolve(target)
-            except PolicyViolationError:
-                ready = False
-                reasons.append(
-                    CandidateSimulationReason(
-                        code="mandatory_claim_missing",
-                        message="A mandatory row-filter claim is missing for the target principal.",
+    seen_filters: set = set()
+    for candidate_policy in candidate_filter_policies:
+        for row_filter in candidate_policy.mandatory_row_filters:
+            if row_filter.table.casefold() not in requested_table_keys:
+                continue
+            if id(row_filter) in seen_filters:
+                continue
+            seen_filters.add(id(row_filter))
+            ready = True
+            if row_filter.from_claim is not None:
+                try:
+                    row_filter.resolve(target)
+                except PolicyViolationError:
+                    ready = False
+                    reasons.append(
+                        CandidateSimulationReason(
+                            code="mandatory_claim_missing",
+                            message=(
+                                "A mandatory row-filter claim is missing for the target "
+                                "principal."
+                            ),
+                        )
                     )
+            filter_readiness.append(
+                MandatoryFilterReadiness(
+                    table=row_filter.table,
+                    column=row_filter.column,
+                    source=("claim" if row_filter.from_claim is not None else "configured_literal"),
+                    claim=row_filter.from_claim,
+                    ready=ready,
                 )
-        filter_readiness.append(
-            MandatoryFilterReadiness(
-                table=row_filter.table,
-                column=row_filter.column,
-                source=("claim" if row_filter.from_claim is not None else "configured_literal"),
-                claim=row_filter.from_claim,
-                ready=ready,
             )
-        )
 
     if not reasons:
         reasons.append(
