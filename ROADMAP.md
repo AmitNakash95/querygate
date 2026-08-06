@@ -333,7 +333,7 @@ claim when the work ships or before explicitly handing the item back.
   for already-archived segments, an explicit design decision, not a
   same-session fix; the residual is recorded in `audit/worm_search.py`'s
   module docstring and `docs/THREAT_MODEL.md` QG-40 in the meantime.*
-- [ ] **155** — `sensitivity_approval_reasons` looks up every table in the
+- [x] **155** — `sensitivity_approval_reasons` looks up every table in the
   query's top-level connection's catalog, never a cross-connection join's own
   connection, so a joined-in `pii`-labelled column can miss the approval
   gate. *Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing

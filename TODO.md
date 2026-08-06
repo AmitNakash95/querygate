@@ -185,7 +185,7 @@ order-of-magnitude, not commitments.
 | 152 | ✅ Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM retention) shipping | S | 19, 134 |
 | 153 | `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention) | S | 19, 134 |
 | 154 | WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate | M | 91, 134 |
-| 155 | `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection | M | 151 |
+| 155 | ✅ `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection | M | 151 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2409,37 +2409,11 @@ local reader.
 **Effort:** M. **Depends on:** 91 (the local chain this mirrors), 134 (phase
 1's WORM sink, phase 2's search surface).
 
-### 155. `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection
+### 155. `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection ✅ DONE
 
-**Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item
-151.** `execution/approval.py`'s `sensitivity_approval_reasons` (the catalog
-`sensitivity: pii` approval trigger, item 92 phase 2) resolves every column it
-walks via `store.get_table(connection_id, physical)` using a single
-`connection_id` argument — the query's own top-level connection. For a
-cross-connection join (`JoinSpec.connection`, gated by policy's `join_group`
-rule and already shipped — see `validation/schema_validation.py`'s
-`resolve_query_table_connections`), a joined table actually lives in a
-*different* connection's catalog. A query joining connection `analytics`'s
-`orders` to connection `crm`'s `customers`, where `customers.email` is
-labelled `pii` only in `crm`'s catalog, never trips the approval gate:
-`store.get_table("analytics", "customers")` looks in the wrong connection's
-catalog, finds no entry, and `sensitivity_approval_reasons` silently treats
-the joined column as unlabelled. This is real and pre-existing (not
-introduced by item 151), and separate in scope from it — item 151 stops an
-*already-minted* token from being redeemed against the wrong connection; this
-item stops the *trigger itself* from being blind to a joined connection's
-labels in the first place, so the gate may never even ask for a token when it
-should.
-
-**What to do (when prioritized):** thread `resolve_query_table_connections`'s
-per-table connection map (already computed during schema validation for
-cross-connection join resolution) into `sensitivity_approval_reasons`, so each
-column's catalog lookup uses the connection the table actually resolved to,
-not the query's single top-level `connection_id`. Needs new test coverage for
-a cross-connection join where the label lives only on the joined side.
-
-**Effort:** M (a currently connection-unaware function needs the per-table
-map threaded through it, plus new join-crossing regression coverage).
-**Depends on:** 151 (shipped — same module), cross-connection joins/
-`join_group` (shipped).
+Threaded schema validation's per-scope table-to-connection map through to the
+catalog sensitivity-label approval trigger, so a cross-connection join's
+table is now looked up in the catalog of the connection it actually resolved
+to, not always the query's top-level connection.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 155).
 
