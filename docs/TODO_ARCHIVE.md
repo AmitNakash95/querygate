@@ -8498,6 +8498,177 @@ large batch from a real, conformant 2026-07-28 gateway once item 128 lands —
 a product tradeoff between pre-auth cost and future-client compatibility, not
 a small/safe fix, and left for a maintainer decision alongside item 128.
 
+### 129. Never advertise a principal-varying MCP result as shared-cacheable ✅ DONE
+
+**Surfaced 2026-07-30 by `competitive-scan`.** The `2026-07-28` revision adds
+caching metadata (SEP-2549) to `tools/list`, `prompts/list`, `resources/list`,
+and `resources/read`: a `ttlMs` freshness hint and a `cacheScope` of `"public"`
+or `"private"`, modelled on HTTP `Cache-Control`, where `public` permits
+**shared intermediaries** to cache and reuse the response across callers.
+
+**Aim this at `tools/list`, not at tool results.** The caching metadata attaches
+to `tools/list` / `prompts/list` / `resources/list` / `resources/read` — *not*
+to `tools/call` results, so `list_connections`'s per-caller output is not the
+exposed surface (an easy mis-aim: it is a tool whose *result* varies, which the
+spec does not make cacheable). The genuinely principal-varying **list** surface
+is `tools/list`, filtered by `_install_scoped_tool_listing` in `mcp/server.py`
+via `_SCOPE_GATED_TOOLS`. Note QueryGate currently registers **zero** resources
+and **zero** prompts, so a test written only against those is close to vacuous —
+the test must therefore also fail if a resource or prompt is ever registered
+without an explicit `cacheScope`.
+
+**Why this is a security rule for QueryGate specifically.** Our MCP surface is
+per-principal by construction, and the spec explicitly blesses this ("the set
+**MAY** vary by the authorization presented on the request"). But a
+principal-varying result marked `cacheScope: "public"` and cached by a shared
+gateway — the very intermediary the P4 play courts — would serve one
+principal's visible tool surface to another, eroding the deny-by-default
+posture without a single line of policy code being wrong.
+
+**Honest severity:** this is defense-in-depth, not an authorization bypass.
+`mcp/server.py` already records that scoped tool listing is
+"token-savings/defense-in-depth only" and that the real boundary is each tool's
+call-time scope check. Keep that framing — do not let this item's write-up imply
+the tool list is a security boundary.
+
+The failure mode is a *default*, not a decision: whichever value the SDK or a
+future refactor emits when nobody thought about it. So encode it as an
+invariant with a test, in the manner of `tests/unit/test_credential_redaction.py`
+(which asserts the no-credential invariant against the live schemas rather
+than trusting convention): **every MCP result whose content depends on the
+caller must carry `cacheScope: "private"`**, asserted against the actual
+emitted payloads, so adding a new per-principal tool cannot silently regress
+it.
+
+**Current state at build time:** the installed `mcp` SDK (1.28.1) reports
+`LATEST_PROTOCOL_VERSION = "2025-11-25"` and defines no `cacheScope`/`ttlMs`
+fields anywhere (grepped the installed package source directly, not assumed —
+item 128, the full `2026-07-28` protocol/SDK migration, has not landed on this
+branch). This item does not wait on that migration: SEP-2549's caching
+metadata is additive to the four existing result shapes, and every one of
+them (`ListToolsResult`/`ListPromptsResult`/`ListResourcesResult`/
+`ReadResourceResult`, and their common `Result` base) already declares
+`model_config = ConfigDict(extra="allow")`, so a caller-invisible `cacheScope`
+field can be forced onto the emitted payload today without depending on the
+SDK's own (not-yet-released) support for the field.
+
+**What shipped.** `mcp/caching.py`'s `install_private_cache_scope` installs a
+self-enforcing `_PrivateCacheScopeHandlers` dict as `mcp_server`'s low-level
+`Server.request_handlers`: overriding `__setitem__` means ANY assignment to
+one of the four SEP-2549 keys (`ListToolsRequest`/`ListPromptsRequest`/
+`ListResourcesRequest`/`ReadResourceRequest`) gets wrapped to force
+`.cacheScope = "private"` onto the returned `ServerResult.root` at write
+time — a plain pydantic attribute assignment (every relevant `mcp.types`
+result class declares `model_config = ConfigDict(extra="allow")`) that
+survives the SDK's own `model_dump(by_alias=True, mode="json",
+exclude_none=True)` serialization path (`shared/session.py`), verified
+end-to-end against a live MCP integration test, not assumed. Deliberately
+*not* `CallToolRequest`/`GetPromptRequest` (a mis-aim the item's own
+write-up above warns about: a tool's or prompt's per-caller *call-time
+result* is not a listed surface) and, with a recorded reasoned exclusion
+rather than a guess, not `ListResourceTemplatesRequest` (no spec artifact in
+this repo names it as a SEP-2549 surface, and the installed SDK predates
+SEP-2549 entirely). `mcp/server.py`'s `setup_mcp` calls the companion
+`assert_private_cache_scope_installed` immediately before
+`streamable_http_app()`, raising loudly rather than silently serving an
+unprotected app if a future refactor ever breaks the wiring.
+
+`tests/unit/test_mcp_cache_scope.py` (14 tests) asserts this against real
+emitted payloads, not source-code grepping, in the manner of
+`test_credential_redaction.py`: the real `create_mcp_server()` instance's
+`tools/list`/`prompts/list`/`resources/list`; a from-scratch `FastMCP`
+server with a real resource and prompt registered *after*
+`install_private_cache_scope` runs, proving the future-registration case
+isn't vacuous; a negative control on an unprotected `FastMCP` instance;
+`tools/call` and `prompts/get` both confirmed to carry no `cacheScope` at
+all (guarding the "aim at lists, not results" distinction on both excluded
+surfaces, not just one); installing cache-scope enforcement *before*
+`_install_scoped_tool_listing` and re-running the latter twice afterward
+(simulating a hypothetical future config-reload path), proving the
+guarantee is order-independent rather than resting on a call-order
+convention; ten repeated `install_private_cache_scope` calls and a direct
+handler re-assignment both proven not to nest wrapper closures (an identity
+check, not just a behavioral one); a stub server object missing a handler
+proven to raise rather than silently install a partial guarantee; and both
+of `assert_private_cache_scope_installed`'s raise/pass paths, including
+against the real singleton.
+
+**Four defects found and fixed by the post-build `auditors` pass**
+(`architecture-boundary-reviewer`, `security-invariant-reviewer`, and
+`test-contract-reviewer` run in parallel; two independently converged on the
+same root cause from different angles):
+
+1. **Installation-order dependence (architecture-boundary F1, independently
+   found by security-invariant M129-1).** The first version wrapped
+   whichever handler happened to be registered *right now*, which only
+   works if `install_private_cache_scope` always runs after every other
+   handler installer (`_install_scoped_tool_listing` included) — a
+   convention enforced only by a comment, invisible to every test since
+   they all went through the one correctly-ordered `create_mcp_server()`.
+   Fixed by making the guarantee structural instead of order-dependent: the
+   `_PrivateCacheScopeHandlers.__setitem__` override above, plus
+   `assert_private_cache_scope_installed` as a fail-loud backstop at serve
+   time.
+2. **Unbounded wrapper-closure growth on repeated installation
+   (architecture-boundary F2, security-invariant M129-2, and independently
+   test-contract F2 — all three reviewers found this).** Calling
+   `create_mcp_server()` more than once (several existing unit tests do,
+   against the shared module-level `mcp_server` singleton) re-wrapped
+   `prompts/list`/`resources/list`/`resources/read`'s already-wrapped
+   handler on every call, growing one closure layer per call —
+   functionally invisible today only because the sole side effect (setting
+   `cacheScope` to the same value repeatedly) is itself idempotent. Fixed
+   with a marker attribute (`_qg_forced_private_cache_scope`) checked
+   before wrapping.
+3. **Silent skip on a missing handler (security-invariant M129-1b).** The
+   original loop did `if inner is None: continue`; replaced with a raise,
+   since a real `FastMCP` instance always has all four handlers and staying
+   silent would hide a real bug behind an apparently-successful install.
+4. **Missing negative test for the second exclusion (test-contract F1).**
+   The module docstring named both `CallToolRequest` and `GetPromptRequest`
+   as deliberately excluded, but only the former had a regression test;
+   added `test_get_prompt_result_is_not_annotated_with_cache_scope` as a
+   sibling to the existing `tools/call` check.
+
+Two purely-informational items from the same pass were recorded rather than
+requiring code changes: `ListResourceTemplatesRequest`'s exclusion is now a
+reasoned docstring note (security-invariant M129-3) rather than a silent
+omission, and the protocol-version interop residual — the field is emitted
+while the server still negotiates `2025-11-25`, working only because of
+`extra="allow"` — is now one sentence in `caching.py`'s module docstring
+(security-invariant M129-4) in addition to the "Honest scope note" below.
+Test-contract's F3 (the future-registration test proves the helper works in
+isolation, not that a real future registration through
+`discover_and_register_tools()` would hit the same path) was accepted as a
+low-risk residual per the reviewer's own recommendation, not fixed — tightening
+it would require a throwaway registration on the real singleton for a case
+that has zero present impact (QueryGate registers zero resources/prompts
+today).
+
+Every one of the four accepted fixes was mutation-verified individually
+(not just re-running the full suite): reverting the `__setitem__`
+auto-wrap to the original one-shot wrap made the reordering test fail for
+the expected reason; removing the idempotency marker check made a
+direct-reassignment test fail (the outer `install_private_cache_scope`
+call-count guard alone did **not** catch this — that gap was itself found
+during mutation testing and closed with a dedicated test targeting the
+marker independent of the call-count guard); reverting the raise to a
+silent skip made its own test fail; and neutering
+`assert_private_cache_scope_installed` made its own tests fail. Full
+`poetry run pytest` (2,722 tests, unit + integration, including a live-server
+MCP integration test that exercises the real `setup_mcp()` path
+end-to-end) passed clean on the final tree.
+
+**Honest scope note:** this lands ahead of item 128, not on top of it, since
+128 has not shipped on this branch. The mechanism (forcing an extra pydantic
+field through `extra="allow"`) is intentionally SDK-version-agnostic, so it
+needs no rework when 128 lands — but the eventual native-SDK type for this
+field (once the Python SDK ships real SEP-2549 support) should replace the
+`extra="allow"` field-forcing here rather than stack on top of it.
+
+**Effort:** S. **Depends on:** 128 (not required as a hard blocker in
+practice — implemented independently; see honest scope note above).
+
 ### 132. Reconcile stale shipped-status claims left behind by items 90–93 ✅ DONE
 
 **Surfaced 2026-07-30 by the `auditors` claim review of the `competitive-scan`
