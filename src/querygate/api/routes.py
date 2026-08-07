@@ -11,6 +11,7 @@ from typing import Annotated, Callable, List, Optional, Union
 import pydantic as pyd
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 
+from querygate.admin.service import safe_pydantic_error_lines
 from querygate.api._errors import admission_headers, mask_unexpected, require_scope
 from querygate.config_reload import ReloadResult, reload_config
 from querygate.catalog.retrieval import CatalogSearchResponse
@@ -610,6 +611,18 @@ def build_router(
                 catalog_file=cfg.catalog_file,
                 template_file=cfg.template_file,
                 resolver_registry=build_secret_resolver_registry(cfg),
+            )
+        except pyd.ValidationError as exc:
+            # A malformed connections.yaml entry is validated by
+            # ConnectionProfile.model_validate() *after* ${...} interpolation,
+            # so the object pydantic is validating already carries a live
+            # credential. str(exc) (and error["input"]/["input_value"]) can
+            # embed that whole object for some error kinds (e.g. a
+            # `missing`-type error on a required field) -- never surface the
+            # raw exception here. Build detail from loc/msg only. See item 165.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="; ".join(safe_pydantic_error_lines(exc)),
             )
         except Exception as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

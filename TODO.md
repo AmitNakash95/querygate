@@ -195,7 +195,7 @@ order-of-magnitude, not commitments.
 | 162 | Dialects beyond MySQL/Snowflake/BigQuery (item 19's open-ended "…" scope) | unscoped | — |
 | 163 | A not-connectable dialect (Snowflake/BigQuery) as the SECONDARY side of a cross-connection join never reaches the `is_connectable()` guard | S–M | — |
 | 164 | `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s | S | — |
-| 165 | `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body | S | — |
+| 165 | ✅ `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body | S | — |
 | 166 | Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo ignores which connection a name resolves to | S–M | 159 |
 | 167 | A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed) | S | 159 |
 
@@ -2800,68 +2800,14 @@ for the date/interval maps.
 **Effort:** S (five adapters, one mechanical guard clause each; no design
 change). **Depends on:** none.
 
-### 165. `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body
+### 165. `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body ✅ DONE
 
-**Surfaced 2026-08-07 by `security-invariant-reviewer` while auditing item
-158 (pre-existing, not introduced by that item — item 158's own new
-validator is independently verified NOT to leak; this is a broader,
-already-existing gap in the surrounding error handling that item 158's
-Decision Log entry happened to name the exact mechanism of).**
-`api/routes.py`'s `reload_config_endpoint` (routes.py:604-615) does:
+`reload_config_endpoint` now catches `pydantic.ValidationError` separately,
+before the generic `except Exception`, and builds `detail` from a new
+`safe_pydantic_error_lines` helper (`admin/service.py`) that asks pydantic
+itself to never materialize `input`/`input_value` — never a credential.
 
-```python
-try:
-    return await reload_config(...)
-except Exception as exc:
-    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-```
-
-`reload_config` → `ConnectionRegistry.from_file` → `ConnectionProfile.
-model_validate(entry)` on an ALREADY-INTERPOLATED entry (real credential
-included). Any pydantic `ValidationError` this raises — not just item 158's
-own dialect-mismatch validator, which is independently safe (verified: its
-`input`/`loc` are always scoped to the `dialect` field's own value, never
-`connection_string`) — has its raw `str(exc)`/`.errors()` shape include the
-full input dict for certain error kinds. Confirmed directly: omitting a
-required field (e.g. `dialect`) from one `connections.yaml` entry produces
-a `missing`-type pydantic error whose `input_value` is the whole entry
-dict, including the live `connection_string`; `str(ValidationError)`
-truncates a long dict repr to its head/tail, so the host and database name
-always survive truncation and the password survives whenever the
-connection string is short enough. That raw string reaches `detail=` in
-the HTTP 400 response verbatim. Reachable by anyone holding
-`ADMIN_RELOAD_CONFIG_SCOPE` who reloads a malformed `connections.yaml` (or
-by whoever reads the resulting response/logs).
-
-**Why this wasn't caught by `test_credential_redaction.py`:** that suite
-asserts against the live OpenAPI/MCP *schemas* (what fields a model
-declares), not against actual error-response *bodies* — a schema check
-can't catch a runtime exception's stringified content leaking through a
-generic `except Exception` handler.
-
-**A safe precedent already exists in this codebase for exactly this
-problem:** `admin/service.py`'s `_humanize_validation_errors` (used by the
-config-governance dry-run path, `validate_candidate_content`) strips
-pydantic's `[type=..., input_value=..., input_type=...]` tail and the docs
-URL line before ever showing an error to an admin — that path is already
-safe. `reload_config_endpoint`'s `except Exception as exc: ...
-detail=str(exc)` is the one place that still hands the raw exception
-straight through.
-
-**What to do (when prioritized):** catch `pydantic.ValidationError`
-separately in `reload_config_endpoint` and build `detail` from each
-error's `loc`/`msg` only (never `error["input"]`) — e.g. reusing or
-extending `_humanize_validation_errors`'s stripping approach rather than a
-third bespoke formatter — before falling through to the existing generic
-`except Exception` for everything else (file-not-found, YAML syntax
-errors, etc., which don't carry a credential). Add a regression test:
-POST a malformed `connections.yaml` (a real-looking password, a missing
-required field) to `/admin/reload-config` with the admin scope and assert
-the password substring is absent from the response body.
-
-**Effort:** S (one route's exception handling; the stripping pattern
-already exists in `admin/service.py` to reuse or adapt). **Depends on:**
-none.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 165).
 
 ### 166. Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo is keyed by table name alone, not by which connection a name resolves to
 
