@@ -704,6 +704,42 @@ def resolve_column(table: sa.Table, column_name: str) -> sa.Column:
     return col_map[key]
 
 
+def table_by_name_or_none(tables: Dict[str, sa.Table], name: str) -> Optional[sa.Table]:
+    """Case-insensitive, first-match lookup into a `tables` dict keyed by
+    effective name -- the SAME resolution order `table_by_name` (below) and
+    every FROM/JOIN construction in `compiler/sqlalchemy_compiler.py` use.
+
+    Exists because `tables`/`scoped_tables` (this module's `_reflect_and_
+    validate_scope` return value) can hold TWO distinct `sa.Table.alias(...)`
+    objects for one declared join occurrence -- e.g. `tables["O"]` from a
+    join's own declared `alias="O"`, plus a phantom `tables["o"]` from some
+    other column ref in the same scope spelling it "o.<col>" -- since `needed`
+    unions the declared spelling with every column ref's own (possibly
+    differently-cased) spelling of the same table, and each name in `needed`
+    gets its own `source.alias(name)` call. An exact `tables[key]` index picks
+    whichever object happens to sit at the literal spelling queried, which is
+    not guaranteed to be the object `table_by_name` will pick for the parent's
+    own compiled FROM/JOIN clause (item 167 fixed this exact mismatch for
+    `_apply_mandatory_row_filters`; item 169 is the same fix for
+    `validate_schema`'s correlated-subquery ref resolution). Returning `None`
+    on a miss -- rather than raising, like `table_by_name` does -- lets a
+    caller that wants a caller-facing error (e.g. an unresolved `correlate`
+    ref) raise its own, more specific message."""
+    for key, table in tables.items():
+        if key.casefold() == name.casefold():
+            return table
+    return None
+
+
+def table_by_name(tables: Dict[str, sa.Table], name: str) -> sa.Table:
+    """Same lookup as `table_by_name_or_none`, but raises when nothing
+    matches -- the shape every compiler call site wants."""
+    table = table_by_name_or_none(tables, name)
+    if table is None:
+        raise QueryValidationError(f"Unknown table {name!r}")
+    return table
+
+
 def _date_bucket_alias(item: DateBucketSelectItem, tables: Dict[str, sa.Table]) -> str:
     if item.alias:
         return item.alias
@@ -1248,7 +1284,28 @@ async def validate_schema(
                 visible: Dict[str, sa.Table] = {}
                 for ref in nested.correlate:
                     table_name, column_name = parse_column_ref(ref)
-                    outer = scoped_tables.get(table_name)
+                    # `table_by_name_or_none` — not an exact `scoped_tables.get(...)`
+                    # index — for the identical reason item 167 routed the
+                    # mandatory-row-filter walk through the same lookup (see that
+                    # helper's docstring). `scoped_tables` is the SAME dict object
+                    # the compiler will resolve the parent's own FROM/JOIN clause
+                    # against; if a phantom, differently-cased alias exists for
+                    # this table (a column ref elsewhere in the parent scope spelled
+                    # it differently than the join declared), an exact index on the
+                    # correlate ref's own literal spelling can pick a DIFFERENT
+                    # `sa.Table.alias(...)` object than the one that actually lands
+                    # in the parent's compiled FROM/JOIN. SQLAlchemy's auto-
+                    # correlation matches by object identity, so that mismatch
+                    # silently produces an UNCORRELATED, independent subquery scan
+                    # of the table instead of a correlated one — and if the table
+                    # also carries a `mandatory_row_filter`, the independent scan
+                    # never picks that filter up either, since it only applies to
+                    # whichever object the outer scope's own FROM/JOIN uses (item
+                    # 169). Routing through the same case-insensitive, first-match
+                    # lookup the compiler itself uses guarantees this always
+                    # resolves to that same object, regardless of `tables`'
+                    # iteration order.
+                    outer = table_by_name_or_none(scoped_tables, table_name)
                     if outer is not None and table_name.casefold() not in own_names:
                         outer = None  # inherited by the parent, not the parent's own
                     if outer is None:
@@ -1543,7 +1600,20 @@ async def _reflect_and_validate_scope(
         # A declared correlated name binds to the PARENT's own table object, not a
         # fresh reflection of the same table. Identity is what makes the compiled
         # subquery correlate instead of silently re-scanning an independent copy.
-        outer = (correlated_tables or {}).get(name)
+        #
+        # `table_by_name_or_none`, not an exact `(correlated_tables or {}).get
+        # (name)` index: `correlated_tables` is keyed by whichever literal
+        # spelling the `correlate` declaration itself used (e.g. "c" for
+        # `correlate=["c.id"]`), but `needed` can ALSO contain a differently-
+        # cased ref to that same table from the child scope's OWN body (e.g.
+        # a WHERE predicate spelled "C.name") — `declared_tables` (above)
+        # already accepts it case-insensitively, so it reaches this loop. An
+        # exact index misses that spelling, falls through to `name_to_
+        # physical[name.casefold()]` below, and raises a raw KeyError (not a
+        # QueryValidationError) because a correlated-only table was never
+        # part of this scope's OWN name_to_physical map. Found while fixing
+        # item 169's sibling bug in the same region.
+        outer = table_by_name_or_none(correlated_tables or {}, name)
         if outer is not None:
             tables[name] = outer
             continue
