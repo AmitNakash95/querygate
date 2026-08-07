@@ -11,6 +11,7 @@ import pytest
 import sqlalchemy as sa
 
 from querygate.compiler.dialect_adapters import (
+    BigQueryDialectAdapter,
     DialectAdapter,
     MSSQLDialectAdapter,
     MySQLDialectAdapter,
@@ -50,6 +51,34 @@ def _render_snowflake(expr) -> str:
 
 def _render(expr) -> str:
     return str(expr.compile(compile_kwargs={"literal_binds": True}))
+
+
+# BigQuery cases throughout this file render against the REAL installed
+# `sqlalchemy_bigquery` dialect object, the same "renders as documented, not
+# confirmed correct against a real account" posture as the Snowflake cases
+# above (TODO.md item 19 phase 3) — no BigQuery project/credentials are
+# available in this environment. `sqlalchemy-bigquery` is a DEV-ONLY
+# dependency for the identical reason `snowflake-sqlalchemy` is (see
+# pyproject.toml): no production module imports it, since
+# connections/engine.py's init_engine refuses to open a BigQuery connection
+# at all. `importorskip`, matching the Snowflake pattern, so this file still
+# collects cleanly in a hypothetical main-dependencies-only environment.
+_sqlalchemy_bigquery = pytest.importorskip("sqlalchemy_bigquery")
+_BIGQUERY_DIALECT = _sqlalchemy_bigquery.BigQueryDialect()
+
+
+def _render_bigquery(expr) -> str:
+    return str(expr.compile(dialect=_BIGQUERY_DIALECT, compile_kwargs={"literal_binds": True}))
+
+
+def _bq_col(name: str, type_=None):
+    """A BigQuery-typed column reference. `date_bucket`/`date_add` dispatch
+    on the operand's concrete SQLAlchemy type (see `_bq_temporal_kind`'s
+    docstring in dialect_adapters.py) — unlike every other adapter's
+    plain `sa.column(name)`, an untyped reference renders nothing useful for
+    those two methods, only for the type-agnostic ones (extract_part,
+    scalar_function, ...)."""
+    return sa.column(name, type_=type_) if type_ is not None else sa.column(name)
 
 
 class TestGetDialectAdapter:
@@ -142,6 +171,26 @@ class TestDateBucketRegression:
         with pytest.raises(QueryValidationError, match="Unsupported date_bucket granularity"):
             SnowflakeDialectAdapter().date_bucket(col, "decade")
 
+    @pytest.mark.parametrize("granularity", ["day", "week", "month", "quarter", "year"])
+    def test_bigquery_supports_every_granularity(self, granularity):
+        # BigQuery's DATETIME_TRUNC covers every granularity directly
+        # (documented in Google's docs), unlike Postgres it needs a
+        # concretely-typed operand — see TestBigQueryTemporalKindDispatch for
+        # the three-way DATE/DATETIME/TIMESTAMP dispatch this exercises.
+        col = _bq_col("created_at", sa.DateTime)
+        expr = BigQueryDialectAdapter().date_bucket(col, granularity)
+        _render_bigquery(expr)  # must not raise
+
+    def test_bigquery_week_uses_isoweek(self):
+        col = _bq_col("created_at", sa.DateTime)
+        rendered = _render_bigquery(BigQueryDialectAdapter().date_bucket(col, "week")).lower()
+        assert "isoweek" in rendered
+
+    def test_bigquery_rejects_unsupported_granularity(self):
+        col = _bq_col("created_at", sa.DateTime)
+        with pytest.raises(QueryValidationError, match="Unsupported date_bucket granularity"):
+            BigQueryDialectAdapter().date_bucket(col, "decade")
+
 
 class TestOrderByTerms:
     def test_postgres_no_nulls_returns_single_term(self):
@@ -206,6 +255,20 @@ class TestOrderByTerms:
         assert len(terms) == 1
         assert f"NULLS {nulls.upper()}" in _render_snowflake(terms[0]).upper()
 
+    def test_bigquery_no_nulls_returns_single_term(self):
+        col = sa.column("status")
+        terms = BigQueryDialectAdapter().order_by_terms(col, "desc", None)
+        assert len(terms) == 1
+
+    @pytest.mark.parametrize("nulls", ["first", "last"])
+    def test_bigquery_nulls_uses_native_clause(self, nulls):
+        # Like Snowflake, BigQuery supports NULLS FIRST/LAST natively
+        # (Google's Query syntax reference) — the Postgres/SQLite shape.
+        col = sa.column("status")
+        terms = BigQueryDialectAdapter().order_by_terms(col, "asc", nulls)
+        assert len(terms) == 1
+        assert f"NULLS {nulls.upper()}" in _render_bigquery(terms[0]).upper()
+
 
 class TestStatFn:
     def test_postgres_stddev_variance_render_plain_names(self):
@@ -249,6 +312,20 @@ class TestStatFn:
         assert "stddev(" in rendered_std and "stddev_samp" not in rendered_std
         assert "variance(" in rendered_var and "var_samp" not in rendered_var
 
+    def test_bigquery_stddev_variance_render_plain_names(self):
+        # BigQuery's bare STDDEV/VARIANCE ARE documented as aliases of
+        # STDDEV_SAMP/VAR_SAMP — the Postgres/Snowflake shape, not MySQL's
+        # population-default gap. Exact-name assertions (not `"stddev" in
+        # rendered`), the same substring-collision discipline as
+        # Snowflake's case above: "stddev" is a substring of "stddev_samp",
+        # so a plain-substring check would stay green even if this branch
+        # were accidentally copied from MySQL's `stddev_samp` mapping.
+        col = sa.column("amount")
+        rendered_std = _render_bigquery(BigQueryDialectAdapter().stat_fn("stddev")(col)).lower()
+        rendered_var = _render_bigquery(BigQueryDialectAdapter().stat_fn("variance")(col)).lower()
+        assert "stddev(" in rendered_std and "stddev_samp" not in rendered_std
+        assert "variance(" in rendered_var and "var_samp" not in rendered_var
+
 
 class TestStringAgg:
     def test_postgres_renders_string_agg(self):
@@ -283,6 +360,15 @@ class TestStringAgg:
         col = sa.column("email")
         rendered = _render_snowflake(SnowflakeDialectAdapter().string_agg(col, ", ")).lower()
         assert "listagg(email" in rendered
+
+    def test_bigquery_renders_string_agg(self):
+        # STRING_AGG(expr, delimiter) — the same 2-argument comma shape as
+        # Postgres's string_agg/Snowflake's LISTAGG. BigQuery's compiler
+        # backtick-quotes identifiers (`` `email` ``), unlike the other
+        # dialects here, so the assertion checks for the quoted form.
+        col = sa.column("email")
+        rendered = _render_bigquery(BigQueryDialectAdapter().string_agg(col, ", ")).lower()
+        assert "string_agg(`email`" in rendered
 
 
 class TestArrayAgg:
@@ -321,6 +407,14 @@ class TestArrayAgg:
         # equivalent, so this is a real render, not a rejection.
         col = sa.column("status")
         rendered = _render_snowflake(SnowflakeDialectAdapter().array_agg(col)).lower()
+        assert "array_agg(" in rendered
+
+    def test_bigquery_renders_array_agg(self):
+        # Like Snowflake, BigQuery's ARRAY_AGG returns a genuine native
+        # ARRAY<T> type — a real equivalent, so this is a real render, not a
+        # rejection.
+        col = sa.column("status")
+        rendered = _render_bigquery(BigQueryDialectAdapter().array_agg(col)).lower()
         assert "array_agg(" in rendered
 
 
@@ -374,6 +468,7 @@ class TestWindowFrame:
         "mysql": MySQLDialectAdapter(),
         "sqlite": SQLiteDialectAdapter(),
         "snowflake": SnowflakeDialectAdapter(),
+        "bigquery": BigQueryDialectAdapter(),
     }
 
     @pytest.mark.parametrize("name", sorted(_ADAPTERS))
@@ -396,11 +491,13 @@ class TestWindowFrame:
         with pytest.raises(QueryValidationError, match="RANGE frame with a numeric offset"):
             MSSQLDialectAdapter().window_frame("range", start, end)
 
-    @pytest.mark.parametrize("name", ["postgres", "mysql", "sqlite", "snowflake"])
+    @pytest.mark.parametrize("name", ["postgres", "mysql", "sqlite", "snowflake", "bigquery"])
     def test_numeric_range_offsets_are_supported_off_mssql(self, name):
         # Snowflake's RANGE BETWEEN with a numeric offset reached General
-        # Availability 2024-08-08 per Snowflake's release notes — this is a
-        # rendering assertion only; an account on an older Snowflake release
+        # Availability 2024-08-08 per Snowflake's release notes; BigQuery's
+        # window-function-calls reference documents `numeric_preceding`/
+        # `numeric_following` as part of its frame grammar directly — this is
+        # a rendering assertion only; an account/project on an older release
         # could genuinely lack it, which no test in this environment can
         # catch without a live server.
         assert self._ADAPTERS[name].window_frame("range", -6, 0) == {"range_": (-6, 0)}
@@ -624,3 +721,349 @@ class TestSnowflakeMapsAreNotDeadCode:
                 adapter.date_add(sa.column("c"), "day", 1)
         finally:
             da._SNOWFLAKE_DATEADD_UNITS = original
+
+
+class TestBigQueryTemporalKindDispatch:
+    """BigQuery is the one adapter whose date_bucket/date_add genuinely need
+    to know the operand's concrete type (see `_bq_temporal_kind`'s docstring
+    in dialect_adapters.py) — no other dialect's adapter has this axis, so
+    it gets its own test class rather than folding into the extract/date_add
+    class below."""
+
+    def test_date_kind_uses_date_trunc_and_date_add(self):
+        adapter = BigQueryDialectAdapter()
+        col = _bq_col("d", sa.Date)
+        bucket = _render_bigquery(adapter.date_bucket(col, "month"))
+        assert "date_trunc" in bucket.lower()
+        assert "datetime_trunc" not in bucket.lower()
+        assert "timestamp_trunc" not in bucket.lower()
+        added = adapter.date_add(col, "month", 1)
+        compiled = str(added.compile(dialect=_BIGQUERY_DIALECT))
+        assert "date_add" in compiled.lower()
+        assert "datetime_add" not in compiled.lower()
+        assert "timestamp_add" not in compiled.lower()
+
+    def test_datetime_kind_uses_datetime_trunc_and_datetime_add(self):
+        adapter = BigQueryDialectAdapter()
+        col = _bq_col("dt", sa.DateTime)
+        bucket = _render_bigquery(adapter.date_bucket(col, "month"))
+        assert "datetime_trunc" in bucket.lower()
+        added = adapter.date_add(col, "hour", 1)
+        compiled = str(added.compile(dialect=_BIGQUERY_DIALECT))
+        assert "datetime_add" in compiled.lower()
+
+    def test_timestamp_kind_uses_timestamp_trunc_and_timestamp_add(self):
+        adapter = BigQueryDialectAdapter()
+        col = _bq_col("ts", sa.TIMESTAMP)
+        bucket = _render_bigquery(adapter.date_bucket(col, "month"))
+        assert "timestamp_trunc" in bucket.lower()
+        added = adapter.date_add(col, "hour", 1)
+        compiled = str(added.compile(dialect=_BIGQUERY_DIALECT))
+        assert "timestamp_add" in compiled.lower()
+
+    def test_timestamp_is_not_misclassified_as_datetime(self):
+        """The isinstance-ordering bug this dispatch would fall into if
+        checked in the wrong order: `sa.TIMESTAMP` IS a subclass of
+        `sa.DateTime`, so checking `isinstance(t, sa.DateTime)` first would
+        silently route every TIMESTAMP column through DATETIME_TRUNC/
+        DATETIME_ADD instead — which, for date_add, would WRONGLY accept
+        week/month/year units DATETIME_ADD supports but TIMESTAMP_ADD does
+        not (a silent capability-gap miss, not a syntax error)."""
+        adapter = BigQueryDialectAdapter()
+        col = _bq_col("ts", sa.TIMESTAMP)
+        # TIMESTAMP_ADD genuinely lacks 'week' (see TestBigQueryDateAddTypeGaps
+        # below) — if this misclassified as DATETIME it would render instead
+        # of raising.
+        with pytest.raises(QueryValidationError, match="TIMESTAMP_ADD"):
+            adapter.date_add(col, "week", 1)
+
+    def test_untyped_operand_is_rejected_not_guessed(self):
+        """An expression whose SQLAlchemy type cannot be determined (NullType
+        — e.g. a bare `sa.column(...)` with no `type_`) must raise a named,
+        typed error, never silently pick a kind."""
+        adapter = BigQueryDialectAdapter()
+        untyped = sa.column("mystery")
+        with pytest.raises(QueryValidationError, match="could not determine"):
+            adapter.date_bucket(untyped, "month")
+        with pytest.raises(QueryValidationError, match="could not determine"):
+            adapter.date_add(untyped, "day", 1)
+
+    def test_date_bucket_and_date_add_results_carry_type_for_nesting(self):
+        """current_timestamp/date_bucket/date_add each type_coerce their
+        result so a caller can nest date_add(date_bucket(x), ...) or
+        date_add(current_timestamp(...), ...) and still get correct dispatch
+        at the next level — a bare `sa.func.x(...)` call defaults to
+        NullType, which would make any such nesting hit the
+        "could not determine" rejection above."""
+        adapter = BigQueryDialectAdapter()
+        now_ts = adapter.current_timestamp("timestamp")
+        assert isinstance(now_ts.type, sa.TIMESTAMP)
+        nested = adapter.date_add(now_ts, "hour", -1)
+        # Renders via TIMESTAMP_ADD (not "could not determine ...") — proves
+        # the type survived current_timestamp -> date_add.
+        compiled = str(nested.compile(dialect=_BIGQUERY_DIALECT))
+        assert "timestamp_add" in compiled.lower()
+
+        bucketed = adapter.date_bucket(_bq_col("dt", sa.DateTime), "day")
+        assert isinstance(bucketed.type, sa.DateTime)
+        renested = adapter.date_add(bucketed, "week", 1)
+        compiled2 = str(renested.compile(dialect=_BIGQUERY_DIALECT))
+        assert "datetime_add" in compiled2.lower()
+
+
+class TestBigQueryDateAddTypeGaps:
+    """The reject-don't-emulate cases unique to BigQuery's three-way type
+    split — a DATE has no time-of-day (so hour/minute/second are refused)
+    and a TIMESTAMP is a timezone-independent instant (so week/month/quarter/
+    year are refused), confirmed against Google's DATE_ADD/TIMESTAMP_ADD
+    docs, not assumed."""
+
+    @pytest.mark.parametrize("unit", ["hour", "minute", "second"])
+    def test_date_operand_rejects_sub_day_units(self, unit):
+        adapter = BigQueryDialectAdapter()
+        with pytest.raises(QueryValidationError, match="DATE_ADD"):
+            adapter.date_add(_bq_col("d", sa.Date), unit, 1)
+
+    @pytest.mark.parametrize("unit", ["week", "month", "year"])
+    def test_timestamp_operand_rejects_calendar_units(self, unit):
+        adapter = BigQueryDialectAdapter()
+        with pytest.raises(QueryValidationError, match="TIMESTAMP_ADD"):
+            adapter.date_add(_bq_col("ts", sa.TIMESTAMP), unit, 1)
+
+    def test_datetime_operand_has_no_gaps(self):
+        """DATETIME_ADD supports the full IntervalUnit range — the one
+        BigQuery kind with no genuine gap."""
+        adapter = BigQueryDialectAdapter()
+        for unit in IntervalUnit.__args__:
+            expr = adapter.date_add(_bq_col("dt", sa.DateTime), unit, 1)
+            assert _render_bigquery(expr)
+
+
+class TestBigQueryExtractPartDateAddCurrentTimestamp:
+    def test_every_date_part_is_supported(self):
+        # Iterates the live `DatePart` enum directly, for the same reason
+        # the Snowflake class above does. BigQuery has NO declared gaps
+        # (extract_part needs no type dispatch — EXTRACT accepts DATE/
+        # DATETIME/TIMESTAMP alike), so an untyped column is fine here.
+        for part in DatePart.__args__:
+            expr = BigQueryDialectAdapter().extract_part(part, sa.column("created_at"))
+            assert _render_bigquery(expr)
+
+    def test_dayofweek_is_extracted_and_normalized_modulo_sunday_first(self):
+        # EXTRACT(DAYOFWEEK FROM x) returns [1,7] with Sunday=1 (Google's
+        # docs); subtracting 1 gives the 0=Sunday..6=Saturday contract.
+        rendered = _render_bigquery(
+            BigQueryDialectAdapter().extract_part("dayofweek", sa.column("created_at"))
+        ).lower()
+        assert "dayofweek" in rendered
+        assert "- 1" in rendered
+
+    def test_week_uses_isoweek_not_the_sunday_start_week(self):
+        rendered = _render_bigquery(
+            BigQueryDialectAdapter().extract_part("week", sa.column("created_at"))
+        ).lower()
+        assert "isoweek" in rendered
+
+    def test_unknown_part_raises_a_typed_error_not_a_keyerror(self):
+        with pytest.raises(QueryValidationError, match="not supported"):
+            BigQueryDialectAdapter().extract_part("nanocentury", sa.column("c"))
+
+    def test_date_add_renders_every_unit_on_a_datetime_operand(self):
+        # `IntervalUnit.__args__` directly, for the same reason
+        # `test_every_date_part_is_supported` above iterates `DatePart`
+        # rather than a hand-copied tuple. A DATETIME operand is used
+        # because it is the one BigQuery kind with no genuine unit gap
+        # (see TestBigQueryDateAddTypeGaps) — DATE/TIMESTAMP each reject a
+        # real subset, covered separately above.
+        for unit in IntervalUnit.__args__:
+            expr = BigQueryDialectAdapter().date_add(_bq_col("created_at", sa.DateTime), unit, 1)
+            assert _render_bigquery(expr)
+
+    def test_date_add_unknown_unit_raises_a_typed_error(self):
+        with pytest.raises(QueryValidationError, match="not supported"):
+            BigQueryDialectAdapter().date_add(_bq_col("c", sa.DateTime), "nanocentury", 3)
+
+    def test_date_add_binds_the_amount_rather_than_inlining_it(self):
+        # `sa.text(...).bindparams(amt=amount)` is a BOUND PARAMETER, not
+        # text interpolation — asserted by compiling WITHOUT literal_binds
+        # (the default) and checking the amount does NOT appear in the SQL
+        # text itself, only in the compiled statement's params.
+        expr = BigQueryDialectAdapter().date_add(_bq_col("created_at", sa.DateTime), "day", -7)
+        compiled = expr.compile(dialect=_BIGQUERY_DIALECT)
+        assert "-7" not in str(compiled), "the amount must bind, not be inlined into SQL text"
+        assert -7 in compiled.params.values()
+
+    def test_current_timestamp_uses_current_timestamp_function(self):
+        rendered = _render_bigquery(BigQueryDialectAdapter().current_timestamp("timestamp"))
+        assert "CURRENT_TIMESTAMP" in rendered.upper()
+
+    def test_current_timestamp_date_kind_casts_to_a_real_date_type(self):
+        sql = _render_bigquery(BigQueryDialectAdapter().current_timestamp("date"))
+        cast_target = sql.upper().rsplit(" AS ", 1)[1].rstrip(")")
+        assert cast_target == "DATE", f"expected a DATE cast, got {cast_target!r}"
+
+
+class TestBigQueryScalarFunctions:
+    def test_ceil_length_substring_round(self):
+        adapter = BigQueryDialectAdapter()
+        col = sa.column("x")
+        assert "ceil" in _render_bigquery(adapter.scalar_function("ceil", [col])).lower()
+        assert "length" in _render_bigquery(adapter.scalar_function("length", [col])).lower()
+        rendered_sub = _render_bigquery(
+            adapter.scalar_function("substring", [col, sa.literal(1), sa.literal(3)])
+        ).lower()
+        assert "substr" in rendered_sub
+        assert "round" in _render_bigquery(adapter.scalar_function("round", [col])).lower()
+        rendered_round2 = _render_bigquery(
+            adapter.scalar_function("round", [col, sa.literal(2)])
+        ).lower()
+        assert "round" in rendered_round2
+
+    def test_unsupported_scalar_function_is_rejected(self):
+        with pytest.raises(QueryValidationError, match="Unsupported scalar function"):
+            BigQueryDialectAdapter().scalar_function("not_a_real_function", [sa.column("x")])
+
+
+class TestBigQuerySetOperation:
+    def test_union_all_is_supported(self):
+        selects = [sa.select(sa.literal_column("1")), sa.select(sa.literal_column("2"))]
+        compound = BigQueryDialectAdapter().set_operation("union", True, selects)
+        assert "UNION ALL" in str(compound.compile(dialect=_BIGQUERY_DIALECT)).upper()
+
+    @pytest.mark.parametrize("op", ["intersect", "except"])
+    def test_intersect_except_all_are_rejected_not_emulated(self, op):
+        # BigQuery's INTERSECT/EXCEPT are distinct-only — the same genuine
+        # gap as MSSQL/MySQL/Snowflake, not a spelling difference.
+        selects = [sa.select(sa.literal_column("1")), sa.select(sa.literal_column("2"))]
+        with pytest.raises(QueryValidationError, match=f"{op.upper()} ALL is not supported"):
+            BigQueryDialectAdapter().set_operation(op, True, selects)
+
+    @pytest.mark.parametrize("op", ["intersect", "except"])
+    def test_intersect_except_without_all_are_supported(self, op):
+        # Asserts the RENDERED KEYWORD, not just "returned something" — same
+        # discipline as the Snowflake case above. BigQuery's compiler injects
+        # an explicit DISTINCT keyword (confirmed by compiling against the
+        # installed dialect object) rather than a bare keyword, so this also
+        # guards that the DISTINCT form is what's actually produced.
+        selects = [sa.select(sa.literal_column("1")), sa.select(sa.literal_column("2"))]
+        compound = BigQueryDialectAdapter().set_operation(op, False, selects)
+        rendered = str(compound.compile(dialect=_BIGQUERY_DIALECT)).upper()
+        assert op.upper() in rendered
+        assert f"{op.upper()} ALL" not in rendered
+
+
+class TestBigQueryPercentileContRejected:
+    def test_percentile_cont_is_rejected_as_a_group_by_aggregate(self):
+        # BigQuery's PERCENTILE_CONT syntax requires OVER(...) — there is no
+        # GROUP BY-compatible form, the same genuine gap as MSSQL's.
+        with pytest.raises(QueryValidationError, match="navigation/window function"):
+            BigQueryDialectAdapter().percentile_cont(sa.column("x"), 0.5)
+
+
+class TestBigQueryColumnMask:
+    def _mask(self, kind: str, **extra):
+        from querygate.policy.models import ColumnMask
+
+        return ColumnMask(column="t.c", kind=kind, **extra)
+
+    def test_null_and_bucket_render(self):
+        adapter = BigQueryDialectAdapter()
+        col = sa.column("amount")
+        null_expr = adapter.column_mask(col, self._mask("null"))
+        assert "NULL" in _render_bigquery(sa.select(null_expr)).upper()
+        bucket_expr = adapter.column_mask(col, self._mask("bucket", bucket_size=10))
+        assert "floor" in _render_bigquery(sa.select(bucket_expr)).lower()
+
+    def test_last_renders_right(self):
+        adapter = BigQueryDialectAdapter()
+        col = sa.column("ssn")
+        expr = adapter.column_mask(col, self._mask("last", length=4))
+        rendered = _render_bigquery(sa.select(expr)).lower()
+        assert "right(" in rendered
+
+    def test_hash_renders_to_hex_sha256(self):
+        adapter = BigQueryDialectAdapter()
+        col = sa.column("email")
+        expr = adapter.column_mask(col, self._mask("hash"))
+        rendered = _render_bigquery(sa.select(expr)).lower()
+        assert "to_hex(" in rendered
+        assert "sha256(" in rendered
+
+
+class TestBigQueryMapsAreNotDeadCode:
+    """Mutation check (CLAUDE.md's self-review discipline) — same technique
+    as TestSnowflakeMapsAreNotDeadCode above."""
+
+    def test_extract_field_map_is_read_by_the_adapter(self):
+        from querygate.compiler import dialect_adapters as da
+
+        expr = lambda: da.BigQueryDialectAdapter().extract_part(  # noqa: E731
+            "year", sa.column("created_at")
+        )
+        baseline = _render_bigquery(expr())
+        original = da._BQ_EXTRACT_FIELDS["year"]
+        da._BQ_EXTRACT_FIELDS["year"] = "qg_sentinel_value"
+        try:
+            mutated = _render_bigquery(expr())
+        finally:
+            da._BQ_EXTRACT_FIELDS["year"] = original
+        assert mutated != baseline and "qg_sentinel_value" in mutated
+
+    def test_trunc_keyword_map_is_read_by_the_adapter(self):
+        from querygate.compiler import dialect_adapters as da
+
+        adapter = da.BigQueryDialectAdapter()
+        col = _bq_col("dt", sa.DateTime)
+        baseline = _render_bigquery(adapter.date_bucket(col, "month"))
+        original = da._BQ_TRUNC_KEYWORDS["month"]
+        da._BQ_TRUNC_KEYWORDS["month"] = "QG_SENTINEL"
+        try:
+            mutated = _render_bigquery(adapter.date_bucket(col, "month"))
+        finally:
+            da._BQ_TRUNC_KEYWORDS["month"] = original
+        assert mutated != baseline and "QG_SENTINEL" in mutated
+
+    def test_datetime_add_unit_map_is_read_by_the_adapter(self):
+        """IDENTITY-shaped mapping (same as `_MSSQL_DATEADD_UNITS`), so the
+        only observable coupling is the rejection: remove a unit and the
+        adapter must refuse it."""
+        from querygate.compiler import dialect_adapters as da
+
+        adapter = da.BigQueryDialectAdapter()
+        original = dict(da._BQ_DATETIME_ADD_UNITS)
+        da._BQ_DATETIME_ADD_UNITS = {k: v for k, v in original.items() if k != "day"}
+        try:
+            with pytest.raises(QueryValidationError, match="not supported"):
+                adapter.date_add(_bq_col("dt", sa.DateTime), "day", 1)
+        finally:
+            da._BQ_DATETIME_ADD_UNITS = original
+
+    def test_date_add_unit_map_is_read_by_the_adapter(self):
+        """The sibling of the DATETIME test above for `_BQ_DATE_ADD_UNITS` —
+        each of the three per-kind unit maps is a direct module-global
+        reference inside `date_add`, not a single shared indirection dict
+        (see the code comment on that choice), so each needs its own
+        mutation pin or a mutation to one specific map could go unnoticed."""
+        from querygate.compiler import dialect_adapters as da
+
+        adapter = da.BigQueryDialectAdapter()
+        original = dict(da._BQ_DATE_ADD_UNITS)
+        da._BQ_DATE_ADD_UNITS = {k: v for k, v in original.items() if k != "day"}
+        try:
+            with pytest.raises(QueryValidationError, match="not supported"):
+                adapter.date_add(_bq_col("d", sa.Date), "day", 1)
+        finally:
+            da._BQ_DATE_ADD_UNITS = original
+
+    def test_timestamp_add_unit_map_is_read_by_the_adapter(self):
+        """The `_BQ_TIMESTAMP_ADD_UNITS` sibling of the two tests above."""
+        from querygate.compiler import dialect_adapters as da
+
+        adapter = da.BigQueryDialectAdapter()
+        original = dict(da._BQ_TIMESTAMP_ADD_UNITS)
+        da._BQ_TIMESTAMP_ADD_UNITS = {k: v for k, v in original.items() if k != "day"}
+        try:
+            with pytest.raises(QueryValidationError, match="not supported"):
+                adapter.date_add(_bq_col("ts", sa.TIMESTAMP), "day", 1)
+        finally:
+            da._BQ_TIMESTAMP_ADD_UNITS = original

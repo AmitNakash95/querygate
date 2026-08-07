@@ -212,6 +212,17 @@ def test_upsert_compiles_on_conflict_for_postgres_and_rejects_mssql():
     with pytest.raises(QueryValidationError, match="MERGE"):
         compile_write(stmt, table, "snowflake")
 
+    # BigQuery: same MERGE-only gap as Snowflake, plus a second, stronger
+    # reason — its PRIMARY KEY/UNIQUE constraints, even when declared, are
+    # NOT ENFORCED, so there is no database-enforced uniqueness for
+    # conflict_columns to even name a real target against (TODO.md item 19
+    # phase 3). Captured once so both substrings are proven to be in the
+    # SAME message, not just each independently matchable somewhere.
+    with pytest.raises(QueryValidationError) as excinfo:
+        compile_write(stmt, table, "bigquery")
+    assert "MERGE" in str(excinfo.value)
+    assert "NOT ENFORCED" in str(excinfo.value)
+
 
 def test_upsert_statement_rejects_update_column_that_is_a_conflict_column():
     from querygate.write_ast.models import UpsertStatement

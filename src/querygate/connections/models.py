@@ -31,21 +31,41 @@ class DatabaseDialect(StrEnum):
     engine, not `ConnectionProfile.dialect`) for where that string can still
     legitimately be `"sqlite"` and stays a plain `str`.
 
-    `SNOWFLAKE` (TODO.md item 19 phase 2) is accepted here and has a real
-    `SnowflakeDialectAdapter`/`SnowflakeSessionAdapter`, but — unlike the other
-    three members — `connections/engine.py`'s `init_engine` refuses to actually
-    open a connection for it: `snowflake-sqlalchemy`'s DBAPI has no async
-    driver, so `create_async_engine` cannot be used the way it is for every
-    other dialect here. This member exists so the compiler/session adapters
-    can be built and rendering-tested now; see `init_engine`'s docstring and
-    TODO.md item 19 for the live-async-execution gap that blocks actually
-    running a query against Snowflake.
+    `SNOWFLAKE` (TODO.md item 19 phase 2) and `BIGQUERY` (TODO.md item 19
+    phase 3) are both accepted here and both have a real `DialectAdapter`/
+    `SessionDialectAdapter`, but — unlike the first three members —
+    `connections/engine.py`'s `init_engine` refuses to actually open a
+    connection for either: neither `snowflake-sqlalchemy` nor
+    `sqlalchemy-bigquery`'s DBAPI has an async driver. For Snowflake this was
+    confirmed directly the simple way — constructing SQLAlchemy's async
+    engine factory against a `"snowflake://..."` URL raises
+    `sqlalchemy.exc.InvalidRequestError: The asyncio extension requires an
+    async driver to be used`. BigQuery's driver has the identical gap, but
+    confirming it the same direct way is NOT possible with no GCP
+    credentials configured (the case in this project's environment):
+    `sqlalchemy_bigquery.BigQueryDialect.create_connect_args` builds a real
+    `google.cloud.bigquery.Client` (resolving Google credentials) at
+    ENGINE-CONSTRUCTION time, not connection time, and fails there FIRST —
+    confirmed directly: a bare call to that same async engine factory
+    against a `"bigquery://project/dataset"` URL with no credentials
+    configured raises `google.auth.exceptions.DefaultCredentialsError`
+    immediately inside `create_connect_args`, before SQLAlchemy's own
+    async-driver check ever gets a chance to run. (With a syntactically
+    valid, if fake, credentials file supplied so `create_connect_args` can
+    proceed past that step, the same `InvalidRequestError` Snowflake's
+    driver raises was also confirmed for BigQuery's — but that is not the
+    error either dialect actually presents in this project's normal,
+    credential-less environment.) These members exist so the
+    compiler/session adapters can be built and rendering-tested now; see
+    `init_engine`'s docstring and TODO.md item 19 for the live-async-
+    execution gap that blocks actually running a query against either.
     """
 
     POSTGRESQL = "postgresql"
     MSSQL = "mssql"
     MYSQL = "mysql"
     SNOWFLAKE = "snowflake"
+    BIGQUERY = "bigquery"
 
 
 _VALID_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]*$")

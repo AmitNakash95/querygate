@@ -370,6 +370,35 @@ claim when the work ships or before explicitly handing the item back.
   by `security-invariant-reviewer` while auditing item 156 itself — none is a
   live bypass; grouped since a real fix to any one likely touches the same
   call sites as the others.*
+- [ ] **161** — BigQuery live-server verification and deeper feature parity
+  (item 19 phase 3 residual). *Filed 2026-08-07 alongside item 19 phase 3
+  (BigQuery `DialectAdapter`/`SessionDialectAdapter`, rendering-only, not
+  live-verified — no BigQuery project or GCP credentials available in this
+  environment). Blocked on deciding/building an async execution path for
+  `sqlalchemy-bigquery`'s sync-only driver, plus a second, BigQuery-specific
+  question (its dialect resolves credentials at engine-construction time),
+  before a live connection can even be attempted; not eligible for pickup
+  until that's a live-buildable slice.*
+- [ ] **162** — dialects beyond MySQL/Snowflake/BigQuery (item 19's
+  open-ended "…" scope). *Filed 2026-08-07 when item 19 closed, so the
+  original scope's trailing "…" has a real home instead of keeping item 19
+  open indefinitely. Unscoped — no specific dialect chosen or investigated;
+  picking one is a product/roadmap decision, not a technical blocker.*
+- [ ] **163** — a not-connectable dialect (Snowflake/BigQuery) as the
+  SECONDARY side of a cross-connection join never reaches the
+  `is_connectable()` guard. *Surfaced 2026-08-07 by
+  `security-invariant-reviewer` auditing item 19 phase 3 — pre-existing
+  since Snowflake (item 19 phase 2), not BigQuery-specific. Not a data leak
+  (join_group + the joined Policy still gate it), but a confusing masked
+  500 instead of a clean rejection; small, self-contained fix at
+  `resolve_query_table_connections`.*
+- [ ] **164** — `column_mask`'s HASH branch is an implicit `else`, not an
+  exhaustive match, on all five `DialectAdapter`s. *Surfaced 2026-08-07 by
+  `security-invariant-reviewer` auditing item 19 phase 3 — pre-existing
+  pattern across all five adapters, not new. Low severity (fails toward the
+  strongest mask, `ColumnMaskKind` is a stable closed 4-member enum);
+  mechanical five-adapter guard-clause fix matching the date-part/interval-
+  unit maps' existing exhaustiveness discipline.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
@@ -547,13 +576,16 @@ position.
   (sync compiler `DialectAdapter` [item 73] + new async `SessionDialectAdapter`;
   reverses the prior inline-branching exception. Adding a dialect = implement
   both + register).
-- [ ] **19** — Additional dialects (MySQL, Snowflake, BigQuery, …). *Removes the
+- [x] **19** — Additional dialects (MySQL, Snowflake, BigQuery, …). *Removes the
   "QueryGate is narrow" objection. **Depends on 57**; also downstream of the
-  engine — each new adapter must render every Phase 4 primitive.* **MySQL
-  phase 1 shipped 2026-08-06** (live-verified against a real MySQL 8.4
-  server). **Snowflake phase 1 shipped 2026-08-06** (rendering-only, NOT
-  live-verified — no Snowflake instance available in this environment; see
-  item 157). BigQuery remains open, its own L–XL effort.
+  engine — each new adapter must render every Phase 4 primitive.* ✅
+  **Shipped 2026-08-07.** **MySQL phase 1 shipped 2026-08-06**
+  (live-verified against a real MySQL 8.4 server). **Snowflake phase 2
+  shipped 2026-08-06** and **BigQuery phase 3 shipped 2026-08-07** (both
+  rendering-only, NOT live-verified — no Snowflake/BigQuery instance
+  available in this environment; see items 157/161). Item closed with all
+  three originally-named dialects shipped; item 162 tracks any dialect
+  beyond these three.
 - [x] **128** — Conform to the final MCP `2026-07-28` protocol revision. *Added
   2026-07-30 by `competitive-scan`; the spec went final on 2026-07-28 (the
   2026-07-22 scan saw only the RC) and we are a full revision behind on

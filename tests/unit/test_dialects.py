@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from querygate.connections.dialects import (
+    BigQuerySessionAdapter,
     MSSQLSessionAdapter,
     MySQLSessionAdapter,
     PostgresSessionAdapter,
@@ -42,19 +43,22 @@ def test_session_adapter_registry_dispatches_per_dialect():
     pg = get_session_adapter(DatabaseDialect.POSTGRESQL)
     ms = get_session_adapter(DatabaseDialect.MSSQL)
     sf = get_session_adapter(DatabaseDialect.SNOWFLAKE)
+    bq = get_session_adapter(DatabaseDialect.BIGQUERY)
     assert isinstance(pg, PostgresSessionAdapter)
     assert isinstance(ms, MSSQLSessionAdapter)
     assert isinstance(sf, SnowflakeSessionAdapter)
+    assert isinstance(bq, BigQuerySessionAdapter)
     # Both implement the full interface (no abstract methods left unimplemented).
     assert issubclass(PostgresSessionAdapter, SessionDialectAdapter)
     assert issubclass(MSSQLSessionAdapter, SessionDialectAdapter)
     assert issubclass(SnowflakeSessionAdapter, SessionDialectAdapter)
+    assert issubclass(BigQuerySessionAdapter, SessionDialectAdapter)
     with pytest.raises(ValueError, match="Unsupported dialect"):
         get_session_adapter("oracle")  # type: ignore[arg-type]
 
 
-def test_is_connectable_is_true_by_default_and_false_only_for_snowflake():
-    """TODO.md item 19 phase 2 — 2026-08-06 `architecture-boundary-reviewer`
+def test_is_connectable_is_true_by_default_and_false_for_snowflake_and_bigquery():
+    """TODO.md item 19 phases 2/3 — 2026-08-06 `architecture-boundary-reviewer`
     finding: `connections/engine.py`'s guard must dispatch through this
     registered capability method, never an inline `if dialect ==
     DatabaseDialect.SNOWFLAKE` comparison at the `init_engine` call site. Pin
@@ -64,6 +68,7 @@ def test_is_connectable_is_true_by_default_and_false_only_for_snowflake():
     assert get_session_adapter(DatabaseDialect.MSSQL).is_connectable() is True
     assert get_session_adapter(DatabaseDialect.MYSQL).is_connectable() is True
     assert get_session_adapter(DatabaseDialect.SNOWFLAKE).is_connectable() is False
+    assert get_session_adapter(DatabaseDialect.BIGQUERY).is_connectable() is False
 
 
 def test_list_live_tables_extra_filter_only_restricts_mysql():
@@ -84,6 +89,10 @@ def test_list_live_tables_extra_filter_only_restricts_mysql():
     # docstring for the caveat this must be reverified against a live
     # account before item 157 lifts `init_engine`'s connect guard.
     assert list_live_tables_extra_filter_sql(DatabaseDialect.SNOWFLAKE) == ""
+    # Same unverified-but-explicit reasoning for BigQuery — its
+    # INFORMATION_SCHEMA is dataset-scoped (queried as `<project>.<dataset>.
+    # INFORMATION_SCHEMA.TABLES`), not server-wide like MySQL's.
+    assert list_live_tables_extra_filter_sql(DatabaseDialect.BIGQUERY) == ""
 
 
 def test_database_dialect_equals_its_plain_string_value():
@@ -428,4 +437,79 @@ async def test_mssql_cancel_session_rejects_a_non_integer_identifier():
     # statement is built/executed — a test that only checked the raise could
     # still pass even if the malformed value reached the interpolated KILL
     # statement first and the rejection came too late to matter.
+    assert engine.connection.statements == []
+
+
+# --------------------------------------------------------------------------- #
+# BigQuery (TODO.md item 19 phase 3). Same posture as the Snowflake section
+# above — none of this is verified against a live server;
+# `BigQuerySessionAdapter`'s methods are never actually reached in production
+# (`connections/engine.py`'s `init_engine` refuses a BigQuery profile before
+# any of them could run; see `tests/unit/test_connections_engine.py`). Unlike
+# Snowflake, BigQuery genuinely has no session-scoped SQL statement at all
+# (see `BigQuerySessionAdapter`'s class docstring), so apply_session_
+# guardrails is asserted as a real no-op (no statements sent) rather than a
+# rendered ALTER SESSION SET, and capture_session_identifier/cancel_session
+# are asserted to raise rather than fabricate a value.
+# --------------------------------------------------------------------------- #
+def _bigquery_profile() -> ConnectionProfile:
+    return ConnectionProfile(
+        id="demo",
+        dialect="bigquery",
+        connection_string="bigquery://my-project/my_dataset",
+    )
+
+
+def test_build_engine_url_bigquery_is_passthrough():
+    profile = _bigquery_profile()
+    assert build_engine_url(profile) == profile.connection_string
+
+
+def test_build_connect_args_bigquery_is_empty():
+    """Confirmed by reading the installed `sqlalchemy_bigquery.base.
+    BigQueryDialect.create_connect_args` source directly: it builds its
+    `google.cloud.bigquery.Client` entirely from the URL's own query
+    parameters and never consults a `connect_args` dict, so `timeout_seconds`
+    has nowhere to go here — unlike every other adapter's connect_args."""
+    assert build_connect_args(_bigquery_profile(), timeout_seconds=30) == {}
+
+
+def test_register_query_timeout_is_noop_for_bigquery():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    before = _connect_listener_count(engine)
+    register_query_timeout(engine, "bigquery", timeout_seconds=5)
+    assert _connect_listener_count(engine) == before
+    asyncio.run(engine.dispose())
+
+
+@pytest.mark.asyncio
+async def test_bigquery_session_guardrails_are_a_genuine_noop():
+    """Unlike Snowflake's ALTER SESSION SET (or Postgres's/MSSQL's/MySQL's own
+    session-parameter statements), BigQuery has no session-scoped SQL
+    statement at all — there is nothing to SET, so no statement is sent."""
+    session = _RecordingSession()
+    await BigQuerySessionAdapter().apply_session_guardrails(
+        session, lock_timeout_seconds=3, statement_timeout_seconds=7
+    )
+    assert session.statements == []
+
+
+@pytest.mark.asyncio
+async def test_bigquery_capture_session_identifier_raises_rather_than_fabricates():
+    """BigQuery creates no default per-connection session to capture an
+    identifier for — reject, per CLAUDE.md's engine philosophy, rather than
+    SELECT-ing a plausible-looking-but-wrong stand-in (e.g. SESSION_USER(),
+    which identifies the QUERYING USER, not a session)."""
+    session = _RecordingSession()
+    with pytest.raises(NotImplementedError, match="no default per-connection session"):
+        await BigQuerySessionAdapter().capture_session_identifier(session)
+    # Nothing was sent to the (fake) server before the rejection.
+    assert session.statements == []
+
+
+@pytest.mark.asyncio
+async def test_bigquery_cancel_session_raises_rather_than_fabricates():
+    engine = _RecordingEngine()
+    with pytest.raises(NotImplementedError, match="no session-level cancellation primitive"):
+        await BigQuerySessionAdapter().cancel_session(engine, "some-job-id")
     assert engine.connection.statements == []

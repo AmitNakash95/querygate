@@ -518,12 +518,12 @@ without an estimator returns None (proceeds under the reactive guardrails).
   stringified annotations there fail to resolve at registration time. Keep
   annotations as real objects in all six files.
 - `ConnectionProfile.dialect` accepts `"postgresql"`, `"mssql"`, `"mysql"`
-  (item 19 phase 1), or `"snowflake"` (item 19 phase 2 — accepted, but
-  `connections/engine.py`'s `init_engine` refuses to actually connect for
-  it; rendering-level only, not live-verified) — SQLite is used internally
-  for tests/examples by monkeypatching `connections.engine.get_engine`/
-  `session_scope` directly (see `test_sqlite_end_to_end.py`), never through
-  the registry.
+  (item 19 phase 1), or `"snowflake"`/`"bigquery"` (item 19 phases 2/3 —
+  both accepted, but `connections/engine.py`'s `init_engine` refuses to
+  actually connect for either; rendering-level only, not live-verified) —
+  SQLite is used internally for tests/examples by monkeypatching
+  `connections.engine.get_engine`/`session_scope` directly (see
+  `test_sqlite_end_to_end.py`), never through the registry.
 - **Converting an in-process store's interface to `async def` (to prep for a
   future Redis-backed variant, the pattern already used by
   `execution/concurrency.py`/`redis_concurrency.py` and
