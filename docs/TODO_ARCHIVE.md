@@ -11700,3 +11700,88 @@ recorded call rather than relying on `PYTHONHASHSEED`, since today's bug is
 only observable under set-iteration-order variance.
 
 **Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped).
+
+### 165. `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body ✅ DONE
+
+**Surfaced 2026-08-07 by `security-invariant-reviewer` while auditing item
+158 (pre-existing, not introduced by that item — item 158's own new
+validator is independently verified NOT to leak; this is a broader,
+already-existing gap in the surrounding error handling that item 158's
+Decision Log entry happened to name the exact mechanism of).**
+`api/routes.py`'s `reload_config_endpoint` did:
+
+```python
+try:
+    return await reload_config(...)
+except Exception as exc:
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+```
+
+`reload_config` → `ConnectionRegistry.from_file` → `ConnectionProfile.
+model_validate(entry)` on an ALREADY-INTERPOLATED entry (real credential
+included). Any pydantic `ValidationError` this raises — not just item 158's
+own dialect-mismatch validator, which is independently safe (verified: its
+`input`/`loc` are always scoped to the `dialect` field's own value, never
+`connection_string`) — has its raw `str(exc)`/`.errors()` shape include the
+full input dict for certain error kinds. Confirmed directly: omitting a
+required field (e.g. `dialect`) from one `connections.yaml` entry produces
+a `missing`-type pydantic error whose `input_value` is the whole entry
+dict, including the live `connection_string`; `str(ValidationError)`
+truncates a long dict repr to its head/tail, so the host and database name
+always survive truncation and the password survives whenever the
+connection string is short enough. That raw string reached `detail=` in
+the HTTP 400 response verbatim. Reachable by anyone holding
+`ADMIN_RELOAD_CONFIG_SCOPE` who reloads a malformed `connections.yaml` (or
+by whoever reads the resulting response/logs).
+
+**Why this wasn't caught by `test_credential_redaction.py`:** that suite
+asserts against the live OpenAPI/MCP *schemas* (what fields a model
+declares), not against actual error-response *bodies* — a schema check
+can't catch a runtime exception's stringified content leaking through a
+generic `except Exception` handler.
+
+**Shipped: catch `pydantic.ValidationError` separately, before the generic
+`except Exception`, and build `detail` entirely from `loc`/`msg`.**
+`reload_config_endpoint` (`api/routes.py`) now has an
+`except pyd.ValidationError as exc:` clause ahead of the existing generic
+`except Exception`, which builds its `detail` via a new shared helper,
+`safe_pydantic_error_lines(exc)` (`admin/service.py`, alongside the existing
+`_humanize_validation_errors`). That helper calls
+`exc.errors(include_url=False, include_context=False, include_input=False)`
+— asking pydantic itself to never materialize `input`/`input_value` in the
+first place, rather than trying to regex-strip a credential out after the
+fact — and formats each remaining error as `"<loc>: <msg>"`. The generic
+`except Exception` (file-not-found, YAML syntax errors, etc., none of which
+carry a credential) is unchanged. Considered reusing
+`_humanize_validation_errors` directly, but its input shape (pre-stringified
+error lines plus a doc-name substitution map, built for the config-
+governance dry-run path) doesn't fit a live `ValidationError` object cleanly
+enough to force through it — `safe_pydantic_error_lines` is its structured-
+data sibling for callers holding the exception itself, not a third
+unrelated formatter.
+
+**Coverage:** two new regression tests in
+`tests/integration/test_rest_api.py` — `test_reload_config_missing_field_
+error_does_not_leak_credential` (a `connections.yaml` entry with `dialect`
+omitted and a short host/connection-string shape verified directly, before
+writing the test, to reproduce the leak in the un-fixed code — a long,
+production-looking connection string does NOT reliably reproduce it, since
+pydantic truncates the dict repr; a short id + short connection string is
+the actual regression case) and `test_reload_config_dialect_mismatch_error_
+does_not_leak_credential` (item 158's own validator, independently
+confirmed to stay safe through the real HTTP response body, not just by
+re-reading the validator's code). Both assert the planted credential
+substring is absent from the response body while the error stays
+actionable (the missing/mismatched field name is still present).
+Mutation-verified: reverted `reload_config_endpoint` to the original
+`except Exception as exc: detail=str(exc)` shape, confirmed
+`test_reload_config_missing_field_error_does_not_leak_credential` failed
+with the planted password visible in the response body (the dialect-
+mismatch test stayed green throughout, since that validator was already
+scoped safely regardless of the outer formatter), then restored the fix.
+Full unit (2130 passed, 2 skipped) and security (476 passed, 2 skipped)
+suites green after the fix; `black --check` clean.
+
+**Effort:** S (one route's exception handling; the stripping precedent
+already existed in `admin/service.py` to extend). **Depends on:** none.
+

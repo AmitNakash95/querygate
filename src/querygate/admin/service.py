@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import pydantic as pyd
 import sqlalchemy as sa
 import yaml
 
@@ -622,6 +623,28 @@ def _humanize_validation_errors(errors: List[str], doc_names: dict) -> List[str]
         error = _PYDANTIC_TAIL.sub("", error)
         cleaned.append(error.strip())
     return cleaned
+
+
+def safe_pydantic_error_lines(exc: pyd.ValidationError) -> List[str]:
+    """Turn a `pydantic.ValidationError` into safe, human-readable lines built
+    strictly from each error's `loc`/`msg` -- never `input`/`input_value`.
+
+    Companion to `_humanize_validation_errors` above, for callers that hold
+    the live `ValidationError` object rather than a pre-stringified error
+    list: `error["input_value"]` can embed the *entire* validated object for
+    certain pydantic error kinds (e.g. a `missing`-type error), which is
+    dangerous whenever the validated object may already contain a resolved
+    secret -- e.g. `ConnectionProfile.model_validate()` on an
+    already-`${...}`-interpolated `connections.yaml` entry (item 165). Pass
+    `include_input=False` straight to pydantic so the credential-bearing
+    value is never even materialized, rather than trying to redact it after
+    the fact."""
+    lines: List[str] = []
+    for error in exc.errors(include_url=False, include_context=False, include_input=False):
+        loc = ".".join(str(part) for part in error.get("loc", ()))
+        msg = error.get("msg", "")
+        lines.append(f"{loc}: {msg}" if loc else msg)
+    return lines
 
 
 def validate_candidate_content(

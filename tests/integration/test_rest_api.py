@@ -954,3 +954,100 @@ connections:
     mock_hvac_client.assert_called_once_with(
         url="http://vault.internal:8200", token="test-vault-token", namespace=None, timeout=10.0
     )
+
+
+# Deliberately short: pydantic truncates a long `ValidationError.input_value`
+# dict repr to a small head/tail window (see the module docstring on the
+# test below). A short id + short connection_string is what makes the
+# password actually land inside that surviving tail in the un-fixed code --
+# confirmed directly against ConnectionProfile.model_validate() before
+# writing this test, per item 165's own note that the password "survives
+# whenever the connection string is short enough". A longer, more
+# production-looking connection string does NOT reliably reproduce the leak
+# (it gets truncated away), so this shape is the regression case, not an
+# unrealistic corner case.
+_LIVE_PASSWORD = "S3cretPw"
+
+
+@pytest.mark.asyncio
+async def test_reload_config_missing_field_error_does_not_leak_credential(tmp_path, monkeypatch):
+    """Item 165 regression: a malformed connections.yaml entry that trips a
+    pydantic `missing`-type error embeds the WHOLE already-interpolated entry
+    dict (including the live connection_string) in that error's
+    `input_value`. Before the fix, `reload_config_endpoint`'s generic
+    `except Exception as exc: detail=str(exc)` handed that straight to the
+    HTTP 400 body. Assert the real password is nowhere in the response."""
+    monkeypatch.setenv("TEST_RELOAD_LEAK_URL", f"postgresql://user:{_LIVE_PASSWORD}@db:5432/app")
+    connections_file = tmp_path / "connections.yaml"
+    # `dialect` omitted entirely on this entry -> pydantic `missing` error,
+    # whose `input_value` is the full entry dict (with the resolved
+    # connection_string already interpolated in). No other fields on this
+    # entry, so the entry dict is exactly {"id", "connection_string"} --
+    # the shape that puts the password inside pydantic's truncated tail.
+    connections_file.write_text("""
+connections:
+  - id: leaky-demo
+    connection_string: ${TEST_RELOAD_LEAK_URL}
+""")
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("default:\n  enabled: true\n")
+
+    settings = _settings(
+        api_keys=["secret-key"],
+        api_key_scopes=["admin:reload-config"],
+        connections_file=str(connections_file),
+        policy_file=str(policy_file),
+    )
+    reload_app = create_app(settings)
+    async with AsyncClient(transport=ASGITransport(app=reload_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/reload-config", headers={"Authorization": "Bearer secret-key"}
+        )
+
+    assert resp.status_code == 400
+    body_text = resp.text
+    assert _LIVE_PASSWORD not in body_text
+    # The error is still actionable -- it names the missing field.
+    assert "dialect" in body_text
+
+
+@pytest.mark.asyncio
+async def test_reload_config_dialect_mismatch_error_does_not_leak_credential(tmp_path, monkeypatch):
+    """Item 158's own dialect-mismatch field_validator was independently
+    verified safe (its `input`/`loc` are scoped to `dialect`'s own value,
+    never `connection_string`) -- confirm that holds through the actual HTTP
+    response body, not just by re-reading the validator's code."""
+    monkeypatch.setenv(
+        "TEST_RELOAD_MISMATCH_URL",
+        f"postgresql+asyncpg://user:{_LIVE_PASSWORD}@dbhost.internal:5432/proddb",
+    )
+    connections_file = tmp_path / "connections.yaml"
+    connections_file.write_text("""
+connections:
+  - id: mismatch-demo
+    dialect: mssql
+    connection_string: ${TEST_RELOAD_MISMATCH_URL}
+    known_tables: [foo]
+""")
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("default:\n  enabled: true\n")
+
+    settings = _settings(
+        api_keys=["secret-key"],
+        api_key_scopes=["admin:reload-config"],
+        connections_file=str(connections_file),
+        policy_file=str(policy_file),
+    )
+    reload_app = create_app(settings)
+    async with AsyncClient(transport=ASGITransport(app=reload_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/reload-config", headers={"Authorization": "Bearer secret-key"}
+        )
+
+    assert resp.status_code == 400
+    body_text = resp.text
+    assert _LIVE_PASSWORD not in body_text
+    assert "dbhost.internal" not in body_text
+    assert "proddb" not in body_text
+    # Still actionable -- names the mismatch.
+    assert "dialect" in body_text
