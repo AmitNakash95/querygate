@@ -259,6 +259,47 @@ async def test_a_correlated_subquery_still_carries_its_mandatory_row_filter():
     assert "tenant_id = 't1'" in _sql(stmt)
 
 
+async def test_a_mandatory_row_filter_on_the_outer_correlated_table_applies_once_at_the_outer_scope():
+    """The companion case to the test above, and the one item 167's fix to
+    `_apply_mandatory_row_filters` actually turns on. That fix narrowed the
+    walk inside a scope's own compile pass to ONLY its declared FROM/JOIN
+    occurrences — deliberately excluding a table the scope merely reaches via
+    a declared `correlate` name — on the documented theory that the ENCLOSING
+    scope's own compile pass already applies that table's mandatory filters,
+    so re-applying them inside the correlated subquery too would be pure
+    redundancy (AND with itself), never a way to see MORE rows.
+
+    This test is what actually backs that theory for the case it's making a
+    claim about: a `mandatory_row_filter` on `customers` (the OUTER table),
+    reached inside the EXISTS ONLY via `correlate=["customers.id"]`, never
+    declared as a FROM/JOIN table of the subquery's own scope. If a future
+    change broke how the outer scope's own filter coverage works — the thing
+    item 167's docstring is trusting to still be true — the filter would just
+    silently vanish for `customers` inside this correlated-EXISTS shape, and
+    nothing else in this file would catch it (the sibling test above only
+    covers a filter on the SUBQUERY's own declared table, `orders`)."""
+    policy = Policy(
+        mandatory_row_filters=[
+            MandatoryRowFilter(table="customers", column="tenant_id", value="t1")
+        ],
+        max_subquery_depth=2,
+    )
+    query = _q(
+        **{"from": "customers", "select": ["customers.name"]},
+        where=_exists_on(["customers.id"], _MATCH),
+    )
+    stmt, _limit = await _run(query, policy)
+    sql = _sql(stmt)
+    # Applied -- not silently lost because it's only reached via `correlate`.
+    assert "tenant_id = 't1'" in sql, sql
+    # Applied exactly ONCE -- not redundantly re-applied inside the EXISTS too.
+    assert sql.count("tenant_id = 't1'") == 1, sql
+    # And specifically at the OUTER scope: the filter must sit outside the
+    # EXISTS subquery's own body, not inside it.
+    exists_body = sql.split("EXISTS (SELECT", 1)[1].rsplit(")", 1)[0]
+    assert "tenant_id = 't1'" not in exists_body, sql
+
+
 def test_correlated_refs_are_capped_tree_wide():
     query = _q(
         **{"from": "customers", "select": ["customers.name"]},
