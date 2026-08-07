@@ -19,7 +19,35 @@ from querygate.policy.loader import get_policy
 from querygate.query_ast.models import StructuredQuery
 from querygate.validation.policy_validation import validate_batch_size
 
-_CONNECTION_FIELD = Field(description="Connection id from list_connections.")
+# TODO.md item 130: `connection` is a primitive string that's already public
+# (`PublicConnectionInfo` exposes it), so the MCP `2026-07-28` spec's
+# `x-mcp-header` schema annotation is used to mirror it into an
+# `Mcp-Param-Connection` HTTP header (Streamable HTTP transport only) — a
+# fronting gateway can then route/authorize "this identity may only reach
+# connection X" at the edge without parsing the JSON-RPC body. A `tools/call`
+# body carries the mirrored value at `params.arguments.connection`; a present
+# header that disagrees with it is rejected by `mcp/transport_guard.py`'s
+# `_header_body_mismatch` (item 127's guard, extended here — the spec's
+# header/body MUST-reject rule isn't scoped to `Mcp-Method`/`Mcp-Name`). This
+# is still a routing hint only, never an authoritative access decision, and
+# it is deliberately non-exhaustive: a `JoinSpec` can carry its own
+# `connection` for a same-instance cross-database join (`query_ast/models.py`,
+# enforced by the `join_group` policy rule at schema-validation time), and no
+# header exists for that field at all, so a request headed
+# `Mcp-Param-Connection: analytics` may still legitimately join `crm` — the
+# header never substitutes for `resolve_visible_connection(connection_id,
+# principal=...)` (`connections/visibility.py`), which resolves per-principal
+# policy the gateway cannot compute. Visibility/routing only — the actual
+# authorization boundary is each tool's own call-time scope/policy check;
+# this annotation must never become a substitute for that check. Query
+# internals (the `queries` AST) are deliberately never annotated — mirroring
+# AST content into headers would leak query semantics to intermediaries and
+# invert the confidentiality posture. See docs/PRODUCT_GUIDE.md's MCP section
+# for the gateway-facing writeup, including the join caveat.
+_CONNECTION_FIELD = Field(
+    description="Connection id from list_connections.",
+    json_schema_extra={"x-mcp-header": "Connection"},
+)
 _QUEUE_MODE_FIELD = Field(
     default=None,
     description=(
