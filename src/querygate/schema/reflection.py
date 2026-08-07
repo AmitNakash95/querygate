@@ -76,7 +76,7 @@ async def list_live_tables(connection_id: str) -> list[str]:
     async with session_scope(connection_id) as session:
         result = await session.execute(
             sa.text(
-                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "  # nosec B608 — no caller/AST-controlled input reaches this string; `dialect` is a closed, pydantic-validated enum sourced only from server-side connection config, and list_live_tables_extra_filter_sql() dispatches it to one of a fixed set of static literal clauses (never interpolates any value). This is internal INFORMATION_SCHEMA introspection used to seed list_tables(), not the caller-facing StructuredQuery pipeline the "no raw SQL" invariant governs.
                 "WHERE TABLE_TYPE = 'BASE TABLE' "
                 "AND TABLE_SCHEMA NOT IN "
                 "('pg_catalog', 'information_schema', 'sys', 'mysql', 'performance_schema')"

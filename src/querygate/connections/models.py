@@ -96,7 +96,9 @@ _BACKEND_NAME_TO_DIALECT: dict[str, "DatabaseDialect"] = {
 # comment above), which means nothing else forces it to stay a superset of
 # `DatabaseDialect`. Fail loudly at import time, not by silently mis-
 # rejecting every profile for a newly-added dialect at request time.
-assert set(DatabaseDialect) <= set(_BACKEND_NAME_TO_DIALECT.values()), (
+assert set(DatabaseDialect) <= set(
+    _BACKEND_NAME_TO_DIALECT.values()
+), (  # nosec B101 — import-time drift guard over a hardcoded dict, not request-path control flow
     "_BACKEND_NAME_TO_DIALECT is missing an entry for a DatabaseDialect member "
     "— add its make_url() backend name before shipping the new dialect."
 )

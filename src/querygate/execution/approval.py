@@ -303,8 +303,8 @@ TOKEN_FORMAT_VERSION = 1
 # principal was asked about" marker — never itself redeemable. Keeping these
 # as a closed two-value set (not a bool) leaves room for a future kind without
 # a payload-shape change.
-TOKEN_KIND_GRANT = "grant"
-TOKEN_KIND_PENDING = "pending"
+TOKEN_KIND_GRANT = "grant"  # nosec B105 — token *kind* label, not a credential value
+TOKEN_KIND_PENDING = "pending"  # nosec B105 — token *kind* label, not a credential value
 
 
 def issue_approval_token(
