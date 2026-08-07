@@ -403,7 +403,7 @@ claim when the work ships or before explicitly handing the item back.
   strongest mask, `ColumnMaskKind` is a stable closed 4-member enum);
   mechanical five-adapter guard-clause fix matching the date-part/interval-
   unit maps' existing exhaustiveness discipline.*
-- [ ] **165** — `/admin/reload-config`'s generic exception handler can leak a
+- [x] **165** — `/admin/reload-config`'s generic exception handler can leak a
   live credential in its HTTP 400 body on a malformed `connections.yaml`.
   *Surfaced 2026-08-07 by `security-invariant-reviewer` while auditing item
   158 — pre-existing, not caused by item 158's own validator (independently
