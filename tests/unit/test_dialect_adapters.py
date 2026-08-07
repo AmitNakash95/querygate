@@ -21,6 +21,7 @@ from querygate.compiler.dialect_adapters import (
     get_dialect_adapter,
 )
 from querygate.core.exceptions import QueryValidationError
+from querygate.policy.models import ColumnMask
 from querygate.query_ast.models import DatePart, IntervalUnit
 
 # Snowflake cases throughout this file render against the REAL installed
@@ -1067,3 +1068,98 @@ class TestBigQueryMapsAreNotDeadCode:
                 adapter.date_add(_bq_col("ts", sa.TIMESTAMP), "day", 1)
         finally:
             da._BQ_TIMESTAMP_ADD_UNITS = original
+
+
+# --------------------------------------------------------------------------- #
+# column_mask exhaustiveness (TODO.md item 164)
+# --------------------------------------------------------------------------- #
+# `column_mask` used to end every adapter on an unconditional final branch
+# that assumed HASH — an implicit else, not an exhaustive match against
+# `ColumnMaskKind` — unlike this module's date-part/interval-unit maps, which
+# are all deliberately exhaustive so a future enum member is a forced
+# decision, never a silent passthrough. This section pins both halves of the
+# fix: real members still render exactly as before (no behavior change), and
+# an unrecognized kind is now rejected with a typed QueryValidationError
+# naming the dialect, on all five registered adapters, instead of silently
+# rendering as a full HASH transform.
+_COLUMN_MASK_DIALECT_CASES = [
+    ("postgresql", _render, "md5("),
+    ("mssql", _render, "HASHBYTES"),
+    ("mysql", _render, "sha2("),
+    ("snowflake", _render_snowflake, "sha2("),
+    ("bigquery", _render_bigquery, "sha256("),
+]
+
+
+class TestColumnMaskExhaustiveness:
+    @pytest.mark.parametrize(
+        "dialect_name,render,_hash_substr",
+        _COLUMN_MASK_DIALECT_CASES,
+        ids=[c[0] for c in _COLUMN_MASK_DIALECT_CASES],
+    )
+    def test_null_renders(self, dialect_name, render, _hash_substr):
+        adapter = get_dialect_adapter(dialect_name)
+        col = sa.column("phone")
+        expr = adapter.column_mask(col, ColumnMask(column="phone", kind="null"))
+        assert "NULL" in render(sa.select(expr)).upper()
+
+    @pytest.mark.parametrize(
+        "dialect_name,render,_hash_substr",
+        _COLUMN_MASK_DIALECT_CASES,
+        ids=[c[0] for c in _COLUMN_MASK_DIALECT_CASES],
+    )
+    def test_bucket_renders(self, dialect_name, render, _hash_substr):
+        adapter = get_dialect_adapter(dialect_name)
+        col = sa.column("salary")
+        expr = adapter.column_mask(
+            col, ColumnMask(column="salary", kind="bucket", bucket_size=1000)
+        )
+        assert "floor" in render(sa.select(expr)).lower()
+
+    @pytest.mark.parametrize(
+        "dialect_name,render,_hash_substr",
+        _COLUMN_MASK_DIALECT_CASES,
+        ids=[c[0] for c in _COLUMN_MASK_DIALECT_CASES],
+    )
+    def test_last_renders(self, dialect_name, render, _hash_substr):
+        adapter = get_dialect_adapter(dialect_name)
+        col = sa.column("phone")
+        expr = adapter.column_mask(col, ColumnMask(column="phone", kind="last", length=4))
+        assert "right(" in render(sa.select(expr)).lower()
+
+    @pytest.mark.parametrize(
+        "dialect_name,render,hash_substr",
+        _COLUMN_MASK_DIALECT_CASES,
+        ids=[c[0] for c in _COLUMN_MASK_DIALECT_CASES],
+    )
+    def test_hash_renders_dialect_native_idiom(self, dialect_name, render, hash_substr):
+        adapter = get_dialect_adapter(dialect_name)
+        col = sa.column("email")
+        expr = adapter.column_mask(col, ColumnMask(column="email", kind="hash"))
+        rendered = render(sa.select(expr))
+        assert hash_substr.lower() in rendered.lower()
+
+    @pytest.mark.parametrize(
+        "dialect_name",
+        [c[0] for c in _COLUMN_MASK_DIALECT_CASES],
+    )
+    def test_unrecognized_kind_raises_instead_of_rendering_as_hash(self, dialect_name):
+        """The actual regression this item closes: before the fix, an
+        unrecognized `mask.kind` fell through every adapter's final branch
+        and rendered as a full HASH transform. `ColumnMask.kind` is a real
+        pydantic-validated `ColumnMaskKind` field, so a bogus value can't be
+        constructed through the model's normal `__init__` — use
+        `model_construct` (the established validation-skipping idiom already
+        used for this exact purpose in `query_ast/models.py`/
+        `write_ast/models.py`) to reach the adapter with a value none of the
+        `is` checks can match, the same way a future 5th enum member would.
+        Deliberately not `mask.kind = "..."` post-construction assignment:
+        that only stays a validation bypass because `ColumnMask` doesn't set
+        `validate_assignment=True` today — a future hardening pass adding it
+        would make the assignment itself raise `pydantic.ValidationError`
+        before ever reaching the adapter, silently stopping this test from
+        covering the guard at all rather than failing loudly."""
+        adapter = get_dialect_adapter(dialect_name)
+        mask = ColumnMask.model_construct(column="email", kind="qg_sentinel_mask_kind")
+        with pytest.raises(QueryValidationError, match="qg_sentinel_mask_kind"):
+            adapter.column_mask(sa.column("email"), mask)
