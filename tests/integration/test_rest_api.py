@@ -958,11 +958,14 @@ connections:
 
 # Deliberately short: pydantic truncates a long `ValidationError.input_value`
 # dict repr to a small head/tail window (see the module docstring on the
-# test below). A short id + short connection_string is what makes the
-# password actually land inside that surviving tail in the un-fixed code --
-# confirmed directly against ConnectionProfile.model_validate() before
-# writing this test, per item 165's own note that the password "survives
-# whenever the connection string is short enough". A longer, more
+# test below). A short connection_string is what makes the password actually
+# land inside that surviving tail in the un-fixed code -- confirmed directly
+# against ConnectionProfile.model_validate() before writing this test, per
+# item 165's own note that the password "survives whenever the connection
+# string is short enough". (The `id` field's length doesn't matter here --
+# separately confirmed across id lengths from 1 to 200 chars with this same
+# password, it always survives regardless of id length; truncation is driven
+# by connection_string/password length, not id length.) A longer, more
 # production-looking connection string does NOT reliably reproduce the leak
 # (it gets truncated away), so this shape is the regression case, not an
 # unrealistic corner case.
