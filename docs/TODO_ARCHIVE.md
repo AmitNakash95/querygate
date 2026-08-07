@@ -11701,6 +11701,127 @@ only observable under set-iteration-order variance.
 
 **Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped).
 
+### 163. A not-connectable dialect (Snowflake/BigQuery) as the SECONDARY side of a cross-connection join never reaches the `is_connectable()` guard ✅ DONE
+
+**Shipped 2026-08-07:** `validation/schema_validation.py`'s
+`resolve_query_table_connections` now calls
+`get_session_adapter(other.dialect).is_connectable()` for every SECONDARY
+connection a cross-connection join resolves to, alongside its existing
+`join_group` membership check, and raises a `ConfigValidationError` naming
+the connection id and dialect. Following a post-ship audit finding (see
+below), its explanation clause now shares `connections/dialects.py`'s
+`not_connectable_explanation(dialect)` helper with `connections/engine.py`'s
+`init_engine` guard, rather than two independently-worded copies of the same
+"why" text — both raise sites build their own context-specific prefix (which
+connection/table triggered it) and append the identical shared clause. This
+closes the gap where a not-connectable
+secondary sailed past the only other guard in this function — mutation-
+verified directly: temporarily removing the new check turned the regression
+test's clean `ConfigValidationError` into an unguarded
+`sqlalchemy.exc.NoSuchTableError`, confirming the fix's value rather than
+assuming it from the diff alone.
+
+**Post-ship audit correction (2026-08-07):** the original commit message and
+this write-up's first draft described the pre-fix failure as happening
+"deep inside schema reflection's own engine access" — implying an attempt
+was made to actually open the secondary (Snowflake/BigQuery) connection.
+Both a mutation-verification trace and independent findings from the
+`security-invariant-reviewer` and `claim-reviewer` audits of this fix showed
+that is not what happens: `_load_table` always reflects through the
+PRIMARY connection's own engine (`get_engine(connection_id)`, where
+`connection_id` is always the primary — see its docstring), and only uses
+the secondary connection's string to build a schema-qualifier via
+`physical_db_name()` (pure string parsing, no connection opened). So without
+this guard, the PRIMARY engine attempts to reflect the joined table under a
+schema qualifier borrowed from the secondary's connection string and fails
+with `sqlalchemy.exc.NoSuchTableError` (not in `api/_errors.py`'s
+`_ACTIONABLE` tuple, so it surfaces as an opaque REST 500) — the secondary's
+own engine/driver is never actually reached either way. The fix, its test,
+and the 422-vs-masked-error conclusion are all unaffected by this
+correction; only the mechanism narrative was wrong. Both `docs/THREAT_MODEL.md`
+and the code comment at the new check's call site were corrected to match.
+
+The same audits also found the MCP transport and two admin config-governance
+endpoints needed sweeping once `ConfigValidationError` became reachable from
+this new call site (it was already reachable from `init_engine`, but this
+fix made it reachable far more often, from ordinary query validation):
+`mcp/exceptions.py`'s `_error_code_from_exception` had no branch for
+`ConfigValidationError` at all, so it fell through to `"INTERNAL"` and
+triggered a `log.exception()` traceback for what is a routine,
+client-triggerable condition — fixed by folding it into the existing
+`(PolicyViolationError, QueryValidationError)` → `"VALIDATION"` branch (this
+also fixes the identical pre-existing gap for `init_engine`'s own raise).
+`admin/service.py`'s `simulate_candidate_policy` caught only
+`(NotFoundError, QueryValidationError)` around its two
+`resolve_scope_connections`/`resolve_query_table_connections` calls, so a
+candidate config with a not-connectable secondary would 422 the whole
+simulate request instead of reporting a `query_connection_denied` decision
+and skip its audit event — fixed by adding `ConfigValidationError` to both
+handlers. `_check_one_template_schema` had no `ConfigValidationError`
+handler either, so one template referencing a not-connectable secondary
+would abort `check_template_schema`'s entire batch (and its audit event)
+instead of reporting that one template as `status="issues"`, contradicting
+the function's own "a connection that can't be reached never blocks staging"
+contract — fixed by adding a handler alongside its existing
+`QueryValidationError` one. A fourth, lower-severity `architecture-boundary-
+reviewer` finding — the new check's rejection message duplicated
+`init_engine`'s explanation text near-verbatim, nothing keeping the two in
+sync — was also closed: the shared "why" clause now lives in
+`connections/dialects.py`'s `not_connectable_explanation(dialect)`, called
+from both raise sites. A fifth (also `security-invariant-reviewer`,
+out of scope for this fix): cross-connection joins are reflected as if both
+connections are always on the same physical server instance, with nothing
+that actually checks it — filed as TODO.md item 168 rather than folded in
+here, since it's pre-existing and needs its own design call.
+
+**Coverage:** `test_secondary_connection_not_connectable_rejected_at_validation_time`
+(`tests/unit/test_schema_validation.py::TestCrossConnectionJoins`,
+parametrized over both `snowflake` and `bigquery` secondaries) — a
+`join_group`-eligible MSSQL-primary/not-connectable-secondary join,
+asserting a `ConfigValidationError` naming the rejection reason, with
+`_load_table` deliberately left unpatched so the test would fail loudly (by
+attempting real reflection) if the guard ever stopped firing before
+reflection is reached. The existing `test_same_join_group_allowed`/
+`test_different_join_group_rejected`/`test_join_group_uses_per_principal_policy`
+tests in the same class (all still passing, unmodified) confirm normal
+cross-connection joins between two connectable dialects, and the
+primary-connection `is_connectable()` guard in `connections/engine.py`, are
+both unaffected. `tests/unit/test_mcp_exceptions.py` (new file) covers the
+MCP error-mapping fix directly, including a sibling test confirming a
+genuine internal error still logs and reports `"INTERNAL"`.
+
+**Why this is lower severity than a guard bypass, not zero severity.** No
+data ever leaked and no authorization was ever skipped by this gap:
+`join_group` membership still gated whether the join was even permitted, and
+the joined connection's own `Policy` (masks, row filters, deny-lists — item
+156) was still consulted before anything about the joined table was exposed.
+The gap was purely operator-facing: a confusing masked error instead of a
+clean, explained rejection at validation time.
+
+`docs/THREAT_MODEL.md`'s QG-41/QG-42 rows are updated to describe the fix,
+the corrected mechanism, and reference the new test.
+
+**Surfaced 2026-08-07 by the `security-invariant-reviewer` audit of item 19
+phase 3 (BigQuery), but the gap is pre-existing and not specific to
+BigQuery — it has been true since item 19 phase 2 shipped Snowflake, and
+this item's own audit is simply the first time it was written down.**
+`connections/engine.py`'s `init_engine` — the sole place
+`SessionDialectAdapter.is_connectable()` was checked — was only ever called
+for a query's PRIMARY connection. `validation/schema_validation.py`'s
+`resolve_query_table_connections` (and the cross-connection join machinery
+downstream of it) resolves a joined table's SECONDARY connection but never
+checked its connectability. Concretely: a `join_group`-eligible join from a
+live primary connection to a `dialect: snowflake` or `dialect: bigquery`
+secondary connection was not rejected at validation time the way a
+same-guard primary-connection attempt would be — it instead failed later
+when the primary engine's own reflection attempt, qualified against the
+secondary's schema name, raised a masked `NoSuchTableError` (see the
+post-ship correction above for the exact mechanism).
+
+**Effort:** S–M (one additional capability check at an existing validation
+call site; no new architecture). **Depends on:** none — buildable
+independently of items 157/161.
+
 ### 164. `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s ✅ DONE
 
 **Shipped 2026-08-07.** All five `column_mask` implementations

@@ -320,11 +320,14 @@ def simulate_candidate_policy(
                 principal=target,
                 connection_resolver=candidate_resolver,
             )
-        except (NotFoundError, QueryValidationError):
-            # A bad cross-connection reference — the dedicated check below
-            # reports this properly; validate_policy still runs (against no
-            # map, i.e. primary-only) so an unrelated policy violation is not
-            # masked by a connection problem it didn't cause.
+        except (NotFoundError, QueryValidationError, ConfigValidationError):
+            # A bad cross-connection reference — including, since TODO.md
+            # item 163, a join to a candidate secondary connection whose
+            # dialect isn't yet connectable (Snowflake/BigQuery) — the
+            # dedicated check below reports this properly; validate_policy
+            # still runs (against no map, i.e. primary-only) so an unrelated
+            # policy violation is not masked by a connection problem it
+            # didn't cause.
             scope_connections = {}
         try:
             # TODO.md item 145: capture the purpose-narrowed effective Policy
@@ -365,14 +368,15 @@ def simulate_candidate_policy(
                     principal=target,
                     connection_resolver=candidate_resolver,
                 )
-            except (NotFoundError, QueryValidationError):
+            except (NotFoundError, QueryValidationError, ConfigValidationError):
                 query_allowed = False
                 reasons.append(
                     CandidateSimulationReason(
                         code="query_connection_denied",
                         message=(
                             "The structured query references a connection that is not visible "
-                            "to the target principal or is outside the candidate join group."
+                            "to the target principal, is outside the candidate join group, or "
+                            "is a dialect QueryGate cannot yet open a live connection for."
                         ),
                     )
                 )
@@ -745,6 +749,13 @@ async def _check_one_template_schema(template: QueryTemplate) -> TemplateSchemaC
             ],
         )
     except QueryValidationError as exc:  # a missing column, or a structural rule
+        return TemplateSchemaCheck(**base, status="issues", messages=[str(exc)])
+    except ConfigValidationError as exc:
+        # TODO.md item 163: a template whose bound query cross-connection
+        # joins to a secondary connection QueryGate cannot yet open a live
+        # connection for (Snowflake/BigQuery) — reported as a per-template
+        # issue, not raised past this function, so one such template can
+        # never abort the whole batch's results or its audit event.
         return TemplateSchemaCheck(**base, status="issues", messages=[str(exc)])
     except sa.exc.NoSuchTableError as exc:  # a referenced table doesn't exist
         return TemplateSchemaCheck(

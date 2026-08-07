@@ -16,6 +16,7 @@ from querygate.core.exceptions import (
     AuthorizationError,
     CapacityTimeoutError,
     ConcurrencyLimitError,
+    ConfigValidationError,
     NotFoundError,
     PolicyViolationError,
     QueryValidationError,
@@ -64,7 +65,16 @@ def _error_code_from_exception(exc: Exception) -> tuple[str, str]:
     # validation error.
     if isinstance(exc, (QuotaExceededError, ConcurrencyLimitError)):
         return "RATE_LIMITED", public_error_message(exc)
-    if isinstance(exc, (PolicyViolationError, QueryValidationError)):
+    # ConfigValidationError joined this bucket 2026-08-07 (TODO.md item 163's
+    # own audit): it is the identical "client-actionable, explained rejection"
+    # shape as QueryValidationError (see connections/engine.py's init_engine
+    # and validation/schema_validation.py's cross-connection is_connectable()
+    # check, both raise it), mapped to REST 422 the same way in api/_errors.py
+    # — but this MCP mapping had no branch for it at all, so it fell all the
+    # way through to "INTERNAL" and a log.exception() traceback as if it were
+    # a genuine unexpected fault, defeating the whole point of raising a
+    # named, actionable exception instead of letting a real error escape.
+    if isinstance(exc, (PolicyViolationError, QueryValidationError, ConfigValidationError)):
         return "VALIDATION", public_error_message(exc)
     # An optional subsystem isn't configured on this deployment (e.g. the
     # item 47 phase 2 draft store with no encryption key) — no MCP tool

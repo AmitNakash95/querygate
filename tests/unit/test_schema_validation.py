@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.auth import Principal
-from querygate.core.exceptions import NotFoundError
+from querygate.core.exceptions import ConfigValidationError, NotFoundError
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
 from querygate.compiler.sqlalchemy_compiler import compile_structured_query
@@ -447,6 +447,65 @@ class TestCrossConnectionJoins:
             limit=5,
         )
         with pytest.raises(ValueError, match="cross-connection"):
+            await sv.validate_schema(query, connection_id="primary")
+
+    @pytest.mark.parametrize("secondary_dialect", ["snowflake", "bigquery"])
+    async def test_secondary_connection_not_connectable_rejected_at_validation_time(
+        self, secondary_dialect
+    ):
+        """Regression for item 163. A `join_group`-eligible cross-connection join
+        whose SECONDARY connection is a registered-but-not-connectable dialect
+        (Snowflake/BigQuery — item 19 phases 2/3) used to sail straight past
+        `resolve_query_table_connections`'s only other guard (`join_group`
+        membership) because `connections/engine.py`'s `init_engine` — the sole
+        place `SessionDialectAdapter.is_connectable()` was checked — only ever
+        runs for a query's PRIMARY connection. It would then fail later with a
+        confusing masked error rather than a clean, early, client-actionable
+        rejection: `_load_table` always reflects through the PRIMARY
+        connection's own engine (never the secondary's — see its docstring), so
+        without this guard the primary engine would attempt to reflect the
+        joined table under a schema qualifier borrowed from the secondary's
+        connection string and fail with `sqlalchemy.exc.NoSuchTableError` — the
+        secondary's own engine/driver is never actually reached either way.
+
+        Parametrized over both not-connectable dialects (not just Snowflake) so
+        the claim that BigQuery-as-secondary is rejected the same way is
+        actually exercised, not just inferred from `is_connectable()` being
+        independently `False` for it.
+
+        `_load_table` is intentionally left UNPATCHED here (unlike the sibling
+        tests in this class) — the whole point is that reflection must never be
+        reached at all; if the guard regresses, this test would instead
+        exercise the masked-`NoSuchTableError` path described above instead of
+        raising `ConfigValidationError`.
+        """
+        primary = ConnectionProfile(
+            id="primary",
+            dialect="mssql",
+            connection_string="mssql+aioodbc://user:pass@host/primary_db",
+            join_group="shared",
+        )
+        other = ConnectionProfile(
+            id="other",
+            dialect=secondary_dialect,
+            connection_string=f"{secondary_dialect}://user:pass@account/db",
+            join_group="shared",
+        )
+        set_registry(ConnectionRegistry({"primary": primary, "other": other}))
+        set_policy_store(PolicyStore(default=Policy(), overrides={}))
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            joins=[
+                JoinSpec(
+                    table="customers",
+                    on=["orders.customer_id", "customers.id"],
+                    connection="other",
+                )
+            ],
+            limit=5,
+        )
+        with pytest.raises(ConfigValidationError, match="cannot yet open a live connection"):
             await sv.validate_schema(query, connection_id="primary")
 
     async def test_join_group_uses_per_principal_policy(self, monkeypatch):
