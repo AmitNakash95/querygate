@@ -11452,3 +11452,179 @@ the entry now says so explicitly for each of the three rules separately
 **Effort:** M. **Depends on:** cross-connection joins/`join_group` (shipped),
 155 (shipped — same map-computation precedent, reused via a reflection-free
 sibling rather than the original).
+
+### 158. `ConnectionProfile` never validates that `dialect` agrees with `connection_string`'s actual backend ✅ DONE
+
+Surfaced 2026-08-06 by the `security-invariant-reviewer` audit of item 19
+phase 2 (Snowflake), but the gap is pre-existing and dialect-agnostic — it
+predates Snowflake and affects Postgres/MSSQL/MySQL exactly the same way.
+
+**The gap.** Nothing anywhere validated that `ConnectionProfile.dialect`
+(the declared enum value) matched the actual backend named in
+`connection_string`'s URL scheme. A profile with `dialect: postgresql` and
+`connection_string: mysql+asyncmy://user:pass@host/db` (or any other
+mismatched pair) was accepted by Pydantic and reached
+`connections/engine.py`'s `init_engine` untouched, and every place that
+branches on the *declared* dialect rather than the live engine would act on
+the wrong assumption: `session_scope` (`engine.py`) dispatches
+`apply_session_guardrails` on the declared dialect, so a Postgres-declared
+profile pointed at a real MySQL server would send `SET LOCAL
+statement_timeout` to a MySQL connection, which does not understand that
+statement — the session guardrail silently fails to apply (`create_async_
+engine` still resolves the actual driver from the URL, so the wire protocol
+is always correct — only the guardrail is not). More concretely security-
+relevant: `schema/reflection.py`'s `list_live_tables()` selects its extra
+`INFORMATION_SCHEMA.TABLES` filter via `SessionDialectAdapter.
+list_live_tables_extra_filter_sql()`, also keyed on the declared dialect —
+MySQL's adapter appends `AND TABLE_SCHEMA = DATABASE()` specifically
+because MySQL's `INFORMATION_SCHEMA.TABLES` is server-wide (spans every
+database the connecting user can see), unlike Postgres/MSSQL. A profile
+misdeclared `postgresql` over a real MySQL backend would skip that filter
+(Postgres's adapter contributes none), letting `list_tables()` leak
+*other* databases' table names to a caller whose connection was only
+supposed to see one — this item closes that specific cross-database leak,
+not just the guardrail-text mismatch. It also meant item 19 phase 2's
+`SessionDialectAdapter.is_connectable()` Snowflake guard (which keys on the
+*declared* dialect) couldn't be trusted to catch a `dialect: postgresql`
+profile pointed at a real `snowflake://` URL.
+
+**Shipped: a `field_validator("dialect")` on `ConnectionProfile`**
+(`connections/models.py`), alongside the existing `_valid_id` validator,
+that parses `connection_string` with `sa.engine.url.make_url(...)
+.get_backend_name()` and rejects a mismatch against `dialect` with a clear
+message naming both the declared dialect and the actual backend found —
+closing both the general session-guardrail-mismatch case and the Snowflake
+`is_connectable()` case in one place, rather than teaching `init_engine` a
+second, narrower parse-based check. `get_backend_name()` was verified
+directly (not assumed) to return exactly `DatabaseDialect`'s own spelling
+for every driver combination this codebase uses:
+`postgresql+asyncpg`/`mssql+aioodbc`/`mysql+asyncmy`/`mysql+aiomysql`/
+`snowflake` all map cleanly, via an explicit `_BACKEND_NAME_TO_DIALECT`
+lookup table (not `DatabaseDialect(backend_name)` directly, so an
+SQLAlchemy-recognized backend QueryGate doesn't support, e.g. `sqlite` or
+`oracle`, gets this module's own clear rejection instead of a bare enum
+`ValueError`).
+
+**A credential leak was caught and fixed during implementation, before
+landing — not after.** The first draft used a whole-model
+`model_validator(mode="after")`. Verified directly against a live
+`pydantic.ValidationError`: when a `ValueError` is raised from a
+model-level validator, pydantic populates the error's `input_value` (both
+`str(ValidationError)` and `.errors()[0]["input"]`) with the **entire raw
+input dict** — including `connection_string`, credential and all. This
+class's own docstring is explicit that `connection_string` must never end
+up "embedded in a validation error," and `api/routes.py`'s
+`reload_config_endpoint` does `except Exception as exc: raise
+HTTPException(..., detail=str(exc))` — a concrete path that would have
+handed a real credential straight back in an HTTP 400 body the first time
+an admin fat-fingered a reload with a mismatched dialect. Confirmed the same
+leak happens even scoping to `field_validator("connection_string")`, since
+that field's own raw value *is* the credential. The fix: reorder
+`ConnectionProfile`'s fields so `connection_string` is declared before
+`dialect`, and scope the validator to `field_validator("dialect")` instead,
+reading `connection_string` via `info.data` (already-validated, since it's
+declared earlier) — `dialect`'s own value (e.g. `"postgresql"`) is what ends
+up in `input_value` on rejection, never the connection string. Verified
+directly against a live `ValidationError` again after the fix, with a
+credential marker planted in the connection string, to confirm it doesn't
+appear in `str(exc)` or any `.errors()` entry.
+
+**A second real-usage gap was caught by running the full test suite, not
+assumed away.** The item's own write-up (and a first-draft assumption) held
+that "the URL scheme is always literal, never templated," so a validator
+could safely reject anything `make_url` can't parse. Two real integration
+tests failed on that assumption:
+`test_mcp_server.py::test_mcp_configuration_inspection_uses_request_application_config`
+and
+`test_product_guide_api.py::test_configuration_summary_is_scope_gated_and_never_returns_raw_yaml`.
+Both exercise `help/service.py`'s `_redacted_connection`, which
+deliberately constructs a `ConnectionProfile` straight from a stored config
+version's raw, never-interpolated YAML text (for an admin summary that only
+needs typed `dialect`/`id`/`known_tables`/`join_group` access — it never
+resolves or needs the real secret). `examples/connections.example.yaml`
+(the default `AppConfig.connections_file`) confirmed the *whole*
+`connection_string` value, not just the credential portion, is commonly a
+single `${QUERYGATE_DEMO_DB_URL}`-shaped reference with no literal scheme
+at all. Fixed by having the validator skip the check (not reject) when
+`make_url` raises `ArgumentError` — there's no basis to assert a mismatch
+against a string with no parseable backend, and this isn't a live bypass:
+the one path that actually opens a connection
+(`ConnectionRegistry.from_entries`) always interpolates `connection_string`
+before constructing `ConnectionProfile`, so the real check still runs
+against the fully-resolved URL by the time a connection is ever opened.
+
+**Two more real gaps caught by the post-implementation `auditors` review, both
+fixed before landing.** The `architecture-boundary-reviewer` found: (1)
+`make_url()` doesn't only raise `sa.exc.ArgumentError` on an unparseable
+string — a *templated port* (`...@${DB_HOST}:${DB_PORT}/...`, the same
+"still templated" shape as a templated user/pass/host, just further along
+in `make_url`'s parse) raises a plain `ValueError` while coercing the port
+to an int, confirmed directly (`invalid literal for int() with base 10:
+'${DB_PORT}'`), which the validator's original `except sa.exc.ArgumentError:`
+didn't catch — so a genuinely-matching, legitimately-templated profile
+would have been incorrectly rejected. Fixed by widening the except clause
+to `except (sa.exc.ArgumentError, ValueError):`, both treated identically
+(skip, don't reject) since neither yields a backend to compare against. (2)
+`_BACKEND_NAME_TO_DIALECT` is hand-maintained, deliberately not derived
+from `DatabaseDialect` (so an unsupported-but-SQLAlchemy-known backend like
+`sqlite` gets this module's own clear rejection instead of a bare enum
+`ValueError`) — but nothing forced it to stay a superset of the enum, so a
+fifth `DatabaseDialect` member added later without a matching entry here
+would silently mis-reject every profile for that new dialect. Fixed with a
+module-level `assert set(DatabaseDialect) <= set(_BACKEND_NAME_TO_DIALECT.
+values())` so that failure mode is loud (import-time) instead of silent
+(request-time). The same review also flagged (informational, no fix
+needed) that the field-reordering `connection_string`-before-`dialect`
+dependency, while real, is already adequately covered indirectly by the
+existing mismatch tests, which would fail (just without saying why) if a
+future reorder broke it.
+
+A separate `test-contract-reviewer` pass on the same diff found one more
+real gap: every test up to that point exercised `ConnectionProfile`
+directly with already-resolved literal strings, never through
+`ConnectionRegistry.from_entries` — so the write-up's own central claim
+("the one path that actually opens a connection always interpolates
+`connection_string` before constructing `ConnectionProfile`, so this check
+still runs against the fully-resolved URL") was asserted but never pinned
+by a test at the registry level. Fixed by adding
+`test_from_entries_rejects_a_dialect_mismatch_only_visible_after_interpolation`
+to `tests/unit/test_connections_registry.py`, which calls `from_entries`
+with a declared dialect that only disagrees with the connection string
+*after* `${MYSQL_URL}`-style interpolation resolves it — the one shape that
+can only be caught by validating post-interpolation, exactly the order
+`from_entries` uses.
+
+**Coverage:** `tests/unit/test_connections_models.py` (new, 18 tests) —
+matching profiles accepted across all four dialects' real driver schemes;
+every pairwise mismatch across the four dialects rejected with both dialect
+names named in the message; a partially-templated connection string
+(scheme literal, credentials/host/db templated) still validates and still
+catches a mismatch; a templated port validates too (the fix above); a
+wholly-templated (`${VAR}`-only) and a garbage non-URL connection string
+are both left unrejected (the real-usage cases above); an SQLAlchemy-known
+but QueryGate-unsupported backend (`sqlite`) is rejected even though it
+parses; the `_BACKEND_NAME_TO_DIALECT`/`DatabaseDialect` drift guard; and a
+dedicated credential-leak test that plants a marker string in the
+connection string and asserts it never appears in `str(ValidationError)`
+or any `.errors()` entry. `tests/unit/test_connections_registry.py` gained
+the post-interpolation registry-level test above (10 tests total in that
+file). `tests/unit/test_credential_redaction.py`'s existing suite still
+passes unmodified. Mutation-verified: disabling the mismatch check,
+disabling the unsupported-backend check, narrowing the except clause back
+to `sa.exc.ArgumentError` alone, and removing an entry from
+`_BACKEND_NAME_TO_DIALECT` each caused the corresponding test to fail for
+the right reason, then all four were restored. Full unit (2295), non-
+`real_db` integration, and security suites all green after every fix; no
+existing `ConnectionProfile` fixture anywhere in the repo needed weakening.
+`make release-check`'s deterministic steps (formatting, full default suite,
+config validation, catalog benchmarks, packaging, SBOM) and `make
+release-smoke` (real container against real Postgres — structured query,
+window function, non-equi join, governed write) both passed against the
+final tree; `make release-check`'s `sast` step reports one pre-existing
+bandit finding in `execution/approval.py`/`schema/reflection.py`
+(unrelated files, confirmed identical on the pre-158 base commit — not
+introduced by this item).
+
+**Effort:** S–M (one validator + tests across all four dialects' URL
+schemes; no runtime architecture change). **Depends on:** none — buildable
+independently of item 157.
