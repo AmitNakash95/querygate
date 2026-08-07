@@ -610,3 +610,26 @@ async def cancel_session(engine: AsyncEngine, dialect: DatabaseDialect, identifi
 
 def list_live_tables_extra_filter_sql(dialect: DatabaseDialect) -> str:
     return get_session_adapter(dialect).list_live_tables_extra_filter_sql()
+
+
+def not_connectable_explanation(dialect: DatabaseDialect) -> str:
+    """The shared clause behind every `is_connectable() == False` rejection —
+    `connections/engine.py`'s `init_engine` (the PRIMARY connection guard)
+    and `validation/schema_validation.py`'s `resolve_query_table_connections`
+    (the SECONDARY/joined-connection guard, TODO.md item 163) each build
+    their own `ConfigValidationError` with different context-specific framing
+    (which connection/table triggered it), but both need the identical
+    "cannot yet open a live connection for this dialect, here's why" body —
+    factored out once so the two call sites can't quietly drift apart
+    (2026-08-07 `architecture-boundary-reviewer` finding on item 163's own
+    audit). Callers prepend their own context and a colon/dash before this.
+    """
+    return (
+        f"QueryGate cannot yet open a live connection for dialect {dialect!r}: its "
+        "SessionDialectAdapter is registered but not connectable (see "
+        "SessionDialectAdapter.is_connectable's docstring for why — Snowflake's "
+        "and BigQuery's drivers both have no async SQLAlchemy engine support, and "
+        "this codebase's execution pipeline requires one). Its compiler/session "
+        "adapters exist for rendering-level development and testing only "
+        "(TODO.md item 19) — see its live-verification follow-up item."
+    )

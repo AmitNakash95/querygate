@@ -193,13 +193,14 @@ order-of-magnitude, not commitments.
 | 160 | ✅ Item 156 follow-up: harden the connection-resolution edge cases a full security-invariant audit surfaced (findings 1, 2, 4 fixed; finding 3 open — needs a maintainer decision) | M | 156 |
 | 161 | BigQuery live-server verification and deeper feature parity (item 19 phase 3 residual) | L–XL | 19 |
 | 162 | Dialects beyond MySQL/Snowflake/BigQuery (item 19's open-ended "…" scope) | unscoped | — |
-| 163 | A not-connectable dialect (Snowflake/BigQuery) as the SECONDARY side of a cross-connection join never reaches the `is_connectable()` guard | S–M | — |
+| 163 | ✅ A not-connectable dialect (Snowflake/BigQuery) as the SECONDARY side of a cross-connection join never reaches the `is_connectable()` guard | S–M | — |
 | 164 | ✅ `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s | S | — |
 | 165 | ✅ `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body | S | — |
 | 166 | Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo ignores which connection a name resolves to | S–M | 159 |
 | 167 | ✅ A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed) | S | 159 |
 | 168 | Config-governance dry-run's credential-safety net is a post-hoc regex scrub, not structural, and the validate-config CLI's stderr isn't scrubbed at all | S–M | 165 |
 | 169 | A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an unfiltered scan | S–M | 106, 167 |
+| 170 | Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it | S–M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2720,51 +2721,14 @@ L–XL if it repeats Snowflake/BigQuery's rendering-only shape). **Depends
 on:** none — the template is proven; picking a dialect is a product/roadmap
 decision, not a technical blocker.
 
-### 163. A not-connectable dialect (Snowflake/BigQuery) as the SECONDARY side of a cross-connection join never reaches the `is_connectable()` guard
+### 163. A not-connectable dialect (Snowflake/BigQuery) as the SECONDARY side of a cross-connection join never reaches the `is_connectable()` guard ✅ DONE
 
-Surfaced 2026-08-07 by the `security-invariant-reviewer` audit of item 19
-phase 3 (BigQuery), but the gap is pre-existing and not specific to
-BigQuery — it has been true since item 19 phase 2 shipped Snowflake, and
-this item's own audit is simply the first time it was written down.
+`resolve_query_table_connections` now checks `is_connectable()` on a
+cross-connection join's SECONDARY connection too, not just the primary,
+rejecting with the same client-actionable `ConfigValidationError` shape
+`init_engine`'s guard already gives for the primary.
 
-**The gap.** `connections/engine.py`'s `init_engine` — the sole place
-`SessionDialectAdapter.is_connectable()` is checked — is only ever called
-for a query's PRIMARY connection. `validation/schema_validation.py`'s
-`resolve_query_table_connections` (and the cross-connection join machinery
-downstream of it) resolves and reflects a joined table's SECONDARY
-connection through `schema/reflection.py`'s own engine access, which never
-routes through `init_engine`'s guard. Concretely: a `join_group`-eligible
-join from a live primary connection to a `dialect: snowflake` or
-`dialect: bigquery` secondary connection is not rejected at validation
-time the way a same-guard primary-connection attempt would be — it instead
-fails later, deeper, with a confusing masked 500 once schema reflection (or
-execution) actually tries to open that engine.
-
-**Why this is lower severity than a guard bypass, not zero severity.** No
-data leaks and no authorization is skipped: `join_group` membership still
-gates whether the join is even permitted, and the joined connection's own
-`Policy` (masks, row filters, deny-lists — item 156) is still consulted
-before anything about the joined table is exposed. The actual failure mode
-is an operator-facing one: `docs/THREAT_MODEL.md`'s QG-41/QG-42 rows
-describe `is_connectable()` as blocking a not-yet-connectable dialect
-"before any of these methods can run" — true for the primary-connection
-path, not exactly true for a secondary join target, which is a narrower
-guard than the docs currently imply.
-
-**What to do (when prioritized):** call
-`get_session_adapter(other_connection.dialect).is_connectable()` alongside
-the existing `join_group` check in (or near)
-`resolve_query_table_connections`, and reject with the same
-`ConfigValidationError`-shaped, client-actionable message `init_engine`'s
-own guard gives — a clean, early, explained rejection instead of a
-confusing masked 500 discovered deep in reflection. Update
-`docs/THREAT_MODEL.md`'s QG-41/QG-42 wording once fixed (or narrow the
-wording now, if this isn't picked up soon, so the docs don't overclaim
-guard coverage in the meantime).
-
-**Effort:** S–M (one additional capability check at an existing validation
-call site; no new architecture). **Depends on:** none — buildable
-independently of items 157/161.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 163).
 
 ### 164. `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s ✅ DONE
 
@@ -3008,3 +2972,44 @@ case-insensitive lookup.
 effort of a first real compiled repro plus a correlation-boundary test, which
 item 167 didn't need to write from scratch). **Depends on:** 106 (correlated
 subqueries, shipped), 167 (shipped — same root cause, first consumer fixed).
+
+### 170. Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it
+
+**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 163's
+own fix** (pre-existing; not introduced or closed by that item — item 163
+only added the `is_connectable()` check to the same function this
+observation is about). `validation/schema_validation.py`'s `_load_table`
+always reflects a cross-connection join's table through the PRIMARY
+connection's own engine, qualified with a schema string built from
+`connections/engine.py`'s `physical_db_name(table_connection)` — i.e. it
+assumes the joined ("secondary") connection is a same-instance,
+cross-database sibling of the primary (e.g. two databases on one MSSQL
+server), never a genuinely separate host. The only gate on whether two
+connections may cross-connection-join at all is `join_group` string
+equality (`resolve_query_table_connections`); nothing compares host/instance
+identity between the two connections' connection strings. Two connections
+placed in the same `join_group` that actually point at *different* physical
+hosts would not be rejected at validation time — instead, if a same-named
+database happens to exist on the primary's host, the query would silently
+read that unrelated database instead of the joined connection's real one;
+if no such database exists, it fails with the same masked `NoSuchTableError`
+item 163 already documents for a different cause. This requires an operator
+misconfiguration (placing two unrelated-host connections in one
+`join_group`) — no caller-supplied input can trigger it — so exploitability
+is low, but the failure mode (a silent wrong-database read rather than an
+error) is worse than a masked error.
+
+**What to do:** either (a) validate that every connection sharing a
+`join_group` resolves to the same host/instance at config-load or
+hot-reload time (parsing both connection strings' host component, similar
+in spirit to item 158's dialect-vs-connection_string check), rejecting a
+`join_group` membership that spans hosts, or (b) if same-host is not meant
+to be a hard requirement, document the assumption explicitly in
+`join_group`'s own docstring/example config and in `docs/THREAT_MODEL.md`
+rather than leaving it implicit in `physical_db_name`'s docstring alone.
+Add a regression test once the direction is picked.
+
+**Effort:** S–M (a validator akin to item 158's, or a documentation-only
+fix if same-host is accepted as a deliberate operator responsibility).
+**Depends on:** none.
+
