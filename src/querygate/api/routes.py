@@ -9,9 +9,10 @@ from __future__ import annotations
 from typing import Annotated, Callable, List, Optional, Union
 
 import pydantic as pyd
+import yaml
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 
-from querygate.admin.service import safe_pydantic_error_lines
+from querygate.admin.service import safe_pydantic_error_lines, safe_yaml_error_detail
 from querygate.api._errors import admission_headers, mask_unexpected, require_scope
 from querygate.config_reload import ReloadResult, reload_config
 from querygate.catalog.retrieval import CatalogSearchResponse
@@ -623,6 +624,17 @@ def build_router(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="; ".join(safe_pydantic_error_lines(exc)),
+            )
+        except yaml.YAMLError as exc:
+            # A syntactically-broken connections.yaml (e.g. an unterminated
+            # quote on a connection_string: line) raises before pydantic
+            # ever runs, on the SAME already-interpolated content -- so the
+            # line PyYAML points at can itself contain the live credential.
+            # str(exc) calls Mark.__str__(), which embeds that source line
+            # verbatim; never surface it. See item 165.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=safe_yaml_error_detail(exc),
             )
         except Exception as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

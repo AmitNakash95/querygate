@@ -1051,3 +1051,46 @@ connections:
     assert "proddb" not in body_text
     # Still actionable -- names the mismatch.
     assert "dialect" in body_text
+
+
+@pytest.mark.asyncio
+async def test_reload_config_yaml_syntax_error_does_not_leak_credential(tmp_path):
+    """Item 165 follow-up (surfaced by a post-fix `security-invariant-reviewer`
+    audit): a SYNTACTICALLY broken connections.yaml raises `yaml.YAMLError`
+    before pydantic ever runs, on the same file content -- and PyYAML's own
+    `Mark.__str__()` embeds the literal offending SOURCE LINE via
+    `get_snippet()`. A connections.yaml entry is permitted to carry a literal
+    (non-`${...}`) credential (config-governance drafts explicitly support
+    this), so an unterminated quote on a `connection_string:` line puts the
+    real password inside `str(yaml.YAMLError)` -- which used to reach the
+    generic `except Exception as exc: detail=str(exc)` handler verbatim."""
+    connections_file = tmp_path / "connections.yaml"
+    # Deliberately malformed: the quote on the connection_string line is
+    # never closed, which is exactly the shape whose YAMLError.problem_mark
+    # points at (and whose str() would echo) this line.
+    connections_file.write_text(f"""
+connections:
+  - id: leaky-yaml
+    dialect: postgresql
+    connection_string: "postgresql://user:{_LIVE_PASSWORD}@db:5432/app
+""")
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("default:\n  enabled: true\n")
+
+    settings = _settings(
+        api_keys=["secret-key"],
+        api_key_scopes=["admin:reload-config"],
+        connections_file=str(connections_file),
+        policy_file=str(policy_file),
+    )
+    reload_app = create_app(settings)
+    async with AsyncClient(transport=ASGITransport(app=reload_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/reload-config", headers={"Authorization": "Bearer secret-key"}
+        )
+
+    assert resp.status_code == 400
+    body_text = resp.text
+    assert _LIVE_PASSWORD not in body_text
+    # Still actionable -- names roughly where the syntax broke.
+    assert "line" in body_text
