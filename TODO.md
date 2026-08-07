@@ -160,7 +160,7 @@ order-of-magnitude, not commitments.
 | 127 | ✅ Reject an MCP request whose routing headers disagree with its body | S–M | 86 |
 | 128 | ✅ Conform to the final MCP `2026-07-28` protocol revision | L | 90, 92, 93 |
 | 129 | ✅ Never advertise a principal-varying MCP result as shared-cacheable | S | 128 |
-| 130 | Annotate `connection` with `x-mcp-header` for gateway-native authorization | S | 127, 128 |
+| 130 | ✅ Annotate `connection` with `x-mcp-header` for gateway-native authorization | S | 127, 128 |
 | 131 | ✅ Publish the StructuredQuery AST as a namespaced MCP extension | M | 128 |
 | 132 | ✅ Reconcile stale shipped-status claims left behind by items 90–93 | S | — |
 | 133 | ✅ Caller-facing quota-metered verdict endpoint (play P4) — reuses 31/39's decision logic | M–L | 26, 31, 39, 45, 121 |
@@ -1957,53 +1957,33 @@ unconditionally and structurally (not a per-registration opt-in), landing
 on top of item 128's `mcp` SDK v2 migration.
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 129).
 
-### 130. Annotate `connection` with `x-mcp-header` so a fronting gateway can authorize per-connection without parsing the body
+### 130. Annotate `connection` with `x-mcp-header` so a fronting gateway can authorize per-connection without parsing the body ✅ DONE
 
-**Surfaced 2026-07-30 by `competitive-scan`.** The `2026-07-28` revision lets a
-server mark primitive tool parameters with an `x-mcp-header` annotation;
-conforming clients **MUST** mirror those values into `Mcp-Param-{Name}` HTTP
-headers, so "network intermediaries (load balancers, proxies, WAFs) can route
-and process requests based on parameter values without parsing the request
-body."
-
-**Why it matters — this is the P4 play expressed in the spec's own mechanism.**
-Every QueryGate tool takes a `connection` id: a primitive string that is
-already public (`PublicConnectionInfo` exposes it; the spec warns only against
-annotating *sensitive* parameters — passwords, keys, PII — which this is not).
-Annotating it means a customer's existing gateway can enforce "this agent
-identity may only reach the `analytics` connection" at the edge, cheaply and
-natively, while the decision it structurally *cannot* make — whether this
-particular query *shape* is allowed — stays with QueryGate. That is precisely
-the "complement, not rival; make them a channel" thesis, and it lowers the
-integration cost of putting QueryGate behind an incumbent front door.
-
-**The mirrored header is a routing hint, never an authoritative access
-decision — and it is deliberately non-exhaustive.** A read's top-level
-`connection` is not the only connection a request can touch: every `JoinSpec`
-carries its own optional `connection` for same-instance cross-database joins
-(`query_ast/models.py`, resolved at pipeline step 2 against the `join_group`
-policy rule). A single-valued `Mcp-Param-Connection` mirrors `params.connection`
-only, so a request headed `analytics` may still legitimately join `crm`, and
-item 127's header–body check — which compares header to `params.connection` —
-will pass. **Do not describe this as closing the cross-connection case; it does
-not.** Two consequences the implementer must carry:
-
-- The gateway's per-connection verdict is **additive only**. It never
-  substitutes for `resolve_visible_connection(connection_id, principal=…)`
-  (`connections/visibility.py`), which resolves per-principal policy the
-  gateway cannot compute. Copy the precedent wording already used for the
-  analogous mechanism in `mcp/server.py` (`_SCOPE_GATED_TOOLS`: *"Visibility
-  only — the actual authorization boundary is each tool's own call-time scope
-  check; this dict must never become a substitute for that check."*).
-- Document the join case explicitly in the integration guide, so an operator
-  writing an edge rule knows it is a coarse filter and that `join_group` policy
-  is what actually bounds cross-connection reach.
-
-**Scope:** annotate `connection` only. Resist annotating query internals —
-mirroring AST content into headers would leak query semantics to
-intermediaries and invert the confidentiality posture.
-
-**Effort:** S. **Depends on:** 128, 127.
+Every tool's `connection` parameter (`run_structured_queries`, `list_tables`,
+`describe_table`, `search_catalog`, `run_structured_writes` — the five with a
+top-level `connection` arg; `run_query_template`/`list_connections` legitimately
+have none) carries the `x-mcp-header: "Connection"` JSON-schema annotation via
+`Field(json_schema_extra=...)`, verified to survive FastMCP's pydantic ->
+`model_json_schema()` pipeline into the emitted `inputSchema`. A conforming
+`2026-07-28` client mirrors it into `Mcp-Param-Connection`, which
+`mcp/transport_guard.py`'s item-127 guard now also validates against
+`params.arguments.connection` (a same-day `auditors` finding: the spec's
+header/body MUST-reject rule isn't scoped to `Mcp-Method`/`Mcp-Name`, so
+shipping the annotation without this reopened the exact confused-deputy gap
+item 127 closed). Documented in `docs/PRODUCT_GUIDE.md`'s MCP section,
+README.md, a Decision Log entry, and each field's own module comment as a
+routing hint only (never a substitute for `resolve_visible_connection`) that
+is explicitly non-exhaustive — it mirrors `params.arguments.connection` only,
+so it says nothing about a `JoinSpec`'s own `connection` for a cross-database
+join, which stays bounded by `join_group` policy, and three tools take no
+`connection` argument at all so emit no header. Scope held to `connection`
+only; no query/write AST field is annotated (verified by walking every
+`$defs` entry, not just top-level tool arguments). Ships independently of
+item 128 (still open in this lineage): both the annotation and the header
+check are inert `inputSchema`/dormant-header logic under the current
+FastMCP/`mcp>=1.28.1` pipeline, forward-compatible with that SDK migration
+rather than blocked on it.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 130).
 
 ### 131. Publish the StructuredQuery AST as a namespaced MCP extension ✅ DONE (internal half)
 

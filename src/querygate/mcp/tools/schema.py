@@ -13,7 +13,13 @@ from querygate.mcp.auth import get_mcp_caller
 from querygate.mcp.exceptions import MCPErrorResult, safe_mcp_tool
 from querygate.mcp.server import mcp_server
 
-_CONNECTION_FIELD = Field(description="Connection id from list_connections.")
+# TODO.md item 130: `x-mcp-header` annotation, mirrored into
+# `Mcp-Param-Connection` for a fronting gateway — see mcp/tools/query.py's
+# `_CONNECTION_FIELD` for the full rationale and the join-connection caveat.
+_CONNECTION_FIELD = Field(
+    description="Connection id from list_connections.",
+    json_schema_extra={"x-mcp-header": "Connection"},
+)
 _VERBOSE_PROVENANCE_FIELD = Field(
     default=False,
     description=(

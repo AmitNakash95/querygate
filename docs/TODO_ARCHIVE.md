@@ -8950,6 +8950,202 @@ SDK-version-agnostic, but the specific implementation required 128's v2 API
 shape once merged, as the note above documents honestly rather than
 asserting a clean independence that didn't hold in practice).
 
+### 130. Annotate `connection` with `x-mcp-header` so a fronting gateway can authorize per-connection without parsing the body ✅ DONE
+
+**Surfaced 2026-07-30 by `competitive-scan`.** The `2026-07-28` revision lets a
+server mark primitive tool parameters with an `x-mcp-header` annotation;
+conforming clients **MUST** mirror those values into `Mcp-Param-{Name}` HTTP
+headers, so "network intermediaries (load balancers, proxies, WAFs) can route
+and process requests based on parameter values without parsing the request
+body."
+
+**Why it matters — this is the P4 play expressed in the spec's own mechanism.**
+Every QueryGate tool takes a `connection` id: a primitive string that is
+already public (`PublicConnectionInfo` exposes it; the spec warns only against
+annotating *sensitive* parameters — passwords, keys, PII — which this is not).
+Annotating it means a customer's existing gateway can enforce "this agent
+identity may only reach the `analytics` connection" at the edge, cheaply and
+natively, while the decision it structurally *cannot* make — whether this
+particular query *shape* is allowed — stays with QueryGate.
+
+**The mirrored header is a routing hint, never an authoritative access
+decision — and it is deliberately non-exhaustive.** A read's top-level
+`connection` is not the only connection a request can touch: every `JoinSpec`
+carries its own optional `connection` for same-instance cross-database joins
+(`query_ast/models.py`, resolved at pipeline step 2 against the `join_group`
+policy rule). A single-valued `Mcp-Param-Connection` mirrors
+`params.arguments.connection` only — no header exists for a `JoinSpec`'s
+connection at all — so a request headed `Mcp-Param-Connection: analytics` may
+still legitimately join `crm` even after the header/body agreement check
+below is extended to cover it (that check only proves the header didn't lie
+about the *entry-point* connection). This is documented, not closed,
+everywhere the mechanism appears.
+
+**What shipped.** The spec's exact mechanism (confirmed against the live
+`modelcontextprotocol.io/specification/2026-07-28/server/tools` page, not
+guessed): `x-mcp-header` is placed directly in a property's JSON Schema, its
+string value is the `{name}` portion of the resulting `Mcp-Param-{name}`
+header (e.g. `"x-mcp-header": "Region"` -> `Mcp-Param-Region`). Every tool
+with a top-level `connection` argument —
+`run_structured_queries` (`mcp/tools/query.py`), `list_tables`/
+`describe_table`/`search_catalog` (`mcp/tools/schema.py`), and
+`run_structured_writes` (`mcp/tools/write.py`) — now defines its shared
+`_CONNECTION_FIELD` as `Field(description=..., json_schema_extra={"x-mcp-header":
+"Connection"})`; `write.py`'s previously-inline `Field(...)` was extracted
+into the same `_CONNECTION_FIELD` module constant for consistency with the
+other two modules. `list_connections` and `run_query_template` legitimately
+have no `connection` argument (the latter resolves its connection from the
+stored template) and are correctly un-annotated.
+
+The mechanism was verified directly against the installed SDK before writing
+any code: `mcp.server.fastmcp.tools.base.Tool.from_function` builds
+`inputSchema` via plain `arg_model.model_json_schema(by_alias=True)` — no
+custom schema generator — and `func_metadata()` wraps each parameter's
+existing `Annotated[T, FieldInfo]` in one more `Annotated[..., Field()]`
+layer; a standalone repro against that exact double-wrapped shape confirmed
+pydantic preserves `json_schema_extra` through both the wrap and the
+`model_json_schema()` call, so the annotation reaches the emitted
+`inputSchema` unmodified.
+
+**Sequencing note, honestly recorded.** This worktree's lineage has item 127
+shipped but **not** item 128 (the `2026-07-28` transport/SDK migration) —
+`mcp>=1.28.1`, still `FastMCP` rather than `MCPServer`/`mcp>=2.0.0`, at
+implementation time, contrary to the item's original "Depends on: 128, 127"
+note (accurate on other lineages that had already merged 128, stale on this
+one). The annotation does not actually require the migration: `inputSchema`
+is `dict[str, Any]` on both SDK generations, and `x-mcp-header` is inert extra
+JSON Schema metadata a server can emit regardless of which protocol revision
+it currently negotiates over the wire — a `2025-11-25`-speaking QueryGate
+emitting the annotation today is forward-compatible with, not blocked on,
+item 128 landing later in this lineage (e.g. via merge).
+
+Scope held exactly to `connection`: no query/write AST field carries the
+annotation, verified by a dedicated regression test, not just by review —
+mirroring AST content into headers would leak query semantics to
+intermediaries and invert the confidentiality posture.
+
+Documented in three places: `docs/PRODUCT_GUIDE.md`'s MCP section (the
+gateway-facing mechanism, the non-exhaustive join and header-less-tool
+caveats, and the `_SCOPE_GATED_TOOLS`-style "visibility/routing only"
+framing, adapted from that precedent's wording per this item's instruction —
+not copied verbatim, since it needed "/routing" and "and policy" added to fit
+this mechanism precisely), a new Decision Log entry, and README.md's MCP
+usage section (a short pointer for an integrator reading top-down). Each tool
+module's `_CONNECTION_FIELD` also carries the rationale inline (full text in
+`mcp/tools/query.py`, cross-referenced from `schema.py`/`write.py`).
+
+**Coverage.** `tests/unit/test_mcp_connection_header_annotation.py`, three
+tests against a real `create_mcp_server()` instance's emitted tool schemas
+(never source grepping): every tool with a `connection` property carries
+`x-mcp-header: "Connection"` (and the exact expected 5-tool roster is
+asserted, not just "at least these"); no property other than `connection`
+carries the annotation on any tool; and no tool outside the 5-tool roster has
+the annotation anywhere. The scope-guard check walks **both** levels a tool's
+`inputSchema` can carry a property: the tool's own top-level arguments and
+every query/write AST field nested under `$defs` (`ColumnExpr.col`,
+`CaseExpr.when`, `InsertStatement.rows`, ...) — pydantic's
+`model_json_schema()` hoists every referenced submodel there rather than
+inlining it, so a check that only walked top-level `properties` would
+silently miss an annotation added to an AST field, exactly the leak this
+item's scope note warns against. (The `test-contract-reviewer` pass below
+caught the `$defs` gap in the first version of this test — see that section.)
+
+Mutation-verified before landing: removing the annotation from `schema.py`'s
+shared `_CONNECTION_FIELD` made the first test fail for exactly that reason
+(`assert None == 'Connection'`); adding an out-of-scope annotation to
+`describe_table`'s `verbose_provenance` field made the scope-guard test fail
+for exactly that reason; and, after the `$defs` fix, adding
+`json_schema_extra={"x-mcp-header": "Col"}` to `query_ast/models.py`'s
+`ColumnExpr.col` — a nested AST field, not a top-level tool argument — also
+made the scope-guard test fail for exactly that reason. All three reverted
+after confirming.
+
+**Post-build `auditors` pass (security-invariant, architecture-boundary,
+test-contract, claim reviewers, run in parallel).** Two real findings, one of
+them the substantive kind this repo's working agreement exists to catch
+before a security-adjacent change ships.
+
+1. **The annotation was advertised without the validation the spec requires
+   for it (security-invariant + architecture-boundary, independently, matching
+   findings).** `x-mcp-header` on `connection` makes `Mcp-Param-Connection` a
+   spec-defined mirrored header for the first time, and the `2026-07-28`
+   spec's "Server Validation" section states its MUST-reject rule generically
+   — *"Servers that process the request body **MUST** reject requests where
+   the values specified in the headers do not match the corresponding values
+   in the request body"* — not scoped to `Mcp-Method`/`Mcp-Name`, the two
+   headers item 127's guard originally covered. Fetched and read the live
+   `2026-07-28` Streamable HTTP transport spec page directly to confirm this
+   (its validation-failure list explicitly names `Mcp-Param-{Name}` alongside
+   `Mcp-Name` for the Base64-sentinel-decode-before-compare rule, and its
+   client/server behavior table has a `Mcp-Param-*` row reading "Server MUST
+   validate header matches body"). The first version of this item shipped the
+   annotation alone: `mcp/transport_guard.py`'s `_header_body_mismatch` still
+   only checked `Mcp-Method`/`Mcp-Name`, so a gateway could authorize
+   `Mcp-Param-Connection: analytics` while the body's actual
+   `params.arguments.connection` named a different, disallowed connection,
+   and QueryGate would silently execute it — the exact confused-deputy shape
+   item 127 exists to close, reopened by the one header item 130 itself
+   introduces. Worse, the PRODUCT_GUIDE.md/TODO_ARCHIVE.md text written for
+   the first version *asserted* item 127's check already covered
+   `Mcp-Param-Connection` — a false claim about an enforced control, not a
+   disclosed gap. **Fixed in the same commit, not deferred**: extended
+   `_header_body_mismatch` with a third header check
+   (`_MCP_PARAM_CONNECTION_HEADER`), same validate-if-present posture and
+   repeated-header/malformed-sentinel handling as the existing two, comparing
+   against `params.arguments.connection` (a `tools/call` body's actual
+   nesting — the field is never at bare `params.connection`, a second,
+   smaller inaccuracy in the original text that both reviewers also caught
+   and this fix also corrects everywhere it appeared). Four new regression
+   tests in `tests/security/test_malformed_input_fuzzing.py` (mismatch
+   rejected, honest agreement passes through, a header present over a body
+   with no `connection` argument fails closed, a repeated header is rejected
+   not first-matched) — mirroring item 127's existing four-shape coverage for
+   `Mcp-Method`/`Mcp-Name`. Mutation-verified both the new early-return gate
+   and the new comparison independently: disabling either made exactly the
+   new tests fail (the two tests that send no `Mcp-Method`/`Mcp-Name` catch
+   the gate; all four catch the comparison), confirmed against the reviewer's
+   own suggested regression-test shape before writing it. All 16
+   `Mcp-Method`/`Mcp-Name`/`Mcp-Param-Connection` tests in that file — old and
+   new — pass together, confirming no regression on item 127's existing
+   coverage. Docs corrected to describe what's actually enforced (see the
+   "mirrored header" paragraph above, the Decision Log entry, README.md, and
+   `mcp/tools/query.py`'s field comment) rather than downgraded to admit a
+   gap that no longer exists.
+2. **The scope-guard test only walked each tool's top-level `properties`,
+   never `$defs` (test-contract-reviewer).** A future `x-mcp-header` added to
+   a nested AST field (e.g. `ColumnExpr.col`) would have passed the test and
+   CI, silently mirroring query semantics into a header, even though the
+   test's own docstring and this write-up both already claimed "no
+   query/write AST field carries the annotation... verified by a dedicated
+   regression test." No such annotation existed at review time (confirmed by
+   grep — latent, not live), but the claim was inaccurate for the full AST
+   surface until fixed. Closed by extending the walk into `$defs` (above) and
+   mutation-verifying the new check specifically (adding
+   `json_schema_extra={"x-mcp-header": "Col"}` to `query_ast/models.py`'s
+   `ColumnExpr.col` — a nested field, not a top-level tool argument — made
+   the scope-guard test fail for exactly that reason; reverted after
+   confirming), not just re-running the old one.
+
+Two low-severity claim-reviewer findings, both fixed: the "verbatim"
+`_SCOPE_GATED_TOOLS` wording claim (corrected to "adapted from," above), and
+the header-less-tool caveat (`list_connections`/`list_query_templates`/
+`run_query_template`) missing from the operator-facing docs, now added to
+PRODUCT_GUIDE.md and README.md. Two out-of-scope findings recorded rather
+than fixed here: `docs/business/COMPETITORS.md` and
+`COMPETITOR_MCP_GATEWAYS.md` still bucket items 127-130 together as
+undifferentiated forward-looking strategy despite two of the four (127, 130)
+now being shipped — pre-existing drift this item's `auditors` pass surfaced
+but didn't cause, filed as a `pitch-sync`/`competitive-scan` follow-up rather
+than hand-fixed inside a security-focused item.
+
+**Effort:** S, plus the transport_guard.py extension the `auditors` pass
+found was actually required by the spec once the annotation shipped — not a
+scope increase decided in the open beforehand, but the smallest safe fix for
+a real finding, closed immediately per the working agreement rather than
+deferred. **Originally depended on:** 128, 127 — 127 was genuinely shipped in
+this lineage (and is the exact guard this item extends); 128 was not, and
+turned out not to be a real blocker (see sequencing note above).
+
 ### 132. Reconcile stale shipped-status claims left behind by items 90–93 ✅ DONE
 
 **Surfaced 2026-07-30 by the `auditors` claim review of the `competitive-scan`

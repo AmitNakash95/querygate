@@ -44,6 +44,14 @@ _WriteStatement = Annotated[
     Field(discriminator="op"),
 ]
 
+# TODO.md item 130: `x-mcp-header` annotation, mirrored into
+# `Mcp-Param-Connection` for a fronting gateway — see mcp/tools/query.py's
+# `_CONNECTION_FIELD` for the full rationale and the join-connection caveat.
+_CONNECTION_FIELD = Field(
+    description="Connection id from list_connections.",
+    json_schema_extra={"x-mcp-header": "Connection"},
+)
+
 
 class WritePreviewBatchResult(BaseModel):
     results: List[WritePreview]
@@ -76,7 +84,7 @@ class WriteExecuteBatchResult(BaseModel):
 )
 @safe_mcp_tool
 async def run_structured_writes(
-    connection: Annotated[str, Field(description="Connection id from list_connections.")],
+    connection: Annotated[str, _CONNECTION_FIELD],
     writes: Annotated[
         List[_WriteStatement],
         Field(min_length=1, description="One or more write ASTs to preview or execute, in order."),
