@@ -416,12 +416,18 @@ claim when the work ships or before explicitly handing the item back.
   by `security-invariant-reviewer` auditing item 159's own fix — pre-existing,
   not closed by that item; needs a design call (fix the memo key vs. reject
   cross-connection self-joins explicitly) before implementation.*
-- [ ] **167** — a case-different column ref to a joined alias leaves a
+- [x] **167** — a case-different column ref to a joined alias leaves a
   phantom second `sa.Table` alias that a mandatory row filter turns into an
   implicit cross join (confirmed by compiling the shape — real row
   duplication, not just cost). *Surfaced 2026-08-07 by
   `security-invariant-reviewer` auditing item 159's own fix — small,
   self-contained compiler-side dedupe.*
+- [ ] **168** — a correlated subquery's `correlate` ref binds to a phantom
+  alias object by exact dict index, which can silently turn an EXISTS/scalar
+  subquery into an independent, unfiltered scan of a mandatory-row-filtered
+  table. *Surfaced 2026-08-07 by `security-invariant-reviewer`'s post-fix
+  re-review of item 167 — same root cause, a different consumer; needs a real
+  compiled repro before landing a fix, the same way item 167 required one.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
