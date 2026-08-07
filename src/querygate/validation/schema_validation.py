@@ -936,16 +936,16 @@ def resolve_scope_connections(
     and table/column deny-list — is consulted alongside the primary
     connection's, the same way item 155 fixed the catalog sensitivity-label
     trigger to do. Deliberately a SEPARATE walk from `validate_schema`'s
-    (rather than a shared one both call): that one also threads each scope's
-    `table_connection` mapping into `_reflect_and_validate_scope`'s
-    `_load_table` schema argument. Both consumers ultimately need a
-    case-insensitive lookup — `_reflect_and_validate_scope` case-folds its own
-    copy internally before using it (item 159; a raw, case-sensitive lookup
-    there let a joined table's own `Table.Column` ref, spelled with different
+    (rather than a shared one both call) — because, per the ordering
+    contract above, policy validation must run before ANY reflection, so it
+    cannot simply reuse `validate_schema`'s own map, which reflection has to
+    compute regardless. NOT because the two need differently-cased maps: both
+    are case-folded (`_reflect_and_validate_scope` case-folds its own copy
+    internally before using it — item 159; a raw, case-sensitive lookup there
+    let a joined table's own `Table.Column` ref, spelled with different
     casing than the join's declared alias, silently reflect against the
-    PRIMARY connection instead) — so this function case-folds up front instead
-    of leaving each consumer to do it separately, the same contract
-    `sensitivity_approval_reasons` already relies on for its own copy.
+    PRIMARY connection instead), the same contract `sensitivity_approval_
+    reasons` already relies on for its own copy.
     """
     cte_names = declared_cte_names(query)
     result: Dict[int, Dict[str, str]] = {}
@@ -1476,10 +1476,14 @@ async def _reflect_and_validate_scope(
     # matches when `name` happens to be the declared spelling; when a
     # differently-cased ref's spelling is the one actually used for a given
     # table's `_load_table` call, the lookup silently misses and falls back
-    # to the PRIMARY connection, reflecting (and, per item 156, applying
-    # masks/filters/deny-list for) the wrong connection. Mirrors
-    # `resolve_scope_connections`, which already case-folds for exactly this
-    # reason.
+    # to the PRIMARY connection — reflecting the table's SCHEMA against the
+    # wrong physical connection (a spurious "table not found", or a silent
+    # join against an unrelated same-named table on the primary connection).
+    # NOT an item-156 mask/filter/deny-list bypass: those read `scope_connections`
+    # (`validate_schema`'s own case-folded copy, populated independently of
+    # this one — see that function), so they already resolved correctly
+    # either way. Mirrors `resolve_scope_connections`, which case-folds for
+    # the same reason.
     table_connection_cf = {name.casefold(): cx for name, cx in table_connection.items()}
     _validate_join_graph(query)
     name_to_physical = effective_name_map(query)

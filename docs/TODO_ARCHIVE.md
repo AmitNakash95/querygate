@@ -11125,6 +11125,25 @@ the first deterministically, by handing `_reflect_and_validate_scope` a
 `table_connection` map whose casing doesn't match the query's own, sidestepping
 the set-iteration race entirely rather than relying on `PYTHONHASHSEED` luck.
 
+**Post-ship audit correction (2026-08-07):** the "Surfaced" paragraph below
+(preserved as originally filed) and this item's own first commit message
+described the impact as item 156's column masks/mandatory row filters/deny-list
+getting resolved against the wrong Policy. A `security-invariant-reviewer` audit
+of the fix itself traced this and found it does not actually hold: item 156's
+mask/filter/deny-list enforcement reads `scope_connections`
+(`validate_schema`'s own map, case-folded independently of the raw
+`table_connection` this item's bug lived in — see `resolve_scope_connections`'s
+docstring), so it was never exposed to this bug. What the bug actually affected
+is narrower but still real: which physical connection/schema `_load_table`
+reflects the table's SCHEMA against — i.e. whether the compiled statement's
+FROM/JOIN targets the correct connection, with a spurious "table not found" or
+(for a same-named table on both connections) a silent read from the wrong
+database as the possible outcomes. The fix and both regression tests were
+unaffected by this correction — they always exercised the `_load_table`
+connection argument, never a mask/filter/deny-list code path. The same audit
+also surfaced a related but distinct pre-existing bug this item did not
+close — see item 161.
+
 **Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item 156
 (pre-existing, not introduced by that item — item 156 never touches this
 code path).** `validation/schema_validation.py`'s `_reflect_and_validate_scope`

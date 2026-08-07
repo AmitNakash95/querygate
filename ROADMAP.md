@@ -370,6 +370,18 @@ claim when the work ships or before explicitly handing the item back.
   by `security-invariant-reviewer` while auditing item 156 itself — none is a
   live bypass; grouped since a real fix to any one likely touches the same
   call sites as the others.*
+- [ ] **161** — cross-connection self-join reflects both aliases against ONE
+  connection: the `physical_tables` reflection memo is keyed by table name
+  alone, ignoring which connection a name resolves to. *Surfaced 2026-08-07
+  by `security-invariant-reviewer` auditing item 159's own fix — pre-existing,
+  not closed by that item; needs a design call (fix the memo key vs. reject
+  cross-connection self-joins explicitly) before implementation.*
+- [ ] **162** — a case-different column ref to a joined alias leaves a
+  phantom second `sa.Table` alias that a mandatory row filter turns into an
+  implicit cross join (confirmed by compiling the shape — real row
+  duplication, not just cost). *Surfaced 2026-08-07 by
+  `security-invariant-reviewer` auditing item 159's own fix — small,
+  self-contained compiler-side dedupe.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
