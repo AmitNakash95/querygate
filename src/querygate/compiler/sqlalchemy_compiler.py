@@ -831,6 +831,7 @@ def _join_can_fan_out(join: Any, tables: Dict[str, sa.Table]) -> bool:
 
 def _apply_mandatory_row_filters(
     stmt: sa.Select,
+    query: StructuredQuery,
     policy: Policy,
     tables: Dict[str, sa.Table],
     name_to_physical: Dict[str, str],
@@ -851,6 +852,41 @@ def _apply_mandatory_row_filters(
     a self-join of a mandatory-filtered table must be filtered on every
     alias, or one side could see rows the filter was meant to hide.
 
+    Walks `query`'s own declared FROM/JOIN occurrences (`query.from_alias or
+    query.from_table`, then each `join.alias or join.table`) rather than
+    every key in `tables` (item 167), AND resolves each one through
+    `_table_by_name` rather than an exact `tables[key]` index — both parts are
+    required, not just the first.
+
+    `tables` can legitimately contain MORE keys than declared occurrences:
+    `_reflect_and_validate_scope` (`validation/schema_validation.py`) unions
+    the declared alias/table spelling with every column ref's own (possibly
+    differently-cased) spelling of the same table, so a join declared
+    `alias="O"` but referenced only as `"o.id"` leaves both `tables["O"]` and
+    `tables["o"]` present — two DISTINCT `sa.Table.alias(...)` objects
+    wrapping the same physical table, since each is built via
+    `source.alias(name)` with its own spelling. Restricting the walk to
+    declared occurrence NAMES fixes which tables get a filter applied (no
+    more filtering the phantom "o" that isn't really part of this query's
+    graph), but does not by itself fix WHICH OBJECT the filter binds to:
+    `tables` is a plain dict keyed by two casefold-colliding strings, and the
+    FROM/JOIN construction above (and everywhere else in this module) never
+    indexes it directly — it always resolves through `_table_by_name`, which
+    is a case-INSENSITIVE, first-match-in-*iteration*-order search. `needed`
+    in `_reflect_and_validate_scope` is built from a Python `set`, so which of
+    "O"/"o" iterates first — and therefore which object the FROM/JOIN loop
+    actually places in the statement — is not the declared spelling by
+    guarantee, only by convention. An exact `tables[key]` index here would
+    silently pick whichever object happens to sit at that key, independent of
+    which object `_table_by_name` picked for the FROM/JOIN clause; under the
+    unlucky ordering that is TWO DIFFERENT objects, so the filter binds to an
+    alias absent from FROM/JOIN (recreating the exact phantom comma-join this
+    fix removes) while the alias actually projected goes completely
+    unfiltered — a mandatory-row-filter bypass, not merely a cartesian
+    product. Routing through `_table_by_name` here guarantees this always
+    resolves to the SAME object the FROM/JOIN loop above used, regardless of
+    `tables`' iteration order.
+
     A filter's value is either a static literal or resolved from the
     authenticated principal's claims (`MandatoryRowFilter.resolve` raises
     `PolicyViolationError` if `from_claim` is set but the principal lacks
@@ -864,6 +900,17 @@ def _apply_mandatory_row_filters(
     filtered table, so this is defence in depth on the compile side rather than the
     only guard. The filter is NOT lost: the block's body is compiled through this
     same function against its own real tables, which is where those rows are read.
+
+    A correlated subquery's own scope (item 106's EXISTS, or a `value_subquery`)
+    only walks ITS OWN `query.from_table`/`query.joins` here — a table it merely
+    references via a declared correlated name (bound to the PARENT's own table
+    object in `tables`, see `_reflect_and_validate_scope`) is not part of that
+    list and is not re-filtered inside the subquery. This is NOT a gap: the
+    correlated reference is a row of the ENCLOSING statement, and the enclosing
+    scope's own `_compile_scope_body` call already applies that table's
+    mandatory filters there — re-applying the same filter inside the correlated
+    subquery too would be redundant (AND with itself), never a way to see more
+    rows than the outer scope already allows.
 
     `connection_id`/`table_connection` (TODO.md item 156): for EACH table
     occurrence, not just once per filter, the candidate Policies are resolved
@@ -879,7 +926,9 @@ def _apply_mandatory_row_filters(
     to the same occurrences, in a WHERE clause where AND is commutative.
     """
     table_connection = table_connection or {}
-    for key in tables:
+    declared_keys: List[str] = [query.from_alias or query.from_table]
+    declared_keys.extend(join.alias or join.table for join in query.joins)
+    for key in declared_keys:
         physical = name_to_physical.get(key.casefold(), key)
         if physical.casefold() in cte_names:
             continue
@@ -896,7 +945,23 @@ def _apply_mandatory_row_filters(
                     continue  # same object seen via more than one candidate
                 applied.add(id(row_filter))
                 value = row_filter.resolve(principal)
-                col = resolve_column(tables[key], row_filter.column)
+                # `_table_by_name`, not `tables[key]`: `key` is the query's own
+                # DECLARED spelling, but `tables` can hold a second, phantom
+                # entry for the same table under a differently-cased column-ref
+                # spelling (see the module docstring above and item 167). An
+                # exact dict index would bind the filter to whichever object
+                # `tables[key]` happens to be, independent of which object the
+                # FROM/JOIN loop above actually put in the statement (it always
+                # resolves via this same case-insensitive `_table_by_name`,
+                # first-match-in-insertion-order) — a hash-seed-dependent
+                # coin flip that can leave the filter bound to an alias absent
+                # from FROM/JOIN (recreating the phantom comma-join) while the
+                # alias actually in the statement goes unfiltered (a
+                # mandatory-row-filter bypass, not just a cartesian). Routing
+                # through `_table_by_name` guarantees this always resolves to
+                # the SAME object the FROM/JOIN construction used, regardless
+                # of `tables`' iteration order.
+                col = resolve_column(_table_by_name(tables, key), row_filter.column)
                 stmt = stmt.where(col == value)
     return stmt
 
@@ -1464,6 +1529,7 @@ def _compile_scope_body(
 
     stmt = _apply_mandatory_row_filters(
         stmt,
+        query,
         policy,
         tables,
         name_to_physical,
