@@ -2763,6 +2763,58 @@ than once — which has no single source of truth for an intermediary to agree
 with QueryGate about — is rejected outright rather than resolved by first
 match.
 
+**Gateway-native per-connection routing (TODO item 130).** Every tool's
+`connection` parameter carries the `2026-07-28` spec's `x-mcp-header`
+JSON-schema annotation (`inputSchema.properties.connection["x-mcp-header"] =
+"Connection"`), which a conforming client mirrors into an
+`Mcp-Param-Connection` HTTP header on the Streamable HTTP transport (the
+value lives at `params.arguments.connection` in the JSON-RPC body, since a
+`tools/call` request nests every tool argument under `arguments`). `id` is
+already public — `PublicConnectionInfo` returns it, and the spec only warns
+against annotating *sensitive* parameters — so a customer's existing gateway
+can enforce "this agent identity may only reach the `analytics` connection"
+at the edge, cheaply and natively, entirely without parsing the JSON-RPC
+body. `mcp/transport_guard.py`'s `MCPRequestGuardMiddleware` — the same
+guard item 127 built for `Mcp-Method`/`Mcp-Name` — is extended to this
+header too: a present `Mcp-Param-Connection` that disagrees with
+`params.arguments.connection` is rejected as `-32020 HeaderMismatch`,
+because the `2026-07-28` spec's "Server Validation" MUST-reject rule is
+written generically for any header a server mirrors via `x-mcp-header`, not
+only `Mcp-Method`/`Mcp-Name`.
+
+**This is still a routing hint, never an authoritative access decision.**
+The header/body agreement check stops a caller from lying to the gateway
+about which connection its own request targets; it does not, and cannot,
+make the gateway's decision correct or complete. Visibility/routing only —
+the actual authorization boundary is each tool's own call-time scope and
+policy check (`resolve_visible_connection`, `connections/visibility.py`);
+this annotation must never become a substitute for that check, the same
+posture `mcp/server.py`'s `_SCOPE_GATED_TOOLS` already documents for scoped
+tool listing. It is also deliberately **non-exhaustive** in two ways an
+operator writing an edge rule needs to know:
+
+- A read's top-level `connection` is not the only connection a request can
+  touch — every `JoinSpec` carries its own optional `connection` for a
+  same-instance cross-database join (`query_ast/models.py`), resolved at
+  schema-validation time against the `join_group` policy rule. No header
+  exists for a `JoinSpec`'s connection at all (only the top-level `connection`
+  argument is annotated), so a request headed `Mcp-Param-Connection:
+  analytics` may still legitimately join `crm` — the header/body agreement
+  check above only proves the header didn't lie about the *entry-point*
+  connection, not that the query touches nothing else. `join_group` policy is
+  what actually bounds cross-connection reach.
+- `list_connections`, `list_query_templates`, and `run_query_template` take
+  no `connection` argument at all (the last resolves it from the stored
+  template server-side), so no `Mcp-Param-Connection` header is ever emitted
+  for them. A gateway rule keyed on this header must decide explicitly how to
+  treat a header-less `tools/call` for one of these three tools — deny by
+  default, or gate on `Mcp-Name` (the tool name) instead — rather than assume
+  every request carries the header.
+
+Scope is deliberately narrow: only `connection` is annotated, never a
+query/write AST field — mirroring query internals into headers would leak
+query semantics to intermediaries and invert the confidentiality posture.
+
 The actual tools, one module per concern:
 
 - `mcp/tools/connections.py` — `list_connections`.
@@ -3365,6 +3417,52 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-08-06 — `connection` gets the MCP `x-mcp-header` annotation;
+  query/write AST fields deliberately do not (TODO.md item 130).** The
+  `2026-07-28` spec lets a server mark a primitive tool parameter so
+  conforming clients mirror it into an `Mcp-Param-{Name}` HTTP header, so a
+  fronting gateway can route/authorize on it without parsing the body.
+  `connection` is the one parameter every tool shares that is (a) already
+  public (`PublicConnectionInfo` returns it) and (b) meaningful to a gateway's
+  own routing decision ("this identity may reach connection X"), so it's
+  annotated `x-mcp-header: "Connection"` in `mcp/tools/{query,schema,
+  write}.py`. Query/write AST content is deliberately never annotated —
+  mirroring AST internals into headers would leak query *semantics* (which
+  tables, columns, predicates a caller is touching) to every intermediary on
+  the path, inverting the confidentiality posture QueryGate exists to
+  enforce; the spec itself only clears primitive, already-non-sensitive
+  parameters for this treatment. The header is documented everywhere it
+  appears (this section, README.md, the field's own docstring in each tool
+  module) as a **routing hint, never an authoritative access decision** —
+  visibility/routing only, same posture as `_SCOPE_GATED_TOOLS` — and as
+  **non-exhaustive**: it mirrors `params.arguments.connection` alone, so it
+  says nothing about a `JoinSpec`'s own optional `connection` field for a
+  same-instance cross-database join (no header exists for that field at all),
+  which is bounded by `join_group` policy instead, not by anything a gateway
+  can see on the wire; and three tools (`list_connections`,
+  `list_query_templates`, `run_query_template`) take no `connection` argument
+  at all, so no header is ever emitted for them.
+
+  **A same-day `auditors` pass caught, and this item's own fix closed, a real
+  gap**: the annotation makes `connection` a spec-defined mirrored header for
+  the first time, and the `2026-07-28` spec's "Server Validation" MUST-reject
+  rule is written generically for *any* such header — not scoped to
+  `Mcp-Method`/`Mcp-Name`, the two item 127 originally implemented it for.
+  Shipping the annotation without extending that check would have told
+  clients (and any gateway trusting them) to rely on `Mcp-Param-Connection`
+  while QueryGate silently accepted a body whose actual `connection` argument
+  disagreed — the exact confused-deputy shape item 127 exists to prevent, now
+  reopened for the one header item 130 itself introduces. Fixed in the same
+  commit: `mcp/transport_guard.py`'s `_header_body_mismatch` (item 127's
+  guard) now also validates `Mcp-Param-Connection` against
+  `params.arguments.connection`, validate-if-present like the other two
+  headers, with its own regression tests in
+  `tests/security/test_malformed_input_fuzzing.py`. This ships independently
+  of item 128 (the `2026-07-28` transport/SDK migration): both the annotation
+  and the header check are inert/dormant under the protocol revision
+  QueryGate's own server currently negotiates, forward-compatible with that
+  migration rather than blocked on it.
 
 - **2026-07-28 — item 35 phase 3's four design-gated questions are resolved,
   maintainer-approved before build (TODO.md item 35).** Phases 1-2 shipped
