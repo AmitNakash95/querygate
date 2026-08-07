@@ -109,13 +109,16 @@ class SessionDialectAdapter(ABC):
 
     def is_connectable(self) -> bool:
         """Whether `connections/engine.py`'s `init_engine` may proceed to
-        `create_async_engine` for this dialect at all (TODO.md item 19 phase
-        2). Default `True` — every dialect with a real async SQLAlchemy
-        driver (Postgres/MSSQL/MySQL) is connectable and never overrides
-        this. `SnowflakeSessionAdapter` overrides it to `False`:
-        `snowflake-sqlalchemy`'s DBAPI has no async driver, so attempting
-        `create_async_engine` for it fails inside SQLAlchemy itself with a
-        confusing library-internal error rather than a QueryGate-owned one.
+        `create_async_engine` for this dialect at all (TODO.md item 19
+        phases 2/3). Default `True` — every dialect with a real async
+        SQLAlchemy driver (Postgres/MSSQL/MySQL) is connectable and never
+        overrides this. `SnowflakeSessionAdapter` and `BigQuerySessionAdapter`
+        both override it to `False`: neither `snowflake-sqlalchemy`'s nor
+        `sqlalchemy_bigquery`'s DBAPI has an async driver, so attempting
+        `create_async_engine` for either fails inside SQLAlchemy itself (or,
+        for BigQuery specifically, even earlier — see
+        `BigQuerySessionAdapter`'s own docstring) with a confusing
+        library-internal error rather than a QueryGate-owned one.
 
         This is a capability check on the REGISTERED interface, not an
         inline `if profile.dialect == ...` at the `init_engine` call site
@@ -427,11 +430,135 @@ class SnowflakeSessionAdapter(SessionDialectAdapter):
         return ""
 
 
+class BigQuerySessionAdapter(SessionDialectAdapter):
+    """TODO.md item 19 phase 3 — like `SnowflakeSessionAdapter`, implemented
+    for real where BigQuery has a real equivalent, but **never actually
+    exercised**: `connections/engine.py`'s `init_engine` refuses to open a
+    BigQuery connection before any of these methods can run, because
+    `sqlalchemy_bigquery`'s DBAPI has no async driver — the same gap
+    Snowflake's has. Confirming that the SIMPLE way Snowflake's was
+    confirmed (constructing an async engine and reading the resulting
+    `InvalidRequestError`) is not possible with no GCP credentials
+    configured: BigQuery's dialect resolves real Google credentials and
+    builds a live client at engine-construction time, and fails there
+    FIRST — confirmed directly: with no credentials configured, the same
+    attempt raises `google.auth.exceptions.DefaultCredentialsError` before
+    SQLAlchemy's own async-driver check ever runs. (With a syntactically
+    valid, if fake, credentials file supplied to get past that step, the
+    identical `InvalidRequestError` Snowflake's driver raises — "The asyncio
+    extension requires an async driver to be used. The loaded 'bigquery' is
+    not async." — was also confirmed for BigQuery's driver; see
+    `connections/models.py`'s `DatabaseDialect` docstring for the full
+    sequencing.) See `is_connectable`'s override below.
+
+    BigQuery is architecturally further from a session-oriented RDBMS than
+    Snowflake is, in a way that goes beyond the missing async driver: it has
+    NO session-scoped SQL statement at all. A BigQuery "connection" issues
+    independent, stateless query jobs against Google's REST API — there is
+    no SET/ALTER SESSION equivalent the way Postgres/MSSQL/MySQL/Snowflake
+    all have one, and no default per-connection session identifier a later
+    connection could target for cancellation (BigQuery's multi-statement
+    SESSION feature is opt-in per query job via `create_session=True`/
+    `connection_properties`, which this connect-time code never requests).
+    `apply_session_guardrails` is therefore a genuine no-op, not a stub —
+    there is nothing to SET — and `capture_session_identifier`/
+    `cancel_session` raise rather than fabricate a plausible-looking
+    identifier for a session that was never created (CLAUDE.md's engine
+    philosophy: reject a genuine capability gap, don't emulate one). This
+    means query-cancellation support (`Policy.allow_query_cancellation`)
+    could not work for BigQuery even if the async-driver gap were somehow
+    resolved — real additional scope the live-verification follow-up item in
+    TODO.md now also tracks, since BigQuery's actual timeout/cancellation
+    primitives are per-QUERY-JOB (`QueryJobConfig.job_timeout_ms`, `jobs.
+    cancel`), a materially different mechanism than every other adapter's
+    session-level one.
+    """
+
+    def is_connectable(self) -> bool:
+        # The one override of the base class's `True` default, for the same
+        # reason SnowflakeSessionAdapter's is — see the class docstring and
+        # `is_connectable`'s own docstring on the base class.
+        return False
+
+    def build_engine_url(self, profile: ConnectionProfile) -> str:
+        # Passthrough, like Postgres/MySQL/Snowflake: the operator's YAML
+        # already supplies a complete `bigquery://project/dataset?...` URL
+        # (see examples/connections.example.yaml).
+        return profile.connection_string
+
+    def build_connect_args(self, profile: ConnectionProfile, timeout_seconds: int) -> dict:
+        # Deliberately empty, not merely unimplemented: confirmed by reading
+        # the installed `sqlalchemy_bigquery.base.BigQueryDialect.
+        # create_connect_args(self, url)` source directly — it builds the
+        # `google.cloud.bigquery.Client` entirely from the URL's own query
+        # parameters (credentials_path, location, arraysize, ...) and never
+        # consults a `connect_args` dict at all, so `timeout_seconds` has
+        # nowhere to go at this layer. BigQuery's real timeout model is
+        # per-query-job (`QueryJobConfig.job_timeout_ms`), not per-connection
+        # — a materially different mechanism from every other adapter's
+        # connect-time (Snowflake's `login_timeout`) or post-connect
+        # (MSSQL's pyodbc `timeout`) timeout. See the class docstring.
+        return {}
+
+    def register_query_timeout(self, engine: AsyncEngine, timeout_seconds: int) -> None:
+        # No post-connect attribute to set, for the same reason
+        # build_connect_args above returns {} — see that method's comment.
+        return None
+
+    async def apply_session_guardrails(
+        self,
+        session: AsyncSession,
+        *,
+        lock_timeout_seconds: int,
+        statement_timeout_seconds: int,
+    ) -> None:
+        # A genuine no-op, not a stub: BigQuery has no SET/ALTER SESSION
+        # statement at all to send — see the class docstring.
+        return None
+
+    async def capture_session_identifier(self, session: AsyncSession) -> str:
+        # Reject, don't fabricate: BigQuery creates no default per-connection
+        # session to capture an identifier for — see the class docstring.
+        # Unreachable in production either way: connections/engine.py's
+        # init_engine refuses to open a BigQuery connection at all before a
+        # session is ever created.
+        raise NotImplementedError(
+            "BigQuery has no default per-connection session to capture an "
+            "identifier for (see BigQuerySessionAdapter's docstring) — and this "
+            "method is unreachable in production, since init_engine refuses to "
+            "open a BigQuery connection before a session exists."
+        )
+
+    async def cancel_session(self, engine: AsyncEngine, identifier: str) -> None:
+        # Same reasoning as capture_session_identifier above: there is no
+        # session-level cancellation primitive to target with a captured
+        # identifier that was never captured.
+        raise NotImplementedError(
+            "BigQuery has no session-level cancellation primitive to target (see "
+            "BigQuerySessionAdapter's docstring) — and this method is unreachable "
+            "in production for the same reason capture_session_identifier is."
+        )
+
+    def list_live_tables_extra_filter_sql(self) -> str:
+        # BigQuery's INFORMATION_SCHEMA.TABLES is dataset-scoped (queried as
+        # `<project>.<dataset>.INFORMATION_SCHEMA.TABLES`) — the same
+        # per-database scoping reasoning as Postgres's/MSSQL's, not MySQL's
+        # server-wide view. Deliberately inherits the base class's ""
+        # no-op default, recorded explicitly here rather than left as a
+        # silent inheritance (2026-08-06 security-invariant-reviewer finding
+        # on this exact default for Snowflake, applied here too) — this is a
+        # documentation-derived claim, unverified against a live project
+        # like everything else on this adapter, and unreachable today (see
+        # the class docstring) regardless.
+        return ""
+
+
 _SESSION_ADAPTERS: Dict[DatabaseDialect, SessionDialectAdapter] = {
     DatabaseDialect.POSTGRESQL: PostgresSessionAdapter(),
     DatabaseDialect.MSSQL: MSSQLSessionAdapter(),
     DatabaseDialect.MYSQL: MySQLSessionAdapter(),
     DatabaseDialect.SNOWFLAKE: SnowflakeSessionAdapter(),
+    DatabaseDialect.BIGQUERY: BigQuerySessionAdapter(),
 }
 
 

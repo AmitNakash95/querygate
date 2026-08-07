@@ -111,6 +111,28 @@ All notable changes to QueryGate are documented here.
   live-verification follow-up before relying on it for a real deployment.
   Upsert (`MERGE`) is rejected rather than emulated, the same
   reject-don't-emulate posture as MySQL's `ON DUPLICATE KEY UPDATE` gap.
+- **BigQuery as a connection dialect — rendering/compilation only, NOT
+  live-verified** (TODO.md item 19 phase 3, the same posture as Snowflake's
+  phase above). A real `DialectAdapter`/`SessionDialectAdapter` cover the
+  same primitive surface the other four dialects do, backed by Google's
+  public SQL docs and checked against a real installed `sqlalchemy_bigquery`
+  dialect object — but there is no BigQuery project or GCP credentials
+  available to this project, and `sqlalchemy-bigquery`'s driver has no async
+  SQLAlchemy engine support either (plus a second, BigQuery-specific gap:
+  its dialect resolves real Google credentials and builds a live client at
+  engine-construction time), so QueryGate deliberately refuses to open a
+  live BigQuery connection today. **Do not treat this the way MySQL's
+  live-tested phase 1 is treated** — see TODO.md item 19 and its BigQuery
+  live-verification follow-up item before relying on it for a real
+  deployment. Upsert (`MERGE`) and `PERCENTILE_CONT` as a `GROUP BY`
+  aggregate are both rejected rather than emulated, the same
+  reject-don't-emulate posture as Snowflake's/MSSQL's respective gaps —
+  BigQuery's `date_bucket`/`date_add` also, uniquely among the five
+  dialects, dispatch on whether the operand is a DATE/DATETIME/TIMESTAMP,
+  since BigQuery has three separate, differently-capable functions for each
+  rather than one polymorphic function the way every other dialect here
+  does. With MySQL, Snowflake, and BigQuery now all shipped, TODO.md item 19
+  is marked done; a new item tracks any further dialect beyond these three.
 - **Compliance-grade WORM (write-once-read-many) audit archival, with
   managed search over it** (TODO.md item 134, both phases). A new opt-in
   audit sink backend (`AUDIT_SINK_BACKEND=jsonl_chained_s3_worm`) composes

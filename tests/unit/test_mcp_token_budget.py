@@ -225,7 +225,21 @@ from querygate.mcp.server import create_mcp_server
 # member (each tool's output schema embeds the enum once), real new
 # capability (a caller can now see/reason about a Snowflake connection at
 # all), not duplication.
-_MAX_TOTAL_CHARS = 125_000
+#
+# 2026-08-07 (TODO.md item 19 phase 3): +1,350 chars, the same shape as the
+# Snowflake bump above — `DatabaseDialect` gained a `bigquery` member (each
+# tool's output schema embeds the enum once), real new capability (a caller
+# can now see/reason about a BigQuery connection at all), not duplication.
+#
+# 2026-08-07 (same item, post-audit fix): +318 chars — an auditors pass on
+# this same item found and corrected a self-contradictory "confirmed
+# directly" claim in `DatabaseDialect`'s own docstring (it asserted an
+# `InvalidRequestError` was observed while the very next sentence explained
+# BigQuery's driver actually fails earlier, with a different error, before
+# that check can run); the accurate replacement text is longer. A doc-
+# accuracy fix, not new capability, but it does live inside the schema this
+# budget measures.
+_MAX_TOTAL_CHARS = 128_000
 
 
 def _tool_schema_chars(tool: object) -> int:

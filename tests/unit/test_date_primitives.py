@@ -45,11 +45,37 @@ from querygate.validation.policy_validation import validate_policy
 
 pytestmark = pytest.mark.unit
 
+# `sqlalchemy_bigquery` is a dev-only dependency (TODO.md item 19 phase 3,
+# same reasoning as `snowflake-sqlalchemy`) — `importorskip` so this module
+# still collects cleanly in a hypothetical main-dependencies-only
+# environment, matching test_dialect_adapters.py's pattern.
+_sqlalchemy_bigquery = pytest.importorskip("sqlalchemy_bigquery")
+
 _DIALECTS = {
     "postgresql": postgresql.dialect(),
     "mssql": mssql.dialect(),
     "mysql": mysql.dialect(),
     "sqlite": sqlite.dialect(),
+    # BigQuery (TODO.md item 19 phase 3) joins the shared enum-driven suite
+    # from the start — Snowflake (phase 2) did NOT get folded in here
+    # (2026-08-06 architecture-boundary-reviewer finding on that item,
+    # flagged as a gap not to repeat). Two different operand types get
+    # exercised by this fixture depending on the test: `orders.created_at`
+    # below is a plain `sa.DateTime`, which `_bq_temporal_kind` classifies as
+    # BigQuery's DATETIME kind — the one BigQuery temporal kind with no
+    # genuine date_add unit gap (DATETIME_ADD supports the full IntervalUnit
+    # range) — used by most tests in this file (e.g.
+    # `test_every_ordinary_part_renders_on_every_dialect`). But
+    # `test_every_interval_unit_renders_on_every_dialect` below builds its
+    # `date_add` expression over `NowExpr(now="timestamp")` instead, which
+    # `BigQueryDialectAdapter.current_timestamp` renders as a TIMESTAMP —
+    # THAT kind genuinely lacks week/month/year (TIMESTAMP_ADD's real gap),
+    # which is why that one test needs its own `_DECLARED_UNIT_GAPS` set
+    # further down rather than being gap-free like the DATETIME case. Its
+    # DATE-only and TIMESTAMP-only `date_add` unit gaps are covered more
+    # exhaustively in test_dialect_adapters.py's `TestBigQueryDateAddTypeGaps`
+    # against concretely DATE/TIMESTAMP-typed columns.
+    "bigquery": _sqlalchemy_bigquery.BigQueryDialect(),
 }
 
 
@@ -374,6 +400,50 @@ def test_postgres_date_add_binds_the_amount_rather_than_inlining_it():
     assert "-7" not in sql, "the amount must bind, not be inlined into SQL text"
 
 
+@pytest.mark.parametrize("dialect", ["mysql", "bigquery"])
+def test_two_date_adds_in_one_query_do_not_collide_on_the_same_bind_name(dialect):
+    """2026-08-07 security-invariant-reviewer finding: MySQL's and BigQuery's
+    `date_add` both build their INTERVAL clause with `sa.text("INTERVAL :amt
+    ...").bindparams(amt=amount)` — a bare, non-unique bindparam name. Two
+    `date_add` calls compiled into the SAME statement (e.g. a two-sided
+    window filter, `col > date_add(now(), 'day', -30) AND col < date_add(
+    now(), 'day', -1)`) previously rendered two `:amt` placeholders sharing
+    ONE bound value — the LAST amount silently won and the first was lost,
+    with no error raised. This is reachable today on MySQL (already
+    shipped, live-tested) — not a guardrail bypass (`max_interval_days` is
+    checked pre-compile, so no cap is defeated), but a silent-wrong-results
+    correctness bug: the query above would use -1 for BOTH bounds instead
+    of -30/-1, returning the wrong row set with no signal to the caller.
+    Fixed with `sa.bindparam("amt", value=amount, unique=True)` at both call
+    sites. This test fails today (before the fix) for the reason above."""
+    lower = DateAddExpr(date_add=NowExpr(now="timestamp"), unit="day", amount=-30)
+    upper = DateAddExpr(date_add=NowExpr(now="timestamp"), unit="day", amount=-1)
+    where = StructuredQuery.model_validate(
+        {
+            "from": "orders",
+            "select": ["orders.id"],
+            "where": {
+                "and": [
+                    {"col": "orders.created_at", "op": "gte", "value_expr": lower.model_dump()},
+                    {"col": "orders.created_at", "op": "lte", "value_expr": upper.model_dump()},
+                ]
+            },
+        }
+    ).where
+    from querygate.compiler.sqlalchemy_compiler import _compile_where
+
+    condition = _compile_where(where, _tables(), {}, dialect)
+    compiled = condition.compile(dialect=_DIALECTS[dialect])
+    params = compiled.construct_params()
+    # Two DISTINCT bind entries, not one shared/overwritten one.
+    assert len(params) == 2, (
+        f"expected 2 distinct bind params for the 2 date_add amounts, got {params!r} — "
+        "a bare, non-unique bindparam name let the second date_add silently "
+        "overwrite the first's bound value"
+    )
+    assert set(params.values()) == {-30, -1}, f"both amounts must survive intact, got {params!r}"
+
+
 def test_mssql_now_date_truncates_to_a_real_date_type():
     """`now: "date"` means midnight UTC. The generic sa.Date renders DATETIME
     against an unconnected mssql dialect, which would NOT truncate — so the
@@ -421,13 +491,37 @@ def test_every_date_part_is_supported_except_the_declared_gaps(part):
         )
 
 
+# BigQuery is the one dialect with a genuine gap here, found by integrating
+# it into this shared suite (rather than the historical "no dialect has a
+# genuine gap" claim below staying true by never being tested against it):
+# `date_add(now(), unit, ...)` renders `now()` as a BigQuery TIMESTAMP (a
+# timezone-independent absolute instant — see BigQueryDialectAdapter.
+# current_timestamp), and BigQuery's TIMESTAMP_ADD genuinely lacks
+# week/month/year (confirmed against Google's docs; see
+# TestBigQueryDateAddTypeGaps in test_dialect_adapters.py for the dedicated,
+# real coverage of this — including the DATETIME-typed operand case, where
+# BigQuery has NO gap at all). Declared explicitly, the same pattern
+# `_DECLARED_PART_GAPS` above uses, rather than silently excluding bigquery
+# from the loop.
+_DECLARED_UNIT_GAPS = {("bigquery", "week"), ("bigquery", "month"), ("bigquery", "year")}
+
+
 @pytest.mark.parametrize("unit", list(IntervalUnit.__args__))
 def test_every_interval_unit_renders_on_every_dialect(unit):
-    """Unlike parts, no dialect has a genuine gap here — all three can shift by
-    every unit, so any failure is a missing mapping, not a capability gap."""
+    """No dialect but BigQuery has a genuine gap here (see
+    `_DECLARED_UNIT_GAPS`) — every other dialect can shift `now()` by every
+    unit, so any OTHER failure is a missing mapping, not a capability gap."""
     expr = DateAddExpr(date_add=NowExpr(now="timestamp"), unit=unit, amount=1)
     for dialect in _DIALECTS:
-        assert _sql(expr, dialect)
+        declared = (dialect, unit) in _DECLARED_UNIT_GAPS
+        try:
+            assert _sql(expr, dialect)
+            rejected = False
+        except QueryValidationError:
+            rejected = True
+        assert rejected == declared, f"{dialect}/{unit}: " + (
+            "declared as a gap but rendered" if declared else "rejected but not a declared gap"
+        )
 
 
 def test_every_date_part_has_a_live_both_dialects_case():
@@ -533,7 +627,7 @@ def test_no_date_part_map_is_dead_code():
             setattr(da, target, original)
 
 
-@pytest.mark.parametrize("dialect", ["postgresql", "mssql", "mysql", "sqlite"])
+@pytest.mark.parametrize("dialect", ["postgresql", "mssql", "mysql", "sqlite", "bigquery"])
 def test_an_unknown_date_part_raises_a_typed_error_not_a_keyerror(dialect):
     """A future `DatePart` member added without teaching an adapter must surface
     as a clean 4xx naming the dialect, never a KeyError 500 and never a silent
@@ -545,7 +639,7 @@ def test_an_unknown_date_part_raises_a_typed_error_not_a_keyerror(dialect):
         adapter.extract_part("nanocentury", sa.column("c"))
 
 
-@pytest.mark.parametrize("dialect", ["postgresql", "mssql", "mysql", "sqlite"])
+@pytest.mark.parametrize("dialect", ["postgresql", "mssql", "mysql", "sqlite", "bigquery"])
 def test_an_unknown_interval_unit_raises_a_typed_error_on_every_dialect(dialect):
     """The `date_add` half of the same rule, which the first version of the
     exhaustiveness refactor left out — it guarded `extract_part` on all three
@@ -558,8 +652,17 @@ def test_an_unknown_interval_unit_raises_a_typed_error_on_every_dialect(dialect)
     from querygate.compiler.dialect_adapters import get_dialect_adapter
 
     adapter = get_dialect_adapter(dialect)
+    # BigQuery's date_add needs a CONCRETELY TYPED operand before it can even
+    # get to the unit lookup (see _bq_temporal_kind's docstring) — an untyped
+    # `sa.column("c")` hits that gap first, with a different message, which
+    # is exactly what test_untyped_operand_is_rejected_not_guessed in
+    # test_dialect_adapters.py covers separately. Give BigQuery a
+    # DATETIME-typed column here so this test actually exercises the
+    # "unknown unit" rejection it is named for, the same one every other
+    # dialect's plain `sa.column("c")` already reaches.
+    col = sa.column("c", type_=sa.DateTime) if dialect == "bigquery" else sa.column("c")
     with pytest.raises(QueryValidationError, match="not supported"):
-        adapter.date_add(sa.column("c"), "nanocentury", 3)
+        adapter.date_add(col, "nanocentury", 3)
 
 
 def test_date_add_amount_is_bounded_to_int32():
