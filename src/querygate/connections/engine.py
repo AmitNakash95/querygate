@@ -25,6 +25,7 @@ from querygate.connections.dialects import (
     build_engine_url,
     capture_session_identifier,
     get_session_adapter,
+    not_connectable_explanation,
     register_query_timeout,
 )
 from querygate.connections.models import ConnectionProfile
@@ -112,14 +113,12 @@ def init_engine(connection_id: str) -> AsyncEngine:
         # exact "an admin caller needs to see exactly what's wrong with a
         # candidate config" shape its own docstring describes. The message
         # embeds only `connection_id`/`profile.dialect` — never a credential.
+        # The shared explanation clause lives in `not_connectable_explanation`
+        # (connections/dialects.py) so this and `resolve_query_table_connections`'s
+        # identical secondary-connection guard (TODO.md item 163) can't drift
+        # apart (2026-08-07 `architecture-boundary-reviewer` finding).
         raise ConfigValidationError(
-            f"Connection {connection_id!r} is dialect {profile.dialect!r}, which QueryGate "
-            "cannot yet open a live connection for: its SessionDialectAdapter is registered "
-            "but not connectable (see SessionDialectAdapter.is_connectable's docstring for "
-            "why — Snowflake's and BigQuery's drivers both have no async SQLAlchemy engine "
-            "support, and this codebase's execution pipeline requires one). Its compiler/"
-            "session adapters exist for rendering-level development and testing only "
-            "(TODO.md item 19) — see its live-verification follow-up item."
+            f"Connection {connection_id!r}: {not_connectable_explanation(profile.dialect)}"
         )
     policy = get_policy(connection_id)
     engine = create_async_engine(

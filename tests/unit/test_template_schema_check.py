@@ -14,6 +14,8 @@ import pytest
 import sqlalchemy as sa
 
 from querygate.admin import service as governance
+from querygate.connections.models import ConnectionProfile
+from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.templates.models import QueryTemplate
 from querygate.validation import schema_validation
 
@@ -115,3 +117,55 @@ async def test_structurally_invalid_skeleton_is_flagged_separately(monkeypatch):
         _template({"from": "orders", "select": [], "limit": 5})
     )
     assert result.status == "structural_error"
+
+
+@pytest.mark.asyncio
+async def test_not_connectable_secondary_join_is_reported_as_issues_not_raised(monkeypatch):
+    """Post-ship audit finding on TODO.md item 163's own fix
+    (`security-invariant-reviewer`, 2026-08-07): `validate_schema`'s
+    `resolve_query_table_connections` now raises `ConfigValidationError` for a
+    cross-connection join whose SECONDARY connection is a not-yet-connectable
+    dialect (Snowflake/BigQuery). `_check_one_template_schema` had no handler
+    for that exception type — it escaped past this function (and past
+    `check_template_schema`, which has no wrapping try either) instead of
+    being reported as a per-template `issues` result, contradicting this
+    module's own "a connection that can't be reached never blocks staging"
+    contract (`check_template_schema`'s docstring). `_patch_reflection`'s
+    default fake still raises `NoSuchTableError` for any table other than
+    "orders" (see its definition above) — if this guard ever stopped firing
+    before reflection, the resulting message would be about the "customers"
+    table not existing, not the dialect, so the "snowflake" assertion below
+    only passes for the right reason.
+    """
+    demo = ConnectionProfile(
+        id="demo",
+        dialect="postgresql",
+        connection_string="postgresql+asyncpg://user:pass@localhost/demo",
+        join_group="shared",
+    )
+    other = ConnectionProfile(
+        id="other",
+        dialect="snowflake",
+        connection_string="snowflake://user:pass@account/db",
+        join_group="shared",
+    )
+    set_registry(ConnectionRegistry({"demo": demo, "other": other}))
+    _patch_reflection(monkeypatch)
+    result = await governance._check_one_template_schema(
+        _template(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "joins": [
+                    {
+                        "table": "customers",
+                        "on": ["orders.customer_id", "customers.id"],
+                        "connection": "other",
+                    }
+                ],
+                "limit": 5,
+            }
+        )
+    )
+    assert result.status == "issues"
+    assert any("snowflake" in m for m in result.messages)
