@@ -430,7 +430,7 @@ claim when the work ships or before explicitly handing the item back.
   `security-invariant-reviewer` auditing item 165's fix — not independently
   confirmed currently exploitable; mechanical extension of item 165's
   `safe_pydantic_error_lines` pattern to `cli.py`'s `load_config_context`.*
-- [ ] **169** — a correlated subquery's `correlate` ref binds to a phantom
+- [x] **169** — a correlated subquery's `correlate` ref binds to a phantom
   alias object by exact dict index, which can silently turn an EXISTS/scalar
   subquery into an independent, unfiltered scan of a mandatory-row-filtered
   table. *Surfaced 2026-08-07 by `security-invariant-reviewer`'s post-fix

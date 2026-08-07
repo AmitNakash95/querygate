@@ -199,7 +199,7 @@ order-of-magnitude, not commitments.
 | 166 | Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo ignores which connection a name resolves to | S–M | 159 |
 | 167 | ✅ A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed) | S | 159 |
 | 168 | Config-governance dry-run's credential-safety net is a post-hoc regex scrub, not structural, and the validate-config CLI's stderr isn't scrubbed at all | S–M | 165 |
-| 169 | A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an unfiltered scan | S–M | 106, 167 |
+| 169 | ✅ A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an unfiltered scan | S–M | 106, 167 |
 | 170 | Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it | S–M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
@@ -2901,77 +2901,12 @@ site, plus resolving the `cli.py`/`admin/service.py` import direction for a
 shared helper). **Depends on:** 165 (shipped — `safe_pydantic_error_lines`
 is the structural building block this reuses).
 
-### 169. A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an independent, unfiltered scan of a mandatory-row-filtered table
+### 169. A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an independent, unfiltered scan of a mandatory-row-filtered table ✅ DONE
 
-**Surfaced 2026-08-07 by `security-invariant-reviewer`'s post-fix re-review of
-item 167** — a sibling of item 167's own bug, in a different consumer of the
-same root cause (schema validation's `_reflect_and_validate_scope` can build
-TWO distinct `sa.Table.alias(...)` objects for one declared join occurrence
-when a column ref elsewhere spells the alias with different case — see item
-167's write-up for the full mechanism). Item 167 fixed the mandatory-row-filter
-consumer (`compiler/sqlalchemy_compiler.py`'s `_apply_mandatory_row_filters`);
-this item is about a second, distinct consumer of the same duplicated-alias
-`tables` dict: `validation/schema_validation.py`'s correlation-visibility
-resolution.
-
-`validate_schema` (`schema_validation.py:1221-1233`) resolves each
-`nested.correlate` ref against the PARENT scope's own `scoped_tables` dict via
-`outer = scoped_tables.get(table_name)` — an EXACT dict index using the
-correlate ref's own spelling, not the case-insensitive, first-match
-`_table_by_name` lookup the compiler itself uses everywhere it resolves a
-`tables` entry (including, as of item 167, the mandatory-row-filter path).
-If the parent scope declared a join `alias="C"` but ALSO has some other
-column ref elsewhere spelled `"c.<col>"` (creating the same phantom
-`tables["c"]` entry item 167 diagnosed), and a child `EXISTS`/scalar subquery
-declares `correlate=["c.id"]`, the exact index at line 1223 can bind the
-child's correlation to a DIFFERENT `sa.Table.alias` object than whichever one
-`_table_by_name` actually places in the parent's compiled FROM/JOIN clause.
-SQLAlchemy's auto-correlation matches by object identity against the
-enclosing statement's own FROM elements — if the object handed to the
-subquery isn't the one in the parent's FROM, correlation silently does not
-fire, and the subquery compiles as an independent, UNCORRELATED,
-full-table `EXISTS` — which, if the correlated table also carries a
-`mandatory_row_filter` (e.g. tenant scoping), evaluates over every tenant's
-rows, not just the enclosing row's, since the filter (per item 167) binds to
-whichever object the FROM/JOIN loop actually used — not necessarily the one
-the subquery independently scans. This can leak a cross-tenant EXISTS boolean
-oracle, or simply return silently wrong results, depending on which side of
-the row-filter boundary the mismatched object falls.
-
-Not yet reproduced by compiling an end-to-end shape (unlike item 167, which
-was); the mechanism is traced through the code (`schema_validation.py:1223`,
-the duplicate-alias source at `schema_validation.py:1537`, and the
-compiler's own correlation-identity contract documented in
-`compiler/sqlalchemy_compiler.py`'s `_compile_exists` docstring) but not yet
-confirmed against an actual compiled statement — do that first as part of
-fixing this, the same way item 167 demanded a real repro before landing a fix.
-**What to do:** at `schema_validation.py:1223`, replace the exact
-`scoped_tables.get(table_name)` index with a case-insensitive, first-match
-lookup using the SAME semantics as the compiler's `_table_by_name`
-(`compiler/sqlalchemy_compiler.py`) — since `scoped_tables` is the identical
-dict object the compiler will later resolve against, this guarantees the
-correlate binds to whatever object the parent's own FROM/JOIN construction
-will actually use, closing the identity gap the same way item 167 closed it
-for mandatory row filters. Add a regression test in
-`tests/security/test_correlation_boundary.py` (or `tests/unit/test_compiler.py`
-alongside item 167's own tests) that compiles a parent with a declared alias
-plus a differently-cased column ref to the same table, a child `EXISTS`
-correlated against that alias, and a `mandatory_row_filter` on the table —
-parametrized over both `tables`-dict insertion orders, mirroring item 167's
-own regression test — and assert the compiled SQL shows genuine correlation
-(no independent `FROM`/no un-correlated scan inside the subquery) under
-both orderings. Consider fixing the shared root cause instead of (or in
-addition to) either point-consumer fix: have `_reflect_and_validate_scope`
-key `tables` only by declared effective names (plus correlated names) in the
-first place, so a differently-cased column ref never materializes a second
-alias object at all — every consumer (this one, item 167's, and any future
-one) would then be correct by construction rather than needing its own
-case-insensitive lookup.
-
-**Effort:** S–M (the point fix mirrors item 167's one-line shape; add the
-effort of a first real compiled repro plus a correlation-boundary test, which
-item 167 didn't need to write from scratch). **Depends on:** 106 (correlated
-subqueries, shipped), 167 (shipped — same root cause, first consumer fixed).
+**Reproduced, then fixed** — confirmed by compiling the exact shape the item
+described, and a second, closely related crash bug found in the same code
+region was fixed alongside it. **Full write-up:**
+[docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 169).
 
 ### 170. Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it
 

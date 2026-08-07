@@ -300,6 +300,177 @@ async def test_a_mandatory_row_filter_on_the_outer_correlated_table_applies_once
     assert "tenant_id = 't1'" not in exists_body, sql
 
 
+# --------------------------------------------------------------------------- #
+# Item 169: a phantom, differently-cased alias object must not break identity #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("insertion_order", [("C", "c"), ("c", "C")])
+async def test_correlate_resolves_to_the_same_object_the_from_join_clause_uses(insertion_order):
+    """Item 169: a sibling of item 167's phantom-alias bug, in a DIFFERENT
+    consumer of the same duplicated-alias `tables` dict.
+
+    Here the parent scope declares `JOIN customers alias="C"` but ALSO
+    references the same table elsewhere with different case ("c.name" in
+    SELECT) -- `_reflect_and_validate_scope`'s `needed` union (item 167's own
+    mechanism) leaves TWO distinct `sa.Table.alias(...)` objects in the
+    parent's own reflected `tables` dict, `tables["C"]` and `tables["c"]`,
+    both wrapping the same physical `customers` table. A child EXISTS
+    correlates against it using the PHANTOM spelling, `correlate=["c.id"]`.
+
+    `validate_schema` used to resolve that ref with an EXACT `scoped_tables.
+    get("c")` index -- always `tables["c"]`, regardless of which object the
+    compiler's own FROM/JOIN construction (`table_by_name`, case-insensitive,
+    first-match-in-iteration-order) actually places in the parent's compiled
+    FROM/JOIN clause. Confirmed by compiling this exact shape (see TODO.md
+    item 169): under the `("C", "c")` insertion order, the FROM/JOIN clause
+    used `tables["C"]` while the correlate ref bound to `tables["c"]` --
+    SQLAlchemy's auto-correlation matches by object identity, so those don't
+    match and the EXISTS silently compiled as an INDEPENDENT, UNCORRELATED,
+    full-table scan of `customers` -- one that never picked up the
+    `mandatory_row_filter` on `customers` either, since that filter only
+    applies to whichever object the outer scope's own FROM/JOIN actually
+    uses. That is a cross-tenant EXISTS boolean oracle.
+
+    `_reflect_and_validate_scope`'s `needed` is a Python `set`, so which of
+    "C"/"c" a real query's own reflection would insert first is hash-order
+    dependent (the same nondeterminism item 167's own regression test dealt
+    with) -- so this test forces BOTH possible orders directly, by replacing
+    `_reflect_and_validate_scope` with a stand-in that returns a `tables`
+    dict built in the given order for the parent scope, while leaving
+    `validate_schema`'s own correlate-ref resolution loop -- the actual code
+    under test -- completely real.
+    """
+    metadata = sa.MetaData()
+    orders = sa.Table(
+        "orders",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("customer_id", sa.Integer),
+    )
+    customers = sa.Table(
+        "customers",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("name", sa.String),
+        sa.Column("tenant_id", sa.String),
+    )
+    parent_tables = {"orders": orders}
+    for name in insertion_order:
+        parent_tables[name] = customers.alias(name)
+
+    query = _q(
+        **{
+            "from": "orders",
+            "select": ["orders.id", "c.name"],  # phantom lowercase ref
+            "joins": [{"table": "customers", "alias": "C", "on": ["orders.customer_id", "C.id"]}],
+        },
+        where={
+            "op": "exists",
+            "exists_subquery": {
+                "from": "orders",
+                "from_alias": "o2",
+                "select": ["o2.id"],
+                "correlate": ["c.id"],  # phantom spelling, not the declared "C"
+                "where": {"col": "o2.customer_id", "op": "eq", "value_col": "c.id"},
+            },
+        },
+    )
+
+    received_correlated_tables = {}
+
+    async def _fake_reflect(
+        scope,
+        connection_id,
+        principal=None,
+        cte_tables=None,
+        correlated_tables=None,
+        *,
+        table_connection=None,
+    ):
+        if scope is query:
+            return parent_tables
+        # the EXISTS subquery's own scope
+        received_correlated_tables.update(correlated_tables or {})
+        tables = {"o2": orders.alias("o2")}
+        tables.update(correlated_tables or {})
+        return tables
+
+    policy = Policy(
+        mandatory_row_filters=[
+            MandatoryRowFilter(table="customers", column="tenant_id", value="t1")
+        ],
+        max_subquery_depth=2,
+    )
+    scope_tables: dict = {}
+    with patch.object(sv, "_reflect_and_validate_scope", AsyncMock(side_effect=_fake_reflect)):
+        outer = await sv.validate_schema(query, _CONN, scope_tables=scope_tables)
+
+    # The core identity property: whatever object validate_schema resolved
+    # the correlate ref to must be the SAME object `table_by_name` -- the
+    # compiler's own FROM/JOIN lookup -- would pick for the join's declared
+    # spelling, regardless of which of "C"/"c" landed in `parent_tables`
+    # first.
+    expected = sv.table_by_name_or_none(parent_tables, "C")
+    assert expected is not None
+    assert received_correlated_tables.get("c") is expected, (
+        f"correlate bound to a different object than the compiler's FROM/JOIN "
+        f"clause will use (insertion_order={insertion_order})"
+    )
+
+    stmt, _limit = compile_structured_query(
+        query, outer, policy, dialect="postgresql", subquery_tables=scope_tables
+    )
+    sql = _sql(stmt)
+
+    assert "EXISTS (SELECT" in sql, sql
+    exists_body = sql.split("EXISTS (SELECT", 1)[1].rsplit(")", 1)[0]
+    # No independent scan of customers inside the EXISTS -- it must be a real
+    # correlated reference to the outer join's own alias, not a second,
+    # unconditioned FROM entry.
+    assert "customers" not in exists_body, sql
+    # The mandatory row filter on customers must actually be reachable from
+    # inside the EXISTS's own WHERE (via correlation to the filtered outer
+    # object) -- i.e. the filter is not silently bypassed by scanning an
+    # unfiltered independent copy of customers.
+    assert sql.count("tenant_id = 't1'") == 1, sql
+    assert "tenant_id = 't1'" not in exists_body, sql
+
+
+async def test_child_ref_to_correlated_table_in_different_case_than_correlate_does_not_crash():
+    """Found while fixing item 169, in the same code region: `_reflect_and_
+    validate_scope`'s own resolution of `correlated_tables` (the map built by
+    `validate_schema`'s correlate loop, keyed by whichever spelling the
+    `correlate` declaration used) was ALSO an exact dict index. A child
+    scope's OWN body may legally reference the correlated table with
+    DIFFERENT case than `correlate` declared -- `declared_tables` already
+    accepts it case-insensitively -- but the exact index missed it and fell
+    through to `name_to_physical[name.casefold()]`, which raises a raw,
+    uncaught `KeyError` (not the usual typed `QueryValidationError`) because
+    a correlated-only table was never part of the child scope's own
+    from/join map. Not the item 169 cross-tenant bypass itself (no policy
+    result is affected -- it fails closed, just ungracefully as an unhandled
+    500 rather than a rejection), but the identical fix (`table_by_name_or_
+    none` instead of an exact index) closes it too."""
+    query = _q(
+        **{"from": "customers", "select": ["customers.name"]},
+        where=_exists_on(
+            ["customers.id"],
+            {
+                "and": [
+                    _MATCH,
+                    # "Customers.id" -- different case than the correlate
+                    # declaration's own "customers.id" spelling.
+                    {"col": "orders.id", "op": "gt", "value_col": "Customers.id"},
+                ]
+            },
+        ),
+    )
+    stmt, _limit = await _run(query, _DEEP)
+    sql = _sql(stmt)
+    assert "EXISTS (SELECT" in sql, sql
+
+
 def test_correlated_refs_are_capped_tree_wide():
     query = _q(
         **{"from": "customers", "select": ["customers.name"]},
