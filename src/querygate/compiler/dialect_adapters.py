@@ -155,7 +155,10 @@ class DialectAdapter(ABC):
         (TODO.md item 49). NULL/BUCKET render identically everywhere; HASH and
         LAST use each dialect's own function idiom. A dialect with no genuine
         equivalent for a kind raises QueryValidationError rather than emulating
-        it (see SQLiteDialectAdapter's HASH)."""
+        it (see SQLiteDialectAdapter's HASH). Every `mask.kind` branch is an
+        explicit `is` check, exhaustive against `ColumnMaskKind`, ending in a
+        `_missing_mask_kind` raise for anything unrecognized (TODO.md item
+        164) — never an implicit final `else`."""
 
 
 def _direction_expr(col_expr: Any, direction: Literal["asc", "desc"]) -> Any:
@@ -216,6 +219,18 @@ def _missing_unit(unit: str, dialect: str) -> QueryValidationError:
     and both must, or the exhaustiveness doctrine holds for half the surface —
     which is what the first version of this refactor actually shipped."""
     return QueryValidationError(f"interval unit {unit!r} is not supported on {dialect}")
+
+
+def _missing_mask_kind(kind: Any, dialect: str) -> QueryValidationError:
+    """The `column_mask` sibling of `_missing_part`/`_missing_unit` (TODO.md
+    item 164). Every `column_mask` implementation used to end on an
+    unconditional final branch that assumed HASH — an implicit else, not an
+    exhaustive match — so a future `ColumnMaskKind` member would have
+    silently rendered as a HASH transform instead of raising. This turns
+    that gap into the same typed 4xx the date-part/interval-unit maps
+    already raise, so a new enum member is a forced decision everywhere,
+    never a silent passthrough."""
+    return QueryValidationError(f"column_mask kind {kind!r} is not supported on {dialect}")
 
 
 # The `date_add` unit vocabulary per dialect, exhaustive for the same reason the
@@ -426,8 +441,10 @@ class PostgresDialectAdapter(DialectAdapter):
             return _bucket_mask(col_expr, mask)
         if mask.kind is ColumnMaskKind.LAST:
             return sa.func.right(sa.cast(col_expr, sa.Text), mask.length)
-        # HASH — deterministic md5 of the text form.
-        return sa.func.md5(sa.cast(col_expr, sa.Text))
+        if mask.kind is ColumnMaskKind.HASH:
+            # deterministic md5 of the text form.
+            return sa.func.md5(sa.cast(col_expr, sa.Text))
+        raise _missing_mask_kind(mask.kind, "Postgres")
 
 
 class MSSQLDialectAdapter(DialectAdapter):
@@ -606,12 +623,14 @@ class MSSQLDialectAdapter(DialectAdapter):
         text = sa.cast(col_expr, sa.Unicode)
         if mask.kind is ColumnMaskKind.LAST:
             return sa.func.RIGHT(text, mask.length)
-        # HASH — CONVERT the SHA2_256 HASHBYTES digest to a hex string (style 2).
-        return sa.func.CONVERT(
-            sa.literal_column("VARCHAR(64)"),
-            sa.func.HASHBYTES(sa.literal("SHA2_256"), text),
-            sa.literal(2),
-        )
+        if mask.kind is ColumnMaskKind.HASH:
+            # CONVERT the SHA2_256 HASHBYTES digest to a hex string (style 2).
+            return sa.func.CONVERT(
+                sa.literal_column("VARCHAR(64)"),
+                sa.func.HASHBYTES(sa.literal("SHA2_256"), text),
+                sa.literal(2),
+            )
+        raise _missing_mask_kind(mask.kind, "MSSQL")
 
 
 class SQLiteDialectAdapter(DialectAdapter):
@@ -1011,8 +1030,10 @@ class MySQLDialectAdapter(DialectAdapter):
             return _bucket_mask(col_expr, mask)
         if mask.kind is ColumnMaskKind.LAST:
             return sa.func.right(sa.cast(col_expr, sa.Text), mask.length)
-        # HASH — SHA2-256 hex digest of the text form.
-        return sa.func.sha2(sa.cast(col_expr, sa.Text), 256)
+        if mask.kind is ColumnMaskKind.HASH:
+            # SHA2-256 hex digest of the text form.
+            return sa.func.sha2(sa.cast(col_expr, sa.Text), 256)
+        raise _missing_mask_kind(mask.kind, "MySQL")
 
 
 _SNOWFLAKE_EXTRACT_FIELDS: Dict[str, str] = {
@@ -1210,9 +1231,11 @@ class SnowflakeDialectAdapter(DialectAdapter):
             return _bucket_mask(col_expr, mask)
         if mask.kind is ColumnMaskKind.LAST:
             return sa.func.right(sa.cast(col_expr, sa.Text), mask.length)
-        # HASH — SHA2 requires an explicit bit length; 256 matches the
-        # Postgres/MySQL adapters' choice of a SHA-256-class digest.
-        return sa.func.sha2(sa.cast(col_expr, sa.Text), 256)
+        if mask.kind is ColumnMaskKind.HASH:
+            # SHA2 requires an explicit bit length; 256 matches the
+            # Postgres/MySQL adapters' choice of a SHA-256-class digest.
+            return sa.func.sha2(sa.cast(col_expr, sa.Text), 256)
+        raise _missing_mask_kind(mask.kind, "Snowflake")
 
 
 def _bq_temporal_kind(expr: Any) -> Optional[Literal["timestamp", "datetime", "date"]]:
@@ -1610,11 +1633,13 @@ class BigQueryDialectAdapter(DialectAdapter):
             # Google's String functions reference) — the same shape as
             # Postgres's/MySQL's/Snowflake's RIGHT().
             return sa.func.right(sa.cast(col_expr, sa.Text), mask.length)
-        # HASH — SHA256 returns BYTES; TO_HEX converts it to a lowercase hex
-        # STRING (per a worked example in Google's docs: TO_HEX(
-        # SHA256("Hello")) -> "185f8db3...") — the BigQuery-native equivalent
-        # of Postgres's md5()/MySQL's sha2()-as-hex-string.
-        return sa.func.to_hex(sa.func.sha256(sa.cast(col_expr, sa.Text)))
+        if mask.kind is ColumnMaskKind.HASH:
+            # SHA256 returns BYTES; TO_HEX converts it to a lowercase hex
+            # STRING (per a worked example in Google's docs: TO_HEX(
+            # SHA256("Hello")) -> "185f8db3...") — the BigQuery-native
+            # equivalent of Postgres's md5()/MySQL's sha2()-as-hex-string.
+            return sa.func.to_hex(sa.func.sha256(sa.cast(col_expr, sa.Text)))
+        raise _missing_mask_kind(mask.kind, "BigQuery")
 
 
 _ADAPTERS: Dict[str, DialectAdapter] = {

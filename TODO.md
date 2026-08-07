@@ -194,7 +194,7 @@ order-of-magnitude, not commitments.
 | 161 | BigQuery live-server verification and deeper feature parity (item 19 phase 3 residual) | L–XL | 19 |
 | 162 | Dialects beyond MySQL/Snowflake/BigQuery (item 19's open-ended "…" scope) | unscoped | — |
 | 163 | A not-connectable dialect (Snowflake/BigQuery) as the SECONDARY side of a cross-connection join never reaches the `is_connectable()` guard | S–M | — |
-| 164 | `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s | S | — |
+| 164 | ✅ `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s | S | — |
 | 165 | `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body | S | — |
 | 166 | Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo ignores which connection a name resolves to | S–M | 159 |
 | 167 | A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed) | S | 159 |
@@ -2764,41 +2764,13 @@ guard coverage in the meantime).
 call site; no new architecture). **Depends on:** none — buildable
 independently of items 157/161.
 
-### 164. `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s
+### 164. `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s ✅ DONE
 
-Surfaced 2026-08-07 by the `security-invariant-reviewer` audit of item 19
-phase 3 (BigQuery), but the pattern is pre-existing across all five
-adapters (Postgres/MSSQL/MySQL/Snowflake/BigQuery), not introduced by this
-item.
+All five `column_mask` implementations now raise a typed
+`QueryValidationError` for any unrecognized `ColumnMaskKind` instead of
+silently falling through to HASH.
 
-**The gap.** Every `DialectAdapter.column_mask` implementation checks
-`ColumnMaskKind.NULL`, `.BUCKET`, and `.LAST` explicitly, then falls through
-to an unconditional final branch that assumes HASH — e.g.
-`# HASH — SHA2 requires an explicit bit length; ...` with no `if
-mask.kind is ColumnMaskKind.HASH` guard above it. Contrast with this
-module's date-part/interval-unit maps, which are all deliberately
-exhaustive (a `.get(part)` returning `None` raises a typed
-`QueryValidationError` naming the dialect) specifically so a future enum
-member is a forced decision, never a silent passthrough — the same
-exhaustiveness doctrine is not applied to `ColumnMaskKind` here.
-
-**Why this is low severity, not a disclosure risk.** `ColumnMaskKind` is a
-closed, stable 4-member enum (NULL/BUCKET/LAST/HASH) that has not changed
-since item 49, and the implicit-else "fails toward the strongest mask" —
-a future 5th kind would render as HASH (a full, salted-looking transform)
-rather than silently rendering the RAW column, so there is no realistic
-version of this gap that leaks more than the caller asked to mask, only a
-theoretical future member that gets over-masked or mis-rendered without a
-clean typed error naming the gap.
-
-**What to do (when prioritized):** add an explicit `if mask.kind is
-ColumnMaskKind.HASH: ...` branch with a final `raise QueryValidationError`
-(or an `assert_never`-style exhaustiveness check) on all five adapters,
-matching the discipline `_missing_part`/`_missing_unit` already establish
-for the date/interval maps.
-
-**Effort:** S (five adapters, one mechanical guard clause each; no design
-change). **Depends on:** none.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 164).
 
 ### 165. `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body
 

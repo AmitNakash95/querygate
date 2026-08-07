@@ -396,8 +396,9 @@ claim when the work ships or before explicitly handing the item back.
   (join_group + the joined Policy still gate it), but a confusing masked
   500 instead of a clean rejection; small, self-contained fix at
   `resolve_query_table_connections`.*
-- [ ] **164** — `column_mask`'s HASH branch is an implicit `else`, not an
-  exhaustive match, on all five `DialectAdapter`s. *Surfaced 2026-08-07 by
+- [x] **164** — `column_mask`'s HASH branch is an implicit `else`, not an
+  exhaustive match, on all five `DialectAdapter`s.
+  *Surfaced 2026-08-07 by
   `security-invariant-reviewer` auditing item 19 phase 3 — pre-existing
   pattern across all five adapters, not new. Low severity (fails toward the
   strongest mask, `ColumnMaskKind` is a stable closed 4-member enum);
