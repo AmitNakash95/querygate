@@ -188,13 +188,14 @@ order-of-magnitude, not commitments.
 | 155 | ✅ `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection | M | 151 |
 | 156 | ✅ A cross-connection join's joined table is governed only by the primary connection's Policy — masks/row filters/deny-lists never apply from the joined connection's own Policy | M/L | 155 |
 | 157 | Snowflake live-server verification and deeper feature parity (item 19 phase 2 residual) | L–XL | 19 |
-| 158 | `ConnectionProfile` never validates `dialect` agrees with `connection_string`'s actual backend | S–M | — |
+| 158 | ✅ `ConnectionProfile` never validates `dialect` agrees with `connection_string`'s actual backend | S–M | — |
 | 159 | Cross-connection schema reflection can pick the wrong connection when a join's alias casing differs from a column ref's casing | S | — |
 | 160 | ✅ Item 156 follow-up: harden the connection-resolution edge cases a full security-invariant audit surfaced (findings 1, 2, 4 fixed; finding 3 open — needs a maintainer decision) | M | 156 |
 | 161 | BigQuery live-server verification and deeper feature parity (item 19 phase 3 residual) | L–XL | 19 |
 | 162 | Dialects beyond MySQL/Snowflake/BigQuery (item 19's open-ended "…" scope) | unscoped | — |
 | 163 | A not-connectable dialect (Snowflake/BigQuery) as the SECONDARY side of a cross-connection join never reaches the `is_connectable()` guard | S–M | — |
 | 164 | `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s | S | — |
+| 165 | `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body | S | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2454,51 +2455,14 @@ so that gap isn't silently lost.
 is incremental once that exists). **Depends on:** item 19 phase 2 (shipped);
 a real Snowflake account/credentials becoming available to this project.
 
-### 158. `ConnectionProfile` never validates that `dialect` agrees with `connection_string`'s actual backend
+### 158. `ConnectionProfile` never validates that `dialect` agrees with `connection_string`'s actual backend ✅ DONE
 
-Surfaced 2026-08-06 by the `security-invariant-reviewer` audit of item 19
-phase 2 (Snowflake), but the gap is pre-existing and dialect-agnostic — it
-predates Snowflake and affects Postgres/MSSQL/MySQL exactly the same way.
+Added a `field_validator("dialect")` on `ConnectionProfile` that parses
+`connection_string` and rejects a mismatch against the declared dialect —
+also catching and fixing a credential-leak risk in the first-draft
+whole-model-validator approach along the way.
 
-**The gap.** Nothing anywhere validates that `ConnectionProfile.dialect`
-(the declared enum value) matches the actual backend named in
-`connection_string`'s URL scheme. A profile with `dialect: postgresql` and
-`connection_string: mysql+asyncmy://user:pass@host/db` (or any other
-mismatched pair) is accepted by Pydantic and reaches
-`connections/engine.py`'s `init_engine` untouched — `session_scope`
-(`engine.py`) then dispatches `apply_session_guardrails` on the *declared*
-`profile.dialect`, so a Postgres-declared profile pointed at a real MySQL
-server would send `SET LOCAL statement_timeout` to a MySQL connection, which
-does not understand that statement — the session guardrail silently fails to
-apply (a config error masquerading as one dialect's own gap, not a security
-bypass: `create_async_engine` itself resolves the driver from the URL, not
-the declared `dialect`, so the actual DBAPI/wire protocol used is always
-correct — only the *guardrail SQL text chosen* can be wrong).
-
-**Why item 19 phase 2 surfaced it.** Its own Snowflake `init_engine` guard
-(`SessionDialectAdapter.is_connectable()`) keys on `profile.dialect`, not on
-parsing `connection_string`'s URL — so today, a profile misconfigured as
-`dialect: postgresql` over a real `snowflake://...` URL would not be caught
-by that guard either, and would instead fail deeper inside SQLAlchemy with a
-less-clear `InvalidRequestError`. Because the async-driver check is
-currently the load-bearing barrier for Snowflake specifically (not this
-gap), there is no live bypass today — but the moment item 157 ever adds a
-usable async path for Snowflake, `is_connectable()`'s declared-dialect check
-becomes the *only* barrier, and inherits this same weakness.
-
-**What to do (when prioritized):** add a `ConnectionProfile` model validator
-(alongside `_valid_id` in `connections/models.py`) that parses
-`connection_string` with `sa.engine.url.make_url(...).get_backend_name()`
-and rejects a mismatch against `dialect`, with a clear config-validation
-error (not a raw SQLAlchemy exception) — closing both the general
-session-guardrail-mismatch case and the Snowflake `is_connectable()` case in
-one place, rather than teaching `init_engine` a second, narrower parse-based
-check.
-
-**Effort:** S–M (one validator + tests across all five dialects' URL
-schemes — BigQuery joined this list 2026-08-07 via item 19 phase 3; no
-runtime architecture change). **Depends on:** none — buildable
-independently of item 157.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 158).
 
 ### 159. Cross-connection schema reflection can pick the wrong connection when a join's alias casing differs from a column ref's casing
 
@@ -2863,4 +2827,67 @@ for the date/interval maps.
 
 **Effort:** S (five adapters, one mechanical guard clause each; no design
 change). **Depends on:** none.
+
+### 165. `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body
+
+**Surfaced 2026-08-07 by `security-invariant-reviewer` while auditing item
+158 (pre-existing, not introduced by that item — item 158's own new
+validator is independently verified NOT to leak; this is a broader,
+already-existing gap in the surrounding error handling that item 158's
+Decision Log entry happened to name the exact mechanism of).**
+`api/routes.py`'s `reload_config_endpoint` (routes.py:604-615) does:
+
+```python
+try:
+    return await reload_config(...)
+except Exception as exc:
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+```
+
+`reload_config` → `ConnectionRegistry.from_file` → `ConnectionProfile.
+model_validate(entry)` on an ALREADY-INTERPOLATED entry (real credential
+included). Any pydantic `ValidationError` this raises — not just item 158's
+own dialect-mismatch validator, which is independently safe (verified: its
+`input`/`loc` are always scoped to the `dialect` field's own value, never
+`connection_string`) — has its raw `str(exc)`/`.errors()` shape include the
+full input dict for certain error kinds. Confirmed directly: omitting a
+required field (e.g. `dialect`) from one `connections.yaml` entry produces
+a `missing`-type pydantic error whose `input_value` is the whole entry
+dict, including the live `connection_string`; `str(ValidationError)`
+truncates a long dict repr to its head/tail, so the host and database name
+always survive truncation and the password survives whenever the
+connection string is short enough. That raw string reaches `detail=` in
+the HTTP 400 response verbatim. Reachable by anyone holding
+`ADMIN_RELOAD_CONFIG_SCOPE` who reloads a malformed `connections.yaml` (or
+by whoever reads the resulting response/logs).
+
+**Why this wasn't caught by `test_credential_redaction.py`:** that suite
+asserts against the live OpenAPI/MCP *schemas* (what fields a model
+declares), not against actual error-response *bodies* — a schema check
+can't catch a runtime exception's stringified content leaking through a
+generic `except Exception` handler.
+
+**A safe precedent already exists in this codebase for exactly this
+problem:** `admin/service.py`'s `_humanize_validation_errors` (used by the
+config-governance dry-run path, `validate_candidate_content`) strips
+pydantic's `[type=..., input_value=..., input_type=...]` tail and the docs
+URL line before ever showing an error to an admin — that path is already
+safe. `reload_config_endpoint`'s `except Exception as exc: ...
+detail=str(exc)` is the one place that still hands the raw exception
+straight through.
+
+**What to do (when prioritized):** catch `pydantic.ValidationError`
+separately in `reload_config_endpoint` and build `detail` from each
+error's `loc`/`msg` only (never `error["input"]`) — e.g. reusing or
+extending `_humanize_validation_errors`'s stripping approach rather than a
+third bespoke formatter — before falling through to the existing generic
+`except Exception` for everything else (file-not-found, YAML syntax
+errors, etc., which don't carry a credential). Add a regression test:
+POST a malformed `connections.yaml` (a real-looking password, a missing
+required field) to `/admin/reload-config` with the admin scope and assert
+the password substring is absent from the response body.
+
+**Effort:** S (one route's exception handling; the stripping pattern
+already exists in `admin/service.py` to reuse or adapt). **Depends on:**
+none.
 
