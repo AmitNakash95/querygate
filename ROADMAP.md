@@ -340,6 +340,10 @@ claim when the work ships or before explicitly handing the item back.
   item 151 — real and pre-existing, but a separate, non-trivial fix (needs
   `resolve_query_table_connections`'s per-table connection map threaded into
   the sensitivity check); deliberately left out of item 151's own scope.*
+- [x] **156** — a cross-connection join's joined table is governed only by
+  the primary connection's `Policy` — masks/mandatory row filters/deny-lists
+  never apply from the joined connection's own `Policy`. *Surfaced 2026-08-06
+  by `security-invariant-reviewer` while auditing item 155 — pre-existing,
   fixed by threading a reflection-free sibling of item 155's per-scope
   connection map through policy validation and compilation, unioned (never
   replaced) with the primary connection's Policy.*
@@ -356,7 +360,7 @@ claim when the work ships or before explicitly handing the item back.
   dialect-agnostic (affects Postgres/MSSQL/MySQL identically), not a
   Snowflake-specific gap; small, self-contained validator fix, buildable
   independently of item 157.*
-- [ ] **159** — cross-connection schema reflection can pick the wrong
+- [x] **159** — cross-connection schema reflection can pick the wrong
   connection when a join's alias casing differs from a column ref's casing
   (a hash-order-dependent bug in the raw, case-sensitive `table_connection`
   lookup). *Surfaced 2026-08-06 by `security-invariant-reviewer` while
@@ -406,6 +410,18 @@ claim when the work ships or before explicitly handing the item back.
   verified safe); a safe stripping precedent already exists in
   `admin/service.py`'s `_humanize_validation_errors` to reuse or adapt; small,
   self-contained fix to one route's exception handling.*
+- [ ] **166** — cross-connection self-join reflects both aliases against ONE
+  connection: the `physical_tables` reflection memo is keyed by table name
+  alone, ignoring which connection a name resolves to. *Surfaced 2026-08-07
+  by `security-invariant-reviewer` auditing item 159's own fix — pre-existing,
+  not closed by that item; needs a design call (fix the memo key vs. reject
+  cross-connection self-joins explicitly) before implementation.*
+- [ ] **167** — a case-different column ref to a joined alias leaves a
+  phantom second `sa.Table` alias that a mandatory row filter turns into an
+  implicit cross join (confirmed by compiling the shape — real row
+  duplication, not just cost). *Surfaced 2026-08-07 by
+  `security-invariant-reviewer` auditing item 159's own fix — small,
+  self-contained compiler-side dedupe.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 

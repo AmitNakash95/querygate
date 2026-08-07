@@ -11628,3 +11628,75 @@ introduced by this item).
 **Effort:** S–M (one validator + tests across all four dialects' URL
 schemes; no runtime architecture change). **Depends on:** none — buildable
 independently of item 157.
+
+### 159. Cross-connection schema reflection can pick the wrong connection when a join's alias casing differs from a column ref's casing ✅ DONE
+
+**Shipped 2026-08-07:** `_reflect_and_validate_scope` (`validation/schema_validation.py`)
+now builds one case-folded copy of `table_connection` up front and uses it for
+the `_load_table` lookup, so a joined table's `_load_table` connection lookup
+no longer depends on which of the join's declared alias casing or a column
+ref's own (possibly differently-cased) spelling happened to win Python's
+hash-randomized `set` iteration order — it always resolves to the table's real
+connection, mirroring `resolve_scope_connections`'s existing case-fold.
+Regression tests in `tests/unit/test_schema_validation.py`
+(`TestCrossConnectionJoins::test_reflection_lookup_case_folds_table_connection_key`,
+`::test_natural_casing_mismatch_resolves_to_the_joined_connection`) cover it —
+the first deterministically, by handing `_reflect_and_validate_scope` a
+`table_connection` map whose casing doesn't match the query's own, sidestepping
+the set-iteration race entirely rather than relying on `PYTHONHASHSEED` luck.
+
+**Post-ship audit correction (2026-08-07):** the "Surfaced" paragraph below
+(preserved as originally filed) and this item's own first commit message
+described the impact as item 156's column masks/mandatory row filters/deny-list
+getting resolved against the wrong Policy. A `security-invariant-reviewer` audit
+of the fix itself traced this and found it does not actually hold: item 156's
+mask/filter/deny-list enforcement reads `scope_connections`
+(`validate_schema`'s own map, case-folded independently of the raw
+`table_connection` this item's bug lived in — see `resolve_scope_connections`'s
+docstring), so it was never exposed to this bug. What the bug actually affected
+is narrower but still real: which physical connection/schema `_load_table`
+reflects the table's SCHEMA against — i.e. whether the compiled statement's
+FROM/JOIN targets the correct connection, with a spurious "table not found" or
+(for a same-named table on both connections) a silent read from the wrong
+database as the possible outcomes. The fix and both regression tests were
+unaffected by this correction — they always exercised the `_load_table`
+connection argument, never a mask/filter/deny-list code path. The same audit
+also surfaced a related but distinct pre-existing bug this item did not
+close — see item 166.
+
+**Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item 156
+(pre-existing, not introduced by that item — item 156 never touches this
+code path).** `validation/schema_validation.py`'s `_reflect_and_validate_scope`
+reflects each table via `_load_table(connection_id, physical_name,
+table_connection.get(name, connection_id))` where `table_connection` is
+`resolve_query_table_connections`'s output, keyed by the EXACT (not
+case-folded) alias/table spelling a join declared. The set of names it looks
+up (`needed`) is built by unioning the declared alias with every column ref's
+own table token, so for `joins: [{"table": "orders", "alias": "O",
+"connection": "b"}]` with refs written `"o.id"` (lower-case), `needed`
+contains both `"O"` and `"o"` — and `table_connection` only has an entry for
+`"O"` (the map's key preserves the join's own declared casing). If `"o"` (the
+ref's own casing) happens to be the specific spelling used for the reflection
+lookup, `table_connection.get("o", connection_id)` misses and silently falls
+back to `connection_id` — the PRIMARY connection — so the table is reflected
+(and, per item 156, its column masks/mandatory row filters/deny-list
+resolved) against the wrong connection. `needed` is built from an unordered
+`set`, so which spelling "wins" is Python's hash-randomized set iteration
+order — the same query can reflect correctly on one process and incorrectly
+on another. Contrast `resolve_scope_connections`/`scope_connections` (item
+155/156), which deliberately case-folds every key for exactly this reason —
+this is the one remaining raw, case-sensitive lookup against the same kind of
+map.
+
+**What to do:** case-fold the lookup — either
+`table_connection.get(name, table_connection.get(name.casefold(),
+connection_id))`, or (cleaner) build one case-folded copy of `table_connection`
+once at the top of `_reflect_and_validate_scope` and use it for every lookup
+in that function, mirroring what `resolve_scope_connections` already does.
+Add a regression test with a cross-connection join whose alias casing differs
+from the casing used in its own column refs, patching `_load_table` and
+asserting the connection argument it receives — assert directly on the
+recorded call rather than relying on `PYTHONHASHSEED`, since today's bug is
+only observable under set-iteration-order variance.
+
+**Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped).
