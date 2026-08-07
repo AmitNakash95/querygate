@@ -423,7 +423,7 @@ claim when the work ships or before explicitly handing the item back.
   duplication, not just cost). *Surfaced 2026-08-07 by
   `security-invariant-reviewer` auditing item 159's own fix — small,
   self-contained compiler-side dedupe.*
-- [ ] **168** — config-governance dry-run's credential-safety net
+- [x] **168** — config-governance dry-run's credential-safety net
   (`_humanize_validation_errors`) is a post-hoc regex scrub, not a
   structural guarantee, and the `querygate-validate-config` CLI's stderr
   output isn't scrubbed at all. *Surfaced 2026-08-07 by
