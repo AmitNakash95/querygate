@@ -23,6 +23,27 @@ protocol revision ``2025-11-25`` (item 128), which does not define these
 headers, so this validates **if present**, not required — shippable now,
 independent of the protocol upgrade, and it fails closed the moment a fronting
 gateway starts sending them.
+
+TODO.md item 130. The same spec lets a server mark a primitive tool
+*parameter* (not just ``method``/``name``) with an ``x-mcp-header`` schema
+annotation, mirrored by a conforming client into ``Mcp-Param-{Name}``.
+QueryGate annotates ``connection`` on every tool that takes it
+(``mcp/tools/{query,schema,write}.py``), so ``Mcp-Param-Connection`` is now a
+header a real client can send — and the spec's "Server Validation" section
+states the header/body agreement ``MUST`` generically, not only for
+``Mcp-Method``/``Mcp-Name``: *"Servers that process the request body MUST
+reject requests where the values specified in the headers do not match the
+corresponding values in the request body."* Extending item 127's guard to
+this one header closes the same confused-deputy shape for the one parameter
+QueryGate has actually started asking clients to mirror: a gateway
+authorizing ``Mcp-Param-Connection: analytics`` while the body's
+``params.arguments.connection`` names a different, disallowed connection.
+Same posture as item 127 — validate **if present**, not required, since
+QueryGate doesn't yet require ``2026-07-28``. This does not, and cannot,
+cover a ``JoinSpec``'s own ``connection`` field (no header exists for it —
+see item 130's write-up); that gap is bounded by ``join_group`` policy at
+schema-validation time, not by anything a transport-layer header check can
+see.
 """
 
 from __future__ import annotations
@@ -47,6 +68,7 @@ _BACKSLASH = 0x5C  # \
 
 _MCP_METHOD_HEADER = b"mcp-method"
 _MCP_NAME_HEADER = b"mcp-name"
+_MCP_PARAM_CONNECTION_HEADER = b"mcp-param-connection"
 _BASE64_SENTINEL_PREFIX = "=?base64?"
 _BASE64_SENTINEL_SUFFIX = "?="
 _HEADER_MISMATCH_CODE = -32020
@@ -121,16 +143,18 @@ def _header_body_mismatch(headers: Iterable[tuple[bytes, bytes]], raw: bytes) ->
     """Return a HeaderMismatch message if a present routing header disagrees
     with the parsed body, else ``None``.
 
-    Deliberately validate-if-present (TODO.md item 127): QueryGate does not
-    yet require ``Mcp-Method``/``Mcp-Name`` (they're undefined pre-2026-07-28,
-    item 128), so their absence is not itself a violation. But once either is
-    present, the body must be parseable and must agree — a hostile or
-    malformed body under a present header fails closed rather than being
-    waved through, per the spec's own validation-failure list.
+    Deliberately validate-if-present (TODO.md item 127, extended by item 130
+    to ``Mcp-Param-Connection``): QueryGate does not yet require
+    ``Mcp-Method``/``Mcp-Name``/``Mcp-Param-Connection`` (they're undefined
+    pre-2026-07-28, item 128), so their absence is not itself a violation.
+    But once any is present, the body must be parseable and must agree — a
+    hostile or malformed body under a present header fails closed rather than
+    being waved through, per the spec's own validation-failure list.
     """
     method_values = _find_header_values(headers, _MCP_METHOD_HEADER)
     name_values = _find_header_values(headers, _MCP_NAME_HEADER)
-    if not method_values and not name_values:
+    param_connection_values = _find_header_values(headers, _MCP_PARAM_CONNECTION_HEADER)
+    if not method_values and not name_values and not param_connection_values:
         return None
 
     try:
@@ -180,6 +204,26 @@ def _header_body_mismatch(headers: Iterable[tuple[bytes, bytes]], raw: bytes) ->
             return (
                 f"Header mismatch: Mcp-Name header value {_clip(decoded)} does not "
                 f"match body value {_clip(body_name)}"
+            )
+
+    if param_connection_values:
+        if len(param_connection_values) > 1:
+            return "Header mismatch: Mcp-Param-Connection header is repeated."
+        decoded = _decode_sentinel_value(param_connection_values[0])
+        if decoded is None:
+            return "Header mismatch: Mcp-Param-Connection header value is malformed."
+        # Item 130: the annotated parameter always lives at
+        # params.arguments.connection for a tools/call body (the only request
+        # shape a `connection`-taking tool is ever invoked through) — never at
+        # params.connection itself, which is not a JSON-RPC field QueryGate's
+        # tools define.
+        params = body.get("params")
+        arguments = params.get("arguments") if isinstance(params, dict) else None
+        body_connection = arguments.get("connection") if isinstance(arguments, dict) else None
+        if decoded != body_connection:
+            return (
+                f"Header mismatch: Mcp-Param-Connection header value {_clip(decoded)} does "
+                f"not match body value {_clip(body_connection)}"
             )
 
     return None

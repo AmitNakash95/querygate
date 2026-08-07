@@ -465,7 +465,7 @@ position.
   one caller's visible connection/table surface to another. Encode it as a
   tested invariant (à la `test_credential_redaction.py`), because the failure
   mode is a default nobody chose, not a policy bug.* **Depends on 128.**
-- [ ] **130** — Annotate `connection` with `x-mcp-header` for gateway-native
+- [x] **130** — Annotate `connection` with `x-mcp-header` for gateway-native
   authorization. *P4 expressed in the spec's own mechanism: a fronting gateway
   can enforce "this identity may only reach connection X" on a header without
   parsing the body, while the query-**shape** decision it structurally cannot

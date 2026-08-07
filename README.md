@@ -1356,6 +1356,18 @@ and single-or-batch — `queries` is always a list — all in one tool),
 the product-guide and access tools described below. More examples in
 [`examples/mcp_calls.md`](examples/mcp_calls.md).
 
+Every tool that takes a `connection` argument (all but `list_connections` and
+`run_query_template`, which resolve it server-side) carries the MCP spec's
+`x-mcp-header` schema annotation, so a conforming gateway mirrors it into an
+`Mcp-Param-Connection` HTTP header and can route/authorize per-connection at
+the edge without parsing the body; QueryGate itself rejects a request where
+that header disagrees with the body's actual `connection` argument. Treat it
+as a routing hint only, never an authoritative access decision — it does not
+cover a `JoinSpec`'s own `connection` for cross-database joins, which stays
+bounded by `join_group` policy, and a tool with no `connection` argument
+emits no header at all. See `docs/PRODUCT_GUIDE.md`'s MCP section for the
+full mechanism.
+
 ## Curated query templates (optional)
 
 Instead of (or alongside) letting an agent compose an arbitrary
