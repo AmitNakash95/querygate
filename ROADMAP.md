@@ -350,7 +350,7 @@ claim when the work ships or before explicitly handing the item back.
   environment). Blocked on deciding/building an async execution path for
   `snowflake-sqlalchemy`'s sync-only driver before a live connection can even
   be attempted; not eligible for pickup until that's a live-buildable slice.*
-- [ ] **158** — `ConnectionProfile` never validates `dialect` agrees with
+- [x] **158** — `ConnectionProfile` never validates `dialect` agrees with
   `connection_string`'s actual backend. *Surfaced 2026-08-06 by the
   `security-invariant-reviewer` audit of item 19 phase 2 — pre-existing and
   dialect-agnostic (affects Postgres/MSSQL/MySQL identically), not a
@@ -370,6 +370,13 @@ claim when the work ships or before explicitly handing the item back.
   by `security-invariant-reviewer` while auditing item 156 itself — none is a
   live bypass; grouped since a real fix to any one likely touches the same
   call sites as the others.*
+- [ ] **161** — `/admin/reload-config`'s generic exception handler can leak a
+  live credential in its HTTP 400 body on a malformed `connections.yaml`.
+  *Surfaced 2026-08-07 by `security-invariant-reviewer` while auditing item
+  158 — pre-existing, not caused by item 158's own validator (independently
+  verified safe); a safe stripping precedent already exists in
+  `admin/service.py`'s `_humanize_validation_errors` to reuse or adapt; small,
+  self-contained fix to one route's exception handling.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 

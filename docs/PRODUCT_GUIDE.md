@@ -1390,6 +1390,13 @@ the *actual, live* interfaces a caller sees, not just the model definition:
   equivalent check against every registered MCP tool's parameter and output
   schema.
 
+`ConnectionProfile` also validates that the declared `dialect` agrees with
+the backend actually named in `connection_string`'s URL scheme (TODO.md item
+158) — see the 2026-08-07 Decision Log entry for why that validator is
+specifically a `field_validator("dialect")`, not a whole-model validator or
+a validator scoped to `connection_string` itself: either of the latter two
+leaks the credential straight into `pydantic.ValidationError.input_value`.
+
 Why check the live schema instead of just trusting the model split above?
 Because a schema is a *derived* artifact — FastAPI and `MCPServer` both
 generate it automatically from whatever models are wired into a route or
@@ -3536,6 +3543,104 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-08-07 — `ConnectionProfile.dialect` is now validated against
+  `connection_string`'s actual backend, and the fix itself is a case study
+  in why a whole-model Pydantic validator is the wrong tool near a
+  credential field (TODO.md item 158).** Nothing previously checked that
+  the declared `dialect` enum agreed with the backend named in
+  `connection_string`'s URL scheme — a `dialect: postgresql` profile
+  pointed at a real `mysql+asyncmy://...` string was accepted, and every
+  place that branches on the *declared* dialect rather than the live engine
+  would act on the wrong assumption. `connections/engine.py`'s
+  `session_scope` applies session guardrails (`SET LOCAL statement_timeout`,
+  etc.) keyed on the declared dialect, so a misdeclared profile's guardrail
+  SQL silently doesn't apply (`create_async_engine` still resolves the
+  actual driver from the URL regardless of what's declared, so the wire
+  protocol itself is always correct — but the guardrail is not). More
+  concretely security-relevant: `schema/reflection.py`'s
+  `list_live_tables()` selects its extra `INFORMATION_SCHEMA.TABLES` filter
+  via `SessionDialectAdapter.list_live_tables_extra_filter_sql()`, keyed on
+  the same declared dialect — MySQL's adapter appends `AND TABLE_SCHEMA =
+  DATABASE()` specifically because MySQL's `INFORMATION_SCHEMA.TABLES` is
+  server-wide (spans every database the connecting user can see), unlike
+  Postgres/MSSQL. A profile misdeclared `postgresql` over a real MySQL
+  backend would skip that filter (Postgres's adapter contributes none),
+  letting `list_tables()` leak *other* databases' table names to a caller
+  whose connection was only supposed to see one. Item 158 closes that
+  specific cross-database leak, not just the guardrail-text mismatch. It
+  also meant item 19 phase 2's Snowflake `is_connectable()` guard, which
+  keys on the declared dialect, couldn't be trusted to catch a misdeclared
+  Snowflake connection.
+
+  **Fix:** a `field_validator("dialect")` on `ConnectionProfile`
+  (`connections/models.py`) that parses `connection_string` with
+  `sa.engine.url.make_url(...).get_backend_name()` and rejects a mismatch,
+  naming both the declared dialect and the actual backend found.
+
+  **Why a field validator on `dialect`, not a whole-model validator or a
+  field validator on `connection_string` — the credential-leak catch.**
+  `ConnectionProfile`'s own docstring says its `connection_string` must
+  never end up "embedded in a validation error." A first draft used
+  `@model_validator(mode="after")`, and a direct check against a live
+  `pydantic.ValidationError` showed that when a model-level validator
+  raises `ValueError`, pydantic populates the error's `input_value` — in
+  both `str(ValidationError)` and `.errors()[0]["input"]` — with the
+  **entire raw input dict**, `connection_string` included. `api/routes.py`'s
+  `reload_config_endpoint` does `except Exception as exc: raise
+  HTTPException(..., detail=str(exc))`, so this would have handed a live
+  credential straight back in an HTTP 400 body the first time someone
+  reloaded a mismatched config. Scoping to `field_validator
+  ("connection_string")` instead doesn't fix it either — that field's own
+  raw value *is* the credential, so `input_value` is the leak. The actual
+  fix: reorder `ConnectionProfile`'s fields so `connection_string` is
+  declared before `dialect`, and scope the validator to
+  `field_validator("dialect")`, reading `connection_string` back out via
+  `info.data` (already-validated, since it's declared earlier). `dialect`'s
+  own value (e.g. `"postgresql"`) is all that ever lands in `input_value`
+  on rejection. If you touch this validator, keep it scoped to a field
+  whose own raw value is never the credential — don't "simplify" it back
+  into a model-level check.
+
+  **The "scheme is always literal" assumption in the item's own write-up
+  turned out to be false**, caught by running the full suite, not asserted
+  from the spec. Two integration tests failed:
+  `test_mcp_server.py::test_mcp_configuration_inspection_uses_request_application_config`
+  and `test_product_guide_api.py::test_configuration_summary_is_scope_gated_and_never_returns_raw_yaml`.
+  Both go through `help/service.py`'s `_redacted_connection`, which
+  deliberately builds a `ConnectionProfile` straight from a stored config
+  version's raw, never-interpolated YAML — it only wants typed
+  `dialect`/`id`/`known_tables`/`join_group` for an admin summary and never
+  resolves the real secret. `examples/connections.example.yaml` (the
+  default `connections_file`) confirmed the *whole* `connection_string`
+  value, not just its credentials, is commonly one `${VAR}`-shaped
+  reference with no literal scheme present at all. The validator now skips
+  the check (doesn't reject) when `make_url` can't parse a backend out of
+  the string at all — there's nothing to compare against, and it's not a
+  live bypass: `ConnectionRegistry.from_entries`, the one path that
+  actually opens a connection, always interpolates `connection_string`
+  before constructing `ConnectionProfile`, so the real check still runs
+  against the fully-resolved URL by the time a connection is opened.
+
+  **Two more real gaps surfaced by the `auditors` review of this same
+  change, both fixed before landing.** `make_url` doesn't only raise
+  `sa.exc.ArgumentError` on an unparseable string — a *templated port*
+  (`...@${DB_HOST}:${DB_PORT}/...`) raises a plain `ValueError` while
+  coercing the port to an int, which the original `except
+  sa.exc.ArgumentError:` missed, so a legitimately-templated profile could
+  have been wrongly rejected; fixed by widening the except clause to catch
+  both. And `_BACKEND_NAME_TO_DIALECT` (hand-maintained on purpose, so an
+  unsupported backend gets a clear rejection instead of a bare enum error)
+  had nothing forcing it to stay a superset of `DatabaseDialect`, so a
+  future fifth dialect added without a matching entry would silently
+  mis-reject every profile for it; fixed with a module-level `assert` that
+  fails at import time instead. A separate reviewer also found the
+  "interpolate-then-validate" claim two paragraphs up was asserted in prose
+  but never pinned by a test that actually goes through
+  `ConnectionRegistry.from_entries` — every test up to that point exercised
+  `ConnectionProfile` directly with already-resolved literals. Fixed with
+  `test_from_entries_rejects_a_dialect_mismatch_only_visible_after_interpolation`
+  in `tests/unit/test_connections_registry.py`.
 
 - **2026-08-06 — column masks, mandatory row filters, and the table/column
   deny-list now consult a cross-connection join's table's OWN connection's
