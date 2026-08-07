@@ -166,9 +166,15 @@ class ConnectionProfile(pyd.BaseModel):
         the connection string itself, since that field's own raw value IS
         the credential. Scoping to `dialect` instead means `input_value` is
         always just the declared dialect string (e.g. `"postgresql"`) — see
-        `api/routes.py`'s `reload_config_endpoint`, which stringifies any
-        exception straight into an HTTP 400 `detail`, for a concrete path
-        this would otherwise leak through.
+        `api/routes.py`'s `reload_config_endpoint`, which (before item 165's
+        fix) stringified any exception straight into an HTTP 400 `detail`,
+        for a concrete path this would otherwise have leaked through. That
+        endpoint now catches `pydantic.ValidationError` and `yaml.YAMLError`
+        separately and builds `detail` without ever calling `str()` on
+        either (`admin/service.py`'s `safe_pydantic_error_lines`/
+        `safe_yaml_error_detail`) — but this validator's own scoping to
+        `dialect` remains the reason its *own* error is safe regardless of
+        which handler catches it.
 
         `connection_string` can still be an entirely-unresolved `${ENV_VAR}`
         placeholder when this runs — confirmed against real usage, not

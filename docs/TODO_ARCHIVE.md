@@ -11779,8 +11779,75 @@ Mutation-verified: reverted `reload_config_endpoint` to the original
 with the planted password visible in the response body (the dialect-
 mismatch test stayed green throughout, since that validator was already
 scoped safely regardless of the outer formatter), then restored the fix.
-Full unit (2130 passed, 2 skipped) and security (476 passed, 2 skipped)
-suites green after the fix; `black --check` clean.
+
+**A post-implementation `auditors` review (`test-contract-reviewer`) found
+one real gap, fixed before landing:** the two integration tests above prove
+`safe_pydantic_error_lines` works for the two specific dict shapes they
+happen to construct — and one of those is deliberately tuned to trip
+`str(ValidationError)`'s own truncation window, so its regression power was
+tied to that window rather than to the helper's actual guarantee. Added
+`test_safe_pydantic_error_lines_never_includes_input` to
+`tests/unit/test_admin_service.py`, exercising the helper directly (not
+through the HTTP endpoint) against three distinct pydantic error kinds on a
+credential-bearing dict — `missing` (an arbitrarily long dict, independent
+of any truncation window), `value_error` (item 158's dialect-mismatch
+validator), and `extra_forbidden` (a field `ConnectionProfile`'s
+`extra="forbid"` rejects) — asserting no returned line contains the planted
+secret or any `input`/`input_value=` marker. Mutation-verified separately:
+changed the helper to append `error.get("input")` into each formatted line,
+confirmed the new unit test failed with the full untruncated secret visible
+in the failure output (proving it's strictly more sensitive than the
+truncation-dependent integration test), then restored the fix.
+
+**A second real gap, found by the same `auditors` `security-invariant-reviewer`
+pass, fixed before landing:** a syntactically broken `connections.yaml` (e.g.
+an unterminated quote on a `connection_string:` line) raises `yaml.YAMLError`
+BEFORE pydantic ever runs, on the same file content — and PyYAML's
+`Mark.__str__()` embeds `get_snippet()`, the literal offending source line,
+which the item's own write-up had assumed (incorrectly) was credential-free
+("file-not-found, YAML syntax errors, etc., which don't carry a credential").
+Confirmed directly: a `connections.yaml` entry with a literal (non-`${...}`)
+password and an unterminated quote on that exact line reproduces the password
+in `str(yaml.YAMLError)` — and config-governance drafts are explicitly
+permitted to carry a literal credential (not just an env/vault reference), so
+this was reachable, not hypothetical. Added a second helper,
+`safe_yaml_error_detail` (`admin/service.py`, alongside
+`safe_pydantic_error_lines`), which builds `detail` from only the plain
+string fields (`.context`/`.problem`/`.note`) and the mark's integer
+`.line`/`.column` — never `str()` on the exception or on `.problem_mark`/
+`.context_mark`. `reload_config_endpoint` now has `except yaml.YAMLError`
+ahead of the generic handler too. Regression test
+`test_reload_config_yaml_syntax_error_does_not_leak_credential`
+(`tests/integration/test_rest_api.py`) mutation-verified the same way: removing
+the new `except` clause made it fail with the full password visible in the
+response body, then the fix was restored.
+
+**Two informational findings from the same review, addressed as small doc
+fixes:** `safe_pydantic_error_lines`'s docstring overstated
+`include_input=False` as "the" safety mechanism — reworded to state the
+actual guarantee (the function only ever reads `loc`/`msg`; the pydantic
+flag is belt-and-braces on top of that, not instead of it).
+`connections/models.py`'s `_dialect_matches_connection_string` docstring
+referenced `reload_config_endpoint`'s old unconditional `str(exc)` behavior
+as a still-live fact; updated to describe the fixed behavior while keeping
+its own point intact (the `dialect`-scoped validator is safe regardless of
+which handler catches its error).
+
+**One finding recorded as an out-of-scope follow-up, not fixed here:** the
+same review flagged that `cli.py`'s `load_config_context` (used by both the
+`querygate-validate-config` CLI and the config-governance dry-run endpoints)
+still stringifies a raw `ValidationError` at the source, relying on
+`admin/service.py`'s pre-existing `_humanize_validation_errors` regex-based
+scrub downstream rather than the structural `include_input=False` guarantee
+this item introduced — and that scrub doesn't cover `cli.py main()`'s direct
+stderr output at all. Not confirmed currently exploitable (the regex scrub
+does work today), but a real structural gap; recorded as TODO.md item 168
+rather than folded into this item, since closing it well requires resolving
+an import-direction question (`admin/service.py` already imports from
+`cli.py`) that's a small design call of its own, not a mechanical extension.
+
+Full unit (2375 passed) and security (476 passed, 2 skipped) suites green
+on the final tree; `black --check` clean.
 
 **Effort:** S (one route's exception handling; the stripping precedent
 already existed in `admin/service.py` to extend). **Depends on:** none.

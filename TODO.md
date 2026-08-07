@@ -198,6 +198,7 @@ order-of-magnitude, not commitments.
 | 165 | ✅ `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body | S | — |
 | 166 | Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo ignores which connection a name resolves to | S–M | 159 |
 | 167 | A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed) | S | 159 |
+| 168 | Config-governance dry-run's credential-safety net is a post-hoc regex scrub, not structural, and the validate-config CLI's stderr isn't scrubbed at all | S–M | 165 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2942,4 +2943,71 @@ today, per the reproduction above).
 **Effort:** S (the compiler-side dedupe is small and localized; the shape is
 already confirmed, not hypothetical). **Depends on:** 159 (shipped — same
 `needed`-union behavior that creates the phantom alias).
+
+### 168. Config-governance dry-run's credential-safety net (`_humanize_validation_errors`) is a post-hoc regex scrub, not a structural guarantee — and `cli.py`'s `load_config_context`/`main()` still stringify raw `ValidationError`s at the source
+
+**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 165's
+fix** (pre-existing; item 165 fixed the one confirmed *reachable* leak in
+`reload_config_endpoint`, this is a broader structural fragility in the
+surrounding config-governance surface that the same review pass flagged as
+lower-severity and not yet independently confirmed to be currently
+exploitable).
+
+Two related gaps:
+
+1. `cli.py`'s `load_config_context` (used by both the `querygate-validate-
+   config` CLI and, via `admin/service.py`'s `validate_candidate_content`,
+   the config-governance dry-run endpoints `/admin/config/validate` and
+   `/admin/config/preview`) does `errors.append(f"{connections_file}:
+   {exc}")` on any exception from `ConnectionRegistry.from_file` — including
+   a `pydantic.ValidationError`, stringified the same unsafe way item 165
+   fixed at the REST layer. The list this builds is only made safe
+   downstream, by `admin/service.py`'s `_humanize_validation_errors`, which
+   regex-strips pydantic's `[type=..., input_value=..., input_type=...]`
+   tail. That currently works (confirmed: `_PYDANTIC_TAIL`'s pattern still
+   matches the live pydantic 2.13 error-line shape), but it is a redaction
+   step applied AFTER the credential is already embedded in a plain string,
+   not a structural guarantee like item 165's `safe_pydantic_error_lines`
+   (which asks pydantic to never materialize the credential in the first
+   place). A future pydantic error-format change could silently widen the
+   regex's blind spot, and the existing unit test
+   (`test_humanize_validation_errors_attributes_and_strips_pydantic_noise`,
+   `tests/unit/test_admin_service.py`) asserts against a hand-written
+   literal string, not a real `ValidationError`, so it would not catch that
+   drift.
+2. `cli.py`'s `main()` prints `load_config_context`'s raw (unscrubbed) error
+   list directly to stderr for the `querygate-validate-config` CLI path —
+   a different surface than the HTTP dry-run endpoints, not covered by
+   `_humanize_validation_errors` at all. A Vault- or env-resolved credential
+   in a malformed `connections.yaml` would land in an operator's terminal or
+   CI log.
+
+**What to do (when prioritized):** extend `load_config_context` to catch
+`pydantic.ValidationError` separately and build its error-list entry via
+item 165's `safe_pydantic_error_lines` (or a shared equivalent) instead of
+`f"...: {exc}"`, for both gaps at once — this closes gap 2 directly (no
+scrubbing needed if the raw string is never unsafe) and makes gap 1's
+`_humanize_validation_errors` step redundant-but-harmless for the pydantic
+case (it'd still be needed for other exception types `load_config_context`
+stringifies, e.g. YAML/policy/catalog/template loader errors, which item
+165's `security-invariant-reviewer` review did not find to carry the same
+risk — `PolicyStore`/`CatalogStore`/`TemplateStore` validate their own YAML
+before any secret interpolation touches connections). Note the import
+direction: `admin/service.py` currently imports from `querygate.cli`
+(`load_config_context`, `validate_config`), so a shared helper used by both
+must live somewhere both can import without a cycle — either `cli.py` calls
+into `admin/service.py`'s existing `safe_pydantic_error_lines` directly (the
+cycle only exists if `cli.py` needs something `admin/service.py` doesn't
+already re-export), or the helper moves to a neutral module (e.g.
+`core/exceptions.py`) and both re-export/import from there. Add a
+regression test at the `load_config_context`/`validate_config` level (not
+just the HTTP layer item 165 already covers) asserting a planted credential
+in a `connections.yaml` entry that trips a `missing`-type pydantic error
+never appears in the returned error list, and a second test pinning
+`main()`'s stderr output the same way.
+
+**Effort:** S–M (mechanical extension of item 165's pattern to one more call
+site, plus resolving the `cli.py`/`admin/service.py` import direction for a
+shared helper). **Depends on:** 165 (shipped — `safe_pydantic_error_lines`
+is the structural building block this reuses).
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pydantic as pyd
 import pytest
 
 from querygate.admin import service as governance
@@ -18,6 +19,7 @@ from querygate.admin.store import (
     set_config_version_store,
 )
 from querygate.audit.sinks import JsonlAuditSink, reset_audit_sink, set_audit_sink
+from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
@@ -109,6 +111,80 @@ def test_humanize_validation_errors_attributes_and_strips_pydantic_noise():
     assert "/tmp/xyzabc" not in cleaned
     assert "pydantic.dev" not in cleaned
     assert "input_type=" not in cleaned and "[type=" not in cleaned
+
+
+def test_safe_pydantic_error_lines_never_includes_input():
+    """Item 165: `safe_pydantic_error_lines` is the actual security-critical
+    function -- it's what guarantees a `pydantic.ValidationError` raised
+    against an already-`${...}`-interpolated `ConnectionProfile` entry (real
+    credential included) never leaks that credential through
+    `reload_config_endpoint`'s HTTP 400 body. The integration-level HTTP
+    tests in `test_rest_api.py` only prove this for the two specific dict
+    shapes they happen to construct (and one of those is deliberately tuned
+    to trip pydantic's own `str()` truncation window); this test exercises
+    the helper directly against several distinct pydantic error *kinds* --
+    `missing`, `value_error` (item 158's own dialect-mismatch validator),
+    and `extra_forbidden` -- each on a dict carrying a planted secret, and
+    asserts none of the returned lines contain the secret or any
+    `input`/`input_value` marker, independent of dict length or `str()`
+    truncation behavior."""
+    secret = "PlantedSecretMarker123"
+    cases: list[pyd.ValidationError] = []
+
+    # `missing`-type: a required field (`dialect`) omitted. Deliberately a
+    # LONG dict (long id, long host, long db name) -- str(ValidationError)'s
+    # truncation would hide the secret here, but safe_pydantic_error_lines
+    # must not rely on that; it must never see the secret at all.
+    try:
+        ConnectionProfile.model_validate(
+            {
+                "id": "unit-test-missing-dialect",
+                "connection_string": (
+                    f"postgresql+asyncpg://user:{secret}@a-fairly-long-hostname."
+                    "internal.example.com:5432/a_fairly_long_database_name"
+                ),
+                "known_tables": ["a", "b", "c"],
+            }
+        )
+        pytest.fail("expected a ValidationError for the missing dialect field")
+    except pyd.ValidationError as exc:
+        cases.append(exc)
+
+    # `value_error`-type: item 158's own dialect-mismatch field_validator.
+    try:
+        ConnectionProfile.model_validate(
+            {
+                "id": "unit-test-mismatch",
+                "dialect": "mssql",
+                "connection_string": f"postgresql+asyncpg://user:{secret}@host/db",
+            }
+        )
+        pytest.fail("expected a ValidationError for the dialect/backend mismatch")
+    except pyd.ValidationError as exc:
+        cases.append(exc)
+
+    # `extra_forbidden`-type: model_config forbids extra fields.
+    try:
+        ConnectionProfile.model_validate(
+            {
+                "id": "unit-test-extra",
+                "dialect": "postgresql",
+                "connection_string": f"postgresql+asyncpg://user:{secret}@host/db",
+                "not_a_real_field": "surprise",
+            }
+        )
+        pytest.fail("expected a ValidationError for the forbidden extra field")
+    except pyd.ValidationError as exc:
+        cases.append(exc)
+
+    assert len(cases) == 3
+    for exc in cases:
+        lines = governance.safe_pydantic_error_lines(exc)
+        assert lines
+        for line in lines:
+            assert secret not in line
+            assert "input_value=" not in line
+            assert "input=" not in line
 
 
 def test_preview_validates_and_reports_only_document_level_changes(tmp_path, monkeypatch):
