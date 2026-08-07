@@ -55,6 +55,7 @@ from querygate.validation.schema_validation import (
     parse_column_ref,
     resolve_column,
     resolve_table_policies,
+    table_by_name as _table_by_name,
 )
 
 _AGG_FNS = {
@@ -108,13 +109,6 @@ def _aggregate_fn(fn_name: str, dialect: str) -> Any:
     if fn_name in _STAT_FNS:
         return get_dialect_adapter(dialect).stat_fn(fn_name)
     return _AGG_FNS[fn_name]
-
-
-def _table_by_name(tables: Dict[str, sa.Table], name: str) -> sa.Table:
-    for key, table in tables.items():
-        if key.casefold() == name.casefold():
-            return table
-    raise QueryValidationError(f"Unknown table {name!r}")
 
 
 def _column(tables: Dict[str, sa.Table], col_ref: str) -> sa.Column:

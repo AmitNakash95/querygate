@@ -12125,3 +12125,120 @@ described above; restoring both passes both orders.
 **Effort:** S (the compiler-side dedupe is small and localized; the shape is
 already confirmed, not hypothetical). **Depends on:** 159 (shipped — same
 `needed`-union behavior that creates the phantom alias).
+
+### 169. A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an independent, unfiltered scan of a mandatory-row-filtered table ✅ DONE
+
+**Surfaced 2026-08-07 by `security-invariant-reviewer`'s post-fix re-review of
+item 167** — a sibling of item 167's own bug, in a different consumer of the
+same root cause (schema validation's `_reflect_and_validate_scope` can build
+TWO distinct `sa.Table.alias(...)` objects for one declared join occurrence
+when a column ref elsewhere spells the alias with different case). Item 167
+fixed the mandatory-row-filter consumer
+(`compiler/sqlalchemy_compiler.py`'s `_apply_mandatory_row_filters`); this
+item is the second, distinct consumer of the same duplicated-alias `tables`
+dict: `validation/schema_validation.py`'s correlation-visibility resolution,
+`validate_schema`'s handling of `nested.correlate` refs.
+
+**Reproduced by compiling the exact shape** — a parent query `FROM orders
+JOIN customers alias="C"`, a select column additionally spelled `"c.name"`
+(the differently-cased ref that materializes the phantom alias, per item
+167's own mechanism), a `mandatory_row_filter` on `customers.tenant_id`, and
+a child `EXISTS` subquery declaring `correlate=["c.id"]` (the PHANTOM
+spelling, not the join's own declared `"C"`). Forcing both possible
+`needed`-set iteration orders via `PYTHONHASHSEED` (the same
+hash-randomization dependency item 167's own construction has) confirmed
+both halves of the item's hypothesis: (a) the phantom-alias condition does
+arise here exactly as traced, and (b) under the `("C", "c")` insertion
+order, the compiled SQL was:
+
+```sql
+SELECT orders.id, "C".name
+FROM orders JOIN customers AS "C" ON orders.customer_id = "C".id
+WHERE "C".tenant_id = 't1' AND (EXISTS (SELECT o2.id
+FROM orders AS o2, customers AS c
+WHERE o2.customer_id = c.id))
+LIMIT 50
+```
+
+— the EXISTS subquery independently scans `customers AS c` via an
+unconditioned comma-join with `orders AS o2`, completely bypassing the
+`tenant_id = 't1'` mandatory row filter that the outer scope's own
+`"C"`-aliased occurrence carries. A real, confirmed cross-tenant EXISTS
+boolean oracle, not a hypothetical — the other insertion order (`("c", "C")`)
+happened to bind correctly by coincidence, which is exactly the kind of
+order-dependent false negative item 167's own regression test was written to
+catch.
+
+**Shipped.** `_table_by_name` (the case-insensitive, first-match lookup the
+compiler's own FROM/JOIN construction has always used) moved from
+`compiler/sqlalchemy_compiler.py` into `validation/schema_validation.py` as
+two public functions, `table_by_name` and `table_by_name_or_none` — relocated
+rather than duplicated so both the compiler and schema validation share the
+exact same resolution order over the exact same `tables`/`scoped_tables` dict
+object, guaranteeing they can never independently drift again. The compiler
+now imports `table_by_name` from schema validation (aliased back to
+`_table_by_name` at every existing call site, so no other line in the
+compiler changed). `validate_schema`'s correlate-ref resolution
+(`outer = scoped_tables.get(table_name)`) now calls
+`table_by_name_or_none(scoped_tables, table_name)` instead of the exact
+index, closing the identity gap the same way item 167 closed it for
+mandatory row filters.
+
+**A second, closely related bug was found and fixed in the same code
+region while verifying this fix**, not described by the item's own text: at
+the OTHER end of the same correlation mechanism, `_reflect_and_validate_
+scope`'s own per-name resolution loop (`outer = (correlated_tables or
+{}).get(name)`, building the CHILD scope's `tables` dict) was ALSO an exact
+dict index against `correlated_tables` — the map keyed by whichever literal
+spelling the `correlate` declaration itself used. A child scope's OWN body
+may legally reference the correlated table with DIFFERENT case than
+`correlate` declared (`declared_tables` already accepts it
+case-insensitively), and when it does, the exact index misses, falls through
+to `name_to_physical[name.casefold()]`, and raises a raw, uncaught
+`KeyError` — not the usual typed `QueryValidationError` — because a
+correlated-only table was never part of the child scope's own from/join map.
+Confirmed reachable purely from caller-supplied AST shape (no operator
+misconfiguration needed): a child EXISTS with `correlate=["customers.id"]`
+whose own WHERE also references `"Customers.name"` crashed with
+`KeyError: 'customers'` before the fix. Not the cross-tenant bypass the item
+describes (it fails closed, just ungracefully as an unhandled exception
+rather than a rejection), but the identical `table_by_name_or_none` fix
+closes it too.
+
+The deeper root-cause fix the item raised as an alternative — having
+`_reflect_and_validate_scope` key `tables` only by declared effective names
+(plus correlated names) in the first place, so a differently-cased column
+ref never materializes a second alias object at all — was NOT taken, for the
+same reason item 167 didn't take it: it is a larger, riskier change to a
+function every scope in the engine runs through, and the point-fix (now
+applied identically to BOTH consumers plus this newly found third one) fully
+closes the gap for every current call site. The root cause remains: a
+future fourth consumer of `tables`/`scoped_tables` that indexes it exactly
+rather than through `table_by_name`/`table_by_name_or_none` would
+reintroduce this same class of bug.
+
+Regression tests in `tests/security/test_correlation_boundary.py`:
+`test_correlate_resolves_to_the_same_object_the_from_join_clause_uses` is
+parametrized over both `tables`-dict insertion orders (`("C", "c")` and
+`("c", "C")`), mirroring item 167's own regression test — it forces the
+order by replacing `_reflect_and_validate_scope` with a stand-in that
+returns a `tables` dict built in the given order for the parent scope, while
+leaving `validate_schema`'s own correlate-ref resolution loop (the code
+under test) completely real; it asserts both the object-identity property
+directly and, via a full `compile_structured_query` call, that the compiled
+SQL shows genuine correlation (no independent `FROM`, no un-correlated scan
+inside the `EXISTS`, the mandatory filter reachable exactly once and not
+duplicated inside the subquery).
+`test_child_ref_to_correlated_table_in_different_case_than_correlate_does_not_crash`
+covers the second finding. Mutation-verified both: reverting the
+`validate_schema` correlate-loop fix alone reproduces the `("C", "c")`-order
+failure (object-identity mismatch) while leaving `("c", "C")` passing by
+coincidence, exactly matching the confirmed repro; reverting the
+`_reflect_and_validate_scope` per-name-loop fix alone reproduces the raw
+`KeyError`. Both restored and the full unit (2412 passed) and security (480
+passed) suites are green.
+
+**Effort:** S–M (point fix mirrored item 167's shape; the real compiled repro
+and a second, adjacent bug found in the same region took the effort past a
+pure S). **Depends on:** 106 (correlated subqueries, shipped), 167 (shipped —
+same root cause, first consumer fixed).
