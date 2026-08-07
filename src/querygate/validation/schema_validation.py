@@ -26,10 +26,11 @@ from typing import (
 import sqlalchemy as sa
 
 from querygate.core.auth import Principal
+from querygate.connections.dialects import get_session_adapter, not_connectable_explanation
 from querygate.connections.engine import get_engine, physical_db_name
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.visibility import resolve_visible_connection
-from querygate.core.exceptions import QueryValidationError
+from querygate.core.exceptions import ConfigValidationError, QueryValidationError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
@@ -865,7 +866,11 @@ def resolve_query_table_connections(
     cte_names: Optional[Set[str]] = None,
 ) -> Dict[str, str]:
     """Resolve which connection each table belongs to, rejecting any join
-    whose connection isn't in the same policy join_group as the primary.
+    whose connection isn't in the same policy join_group as the primary, or
+    whose dialect isn't yet connectable (TODO.md item 163 — the same
+    ``SessionDialectAdapter.is_connectable()`` check ``connections/engine.py``'s
+    ``init_engine`` runs for the primary connection, applied here to every
+    SECONDARY connection a join resolves to).
 
     ``connection_resolver`` lets the config simulator run this exact
     production visibility/join-group rule against isolated candidate stores.
@@ -901,6 +906,29 @@ def resolve_query_table_connections(
                     f"{join_connection_id!r}, which is not in the same join_group as the "
                     f"primary connection {connection_id!r} — run a separate query per "
                     "connection and combine results instead."
+                )
+            # TODO.md item 163: `connections/engine.py`'s `init_engine` is the
+            # only place `SessionDialectAdapter.is_connectable()` was checked,
+            # and it only ever runs for a query's PRIMARY connection. A
+            # `join_group`-eligible join to a not-yet-connectable secondary
+            # (Snowflake/BigQuery — item 19 phases 2/3) would sail past that
+            # guard here. `_load_table` below always reflects through the
+            # PRIMARY connection's own engine (never the secondary's — see its
+            # docstring), so the secondary's engine is never actually opened;
+            # instead the primary engine would attempt to reflect the joined
+            # table under a schema qualifier borrowed from the secondary's
+            # connection string, and fail with a masked `NoSuchTableError`
+            # that names neither the real cause nor the secondary's dialect.
+            # Mirror `init_engine`'s own check and message shape here so the
+            # rejection is clean, early, and client-actionable instead. The
+            # shared explanation clause lives in `not_connectable_explanation`
+            # (connections/dialects.py) so this and `init_engine`'s identical
+            # primary-connection guard can't drift apart (2026-08-07
+            # `architecture-boundary-reviewer` finding).
+            if not get_session_adapter(other.dialect).is_connectable():
+                raise ConfigValidationError(
+                    f"cross-connection join: {join.table!r} is in connection "
+                    f"{join_connection_id!r}: {not_connectable_explanation(other.dialect)}"
                 )
         table_connection[join.alias or join.table] = join_connection_id
     return table_connection
