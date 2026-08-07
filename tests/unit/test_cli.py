@@ -14,11 +14,17 @@ from querygate.secrets.resolvers import EnvSecretResolver, SecretResolverRegistr
 # Deliberately short, and matching `test_rest_api.py`'s own `_LIVE_PASSWORD`
 # exactly (item 165): pydantic truncates a long `ValidationError.input_value`
 # dict repr to a small head/tail window, and confirmed directly (before
-# writing these tests) that only this specific short id + short password
-# shape survives that truncation -- a longer id or a few extra password
-# characters pushes the password out of the surviving tail and the
-# un-fixed code would pass these tests for the wrong reason. Every test
-# below reuses this exact id/password shape for that reason.
+# writing these tests) that only a password this short survives that
+# truncation into the tail -- a few extra password characters push it out of
+# the surviving tail and the un-fixed code would pass these tests for the
+# wrong reason. (The `id` field's length doesn't matter here -- confirmed
+# directly by re-running the same check across id lengths from 1 to 200
+# chars with this password: it always survives, regardless of id length.
+# Truncation is driven by the length of `input_value`'s dict repr as a
+# whole, and `connection_string` -- which embeds the password -- dominates
+# that length far more than `id` does.) Every test below reuses this exact
+# password for that reason; the `id` values differ per test only for
+# readability, not because id length is load-bearing.
 _LIVE_PASSWORD = "S3cretPw"
 
 CONNECTIONS_YAML = """
