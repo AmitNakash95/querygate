@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pydantic
 import pytest
 
 from querygate.connections.registry import ConnectionRegistry
@@ -126,6 +127,26 @@ def test_connection_string_resolved_through_custom_resolver_registry():
         resolver_registry=registry,
     )
     assert connections.get("demo").connection_string == "postgresql+asyncpg://vault-resolved/db"
+
+
+def test_from_entries_rejects_a_dialect_mismatch_only_visible_after_interpolation(monkeypatch):
+    """TODO.md item 158: the dialect-match validator on `ConnectionProfile`
+    only matters in production if it actually runs on the RESOLVED
+    connection string, on the one path (`ConnectionRegistry.from_entries`)
+    that ever builds a `ConnectionProfile` bound for a real engine. This
+    pins that claim at the registry level, not just against the model in
+    isolation: `${MYSQL_URL}` resolves to a mysql backend, but the entry
+    declares `dialect: postgresql` — this can only be caught by validating
+    AFTER `registry.interpolate()` runs, exactly the order `from_entries`
+    uses. If a future change ever built profiles via `model_construct()`
+    (skipping validation) or reordered interpolate-then-validate, this is
+    the test that would catch it.
+    """
+    monkeypatch.setenv("MYSQL_URL", "mysql+asyncmy://user:pass@host:3306/db")
+    with pytest.raises(pydantic.ValidationError, match="mysql"):
+        ConnectionRegistry.from_entries(
+            [{"id": "demo", "dialect": "postgresql", "connection_string": "${MYSQL_URL}"}]
+        )
 
 
 def test_unregistered_scheme_is_reported_clearly():
