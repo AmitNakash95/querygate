@@ -197,8 +197,9 @@ order-of-magnitude, not commitments.
 | 164 | `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s | S | — |
 | 165 | ✅ `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body | S | — |
 | 166 | Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo ignores which connection a name resolves to | S–M | 159 |
-| 167 | A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed) | S | 159 |
+| 167 | ✅ A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed) | S | 159 |
 | 168 | Config-governance dry-run's credential-safety net is a post-hoc regex scrub, not structural, and the validate-config CLI's stderr isn't scrubbed at all | S–M | 165 |
+| 169 | A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an unfiltered scan | S–M | 106, 167 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2883,66 +2884,19 @@ regression test; the judgment call is which of the two approaches to take).
 **Depends on:** cross-connection joins/`join_group` (shipped), 159 (shipped —
 same code path; this is what remained after that fix).
 
-### 167. A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed by compiling the shape — row duplication, not just cost)
+### 167. A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed by compiling the shape — row duplication, not just cost) ✅ DONE
 
-**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 159's
-own fix, empirically confirmed the same day** (pre-existing; the same
-case-mismatch shape item 159 fixed the connection LOOKUP for, but this is a
-distinct downstream consequence in the compiler, not in schema validation).
-`_reflect_and_validate_scope`'s `needed` set (`validation/schema_validation.py`)
-unions a join's declared alias/table spelling with every column ref's own
-(possibly differently-cased) spelling of the same table — item 159's own
-write-up. Every name in `needed` gets its own entry in the `tables` dict the
-validator returns (`tables[name] = source if name.casefold() == physical_key
-else source.alias(name)`), so a join declared `alias="O"` but referenced only
-as `"o.id"` leaves TWO entries in `tables` — `tables["O"]` and `tables["o"]`
-— both aliasing the same reflected `sa.Table`, even though the query only
-declared one join occurrence. Column-ref resolution is unaffected
-(`resolve_column(tables[t], c)` finds either key), and the compiler's
-FROM/JOIN construction is also unaffected (`_table_by_name` is always called
-with `join.alias or join.table`, i.e. `"O"` only, never the phantom `"o"`) —
-but `compiler/sqlalchemy_compiler.py`'s `_apply_mandatory_row_filters`
-iterates `for key in tables:` (every key, not just the ones the FROM/JOIN
-clause actually uses), so when a `mandatory_row_filter` policy exists on that
-table, it applies a `WHERE` against BOTH `tables["O"]` and `tables["o"]` —
-and SQLAlchemy Core adds any table referenced by a `.where()` clause but
-absent from the statement's own FROM/JOIN list as an implicit comma-join
-(cartesian product).
+`_apply_mandatory_row_filters` now walks only the query's own declared
+FROM/JOIN occurrences, resolved through the same case-insensitive
+`_table_by_name` lookup the FROM/JOIN clause itself uses (not an exact dict
+index — a name-only fix alone still let the filter bind to a different alias
+object than the one in the compiled statement under some `tables` dict
+orderings, a bypass caught in post-ship review before this landed), so a
+case-different column ref no longer leaves a phantom alias for a mandatory
+row filter to turn into an unconditioned cartesian join or an unfiltered
+joined alias.
 
-**Confirmed by compiling the shape** (`from_table="customers"`,
-`select=["customers.id", "o.id"]`, one join `table="orders" alias="O"
-on=["customers.id", "O.customer_id"]`, a `Policy` with a
-`mandatory_row_filter` on `orders.status`) — the compiled SQL is:
-
-```sql
-SELECT customers.id, "O".id AS id_1
-FROM customers JOIN orders AS "O" ON customers.id = "O".customer_id, orders AS o
-WHERE "O".status = 'active' AND o.status = 'active'
-LIMIT 5
-```
-
-The trailing `, orders AS o` is a real, unconditioned cartesian product
-against a second, unrelated copy of `orders` — this multiplies the result set
-(every output row repeated once per row in `orders`, capped only by the
-query's own `LIMIT` on the OUTER result, so the multiplication is real even
-though the final row count is bounded), a genuine correctness bug (duplicated
-rows), not merely wasted cost. Not a policy bypass — no new columns or values
-outside what the query and Policy already allow — but it corrupts the result
-shape the caller asked for.
-
-**What to do:** dedupe `_apply_mandatory_row_filters`'s walk to each table's
-ONE declared effective name (e.g. iterate `query.from_table`/`query.joins`'
-own alias-or-table spellings — the same source `_table_by_name` already uses
-— rather than every key `_reflect_and_validate_scope` happened to populate),
-or, upstream, stop `_reflect_and_validate_scope` from creating more than one
-`tables` entry per declared join occurrence in the first place. Add a
-regression test in `tests/unit/test_compiler.py` matching the shape above:
-assert the rendered SQL's FROM clause names the table exactly once (fails
-today, per the reproduction above).
-
-**Effort:** S (the compiler-side dedupe is small and localized; the shape is
-already confirmed, not hypothetical). **Depends on:** 159 (shipped — same
-`needed`-union behavior that creates the phantom alias).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 167).
 
 ### 168. Config-governance dry-run's credential-safety net (`_humanize_validation_errors`) is a post-hoc regex scrub, not a structural guarantee — and `cli.py`'s `load_config_context`/`main()` still stringify raw `ValidationError`s at the source
 
@@ -3011,3 +2965,74 @@ site, plus resolving the `cli.py`/`admin/service.py` import direction for a
 shared helper). **Depends on:** 165 (shipped — `safe_pydantic_error_lines`
 is the structural building block this reuses).
 
+### 169. A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an independent, unfiltered scan of a mandatory-row-filtered table
+
+**Surfaced 2026-08-07 by `security-invariant-reviewer`'s post-fix re-review of
+item 167** — a sibling of item 167's own bug, in a different consumer of the
+same root cause (schema validation's `_reflect_and_validate_scope` can build
+TWO distinct `sa.Table.alias(...)` objects for one declared join occurrence
+when a column ref elsewhere spells the alias with different case — see item
+167's write-up for the full mechanism). Item 167 fixed the mandatory-row-filter
+consumer (`compiler/sqlalchemy_compiler.py`'s `_apply_mandatory_row_filters`);
+this item is about a second, distinct consumer of the same duplicated-alias
+`tables` dict: `validation/schema_validation.py`'s correlation-visibility
+resolution.
+
+`validate_schema` (`schema_validation.py:1221-1233`) resolves each
+`nested.correlate` ref against the PARENT scope's own `scoped_tables` dict via
+`outer = scoped_tables.get(table_name)` — an EXACT dict index using the
+correlate ref's own spelling, not the case-insensitive, first-match
+`_table_by_name` lookup the compiler itself uses everywhere it resolves a
+`tables` entry (including, as of item 167, the mandatory-row-filter path).
+If the parent scope declared a join `alias="C"` but ALSO has some other
+column ref elsewhere spelled `"c.<col>"` (creating the same phantom
+`tables["c"]` entry item 167 diagnosed), and a child `EXISTS`/scalar subquery
+declares `correlate=["c.id"]`, the exact index at line 1223 can bind the
+child's correlation to a DIFFERENT `sa.Table.alias` object than whichever one
+`_table_by_name` actually places in the parent's compiled FROM/JOIN clause.
+SQLAlchemy's auto-correlation matches by object identity against the
+enclosing statement's own FROM elements — if the object handed to the
+subquery isn't the one in the parent's FROM, correlation silently does not
+fire, and the subquery compiles as an independent, UNCORRELATED,
+full-table `EXISTS` — which, if the correlated table also carries a
+`mandatory_row_filter` (e.g. tenant scoping), evaluates over every tenant's
+rows, not just the enclosing row's, since the filter (per item 167) binds to
+whichever object the FROM/JOIN loop actually used — not necessarily the one
+the subquery independently scans. This can leak a cross-tenant EXISTS boolean
+oracle, or simply return silently wrong results, depending on which side of
+the row-filter boundary the mismatched object falls.
+
+Not yet reproduced by compiling an end-to-end shape (unlike item 167, which
+was); the mechanism is traced through the code (`schema_validation.py:1223`,
+the duplicate-alias source at `schema_validation.py:1537`, and the
+compiler's own correlation-identity contract documented in
+`compiler/sqlalchemy_compiler.py`'s `_compile_exists` docstring) but not yet
+confirmed against an actual compiled statement — do that first as part of
+fixing this, the same way item 167 demanded a real repro before landing a fix.
+**What to do:** at `schema_validation.py:1223`, replace the exact
+`scoped_tables.get(table_name)` index with a case-insensitive, first-match
+lookup using the SAME semantics as the compiler's `_table_by_name`
+(`compiler/sqlalchemy_compiler.py`) — since `scoped_tables` is the identical
+dict object the compiler will later resolve against, this guarantees the
+correlate binds to whatever object the parent's own FROM/JOIN construction
+will actually use, closing the identity gap the same way item 167 closed it
+for mandatory row filters. Add a regression test in
+`tests/security/test_correlation_boundary.py` (or `tests/unit/test_compiler.py`
+alongside item 167's own tests) that compiles a parent with a declared alias
+plus a differently-cased column ref to the same table, a child `EXISTS`
+correlated against that alias, and a `mandatory_row_filter` on the table —
+parametrized over both `tables`-dict insertion orders, mirroring item 167's
+own regression test — and assert the compiled SQL shows genuine correlation
+(no independent `FROM`/no un-correlated scan inside the subquery) under
+both orderings. Consider fixing the shared root cause instead of (or in
+addition to) either point-consumer fix: have `_reflect_and_validate_scope`
+key `tables` only by declared effective names (plus correlated names) in the
+first place, so a differently-cased column ref never materializes a second
+alias object at all — every consumer (this one, item 167's, and any future
+one) would then be correct by construction rather than needing its own
+case-insensitive lookup.
+
+**Effort:** S–M (the point fix mirrors item 167's one-line shape; add the
+effort of a first real compiled repro plus a correlation-boundary test, which
+item 167 didn't need to write from scratch). **Depends on:** 106 (correlated
+subqueries, shipped), 167 (shipped — same root cause, first consumer fixed).
