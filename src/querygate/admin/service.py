@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import pydantic as pyd
 import sqlalchemy as sa
 import yaml
 
@@ -59,6 +58,8 @@ from querygate.core.exceptions import (
     PolicyViolationError,
     QueryValidationError,
     ServiceDisabledError,
+    safe_pydantic_error_lines,
+    safe_yaml_error_detail,
 )
 from querygate.core.scopes import ADMIN_CONFIG_READ_SCOPE
 from querygate.policy.models import Policy
@@ -627,61 +628,6 @@ def _humanize_validation_errors(errors: List[str], doc_names: dict) -> List[str]
         error = _PYDANTIC_TAIL.sub("", error)
         cleaned.append(error.strip())
     return cleaned
-
-
-def safe_pydantic_error_lines(exc: pyd.ValidationError) -> List[str]:
-    """Turn a `pydantic.ValidationError` into safe, human-readable lines built
-    strictly from each error's `loc`/`msg` -- never `input`/`input_value`.
-
-    Companion to `_humanize_validation_errors` above, for callers that hold
-    the live `ValidationError` object rather than a pre-stringified error
-    list: `error["input_value"]` can embed the *entire* validated object for
-    certain pydantic error kinds (e.g. a `missing`-type error), which is
-    dangerous whenever the validated object may already contain a resolved
-    secret -- e.g. `ConnectionProfile.model_validate()` on an
-    already-`${...}`-interpolated `connections.yaml` entry (item 165). The
-    actual guarantee is that this function only ever reads `loc`/`msg` from
-    each error dict -- `include_input=False` is a belt-and-braces request to
-    pydantic to not even materialize `input`/`input_value` in the first
-    place, on top of (not instead of) that."""
-    lines: List[str] = []
-    for error in exc.errors(include_url=False, include_context=False, include_input=False):
-        loc = ".".join(str(part) for part in error.get("loc", ()))
-        msg = error.get("msg", "")
-        lines.append(f"{loc}: {msg}" if loc else msg)
-    return lines
-
-
-def safe_yaml_error_detail(exc: yaml.YAMLError) -> str:
-    """Turn a `yaml.YAMLError` into a safe, human-readable summary that never
-    calls `str()` on the exception itself, or on its `.problem_mark`/
-    `.context_mark`.
-
-    PyYAML's `Mark.__str__` embeds `get_snippet()` -- the literal offending
-    SOURCE LINE -- which for a `connections.yaml` parse failure can be a
-    line containing an already-interpolated, credential-bearing
-    `connection_string` (item 165: confirmed directly, an unterminated
-    quote on a `connection_string:` line reproduces the password in
-    `str(yaml.YAMLError)`). Only the plain string fields (`.context`/
-    `.problem`/`.note`) and the mark's integer `.line`/`.column` are used --
-    never the mark's own `__str__`, and never `.name` (which can be a
-    caller-controlled stream/file label)."""
-    parts: List[str] = []
-    context = getattr(exc, "context", None)
-    if context:
-        parts.append(str(context))
-    problem = getattr(exc, "problem", None)
-    if problem:
-        parts.append(str(problem))
-    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
-    if mark is not None:
-        parts.append(f"at line {mark.line + 1}, column {mark.column + 1}")
-    note = getattr(exc, "note", None)
-    if note:
-        parts.append(str(note))
-    if not parts:
-        parts.append("Invalid YAML syntax")
-    return "; ".join(parts)
 
 
 def validate_candidate_content(
