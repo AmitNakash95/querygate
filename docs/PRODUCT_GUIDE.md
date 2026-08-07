@@ -40,6 +40,7 @@ task. Small, incremental, accurate updates only.
 
 ## Table of contents
 
+0. [TL;DR — read this before a demo](#tldr--read-this-before-a-demo) — *status: populated*
 1. [What is QueryGate](#what-is-querygate) — *status: populated*
 2. [The Core Request Pipeline](#the-core-request-pipeline) — *status: populated*
 3. [Security Model](#security-model) — *status: populated*
@@ -53,15 +54,122 @@ task. Small, incremental, accurate updates only.
 
 ---
 
+## TL;DR — read this before a demo
+
+**Read time: about 3 minutes.** This section exists so you can walk into a
+demo or a hallway conversation and sound confident without having read the
+rest of this document. Everything here is explained in plain words on
+purpose — no jargon without a definition next to it. If a question goes
+deeper than this section, the [FAQ](#faq-for-marketingpositioning-conversations)
+below has a longer, more precise answer for almost anything you'll get asked.
+
+### The 10-second pitch
+
+**QueryGate lets an AI agent query your company's real database, but the
+agent can never send it a raw command — only a pre-checked, structured
+request. That one design choice is why it's safe.**
+
+Think of the difference between handing someone a blank check versus a form
+with fixed fields (amount, payee, date) that a teller checks before it's
+ever cashed. Most "AI talks to your database" tools hand the AI a blank
+check — a text box where it writes SQL (the language databases understand)
+and hope it behaves. QueryGate never gives it that text box. The AI can only
+fill out the form.
+
+### The problem, in one paragraph
+
+If you let an AI agent write its own SQL, you're trusting a system that
+sometimes makes things up, can be tricked by hidden instructions in the data
+it reads ("prompt injection"), and might phrase a legitimate-sounding
+request that happens to touch a table it should never see. A read-only
+database account doesn't fix this — it can still read *every* table it has
+access to and run something slow enough to hurt the database for everyone
+else. QueryGate closes that gap structurally: since the agent can never
+write SQL in the first place, there's no SQL string for a mistake or an
+attack to hide inside.
+
+### How it works, in four steps
+
+1. **The agent sends a request as data, not code** — a JSON object naming
+   which table, which columns, which filters. It looks like a form, not a
+   sentence.
+2. **QueryGate checks the request** against two things before touching the
+   database: does this table/column actually exist, and is this caller
+   *allowed* to see it (an admin-configured allow/deny list, per database,
+   sometimes per person).
+3. **Only if both checks pass**, QueryGate turns the request into real,
+   safe SQL and runs it — with a timeout and a cap on how many other queries
+   can run at once, so nothing can accidentally overload the database.
+4. **Every attempt is logged** — who asked, what they asked for, whether it
+   was allowed — without ever writing down the sensitive values themselves,
+   so the log is safe to store and safe to show an auditor.
+
+### What makes it hard to copy (the three-part story)
+
+Say these three points together — they're the whole pitch, and no single
+competitor does all three:
+
+1. **Structural safety.** Not "we scan the SQL for bad words" — there is no
+   SQL for the agent to write, so there's nothing to scan. This also lets us
+   enforce *shape* rules a scanner can't reach — "no more than 3 joins," "no
+   filters that would return under 5 rows" (protects against fishing for one
+   person's data one narrow query at a time).
+2. **It runs on your real, live database.** Not a copy, not a warehouse we
+   host, not a semantic layer that needs a modeling project first. It
+   connects to the operational database you already run, self-hosted inside
+   your own infrastructure — data and credentials never leave your network.
+3. **Proof, not just prevention.** Every access is tied to the actual human
+   behind it (not just "an API key"), and the audit log is tamper-evident —
+   there's a cryptographic way to prove afterward that nobody edited it.
+   That's the thing a security reviewer actually needs to sign off.
+
+### What it explicitly does *not* do (say this with confidence, don't dodge)
+
+These are deliberate choices, not gaps we haven't gotten to — if asked, say
+"that's on purpose" and move on:
+- No mode that lets an agent run a raw SQL string, ever.
+- No running AI-generated code of any kind.
+- No stored procedures / arbitrary procedural SQL.
+- No mandatory upfront modeling step before you can start querying — it
+  works against the schema you already have.
+- We don't host a database or a data warehouse ourselves.
+
+### Quick answers to the questions you'll actually get asked
+
+- **"What databases does it support?"** Postgres, SQL Server, and MySQL
+  today, tested against real servers. Snowflake and BigQuery can already
+  generate correct queries but aren't wired up for live connections yet —
+  say "in progress," not "supported."
+- **"Isn't this just a firewall that blocks bad SQL?"** No — a firewall
+  still has to accept a SQL string and guess whether it's dangerous.
+  QueryGate never accepts a SQL string, so there's nothing to guess about.
+- **"Can the AI ever break out and run something arbitrary?"** No — there is
+  no field or tool anywhere in the product that accepts raw SQL. It's not a
+  setting you could even turn on.
+- **"Does our data ever leave our network?"** No — QueryGate runs inside
+  your own infrastructure, next to your database.
+- **"Can we change the rules without downtime?"** Yes — policy changes
+  reload live, with a versioned history and one-click rollback.
+- **"How do you know the security claims actually hold?"** Every one of
+  them is backed by an automated test that runs on every code change,
+  including a dedicated suite whose whole job is to try to break the
+  access rules. Not a one-time audit — continuous enforcement.
+
+If you get a question this section doesn't cover, it's almost certainly in
+the [FAQ](#faq-for-marketingpositioning-conversations) further down — that
+section is written for exactly this purpose, just in more depth.
+
 ## What is QueryGate
 
 QueryGate is an **agent-safe database access gateway**: it lets you connect
-an AI agent to a real Postgres or MSSQL database, but the agent can never
-submit raw SQL — there is no `sql` field, tool, or endpoint anywhere in the
-codebase that would accept one. Every request goes in as a validated,
-structured JSON object instead, and QueryGate runs it inside your own
-infrastructure, next to your database, so credentials and data never leave
-your network.
+an AI agent to a real database — Postgres, SQL Server (MSSQL), or MySQL
+today, all verified against real servers, with Snowflake and BigQuery
+rendering-only for now (see the FAQ's "What databases does it support?") —
+but the agent can never submit raw SQL. There is no `sql` field, tool, or
+endpoint anywhere in the codebase that would accept one. Every request goes
+in as a validated, structured JSON object instead, and QueryGate runs it
+inside your own infrastructure, next to your database, so credentials and
+data never leave your network.
 
 ### The problem it solves
 
@@ -94,8 +202,8 @@ section of this guide.)
 ### Who it's for
 
 Teams building an internal agent, copilot, or automated workflow that needs
-controlled read access to a production Postgres or SQL Server database —
-typically in B2B software, fintech, healthcare, or any engineering
+controlled read access to a production database — typically in B2B software,
+fintech, healthcare, or any engineering
 organization where "let the model write SQL against prod" won't pass a
 security review. The people in the room are usually a platform/AI engineer
 building the integration, and a security or database owner who has to sign
@@ -3596,6 +3704,150 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-08-07 — A correlated subquery's `correlate` reference now resolves
+  through the same shared, case-insensitive table lookup everywhere, closing
+  a real cross-tenant `EXISTS`/scalar-subquery bypass (TODO.md item 169).**
+  This is a sibling of the item 167 bug just below: when a query joins a
+  table under one alias (say `"C"`) but also references it elsewhere with
+  different letter-casing (`"c"`), schema validation can end up holding two
+  separate Python objects for what should be one alias. Item 167 closed the
+  consumer of that duplication inside the compiler's mandatory-row-filter
+  step; this item found and closed a second, independent consumer: a child
+  `EXISTS`/scalar subquery's `correlate` field, which tells the compiler
+  which outer-query table the subquery should stay tied to. Reproducing the
+  exact shape (a joined `customers` table with a `mandatory_row_filter` on
+  `tenant_id`, and a child `EXISTS` correlating against the differently-cased
+  spelling) compiled to a subquery that silently dropped the correlation
+  entirely and scanned `customers` as an independent, unconditioned join —
+  a genuine cross-tenant boolean oracle a caller could use to test row
+  existence outside their own tenant's mandatory filter, not a hypothetical.
+  **Fix:** the same case-insensitive `_table_by_name` helper the compiler's
+  FROM/JOIN construction already used was relocated into
+  `validation/schema_validation.py` (as `table_by_name`/
+  `table_by_name_or_none`) so both the compiler and the schema validator
+  resolve every alias through the identical function over the identical
+  dict, instead of two independently-written lookups that could silently
+  drift apart. While verifying the fix, a second, related bug in the same
+  code region was found and closed in the same change: a child subquery's
+  own body referencing a correlated table with different case than its
+  `correlate` declaration used raised an unhandled `KeyError` instead of a
+  clean validation error (a crash, not a bypass, but the same root
+  duplication). The deeper structural option — preventing the duplicate
+  alias objects from ever being created in the first place — was
+  considered and deliberately not taken, for the same reason item 167 didn't
+  take it: it touches a function every query in the engine runs through, and
+  the narrower fix (routing every consumer through one shared lookup) fully
+  closes this class of bug for both known consumers today. The residual risk
+  is a future third consumer that indexes the table dict directly instead of
+  through the shared helper — worth remembering if you ever add a new place
+  that reads schema validation's resolved table map. See
+  [The Core Request Pipeline](#the-core-request-pipeline) and
+  [3. Compilation](#3-compilation--ast--policy-becomes-real-sql).
+
+- **2026-08-07 — Extended item 165's structural credential-safety fix to the
+  `querygate-validate-config` CLI and the config-governance dry-run path,
+  closing the one gap item 165 itself flagged as a follow-up (TODO.md item
+  168).** Item 165 (below) stopped the REST `/admin/reload-config` endpoint
+  from ever stringifying a raw pydantic/YAML exception into an HTTP error
+  body. But `cli.py`'s `load_config_context` — shared by the CLI and by the
+  admin config-governance "validate"/"preview" dry-run endpoints — still
+  built its own error messages the old, unsafe way, relying on a downstream
+  regex scrub (`_humanize_validation_errors`) that only ever ran on the HTTP
+  path, not on the CLI's own terminal/CI-log output. A malformed
+  `connections.yaml` carrying a real credential could still leak it straight
+  into an operator's terminal or CI log. **Fix:** the two structural helpers
+  item 165 introduced (`safe_pydantic_error_lines`, `safe_yaml_error_detail`)
+  moved to the neutral `core/exceptions.py` (both `cli.py` and
+  `admin/service.py` needed to import them, and `admin/service.py` already
+  imports from `cli.py`, so a shared home avoided a circular import), and
+  `load_config_context` now routes every one of its four file loads through
+  them instead of `f"{file}: {exc}"`. See
+  [2. Credential redaction is a tested invariant, not a habit](#2-credential-redaction-is-a-tested-invariant-not-a-habit).
+
+- **2026-08-07 — Closed the `is_connectable()` gap for the SECONDARY
+  connection in a cross-connection join (TODO.md item 163).** Some dialects
+  (Snowflake, BigQuery) support policy/rendering but can't actually be
+  connected to yet (`connections/engine.py` deliberately refuses to open a
+  live connection for them — see the BigQuery entry just below). That guard
+  was only ever checked for a query's *primary* connection. A join whose
+  *secondary* connection was one of these not-yet-connectable dialects
+  wasn't rejected up front the way the same attempt on a primary connection
+  already was — it instead failed later, deep in reflection, as an opaque,
+  masked `NoSuchTableError` (a raw 500, not a clean validation error). No
+  data ever leaked and no check was skipped (the join's `join_group`
+  membership and the joined connection's own policy were both still
+  enforced) — this was purely a confusing-error problem, not a security
+  bypass, but a bad one: an operator debugging a rejected join got no signal
+  about why. **Fix:** the same `is_connectable()` check `init_engine` already
+  runs for a primary connection now also runs for a join's secondary
+  connection, raising the identical, clearly-worded rejection. See
+  [Why policy is per-connection, not global](#why-policy-is-per-connection-not-global).
+
+- **2026-08-07 — Made `column_mask`'s HASH branch an explicit, exhaustive
+  check on all five `DialectAdapter`s, instead of an implicit "falls through
+  to HASH" default (TODO.md item 164).** Every dialect adapter's column-mask
+  renderer already treats an unrecognized date-part or interval unit as a
+  hard rejection (a deliberate exhaustiveness habit, so a future enum member
+  is a forced decision rather than a silent guess) — but the same discipline
+  wasn't applied to `ColumnMaskKind`: an unrecognized mask kind silently
+  rendered as the strongest mask (HASH) instead of raising. Not a live
+  disclosure risk today (`ColumnMaskKind` is a closed, stable four-member
+  enum, and "fails toward the strongest mask" never under-masks a column) —
+  but a gap worth closing on principle before a future fifth mask kind makes
+  it a real one. **Fix:** all five adapters
+  (Postgres/MSSQL/MySQL/Snowflake/BigQuery) now check for `HASH` explicitly
+  and raise a typed `QueryValidationError` for anything else, matching the
+  same pattern already used for date/interval maps.
+
+- **2026-08-07 — A case-different column reference to a joined alias could
+  leave a phantom second copy of that table, which a mandatory row filter
+  then turned into either an unconditioned cross join (duplicated rows) or,
+  under a different internal ordering, a silent bypass of the filter itself
+  (TODO.md item 167).** If a query joins a table under one alias spelling
+  (say `orders AS "O"`) but a column elsewhere in the query refers to it with
+  different letter-casing (`"o.id"`), schema validation's internal bookkeeping
+  ends up with two distinct table objects for what should be a single join
+  occurrence — one for `"O"`, one for the phantom `"o"`. The compiler's
+  mandatory-row-filter step used to walk *every* such name it found, not just
+  the ones the query's actual `FROM`/`JOIN` clause declared. Compiling the
+  exact shape confirmed real, measurable damage: the filter's `WHERE` clause
+  ended up applied to both the real alias and the phantom one, and because the
+  phantom alias was never part of the statement's own `FROM`/`JOIN`, SQL
+  silently added it as an unconditioned cartesian join — multiplying every
+  output row. A first, narrower fix (deduping by name alone) was caught by
+  review as *still* wrong under the opposite internal ordering: it could bind
+  the filter to the phantom object while the alias actually used in the query
+  went completely unfiltered — a real mandatory-row-filter bypass, worse than
+  the row-duplication bug it was meant to fix. **Fix, in two parts, both
+  required:** the mandatory-filter step now walks only the table names the
+  query itself declared in `FROM`/`JOIN` (never the extra casing variants),
+  and resolves each one through the same case-insensitive lookup the
+  `FROM`/`JOIN` clause construction already uses — guaranteeing the filter
+  always binds to the exact object that ends up in the compiled statement,
+  regardless of internal ordering. (Item 169, above, found and closed a
+  second, independent consumer of this same underlying duplication.) See
+  [3. Compilation](#3-compilation--ast--policy-becomes-real-sql).
+
+- **2026-08-07 — `/admin/reload-config`'s generic error handler could leak a
+  live credential in its HTTP 400 response body; fixed with a structural
+  guarantee, not a string scrub (TODO.md item 165).** The endpoint's
+  exception handling built its error message from Python's default
+  stringification of a validation failure — and pydantic's default rendering
+  of certain error kinds includes the *entire offending input*, connection
+  string and password included, truncated but often not enough to hide a
+  short host/password. A syntactically broken `connections.yaml` could leak
+  the same way through a YAML parser error, which embeds the literal
+  offending source line. Reachable by anyone holding the config-reload admin
+  scope. **Fix:** two dedicated exception handlers, ahead of the generic
+  catch-all, that build the error text from only the safe, structured parts
+  of the failure (field name and message — never the raw input value), so
+  the credential is never materialized into a string in the first place
+  rather than being scrubbed out after the fact. Both new regression tests
+  were confirmed to fail with the real credential visible when reverted to
+  the old behavior, then the fix restored — the standard mutation-verify
+  discipline for a new enforcement point. See
+  [2. Credential redaction is a tested invariant, not a habit](#2-credential-redaction-is-a-tested-invariant-not-a-habit).
 
 - **2026-08-07 — `ConnectionProfile.dialect` is now validated against
   `connection_string`'s actual backend, and the fix itself is a case study
