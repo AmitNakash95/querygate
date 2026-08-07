@@ -11701,6 +11701,58 @@ only observable under set-iteration-order variance.
 
 **Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped).
 
+### 164. `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s ✅ DONE
+
+**Shipped 2026-08-07.** All five `column_mask` implementations
+(`PostgresDialectAdapter`/`MSSQLDialectAdapter`/`MySQLDialectAdapter`/
+`SnowflakeDialectAdapter`/`BigQueryDialectAdapter` in
+`compiler/dialect_adapters.py`) now check `if mask.kind is
+ColumnMaskKind.HASH:` explicitly instead of falling through to an
+unconditional final branch, with a shared `_missing_mask_kind` helper
+(matching `_missing_part`/`_missing_unit`'s message style) raising
+`QueryValidationError` for any unrecognized kind. New parametrized coverage
+in `tests/unit/test_dialect_adapters.py::TestColumnMaskExhaustiveness`
+confirms all four real `ColumnMaskKind` members still render unchanged on
+every adapter and that a sentinel/fake kind is rejected on every adapter
+instead of silently rendering as HASH — confirmed to fail for that exact
+reason before the fix by a mutation check. SQLite is intentionally out of
+scope (already rejects HASH explicitly, and is not a registered
+`ConnectionRegistry` dialect).
+
+Surfaced 2026-08-07 by the `security-invariant-reviewer` audit of item 19
+phase 3 (BigQuery), but the pattern is pre-existing across all five
+adapters (Postgres/MSSQL/MySQL/Snowflake/BigQuery), not introduced by this
+item.
+
+**The gap.** Every `DialectAdapter.column_mask` implementation checks
+`ColumnMaskKind.NULL`, `.BUCKET`, and `.LAST` explicitly, then falls through
+to an unconditional final branch that assumes HASH — e.g.
+`# HASH — SHA2 requires an explicit bit length; ...` with no `if
+mask.kind is ColumnMaskKind.HASH` guard above it. Contrast with this
+module's date-part/interval-unit maps, which are all deliberately
+exhaustive (a `.get(part)` returning `None` raises a typed
+`QueryValidationError` naming the dialect) specifically so a future enum
+member is a forced decision, never a silent passthrough — the same
+exhaustiveness doctrine is not applied to `ColumnMaskKind` here.
+
+**Why this is low severity, not a disclosure risk.** `ColumnMaskKind` is a
+closed, stable 4-member enum (NULL/BUCKET/LAST/HASH) that has not changed
+since item 49, and the implicit-else "fails toward the strongest mask" —
+a future 5th kind would render as HASH (a full, salted-looking transform)
+rather than silently rendering the RAW column, so there is no realistic
+version of this gap that leaks more than the caller asked to mask, only a
+theoretical future member that gets over-masked or mis-rendered without a
+clean typed error naming the gap.
+
+**What to do (when prioritized):** add an explicit `if mask.kind is
+ColumnMaskKind.HASH: ...` branch with a final `raise QueryValidationError`
+(or an `assert_never`-style exhaustiveness check) on all five adapters,
+matching the discipline `_missing_part`/`_missing_unit` already establish
+for the date/interval maps.
+
+**Effort:** S (five adapters, one mechanical guard clause each; no design
+change). **Depends on:** none.
+
 ### 165. `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body ✅ DONE
 
 **Surfaced 2026-08-07 by `security-invariant-reviewer` while auditing item
