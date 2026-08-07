@@ -1018,9 +1018,13 @@ class MySQLDialectAdapter(DialectAdapter):
         # a silent-wrong-results bug, not a raised error. `unique=True`
         # makes SQLAlchemy render distinct `amt_1`/`amt_2`-style names per
         # occurrence, the same statement text otherwise unchanged.
-        interval = sa.text(f"INTERVAL :amt {keyword}").bindparams(
-            sa.bindparam("amt", value=amount, unique=True)
-        )  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        # `# fmt: off` keeps the `# nosemgrep` on the `sa.text(...)` match line
+        # (semgrep anchors a multi-line match to its first line, not wherever
+        # the statement happens to close — a trailing-line comment silently
+        # stopped suppressing this once black wrapped the call across lines).
+        # fmt: off
+        interval = sa.text(f"INTERVAL :amt {keyword}").bindparams(sa.bindparam("amt", value=amount, unique=True))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        # fmt: on
         return sa.func.date_add(expr, interval)
 
     def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
@@ -1614,9 +1618,13 @@ class BigQueryDialectAdapter(DialectAdapter):
         # above for the full rationale and the confirmed collision this
         # avoids): a bare `:amt` name is not disambiguated when this method
         # is called more than once in the same compiled statement.
-        interval = sa.text(f"INTERVAL :amt {keyword}").bindparams(
-            sa.bindparam("amt", value=amount, unique=True)
-        )  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        # `# fmt: off` keeps the `# nosemgrep` on the `sa.text(...)` match line
+        # (semgrep anchors a multi-line match to its first line, not wherever
+        # the statement happens to close — a trailing-line comment silently
+        # stopped suppressing this once black wrapped the call across lines).
+        # fmt: off
+        interval = sa.text(f"INTERVAL :amt {keyword}").bindparams(sa.bindparam("amt", value=amount, unique=True))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        # fmt: on
         result = _BQ_ADD_FN[kind](expr, interval)
         # type_coerce for the same nesting reason as date_bucket above:
         # DATE_ADD/DATETIME_ADD/TIMESTAMP_ADD each return the SAME temporal
