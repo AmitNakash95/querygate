@@ -191,6 +191,8 @@ order-of-magnitude, not commitments.
 | 158 | `ConnectionProfile` never validates `dialect` agrees with `connection_string`'s actual backend | S–M | — |
 | 159 | ✅ Cross-connection schema reflection can pick the wrong connection when a join's alias casing differs from a column ref's casing | S | — |
 | 160 | Item 156 follow-up: harden the connection-resolution edge cases a full security-invariant audit surfaced | M | 156 |
+| 161 | Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo ignores which connection a name resolves to | S–M | 159 |
+| 162 | A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed) | S | 159 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2668,4 +2670,138 @@ others:
 finding 4 is scope confirmation only, no code change, unless later
 prioritized). **Depends on:** 156 (shipped — this is entirely about hardening
 its own edges).
+
+### 161. Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo is keyed by table name alone, not by which connection a name resolves to
+
+**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 159's own
+fix** (pre-existing; not introduced or closed by that item — item 159's fix
+only changes which STRING key is used to look up `table_connection`; this is
+a separate defect in what happens to that lookup's result). `_reflect_and_
+validate_scope`'s `physical_tables` reflection cache
+(`validation/schema_validation.py`) is keyed by `physical_key` alone (the
+casefolded physical table name), not by which connection that occurrence
+resolves to:
+
+```python
+if physical_key not in physical_tables:
+    physical_tables[physical_key] = await _load_table(
+        connection_id, physical_name,
+        table_connection_cf.get(name.casefold(), connection_id),
+    )
+source = physical_tables[physical_key]
+```
+
+For a same-connection self-join
+(`test_self_join_reflects_physical_table_once_and_aliases_both`), this is
+correct and deliberate — the physical table is genuinely identical for both
+aliases, so reflecting once and re-aliasing (`source.alias(name)`) is right
+and cheaper than reflecting twice. But `StructuredQuery` also permits a
+CROSS-CONNECTION self-join: the same physical table name, joined to itself,
+with the join declaring a DIFFERENT `connection` than the primary
+(`_validate_table_aliases` in `query_ast/models.py` only requires an alias
+per occurrence of a repeated physical name — it does not forbid the two
+occurrences from naming different connections). In that shape, `physical_key`
+is identical for both aliases even though their resolved `table_cx` values
+differ (alias `a` → primary connection, alias `b` → `connection="other"`).
+Whichever alias's name happens to be processed first (the `needed` set's
+hash-randomized iteration order — the same nondeterminism item 159 fixed for
+the lookup key) reflects the table once, against ITS OWN connection — the
+SECOND alias then silently reuses that same `sa.Table` object, so it is
+compiled and executed against the FIRST alias's connection instead of its own
+declared one. The compiled SQL for the "losing" alias never actually reaches
+the connection the caller named for it.
+
+Unlike item 159 itself, this is NOT fixed by case-folding the lookup: the
+per-alias lookup (via `table_connection_cf`) is already correct; the bug is
+that its result is discarded by the memo's coarser key. Item 156's mask/
+filter/deny-list resolution is unaffected in the sense that it reads a
+separately-computed, correctly-per-alias `scope_connections` map — so the
+POLICY CHECK still runs against the right connection's Policy for each alias
+— but the DATA the compiled query actually reads does not correspond to that
+check for whichever alias lost the race, which is arguably worse than a
+masking gap: the query silently reads a different physical table than the
+one its own Policy was just evaluated against.
+
+**What to do:** key `physical_tables` by `(table_cx, physical_key)` instead
+of `physical_key` alone, so two aliases of the same physical table name only
+share a reflection when they actually resolve to the same connection
+(byte-identical to today for every single-connection query, including
+same-connection self-joins). Alternatively, if a cross-connection self-join
+is judged not worth supporting, reject it explicitly (in `resolve_query_
+table_connections`, where the `join_group` check already lives) rather than
+silently collapsing to one connection — a deliberate product decision either
+way, not one to make silently under this write-up. Add a regression test: a
+self-join where the from-table and the join name the same physical table but
+different connections in the same `join_group`, patching `_load_table` and
+asserting BOTH connection arguments are recorded (one per alias, matching
+each alias's own declared connection) —
+`test_self_join_reflects_physical_table_once_and_aliases_both` already pins
+the single-connection case as reflecting once; this needs the
+cross-connection sibling asserting two.
+
+**Effort:** S–M (mechanical memo-key fix, or a rejection guard, plus one
+regression test; the judgment call is which of the two approaches to take).
+**Depends on:** cross-connection joins/`join_group` (shipped), 159 (shipped —
+same code path; this is what remained after that fix).
+
+### 162. A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed by compiling the shape — row duplication, not just cost)
+
+**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 159's
+own fix, empirically confirmed the same day** (pre-existing; the same
+case-mismatch shape item 159 fixed the connection LOOKUP for, but this is a
+distinct downstream consequence in the compiler, not in schema validation).
+`_reflect_and_validate_scope`'s `needed` set (`validation/schema_validation.py`)
+unions a join's declared alias/table spelling with every column ref's own
+(possibly differently-cased) spelling of the same table — item 159's own
+write-up. Every name in `needed` gets its own entry in the `tables` dict the
+validator returns (`tables[name] = source if name.casefold() == physical_key
+else source.alias(name)`), so a join declared `alias="O"` but referenced only
+as `"o.id"` leaves TWO entries in `tables` — `tables["O"]` and `tables["o"]`
+— both aliasing the same reflected `sa.Table`, even though the query only
+declared one join occurrence. Column-ref resolution is unaffected
+(`resolve_column(tables[t], c)` finds either key), and the compiler's
+FROM/JOIN construction is also unaffected (`_table_by_name` is always called
+with `join.alias or join.table`, i.e. `"O"` only, never the phantom `"o"`) —
+but `compiler/sqlalchemy_compiler.py`'s `_apply_mandatory_row_filters`
+iterates `for key in tables:` (every key, not just the ones the FROM/JOIN
+clause actually uses), so when a `mandatory_row_filter` policy exists on that
+table, it applies a `WHERE` against BOTH `tables["O"]` and `tables["o"]` —
+and SQLAlchemy Core adds any table referenced by a `.where()` clause but
+absent from the statement's own FROM/JOIN list as an implicit comma-join
+(cartesian product).
+
+**Confirmed by compiling the shape** (`from_table="customers"`,
+`select=["customers.id", "o.id"]`, one join `table="orders" alias="O"
+on=["customers.id", "O.customer_id"]`, a `Policy` with a
+`mandatory_row_filter` on `orders.status`) — the compiled SQL is:
+
+```sql
+SELECT customers.id, "O".id AS id_1
+FROM customers JOIN orders AS "O" ON customers.id = "O".customer_id, orders AS o
+WHERE "O".status = 'active' AND o.status = 'active'
+LIMIT 5
+```
+
+The trailing `, orders AS o` is a real, unconditioned cartesian product
+against a second, unrelated copy of `orders` — this multiplies the result set
+(every output row repeated once per row in `orders`, capped only by the
+query's own `LIMIT` on the OUTER result, so the multiplication is real even
+though the final row count is bounded), a genuine correctness bug (duplicated
+rows), not merely wasted cost. Not a policy bypass — no new columns or values
+outside what the query and Policy already allow — but it corrupts the result
+shape the caller asked for.
+
+**What to do:** dedupe `_apply_mandatory_row_filters`'s walk to each table's
+ONE declared effective name (e.g. iterate `query.from_table`/`query.joins`'
+own alias-or-table spellings — the same source `_table_by_name` already uses
+— rather than every key `_reflect_and_validate_scope` happened to populate),
+or, upstream, stop `_reflect_and_validate_scope` from creating more than one
+`tables` entry per declared join occurrence in the first place. Add a
+regression test in `tests/unit/test_compiler.py` matching the shape above:
+assert the rendered SQL's FROM clause names the table exactly once (fails
+today, per the reproduction above).
+
+**Effort:** S (the compiler-side dedupe is small and localized; the shape is
+already confirmed, not hypothetical). **Depends on:** 159 (shipped — same
+`needed`-union behavior that creates the phantom alias).
 
