@@ -11852,3 +11852,103 @@ on the final tree; `black --check` clean.
 **Effort:** S (one route's exception handling; the stripping precedent
 already existed in `admin/service.py` to extend). **Depends on:** none.
 
+### 167. A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed by compiling the shape — row duplication, not just cost) ✅ DONE
+
+**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 159's
+own fix, empirically confirmed the same day** (pre-existing; the same
+case-mismatch shape item 159 fixed the connection LOOKUP for, but this is a
+distinct downstream consequence in the compiler, not in schema validation).
+`_reflect_and_validate_scope`'s `needed` set (`validation/schema_validation.py`)
+unions a join's declared alias/table spelling with every column ref's own
+(possibly differently-cased) spelling of the same table — item 159's own
+write-up. Every name in `needed` gets its own entry in the `tables` dict the
+validator returns (`tables[name] = source if name.casefold() == physical_key
+else source.alias(name)`), so a join declared `alias="O"` but referenced only
+as `"o.id"` leaves TWO entries in `tables` — `tables["O"]` and `tables["o"]`
+— both aliasing the same reflected `sa.Table`, even though the query only
+declared one join occurrence. Column-ref resolution is unaffected
+(`resolve_column(tables[t], c)` finds either key), and the compiler's
+FROM/JOIN construction is also unaffected (`_table_by_name` is always called
+with `join.alias or join.table`, i.e. `"O"` only, never the phantom `"o"`) —
+but `compiler/sqlalchemy_compiler.py`'s `_apply_mandatory_row_filters`
+iterates `for key in tables:` (every key, not just the ones the FROM/JOIN
+clause actually uses), so when a `mandatory_row_filter` policy exists on that
+table, it applies a `WHERE` against BOTH `tables["O"]` and `tables["o"]` —
+and SQLAlchemy Core adds any table referenced by a `.where()` clause but
+absent from the statement's own FROM/JOIN list as an implicit comma-join
+(cartesian product).
+
+**Confirmed by compiling the shape** (`from_table="customers"`,
+`select=["customers.id", "o.id"]`, one join `table="orders" alias="O"
+on=["customers.id", "O.customer_id"]`, a `Policy` with a
+`mandatory_row_filter` on `orders.status`) — the compiled SQL is:
+
+```sql
+SELECT customers.id, "O".id AS id_1
+FROM customers JOIN orders AS "O" ON customers.id = "O".customer_id, orders AS o
+WHERE "O".status = 'active' AND o.status = 'active'
+LIMIT 5
+```
+
+The trailing `, orders AS o` is a real, unconditioned cartesian product
+against a second, unrelated copy of `orders` — this multiplies the result set
+(every output row repeated once per row in `orders`, capped only by the
+query's own `LIMIT` on the OUTER result, so the multiplication is real even
+though the final row count is bounded), a genuine correctness bug (duplicated
+rows), not merely wasted cost. Not a policy bypass — no new columns or values
+outside what the query and Policy already allow — but it corrupts the result
+shape the caller asked for.
+
+**Shipped: a two-part fix, both required** — a first-draft, name-only dedupe
+was caught understating the bug by `security-invariant-reviewer`'s post-ship
+audit of this very item, before landing.
+
+1. `_apply_mandatory_row_filters` (`compiler/sqlalchemy_compiler.py`) now takes
+   the scope's own `query` and walks only its declared FROM/JOIN occurrence
+   NAMES (`query.from_alias or query.from_table`, then each `join.alias or
+   join.table`) instead of every key in `tables` — so the phantom,
+   differently-cased spelling (e.g. `"o"` alongside the join's own declared
+   `"O"`) is no longer treated as an occurrence to filter at all.
+2. Each declared name is then resolved through `_table_by_name` — the SAME
+   case-insensitive lookup the FROM/JOIN construction itself uses — rather
+   than an exact `tables[key]` dict index. This second part turned out to be
+   load-bearing on its own: `tables` is keyed by two casefold-colliding
+   strings ("O" and "o") built from a Python `set` (`needed`, in
+   `_reflect_and_validate_scope`), so which object lands at which key is
+   iteration-order dependent, and `_table_by_name` — not exact indexing — is
+   what every OTHER lookup in this module already uses to resolve that
+   ambiguity consistently. An exact `tables[key]` index in step 1 alone passed
+   the entire suite (including a same-order-only regression test) while still
+   being wrong under the *other* dict order: it could bind the filter to an
+   alias object absent from the compiled FROM/JOIN clause (reintroducing the
+   exact reported comma-join) while the alias object actually projected went
+   completely unfiltered — a mandatory-row-filter BYPASS on the joined alias,
+   not merely the reported cartesian. Routing through `_table_by_name`
+   guarantees the filter always binds to the identical object the FROM/JOIN
+   loop placed in the statement, regardless of `tables`' iteration order.
+
+A self-join (two distinct declared aliases of the same physical table) still
+gets the filter applied on both, exactly as before
+(`test_mandatory_row_filter_applies_to_every_self_join_alias` continues to
+pass unchanged) — declared names are guaranteed case-insensitively unique by
+the AST's own alias validator, so they never collide with each other, only
+with a column-ref-only phantom spelling that is no longer walked at all.
+
+Regression test
+`test_mandatory_row_filter_does_not_create_phantom_alias_for_case_different_ref`
+in `tests/unit/test_compiler.py` is parametrized over BOTH `tables` dict
+insertion orders (`("O", "o")` and `("o", "O")`) specifically because the
+first-draft fix was only caught by testing the second order — it reproduces
+the item's exact confirmed shape and asserts (a) `orders` is named exactly
+once in the compiled SQL, (b) the filter's value appears exactly once, and
+(c) the filter binds to whichever alias the JOIN clause itself actually
+rendered, not a same-name-but-different-object alias absent from it.
+Mutation-verified twice: reverting part 1 alone reproduces the originally
+reported `, orders AS o` cartesian in the `("O","o")` order and fails for that
+reason; reverting part 2 alone (keeping the name-only dedupe) passes the
+`("O","o")` order but fails the `("o","O")` order with the bypass shape
+described above; restoring both passes both orders.
+
+**Effort:** S (the compiler-side dedupe is small and localized; the shape is
+already confirmed, not hypothetical). **Depends on:** 159 (shipped — same
+`needed`-union behavior that creates the phantom alias).

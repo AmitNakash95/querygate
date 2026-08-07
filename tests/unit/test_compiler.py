@@ -986,6 +986,115 @@ class TestCompiler:
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert compiled.count("acme") == 2
 
+    @pytest.mark.parametrize("insertion_order", [("O", "o"), ("o", "O")])
+    def test_mandatory_row_filter_does_not_create_phantom_alias_for_case_different_ref(
+        self, insertion_order
+    ):
+        """Item 167: a case-different column ref to a joined alias (join declares
+        alias="O", a select ref spells it "o.id") used to leave a SECOND,
+        differently-cased `sa.Table.alias(...)` object in the `tables` dict
+        schema validation builds -- `tables["O"]` from the join's own declared
+        spelling, `tables["o"]` from the column ref's spelling -- both wrapping
+        the same physical `orders` table but as two DISTINCT alias objects.
+        `_apply_mandatory_row_filters` used to walk every key in `tables`, so a
+        `mandatory_row_filter` on `orders` applied its `.where()` against BOTH
+        alias objects; SQLAlchemy Core silently added the phantom "o" alias to
+        the FROM clause as an unconditioned comma-join -- a real cartesian
+        product (row duplication in the result set), confirmed by compiling
+        this exact shape (see TODO.md item 167's own repro).
+
+        Parametrized over BOTH `tables` dict insertion orders on purpose (a
+        post-fix review, QG-167-1, caught that iterating only the query's own
+        declared occurrence *names* wasn't enough: `tables[key]` was an exact
+        dict index, but the FROM/JOIN loop resolves through `_table_by_name`,
+        which is a case-INSENSITIVE, first-match-in-iteration-order search.
+        `needed` in `_reflect_and_validate_scope` is a Python `set`, so which
+        of "O"/"o" iterates first -- and therefore which object actually ends
+        up in the FROM/JOIN clause -- is hash-order dependent, not guaranteed
+        to be the declared spelling. The `("o", "O")` case reproduces that:
+        without routing the row-filter lookup through `_table_by_name` too, the
+        filter binds to an alias object ABSENT from the FROM/JOIN clause
+        (recreating the phantom comma-join) while the alias actually projected
+        goes completely unfiltered -- a mandatory-row-filter bypass, not just a
+        cartesian product.)"""
+        metadata = sa.MetaData()
+        customers = sa.Table(
+            "customers",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+        )
+        orders = sa.Table(
+            "orders",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("customer_id", sa.Integer),
+            sa.Column("status", sa.String(20)),
+        )
+        # Mirrors exactly what `_reflect_and_validate_scope` builds for this
+        # query: one entry for the join's declared alias ("O"), plus one
+        # phantom entry for the column ref's differently-cased spelling ("o")
+        # -- inserted in each parametrized order in turn.
+        tables = {"customers": customers}
+        for name in insertion_order:
+            tables[name] = orders.alias(name)
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="orders", column="status", value="active")
+            ]
+        )
+        query = StructuredQuery(
+            from_table="customers",
+            select=["customers.id", "o.id"],
+            joins=[JoinSpec(table="orders", alias="O", on=["customers.id", "O.customer_id"])],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, policy)
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+
+        # `orders` must be named exactly once in the compiled statement: once
+        # via the real JOIN. A second, bare "orders" is the implicit,
+        # unconditioned comma-join that multiplies rows.
+        assert compiled.lower().count("orders") == 1, compiled
+        assert ", orders" not in compiled.lower(), compiled
+        # The filter must be applied exactly once...
+        assert compiled.count("active") == 1, compiled
+        # ...and specifically against whichever alias the REAL JOIN clause
+        # itself rendered -- not a same-name-but-different-object alias absent
+        # from FROM/JOIN. Slice up to the first comma so a reintroduced phantom
+        # comma-join (item 167's original bug) can't be mistaken for the real
+        # join alias by this assertion too -- it must fail on `count("orders")`
+        # above, not quietly pass here by reading the phantom's own alias.
+        real_join_clause = compiled.split("FROM", 1)[1].split("WHERE", 1)[0].split(",", 1)[0]
+        rendered_alias = "O" if '"O"' in real_join_clause else "o"
+        assert f"{rendered_alias}.status = 'active'" in compiled.replace('"', ""), compiled
+
+    def test_mandatory_row_filter_resolves_a_case_mismatched_tables_key_without_a_raw_keyerror(
+        self,
+    ):
+        """A `tables` key case-mismatched against the query's own from_table
+        spelling (e.g. `tables={"Orders": ...}` for `from_table="orders"`) must
+        still resolve through `_table_by_name` here, the same as it does for
+        the FROM/JOIN construction above -- not raise a raw `KeyError` that
+        would surface as an uncaught 500 instead of the usual typed
+        `QueryValidationError`/successful compile."""
+        metadata = sa.MetaData()
+        orders = sa.Table(
+            "Orders",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("status", sa.String(20)),
+        )
+        tables = {"Orders": orders}
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="orders", column="status", value="active")
+            ]
+        )
+        query = StructuredQuery(from_table="orders", select=["orders.id"], limit=5)
+        stmt, _ = compile_structured_query(query, tables, policy)
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "active" in compiled, compiled
+
     def test_query_level_distinct_renders(self):
         tables = _make_tables()
         query = StructuredQuery(
