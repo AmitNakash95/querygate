@@ -388,7 +388,7 @@ claim when the work ships or before explicitly handing the item back.
   original scope's trailing "…" has a real home instead of keeping item 19
   open indefinitely. Unscoped — no specific dialect chosen or investigated;
   picking one is a product/roadmap decision, not a technical blocker.*
-- [ ] **163** — a not-connectable dialect (Snowflake/BigQuery) as the
+- [x] **163** — a not-connectable dialect (Snowflake/BigQuery) as the
   SECONDARY side of a cross-connection join never reaches the
   `is_connectable()` guard. *Surfaced 2026-08-07 by
   `security-invariant-reviewer` auditing item 19 phase 3 — pre-existing
@@ -422,6 +422,14 @@ claim when the work ships or before explicitly handing the item back.
   duplication, not just cost). *Surfaced 2026-08-07 by
   `security-invariant-reviewer` auditing item 159's own fix — small,
   self-contained compiler-side dedupe.*
+- [ ] **168** — cross-connection joins are reflected as if both connections
+  are always on the same physical server instance, with nothing that
+  actually checks it. *Surfaced 2026-08-07 by `security-invariant-reviewer`
+  auditing item 163's own fix — pre-existing, not caused by that item;
+  requires an operator misconfiguration to trigger (no caller-supplied input
+  can), but the failure mode is a silent wrong-database read rather than an
+  error; needs a design call (validate same-host at config-load time vs.
+  document the assumption) before implementation.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
