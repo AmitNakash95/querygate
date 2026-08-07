@@ -490,6 +490,107 @@ connections:
     assert result.query_allowed is True
 
 
+def test_candidate_simulation_reports_a_not_connectable_secondary_as_a_denial_not_a_500(
+    tmp_path, monkeypatch
+):
+    """Post-ship audit finding on TODO.md item 163's own fix (found by
+    `security-invariant-reviewer`, 2026-08-07): `resolve_scope_connections`/
+    `resolve_query_table_connections` now raise `ConfigValidationError` (not
+    just `NotFoundError`/`QueryValidationError`) for a candidate secondary
+    connection whose dialect isn't yet connectable (Snowflake/BigQuery).
+    `simulate_candidate_policy`'s two call sites only caught the original two
+    exception types, so the new one escaped past this function entirely —
+    the whole simulate request 422'd instead of reporting the same
+    `query_connection_denied` decision a `join_group` mismatch already
+    reports, and (see the sibling audit test below) skipped its audit event
+    too. This asserts the report shape; the audit test asserts the event."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_connections = """
+connections:
+  - id: fresh
+    dialect: postgresql
+    connection_string: ${TEST_ADMIN_URL}
+  - id: other
+    dialect: snowflake
+    connection_string: snowflake://user:pass@account/db
+"""
+    candidate_policy = """
+default:
+  enabled: true
+connections:
+  fresh:
+    join_group: shared
+  other:
+    join_group: shared
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            connections_yaml=candidate_connections,
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            connection="fresh",
+            query=_cross_connection_join_query(),
+        ),
+    )
+
+    assert result.decision == "deny"
+    assert result.query_allowed is False
+    assert "query_connection_denied" in {reason.code for reason in result.reasons}
+
+
+def test_candidate_simulation_still_emits_its_audit_event_for_a_not_connectable_secondary(
+    tmp_path, monkeypatch
+):
+    """Sibling to the test above: before the fix, the escaped
+    `ConfigValidationError` skipped `simulate_candidate_policy`'s own
+    `audit_config_change(action="simulate", ...)` call entirely, since it
+    never reached the end of the function — an admin could exercise the
+    simulator against a candidate config with a not-connectable secondary
+    without leaving a simulate record."""
+    audit_path = tmp_path / "simulation-not-connectable-audit.jsonl"
+    set_audit_sink(JsonlAuditSink(str(audit_path)))
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_connections = """
+connections:
+  - id: fresh
+    dialect: postgresql
+    connection_string: ${TEST_ADMIN_URL}
+  - id: other
+    dialect: snowflake
+    connection_string: snowflake://user:pass@account/db
+"""
+    candidate_policy = """
+default:
+  enabled: true
+connections:
+  fresh:
+    join_group: shared
+  other:
+    join_group: shared
+"""
+
+    governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            connections_yaml=candidate_connections,
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            connection="fresh",
+            query=_cross_connection_join_query(),
+        ),
+    )
+
+    event = json.loads(audit_path.read_text())
+    assert event["action"] == "simulate"
+    assert event["outcome"] == "success"
+
+
 def test_candidate_simulation_reports_a_mandatory_filter_declared_only_on_the_joined_connection(
     tmp_path, monkeypatch
 ):
