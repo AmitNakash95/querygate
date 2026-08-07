@@ -686,6 +686,154 @@ that loads both files, runs full Pydantic validation, and cross-checks that
 every `connections:` key in `policy.yaml` corresponds to a real connection
 id — runnable in CI/CD before a config change ships.
 
+### 19. Additional dialects (MySQL, Snowflake, BigQuery) ✅ DONE
+
+**MySQL (phase 1) shipped 2026-08-06.** `MySQLDialectAdapter`
+(`compiler/dialect_adapters.py`) + `MySQLSessionAdapter`
+(`connections/dialects.py`), registered in the item-57 adapter registries —
+purely additive, no existing dispatch site touched. Verified against a real
+MySQL 8.4 server, not just rendering-only tests: `tests/integration/test_mysql_live.py`
+(`make test-mysql-live`), a dedicated CI job (`.github/workflows/ci.yml`'s
+`mysql-live`), and unit coverage in `test_dialect_adapters.py` +
+`test_date_primitives.py`'s exhaustive per-dialect suite. Two genuine
+capability gaps decided the reject-don't-emulate way: MySQL's bare
+`STDDEV`/`VARIANCE` are population statistics (mapped to `STDDEV_SAMP`/
+`VAR_SAMP` instead, to match Postgres's/MSSQL's sample-statistic semantics);
+`ON DUPLICATE KEY UPDATE` can't target a specific `conflict_columns` set
+(rejected, with its own accurate message — see the 2026-08-06 Decision Log
+entry for the full write-up, including the `list_live_tables()` system-schema
+gap this item's own live testing found and fixed). **Not done in this
+pass, honestly:** `test_compiler.py`/`test_cte.py`/`test_nonequi_joins.py`/
+`test_set_operations.py`/`test_column_masking.py` still parametrize only
+postgresql/mssql/sqlite — extending those is real, open follow-on work, not
+required to call MySQL phase 1 shipped. No MySQL cost estimator either (falls
+back to the existing "any other dialect proceeds under the reactive
+guardrails" behavior).
+
+**Snowflake (phase 2 — rendering-only, NOT live-verified) shipped 2026-08-06.**
+`DatabaseDialect` gained a `snowflake` member with a real
+`SnowflakeDialectAdapter` (`compiler/dialect_adapters.py`) +
+`SnowflakeSessionAdapter` (`connections/dialects.py`), registered in the
+item-57 adapter registries — purely additive. Covers the same primitive
+surface as the other three dialects: `DATE_TRUNC`-based date bucketing
+(`week` computed explicitly via `DAYOFWEEKISO` rather than the
+`WEEK_START`-session-dependent `DATE_TRUNC('week', ...)`), native `NULLS
+FIRST/LAST`, sample-statistic `STDDEV`/`VARIANCE` (matches Postgres, unlike
+MySQL's population-default bare names), `LISTAGG`, a genuine `ARRAY_AGG`
+(real ARRAY type), `PERCENTILE_CONT ... WITHIN GROUP` as a plain aggregate,
+full ROWS/RANGE window frames, distinct-only `INTERSECT`/`EXCEPT`. Upsert is
+rejected, not emulated: Snowflake's idiom is `MERGE`, with no
+single-target-constraint model the way `conflict_columns`/`update_columns`
+express one (see the 2026-08-06 Decision Log entry for the full write-up).
+
+`connections/engine.py`'s `init_engine` refuses to actually open a Snowflake
+connection, dispatched through `SessionDialectAdapter.is_connectable()` (a
+registered capability method, not an inline dialect comparison — 2026-08-06
+`architecture-boundary-reviewer` finding) rather than a literal
+`profile.dialect == DatabaseDialect.SNOWFLAKE` check. `snowflake-sqlalchemy`'s
+driver has no async SQLAlchemy engine support, and this codebase's whole
+execution pipeline is built on `AsyncSession`/`AsyncEngine`. A Snowflake
+`ConnectionProfile` fails cleanly with an explained, client-actionable
+`ConfigValidationError` (not a masked 500 — 2026-08-06
+`security-invariant-reviewer` finding: an earlier version raised a bare
+`ValueError`, which REST/MCP's error masking treats as an opaque internal
+error rather than the explained rejection this guard was written to give)
+the first time it's used, rather than connecting. **Nothing about
+Snowflake's SQL rendering is live-verified** — there is no Snowflake
+instance available in this project's environment (unlike Postgres/MySQL/MSSQL,
+which run in Docker) and no real account credentials; every claim is backed by
+Snowflake's public SQL reference docs. The two adapters are tested two
+different ways, not both against the real dialect object (2026-08-06
+`claim-reviewer` finding): `SnowflakeDialectAdapter`'s output is compiled
+against a real, installed `snowflake.sqlalchemy` dialect object
+(`tests/unit/test_dialect_adapters.py`'s `TestSnowflake*` classes);
+`SnowflakeSessionAdapter` is tested against recording fakes asserting the
+exact SQL text/params it builds (`tests/unit/test_dialects.py`'s Snowflake
+session-adapter section) — its statements are built with `sa.text(...)`
+directly, never compiled through any dialect object. Neither reaches a
+live server (`tests/unit/test_connections_engine.py`'s engine-guard test
+proves the connection attempt itself never happens). Do not treat this the
+way MySQL phase 1's live-tested status is treated. See item 157 for the
+live-verification/deeper-parity follow-up, and item 158 for a related,
+dialect-agnostic gap this item's own audit also surfaced (`dialect` is never
+validated against `connection_string`'s actual backend, for any dialect).
+
+**BigQuery (phase 3 — rendering-only, NOT live-verified) shipped 2026-08-07.**
+`DatabaseDialect` gained a `bigquery` member with a real
+`BigQueryDialectAdapter` (`compiler/dialect_adapters.py`) +
+`BigQuerySessionAdapter` (`connections/dialects.py`), registered in the
+item-57 adapter registries — purely additive, following the exact
+Snowflake-phase shape and honesty discipline. Covers the same primitive
+surface: native `NULLS FIRST/LAST`, sample-statistic `STDDEV`/`VARIANCE`
+(both documented BigQuery aliases of the `_SAMP` forms), `STRING_AGG`, a
+genuine `ARRAY_AGG` (real native `ARRAY<T>` type), full ROWS/RANGE window
+frames with numeric offsets, distinct-only `INTERSECT`/`EXCEPT`.
+`PERCENTILE_CONT` is rejected (BigQuery's own syntax requires `OVER(...)` —
+a navigation/window function, not a `GROUP BY`-compatible aggregate, the
+same gap as MSSQL's). Upsert is rejected, not emulated, for a reason
+stronger than Snowflake's: BigQuery's only idiom is `MERGE`, and its
+`PRIMARY KEY`/`UNIQUE` constraints — even when declared — are documented as
+NOT ENFORCED (query-optimizer hints only), so there is no database-enforced
+uniqueness for `conflict_columns` to even name a real target against.
+
+**The one genuinely new mechanism this dialect needed.** BigQuery, uniquely
+among the five dialects, has THREE strictly-typed temporal functions per
+operation (`DATE_TRUNC`/`DATETIME_TRUNC`/`TIMESTAMP_TRUNC`,
+`DATE_ADD`/`DATETIME_ADD`/`TIMESTAMP_ADD`) rather than one polymorphic
+function — each accepts only its own operand type, with a DIFFERENT
+unit/date_part vocabulary per type (documented as such in Google's docs).
+`BigQueryDialectAdapter.date_bucket`/`date_add` dispatch on the operand's
+SQLAlchemy Core `.type` (`_bq_temporal_kind`) and reject, rather than guess,
+when that type can't be determined. This surfaced a genuine, honest product
+fact when BigQuery was integrated into `test_date_primitives.py`'s shared
+cross-dialect suite (Snowflake's phase did NOT get folded into that suite —
+an architecture-boundary-reviewer finding on that item this one does not
+repeat): `date_add(now(), 'year', ...)` — a composition `NowExpr`'s own
+docstring recommends — does not render on BigQuery, because `now()` renders
+as a `TIMESTAMP` and `TIMESTAMP_ADD` genuinely lacks week/month/year. An
+agent needing calendar-unit arithmetic relative to "now" on BigQuery must
+cast first or reference a DATETIME-typed column directly — reject and point
+at primitives, not synthesize, the same item-74 posture.
+
+`connections/engine.py`'s `init_engine` refuses to actually open a BigQuery
+connection for TWO independent reasons: the same missing-async-driver gap
+Snowflake has, and a second, BigQuery-specific one — its dialect's
+`create_connect_args` resolves real Google credentials and builds a live
+`google.cloud.bigquery.Client` at ENGINE-CONSTRUCTION time. The second
+reason is why the first can't be confirmed the simple way Snowflake's was:
+with no GCP credentials configured (this project's environment), a bare
+attempt to construct an async engine against a `bigquery://` URL fails
+INSIDE `create_connect_args` with `google.auth.exceptions.
+DefaultCredentialsError` — confirmed directly by reading the installed
+package's source and by observation — before SQLAlchemy's own async-driver
+check ever gets a chance to run and raise the `InvalidRequestError`
+Snowflake's driver raises directly. (With a fake-but-valid credentials file
+supplied to get past that step, the identical `InvalidRequestError` was
+also confirmed for BigQuery's driver.) Both failure modes are pre-empted by
+the same registered `is_connectable()` seam Snowflake established, reused
+rather than reinvented. Unlike Snowflake,
+`BigQuerySessionAdapter` also documents a THIRD, deeper gap: BigQuery has no
+session-scoped SQL statement at all (no SET/ALTER SESSION equivalent —
+`apply_session_guardrails` is a genuine no-op, not an unverified rendered
+statement), and no default per-connection session identifier
+(`capture_session_identifier`/`cancel_session` raise `NotImplementedError`
+rather than fabricate one). Tested the same two-different-ways split as
+Snowflake: `BigQueryDialectAdapter` compiles against a real, installed
+`sqlalchemy_bigquery` dialect object (`tests/unit/test_dialect_adapters.py`'s
+`TestBigQuery*` classes); `BigQuerySessionAdapter` against recording fakes
+(`tests/unit/test_dialects.py`'s BigQuery section). See the new BigQuery
+live-verification follow-up item for what closing the live-account gap
+requires.
+
+**Item scope closed 2026-08-07.** All three dialects this item originally
+named ("MySQL, Snowflake, BigQuery, …") have shipped — one fully
+live-verified (MySQL), two rendering-only and explicitly flagged as such
+(Snowflake, BigQuery). The trailing "…" in the original scope always implied
+more dialects could be added later; that open-ended possibility is now
+tracked as its own item so this one can close honestly rather than stay open
+indefinitely on the strength of an ellipsis. See the new "further dialects
+beyond MySQL/Snowflake/BigQuery" item for that.
+
 ### 20. Client SDK / agent-framework integration examples ✅ DONE
 
 **Shipped:** `examples/claude_agent_sdk_integration.py` — a runnable script

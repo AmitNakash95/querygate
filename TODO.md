@@ -50,7 +50,7 @@ order-of-magnitude, not commitments.
 | 16 | ✅ Column policy case-sensitivity gap | XS | — |
 | 17 | ✅ No config validation CLI | S | — |
 | 18 | Stored-procedure catalog | XL | — |
-| 19 | Additional dialects (MySQL phase 1 shipped; Snowflake phase 1 — rendering-only, not live-verified — shipped; BigQuery open) | L–XL (per remaining dialect) | 2 (do MSSQL first) |
+| 19 | ✅ Additional dialects (MySQL live-verified; Snowflake/BigQuery rendering-only, not live-verified) | L–XL (per remaining dialect) | 2 (do MSSQL first) |
 | 20 | ✅ Client SDK / integration examples | S | — |
 | 21 | ✅ Principal policy must apply to every MCP/config surface | S | 6, 8, 10 |
 | 22 | ✅ Principal-aware connection/tool visibility | S–M | 6, 8 |
@@ -191,6 +191,10 @@ order-of-magnitude, not commitments.
 | 158 | `ConnectionProfile` never validates `dialect` agrees with `connection_string`'s actual backend | S–M | — |
 | 159 | Cross-connection schema reflection can pick the wrong connection when a join's alias casing differs from a column ref's casing | S | — |
 | 160 | ✅ Item 156 follow-up: harden the connection-resolution edge cases a full security-invariant audit surfaced (findings 1, 2, 4 fixed; finding 3 open — needs a maintainer decision) | M | 156 |
+| 161 | BigQuery live-server verification and deeper feature parity (item 19 phase 3 residual) | L–XL | 19 |
+| 162 | Dialects beyond MySQL/Snowflake/BigQuery (item 19's open-ended "…" scope) | unscoped | — |
+| 163 | A not-connectable dialect (Snowflake/BigQuery) as the SECONDARY side of a cross-connection join never reaches the `is_connectable()` guard | S–M | — |
+| 164 | `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s | S | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -570,86 +574,13 @@ parameters, whether it's confirmed read-only) rather than a generic
 pass-through, matching the "safe stored procedure/tool catalog pattern"
 called out as a goal but intentionally not attempted in v1.
 
-### 19. Additional dialects (MySQL phase 1 shipped 2026-08-06; Snowflake phase 1 — rendering-only, NOT live-verified — shipped 2026-08-06; BigQuery still open)
+### 19. Additional dialects (MySQL, Snowflake, BigQuery) ✅ DONE
 
-**MySQL (phase 1) shipped 2026-08-06.** `MySQLDialectAdapter`
-(`compiler/dialect_adapters.py`) + `MySQLSessionAdapter`
-(`connections/dialects.py`), registered in the item-57 adapter registries —
-purely additive, no existing dispatch site touched. Verified against a real
-MySQL 8.4 server, not just rendering-only tests: `tests/integration/test_mysql_live.py`
-(`make test-mysql-live`), a dedicated CI job (`.github/workflows/ci.yml`'s
-`mysql-live`), and unit coverage in `test_dialect_adapters.py` +
-`test_date_primitives.py`'s exhaustive per-dialect suite. Two genuine
-capability gaps decided the reject-don't-emulate way: MySQL's bare
-`STDDEV`/`VARIANCE` are population statistics (mapped to `STDDEV_SAMP`/
-`VAR_SAMP` instead, to match Postgres's/MSSQL's sample-statistic semantics);
-`ON DUPLICATE KEY UPDATE` can't target a specific `conflict_columns` set
-(rejected, with its own accurate message — see the 2026-08-06 Decision Log
-entry for the full write-up, including the `list_live_tables()` system-schema
-gap this item's own live testing found and fixed). **Not done in this
-pass, honestly:** `test_compiler.py`/`test_cte.py`/`test_nonequi_joins.py`/
-`test_set_operations.py`/`test_column_masking.py` still parametrize only
-postgresql/mssql/sqlite — extending those is real, open follow-on work, not
-required to call MySQL phase 1 shipped. No MySQL cost estimator either (falls
-back to the existing "any other dialect proceeds under the reactive
-guardrails" behavior).
-
-**Snowflake (phase 1 — rendering-only, NOT live-verified) shipped 2026-08-06.**
-`DatabaseDialect` gained a `snowflake` member with a real
-`SnowflakeDialectAdapter` (`compiler/dialect_adapters.py`) +
-`SnowflakeSessionAdapter` (`connections/dialects.py`), registered in the
-item-57 adapter registries — purely additive. Covers the same primitive
-surface as the other three dialects: `DATE_TRUNC`-based date bucketing
-(`week` computed explicitly via `DAYOFWEEKISO` rather than the
-`WEEK_START`-session-dependent `DATE_TRUNC('week', ...)`), native `NULLS
-FIRST/LAST`, sample-statistic `STDDEV`/`VARIANCE` (matches Postgres, unlike
-MySQL's population-default bare names), `LISTAGG`, a genuine `ARRAY_AGG`
-(real ARRAY type), `PERCENTILE_CONT ... WITHIN GROUP` as a plain aggregate,
-full ROWS/RANGE window frames, distinct-only `INTERSECT`/`EXCEPT`. Upsert is
-rejected, not emulated: Snowflake's idiom is `MERGE`, with no
-single-target-constraint model the way `conflict_columns`/`update_columns`
-express one (see the 2026-08-06 Decision Log entry for the full write-up).
-
-**Deliberately incomplete, and load-bearing:** `connections/engine.py`'s
-`init_engine` refuses to actually open a Snowflake connection, dispatched
-through `SessionDialectAdapter.is_connectable()` (a registered capability
-method, not an inline dialect comparison — 2026-08-06
-`architecture-boundary-reviewer` finding) rather than a literal
-`profile.dialect == DatabaseDialect.SNOWFLAKE` check. `snowflake-sqlalchemy`'s
-driver has no async SQLAlchemy engine support, and this codebase's whole
-execution pipeline is built on `AsyncSession`/`AsyncEngine`. A Snowflake
-`ConnectionProfile` fails cleanly with an explained, client-actionable
-`ConfigValidationError` (not a masked 500 — 2026-08-06
-`security-invariant-reviewer` finding: an earlier version raised a bare
-`ValueError`, which REST/MCP's error masking treats as an opaque internal
-error rather than the explained rejection this guard was written to give)
-the first time it's used, rather than connecting. **Nothing about
-Snowflake's SQL rendering is live-verified** — there is no Snowflake
-instance available in this project's environment (unlike Postgres/MySQL/MSSQL,
-which run in Docker) and no real account credentials; every claim is backed by
-Snowflake's public SQL reference docs. The two adapters are tested two
-different ways, not both against the real dialect object (2026-08-06
-`claim-reviewer` finding): `SnowflakeDialectAdapter`'s output is compiled
-against a real, installed `snowflake.sqlalchemy` dialect object
-(`tests/unit/test_dialect_adapters.py`'s `TestSnowflake*` classes);
-`SnowflakeSessionAdapter` is tested against recording fakes asserting the
-exact SQL text/params it builds (`tests/unit/test_dialects.py`'s Snowflake
-session-adapter section) — its statements are built with `sa.text(...)`
-directly, never compiled through any dialect object. Neither reaches a
-live server (`tests/unit/test_connections_engine.py`'s engine-guard test
-proves the connection attempt itself never happens). Do not treat this the
-way MySQL phase 1's live-tested status is treated. See item 157 for the
-live-verification/deeper-parity follow-up, and item 158 for a related,
-dialect-agnostic gap this item's own audit also surfaced (`dialect` is never
-validated against `connection_string`'s actual backend, for any dialect).
-
-**Remaining scope — Effort: L–XL.** BigQuery is architecturally different
-from all four shipped/attempted dialects (no native async driver, a
-different auth model, a different SQL dialect for date functions) and is
-realistically L–XL, closer to "add a new connection type" than "extend an
-enum." The item-57/item-19-phase-1 adapter pattern (one `DialectAdapter` +
-one `SessionDialectAdapter`, registered, no inline `if dialect == ...`) is
-the proven template to follow.
+MySQL shipped fully live-verified (phase 1); Snowflake and BigQuery shipped
+rendering/compilation-only, explicitly NOT live-verified (phases 2–3) —
+follow-up items 157 (Snowflake) and 161 (BigQuery) track closing that gap,
+and item 162 tracks any dialect beyond these three.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 19).
 
 ### 20. Client SDK / agent-framework integration examples ✅ DONE
 
@@ -2584,8 +2515,9 @@ session-guardrail-mismatch case and the Snowflake `is_connectable()` case in
 one place, rather than teaching `init_engine` a second, narrower parse-based
 check.
 
-**Effort:** S–M (one validator + tests across all four dialects' URL
-schemes; no runtime architecture change). **Depends on:** none — buildable
+**Effort:** S–M (one validator + tests across all five dialects' URL
+schemes — BigQuery joined this list 2026-08-07 via item 19 phase 3; no
+runtime architecture change). **Depends on:** none — buildable
 independently of item 157.
 
 ### 159. Cross-connection schema reflection can pick the wrong connection when a join's alias casing differs from a column ref's casing
@@ -2739,4 +2671,216 @@ unrelated finding in the same pass — `_snapshot_connection_resolver`'s
 closure silently discarding its own `principal` argument — was also fixed and
 pinned with its own regression test; see the PRODUCT_GUIDE.md entry for full
 detail on both.
+
+### 161. BigQuery live-server verification and deeper feature parity (item 19 phase 3 residual)
+
+Item 19 phase 3 (2026-08-07) shipped `BigQueryDialectAdapter`/
+`BigQuerySessionAdapter` as **rendering-level only** — every SQL idiom is
+backed by Google's public BigQuery SQL reference docs.
+`BigQueryDialectAdapter` is checked by compiling against a real, installed
+`sqlalchemy_bigquery` dialect object; `BigQuerySessionAdapter` is checked
+against recording fakes asserting the exact SQL text/params it builds, not
+against that real dialect object. **None of it has run against a live
+BigQuery project**, and `connections/engine.py` deliberately refuses to open
+a BigQuery connection at all today (`SessionDialectAdapter.is_connectable()`
+returns `False` for it — `sqlalchemy_bigquery`'s driver has no async
+SQLAlchemy engine support, and separately its dialect resolves real Google
+credentials and builds a live client at engine-construction time — see the
+2026-08-07 Decision Log entry). This item is the honest residual so that gap
+isn't silently lost, following item 157's exact template for Snowflake.
+
+**What to do (when prioritized), roughly in dependency order:**
+
+1. **Async execution path.** Decide and build how BigQuery actually executes
+   a query through this pipeline. `sqlalchemy_bigquery` is sync-only (its
+   DBAPI wraps `google.cloud.bigquery`'s own synchronous, HTTP-based REST
+   client — there is no lower-level async transport to build on the way a
+   raw async driver would give one), and the pipeline
+   (`execution/service.py`, `schema/reflection.py`,
+   `execution/cost_estimation.py`, ...) is built on `AsyncSession`/
+   `AsyncEngine` throughout — this needs either (a) a real
+   `asyncio.to_thread`-wrapped facade that satisfies enough of the
+   `AsyncSession`/`AsyncEngine` surface for every existing call site to keep
+   working unchanged, or (b) confirming whether a genuinely async BigQuery
+   SQLAlchemy dialect has shipped since 2026-08-07 (unverified at time of
+   writing — re-check before committing to either (a) or (b), don't trust
+   this line). Once async support exists, remove `is_connectable`'s BigQuery
+   guard — but also resolve finding 2 below, since credential resolution at
+   engine-construction time is a SEPARATE blocker from the async-driver gap
+   and would need its own fix (e.g. deferring `Client` construction, or
+   accepting it as a one-time synchronous cost at connection-pool warm-up).
+2. **Engine-construction-time credential resolution.** Confirmed directly
+   during item 19 phase 3's own investigation:
+   `sqlalchemy_bigquery.BigQueryDialect.create_connect_args` builds a real
+   `google.cloud.bigquery.Client` (resolving Google Application Default
+   Credentials) the moment an engine is constructed, not when a connection
+   is actually opened — a materially different lifecycle from every other
+   supported dialect here, where `create_engine`/`create_async_engine` is
+   lazy. Decide whether this is acceptable as-is (a `ConnectionProfile`'s
+   engine is already lazily constructed on first use via `get_engine`, so in
+   practice this only moves the credential-resolution cost slightly earlier
+   than "first query," not before) or needs its own guard/health-check
+   surface (e.g. an explicit `POST /admin/connections/{id}/test` that
+   surfaces a credentials problem before an agent's first real query hits
+   it).
+3. **Live verification.** Once (1)/(2) land and a real BigQuery project/
+   credentials are available (a GCP free-tier project or a design-partner's
+   own), add `tests/integration/test_bigquery_live.py` mirroring
+   `test_mysql_live.py`'s shape, and a `make test-bigquery-live` target —
+   deliberately NOT added in phase 3 per this item's own scoping (no way to
+   stand up a BigQuery project in this sandboxed environment or in CI).
+   Confirm each documented-but-unverified claim against real data,
+   especially: the three-way DATE/DATETIME/TIMESTAMP dispatch actually
+   picking the right function against REFLECTED (not hand-typed) column
+   types from a real BigQuery table, `ISOWEEK`'s Monday-start alignment
+   matching Postgres's/MSSQL's/Snowflake's ISO week for the same date,
+   `CURRENT_TIMESTAMP()`'s UTC guarantee, and the RANGE-with-numeric-offset
+   window frame support.
+4. **Cost estimation.** No BigQuery cost estimator exists (falls back to
+   "any other dialect proceeds under the reactive guardrails", the same as
+   MySQL/Snowflake). BigQuery's dry-run query (`jobs.query` with
+   `dryRun=true`, which returns bytes-processed without executing) would be
+   the natural basis for one, dispatched the same way
+   `estimate_postgres_query_cost`/`estimate_mssql_query_cost` are — and,
+   unlike Postgres's/MSSQL's row/cost-based estimate, would naturally
+   express BigQuery's own cost dimension (bytes scanned, which is what
+   BigQuery actually bills on) rather than forcing a row-count-shaped answer
+   onto a byte-based pricing model.
+5. **Test-suite integration gaps.** `test_compiler.py`/`test_cte.py`/
+   `test_nonequi_joins.py`/`test_set_operations.py`/`test_column_masking.py`
+   still don't parametrize BigQuery at all (deliberately kept out — see
+   `tests/unit/test_dialect_adapters.py`'s dedicated `TestBigQuery*` classes
+   for where phase 3's coverage actually lives instead).
+   `test_date_primitives.py`'s shared suite WAS extended to include BigQuery
+   in phase 3 (unlike Snowflake's phase, which is item 157's own flagged
+   gap) — but only for `DatePart`/`IntervalUnit` exhaustiveness, not a live
+   differential.
+6. **Auth/connection-shape model.** BigQuery's connection shape (GCP project
+   ID, dataset, service-account JSON or ADC, optional location/region) is
+   more elaborate than a plain `${ENV_VAR}` connection-string secret was
+   designed for — confirm `examples/connections.example.yaml`'s BigQuery
+   example URL shape and `secrets/resolvers.py` cover what a real deployment
+   needs (e.g. a service-account JSON key file path or inline JSON, which
+   doesn't fit a single password-shaped secret the way Postgres/MySQL/MSSQL
+   do).
+
+**Effort:** L–XL (async execution path and the engine-construction-time
+credential-resolution question are the two load-bearing unknowns; the rest
+is incremental once those exist). **Depends on:** item 19 phase 3 (shipped);
+a real BigQuery project/credentials becoming available to this project.
+
+### 162. Dialects beyond MySQL/Snowflake/BigQuery (item 19's open-ended "…" scope)
+
+Item 19 originally read "Additional dialects (MySQL, Snowflake, BigQuery,
+…)" — the trailing "…" always implied more dialects could be added later.
+With MySQL/Snowflake/BigQuery all now shipped (2026-08-06/2026-08-07, item
+19 phases 1–3) and item 19 itself closed and archived, this item exists so
+that open-ended possibility has a real home instead of either being lost or
+keeping item 19 open forever on the strength of an ellipsis.
+
+**Not scoped to a specific dialect on purpose.** Candidates a future pass
+might consider (no priority implied by list order, and none investigated —
+this is a placeholder, not a commitment): Redshift (Postgres-wire-compatible
+enough that much of `PostgresDialectAdapter` might transfer directly, unlike
+Snowflake/BigQuery's from-scratch adapters), DuckDB (increasingly common as
+an embedded analytics engine; has a real async story via `duckdb`'s own
+Python API, unlike Snowflake/BigQuery — worth checking whether that changes
+the "rendering-only phase" pattern entirely for once), Databricks/SQL
+Warehouse, ClickHouse. Whichever is picked should follow the exact
+`DialectAdapter`/`SessionDialectAdapter`-pair-plus-registry template item 57
+established and items 19/73 have now used four times over (MySQL/Snowflake/
+BigQuery, plus the original Postgres/MSSQL pair) — and should do the same
+diligence this item's own precedents did before writing any adapter code:
+confirm the target's actual async-driver story directly (constructing a real
+engine against it, not assuming), rather than guessing from a library's
+name or its sync sibling's reputation.
+
+**Effort:** unscoped (depends entirely on which dialect and its actual
+async-driver/auth-model story — could be S if a dialect turns out to have a
+real async SQLAlchemy driver and Postgres-compatible wire protocol, or
+L–XL if it repeats Snowflake/BigQuery's rendering-only shape). **Depends
+on:** none — the template is proven; picking a dialect is a product/roadmap
+decision, not a technical blocker.
+
+### 163. A not-connectable dialect (Snowflake/BigQuery) as the SECONDARY side of a cross-connection join never reaches the `is_connectable()` guard
+
+Surfaced 2026-08-07 by the `security-invariant-reviewer` audit of item 19
+phase 3 (BigQuery), but the gap is pre-existing and not specific to
+BigQuery — it has been true since item 19 phase 2 shipped Snowflake, and
+this item's own audit is simply the first time it was written down.
+
+**The gap.** `connections/engine.py`'s `init_engine` — the sole place
+`SessionDialectAdapter.is_connectable()` is checked — is only ever called
+for a query's PRIMARY connection. `validation/schema_validation.py`'s
+`resolve_query_table_connections` (and the cross-connection join machinery
+downstream of it) resolves and reflects a joined table's SECONDARY
+connection through `schema/reflection.py`'s own engine access, which never
+routes through `init_engine`'s guard. Concretely: a `join_group`-eligible
+join from a live primary connection to a `dialect: snowflake` or
+`dialect: bigquery` secondary connection is not rejected at validation
+time the way a same-guard primary-connection attempt would be — it instead
+fails later, deeper, with a confusing masked 500 once schema reflection (or
+execution) actually tries to open that engine.
+
+**Why this is lower severity than a guard bypass, not zero severity.** No
+data leaks and no authorization is skipped: `join_group` membership still
+gates whether the join is even permitted, and the joined connection's own
+`Policy` (masks, row filters, deny-lists — item 156) is still consulted
+before anything about the joined table is exposed. The actual failure mode
+is an operator-facing one: `docs/THREAT_MODEL.md`'s QG-41/QG-42 rows
+describe `is_connectable()` as blocking a not-yet-connectable dialect
+"before any of these methods can run" — true for the primary-connection
+path, not exactly true for a secondary join target, which is a narrower
+guard than the docs currently imply.
+
+**What to do (when prioritized):** call
+`get_session_adapter(other_connection.dialect).is_connectable()` alongside
+the existing `join_group` check in (or near)
+`resolve_query_table_connections`, and reject with the same
+`ConfigValidationError`-shaped, client-actionable message `init_engine`'s
+own guard gives — a clean, early, explained rejection instead of a
+confusing masked 500 discovered deep in reflection. Update
+`docs/THREAT_MODEL.md`'s QG-41/QG-42 wording once fixed (or narrow the
+wording now, if this isn't picked up soon, so the docs don't overclaim
+guard coverage in the meantime).
+
+**Effort:** S–M (one additional capability check at an existing validation
+call site; no new architecture). **Depends on:** none — buildable
+independently of items 157/161.
+
+### 164. `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s
+
+Surfaced 2026-08-07 by the `security-invariant-reviewer` audit of item 19
+phase 3 (BigQuery), but the pattern is pre-existing across all five
+adapters (Postgres/MSSQL/MySQL/Snowflake/BigQuery), not introduced by this
+item.
+
+**The gap.** Every `DialectAdapter.column_mask` implementation checks
+`ColumnMaskKind.NULL`, `.BUCKET`, and `.LAST` explicitly, then falls through
+to an unconditional final branch that assumes HASH — e.g.
+`# HASH — SHA2 requires an explicit bit length; ...` with no `if
+mask.kind is ColumnMaskKind.HASH` guard above it. Contrast with this
+module's date-part/interval-unit maps, which are all deliberately
+exhaustive (a `.get(part)` returning `None` raises a typed
+`QueryValidationError` naming the dialect) specifically so a future enum
+member is a forced decision, never a silent passthrough — the same
+exhaustiveness doctrine is not applied to `ColumnMaskKind` here.
+
+**Why this is low severity, not a disclosure risk.** `ColumnMaskKind` is a
+closed, stable 4-member enum (NULL/BUCKET/LAST/HASH) that has not changed
+since item 49, and the implicit-else "fails toward the strongest mask" —
+a future 5th kind would render as HASH (a full, salted-looking transform)
+rather than silently rendering the RAW column, so there is no realistic
+version of this gap that leaks more than the caller asked to mask, only a
+theoretical future member that gets over-masked or mis-rendered without a
+clean typed error naming the gap.
+
+**What to do (when prioritized):** add an explicit `if mask.kind is
+ColumnMaskKind.HASH: ...` branch with a final `raise QueryValidationError`
+(or an `assert_never`-style exhaustiveness check) on all five adapters,
+matching the discipline `_missing_part`/`_missing_unit` already establish
+for the date/interval maps.
+
+**Effort:** S (five adapters, one mechanical guard clause each; no design
+change). **Depends on:** none.
 

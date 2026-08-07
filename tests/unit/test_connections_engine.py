@@ -1,12 +1,18 @@
 """Unit tests for `connections/engine.py`'s `init_engine` — specifically the
-Snowflake guard (TODO.md item 19 phase 2).
+Snowflake (TODO.md item 19 phase 2) and BigQuery (item 19 phase 3) guards.
 
 `create_async_engine` is lazy (it does not actually open a network connection
 at construction time), so `init_engine` is safely unit-testable for the three
 live-verified dialects too: this just proves the guard fires ONLY for
-Snowflake, before `create_async_engine` is ever reached, rather than letting a
-Snowflake profile fall through to SQLAlchemy's own (correct, but confusing
-out of context) `InvalidRequestError`.
+Snowflake/BigQuery, before `create_async_engine` is ever reached, rather than
+letting one of those profiles fall through to SQLAlchemy's own (correct, but
+confusing out of context) `InvalidRequestError` — or, for BigQuery
+specifically, its OWN even-earlier `DefaultCredentialsError` from Google's
+auth library (confirmed directly: `sqlalchemy_bigquery`'s
+`create_connect_args` builds a real `google.cloud.bigquery.Client` at engine-
+construction time, so a bare `create_async_engine("bigquery://...")` with no
+credentials configured fails there before SQLAlchemy's own async-driver check
+even runs).
 """
 
 from __future__ import annotations
@@ -36,6 +42,24 @@ def test_snowflake_profile_is_rejected_before_create_async_engine():
     # api/_errors.py's _ACTIONABLE tuple, so it would be masked to an opaque
     # REST 500 / MCP INTERNAL rather than the explained, client-actionable
     # rejection this guard exists to give.
+    with pytest.raises(ConfigValidationError, match="cannot yet open a live connection"):
+        init_engine("demo")
+
+
+def test_bigquery_profile_is_rejected_before_create_async_engine():
+    set_registry(
+        make_demo_registry(
+            dialect="bigquery",
+            connection_string="bigquery://my-project/my_dataset",
+        )
+    )
+    # Same actionable-error requirement as the Snowflake test above — and,
+    # for BigQuery specifically, this also proves the guard fires BEFORE
+    # `create_connect_args`'s own credential resolution ever runs (this test
+    # has no GOOGLE_APPLICATION_CREDENTIALS configured, so an unguarded call
+    # would fail with google.auth.exceptions.DefaultCredentialsError instead
+    # — a confusing, un-actionable error from a different library, not this
+    # one's own ConfigValidationError).
     with pytest.raises(ConfigValidationError, match="cannot yet open a live connection"):
         init_engine("demo")
 
@@ -83,4 +107,31 @@ def test_create_async_engine_has_exactly_one_production_call_site():
         f"create_async_engine(...) now appears in {call_sites!r}, not just "
         "connections/engine.py — a new call site bypasses init_engine's "
         "is_connectable() guard (and its policy/timeout wiring)."
+    )
+
+
+def test_no_production_module_imports_the_never_connectable_dialect_drivers():
+    """2026-08-07 security-invariant-reviewer finding: the pyproject.toml
+    comments for `snowflake-sqlalchemy`/`sqlalchemy-bigquery` (both dev-only
+    dependencies) both claim "no module under src/querygate/ imports"
+    either package — a real security-relevant claim (it's the whole
+    justification for NOT shipping their TLS/crypto/gRPC/auth stacks in the
+    release container/package). That claim was convention-only, unlike the
+    `create_async_engine` single-call-site claim just above, which
+    `test_create_async_engine_has_exactly_one_production_call_site` already
+    machine-checks. This is that same grep-based technique applied to the
+    two driver packages themselves, so the claim can't silently drift.
+    """
+    src_root = pathlib.Path(__file__).resolve().parents[2] / "src" / "querygate"
+    forbidden = ("snowflake.sqlalchemy", "snowflake.connector", "sqlalchemy_bigquery")
+    offenders = []
+    for path in src_root.rglob("*.py"):
+        text = path.read_text()
+        for name in forbidden:
+            if f"import {name}" in text or f"from {name}" in text:
+                offenders.append((str(path.relative_to(src_root)), name))
+    assert offenders == [], (
+        f"production module(s) import a never-connectable dialect driver: {offenders!r} — "
+        "this defeats the whole point of keeping snowflake-sqlalchemy/sqlalchemy-bigquery "
+        "dev-only (see their pyproject.toml comments)."
     )

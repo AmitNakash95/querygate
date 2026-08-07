@@ -51,12 +51,12 @@ def physical_db_name(connection_id: str) -> str:
 
 
 def init_engine(connection_id: str) -> AsyncEngine:
-    """TODO.md item 19 phase 2: a dialect whose `SessionDialectAdapter.
-    is_connectable()` returns `False` (today, only `SnowflakeSessionAdapter`)
-    is refused HERE, deliberately and explicitly, rather than being allowed
-    to reach `create_async_engine` below and fail with a confusing
-    library-internal error. Dispatched through the registered
-    `SessionDialectAdapter` interface (2026-08-06
+    """TODO.md item 19 phases 2/3: a dialect whose `SessionDialectAdapter.
+    is_connectable()` returns `False` (today, `SnowflakeSessionAdapter` and
+    `BigQuerySessionAdapter`) is refused HERE, deliberately and explicitly,
+    rather than being allowed to reach `create_async_engine` below and fail
+    with a confusing library-internal error. Dispatched through the
+    registered `SessionDialectAdapter` interface (2026-08-06
     `architecture-boundary-reviewer` finding — a prior version of this guard
     compared `profile.dialect` to `DatabaseDialect.SNOWFLAKE` literally,
     which is exactly the inline `if dialect == ...` branching the
@@ -70,17 +70,31 @@ def init_engine(connection_id: str) -> AsyncEngine:
     driver — confirmed directly: `create_async_engine("snowflake://...")`
     raises `sqlalchemy.exc.InvalidRequestError: The asyncio extension
     requires an async driver to be used. The loaded 'snowflake' is not
-    async.` — and this codebase's entire session/execution pipeline
-    (`session_scope` below, `execution/service.py`, `schema/reflection.py`,
+    async.` For BigQuery: `sqlalchemy_bigquery`'s DBAPI has the identical
+    driver gap, but confirming it the SAME direct way is not possible with
+    no GCP credentials configured (this project's normal environment) —
+    `BigQueryDialect.create_connect_args` builds a real
+    `google.cloud.bigquery.Client` (resolving Google credentials) at
+    ENGINE-CONSTRUCTION time and fails there FIRST: confirmed directly, a
+    bare `create_async_engine("bigquery://...")` with no credentials
+    configured raises `google.auth.exceptions.DefaultCredentialsError`
+    immediately inside `create_connect_args`, before SQLAlchemy's own
+    async-driver check ever gets a chance to run. (With a fake-but-valid
+    credentials file supplied to get past that step, the identical
+    `InvalidRequestError` was also confirmed for BigQuery's driver.) Either
+    way, this guard's `is_connectable()` check above pre-empts both failure
+    modes with one clean, actionable error instead of either raw one.
+    This codebase's entire session/execution pipeline (`session_scope`
+    below, `execution/service.py`, `schema/reflection.py`,
     `execution/cost_estimation.py`, ...) is built on `AsyncSession`/
     `AsyncEngine` throughout, so there is no small patch here; wrapping a
-    sync Snowflake engine for this pipeline (e.g. via `asyncio.to_thread`,
-    the pattern `catalog/repository.py` uses for a single lock-acquire call)
-    would mean either building an `AsyncSession`-compatible facade over a
-    sync `Session` or forking every call site by dialect — a real
-    architecture change, not a phase-1 slice, and out of scope for a
-    connection type this environment has no live server to verify against.
-    See TODO.md's Snowflake live-verification follow-up item.
+    sync engine for this pipeline (e.g. via `asyncio.to_thread`, the pattern
+    `catalog/repository.py` uses for a single lock-acquire call) would mean
+    either building an `AsyncSession`-compatible facade over a sync
+    `Session` or forking every call site by dialect — a real architecture
+    change, not a phase-1 slice, and out of scope for a connection type this
+    environment has no live server to verify against. See TODO.md's
+    Snowflake/BigQuery live-verification follow-up items.
     """
     from querygate.policy.loader import get_policy
 
@@ -102,10 +116,10 @@ def init_engine(connection_id: str) -> AsyncEngine:
             f"Connection {connection_id!r} is dialect {profile.dialect!r}, which QueryGate "
             "cannot yet open a live connection for: its SessionDialectAdapter is registered "
             "but not connectable (see SessionDialectAdapter.is_connectable's docstring for "
-            "why — for Snowflake specifically, snowflake-sqlalchemy's driver has no async "
-            "SQLAlchemy engine support, and this codebase's execution pipeline requires one). "
-            "Its compiler/session adapters exist for rendering-level development and testing "
-            "only (TODO.md item 19 phase 2) — see its live-verification follow-up item."
+            "why — Snowflake's and BigQuery's drivers both have no async SQLAlchemy engine "
+            "support, and this codebase's execution pipeline requires one). Its compiler/"
+            "session adapters exist for rendering-level development and testing only "
+            "(TODO.md item 19) — see its live-verification follow-up item."
         )
     policy = get_policy(connection_id)
     engine = create_async_engine(

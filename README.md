@@ -1923,7 +1923,17 @@ which run in Docker), and
 `connections/engine.py` refuses to actually open a Snowflake connection today
 — registering one fails with a clear, explained error rather than connecting.
 Do not treat Snowflake as production-ready the way the other three dialects
-are; see TODO.md item 19's Snowflake live-verification follow-up. The real-Postgres load/soak
+are; see TODO.md item 19's Snowflake live-verification follow-up. **BigQuery
+support (item 19 phase 3) is the same compiler/rendering-level-only, NOT
+live-verified posture**, checked the same way (its `DialectAdapter` compiles
+against a real, installed `sqlalchemy_bigquery` dialect object; its
+`SessionDialectAdapter` is unit-tested against recording fakes). BigQuery has
+a second, independent reason beyond the missing async driver that
+`connections/engine.py` refuses to open a connection for it: `sqlalchemy_
+bigquery`'s DBAPI resolves real Google credentials and builds a live client
+at engine-construction time, not connection time. Do not treat BigQuery as
+production-ready either; see TODO.md item 19's BigQuery live-verification
+follow-up. The real-Postgres load/soak
 harness also proves the observed database concurrency cap, overflow rejection,
 queued completion, timeout cancellation, `queue_mode=fail_fast` never
 waiting, and a caller-shortened `wait_timeout_seconds` being honored under
