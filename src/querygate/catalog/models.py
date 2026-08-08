@@ -313,9 +313,17 @@ class TableCatalogEntry(pyd.BaseModel):
         return self
 
     def column(self, column_name: str) -> Optional[ColumnCatalogEntry]:
-        target = column_name.lower()
+        # `.casefold()`, not `.lower()` (TODO.md item 149): this class's own
+        # `_relationship_identities_are_unique`/uniqueness validator above
+        # already keys on `.casefold()`, so two entries that validation
+        # treats as the same table/column could otherwise fail to resolve
+        # here — and an unresolved catalog entry means a sensitivity label
+        # (feeding the human-approval gate, item 92 ph2) silently doesn't
+        # apply. Found by `security-invariant-reviewer` while reviewing the
+        # `policy/models.py` sibling fix for the same class of bug.
+        target = column_name.casefold()
         for key, value in self.columns.items():
-            if key.lower() == target:
+            if key.casefold() == target:
                 return value
         return None
 
@@ -333,9 +341,12 @@ class ConnectionCatalog(pyd.BaseModel):
         return self
 
     def table(self, table_name: str) -> Optional[TableCatalogEntry]:
-        target = table_name.lower()
+        # `.casefold()`, not `.lower()` — see `TableCatalogEntry.column`'s
+        # docstring; same reasoning, this class's own
+        # `_table_names_are_unique` already keys on `.casefold()`.
+        target = table_name.casefold()
         for key, value in self.tables.items():
-            if key.lower() == target:
+            if key.casefold() == target:
                 return value
         return None
 

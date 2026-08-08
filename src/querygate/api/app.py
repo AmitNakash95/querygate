@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette import status
@@ -17,7 +17,7 @@ from querygate.api.admin_config_routes import build_admin_config_router
 from querygate.api.admin_connections_routes import build_admin_connections_router
 from querygate.api.admin_observability_routes import build_admin_observability_router
 from querygate.api.admin_ui_routes import build_admin_ui_router
-from querygate.api._errors import install_exception_handlers
+from querygate.api._errors import install_exception_handlers, require_scope
 from querygate.api.auth import build_principal_dependency
 from querygate.api.catalog_governance_routes import build_catalog_governance_router
 from querygate.api.help_routes import build_help_router
@@ -25,9 +25,12 @@ from querygate.api.routes import build_router
 from querygate.audit.sinks import configure_audit_sink, reset_audit_sink
 from querygate.catalog.refresh import CatalogRefreshMonitor
 from querygate.catalog.usage import CatalogUsageLearningMonitor
-from querygate.core.config import AppConfig, ConcurrencyBackend
+from querygate.config_reload import CredentialLeaseMonitor
+from querygate.core.auth import Principal
+from querygate.core.config import AppConfig, AuditSinkBackend, ConcurrencyBackend
 from querygate.core.config import config as default_config
 from querygate.core.logging import ContextLogger, context_logger, get_logger
+from querygate.core.scopes import ADMIN_METRICS_READ_SCOPE
 from querygate.execution.concurrency import clear_redis_limiter, init_redis_limiter
 from querygate.health import HealthMonitor
 from querygate.metrics import CONTENT_TYPE_LATEST, render_latest
@@ -42,6 +45,24 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         log = get_logger()
         log.info("querygate.startup", environment=conf.environment)
         mcp_task: Optional[asyncio.Task] = None
+
+        # Started before configure_audit_sink() so the WORM sink's buffer
+        # singleton has a monitor actually draining it from the moment the
+        # sink can first receive an event — TODO.md item 134.
+        worm_flush_monitor: Optional["WormFlushMonitor"] = None
+        if conf.audit_sink_backend == AuditSinkBackend.JSONL_CHAINED_S3_WORM:
+            from querygate.audit.worm_sink import WormFlushMonitor
+
+            worm_flush_monitor = WormFlushMonitor(
+                bucket=conf.audit_worm_s3_bucket,
+                prefix=conf.audit_worm_s3_prefix,
+                region=conf.audit_worm_s3_region,
+                retention_mode=conf.audit_worm_retention_mode,
+                retention_days=conf.audit_worm_retention_days,
+                interval_seconds=conf.audit_worm_flush_interval_seconds,
+            )
+            await worm_flush_monitor.start()
+        app.state.worm_flush_monitor = worm_flush_monitor
 
         configure_audit_sink(
             backend=conf.audit_sink_backend.value,
@@ -72,6 +93,16 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             )
             await catalog_usage_learning_monitor.start()
         app.state.catalog_usage_learning_monitor = catalog_usage_learning_monitor
+
+        credential_lease_monitor: Optional[CredentialLeaseMonitor] = None
+        if conf.credential_lease_refresh_enabled:
+            credential_lease_monitor = CredentialLeaseMonitor(
+                cfg=conf,
+                poll_interval_seconds=conf.credential_lease_check_interval_seconds,
+                refresh_margin_seconds=conf.credential_lease_refresh_margin_seconds,
+            )
+            await credential_lease_monitor.start()
+        app.state.credential_lease_monitor = credential_lease_monitor
 
         redis_client = None
         if conf.concurrency_backend == ConcurrencyBackend.REDIS:
@@ -121,8 +152,12 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 await catalog_refresh_monitor.stop()
             if catalog_usage_learning_monitor is not None:
                 await catalog_usage_learning_monitor.stop()
+            if credential_lease_monitor is not None:
+                await credential_lease_monitor.stop()
             await health_monitor.stop()
             reset_audit_sink()
+            if worm_flush_monitor is not None:
+                await worm_flush_monitor.stop()
             if redis_client is not None:
                 clear_redis_limiter()
                 await redis_client.aclose()
@@ -242,9 +277,18 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             ),
         )
 
-    @application.get("/metrics", tags=["health"])
-    async def metrics() -> Response:
-        return Response(content=render_latest(), media_type=CONTENT_TYPE_LATEST)
+    if conf.metrics_require_auth:
+
+        @application.get("/metrics", tags=["health"])
+        async def metrics(principal: Principal = Depends(principal_dependency)) -> Response:
+            require_scope(principal, ADMIN_METRICS_READ_SCOPE)
+            return Response(content=render_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    else:
+
+        @application.get("/metrics", tags=["health"])
+        async def metrics_unauthenticated() -> Response:
+            return Response(content=render_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return application
 

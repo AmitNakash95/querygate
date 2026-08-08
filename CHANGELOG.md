@@ -6,6 +6,32 @@ All notable changes to QueryGate are documented here.
 
 ### Changed
 
+- **The MCP server now speaks the final `2026-07-28` protocol revision**
+  (TODO.md item 128), a full `mcp` SDK v1 → v2 migration. The in-query
+  human-approval step-up flow (elicitation) was reworked around the new
+  stateless-protocol request shape but keeps the same externally-visible
+  behavior: a gated query or write still pauses for human approval and
+  resumes once granted. **Upgrade impact:** an MCP client must speak the
+  `2026-07-28` (or compatible) protocol revision; the OpenAI-function-calling
+  example and any code reading `tool.inputSchema` (now `tool.input_schema`)
+  should be checked against the new SDK's attribute names.
+- **`GET /metrics` now requires authentication by default** (TODO.md item
+  144), gated by a new least-privilege `admin:metrics:read` scope, alongside
+  new `querygate_verdicts_total`/`querygate_verdict_duration_seconds`
+  metrics for the `verdict()` decision-only endpoint. **Upgrade impact:** an
+  existing Prometheus scrape config must present a credential with the new
+  scope, or an operator can opt out via `METRICS_REQUIRE_AUTH=false` for a
+  deployment whose network reachability is already restricted. The bundled
+  Docker Compose and Helm reference deployments were updated to authenticate
+  their own scrape.
+- **The admin audit browser's pagination `cursor` ceiling was lowered from
+  1,000,000 to 5,000** (TODO.md item 140), closing a resource-exhaustion gap
+  where a request near the old ceiling could materialize roughly a gigabyte
+  of parsed audit records. **Upgrade impact:** an automation paginating past
+  page 100 (at the default `limit=50`) against `GET
+  /api/v1/admin/ui/audit/events` will now receive `422` instead of a
+  page — no real admin session was observed to need more.
+
 - **Capacity/queue rejections now return `429 Too Many Requests` with a
   `Retry-After` header, not `422`** (TODO.md item 35 phase 3). Applies to a
   concurrency-limit timeout, a full admission queue, and the bare
@@ -56,6 +82,105 @@ All notable changes to QueryGate are documented here.
   so. Postgres `interval` columns are unaffected — they remain valid operands.
 
 ### Added
+
+- **MySQL 8.4+ as a supported connection dialect** (TODO.md item 19 phase 1),
+  alongside the existing Postgres and MSSQL support — verified against a real
+  MySQL server, not just rendering-only tests. Purely additive; no existing
+  dialect's behavior changes. Two capability gaps are rejected rather than
+  silently emulated: MySQL's bare `STDDEV`/`VARIANCE` are population
+  statistics, so QueryGate maps them to `STDDEV_SAMP`/`VAR_SAMP` to match
+  Postgres's/MSSQL's sample-statistic semantics instead; an upsert's
+  `ON DUPLICATE KEY UPDATE` can't target a specific conflict-column set the
+  way Postgres's `ON CONFLICT` can, so that shape is rejected with an
+  explanatory error rather than silently ignoring the requested columns.
+  Snowflake/BigQuery and a MySQL query-cost estimator remain open follow-on
+  work.
+- **Snowflake as a connection dialect — rendering/compilation only, NOT
+  live-verified** (TODO.md item 19 phase 2). A real `DialectAdapter`/
+  `SessionDialectAdapter` cover the same primitive surface Postgres/MSSQL/
+  MySQL do (date bucketing, native `NULLS FIRST/LAST`, statistical
+  aggregates, `LISTAGG`, a genuine `ARRAY_AGG`, `PERCENTILE_CONT`, window
+  frames, set operations), backed by Snowflake's public SQL docs and checked
+  against a real installed `snowflake.sqlalchemy` dialect object — but there
+  is no Snowflake instance or account available to this project to actually
+  connect to, and `snowflake-sqlalchemy`'s driver has no async SQLAlchemy
+  engine support, so QueryGate deliberately refuses to open a live Snowflake
+  connection today (a clear, explained error, not a silent failure or a
+  confusing library-internal one). **Do not treat this the way MySQL's
+  live-tested phase 1 is treated** — see TODO.md item 19 and its item 157
+  live-verification follow-up before relying on it for a real deployment.
+  Upsert (`MERGE`) is rejected rather than emulated, the same
+  reject-don't-emulate posture as MySQL's `ON DUPLICATE KEY UPDATE` gap.
+- **BigQuery as a connection dialect — rendering/compilation only, NOT
+  live-verified** (TODO.md item 19 phase 3, the same posture as Snowflake's
+  phase above). A real `DialectAdapter`/`SessionDialectAdapter` cover the
+  same primitive surface the other four dialects do, backed by Google's
+  public SQL docs and checked against a real installed `sqlalchemy_bigquery`
+  dialect object — but there is no BigQuery project or GCP credentials
+  available to this project, and `sqlalchemy-bigquery`'s driver has no async
+  SQLAlchemy engine support either (plus a second, BigQuery-specific gap:
+  its dialect resolves real Google credentials and builds a live client at
+  engine-construction time), so QueryGate deliberately refuses to open a
+  live BigQuery connection today. **Do not treat this the way MySQL's
+  live-tested phase 1 is treated** — see TODO.md item 19 and its BigQuery
+  live-verification follow-up item before relying on it for a real
+  deployment. Upsert (`MERGE`) and `PERCENTILE_CONT` as a `GROUP BY`
+  aggregate are both rejected rather than emulated, the same
+  reject-don't-emulate posture as Snowflake's/MSSQL's respective gaps —
+  BigQuery's `date_bucket`/`date_add` also, uniquely among the five
+  dialects, dispatch on whether the operand is a DATE/DATETIME/TIMESTAMP,
+  since BigQuery has three separate, differently-capable functions for each
+  rather than one polymorphic function the way every other dialect here
+  does. With MySQL, Snowflake, and BigQuery now all shipped, TODO.md item 19
+  is marked done; a new item tracks any further dialect beyond these three.
+- **Compliance-grade WORM (write-once-read-many) audit archival, with
+  managed search over it** (TODO.md item 134, both phases). A new opt-in
+  audit sink backend (`AUDIT_SINK_BACKEND=jsonl_chained_s3_worm`) composes
+  the existing local hash-chained audit ledger with S3 Object Lock storage,
+  batching events into retention-protected segments in the background with
+  zero query-path latency impact — a flush failure never blocks or fails the
+  triggering query, and a sustained outage drops only the oldest buffered
+  events, visibly, via a dedicated metric an operator can alert on. A new
+  `GET /api/v1/admin/observability/worm-search` endpoint (gated by its own
+  `admin:audit:worm-search` scope, not implied by general observability
+  read access) lets an authorized operator search the archive directly —
+  bounded by a mandatory time window (default cap 730 days) and per-request
+  scan limits, with a resumable cursor for a truncated page. **Upgrade
+  impact:** none for a deployment that doesn't set
+  `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm`; a deployment that does should
+  read the fail-open buffering caveat above and monitor
+  `querygate_audit_worm_flush_failures_total`/
+  `querygate_audit_worm_buffer_dropped_total`.
+- **Purpose-bound access: a declared query purpose can now narrow what a
+  caller sees, not just get logged** (TODO.md item 145). A new
+  `StructuredQuery.purpose` field, checked against a connection's
+  `Policy.allowed_purposes` allow-list, can apply an additional
+  `Policy.purpose_policies` narrowing (extra denied tables/columns,
+  mandatory row filters, or column masks) on top of the caller's base
+  policy — a purpose can only narrow access, never widen it. Both the
+  Python and TypeScript client SDKs gained a matching `.purpose(...)`
+  builder method. Unset by default; a connection with no
+  `allowed_purposes` configured is unaffected.
+- **A `querygate-quickstart` CLI for a first governed query in minutes**
+  (TODO.md item 146). Points it at a connection and it finds a table with
+  non-sensitive columns, then prints a ready-to-run `curl` command, MCP
+  tool-call JSON, and Python SDK snippet for a plain select, a filtered
+  select, and a group-by aggregate — no server-side changes, no new
+  authority.
+- **A generated, checked-in procurement evidence page**
+  (`docs/TRUST_EVIDENCE.md`, TODO.md item 147) assembling the SBOM status,
+  compliance-control mapping, adversarial benchmark results, and
+  threat-model coverage into one document a prospect's security team can be
+  pointed at, regenerated via `make trust-page` so it can't silently drift
+  from the sources it cites.
+- **Automatic, TTL/lease-driven credential re-resolution** (TODO.md item
+  135) for a Vault-backed connection secret with a reportable lease — no
+  operator-triggered reload required. Opt-in via
+  `CREDENTIAL_LEASE_REFRESH_ENABLED=true` (requires `VAULT_ENABLED=true`);
+  a deployment that doesn't enable it is unaffected. The currently-shipped
+  Vault KV v2 integration reports no lease, so the trigger is inert today
+  and activates automatically, with no further change, against a future
+  dynamic-secrets resolver.
 
 - Agent-visible progress, an asynchronous REST execution lifecycle, and real
   query cancellation (TODO.md item 35 phase 3). MCP's `run_structured_queries`
@@ -367,6 +492,21 @@ All notable changes to QueryGate are documented here.
 
 ### Fixed
 
+- A deployment running the tamper-evident hash-chained audit backend
+  (`AUDIT_SINK_BACKEND=jsonl_chained`) lost four observability read
+  surfaces — the personal denial-history view, the anomaly report, the
+  config/catalog change-trend report, and the admin UI's audit browser —
+  which each accepted only the plain backend (TODO.md item 136). Choosing
+  the stronger audit posture silently cost those features; all four now
+  read either backend.
+- The admin config-diff tool (`POST /api/v1/admin/config/diff` and the
+  blast-radius analysis built on it) never diffed column-masking policy
+  changes at all, despite an inline comment claiming it did (TODO.md item
+  148) — a mask added or removed between two policy versions was invisible
+  to the reviewer workflow both are meant to protect. Fixed and covered by
+  a regression test asserting a masked-then-unmasked column is now reported
+  as a loosening.
+
 - Query-template REST run endpoint returned HTTP 500 on every call (a merge
   regression, never in a release). `POST /api/v1/query-templates/{id}/run`
   (TODO.md item 48) was authored with its own inline `try/except` error
@@ -390,6 +530,75 @@ All notable changes to QueryGate are documented here.
   unaffected; only the REST run route regressed.)
 
 ### Security
+
+- **A denied-write-column configured with any capitalization other than
+  all-lowercase (e.g. `{"Orders": [...]}`) was silently never enforced,
+  regardless of the write statement's own table casing** (TODO.md item
+  149) — the write-column deny list was inert for any table key that
+  wasn't already lowercase. Found and fixed alongside two related
+  case-folding disagreements: `Policy`'s table/column allow-deny lookups
+  used `.lower()` in one place and `.casefold()` in another (differing on
+  Unicode identifiers), and the semantic catalog's table/column resolution
+  disagreed the same way — which could make a sensitivity label silently
+  fail to reach the in-query human-approval gate for an affected identifier.
+  A follow-up sweep (TODO.md item 150) extended the same `.casefold()`
+  consistency fix through the compiler's `mandatory_row_filters` matching
+  and the AST's own alias/CTE-name uniqueness validators, closing the
+  identical disagreement in the tenant row-scoping path.
+- **An approval token minted for a sensitive/expensive query on one
+  connection verified unchanged for the byte-identical query on a
+  different connection** (TODO.md item 151), since the token was bound
+  only to a hash of the query itself. A `query:approve` holder who
+  approved what they believed was a lower-sensitivity connection had, in
+  fact, approved the same query shape everywhere it might be submitted.
+  Approval tokens (both the REST approval endpoints and the MCP in-query
+  approval flow) are now additionally bound to the specific connection and
+  the specific principal that requested execution — a token can no longer
+  be redeemed against a different connection or handed off to a different
+  principal. A previously-issued (unbound) token keeps verifying exactly
+  as before.
+- **A cross-connection join's joined-in table was governed only by the
+  primary connection's catalog labels and `Policy` — never its own
+  connection's** (TODO.md items 155 and 156). A `StructuredQuery` joining
+  connection A (primary) to connection B (`JoinSpec.connection`, gated by
+  policy's `join_group` rule) resolved a joined table's catalog
+  `sensitivity: pii` label, column masks, mandatory row filters, and
+  table/column deny-list entirely against A — so a rule an operator
+  configured only on B's own catalog/Policy never took effect for a query
+  reaching that table through A. Both are now resolved against BOTH
+  connections when they differ (never a replacement of one for the other —
+  an operator's rule on the primary connection keeps applying exactly as
+  before). No caller-visible API change; this is a pure tightening of
+  existing enforcement, not a new capability.
+- Audit read surfaces (the admin UI audit browser, the anomaly report, the
+  config/catalog change-trend report, personal denial history) now verify
+  each record's hash-chain envelope and disclose which audit backend
+  actually produced the response, rather than silently trusting an
+  envelope's shape and reporting the same `source` value regardless of
+  backend (TODO.md item 137). A forged or tampered record is now excluded
+  from the response and counted as malformed instead of being displayed.
+- Hardened the audit-log read paths against resource exhaustion (TODO.md
+  items 138–139): the three per-request audit readers now scan a bounded
+  number of bytes/lines from the end of the file backward (the direction
+  that actually serves what a caller wants — the newest window) instead of
+  an unbounded forward scan of the whole file, and the read/write query
+  AST's previously-unbounded `select`/`joins`/`group_by`/`order_by`/
+  `correlate`/`ctes`/set-operation-arm lists now carry a hard, generous
+  (10–100x a typical policy cap) size ceiling so a pre-rejection audit
+  event can never itself become the oversized-line problem being guarded
+  against.
+- Upgraded `cryptography` to 50.0.0, resolving a Bleichenbacher
+  padding-oracle advisory (`CVE-2026-69247`) in its PKCS7 decrypt
+  functions (TODO.md item 143). QueryGate's own code never called the
+  affected functions, but the dependency-audit gate now passes with zero
+  allowlisted vulnerabilities for this package rather than a
+  reviewed-but-present one.
+- MCP's `tools/list` caching metadata (added by the `2026-07-28` protocol
+  revision) is explicitly marked non-shared-cacheable, since QueryGate's
+  visible tool set varies by the calling principal's scopes (TODO.md item
+  129) — a shared MCP-aware intermediary caching a `"public"`-scoped
+  listing could otherwise serve one principal's tool visibility to
+  another.
 
 - Inference/transitive-exposure adversarial test suite + design note (TODO.md
   item 55). Extends item 28's adversarial suite with a new attack *category*:

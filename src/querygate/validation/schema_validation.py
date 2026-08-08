@@ -15,6 +15,7 @@ from typing import (
     Dict,
     FrozenSet,
     Iterator,
+    List,
     Literal,
     NamedTuple,
     Optional,
@@ -25,10 +26,11 @@ from typing import (
 import sqlalchemy as sa
 
 from querygate.core.auth import Principal
+from querygate.connections.dialects import get_session_adapter, not_connectable_explanation
 from querygate.connections.engine import get_engine, physical_db_name
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.visibility import resolve_visible_connection
-from querygate.core.exceptions import QueryValidationError
+from querygate.core.exceptions import ConfigValidationError, QueryValidationError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import (
     AggregateSelectItem,
@@ -90,9 +92,9 @@ def effective_name_map(query: StructuredQuery) -> Dict[str, str]:
     apply to) and schema validation/compilation (which physical table to
     reflect, and which occurrences need a SQL alias).
     """
-    mapping: Dict[str, str] = {(query.from_alias or query.from_table).lower(): query.from_table}
+    mapping: Dict[str, str] = {(query.from_alias or query.from_table).casefold(): query.from_table}
     for join in query.joins:
-        mapping[(join.alias or join.table).lower()] = join.table
+        mapping[(join.alias or join.table).casefold()] = join.table
     return mapping
 
 
@@ -546,18 +548,19 @@ def iter_correlations(query: StructuredQuery) -> Iterator[Correlation]:
 
 
 def declared_cte_names(query: StructuredQuery) -> FrozenSet[str]:
-    """Lowercased names of every cte this query declares (item 105).
+    """Case-folded (`.casefold()`, TODO.md item 150) names of every cte this
+    query declares (item 105).
 
     Only the ROOT query may declare ctes — `_validate_cte_constraints` enforces
     that — so this is the whole namespace for the query tree, and the callers that
     need to tell "this from/join name is a cte" from "this is a physical table"
     take this one frozenset rather than re-deriving it per scope.
     """
-    return frozenset(spec.name.lower() for spec in query.ctes)
+    return frozenset(spec.name.casefold() for spec in query.ctes)
 
 
 def cte_source_names(query: StructuredQuery) -> Set[str]:
-    """Every lowercased from/join *source* name used anywhere in this query's own
+    """Every case-folded (`.casefold()`) from/join *source* name used anywhere in this query's own
     scope tree — i.e. the names that could be resolving to a cte.
 
     Deliberately the `from`/`table` name and NOT the alias: `{"from": "daily",
@@ -566,13 +569,13 @@ def cte_source_names(query: StructuredQuery) -> Set[str]:
     """
     names: Set[str] = set()
     for _depth, scope in iter_query_scopes(query):
-        names.add(scope.from_table.lower())
-        names.update(join.table.lower() for join in scope.joins)
+        names.add(scope.from_table.casefold())
+        names.update(join.table.casefold() for join in scope.joins)
     return names
 
 
 def cte_chain_depths(query: StructuredQuery) -> Dict[str, int]:
-    """How deep each cte sits in the *reference chain*, by lowercased name — 1 for
+    """How deep each cte sits in the *reference chain*, by case-folded name — 1 for
     a block reading only physical tables, 2 for one reading a 1, and so on.
 
     This is what `max_subquery_depth` is charged for a cte, and it makes the
@@ -589,7 +592,7 @@ def cte_chain_depths(query: StructuredQuery) -> Dict[str, int]:
     depths: Dict[str, int] = {}
     for spec in query.ctes:
         referenced = cte_source_names(spec.query) & set(depths)
-        depths[spec.name.lower()] = 1 + max((depths[name] for name in referenced), default=0)
+        depths[spec.name.casefold()] = 1 + max((depths[name] for name in referenced), default=0)
     return depths
 
 
@@ -624,7 +627,7 @@ def iter_query_scopes(
     if query.ctes:
         depths = cte_chain_depths(query)
         for spec in query.ctes:
-            yield from iter_query_scopes(spec.query, _depth + depths[spec.name.lower()])
+            yield from iter_query_scopes(spec.query, _depth + depths[spec.name.casefold()])
     if query.set_op is not None:
         for arm in query.set_op.arms:
             yield from iter_query_scopes(arm, _depth)
@@ -694,11 +697,47 @@ def iter_column_refs(query: StructuredQuery) -> Iterator[ColumnRef]:
 
 
 def resolve_column(table: sa.Table, column_name: str) -> sa.Column:
-    col_map = {c.name.lower(): c for c in table.c}
-    key = column_name.lower()
+    col_map = {c.name.casefold(): c for c in table.c}
+    key = column_name.casefold()
     if key not in col_map:
         raise QueryValidationError(f"Column '{column_name}' not found in table '{table.name}'")
     return col_map[key]
+
+
+def table_by_name_or_none(tables: Dict[str, sa.Table], name: str) -> Optional[sa.Table]:
+    """Case-insensitive, first-match lookup into a `tables` dict keyed by
+    effective name -- the SAME resolution order `table_by_name` (below) and
+    every FROM/JOIN construction in `compiler/sqlalchemy_compiler.py` use.
+
+    Exists because `tables`/`scoped_tables` (this module's `_reflect_and_
+    validate_scope` return value) can hold TWO distinct `sa.Table.alias(...)`
+    objects for one declared join occurrence -- e.g. `tables["O"]` from a
+    join's own declared `alias="O"`, plus a phantom `tables["o"]` from some
+    other column ref in the same scope spelling it "o.<col>" -- since `needed`
+    unions the declared spelling with every column ref's own (possibly
+    differently-cased) spelling of the same table, and each name in `needed`
+    gets its own `source.alias(name)` call. An exact `tables[key]` index picks
+    whichever object happens to sit at the literal spelling queried, which is
+    not guaranteed to be the object `table_by_name` will pick for the parent's
+    own compiled FROM/JOIN clause (item 167 fixed this exact mismatch for
+    `_apply_mandatory_row_filters`; item 169 is the same fix for
+    `validate_schema`'s correlated-subquery ref resolution). Returning `None`
+    on a miss -- rather than raising, like `table_by_name` does -- lets a
+    caller that wants a caller-facing error (e.g. an unresolved `correlate`
+    ref) raise its own, more specific message."""
+    for key, table in tables.items():
+        if key.casefold() == name.casefold():
+            return table
+    return None
+
+
+def table_by_name(tables: Dict[str, sa.Table], name: str) -> sa.Table:
+    """Same lookup as `table_by_name_or_none`, but raises when nothing
+    matches -- the shape every compiler call site wants."""
+    table = table_by_name_or_none(tables, name)
+    if table is None:
+        raise QueryValidationError(f"Unknown table {name!r}")
+    return table
 
 
 def _date_bucket_alias(item: DateBucketSelectItem, tables: Dict[str, sa.Table]) -> str:
@@ -863,13 +902,17 @@ def resolve_query_table_connections(
     cte_names: Optional[Set[str]] = None,
 ) -> Dict[str, str]:
     """Resolve which connection each table belongs to, rejecting any join
-    whose connection isn't in the same policy join_group as the primary.
+    whose connection isn't in the same policy join_group as the primary, or
+    whose dialect isn't yet connectable (TODO.md item 163 — the same
+    ``SessionDialectAdapter.is_connectable()`` check ``connections/engine.py``'s
+    ``init_engine`` runs for the primary connection, applied here to every
+    SECONDARY connection a join resolves to).
 
     ``connection_resolver`` lets the config simulator run this exact
     production visibility/join-group rule against isolated candidate stores.
     Normal query execution leaves it unset and therefore uses the live stores.
 
-    ``cte_names`` (item 105) are the statement's cte names, lowercased. A cte is
+    ``cte_names`` (item 105) are the statement's cte names, case-folded. A cte is
     computed by this statement rather than living in a database, so naming one as a
     cross-connection join target is rejected rather than quietly resolved against
     the primary connection — silently ignoring the field would tell an operator
@@ -885,7 +928,7 @@ def resolve_query_table_connections(
     table_connection: Dict[str, str] = {(query.from_alias or query.from_table): connection_id}
     for join in query.joins:
         join_connection_id = join.connection or connection_id
-        if join.connection is not None and join.table.lower() in known_ctes:
+        if join.connection is not None and join.table.casefold() in known_ctes:
             raise QueryValidationError(
                 f"join to cte {join.table!r} may not set `connection` — a cte is computed "
                 "by this query, not read from another connection."
@@ -900,8 +943,152 @@ def resolve_query_table_connections(
                     f"primary connection {connection_id!r} — run a separate query per "
                     "connection and combine results instead."
                 )
+            # TODO.md item 163: `connections/engine.py`'s `init_engine` is the
+            # only place `SessionDialectAdapter.is_connectable()` was checked,
+            # and it only ever runs for a query's PRIMARY connection. A
+            # `join_group`-eligible join to a not-yet-connectable secondary
+            # (Snowflake/BigQuery — item 19 phases 2/3) would sail past that
+            # guard here. `_load_table` below always reflects through the
+            # PRIMARY connection's own engine (never the secondary's — see its
+            # docstring), so the secondary's engine is never actually opened;
+            # instead the primary engine would attempt to reflect the joined
+            # table under a schema qualifier borrowed from the secondary's
+            # connection string, and fail with a masked `NoSuchTableError`
+            # that names neither the real cause nor the secondary's dialect.
+            # Mirror `init_engine`'s own check and message shape here so the
+            # rejection is clean, early, and client-actionable instead. The
+            # shared explanation clause lives in `not_connectable_explanation`
+            # (connections/dialects.py) so this and `init_engine`'s identical
+            # primary-connection guard can't drift apart (2026-08-07
+            # `architecture-boundary-reviewer` finding).
+            if not get_session_adapter(other.dialect).is_connectable():
+                raise ConfigValidationError(
+                    f"cross-connection join: {join.table!r} is in connection "
+                    f"{join_connection_id!r}: {not_connectable_explanation(other.dialect)}"
+                )
         table_connection[join.alias or join.table] = join_connection_id
     return table_connection
+
+
+def resolve_scope_connections(
+    query: StructuredQuery,
+    connection_id: str,
+    principal: Optional[Principal] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
+) -> Dict[int, Dict[str, str]]:
+    """The reflection-free sibling of `validate_schema`'s own `scope_connections`
+    output (TODO.md item 155): one per-table connection map per scope — the outer
+    query, every cte body, every set-operation arm, every nested `value_subquery`
+    — keyed by `id(scope)`, each scope's own map case-folded onto its effective
+    table names.
+
+    `validate_schema` cannot run before `validation/policy_validation.py`, by
+    that module's own documented contract ("This runs BEFORE
+    validation/schema_validation.py reflects anything, so a disabled connection
+    or an over-cap query never even touches the database") — so policy
+    validation cannot simply reuse `validate_schema`'s map to learn which
+    connection each table resolves to. `resolve_query_table_connections`
+    itself touches no database (only the in-memory connection registry/policy
+    store), so calling it here, before reflection, is safe and keeps that
+    ordering guarantee intact — a rejected cross-connection join now surfaces
+    slightly earlier (during policy validation) rather than during schema
+    validation, never differently.
+
+    Used by `validate_policy` and threaded through to `compiler.
+    compile_structured_query` (TODO.md item 156) so a cross-connection join's
+    table's own connection's Policy — its column masks, mandatory row filters,
+    and table/column deny-list — is consulted alongside the primary
+    connection's, the same way item 155 fixed the catalog sensitivity-label
+    trigger to do. Deliberately a SEPARATE walk from `validate_schema`'s
+    (rather than a shared one both call) — because, per the ordering
+    contract above, policy validation must run before ANY reflection, so it
+    cannot simply reuse `validate_schema`'s own map, which reflection has to
+    compute regardless. NOT because the two need differently-cased maps: both
+    are case-folded (`_reflect_and_validate_scope` case-folds its own copy
+    internally before using it — item 159; a raw, case-sensitive lookup there
+    let a joined table's own `Table.Column` ref, spelled with different
+    casing than the join's declared alias, silently reflect against the
+    PRIMARY connection instead), the same contract `sensitivity_approval_
+    reasons` already relies on for its own copy.
+    """
+    cte_names = declared_cte_names(query)
+    result: Dict[int, Dict[str, str]] = {}
+    for _depth, scope in iter_query_scopes(query):
+        table_connection = resolve_query_table_connections(
+            scope,
+            connection_id,
+            principal=principal,
+            connection_resolver=connection_resolver,
+            cte_names=cte_names,
+        )
+        result[id(scope)] = {name.casefold(): cx for name, cx in table_connection.items()}
+    return result
+
+
+def resolve_table_policies(
+    table_connection_id: str,
+    connection_id: str,
+    policy: Policy,
+    principal: Optional[Principal] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
+) -> List[Policy]:
+    """The Policy (or policies) that must ALL be consulted for one physical table
+    resolved to `table_connection_id`, inside a query whose primary/top-level
+    connection is `connection_id` (TODO.md item 156).
+
+    Shared by `validation/policy_validation.py`'s table/column allow-deny and
+    masked-column-position checks and `compiler/sqlalchemy_compiler.py`'s mask
+    and mandatory-row-filter application, so the two enforcement paths — policy
+    validation and compilation — can never drift onto two different answers for
+    "which Policy governs this table".
+
+    A same-connection table — every table in a single-connection query, and the
+    overwhelmingly common case even in a cross-connection one — returns
+    `[policy]` alone: byte-identical to the pre-item-156 shape, so a caller that
+    never resolves `table_connection_id != connection_id` sees no behavior
+    change at all.
+
+    A cross-connection join's table (`table_connection_id != connection_id`)
+    returns BOTH the primary `policy` and the table's own resolved connection's
+    Policy — the PRIMARY connection first, never a replacement of one for the
+    other. This mirrors `sensitivity_approval_reasons`'s own hard-won lesson
+    (item 155's follow-up correction, `execution/approval.py`): Policy
+    documents, like catalogs, are curated PER CONNECTION independently, so a
+    rule an operator wrote against the PRIMARY connection naming a joined-in
+    table must keep applying exactly as before, even once that table's own
+    connection also gets an equal say — a strict replacement would silently stop
+    enforcing a primary-side rule the moment the same physical table is instead
+    reached through a cross-connection join.
+
+    **The order is load-bearing, not cosmetic — deliberately primary-first, not
+    joined-first** (a security-invariant-reviewer finding, 2026-08-06, on this
+    same item; an earlier version of this function put the joined connection
+    first, mirroring `sensitivity_approval_reasons`'s own ordering, but that
+    function's OR/trigger semantics make its order cosmetic — either candidate
+    matching fires the same outcome — while a mask/filter caller PICKS one
+    concrete answer from the first candidate that has one). For an allow check,
+    order never matters (`all()` across candidates). For a mandatory row
+    filter, order never matters either (every matching filter on every
+    candidate is applied — a union, not a pick-one). For a MASK, order decides
+    which transform is actually applied when both connections configure a
+    DIFFERENT mask on the same (table, column) — a real, previously untested
+    case. Primary-first means: the primary connection's own mask always wins
+    when it has one (byte-identical to the pre-156 default, which only ever
+    consulted the primary), and only falls through to the joined connection's
+    own mask when the primary has none — never the reverse, which would let a
+    cross-connection join make an already-masked column's protection WEAKER
+    than what querying the primary connection directly would apply. The caller
+    composes the two candidates with whichever direction its own rule needs:
+    AND across candidates for an allow check, first-match (primary-first) for
+    a mask, or an apply-every-match union for a mandatory row filter.
+    """
+    if table_connection_id == connection_id:
+        return [policy]
+    resolver = connection_resolver or (
+        lambda target, actor: resolve_visible_connection(target, principal=actor)
+    )
+    _profile, other_policy = resolver(table_connection_id, principal)
+    return [policy, other_policy]
 
 
 def _validate_join_graph(query: StructuredQuery) -> None:
@@ -920,9 +1107,9 @@ def _validate_join_graph(query: StructuredQuery) -> None:
     that path, so it is not a bypass — but the cross gate must stay where it is
     rather than being "consolidated" here on the assumption policy always ran.
     """
-    known = {(query.from_alias or query.from_table).lower()}
+    known = {(query.from_alias or query.from_table).casefold()}
     for join in query.joins:
-        joined_table = (join.alias or join.table).lower()
+        joined_table = (join.alias or join.table).casefold()
         if join.type == "cross":
             known.add(joined_table)
             continue
@@ -930,13 +1117,15 @@ def _validate_join_graph(query: StructuredQuery) -> None:
         if join.on is not None:
             left_t, _ = parse_column_ref(join.on[0])
             right_t, _ = parse_column_ref(join.on[1])
-            sides = {left_t.lower(), right_t.lower()}
+            sides = {left_t.casefold(), right_t.casefold()}
         else:
             # A general `condition` may legitimately be about more than the joined
             # pair (`JOIN c ON c.x = a.x AND c.y = b.y`), so the rule generalizes to
             # the set of tables it references rather than a fixed pair.
             assert join.condition is not None  # nosec B101 — the AST guarantees one form
-            sides = {parse_column_ref(ref)[0].lower() for ref in _where_column_refs(join.condition)}
+            sides = {
+                parse_column_ref(ref)[0].casefold() for ref in _where_column_refs(join.condition)
+            }
 
         if joined_table not in sides:
             raise QueryValidationError(
@@ -967,7 +1156,7 @@ def _validate_join_graph(query: StructuredQuery) -> None:
         for pair in join.extra_on:
             extra_t0, _ = parse_column_ref(pair[0])
             extra_t1, _ = parse_column_ref(pair[1])
-            if {extra_t0.lower(), extra_t1.lower()} != sides:
+            if {extra_t0.casefold(), extra_t1.casefold()} != sides:
                 raise QueryValidationError(
                     f"extra_on pair {pair!r} for join to {join.table!r} must reference "
                     "the same two tables as `on` — a join's condition is always about "
@@ -981,6 +1170,7 @@ async def validate_schema(
     principal: Optional[Principal] = None,
     *,
     scope_tables: Optional[Dict[int, Dict[str, sa.Table]]] = None,
+    scope_connections: Optional[Dict[int, Dict[str, str]]] = None,
 ) -> Dict[str, sa.Table]:
     """Reflect + verify every table/column the query — every nested
     value_subquery (item 97) and every set-operation arm (item 104) — references
@@ -994,7 +1184,21 @@ async def validate_schema(
     independent scope (its refs resolve to its own tables — undeclared-table
     rejection is exactly what makes a correlated reference to an outer table fail),
     and a subquery is required to stay single-connection (cross-connection nesting
-    is rejected, per item 97's minimal-safe subset)."""
+    is rejected, per item 97's minimal-safe subset).
+
+    If `scope_connections` is provided (item 155), it is populated the same way as
+    `scope_tables`: one entry per scope, keyed by that scope query's `id`, whose
+    value is `resolve_query_table_connections`'s per-table connection map for that
+    scope — case-folded onto each table's effective name, so a later case-
+    insensitive lookup (`sensitivity_approval_reasons` resolves a column ref's
+    table token, which may differ in case from the alias as declared) matches the
+    same way `effective_name_map` already does. This is the SAME map schema
+    validation itself uses to decide which connection's schema to reflect a
+    cross-connection join's table against (`_load_table`'s `table_connection`
+    argument below) — threaded out here rather than recomputed later so the
+    approval gate's view of "which connection does this table actually live in"
+    can never drift from the one schema validation already enforced the
+    `join_group` rule against."""
     outer_tables: Optional[Dict[str, sa.Table]] = None
     # Always collected, even when the caller passes no `scope_tables`: the
     # cross-arm type check below compares scopes against EACH OTHER, so it needs
@@ -1010,13 +1214,20 @@ async def validate_schema(
     cte_tables: Dict[str, sa.Table] = {}
     for spec in query.ctes:
         _reject_cross_connection_nesting(spec.query, connection_id, f"cte {spec.name!r}")
+        table_connection = resolve_query_table_connections(
+            spec.query, connection_id, principal=principal, cte_names=set(cte_tables)
+        )
+        if scope_connections is not None:
+            scope_connections[id(spec.query)] = {
+                name.casefold(): cx for name, cx in table_connection.items()
+            }
         body_tables = await _reflect_and_validate_scope(
-            spec.query, connection_id, principal, cte_tables
+            spec.query, connection_id, principal, cte_tables, table_connection=table_connection
         )
         reflected[id(spec.query)] = body_tables
         if scope_tables is not None:
             scope_tables[id(spec.query)] = body_tables
-        cte_tables[spec.name.lower()] = _cte_projection_table(spec, body_tables)
+        cte_tables[spec.name.casefold()] = _cte_projection_table(spec, body_tables)
 
     # A correlated subquery resolves its declared outer refs against the PARENT's
     # reflected tables, so a parent must be reflected before its children. The scope
@@ -1036,8 +1247,20 @@ async def validate_schema(
                 connection_id,
                 "a nested scope (an IN (subquery), or a set-operation arm within one)",
             )
+        table_connection = resolve_query_table_connections(
+            scope, connection_id, principal=principal, cte_names=set(cte_tables)
+        )
+        if scope_connections is not None:
+            scope_connections[id(scope)] = {
+                name.casefold(): cx for name, cx in table_connection.items()
+            }
         scoped_tables = await _reflect_and_validate_scope(
-            scope, connection_id, principal, cte_tables, correlated.get(id(scope))
+            scope,
+            connection_id,
+            principal,
+            cte_tables,
+            correlated.get(id(scope)),
+            table_connection=table_connection,
         )
         reflected[id(scope)] = scoped_tables
         if scope_tables is not None:
@@ -1057,12 +1280,33 @@ async def validate_schema(
                 # because its parent had declared it, so "one level" held in name
                 # only. Measured 2026-07-27 by the grandparent case in
                 # `test_correlation_boundary.py`, which this line is what fails.
-                own_names = {n.lower() for n in effective_name_map(scope)}
+                own_names = {n.casefold() for n in effective_name_map(scope)}
                 visible: Dict[str, sa.Table] = {}
                 for ref in nested.correlate:
                     table_name, column_name = parse_column_ref(ref)
-                    outer = scoped_tables.get(table_name)
-                    if outer is not None and table_name.lower() not in own_names:
+                    # `table_by_name_or_none` — not an exact `scoped_tables.get(...)`
+                    # index — for the identical reason item 167 routed the
+                    # mandatory-row-filter walk through the same lookup (see that
+                    # helper's docstring). `scoped_tables` is the SAME dict object
+                    # the compiler will resolve the parent's own FROM/JOIN clause
+                    # against; if a phantom, differently-cased alias exists for
+                    # this table (a column ref elsewhere in the parent scope spelled
+                    # it differently than the join declared), an exact index on the
+                    # correlate ref's own literal spelling can pick a DIFFERENT
+                    # `sa.Table.alias(...)` object than the one that actually lands
+                    # in the parent's compiled FROM/JOIN. SQLAlchemy's auto-
+                    # correlation matches by object identity, so that mismatch
+                    # silently produces an UNCORRELATED, independent subquery scan
+                    # of the table instead of a correlated one — and if the table
+                    # also carries a `mandatory_row_filter`, the independent scan
+                    # never picks that filter up either, since it only applies to
+                    # whichever object the outer scope's own FROM/JOIN uses (item
+                    # 169). Routing through the same case-insensitive, first-match
+                    # lookup the compiler itself uses guarantees this always
+                    # resolves to that same object, regardless of `tables`'
+                    # iteration order.
+                    outer = table_by_name_or_none(scoped_tables, table_name)
+                    if outer is not None and table_name.casefold() not in own_names:
                         outer = None  # inherited by the parent, not the parent's own
                     if outer is None:
                         raise QueryValidationError(
@@ -1264,13 +1508,13 @@ def _cte_projection_table(spec: CteSpec, body_tables: Dict[str, sa.Table]) -> sa
     names = [select_item_output_name(item, body_tables) for item in spec.query.select]
     seen: Set[str] = set()
     for name in names:
-        if name.lower() in seen:
+        if name.casefold() in seen:
             raise QueryValidationError(
                 f"cte {spec.name!r} projects more than one column named {name!r}, so "
                 f"{spec.name}.{name} would be ambiguous — give one of them a distinct "
                 "`as` alias."
             )
-        seen.add(name.lower())
+        seen.add(name.casefold())
     return sa.Table(spec.name, sa.MetaData(), *[sa.Column(name) for name in names])
 
 
@@ -1280,6 +1524,8 @@ async def _reflect_and_validate_scope(
     principal: Optional[Principal] = None,
     cte_tables: Optional[Dict[str, sa.Table]] = None,
     correlated_tables: Optional[Dict[str, sa.Table]] = None,
+    *,
+    table_connection: Optional[Dict[str, str]] = None,
 ) -> Dict[str, sa.Table]:
     """Reflect + verify one query scope (the outer query, a cte body, or a single
     subquery), independent of any other scope — its column refs resolve only
@@ -1290,10 +1536,40 @@ async def _reflect_and_validate_scope(
     DECLARED it may read, already resolved by the caller against the parent's name
     map. They are added to the resolvable set here and nowhere else, so a scope that
     declared nothing keeps the pre-106 behavior exactly: an outer reference is an
-    undeclared table, and undeclared tables are rejected below."""
-    table_connection = resolve_query_table_connections(
-        query, connection_id, principal=principal, cte_names=set(cte_tables or {})
-    )
+    undeclared table, and undeclared tables are rejected below.
+
+    ``table_connection`` (item 155) is this scope's own `resolve_query_table_
+    connections` result. It is a required keyword in practice — both call sites in
+    `validate_schema` always compute and pass it, since the caller needs that same
+    value to populate `scope_connections` for the approval gate — but stays
+    optional (recomputed here when omitted) so this private helper still works
+    standalone, e.g. from a future test that doesn't want to duplicate the call.
+    Its keys preserve a join's own DECLARED alias/table casing; this function
+    case-folds its own copy before ever looking a name up in it (item 159),
+    because `needed` (below) can legitimately contain a differently-cased
+    spelling of the same table via a column ref."""
+    if table_connection is None:
+        table_connection = resolve_query_table_connections(
+            query, connection_id, principal=principal, cte_names=set(cte_tables or {})
+        )
+    # Case-folded once, up front, and used for every lookup below (item 159).
+    # `table_connection`'s keys preserve a join's own DECLARED alias/table
+    # casing (see `resolve_query_table_connections`), but `needed` (below) is
+    # unioned from that same declared spelling AND every column ref's own
+    # table token — which a caller may spell differently ("O" declared,
+    # "o.id" referenced). A raw `table_connection.get(name, ...)` lookup only
+    # matches when `name` happens to be the declared spelling; when a
+    # differently-cased ref's spelling is the one actually used for a given
+    # table's `_load_table` call, the lookup silently misses and falls back
+    # to the PRIMARY connection — reflecting the table's SCHEMA against the
+    # wrong physical connection (a spurious "table not found", or a silent
+    # join against an unrelated same-named table on the primary connection).
+    # NOT an item-156 mask/filter/deny-list bypass: those read `scope_connections`
+    # (`validate_schema`'s own case-folded copy, populated independently of
+    # this one — see that function), so they already resolved correctly
+    # either way. Mirrors `resolve_scope_connections`, which case-folds for
+    # the same reason.
+    table_connection_cf = {name.casefold(): cx for name, cx in table_connection.items()}
     _validate_join_graph(query)
     name_to_physical = effective_name_map(query)
 
@@ -1310,8 +1586,8 @@ async def _reflect_and_validate_scope(
         t, _ = parse_column_ref(column_ref.ref)
         needed.add(t)
 
-    declared_tables = set(name_to_physical) | {n.lower() for n in (correlated_tables or {})}
-    undeclared_tables = sorted(name for name in needed if name.lower() not in declared_tables)
+    declared_tables = set(name_to_physical) | {n.casefold() for n in (correlated_tables or {})}
+    undeclared_tables = sorted(name for name in needed if name.casefold() not in declared_tables)
     if undeclared_tables:
         raise QueryValidationError(
             "Column references may only use the query's from table/alias or an "
@@ -1324,12 +1600,25 @@ async def _reflect_and_validate_scope(
         # A declared correlated name binds to the PARENT's own table object, not a
         # fresh reflection of the same table. Identity is what makes the compiled
         # subquery correlate instead of silently re-scanning an independent copy.
-        outer = (correlated_tables or {}).get(name)
+        #
+        # `table_by_name_or_none`, not an exact `(correlated_tables or {}).get
+        # (name)` index: `correlated_tables` is keyed by whichever literal
+        # spelling the `correlate` declaration itself used (e.g. "c" for
+        # `correlate=["c.id"]`), but `needed` can ALSO contain a differently-
+        # cased ref to that same table from the child scope's OWN body (e.g.
+        # a WHERE predicate spelled "C.name") — `declared_tables` (above)
+        # already accepts it case-insensitively, so it reaches this loop. An
+        # exact index misses that spelling, falls through to `name_to_
+        # physical[name.casefold()]` below, and raises a raw KeyError (not a
+        # QueryValidationError) because a correlated-only table was never
+        # part of this scope's OWN name_to_physical map. Found while fixing
+        # item 169's sibling bug in the same region.
+        outer = table_by_name_or_none(correlated_tables or {}, name)
         if outer is not None:
             tables[name] = outer
             continue
-        physical_name = name_to_physical[name.lower()]
-        physical_key = physical_name.lower()
+        physical_name = name_to_physical[name.casefold()]
+        physical_key = physical_name.casefold()
         # A cte name resolves to the block's projected shape, never to reflection —
         # `_load_table` would (correctly) fail to find a table by that name. This is
         # also the only place a cte reference is turned into something columns
@@ -1338,10 +1627,12 @@ async def _reflect_and_validate_scope(
         if source is None:
             if physical_key not in physical_tables:
                 physical_tables[physical_key] = await _load_table(
-                    connection_id, physical_name, table_connection.get(name, connection_id)
+                    connection_id,
+                    physical_name,
+                    table_connection_cf.get(name.casefold(), connection_id),
                 )
             source = physical_tables[physical_key]
-        tables[name] = source if name.lower() == physical_key else source.alias(name)
+        tables[name] = source if name.casefold() == physical_key else source.alias(name)
 
     _validate_select_columns(query, tables)
     _validate_join_columns(query, tables)

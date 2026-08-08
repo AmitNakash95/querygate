@@ -54,16 +54,33 @@ async def list_live_tables(connection_id: str) -> list[str]:
     schema filter, which would otherwise leak internal database structure into
     `list_tables()` for any connection without an explicit `known_tables` seed,
     and made schema-refresh scanning (`catalog/refresh.py`) fail outright by
-    trying to reflect them under the wrong schema.
-    """
-    from querygate.connections.engine import session_scope
+    trying to reflect them under the wrong schema. MySQL has the same problem
+    with its own two additional system schemas: `mysql` (internal server
+    tables — users, plugins, ...) and `performance_schema` (live monitoring
+    tables) are otherwise both listed by `INFORMATION_SCHEMA.TABLES` alongside
+    a connection's real tables (confirmed live against a real MySQL 8.4
+    server, TODO.md item 19) — `sys` and `information_schema` themselves are
+    already excluded above and happen to be spelled identically to MSSQL's.
 
+    `SessionDialectAdapter.list_live_tables_extra_filter_sql()` appends any
+    further dialect-specific restriction beyond the shared exclusion list —
+    MySQL's own `INFORMATION_SCHEMA.TABLES` is server-wide (spans every
+    database the connecting user can see), unlike Postgres's/MSSQL's, which
+    are already scoped to the connected database.
+    """
+    from querygate.connections.dialects import list_live_tables_extra_filter_sql
+    from querygate.connections.engine import session_scope
+    from querygate.connections.registry import get_registry
+
+    dialect = get_registry().get(connection_id).dialect
     async with session_scope(connection_id) as session:
         result = await session.execute(
             sa.text(
-                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "  # nosec B608 — no caller/AST-controlled input reaches this string; `dialect` is a closed, pydantic-validated enum sourced only from server-side connection config, and list_live_tables_extra_filter_sql() dispatches it to one of a fixed set of static literal clauses (never interpolates any value). This is internal INFORMATION_SCHEMA introspection used to seed list_tables(), not the caller-facing StructuredQuery pipeline the "no raw SQL" invariant governs.
                 "WHERE TABLE_TYPE = 'BASE TABLE' "
-                "AND TABLE_SCHEMA NOT IN ('pg_catalog', 'information_schema', 'sys')"
+                "AND TABLE_SCHEMA NOT IN "
+                "('pg_catalog', 'information_schema', 'sys', 'mysql', 'performance_schema')"
+                + list_live_tables_extra_filter_sql(dialect)
             )
         )
         return [row[0] for row in result.all()]

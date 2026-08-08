@@ -53,6 +53,7 @@ def audit_query(
     template_id: Optional[str] = None,
     template_param_shape: Optional[List[str]] = None,
     masked_columns: Optional[List[str]] = None,
+    purpose: Optional[str] = None,
 ) -> None:
     log = get_logger()
     event = AuditEvent(
@@ -79,6 +80,7 @@ def audit_query(
         template_id=template_id,
         template_param_shape=template_param_shape,
         masked_columns=masked_columns or [],
+        purpose=purpose,
     )
     log.info(
         "audit.query",
@@ -93,6 +95,7 @@ def audit_query(
         sql=sql,
         params=params,
         intent=intent,
+        purpose=purpose,
         row_count=row_count,
         response_bytes=response_bytes,
         duration_ms=duration_ms,

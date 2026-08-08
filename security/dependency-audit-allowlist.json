@@ -1,1 +1,9 @@
-[]
+[
+  {
+    "id": "PYSEC-2026-286",
+    "package": "asyncmy",
+    "reason": "SQL injection (CVE-2025-65896, GHSA-qhqw-rrw9-25rm, CVSS 9.8) in asyncmy's converters.pyx escape_dict(): only dict VALUES are escaped, not dict KEYS, so a caller that passes cursor.execute(query, {attacker_controlled_key: value}) with a pyformat/dict-shaped parameter mapping can inject via the key. No fixed version exists yet upstream. Measured, not assumed (2026-08-06, TODO.md item 19): QueryGate never calls asyncmy's cursor directly — every MySQL query goes through SQLAlchemy Core via the async engine. SQLAlchemy's DBAPI execution layer shapes the parameters it hands a cursor according to the dialect's declared `paramstyle`; the mysql+asyncmy dialect declares 'format' (positional %s), which SQLAlchemy always passes as a tuple/sequence, never a dict — regardless of whether the query is built via sa.text() or Core Select. escape_dict()'s vulnerable dict-KEYS codepath is only reached under a dict-shaped paramstyle (pyformat/named), so it is never reached by this dialect's usage pattern. Guarded going forward by a static regression test (tests/unit/test_dialect_adapters.py::TestMySQLAsyncmyParamstyleStaysPositional) asserting the dialect's declared paramstyle stays out of the dict-shaped set — it fails loudly if a future SQLAlchemy release ever changes that, which is when this entry needs re-review, not a live-server trace on every audit pass.",
+    "added": "2026-08-06",
+    "tracking": "TODO.md item 19 phase 1; re-review if asyncmy's paramstyle ever changes or a raw cursor call is ever introduced, and re-check on every dep-audit pass for an upstream fix version."
+  }
+]

@@ -253,7 +253,11 @@ def test_approval_token_bound_to_one_write_is_rejected_for_another(monkeypatch):
     )
     other = DeleteStatement(table="orders", where=WritePredicate(col="orders.id", op="eq", value=2))
     token = issue_approval_token(
-        fingerprint=write_fingerprint(approved), approver_subject="a", key="k"
+        fingerprint=write_fingerprint(approved),
+        approver_subject="a",
+        key="k",
+        connection_id=None,
+        principal_subject=None,
     )
     svc = WriteExecutionService("demo")
     svc._enforce_write_approval_gate(approved, 5, wp, token)  # admits its own write

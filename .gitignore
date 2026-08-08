@@ -1,3 +1,7 @@
+# Overnight-run kill switch — created ad hoc to halt an unattended session,
+# deleted before the next run; never a record worth tracking
+OVERNIGHT_STOP
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -157,6 +161,7 @@ activemq-data/
 .env
 .env.production
 .envrc
+deploy/docker-compose/querygate-metrics-token
 .venv
 env/
 venv/

@@ -138,6 +138,30 @@ class MandatoryRowFilter(pyd.BaseModel):
         return principal.claims[self.from_claim]
 
 
+def _ci_lookup(mapping: dict[str, list], key: str) -> Optional[list]:
+    """Case-insensitive dict lookup, shared by `WritePolicy` and `Policy` —
+    table-name casing in policy.yaml isn't guaranteed to match what schema
+    reflection returns (dialects differ: Postgres lowercases unquoted
+    identifiers, MSSQL usually preserves case), so an exact-string dict
+    lookup here can silently fail to match a configured rule.
+
+    Uses `.casefold()`, not `.lower()` (TODO.md item 149): a handful of real
+    Unicode identifiers disagree between the two (e.g. German `"STRASSE"` vs
+    `"straße"` — `.lower()` leaves them distinct, `.casefold()` unifies
+    them), and every OTHER case-insensitive table-key comparison in this
+    module (`Policy._merge_table_keyed`, and every table-keyed helper in
+    `admin/access_diff.py`) already uses `.casefold()`. A previous version of
+    this function used `.lower()`, the one holdout — found by
+    `security-invariant-reviewer` while reviewing item 148's `_diff_masks`
+    fix, fixed here rather than left as a live inconsistency.
+    """
+    target = key.casefold()
+    for k, value in mapping.items():
+        if k.casefold() == target:
+            return value
+    return None
+
+
 class WritePolicy(pyd.BaseModel):
     """Governed-writes policy (TODO.md item 93). Deny-by-default: writes are OFF
     unless `enabled` is true AND the target table is in `allowed_tables` AND the
@@ -181,22 +205,50 @@ class WritePolicy(pyd.BaseModel):
     def table_writable(self, table_name: str) -> bool:
         if not self.enabled:
             return False
-        name = table_name.lower()
-        return any(t.lower() == name for t in self.allowed_tables)
+        target = table_name.casefold()
+        return any(t.casefold() == target for t in self.allowed_tables)
 
     def operation_allowed(self, op: str) -> bool:
         return self.enabled and op in self.allowed_operations
 
     def write_column_allowed(self, table_name: str, column_name: str) -> bool:
-        col = column_name.lower()
-        for key in (table_name.lower(), "*"):
-            for denied in self.denied_write_columns.get(key, []):
-                if denied.lower() == col:
-                    return False
+        col = column_name.casefold()
+        # `_ci_lookup`, not a literal `.get(table_name.casefold(), [])`: the
+        # PREVIOUS version of this method looked up the dict by exact key
+        # match on the lowercased table name, so a `denied_write_columns` key
+        # configured with any casing other than all-lowercase (e.g. the same
+        # "Orders" casing `allowed_tables` legitimately uses elsewhere in the
+        # same policy) never matched at all — the deny list was silently
+        # inert for that table regardless of what casing the caller passed.
+        # Found while fixing item 149's Policy-side casefold/lower skew;
+        # this was the more severe sibling bug on the write-deny path.
+        denied = (_ci_lookup(self.denied_write_columns, table_name) or []) + (
+            _ci_lookup(self.denied_write_columns, "*") or []
+        )
+        if any(d.casefold() == col for d in denied):
+            return False
         # Also honor the read denied_columns for the *_KEY convention? Kept
         # separate deliberately: a column can be readable but not writable and
         # vice versa; write policy is its own axis.
         return True
+
+
+class PurposePolicyDelta(pyd.BaseModel):
+    """A narrowing-only adjustment layered onto the principal's resolved
+    `Policy` when a query declares this purpose (TODO.md item 145, feature
+    F7 — purpose-bound access). By construction it can only take away access
+    the base `Policy` already granted: there is no "allow" field here, only
+    additional deny/filter/mask constraints unioned onto the base policy's
+    own (`Policy.for_purpose`), so a misconfigured delta cannot grant more
+    than the base policy already allows.
+    """
+
+    denied_tables: list[str] = pyd.Field(default_factory=list)
+    denied_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
+    mandatory_row_filters: list[MandatoryRowFilter] = pyd.Field(default_factory=list)
+    column_masks: dict[str, list[ColumnMask]] = pyd.Field(default_factory=dict)
+
+    model_config = pyd.ConfigDict(extra="forbid")
 
 
 class Policy(pyd.BaseModel):
@@ -212,6 +264,21 @@ class Policy(pyd.BaseModel):
     denied_tables: list[str] = pyd.Field(default_factory=list)
     allowed_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
     denied_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
+
+    # Purpose-bound access (TODO.md item 145, feature F7): the closed set of
+    # purpose tokens a caller may declare (`StructuredQuery.purpose`) on this
+    # connection. Empty (the default) means this connection has not opted
+    # into purpose-gating at all — the same "empty allow-list = unrestricted"
+    # convention as `allowed_tables` — so a declared purpose is accepted but
+    # has no effect. Once non-empty, every query on this connection must
+    # declare a purpose from this set (enforced in
+    # `validation/policy_validation.py`).
+    allowed_purposes: list[str] = pyd.Field(default_factory=list)
+    # Per-purpose narrowing applied on top of the resolved policy when a query
+    # declares that purpose — see `for_purpose`. A purpose with no entry here
+    # is still a legitimate declaration (if listed in `allowed_purposes`)
+    # that adds no further narrowing beyond the base policy.
+    purpose_policies: dict[str, PurposePolicyDelta] = pyd.Field(default_factory=dict)
 
     # Governed writes (TODO.md item 93), deny-by-default and preview-only in
     # Phase 1. A read-only deployment leaves this at its default (writes off).
@@ -582,39 +649,25 @@ class Policy(pyd.BaseModel):
         )
 
     def table_allowed(self, table_name: str) -> bool:
-        name = table_name.lower()
-        if any(t.lower() == name for t in self.denied_tables):
+        target = table_name.casefold()
+        if any(t.casefold() == target for t in self.denied_tables):
             return False
         if self.allowed_tables:
-            return any(t.lower() == name for t in self.allowed_tables)
+            return any(t.casefold() == target for t in self.allowed_tables)
         return True
 
-    @staticmethod
-    def _ci_lookup(mapping: dict[str, list[str]], table_name: str) -> Optional[list[str]]:
-        """Case-insensitive dict lookup — table-name casing in policy.yaml
-        isn't guaranteed to match what schema reflection returns (dialects
-        differ: Postgres lowercases unquoted identifiers, MSSQL usually
-        preserves case), so an exact-string dict lookup here can silently
-        fail to match a configured rule.
-        """
-        target = table_name.lower()
-        for key, value in mapping.items():
-            if key.lower() == target:
-                return value
-        return None
-
     def column_allowed(self, table_name: str, column_name: str) -> bool:
-        col = column_name.lower()
-        denied = (self._ci_lookup(self.denied_columns, table_name) or []) + (
-            self._ci_lookup(self.denied_columns, "*") or []
+        col = column_name.casefold()
+        denied = (_ci_lookup(self.denied_columns, table_name) or []) + (
+            _ci_lookup(self.denied_columns, "*") or []
         )
-        if any(c.lower() == col for c in denied):
+        if any(c.casefold() == col for c in denied):
             return False
-        allowed_specific = self._ci_lookup(self.allowed_columns, table_name)
-        allowed_wildcard = self._ci_lookup(self.allowed_columns, "*")
+        allowed_specific = _ci_lookup(self.allowed_columns, table_name)
+        allowed_wildcard = _ci_lookup(self.allowed_columns, "*")
         allowed = allowed_specific if allowed_specific is not None else allowed_wildcard
         if allowed is not None:
-            return any(c.lower() == col for c in allowed)
+            return any(c.casefold() == col for c in allowed)
         return True
 
     def column_mask(self, table_name: str, column_name: str) -> Optional[ColumnMask]:
@@ -623,17 +676,94 @@ class Policy(pyd.BaseModel):
         first case-insensitive match on `column` wins. Same case-insensitive
         table lookup as `column_allowed` (see `_ci_lookup`).
         """
-        col = column_name.lower()
+        col = column_name.casefold()
         for masks in (
-            self._ci_lookup(self.column_masks, table_name),
-            self._ci_lookup(self.column_masks, "*"),
+            _ci_lookup(self.column_masks, table_name),
+            _ci_lookup(self.column_masks, "*"),
         ):
             if masks is None:
                 continue
             for mask in masks:
-                if mask.column.lower() == col:
+                if mask.column.casefold() == col:
                     return mask
         return None
+
+    @staticmethod
+    def _merge_table_keyed(*mappings_in_order: dict, key_preference: "list[dict]") -> dict:
+        """Union table-keyed lists (`denied_columns`/`column_masks` shape)
+        across mappings, resolving table names the same case-insensitive way
+        `_ci_lookup` reads them back — so a base entry keyed `"customers"` and
+        a delta entry keyed `"Customers"` land under ONE key instead of two.
+
+        Without this, whichever differently-cased key a plain `dict` merge
+        happens to insert wins outright at read time (`_ci_lookup` returns on
+        its first case-insensitive match) — silently dropping the OTHER
+        side's entries for that table entirely. For `column_masks` that is a
+        real widening (a base mask vanishes); for `denied_columns` a delta's
+        added deny silently fails to apply. Both are the exact "narrows never
+        widens" failure item 145 exists to prevent (found by
+        `security-invariant-reviewer`, 2026-08-05).
+
+        `key_preference` is the mapping list (in priority order) whose casing
+        wins as the canonical key when the same table appears under two
+        different spellings — cosmetic only, since lookups are already
+        case-insensitive; it just keeps the merged dict's keys stable.
+        `mappings_in_order` is the order values are concatenated within one
+        table's list, which IS load-bearing for `column_masks`'s first-
+        column-match-wins rule.
+        """
+        canonical: dict[str, str] = {}
+        for mapping in key_preference:
+            for table in mapping:
+                canonical.setdefault(table.casefold(), table)
+        merged: dict[str, list] = {}
+        for mapping in mappings_in_order:
+            for table, values in mapping.items():
+                key = canonical[table.casefold()]
+                merged[key] = merged.get(key, []) + list(values)
+        return merged
+
+    def for_purpose(self, purpose: Optional[str]) -> "Policy":
+        """The effective `Policy` once `purpose` is applied (TODO.md item 145).
+
+        Callers must validate `purpose` against `allowed_purposes` themselves
+        (`validation/policy_validation.py.resolve_purpose_policy` does this) —
+        this method only applies the narrowing, and narrows only, by
+        construction: every field `PurposePolicyDelta` carries is additive to
+        a deny-list, filter list, or mask list, never a replacement or an
+        "allow" that could grant more than this `Policy` already does.
+        `purpose=None`, or a purpose with no configured delta, returns this
+        `Policy` unchanged (not a copy) — the common case costs nothing.
+        """
+        if purpose is None:
+            return self
+        delta = self.purpose_policies.get(purpose)
+        if delta is None:
+            return self
+        merged_columns = self._merge_table_keyed(
+            self.denied_columns,
+            delta.denied_columns,
+            key_preference=[self.denied_columns, delta.denied_columns],
+        )
+        # The delta's own masks are concatenated FIRST within each table's
+        # list (see `column_mask`'s first-match-wins rule on the COLUMN name)
+        # so a purpose that adds a stricter mask to an otherwise-unmasked
+        # column actually takes effect; a column the base policy already
+        # masks keeps that mask unless the delta names the identical column,
+        # in which case the purpose-specific one wins.
+        merged_masks = self._merge_table_keyed(
+            delta.column_masks,
+            self.column_masks,
+            key_preference=[self.column_masks, delta.column_masks],
+        )
+        return self.model_copy(
+            update={
+                "denied_tables": self.denied_tables + delta.denied_tables,
+                "denied_columns": merged_columns,
+                "mandatory_row_filters": self.mandatory_row_filters + delta.mandatory_row_filters,
+                "column_masks": merged_masks,
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -657,9 +787,10 @@ class Policy(pyd.BaseModel):
 
 # Policy fields that are not scalar caps. Each is excluded for a stated reason,
 # NOT because it doesn't matter:
-#   * the structural access rules are already diffed field-by-field by
-#     access_diff (tables, columns, masks, row filters) — reporting them again
-#     as opaque scalars would be worse, not better;
+#   * the structural access rules are diffed field-by-field by access_diff
+#     (tables, columns, row filters, and — since TODO.md item 148 fixed a
+#     pre-existing gap where this claim was false for it — masks too) —
+#     reporting them again as opaque scalars would be worse, not better;
 #   * `write` is a nested WritePolicy with its own caps; diffing those needs its
 #     own change category and is deliberately out of scope here;
 #   * `approval_sensitivities` is a list of labels, so it has no scalar
@@ -676,6 +807,16 @@ _NON_GUARDRAIL_POLICY_FIELDS = frozenset(
         "join_group",
         "write",
         "approval_sensitivities",
+        # TODO.md item 145: structural access rules, the same reason
+        # allowed_tables/denied_columns/mandatory_row_filters are excluded —
+        # a list and a dict of narrowing deltas have no scalar permissiveness
+        # to compare, and reporting them as opaque scalars would be worse
+        # than not reporting them at all. Diffed field-by-field by
+        # `admin/access_diff.py::_diff_purposes` instead (found missing by
+        # `security-invariant-reviewer`/`architecture-boundary-reviewer`
+        # 2026-08-05, then added).
+        "allowed_purposes",
+        "purpose_policies",
     }
 )
 

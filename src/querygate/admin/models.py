@@ -406,7 +406,9 @@ SemanticChangeCategory = Literal[
     "table_access",
     "column_access",
     "mandatory_filter",
+    "column_mask",
     "join_group",
+    "purpose_access",
 ]
 
 SemanticChangeDirection = Literal["tightening", "loosening", "neutral"]

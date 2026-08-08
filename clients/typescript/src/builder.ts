@@ -881,6 +881,7 @@ export class Query {
   private topNSpec: TopNSpec | undefined;
   private setOpSpec: SetOpSpec | undefined;
   private intentText: string | undefined;
+  private purposeText: string | undefined;
 
   private constructor(table: string, alias?: string) {
     this.fromTable = table;
@@ -1039,6 +1040,14 @@ export class Query {
     return this;
   }
 
+  /** Declare the closed-set purpose token this query is for (item 145,
+   * feature F7) — checked against the connection's Policy.allowed_purposes
+   * and narrows the effective policy, never widens it. */
+  purpose(text: string): Query {
+    this.purposeText = text;
+    return this;
+  }
+
   private whereNode(): WhereNode | null {
     return andCombine(this.whereNodes);
   }
@@ -1152,6 +1161,7 @@ export class Query {
       correlate: [],
       ctes: [],
       intent: this.intentText ?? null,
+      purpose: this.purposeText ?? null,
     };
   }
 

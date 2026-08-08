@@ -189,9 +189,9 @@ def live_mcp_server():
 async def test_openai_example_mcp_path_works_against_a_live_server(live_mcp_server):
     """The example's own discovery + a real tool dispatch, over real HTTP."""
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
 
-    async with streamablehttp_client(live_mcp_server) as (read, write, _):
+    async with streamable_http_client(live_mcp_server) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
 

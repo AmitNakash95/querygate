@@ -194,6 +194,89 @@ LEARNED_PROPOSALS_GENERATED_TOTAL = Counter(
     registry=REGISTRY,
 )
 
+AUDIT_WORM_FLUSHES_TOTAL = Counter(
+    "querygate_audit_worm_flushes_total",
+    "WORM audit archival flush attempts (TODO.md item 134) — background "
+    "batches drained from the in-process buffer and PUT to S3 Object Lock, "
+    "whether the PUT itself succeeded or failed (see "
+    "querygate_audit_worm_flush_failures_total for the failure half).",
+    registry=REGISTRY,
+)
+
+AUDIT_WORM_FLUSH_FAILURES_TOTAL = Counter(
+    "querygate_audit_worm_flush_failures_total",
+    "WORM archival flushes whose S3 PUT failed — fails open (the query path "
+    "and the local hash-chained ledger are unaffected), but this is a real "
+    "compliance-retention degradation an operator is expected to alert on. "
+    "The failed batch is re-queued for a retry, not lost, unless the buffer "
+    "is also over capacity (see querygate_audit_worm_buffer_dropped_total).",
+    registry=REGISTRY,
+)
+
+AUDIT_WORM_EVENTS_ARCHIVED_TOTAL = Counter(
+    "querygate_audit_worm_events_archived_total",
+    "Individual audit events successfully archived to WORM storage (a "
+    "successful flush's batch size, summed).",
+    registry=REGISTRY,
+)
+
+AUDIT_WORM_BUFFER_DROPPED_TOTAL = Counter(
+    "querygate_audit_worm_buffer_dropped_total",
+    "Audit events evicted from the WORM in-process buffer before they could "
+    "be archived — the buffer filled faster than flushes (or retries after "
+    "a flush failure) could drain it. A sustained non-zero rate means "
+    "AUDIT_WORM_MAX_BUFFERED_EVENTS or AUDIT_WORM_FLUSH_INTERVAL_SECONDS "
+    "need retuning, or the S3 endpoint is down for longer than the buffer "
+    "can absorb.",
+    registry=REGISTRY,
+)
+
+# Managed search over the WORM archive (TODO.md item 134 phase 2,
+# audit/worm_search.py). `outcome` is one of "ok" | "rejected" | "error" —
+# "rejected" means a bound was violated (missing/over-wide time range,
+# limit out of range, a cursor that doesn't match the current filters) and
+# no S3 call was made at all; "error" means S3 itself failed mid-scan
+# (unreachable, misconfigured bucket); "ok" covers every genuinely served
+# request, complete or truncated.
+AUDIT_WORM_SEARCH_REQUESTS_TOTAL = Counter(
+    "querygate_audit_worm_search_requests_total",
+    "Managed search requests against the WORM S3 archive, by outcome.",
+    ["outcome"],
+    registry=REGISTRY,
+)
+
+AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL = Counter(
+    "querygate_audit_worm_search_objects_scanned_total",
+    "S3 segment objects fetched and parsed while serving WORM search "
+    "requests — the real cost driver of a search; watch this alongside "
+    "querygate_audit_worm_search_requests_total for a caller repeatedly "
+    "paging a wide window.",
+    registry=REGISTRY,
+)
+
+VERDICTS_TOTAL = Counter(
+    "querygate_verdicts_total",
+    "Caller-facing verdict() calls (TODO.md item 133), by connection and "
+    "outcome. outcome is deliberately restricted to allowed | denied — never "
+    "a policy-vs-schema reason breakdown, since verdict()'s whole guarantee "
+    "(docs/THREAT_MODEL.md QG-34) is that a denial never distinguishes its "
+    "real cause; a reason label here would republish exactly the oracle "
+    "verdict()'s response body collapses. A quota/concurrency failure is a "
+    "system-busy state, not a shape verdict, so it is not counted here — see "
+    "querygate_query_quota_rejections_total instead.",
+    ["connection", "outcome"],  # outcome: allowed | denied
+    registry=REGISTRY,
+)
+
+VERDICT_DURATION_SECONDS = Histogram(
+    "querygate_verdict_duration_seconds",
+    "verdict() duration in seconds, by connection (both allowed and denied "
+    "outcomes — unlike querygate_query_duration_seconds, a denied verdict's "
+    "duration is still real validation/compile time, not noise).",
+    ["connection"],
+    registry=REGISTRY,
+)
+
 
 def classify_rejection(exc: BaseException) -> str:
     if isinstance(exc, QueueFullError):
@@ -239,6 +322,14 @@ __all__ = [
     "USAGE_SIGNAL_BUFFER_DROPPED_TOTAL",
     "USAGE_SIGNALS_RECORDED_TOTAL",
     "LEARNED_PROPOSALS_GENERATED_TOTAL",
+    "AUDIT_WORM_FLUSHES_TOTAL",
+    "AUDIT_WORM_FLUSH_FAILURES_TOTAL",
+    "AUDIT_WORM_EVENTS_ARCHIVED_TOTAL",
+    "AUDIT_WORM_BUFFER_DROPPED_TOTAL",
+    "AUDIT_WORM_SEARCH_REQUESTS_TOTAL",
+    "AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL",
+    "VERDICTS_TOTAL",
+    "VERDICT_DURATION_SECONDS",
     "classify_rejection",
     "render_latest",
 ]

@@ -139,17 +139,71 @@ _UPSERT_COMPILERS = {
     "sqlite": lambda: _on_conflict_upsert(_sqlite_upsert_insert()),
 }
 
+# Per-dialect rejection messages for a dialect with no factory above — a
+# gap-message registry, not an inline `if dialect == ...` at the call site
+# (composable-interface doctrine). MySQL, Snowflake, and BigQuery each need a
+# message distinct from the generic one below: all three genuinely have an
+# upsert idiom (MySQL's INSERT ... ON DUPLICATE KEY UPDATE, Snowflake's and
+# BigQuery's MERGE), so "it has no ON CONFLICT clause" would be factually
+# wrong for any of them. MySQL's actual gap: ON DUPLICATE KEY UPDATE fires on
+# a collision with ANY unique/PK constraint on the table, with no way to name
+# a specific target the way conflict_columns declares one — so accepting it
+# would silently misrepresent which constraint triggered the update whenever
+# a table has more than one unique key. Reject rather than emulate, per item
+# 74's doctrine. A dialect absent from both this dict and _UPSERT_COMPILERS
+# (e.g. MSSQL) gets the generic message.
+_UPSERT_UNSUPPORTED_MESSAGES = {
+    "mysql": (
+        "upsert is not supported on MySQL: its ON DUPLICATE KEY UPDATE "
+        "fires on a collision with ANY unique/primary key on the table, "
+        "not a specific caller-named conflict target the way "
+        "conflict_columns declares one — accepting it here would "
+        "silently misrepresent which constraint triggered the update. "
+        "Use a separate governed update then insert, or preview which "
+        "rows exist first."
+    ),
+    "snowflake": (
+        "upsert is not supported on Snowflake: its upsert idiom is MERGE, a "
+        "multi-clause statement (MERGE INTO ... USING ... ON ... WHEN "
+        "MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...) with no "
+        "single-target-constraint model the way conflict_columns/"
+        "update_columns express one — synthesizing a MERGE from those two "
+        "fields would be the engine inventing statement structure the AST "
+        "never asked for, not a mechanical translation of it. Use a "
+        "separate governed update then insert, or preview which rows exist "
+        "first."
+    ),
+    "bigquery": (
+        "upsert is not supported on BigQuery: like Snowflake, its only upsert "
+        "idiom is MERGE, a multi-clause statement (MERGE INTO ... USING ... ON "
+        "... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...) "
+        "with no single-target-constraint model the way conflict_columns/"
+        "update_columns express one. BigQuery's gap is structurally even "
+        "wider than Snowflake's: its PRIMARY KEY/UNIQUE constraints, even "
+        "when declared, are documented as NOT ENFORCED (query-optimizer "
+        "hints only), so there is no database-enforced uniqueness for "
+        "conflict_columns to even name a real target against. Synthesizing a "
+        "MERGE from those two fields would be the engine inventing statement "
+        "structure the AST never asked for, not a mechanical translation of "
+        "it. Use a separate governed update then insert, or preview which "
+        "rows exist first."
+    ),
+}
+
 
 def _compile_upsert(
     statement: UpsertStatement, table: sa.Table, dialect: str
 ) -> sa.sql.expression.Executable:
     """INSERT ... ON CONFLICT DO UPDATE, dispatched by dialect through the
-    registry. A dialect without a native ON CONFLICT (MSSQL) is rejected."""
+    registry. A dialect without a native ON CONFLICT (MSSQL, MySQL) is
+    rejected."""
     factory = _UPSERT_COMPILERS.get(dialect)
     if factory is None:
-        raise QueryValidationError(
+        message = _UPSERT_UNSUPPORTED_MESSAGES.get(
+            dialect,
             f"upsert (INSERT ON CONFLICT) is not supported on dialect {dialect!r} — it has no "
             "ON CONFLICT clause. Use a separate governed update then insert, or preview which "
-            "rows exist first."
+            "rows exist first.",
         )
+        raise QueryValidationError(message)
     return factory()(statement, table)

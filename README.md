@@ -3,8 +3,8 @@
 </p>
 
 **QueryGate is an agent-safe database access gateway.** It lets you expose a
-Postgres or MSSQL database to AI agents over MCP and REST — without ever
-letting them run raw SQL.
+Postgres, MSSQL, or MySQL database to AI agents over MCP and REST — without
+ever letting them run raw SQL.
 
 > **QueryGate runs inside your infrastructure.** It dynamically discovers
 > your schema, exposes policy-controlled MCP and REST tools, limits query
@@ -89,6 +89,20 @@ For development with automatic reload, use `make dev` (or its longer alias,
 `make run-dev`). `make run dev` is interpreted by Make as two separate
 targets and is not the development-server command.
 
+With the server running, get your first governed query in under 5 minutes:
+
+```bash
+export QUERYGATE_URL=http://localhost:8000
+export QUERYGATE_TOKEN=<a bearer token from your .env's API_KEYS>
+querygate-quickstart demo
+```
+
+`querygate-quickstart` (TODO.md item 146) reflects a connection's schema and
+prints 3 ready-to-run example queries — a plain select, a filtered select,
+and an aggregate — scoped to columns the catalog doesn't mark sensitive, each
+with a REST `curl`, an MCP tool-call, and a Python SDK snippet. It composes
+existing read-only discovery routes; it never writes anything.
+
 ## Persisted audit events
 
 The example environment enables an append-only JSONL sink at
@@ -133,6 +147,43 @@ head hash (`verify --expected-head`, which also catches records dropped from the
 end). One logical writer owns the chain head, so run a single replica or give
 each replica its own ledger file. This complements — never replaces — shipping
 events to retained/WORM storage or a SIEM.
+
+### Compliance-grade WORM retention (S3 Object Lock)
+
+Set `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm` to additionally archive the
+same redaction-safe events to S3 Object Lock — genuinely undeletable for the
+configured retention window, including by the AWS account root under
+`AUDIT_WORM_RETENTION_MODE=COMPLIANCE` (the default). It **composes with**
+the hash-chained ledger above, never replaces it: the local file is
+unaffected, and the two controls answer different questions — the chain
+proves nobody edited what was kept, WORM proves you can *produce* it on
+demand for the retention window even if the local file is later rotated or
+lost. Requires `AUDIT_WORM_S3_BUCKET` (with Object Lock enabled on the
+bucket — an S3 prerequisite this feature can't turn on for you) and
+`AUDIT_WORM_S3_REGION`.
+
+Archival is buffered and flushed off the request path (`AUDIT_WORM_FLUSH_INTERVAL_SECONDS`,
+default 60s) as one batched object per flush, never one object per event.
+It fails open by design: a flush failure never blocks or fails the query
+that triggered the event — the local chain already captured it — but the
+batch is re-queued for retry (not dropped) and increments
+`querygate_audit_worm_flush_failures_total`, which you should alert on. Only
+a sustained outage past `AUDIT_WORM_MAX_BUFFERED_EVENTS` drops the oldest
+buffered events, visibly, via `querygate_audit_worm_buffer_dropped_total`.
+
+`GET /api/v1/admin/observability/worm-search` (`admin:audit:worm-search`
+scope — deliberately separate from `admin:observability:read`) is the
+QueryGate-native managed search over that archive: bounded time-range,
+`event_type`/`connection_id`/`principal_id` filters, and cursor-based
+pagination, so "every query against `pii_customers` in the last 18 months"
+is answerable even after the local hash-chained file has long since rotated
+that window out. `start_time`/`end_time` are required on every request (no
+"search everything" mode), the window is capped
+(`AUDIT_WORM_SEARCH_MAX_WINDOW_DAYS`, default 730), and one request's S3
+scan is bounded by `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
+`AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS` — an over-wide/missing range is
+rejected outright, a bound hit mid-scan degrades to a truncated, resumable
+page rather than a slow or unbounded scan.
 
 ### Prove the boundary: the adversarial security benchmark
 
@@ -283,6 +334,15 @@ class plus one registration line, never a change to how
 load — including a hot reload via `POST /api/v1/admin/reload-config` — so a
 rotated Vault secret takes effect on the next reload without a restart, no
 env var/process restart required the way a bare `${VAR}` reference does.
+
+That reload is normally operator-triggered. Set
+`CREDENTIAL_LEASE_REFRESH_ENABLED=true` (requires `VAULT_ENABLED=true`) to
+make it automatic instead: a background monitor polls every `${vault:...}`
+reference for a reported lease expiry and proactively reloads before it runs
+out, closing the outage window a short-TTL dynamic credential would
+otherwise fall into between reloads. It only ever triggers the same
+reload/dispose path above, earlier — see `CREDENTIAL_LEASE_CHECK_INTERVAL_SECONDS`
+and `CREDENTIAL_LEASE_REFRESH_MARGIN_SECONDS` in `.env.example`.
 
 ## Example policy config
 
@@ -1356,6 +1416,18 @@ and single-or-batch — `queries` is always a list — all in one tool),
 the product-guide and access tools described below. More examples in
 [`examples/mcp_calls.md`](examples/mcp_calls.md).
 
+Every tool that takes a `connection` argument (all but `list_connections` and
+`run_query_template`, which resolve it server-side) carries the MCP spec's
+`x-mcp-header` schema annotation, so a conforming gateway mirrors it into an
+`Mcp-Param-Connection` HTTP header and can route/authorize per-connection at
+the edge without parsing the body; QueryGate itself rejects a request where
+that header disagrees with the body's actual `connection` argument. Treat it
+as a routing hint only, never an authoritative access decision — it does not
+cover a `JoinSpec`'s own `connection` for cross-database joins, which stays
+bounded by `join_group` policy, and a tool with no `connection` argument
+emits no header at all. See `docs/PRODUCT_GUIDE.md`'s MCP section for the
+full mechanism.
+
 ## Curated query templates (optional)
 
 Instead of (or alongside) letting an agent compose an arbitrary
@@ -1604,13 +1676,13 @@ Agent (MCP) / Client (REST)
 └───────────────────────────────────────────────────────────────┘
         │
         ▼
-  Real Postgres / MSSQL database
+  Real Postgres / MSSQL / MySQL database
 ```
 
 - **`connections/`** — `ConnectionProfile` registry loaded from YAML,
   `${...}`-interpolated connection strings, per-dialect engine/session
-  lifecycle (`dialects.py` is the only place Postgres/MSSQL-specific SQL
-  lives).
+  lifecycle (`dialects.py` is the only place Postgres/MSSQL/MySQL-specific
+  SQL lives).
 - **`secrets/`** — pluggable `${scheme:reference}` secret resolution
   (`SecretResolver` protocol): the built-in `env` backend plus an optional
   `vault` backend, selectable per-reference without touching how
@@ -1786,13 +1858,21 @@ Being upfront about what's not done yet:
 - **No stored-procedure catalog** — deliberately out of scope for this
   version; exposing stored procedures safely needs its own cataloging and
   policy-approval mechanism, not a generic pass-through.
-- **Audit retention is operator-managed** — QueryGate provides append-only
-  JSONL persistence and rotation-friendly writes, but not a WORM store,
-  retention scheduler, search UI, or built-in SIEM exporter yet.
-- **Config-governance has no approval workflow yet** — a caller with
-  `admin:config:write` can stage and immediately apply a version in one
-  session; there's no second-approver/four-eyes requirement or scheduled
-  apply. `POST /admin/config/diff` reports a resolved-access semantic diff
+- **Audit retention has an opt-in native WORM path with managed search** —
+  `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm` (item 134) archives to S3
+  Object Lock (COMPLIANCE mode) alongside the local hash-chained ledger, and
+  `GET /api/v1/admin/observability/worm-search` (item 134 phase 2) searches
+  that archive directly — bounded time-range, filtered, paginated — but it's
+  still opt-in: the default `jsonl_chained` sink is local-file-only, not
+  itself WORM, and there's no browser UI over the search endpoint yet, REST
+  only.
+- **Config-governance's approval workflow is opt-in, not the default** — a
+  caller with `admin:config:write` can stage and immediately apply a version
+  in one session unless an operator sets `require_config_approvals` above 0
+  (item 42), which then requires that many distinct `admin:config:approve`
+  holders — never the author themselves — before an apply proceeds; there is
+  no scheduled/timed apply either way. `POST /admin/config/diff` reports a
+  resolved-access semantic diff
   (typed tightening/loosening/neutral changes, not just a YAML line diff) at
   the connection baseline, and `POST /admin/config/blast-radius` aggregates
   that same diff across every principal explicitly configured in
@@ -1837,11 +1917,35 @@ Being upfront about what's not done yet:
   threat model and adversarial regression suite, but has not yet undergone an
   independent penetration test or formal compliance certification.
 
-MSSQL support (including the query-execution-timeout guardrail) and the
-Postgres statement-timeout guardrail are both verified against real
-servers, not just unit-tested SQL text — see
-`tests/integration/test_mssql_live.py` and
-`tests/integration/test_postgres_timeout.py`. The real-Postgres load/soak
+MSSQL support (including the query-execution-timeout guardrail), MySQL
+support (item 19 phase 1), and the Postgres statement-timeout guardrail are
+all verified against real servers, not just unit-tested SQL text — see
+`tests/integration/test_mssql_live.py`, `tests/integration/test_mysql_live.py`,
+and `tests/integration/test_postgres_timeout.py`. **Snowflake support (item 19
+phase 2) is compiler/rendering-level only and is NOT live-verified**: the
+`DialectAdapter` is unit-tested by compiling its output against a real
+`snowflake.sqlalchemy` dialect object; the `SessionDialectAdapter` is
+unit-tested against recording fakes that assert the exact SQL text/params it
+builds, not against that real dialect object (its statements are built
+directly with `sa.text(...)` rather than compiled expressions). Neither is
+tested against a live Snowflake instance — there is none available in this
+project's environment (a proprietary cloud service, unlike Postgres/MySQL/MSSQL
+which run in Docker), and
+`snowflake-sqlalchemy`'s driver has no async SQLAlchemy engine support, so
+`connections/engine.py` refuses to actually open a Snowflake connection today
+— registering one fails with a clear, explained error rather than connecting.
+Do not treat Snowflake as production-ready the way the other three dialects
+are; see TODO.md item 19's Snowflake live-verification follow-up. **BigQuery
+support (item 19 phase 3) is the same compiler/rendering-level-only, NOT
+live-verified posture**, checked the same way (its `DialectAdapter` compiles
+against a real, installed `sqlalchemy_bigquery` dialect object; its
+`SessionDialectAdapter` is unit-tested against recording fakes). BigQuery has
+a second, independent reason beyond the missing async driver that
+`connections/engine.py` refuses to open a connection for it: `sqlalchemy_
+bigquery`'s DBAPI resolves real Google credentials and builds a live client
+at engine-construction time, not connection time. Do not treat BigQuery as
+production-ready either; see TODO.md item 19's BigQuery live-verification
+follow-up. The real-Postgres load/soak
 harness also proves the observed database concurrency cap, overflow rejection,
 queued completion, timeout cancellation, `queue_mode=fail_fast` never
 waiting, and a caller-shortened `wait_timeout_seconds` being honored under
