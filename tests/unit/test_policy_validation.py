@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from querygate.connections.models import ConnectionProfile
 from querygate.core.exceptions import PolicyViolationError
 from querygate.policy.models import ColumnMask, MandatoryRowFilter, Policy, PurposePolicyDelta
 from querygate.query_ast.models import JoinSpec, Predicate, StructuredQuery, WhereGroup
@@ -85,6 +86,51 @@ def test_cross_connection_join_denied_table_never_enforced_without_the_map():
     query = _cross_connection_query()
     primary_policy = Policy()
     validate_policy(query, primary_policy, connection_id="primary")  # no raise
+
+
+def test_cross_connection_join_denied_table_self_derived_when_only_the_resolver_is_given():
+    """TODO.md item 160 finding 3 (maintainer-approved 2026-08-09): unlike
+    the test above (which passes NEITHER `scope_connections` nor
+    `connection_resolver`, and correctly still doesn't raise — there is
+    nothing to derive from), a caller that passes `connection_resolver` but
+    forgets `scope_connections` is the actual footgun this finding closes.
+    The map is now self-derived from the resolver, so the joined
+    connection's deny rule is enforced exactly as if the caller had passed
+    `scope_connections` explicitly."""
+    query = _cross_connection_query()
+    primary_policy = Policy()
+    other_policy = Policy(denied_tables=["customers"])
+    # Unlike _connection_resolver (whose profile half is always None, fine
+    # for tests that supply scope_connections directly), self-derivation
+    # exercises resolve_query_table_connections for real, which needs a
+    # genuine ConnectionProfile to check join_group/dialect against.
+    profiles = {
+        "primary": ConnectionProfile(
+            id="primary",
+            dialect="postgresql",
+            connection_string="postgresql+asyncpg://user:pass@host/primary_db",
+            join_group="grp",
+        ),
+        "other": ConnectionProfile(
+            id="other",
+            dialect="postgresql",
+            connection_string="postgresql+asyncpg://user:pass@host/other_db",
+            join_group="grp",
+        ),
+    }
+    policies = {"primary": primary_policy, "other": other_policy}
+
+    def resolver(connection_id, principal=None):
+        return profiles[connection_id], policies[connection_id]
+
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(
+            query,
+            primary_policy,
+            connection_id="primary",
+            connection_resolver=resolver,
+            # scope_connections intentionally omitted.
+        )
 
 
 def test_cross_connection_join_denied_table_still_enforced_from_primary_connection():
