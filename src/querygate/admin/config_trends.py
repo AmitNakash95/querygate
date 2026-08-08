@@ -76,6 +76,12 @@ class ChangeTrendThresholds(pyd.BaseModel):
     # of how many are retained — see `admin.anomaly.AnomalyThresholds.max_lines_read`
     # for the full rationale (same reader shape, tail-first scan).
     max_lines_read: int = pyd.Field(default=200_000, ge=1)
+    # TODO.md item 141 — see `admin.anomaly.AnomalyThresholds.
+    # max_consecutive_out_of_window` for the full rationale (same reader
+    # shape, tail-first scan). Counted across both matching types
+    # (`config.governance`, `catalog.governance`) together, since this
+    # stream treats them as one aggregation.
+    max_consecutive_out_of_window: int = pyd.Field(default=5_000, ge=1)
 
     model_config = pyd.ConfigDict(extra="forbid")
 
@@ -253,6 +259,7 @@ class JsonlChangeEventSource:
         malformed = 0
         lines_read = 0
         stopped_early = False
+        consecutive_out_of_window = 0
         if not self.path.exists():
             return [], 0, False
         try:
@@ -295,7 +302,16 @@ class JsonlChangeEventSource:
                 occurred = event.occurred_at
                 if occurred.tzinfo is None:
                     occurred = occurred.replace(tzinfo=timezone.utc)
-                if occurred <= window_start or occurred > now:
+                if occurred <= window_start:
+                    # TODO.md item 141: a run this long is treated as proof
+                    # the window has genuinely ended — stop without setting
+                    # `stopped_early`/`truncated`.
+                    consecutive_out_of_window += 1
+                    if consecutive_out_of_window >= thresholds.max_consecutive_out_of_window:
+                        break
+                    continue
+                consecutive_out_of_window = 0
+                if occurred > now:
                     continue
                 kept.append(event)
         except AuditFileReadBounded:

@@ -3705,6 +3705,45 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-08 — Accepted a windowed early-exit for the tail-first audit
+  readers (`admin/anomaly.py`, `admin/config_trends.py`), after first closing
+  the dominant source of the ordering risk it depends on (TODO.md item
+  141).** Both readers scan the audit log tail-first (newest line first) and,
+  before this item, always read until a hard line/byte cap fired — correct,
+  but wasteful on a long-running deployment's history once the caller's
+  requested time window has clearly been left behind. The item as originally
+  scoped proposed trading a *bounded chance of silently missing a handful of
+  borderline events* for that speed, because `occurred_at` was stamped at
+  event **construction** time, before an arbitrary amount of intervening work
+  (structured logging, and any future code added between construction and
+  the write) — so under concurrent load, two events' physical write order
+  and their `occurred_at` order were not strictly guaranteed to agree.
+  Investigating whether that risk could be closed outright (not just bounded)
+  found the real fix: `audit/logger.py` now re-stamps `occurred_at` inside a
+  new `_persist` helper, immediately before calling the sink's `emit()` —
+  removing the dominant, effectively-unbounded-under-load source of drift
+  (the gap between construction and the write). A fully unconditional
+  version of this — moving the stamp into the sink's own `emit()` under its
+  write lock, so *no* caller could ever see a different value — was
+  considered and rejected: the audit test suite (and any future
+  backfill/import tooling) legitimately calls `sink.emit()` directly with a
+  synthetic, controlled `occurred_at` to seed historical fixtures, and
+  forcing the sink to always overwrite it would silently break that
+  capability. With the dominant drift source closed, the residual risk is
+  sub-microsecond thread-scheduling jitter around lock acquisition for
+  concurrent writers to the same process's ledger file — real in principle,
+  negligible in practice. **Decision:** keep a `max_consecutive_out_of_window`
+  tolerance (default 5,000, counted only across the reader's own matching
+  event type) as defense-in-depth against that residual jitter, rather than
+  claiming a mathematical guarantee the multi-process case (an operator
+  setting `num_of_workers > 1` in one pod/replica, sharing one `AUDIT_JSONL_PATH`
+  across independent OS processes with no cross-process lock) can't actually
+  back. That multi-worker/single-ledger-file configuration is a pre-existing,
+  undocumented gap (not introduced or worsened by this item) worth its own
+  follow-up; it isn't scoped here. See
+  [Audit logging](#6-audit-logging--every-attempt-always) and
+  [pipeline step 6](#the-one-request-pipeline).
+
 - **2026-08-07 — A correlated subquery's `correlate` reference now resolves
   through the same shared, case-insensitive table lookup everywhere, closing
   a real cross-tenant `EXISTS`/scalar-subquery bypass (TODO.md item 169).**
