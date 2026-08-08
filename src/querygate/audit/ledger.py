@@ -102,6 +102,44 @@ def make_record(
     return LedgerRecord(seq=seq, prev_hash=prev_hash, event=event, hash=digest)
 
 
+def resolve_ledger_key(raw: str) -> Optional[bytes]:
+    """Turn a config-supplied HMAC key string into bytes, or `None` if unset.
+
+    Shared by the sink (`audit/sinks.py`, which HMACs on write) and every
+    reader that needs the same key to verify on read (TODO.md item 137) — one
+    conversion, not one per call site.
+    """
+    return raw.encode("utf-8") if raw.strip() else None
+
+
+def verify_envelope_hash(raw: Any, *, key: Optional[bytes] = None) -> Optional[bool]:
+    """Check a hash-chained ledger envelope's own hash against its contents,
+    without requiring the rest of the chain (TODO.md item 137).
+
+    Returns `None` when `raw` isn't a chain envelope at all (a plain `jsonl`
+    line) — there is nothing to verify, so a caller keeps treating those
+    exactly as before. Returns `True`/`False` for an envelope depending on
+    whether `hash` recomputes over `{seq, prev_hash, event}`: this is
+    self-consistency only, not full chain linkage (a windowed/reverse-order
+    scan never walks the whole file), but it is enough to catch a forged or
+    edited record whose author didn't also recompute a correct digest — e.g.
+    the `{"hash": "anything"}` fabrication this item's report describes.
+    Uses the same constant-time `hmac.compare_digest` `verify_chain` does.
+    """
+    if not (
+        isinstance(raw, dict)
+        and raw.keys() >= {"seq", "prev_hash", "event", "hash"}
+        and isinstance(raw["event"], dict)
+    ):
+        return None
+    try:
+        record = LedgerRecord.model_validate(raw)
+    except pyd.ValidationError:
+        return False
+    expected = compute_record_hash(record.seq, record.prev_hash, record.event, key=key)
+    return hmac.compare_digest(expected, record.hash)
+
+
 def unwrap_envelope(raw: Any) -> Any:
     """Transparently unwrap a hash-chained ledger envelope (TODO.md item 91).
 

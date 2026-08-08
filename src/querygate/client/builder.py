@@ -835,6 +835,7 @@ class Query:
         self._top_n: Optional[TopNSpec] = None
         self._set_op: Optional[SetOpSpec] = None
         self._intent: Optional[str] = None
+        self._purpose: Optional[str] = None
 
     @classmethod
     def from_(cls, table: str, *, alias: Optional[str] = None) -> "Query":
@@ -967,6 +968,15 @@ class Query:
         self._intent = text
         return self
 
+    def purpose(self, text: str) -> "Query":
+        """Declare the closed-set purpose token this query is for (TODO.md
+        item 145, feature F7) — checked against the connection's
+        Policy.allowed_purposes and narrows the effective policy, never
+        widens it. Unlike `intent` (free text), it IS persisted to the audit
+        event."""
+        self._purpose = text
+        return self
+
     # Terminals ----------------------------------------------------------- #
     @staticmethod
     def _and_combine(nodes: List[WhereNode]) -> Optional[WhereNode]:
@@ -997,6 +1007,7 @@ class Query:
             top_n=self._top_n,
             set_op=self._set_op,
             intent=self._intent,
+            purpose=self._purpose,
         )
 
     def to_dict(self) -> dict:

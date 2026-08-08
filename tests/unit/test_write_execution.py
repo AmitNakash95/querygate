@@ -15,6 +15,7 @@ import sqlalchemy as sa
 
 from querygate.audit.sinks import reset_audit_sink, set_audit_sink
 from querygate.compiler.write_compiler import _coerce_write_value
+from querygate.core.auth import Principal
 from querygate.core.exceptions import ApprovalRequiredError, PolicyViolationError
 from querygate.execution import write_execution as wx
 from querygate.execution.approval import issue_approval_token, write_fingerprint
@@ -61,7 +62,11 @@ def test_write_approval_gate_admits_only_its_own_write(monkeypatch):
     approved = _delete(1)
     other = _delete(2)
     token = issue_approval_token(
-        fingerprint=write_fingerprint(approved), approver_subject="human", key=_KEY
+        fingerprint=write_fingerprint(approved),
+        approver_subject="human",
+        key=_KEY,
+        connection_id=None,
+        principal_subject=None,
     )
     svc = WriteExecutionService("demo")
     # The token is bound to `approved` — admits it (no raise)...
@@ -86,6 +91,45 @@ def test_write_approval_gate_noop_under_threshold_or_disabled(monkeypatch):
     svc._enforce_write_approval_gate(_delete(1), 5, _wp(require_approval_over_rows=10), None)
     # Threshold None -> gate off entirely, even for a huge write.
     svc._enforce_write_approval_gate(_delete(1), 10_000, _wp(require_approval_over_rows=None), None)
+
+
+def test_write_approval_gate_rejects_a_token_minted_for_a_different_connection(monkeypatch):
+    """TODO.md item 151, write-side sibling of the read gate's connection-
+    binding test: a write approval minted for connection A must not admit the
+    byte-identical write on connection B."""
+    monkeypatch.setattr(wx.app_config, "approval_token_hmac_key", _KEY)
+    write = _delete(1)
+    token = issue_approval_token(
+        fingerprint=write_fingerprint(write),
+        approver_subject="human",
+        key=_KEY,
+        connection_id="staging",
+        principal_subject=None,
+    )
+    with pytest.raises(ApprovalRequiredError):
+        WriteExecutionService("prod")._enforce_write_approval_gate(write, 5, _wp(), token)
+    # ...but it does admit on the connection it was actually minted for.
+    WriteExecutionService("staging")._enforce_write_approval_gate(write, 5, _wp(), token)
+
+
+def test_write_approval_gate_rejects_a_token_minted_for_a_different_principal(monkeypatch):
+    """The principal-binding sibling: a write approval bound to principal X at
+    issue time must not admit principal Y's identical retry."""
+    monkeypatch.setattr(wx.app_config, "approval_token_hmac_key", _KEY)
+    write = _delete(1)
+    token = issue_approval_token(
+        fingerprint=write_fingerprint(write),
+        approver_subject="alice",
+        key=_KEY,
+        connection_id="demo",
+        principal_subject="alice",
+    )
+    svc_as_bob = WriteExecutionService("demo", principal=Principal(subject="bob"))
+    with pytest.raises(ApprovalRequiredError):
+        svc_as_bob._enforce_write_approval_gate(write, 5, _wp(), token)
+    # ...but it does admit when redeemed by the principal it was bound to.
+    svc_as_alice = WriteExecutionService("demo", principal=Principal(subject="alice"))
+    svc_as_alice._enforce_write_approval_gate(write, 5, _wp(), token)
 
 
 @pytest.mark.asyncio
@@ -151,8 +195,33 @@ def test_upsert_compiles_on_conflict_for_postgres_and_rejects_mssql():
     assert "ON CONFLICT" in rendered and "DO UPDATE" in rendered
 
     # MSSQL has no ON CONFLICT — reject, don't emulate.
-    with pytest.raises(QueryValidationError):
+    with pytest.raises(QueryValidationError, match="no ON CONFLICT clause"):
         compile_write(stmt, table, "mssql")
+
+    # MySQL has ON DUPLICATE KEY UPDATE but it fires on ANY unique/PK
+    # collision, not a caller-named conflict target — reject with the
+    # dialect-specific message, not the generic "no ON CONFLICT" one (which
+    # would be factually wrong for MySQL).
+    with pytest.raises(QueryValidationError, match="ON DUPLICATE KEY UPDATE"):
+        compile_write(stmt, table, "mysql")
+
+    # Snowflake has a real upsert idiom (MERGE), but it's a multi-clause
+    # statement with no single-target-constraint model the way
+    # conflict_columns/update_columns express one — reject rather than
+    # synthesize a MERGE the AST never asked for (TODO.md item 19 phase 2).
+    with pytest.raises(QueryValidationError, match="MERGE"):
+        compile_write(stmt, table, "snowflake")
+
+    # BigQuery: same MERGE-only gap as Snowflake, plus a second, stronger
+    # reason — its PRIMARY KEY/UNIQUE constraints, even when declared, are
+    # NOT ENFORCED, so there is no database-enforced uniqueness for
+    # conflict_columns to even name a real target against (TODO.md item 19
+    # phase 3). Captured once so both substrings are proven to be in the
+    # SAME message, not just each independently matchable somewhere.
+    with pytest.raises(QueryValidationError) as excinfo:
+        compile_write(stmt, table, "bigquery")
+    assert "MERGE" in str(excinfo.value)
+    assert "NOT ENFORCED" in str(excinfo.value)
 
 
 def test_upsert_statement_rejects_update_column_that_is_a_conflict_column():

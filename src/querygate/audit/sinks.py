@@ -5,13 +5,15 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
-from typing import Optional, Protocol
+from typing import Callable, Dict, List, Optional, Protocol
 
 from querygate.audit.events import PersistableEvent
+from querygate.audit.file_reader import AuditFileReadBounded, iter_lines_reverse
 from querygate.audit.ledger import (
     GENESIS_PREV_HASH,
     LedgerRecord,
     make_record,
+    resolve_ledger_key,
 )
 
 
@@ -71,33 +73,31 @@ def _read_last_line(path: Path) -> Optional[str]:
     """Return the last non-empty line of a file, reading only its tail.
 
     Used to recover a hash chain's head on startup without scanning the whole
-    (potentially large) ledger. Reads a bounded window from the end, expanding
-    only if no newline is found yet — chain records are a few hundred bytes, so
-    one window is effectively always enough.
+    (potentially large) ledger. Delegates to `audit.file_reader.iter_lines_reverse`
+    (TODO.md item 138) instead of a second hand-rolled tail reader — that
+    generator already yields tail-first with the same "expand toward the
+    start until a newline is found" shape this function used to duplicate,
+    plus the bound this one lacked: item 138's own reader still had an
+    unbounded expanding read for a trailing region with no newline at all
+    (`chunk = handle.read(size - pos)` re-reading and re-copying a growing
+    span, worst case the entire file, once per boot — TODO.md item 139).
     """
+    if not path.exists():
+        return None
     try:
-        size = path.stat().st_size
-    except OSError:
-        return None
-    if size == 0:
-        return None
-    window = 65536
-    with path.open("rb") as handle:
-        pos = size
-        chunk = b""
-        while pos > 0:
-            step = min(window, pos)
-            pos -= step
-            handle.seek(pos)
-            chunk = handle.read(size - pos)
-            # Need at least one newline *before* the trailing content to isolate
-            # a whole last line; keep expanding toward the start otherwise.
-            if chunk.strip(b"\n").count(b"\n") >= 1 or pos == 0:
-                break
-    text = chunk.decode("utf-8", errors="replace")
-    for line in reversed(text.splitlines()):
-        if line.strip():
+        for line in iter_lines_reverse(path):
             return line
+    except AuditFileReadBounded as exc:
+        # A trailing region this oversized/newline-free is corrupted or
+        # adversarial either way — silently treating it as "file empty,
+        # start at genesis" (the `None` case below) would restart the chain
+        # at seq 0 over real prior content. Fail loud instead, matching
+        # `_recover_head`'s own posture for an unparseable last line.
+        raise ValueError(
+            f"Cannot resume hash-chained audit ledger {path}: its last line "
+            f"could not be read within the bounded-read limits ({exc}). "
+            "Refusing to append and silently fork the chain."
+        ) from exc
     return None
 
 
@@ -170,6 +170,77 @@ class HashChainedAuditSink:
         return None
 
 
+class CompositeAuditSink:
+    """Fans one event out to every composed sink (the `CompositeAuthenticator`
+    shape, TODO.md item 134's "compose, don't replace" requirement) — used to
+    add WORM archival *alongside* the local hash-chained ledger without the
+    single global `_sink` losing either capability. Each sub-sink's `emit` is
+    called even if an earlier one raises, so a WORM buffering failure can
+    never suppress the local tamper-evident write (or vice versa); every
+    raised exception is collected and re-raised together so
+    `audit_query`'s existing `except Exception` still logs a real failure
+    rather than silently swallowing one sink's error.
+    """
+
+    def __init__(self, sinks: List[AuditSink]) -> None:
+        self._sinks = sinks
+
+    def emit(self, event: PersistableEvent) -> None:
+        errors: List[BaseException] = []
+        for sink in self._sinks:
+            try:
+                sink.emit(event)
+            except BaseException as exc:  # noqa: BLE001 — collected, not swallowed
+                errors.append(exc)
+        if errors:
+            raise ExceptionGroup("composite audit sink emit failures", errors)
+
+    def close(self) -> None:
+        for sink in self._sinks:
+            sink.close()
+
+
+def _build_none_sink(**_kwargs) -> AuditSink:
+    return NullAuditSink()
+
+
+def _build_jsonl_sink(*, jsonl_path: str, fsync: bool = False, **_kwargs) -> AuditSink:
+    return JsonlAuditSink(jsonl_path, fsync=fsync)
+
+
+def _build_jsonl_chained_sink(
+    *, jsonl_path: str, fsync: bool = False, ledger_hmac_key: str = "", **_kwargs
+) -> AuditSink:
+    key = resolve_ledger_key(ledger_hmac_key)
+    return HashChainedAuditSink(jsonl_path, key=key, fsync=fsync)
+
+
+def _build_jsonl_chained_s3_worm_sink(
+    *, jsonl_path: str, fsync: bool = False, ledger_hmac_key: str = "", **_kwargs
+) -> AuditSink:
+    """Composes the unchanged local hash-chained sink with the WORM sink
+    (TODO.md item 134). `S3WormAuditSink` reaches the same module-level
+    buffer singleton `WormFlushMonitor` drains (mirrors
+    `catalog/usage.py`'s enqueue/monitor split) — `app.py`'s lifespan
+    independently starts/stops the actual `WormFlushMonitor` from
+    `AppConfig`'s `audit_worm_*` settings when this backend is selected;
+    this factory only needs to wire the emit-side sink, not the monitor."""
+    from querygate.audit.worm_sink import S3WormAuditSink
+
+    chain = _build_jsonl_chained_sink(
+        jsonl_path=jsonl_path, fsync=fsync, ledger_hmac_key=ledger_hmac_key
+    )
+    return CompositeAuditSink([chain, S3WormAuditSink()])
+
+
+_SINK_FACTORIES: Dict[str, Callable[..., AuditSink]] = {
+    "none": _build_none_sink,
+    "jsonl": _build_jsonl_sink,
+    "jsonl_chained": _build_jsonl_chained_sink,
+    "jsonl_chained_s3_worm": _build_jsonl_chained_s3_worm_sink,
+}
+
+
 _sink: AuditSink = NullAuditSink()
 _sink_lock = threading.Lock()
 
@@ -193,17 +264,15 @@ def configure_audit_sink(
     fsync: bool = False,
     ledger_hmac_key: str = "",
 ) -> None:
-    if backend == "none":
-        set_audit_sink(NullAuditSink())
-        return
-    if backend == "jsonl":
-        set_audit_sink(JsonlAuditSink(jsonl_path, fsync=fsync))
-        return
-    if backend == "jsonl_chained":
-        key = ledger_hmac_key.encode("utf-8") if ledger_hmac_key.strip() else None
-        set_audit_sink(HashChainedAuditSink(jsonl_path, key=key, fsync=fsync))
-        return
-    raise ValueError(f"Unsupported audit sink backend: {backend!r}")
+    """Dispatched through `_SINK_FACTORIES` (TODO.md item 134 — mirrors
+    `secrets/resolvers.py`'s `build_secret_resolver_registry`'s registry
+    shape) rather than an inline `if backend == ...` chain, so adding a
+    backend means adding one factory + one registry entry, never hunting
+    for every call site an assumption might have leaked into."""
+    factory = _SINK_FACTORIES.get(backend)
+    if factory is None:
+        raise ValueError(f"Unsupported audit sink backend: {backend!r}")
+    set_audit_sink(factory(jsonl_path=jsonl_path, fsync=fsync, ledger_hmac_key=ledger_hmac_key))
 
 
 def reset_audit_sink() -> None:

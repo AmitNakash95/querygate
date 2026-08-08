@@ -13,7 +13,12 @@ from querygate.catalog.retrieval import CatalogCitation
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, get_registry, set_registry
 from querygate.core.config import AppConfig
-from querygate.core.exceptions import CapacityTimeoutError, QueryValidationError, QueueFullError
+from querygate.core.exceptions import (
+    CapacityTimeoutError,
+    ConfigValidationError,
+    QueryValidationError,
+    QueueFullError,
+)
 from querygate.execution.service import (
     BatchQueryItemResult,
     ColumnCatalogInfo,
@@ -259,6 +264,38 @@ async def test_query_validation_error_is_422(app):
                 "/api/v1/demo/query", json={"from": "customers", "select": ["customers.x"]}
             )
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_query_against_a_not_yet_connectable_dialect_is_422_not_500(app):
+    """TODO.md item 19 phase 2 — 2026-08-06 `security-invariant-reviewer`
+    finding: `connections/engine.py`'s Snowflake guard used to raise a bare
+    `ValueError`, which is NOT in `api/_errors.py`'s `_ACTIONABLE` tuple, so
+    `mask_unexpected()` was silently converting the guard's explained
+    rejection into an opaque REST 500 — defeating the guard's whole point.
+    It now raises `ConfigValidationError`, which has its own dedicated
+    `@app.exception_handler` mapping to 422 with the message intact
+    (`api/_errors.py`). This proves that mapping holds through the real
+    ASGI app for the exact exception `init_engine`'s guard raises, not just
+    that the exception TYPE is correct in isolation
+    (`tests/unit/test_connections_engine.py` proves that half)."""
+    with patch(
+        f"{_SERVICE}.execute",
+        new_callable=AsyncMock,
+        side_effect=ConfigValidationError(
+            "Connection 'demo' is dialect 'snowflake', which QueryGate cannot yet open a "
+            "live connection for"
+        ),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            resp = await client.post(
+                "/api/v1/demo/query", json={"from": "customers", "select": ["customers.id"]}
+            )
+    assert resp.status_code == 422
+    assert "cannot yet open a live connection" in resp.text
+    from querygate.core.exceptions import PUBLIC_INTERNAL_ERROR
+
+    assert PUBLIC_INTERNAL_ERROR not in resp.text
 
 
 @pytest.mark.asyncio
@@ -655,12 +692,40 @@ async def test_jwt_enabled_in_local_dev_still_rejects_invalid_tokens():
 
 
 @pytest.mark.asyncio
-async def test_metrics_endpoint(app):
+async def test_metrics_endpoint_requires_auth_by_default():
+    """TODO.md item 144 / docs/THREAT_MODEL.md QG-36: metrics_require_auth
+    defaults to true, so an unauthenticated caller — including the local/dev
+    anonymous bypass, which grants no scopes — must not reach /metrics."""
+    app = create_app(_settings())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.get("/metrics")
+    assert resp.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint_requires_admin_metrics_read_scope():
+    app = create_app(_settings(api_keys=["secret-key"], api_key_scopes=["admin:connections:read"]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        wrong_scope = await client.get("/metrics", headers={"Authorization": "Bearer secret-key"})
+    assert wrong_scope.status_code == 403
+
+    app = create_app(_settings(api_keys=["secret-key"], api_key_scopes=["admin:metrics:read"]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.get("/metrics", headers={"Authorization": "Bearer secret-key"})
+    assert resp.status_code == 200
+    assert "querygate_queries_total" in resp.text
+    assert "querygate_concurrency_in_use" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint_reachable_unauthenticated_when_disabled():
+    """metrics_require_auth=False is an explicit operator opt-out (e.g. a
+    same-pod sidecar scrape path already restricts reachability)."""
+    app = create_app(_settings(metrics_require_auth=False))
     async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
         resp = await client.get("/metrics")
     assert resp.status_code == 200
     assert "querygate_queries_total" in resp.text
-    assert "querygate_concurrency_in_use" in resp.text
 
 
 @pytest.mark.asyncio
@@ -699,6 +764,60 @@ async def test_health_endpoint_reports_degraded_when_connection_unreachable(app)
     assert body["connections"] == {"healthy": 0, "unhealthy": 1, "unknown": 0}
     assert "demo" not in resp.text
     assert "refused" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_worm_audit_backend_wires_the_flush_monitor_end_to_end(tmp_path):
+    """TODO.md item 134: the piece the unit tests (test_audit_worm_sink.py)
+    can't cover — that app.py's lifespan actually starts a WormFlushMonitor
+    reaching the SAME buffer singleton configure_audit_sink()'s
+    CompositeAuditSink writes into, not two independently-constructed
+    buffers that happen to share a class."""
+    import boto3
+    from moto import mock_aws
+
+    from querygate.audit.events import AuditEvent
+    from querygate.audit.sinks import get_audit_sink
+
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="qg-worm-it-test", ObjectLockEnabledForBucket=True)
+
+        settings = _settings(
+            audit_sink_backend="jsonl_chained_s3_worm",
+            audit_jsonl_path=str(tmp_path / "chain.jsonl"),
+            audit_worm_s3_bucket="qg-worm-it-test",
+            audit_worm_s3_region="us-east-1",
+        )
+        app = create_app(settings)
+        with patch("querygate.health._ping", new_callable=AsyncMock):
+            async with app.router.lifespan_context(app):
+                assert app.state.worm_flush_monitor is not None
+                assert app.state.worm_flush_monitor.is_running
+
+                get_audit_sink().emit(
+                    AuditEvent(
+                        connection_id="demo",
+                        policy_decision="allowed",
+                        outcome="success",
+                        query_shape={"from": "customers"},
+                        duration_ms=1,
+                    )
+                )
+                # Deterministic, rather than waiting out the real interval.
+                await app.state.worm_flush_monitor.flush_once()
+
+        listing = s3.list_objects_v2(Bucket="qg-worm-it-test")
+        assert listing["KeyCount"] == 1
+        body = s3.get_object(Bucket="qg-worm-it-test", Key=listing["Contents"][0]["Key"])[
+            "Body"
+        ].read()
+        assert b'"connection_id":"demo"' in body
+
+        # Local hash-chained ledger still got the same event — WORM composes,
+        # it doesn't replace.
+        assert (tmp_path / "chain.jsonl").exists()
+        assert "demo" in (tmp_path / "chain.jsonl").read_text()
 
 
 def _write_reload_config_files(tmp_path):
@@ -833,5 +952,148 @@ connections:
         == "postgresql+asyncpg://vault-resolved/db"
     )
     mock_hvac_client.assert_called_once_with(
-        url="http://vault.internal:8200", token="test-vault-token", namespace=None
+        url="http://vault.internal:8200", token="test-vault-token", namespace=None, timeout=10.0
     )
+
+
+# Deliberately short: pydantic truncates a long `ValidationError.input_value`
+# dict repr to a small head/tail window (see the module docstring on the
+# test below). A short connection_string is what makes the password actually
+# land inside that surviving tail in the un-fixed code -- confirmed directly
+# against ConnectionProfile.model_validate() before writing this test, per
+# item 165's own note that the password "survives whenever the connection
+# string is short enough". (The `id` field's length doesn't matter here --
+# separately confirmed across id lengths from 1 to 200 chars with this same
+# password, it always survives regardless of id length; truncation is driven
+# by connection_string/password length, not id length.) A longer, more
+# production-looking connection string does NOT reliably reproduce the leak
+# (it gets truncated away), so this shape is the regression case, not an
+# unrealistic corner case.
+_LIVE_PASSWORD = "S3cretPw"
+
+
+@pytest.mark.asyncio
+async def test_reload_config_missing_field_error_does_not_leak_credential(tmp_path, monkeypatch):
+    """Item 165 regression: a malformed connections.yaml entry that trips a
+    pydantic `missing`-type error embeds the WHOLE already-interpolated entry
+    dict (including the live connection_string) in that error's
+    `input_value`. Before the fix, `reload_config_endpoint`'s generic
+    `except Exception as exc: detail=str(exc)` handed that straight to the
+    HTTP 400 body. Assert the real password is nowhere in the response."""
+    monkeypatch.setenv("TEST_RELOAD_LEAK_URL", f"postgresql://user:{_LIVE_PASSWORD}@db:5432/app")
+    connections_file = tmp_path / "connections.yaml"
+    # `dialect` omitted entirely on this entry -> pydantic `missing` error,
+    # whose `input_value` is the full entry dict (with the resolved
+    # connection_string already interpolated in). No other fields on this
+    # entry, so the entry dict is exactly {"id", "connection_string"} --
+    # the shape that puts the password inside pydantic's truncated tail.
+    connections_file.write_text("""
+connections:
+  - id: leaky-demo
+    connection_string: ${TEST_RELOAD_LEAK_URL}
+""")
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("default:\n  enabled: true\n")
+
+    settings = _settings(
+        api_keys=["secret-key"],
+        api_key_scopes=["admin:reload-config"],
+        connections_file=str(connections_file),
+        policy_file=str(policy_file),
+    )
+    reload_app = create_app(settings)
+    async with AsyncClient(transport=ASGITransport(app=reload_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/reload-config", headers={"Authorization": "Bearer secret-key"}
+        )
+
+    assert resp.status_code == 400
+    body_text = resp.text
+    assert _LIVE_PASSWORD not in body_text
+    # The error is still actionable -- it names the missing field.
+    assert "dialect" in body_text
+
+
+@pytest.mark.asyncio
+async def test_reload_config_dialect_mismatch_error_does_not_leak_credential(tmp_path, monkeypatch):
+    """Item 158's own dialect-mismatch field_validator was independently
+    verified safe (its `input`/`loc` are scoped to `dialect`'s own value,
+    never `connection_string`) -- confirm that holds through the actual HTTP
+    response body, not just by re-reading the validator's code."""
+    monkeypatch.setenv(
+        "TEST_RELOAD_MISMATCH_URL",
+        f"postgresql+asyncpg://user:{_LIVE_PASSWORD}@dbhost.internal:5432/proddb",
+    )
+    connections_file = tmp_path / "connections.yaml"
+    connections_file.write_text("""
+connections:
+  - id: mismatch-demo
+    dialect: mssql
+    connection_string: ${TEST_RELOAD_MISMATCH_URL}
+    known_tables: [foo]
+""")
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("default:\n  enabled: true\n")
+
+    settings = _settings(
+        api_keys=["secret-key"],
+        api_key_scopes=["admin:reload-config"],
+        connections_file=str(connections_file),
+        policy_file=str(policy_file),
+    )
+    reload_app = create_app(settings)
+    async with AsyncClient(transport=ASGITransport(app=reload_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/reload-config", headers={"Authorization": "Bearer secret-key"}
+        )
+
+    assert resp.status_code == 400
+    body_text = resp.text
+    assert _LIVE_PASSWORD not in body_text
+    assert "dbhost.internal" not in body_text
+    assert "proddb" not in body_text
+    # Still actionable -- names the mismatch.
+    assert "dialect" in body_text
+
+
+@pytest.mark.asyncio
+async def test_reload_config_yaml_syntax_error_does_not_leak_credential(tmp_path):
+    """Item 165 follow-up (surfaced by a post-fix `security-invariant-reviewer`
+    audit): a SYNTACTICALLY broken connections.yaml raises `yaml.YAMLError`
+    before pydantic ever runs, on the same file content -- and PyYAML's own
+    `Mark.__str__()` embeds the literal offending SOURCE LINE via
+    `get_snippet()`. A connections.yaml entry is permitted to carry a literal
+    (non-`${...}`) credential (config-governance drafts explicitly support
+    this), so an unterminated quote on a `connection_string:` line puts the
+    real password inside `str(yaml.YAMLError)` -- which used to reach the
+    generic `except Exception as exc: detail=str(exc)` handler verbatim."""
+    connections_file = tmp_path / "connections.yaml"
+    # Deliberately malformed: the quote on the connection_string line is
+    # never closed, which is exactly the shape whose YAMLError.problem_mark
+    # points at (and whose str() would echo) this line.
+    connections_file.write_text(f"""
+connections:
+  - id: leaky-yaml
+    dialect: postgresql
+    connection_string: "postgresql://user:{_LIVE_PASSWORD}@db:5432/app
+""")
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("default:\n  enabled: true\n")
+
+    settings = _settings(
+        api_keys=["secret-key"],
+        api_key_scopes=["admin:reload-config"],
+        connections_file=str(connections_file),
+        policy_file=str(policy_file),
+    )
+    reload_app = create_app(settings)
+    async with AsyncClient(transport=ASGITransport(app=reload_app), base_url=_BASE_URL) as client:
+        resp = await client.post(
+            "/api/v1/admin/reload-config", headers={"Authorization": "Bearer secret-key"}
+        )
+
+    assert resp.status_code == 400
+    body_text = resp.text
+    assert _LIVE_PASSWORD not in body_text
+    # Still actionable -- names roughly where the syntax broke.
+    assert "line" in body_text

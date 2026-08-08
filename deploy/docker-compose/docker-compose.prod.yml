@@ -89,6 +89,11 @@ services:
       - "127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # A file, not an env var: Prometheus's `authorization.credentials_file`
+      # rereads this on every scrape, so rotating the underlying API key never
+      # needs a Prometheus restart. Create it once — see
+      # .env.production.example's API_KEY_SCOPES comment for the key itself.
+      - ./querygate-metrics-token:/etc/prometheus/querygate-metrics-token:ro
     depends_on:
       - querygate
 

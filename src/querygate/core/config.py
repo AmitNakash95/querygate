@@ -40,20 +40,59 @@ class AuditSinkBackend(str, Enum):
     # bodies as JSONL, each wrapped in a chain envelope so edits/deletions/
     # reordering are detectable via `querygate-audit verify`.
     JSONL_CHAINED = "jsonl_chained"
+    # Composes the local hash-chained ledger above with an additional,
+    # asynchronously-flushed WORM (S3 Object Lock) archival copy for
+    # compliance-grade retention (TODO.md item 134). The local file is
+    # unchanged by this — every existing local reader keeps working exactly
+    # as it does for JSONL_CHAINED; WORM is a parallel durable copy, not a
+    # replacement (audit/sinks.py's CompositeAuditSink).
+    JSONL_CHAINED_S3_WORM = "jsonl_chained_s3_worm"
 
     def is_locally_readable(self) -> bool:
         """Whether QueryGate's own read surfaces (the personal-denials
         report, the anomaly report, the config/catalog change-trend report,
         and the admin UI audit browser — TODO.md item 136) can read this
         backend's persisted stream back off local disk. Both JSONL variants
-        share one underlying file format — `JSONL_CHAINED` wraps each event
-        in a hash-chain envelope that readers transparently unwrap via
-        `audit.ledger.unwrap_envelope` — so both are readable; `NONE` has
-        nothing persisted to read. The single capability lookup every such
-        gate must use instead of an equality/inequality check against one
-        member, so a future backend (TODO.md item 134) declares its
-        readability once here rather than at every call site."""
-        return self in (AuditSinkBackend.JSONL, AuditSinkBackend.JSONL_CHAINED)
+        and the WORM-composed variant share one underlying local file format
+        — `JSONL_CHAINED`/`JSONL_CHAINED_S3_WORM` wrap each event in a hash-
+        chain envelope that readers transparently unwrap via
+        `audit.ledger.unwrap_envelope` — so all three are readable; `NONE`
+        has nothing persisted to read. The single capability lookup every
+        such gate must use instead of an equality/inequality check against
+        one member, so a future backend declares its readability once here
+        rather than at every call site."""
+        return self in (
+            AuditSinkBackend.JSONL,
+            AuditSinkBackend.JSONL_CHAINED,
+            AuditSinkBackend.JSONL_CHAINED_S3_WORM,
+        )
+
+    def wraps_events_in_a_hash_chain_envelope(self) -> bool:
+        """Whether this backend's persisted local file wraps each event in a
+        `LedgerRecord` envelope (TODO.md item 91) that a reader must unwrap
+        before reading the event body — as opposed to plain JSONL, one event
+        object per line. The second single-capability lookup TODO.md item 136
+        introduced `is_locally_readable()` for: every `require_envelope=...`
+        call site must use this instead of comparing against
+        `AuditSinkBackend.JSONL_CHAINED` alone, so a future envelope-wrapping
+        backend (this item added `JSONL_CHAINED_S3_WORM`) doesn't silently
+        read as `require_envelope=False` and misreport every event's shape."""
+        return self in (
+            AuditSinkBackend.JSONL_CHAINED,
+            AuditSinkBackend.JSONL_CHAINED_S3_WORM,
+        )
+
+    def is_s3_worm_archived(self) -> bool:
+        """Whether this backend archives events to the S3 WORM copy
+        (TODO.md item 134 phase 2, `audit/worm_search.py`) — the capability
+        gate the managed-search endpoint uses to decide whether there is an
+        archive to search at all, instead of comparing against
+        `JSONL_CHAINED_S3_WORM` inline at the route. Only one backend has
+        this today, but the named method keeps the call site future-proof
+        the same way `is_locally_readable()`/`wraps_events_in_a_hash_chain_
+        envelope()` already do for the other two capabilities this enum
+        publishes."""
+        return self == AuditSinkBackend.JSONL_CHAINED_S3_WORM
 
 
 class MetricsHistoryBackend(str, Enum):
@@ -247,6 +286,16 @@ class AppConfig(BaseSettings):
     # GET /health's readiness signal (see querygate/health.py).
     health_check_interval_seconds: float = pyd.Field(default=30)
 
+    # GET /metrics (TODO.md item 144, docs/THREAT_MODEL.md QG-36) already
+    # labels rejections "policy" vs "schema" for existing execute/explain
+    # traffic — the same distinction the verdict endpoint's response body
+    # deliberately collapses (QG-34). Secure by default: a caller needs
+    # admin:metrics:read to scrape it, same Authenticator/scope machinery as
+    # every other admin surface. Set false only when the endpoint's network
+    # reachability is already restricted (e.g. a sidecar-only scrape path)
+    # and an operator has made that tradeoff deliberately.
+    metrics_require_auth: bool = pyd.Field(default=True)
+
     # Minimum interval between two manually triggered "test now" probes
     # (item 43 phase 2) against the same connection. A manual probe opens a
     # real connection to the target database on demand, so this bounds how
@@ -276,6 +325,57 @@ class AppConfig(BaseSettings):
     # (`audit.file_reader.iter_lines_reverse`), so this cap is hit only after
     # every genuinely recent line has already been seen.
     audit_page_max_lines_read: int = pyd.Field(default=200_000, ge=1)
+
+    # Compliance-grade WORM audit retention (TODO.md item 134), active only
+    # when audit_sink_backend=jsonl_chained_s3_worm. Composes with (never
+    # replaces) the local hash-chained ledger above: the local file is
+    # unchanged, and this configures the ADDITIONAL S3 Object Lock archival
+    # copy. Buffered/batched and flushed off the request path — see
+    # audit/worm_sink.py's module docstring for the fail-open rationale.
+    audit_worm_s3_bucket: str = pyd.Field(default="")
+    audit_worm_s3_prefix: str = pyd.Field(default="querygate-audit/")
+    audit_worm_s3_region: str = pyd.Field(default="")
+    # S3 Object Lock retention mode. COMPLIANCE cannot be shortened or
+    # removed by anyone, including the AWS account root — the stronger
+    # guarantee a regulated buyer's "prove nobody could have deleted this"
+    # question needs. GOVERNANCE allows a specifically-permissioned principal
+    # to override it, which weakens the "even we can't delete it" claim this
+    # feature exists to make, so COMPLIANCE is the default; GOVERNANCE is
+    # opt-in for an operator who has a documented, deliberate reason to want
+    # an escape hatch.
+    audit_worm_retention_mode: str = pyd.Field(default="COMPLIANCE")
+    audit_worm_retention_days: int = pyd.Field(default=180, ge=1)
+    # A batch (never a single event — see the Decision Log's object-
+    # granularity rationale) is flushed when either bound is hit, whichever
+    # comes first.
+    audit_worm_flush_interval_seconds: float = pyd.Field(default=60, gt=0)
+    audit_worm_max_buffered_events: int = pyd.Field(default=5000, ge=1)
+
+    # Managed search over the WORM archive (TODO.md item 134 phase 2,
+    # audit/worm_search.py). Reads the same bucket/prefix/region the flush
+    # monitor writes to, above — a search request never touches a second
+    # store. All bounds below exist so a caller cannot make one request scan
+    # an unbounded slice of a potentially years-long compliance archive; a
+    # request outside them is rejected (4xx), never silently served slow.
+    #
+    # Max width of one requested [start, end) window. Default (~2 years)
+    # deliberately covers the "18 months back" compliance-review scenario
+    # this feature exists for, while still being a real, enforced ceiling.
+    audit_worm_search_max_window_days: int = pyd.Field(default=730, ge=1)
+    # Hard per-request cap on S3 objects (segments) fetched — the real cost
+    # driver of a scan, since each is a network round trip. Hit mid-scan, the
+    # response is truncated (not an error) with a cursor to resume, the same
+    # "stop and disclose honestly" posture admin/anomaly.py's max_lines_read
+    # uses for its own bounded reader.
+    audit_worm_search_max_objects_scanned: int = pyd.Field(default=2000, ge=1)
+    # Page size bounds. `limit` on a request is clamped to this ceiling by
+    # the route/tool layer, never silently raised.
+    audit_worm_search_default_limit: int = pyd.Field(default=50, ge=1)
+    audit_worm_search_max_limit: int = pyd.Field(default=500, ge=1)
+    # Wall-clock budget for one request's S3 work. Checked between object
+    # fetches (never mid-fetch), so a request degrades to a truncated,
+    # resumable page rather than hanging past this bound.
+    audit_worm_search_request_timeout_seconds: float = pyd.Field(default=20.0, gt=0)
 
     # HMAC key that signs in-query approval tokens (execution/approval.py,
     # TODO.md item 92). Empty (the default) means the approval gate cannot issue
@@ -407,6 +507,18 @@ class AppConfig(BaseSettings):
     vault_kv_mount: str = pyd.Field(default="secret")
     vault_namespace: str = pyd.Field(default="")
 
+    # TODO item 135: proactive, TTL/lease-driven credential re-resolution.
+    # Item 13 already made a rotated `${vault:...}` value take effect on the
+    # next reload without a restart; this closes the remaining gap that the
+    # refresh was operator-pull only. Off by default and additive — it only
+    # ever *triggers* the existing reload_config()/dispose_engine() path
+    # earlier, proactively, for a reference whose resolver reports a lease
+    # (secrets/resolvers.py's LeasedSecretResolver); a deployment with no
+    # leased resolver registered behaves identically to today.
+    credential_lease_refresh_enabled: bool = pyd.Field(default=False)
+    credential_lease_check_interval_seconds: float = pyd.Field(default=60, gt=0)
+    credential_lease_refresh_margin_seconds: float = pyd.Field(default=300, gt=0)
+
     # Engine pool defaults, shared across connections (per-connection timeout /
     # concurrency guardrails live in policy, not here).
     pool_size: int = pyd.Field(default=20)
@@ -470,6 +582,30 @@ class AppConfig(BaseSettings):
             raise ValueError("VAULT_ADDR must be set when VAULT_ENABLED=true")
         if self.vault_enabled and not self.vault_token:
             raise ValueError("VAULT_TOKEN must be set when VAULT_ENABLED=true")
+        if self.credential_lease_refresh_enabled and not self.vault_enabled:
+            # `VaultSecretResolver` is the only registered LeasedSecretResolver
+            # implementation today — enabling this without Vault would start
+            # a background loop with zero registered resolvers capable of
+            # reporting a lease, a misconfiguration worth failing loudly on
+            # rather than silently doing nothing. This does not guarantee a
+            # *nonzero* lease will ever be reported (the shipped Vault
+            # integration reads KV v2 static secrets, whose lease_duration is
+            # genuinely 0) — only that at least one resolver capable of
+            # reporting one in principle is registered.
+            raise ValueError(
+                "VAULT_ENABLED must be true when CREDENTIAL_LEASE_REFRESH_ENABLED=true "
+                "(no other registered secret resolver currently reports a lease)"
+            )
+        if (
+            self.credential_lease_refresh_enabled
+            and self.credential_lease_check_interval_seconds
+            >= self.credential_lease_refresh_margin_seconds
+        ):
+            raise ValueError(
+                "CREDENTIAL_LEASE_CHECK_INTERVAL_SECONDS must be smaller than "
+                "CREDENTIAL_LEASE_REFRESH_MARGIN_SECONDS, or a lease could come due and expire "
+                "between polls without the monitor ever seeing it inside the margin window"
+            )
         if self.semantic_memory_refresh_enabled and not self.catalog_file:
             raise ValueError("CATALOG_FILE must be set when SEMANTIC_MEMORY_REFRESH_ENABLED=true")
         if self.semantic_memory_usage_signals_enabled and not self.catalog_file:

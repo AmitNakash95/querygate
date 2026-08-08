@@ -161,7 +161,7 @@ async def test_anomalies_surface_a_spike_from_a_hash_chained_ledger(tmp_path):
     assert resp.status_code == 200
     body = resp.json()
 
-    assert body["source"] == "jsonl"
+    assert body["source"] == "jsonl_chained"
     assert body["events_scanned"] == 50
     assert len(body["principals"]) == 1
     assert body["principals"][0]["principal_id"] == "svc-a"

@@ -213,7 +213,33 @@ from querygate.mcp.server import create_mcp_server
 # maintainer rationale out of model docstrings into `#` comments first (a
 # Pydantic docstring becomes the agent-facing schema description and costs
 # tokens on every session; a `#` comment costs nothing).
-_MAX_TOTAL_CHARS = 123_000
+#
+# 2026-08-06 (TODO.md item 128): +412 chars from BatchQueryItemToolResult/
+# WriteBatchItemResult gaining approval_fingerprint/approval_reasons —
+# real new capability (the MCP MRTR approval port needs these visible in
+# the output schema so a client can tell "this item needs approval" apart
+# from any other error without parsing free text), not duplication.
+#
+# 2026-08-06 (TODO.md item 19 phase 2): +648 chars in `list_connections` and
+# `describe_my_querygate_access` — `DatabaseDialect` gained a `snowflake`
+# member (each tool's output schema embeds the enum once), real new
+# capability (a caller can now see/reason about a Snowflake connection at
+# all), not duplication.
+#
+# 2026-08-07 (TODO.md item 19 phase 3): +1,350 chars, the same shape as the
+# Snowflake bump above — `DatabaseDialect` gained a `bigquery` member (each
+# tool's output schema embeds the enum once), real new capability (a caller
+# can now see/reason about a BigQuery connection at all), not duplication.
+#
+# 2026-08-07 (same item, post-audit fix): +318 chars — an auditors pass on
+# this same item found and corrected a self-contradictory "confirmed
+# directly" claim in `DatabaseDialect`'s own docstring (it asserted an
+# `InvalidRequestError` was observed while the very next sentence explained
+# BigQuery's driver actually fails earlier, with a different error, before
+# that check can run); the accurate replacement text is longer. A doc-
+# accuracy fix, not new capability, but it does live inside the schema this
+# budget measures.
+_MAX_TOTAL_CHARS = 128_000
 
 
 def _tool_schema_chars(tool: object) -> int:

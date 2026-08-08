@@ -120,7 +120,7 @@ claim when the work ships or before explicitly handing the item back.
   gate-only fix would turn it from honestly-disabled into silently-empty. Phase
   0 because it makes the stronger audit configuration worse than the weaker one
   — backwards for the security-review story.* **Depends on 91; blocks 134.**
-- [ ] **137** — Audit read surfaces neither verify nor disclose hash-chain
+- [x] **137** — Audit read surfaces neither verify nor disclose hash-chain
   integrity. *Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of
   item 136: the four surfaces item 136 made able to read the `jsonl_chained`
   ledger neither recompute the chain hash nor tell a caller which backend
@@ -136,12 +136,12 @@ claim when the work ships or before explicitly handing the item back.
   separately because fixing it touches the default-backend read path in
   production today and deserves its own scoping/tests rather than riding in on
   a bug-fix commit.*
-- [ ] **139** — Bound audit-line size at the source (AST list caps +
+- [x] **139** — Bound audit-line size at the source (AST list caps +
   `audit/sinks.py`'s own unbounded-read defect). *Surfaced 2026-08-01 by the
   `security-invariant-reviewer` audit of item 138. Needs a maintainer decision
   on the right AST list-size cap, recorded in the PRODUCT_GUIDE Decision Log
   as the item's own first step.* **Depends on 138.**
-- [ ] **140** — `_audit_page` pagination can still materialize ~1M dicts per
+- [x] **140** — `_audit_page` pagination can still materialize ~1M dicts per
   request. *Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of
   item 138; pre-existing (the old deque had the identical bound), same class
   of defect item 138 exists to fix. Needs a maintainer decision on the
@@ -169,13 +169,17 @@ claim when the work ships or before explicitly handing the item back.
   vulnerable `pkcs7_decrypt_*` functions, so this is likely a justified-
   allowlist case, but that's the `dep-audit` skill's call. Blocks the release
   gate for every future item until resolved.*
-- [ ] **144** — `verdict()` emits no query metrics, and `/metrics` is
+- [x] **144** — `verdict()` emits no query metrics, and `/metrics` is
   unauthenticated. *Surfaced 2026-08-02 by the `security-invariant-reviewer`
-  re-audit of item 133. verdict() shares execute()'s quota budget but leaves
-  no metrics trail of its own; separately, /metrics being unauthenticated
-  already exposes a policy-vs-schema rejection-reason label for existing
-  traffic (pre-existing, unrelated). Needs a maintainer call on whether to
-  gate /metrics, recorded before building.*
+  re-audit of item 133. Shipped 2026-08-05: maintainer decided to gate
+  `/metrics` behind a new `admin:metrics:read` scope (not just document the
+  exposure) — see docs/TODO_ARCHIVE.md item 144.*
+- [x] **145** — Purpose-bound access: enforce the declared `intent`, don't
+  just log it (feature F7). *Surfaced 2026-08-05 by `competitive-scan`. Advances
+  the Structural pillar (query-*shape* policy) with a mechanic Immuta owns and
+  no MCP gateway or DB-vendor server matches; composes with policy resolution
+  and audit machinery already shipped (items 90, 49) rather than opening new
+  surface area.*
 
 ### Phase 1 — Pilot-readiness (let one design partner deploy & trust it)
 
@@ -188,7 +192,7 @@ claim when the work ships or before explicitly handing the item back.
   consumer `cosign verify`/`gh attestation verify` docs). Box stays `[ ]` until
   the two maintainer-gated bits — the *first* executed signed release (a
   deliberate tag push) and a chosen Python package-index — are done.
-- [ ] **135** — Automatic (TTL/lease-driven) credential re-resolution, without
+- [x] **135** — Automatic (TTL/lease-driven) credential re-resolution, without
   an operator-triggered reload. *Added 2026-07-30 by `competitive-scan`; scope
   corrected the same day by `auditors` — an earlier draft wrongly claimed
   rotation requires a process restart. It does not: item 13 shipped
@@ -237,14 +241,21 @@ claim when the work ships or before explicitly handing the item back.
   board:** it converts the central claim from self-asserted to
   third-party-attested, which is the objection that actually closes a security
   review.
-- [ ] **134** — Compliance-grade (WORM) audit retention + managed search.
-  *Added 2026-07-30 by `competitive-scan`; scope corrected the same day by
-  `auditors`. Item 91's chain **does** detect in-ledger deletion; the residual
-  is prevention, availability, and whole-file loss — retention is a separate
-  control regulated buyers ask for by name. Note there is **no sink registry**
-  today (`configure_audit_sink` is an `if`-chain), so this item owns building
-  one, composing with the chain rather than replacing it, and getting a remote
-  PUT off the request path.* **Depends on 91, 136.**
+- [x] **147** — Self-serve procurement evidence page. *Added 2026-08-05 by
+  `product-scorecard`. Productizes the `trust-evidence` skill's ad hoc packet
+  into a persistent, always-current `/trust` surface composed read-only from
+  already-shipped artifacts (SBOM, item 54's compliance mapping, item 58's
+  benchmark results, item 60's disclosure program) — the "hand it to them"
+  step Phase 2's other items don't cover. No new evidence generated, no
+  non-negotiable touched.* **Depends on 54, 58 (phase 1), 60.**
+- [x] **134** — Compliance-grade (WORM) audit retention + managed search.
+  *Added 2026-07-30 by `competitive-scan`.* ✅ **Shipped** 2026-08-06 (both
+  phases): phase 1 — `AuditSinkBackend.JSONL_CHAINED_S3_WORM` composes S3
+  Object Lock archival with the existing hash-chained ledger via a new
+  `CompositeAuditSink`; `configure_audit_sink` converted to a real registry;
+  buffered/batched, fail-open flush off the request path. Phase 2 —
+  `GET /api/v1/admin/observability/worm-search` (`admin:audit:worm-search`
+  scope), a bounded/filtered/paginated search directly over the archive.
 - [x] **60** — Bug bounty / responsible disclosure program. *Cheap, durable
   trust signal; stand up after 53 clears the obvious issues.* ✅ **Shipped**
   (coordinated-disclosure program in `SECURITY.md`: recognition-only structure +
@@ -278,6 +289,161 @@ claim when the work ships or before explicitly handing the item back.
 - [x] **41** — Policy-change blast-radius analysis. *Completes the config-change
   safety trio (39/40/41).* ✅ **Shipped** (ph1 ranked aggregation + ph2 paginated
   per-principal evaluation via a `principal_offset`/`next_principal_offset` cursor).
+- [x] **148** — `admin/access_diff.py` never diffs `column_masks` at all.
+  ✅ **Shipped** (`_diff_masks` added, mirrors `_diff_mandatory_filters`).
+  *Surfaced 2026-08-05 by `architecture-boundary-reviewer`/`security-invariant-
+  reviewer` while auditing item 145's own fix for the identical gap on
+  `allowed_purposes`. Pre-existing since item 49 (masking) shipped — the
+  semantic access diff's item-40 governance guarantee ("a loosening change is
+  never reported as no change") has had this one hole the whole time. Small,
+  self-contained, mirrors `_diff_mandatory_filters`'s existing shape.*
+- [x] **149** — `Policy`'s case-insensitive table-key lookups disagree on
+  `casefold()` vs `lower()`. ✅ **Shipped** — grew from a `Policy`-only fix
+  into a 4-site fix (`Policy`, `WritePolicy`, `catalog/models.py`,
+  `admin/templates.py`) once this item's own mandatory security review found
+  three sibling bugs, one of them a fail-open approval-gate bypass.
+  *Surfaced 2026-08-05 by `security-invariant-reviewer` while reviewing item
+  148's fix.*
+- [x] **150** — `compiler/sqlalchemy_compiler.py`'s `mandatory_row_filters`
+  matching uses `.lower()` against `schema_validation.py`'s `.lower()`-
+  consistent AST name-resolution subsystem. ✅ **Shipped** — a mechanical,
+  uniform sweep to `.casefold()` across ~64 call sites in five files.
+  *Surfaced 2026-08-05 by
+  `security-invariant-reviewer` while reviewing item 149's fix; deliberately
+  deferred from it — fixing it properly means switching a shared subsystem
+  with several call sites, not a one-line change, so it deserves its own
+  dedicated review rather than a same-session patch.*
+- [x] **151** — Bind the in-query approval gate's token to a connection and
+  principal, not just an AST fingerprint. *Surfaced 2026-08-06 by
+  `security-invariant-reviewer` while auditing items 19/128 — a design
+  change needing an owner decision on where the binding lives, not a
+  same-session fix.*
+- [x] **152** — Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM
+  retention) shipping. *Surfaced 2026-08-06 by `claim-reviewer` while
+  auditing items 19/128/134/144 — `GO_TO_MARKET.md` was updated correctly,
+  the public pages weren't; run `pitch-sync`.*
+- [x] **153** — `CHANGELOG.md` has no `[Unreleased]` entry for items 19
+  (MySQL) or 134 (WORM retention). *Surfaced 2026-08-06 by `claim-reviewer`
+  while auditing item 152 — a documentation gap, not a claim-accuracy defect;
+  deliberately left out of item 152's own scope.*
+- [ ] **154** — WORM archive segments are unenveloped, so managed search
+  (item 134 phase 2) cannot verify a segment was actually written by
+  QueryGate. *Surfaced 2026-08-06 by `security-invariant-reviewer` auditing
+  item 134 phase 2 — a phase-1 write-format change with a migration question
+  for already-archived segments, an explicit design decision, not a
+  same-session fix; the residual is recorded in `audit/worm_search.py`'s
+  module docstring and `docs/THREAT_MODEL.md` QG-40 in the meantime.*
+- [x] **155** — `sensitivity_approval_reasons` looks up every table in the
+  query's top-level connection's catalog, never a cross-connection join's own
+  connection, so a joined-in `pii`-labelled column can miss the approval
+  gate. *Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing
+  item 151 — real and pre-existing, but a separate, non-trivial fix (needs
+  `resolve_query_table_connections`'s per-table connection map threaded into
+  the sensitivity check); deliberately left out of item 151's own scope.*
+- [x] **156** — a cross-connection join's joined table is governed only by
+  the primary connection's `Policy` — masks/mandatory row filters/deny-lists
+  never apply from the joined connection's own `Policy`. *Surfaced 2026-08-06
+  by `security-invariant-reviewer` while auditing item 155 — pre-existing,
+  fixed by threading a reflection-free sibling of item 155's per-scope
+  connection map through policy validation and compilation, unioned (never
+  replaced) with the primary connection's Policy.*
+- [ ] **157** — Snowflake live-server verification and deeper feature parity
+  (item 19 phase 2 residual). *Filed 2026-08-06 alongside item 19 phase 2
+  (Snowflake `DialectAdapter`/`SessionDialectAdapter`, rendering-only, not
+  live-verified — no Snowflake instance or credentials available in this
+  environment). Blocked on deciding/building an async execution path for
+  `snowflake-sqlalchemy`'s sync-only driver before a live connection can even
+  be attempted; not eligible for pickup until that's a live-buildable slice.*
+- [x] **158** — `ConnectionProfile` never validates `dialect` agrees with
+  `connection_string`'s actual backend. *Surfaced 2026-08-06 by the
+  `security-invariant-reviewer` audit of item 19 phase 2 — pre-existing and
+  dialect-agnostic (affects Postgres/MSSQL/MySQL identically), not a
+  Snowflake-specific gap; small, self-contained validator fix, buildable
+  independently of item 157.*
+- [x] **159** — cross-connection schema reflection can pick the wrong
+  connection when a join's alias casing differs from a column ref's casing
+  (a hash-order-dependent bug in the raw, case-sensitive `table_connection`
+  lookup). *Surfaced 2026-08-06 by `security-invariant-reviewer` while
+  auditing item 156 — pre-existing and unrelated to that item's own change;
+  small, mechanical fix (case-fold the lookup, mirroring `resolve_scope_
+  connections`).*
+- [ ] **160** — item 156 follow-up: harden four smaller connection-resolution
+  edge cases (audit-vs-compiled-SQL snapshot consistency under a concurrent
+  reload, a cap-ordering inversion, a fail-open-by-default parameter shape,
+  and a purpose/k-anonymity/limit scope clarification). *Surfaced 2026-08-06
+  by `security-invariant-reviewer` while auditing item 156 itself — none is a
+  live bypass; grouped since a real fix to any one likely touches the same
+  call sites as the others.*
+- [ ] **161** — BigQuery live-server verification and deeper feature parity
+  (item 19 phase 3 residual). *Filed 2026-08-07 alongside item 19 phase 3
+  (BigQuery `DialectAdapter`/`SessionDialectAdapter`, rendering-only, not
+  live-verified — no BigQuery project or GCP credentials available in this
+  environment). Blocked on deciding/building an async execution path for
+  `sqlalchemy-bigquery`'s sync-only driver, plus a second, BigQuery-specific
+  question (its dialect resolves credentials at engine-construction time),
+  before a live connection can even be attempted; not eligible for pickup
+  until that's a live-buildable slice.*
+- [ ] **162** — dialects beyond MySQL/Snowflake/BigQuery (item 19's
+  open-ended "…" scope). *Filed 2026-08-07 when item 19 closed, so the
+  original scope's trailing "…" has a real home instead of keeping item 19
+  open indefinitely. Unscoped — no specific dialect chosen or investigated;
+  picking one is a product/roadmap decision, not a technical blocker.*
+- [x] **163** — a not-connectable dialect (Snowflake/BigQuery) as the
+  SECONDARY side of a cross-connection join never reaches the
+  `is_connectable()` guard. *Surfaced 2026-08-07 by
+  `security-invariant-reviewer` auditing item 19 phase 3 — pre-existing
+  since Snowflake (item 19 phase 2), not BigQuery-specific. Not a data leak
+  (join_group + the joined Policy still gate it), but a confusing masked
+  500 instead of a clean rejection; small, self-contained fix at
+  `resolve_query_table_connections`.*
+- [x] **164** — `column_mask`'s HASH branch is an implicit `else`, not an
+  exhaustive match, on all five `DialectAdapter`s.
+  *Surfaced 2026-08-07 by
+  `security-invariant-reviewer` auditing item 19 phase 3 — pre-existing
+  pattern across all five adapters, not new. Low severity (fails toward the
+  strongest mask, `ColumnMaskKind` is a stable closed 4-member enum);
+  mechanical five-adapter guard-clause fix matching the date-part/interval-
+  unit maps' existing exhaustiveness discipline.*
+- [x] **165** — `/admin/reload-config`'s generic exception handler can leak a
+  live credential in its HTTP 400 body on a malformed `connections.yaml`.
+  *Surfaced 2026-08-07 by `security-invariant-reviewer` while auditing item
+  158 — pre-existing, not caused by item 158's own validator (independently
+  verified safe); a safe stripping precedent already exists in
+  `admin/service.py`'s `_humanize_validation_errors` to reuse or adapt; small,
+  self-contained fix to one route's exception handling.*
+- [ ] **166** — cross-connection self-join reflects both aliases against ONE
+  connection: the `physical_tables` reflection memo is keyed by table name
+  alone, ignoring which connection a name resolves to. *Surfaced 2026-08-07
+  by `security-invariant-reviewer` auditing item 159's own fix — pre-existing,
+  not closed by that item; needs a design call (fix the memo key vs. reject
+  cross-connection self-joins explicitly) before implementation.*
+- [x] **167** — a case-different column ref to a joined alias leaves a
+  phantom second `sa.Table` alias that a mandatory row filter turns into an
+  implicit cross join (confirmed by compiling the shape — real row
+  duplication, not just cost). *Surfaced 2026-08-07 by
+  `security-invariant-reviewer` auditing item 159's own fix — small,
+  self-contained compiler-side dedupe.*
+- [x] **168** — config-governance dry-run's credential-safety net
+  (`_humanize_validation_errors`) is a post-hoc regex scrub, not a
+  structural guarantee, and the `querygate-validate-config` CLI's stderr
+  output isn't scrubbed at all. *Surfaced 2026-08-07 by
+  `security-invariant-reviewer` auditing item 165's fix — not independently
+  confirmed currently exploitable; mechanical extension of item 165's
+  `safe_pydantic_error_lines` pattern to `cli.py`'s `load_config_context`.*
+- [x] **169** — a correlated subquery's `correlate` ref binds to a phantom
+  alias object by exact dict index, which can silently turn an EXISTS/scalar
+  subquery into an independent, unfiltered scan of a mandatory-row-filtered
+  table. *Surfaced 2026-08-07 by `security-invariant-reviewer`'s post-fix
+  re-review of item 167 — same root cause, a different consumer; needs a real
+  compiled repro before landing a fix, the same way item 167 required one.*
+- [ ] **170** — cross-connection joins are reflected as if both connections
+  are always on the same physical server instance, with nothing that
+  actually checks it. *Surfaced 2026-08-07 by `security-invariant-reviewer`
+  auditing item 163's own fix — pre-existing, not caused by that item;
+  requires an operator misconfiguration to trigger (no caller-supplied input
+  can), but the failure mode is a silent wrong-database read rather than an
+  error; needs a design call (validate same-host at config-load time vs.
+  document the assumption) before implementation.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
@@ -410,6 +576,15 @@ locally-buildable Phase 6 phase-2 slices (44/45/47) first. The walk should
 treat 19 as coming after every other eligible item, not in its listed
 position.
 
+- [x] **146** — "5-minute first governed query" quickstart. *Added
+  2026-08-05 by `product-scorecard`. Executes the 2026-07-22
+  `COMPETITOR_GOOGLE_TOOLBOX.md` Decision's own commitment ("a '5-minute
+  first governed query' quickstart") to close the one dimension that brief's
+  scoring table concedes to a competitor (onboarding/time-to-first-query:
+  Toolbox 9, QueryGate 6) — left un-actioned for two weeks. Pure composition
+  over already-shipped read-only surfaces (item 48 templates, item 51 SDKs,
+  catalog reflection); no new AST, no non-negotiable touched.* **Depends on
+  48, 51 (both shipped).**
 - [ ] **51** — Typed client-side query-builder SDK (Python + TypeScript).
   *Lowers integration friction for the next wave of adopters.* **Phase 1
   shipped** (in-tree Python builder); **phase 2a shipped** (in-tree TypeScript
@@ -446,10 +621,17 @@ position.
   (sync compiler `DialectAdapter` [item 73] + new async `SessionDialectAdapter`;
   reverses the prior inline-branching exception. Adding a dialect = implement
   both + register).
-- [ ] **19** — Additional dialects (MySQL, Snowflake, BigQuery, …). *Removes the
+- [x] **19** — Additional dialects (MySQL, Snowflake, BigQuery, …). *Removes the
   "QueryGate is narrow" objection. **Depends on 57**; also downstream of the
-  engine — each new adapter must render every Phase 4 primitive.*
-- [ ] **128** — Conform to the final MCP `2026-07-28` protocol revision. *Added
+  engine — each new adapter must render every Phase 4 primitive.* ✅
+  **Shipped 2026-08-07.** **MySQL phase 1 shipped 2026-08-06**
+  (live-verified against a real MySQL 8.4 server). **Snowflake phase 2
+  shipped 2026-08-06** and **BigQuery phase 3 shipped 2026-08-07** (both
+  rendering-only, NOT live-verified — no Snowflake/BigQuery instance
+  available in this environment; see items 157/161). Item closed with all
+  three originally-named dialects shipped; item 162 tracks any dialect
+  beyond these three.
+- [x] **128** — Conform to the final MCP `2026-07-28` protocol revision. *Added
   2026-07-30 by `competitive-scan`; the spec went final on 2026-07-28 (the
   2026-07-22 scan saw only the RC) and we are a full revision behind on
   `2025-11-25`. This sits in Adoption, not Moat, because the sharp edge is
@@ -458,14 +640,14 @@ position.
   infer a conforming gateway gains a defensible reason not to front us —
   directly against the P4 play.* **Gated on Python SDK availability — track
   upstream, do not hand-roll the transport.**
-- [ ] **129** — Never advertise a principal-varying MCP result as
+- [x] **129** — Never advertise a principal-varying MCP result as
   shared-cacheable. *The new revision's `cacheScope` lets shared intermediaries
   reuse a `tools/list`/`resources/read` response across callers; our MCP surface
   is per-principal by construction, so `"public"` on such a result would leak
   one caller's visible connection/table surface to another. Encode it as a
   tested invariant (à la `test_credential_redaction.py`), because the failure
   mode is a default nobody chose, not a policy bug.* **Depends on 128.**
-- [ ] **130** — Annotate `connection` with `x-mcp-header` for gateway-native
+- [x] **130** — Annotate `connection` with `x-mcp-header` for gateway-native
   authorization. *P4 expressed in the spec's own mechanism: a fronting gateway
   can enforce "this identity may only reach connection X" on a header without
   parsing the body, while the query-**shape** decision it structurally cannot
@@ -492,7 +674,11 @@ position.
   adopted our messaging. Internal half (author the spec, reserve the namespace,
   declare + test it) is safe to build; **external publication is decision-gated**
   — a standing commitment and an outward-facing act, maintainer's call.*
-  **Depends on 128.**
+  ✅ **Shipped (internal half)** 2026-08-06: namespace reserved
+  (`io.github.agitmit/structured-query-ast`), spec + generated schema +
+  real-server capability declaration + conformance test all in place.
+  Checkbox stays unchecked — external publication (the decision-gated half)
+  is still open. **Depends on 128.**
 
 ### Phase 6 — Catalog & observability depth (lowest marginal ROI — opportunistic)
 

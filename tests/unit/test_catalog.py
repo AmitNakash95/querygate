@@ -155,6 +155,37 @@ def test_column_lookup_is_case_insensitive():
     assert entry.column("phone") is None
 
 
+def test_table_and_column_lookup_use_casefold_not_lower():
+    # `.lower()` and `.casefold()` disagree on a handful of real Unicode
+    # identifiers: "STRASSE".lower() == "strasse" but "straße".lower() ==
+    # "straße" (unchanged) -- while .casefold() unifies both to "strasse".
+    # `ConnectionCatalog.table`/`TableCatalogEntry.column` used to use
+    # `.lower()`, the odd one out against this same class's own uniqueness
+    # validators (`_table_names_are_unique`/the column-uniqueness check),
+    # which already used `.casefold()` -- so a table/column an operator's own
+    # catalog.yaml treats as a single unique entry could fail to resolve here,
+    # silently dropping its sensitivity label from the human-approval gate
+    # (TODO.md item 149; found by `security-invariant-reviewer` while
+    # reviewing the `policy/models.py` sibling fix for the same bug class).
+    catalog = {
+        "version": 1,
+        "connections": {
+            "demo": {
+                "tables": {
+                    "STRASSE": {
+                        "sensitivity": "pii",
+                        "columns": {"HAUSNUMMER": {"sensitivity": "pii"}},
+                    }
+                }
+            }
+        },
+    }
+    store = CatalogStore.from_dict(catalog)
+    entry = store.get_table("demo", "straße")
+    assert entry is not None
+    assert entry.column("hausnummer") is not None
+
+
 def test_unknown_connection_returns_none():
     store = CatalogStore.from_dict(_catalog_dict())
     assert store.get_table("other", "customers") is None

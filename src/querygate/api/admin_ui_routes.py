@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from querygate.api._errors import require_scope
 from querygate.audit.events import PersistableEvent
 from querygate.audit.file_reader import AuditFileReadBounded, iter_lines_reverse
-from querygate.audit.ledger import unwrap_envelope
+from querygate.audit.ledger import resolve_ledger_key, unwrap_envelope, verify_envelope_hash
 from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
@@ -117,7 +117,7 @@ class PolicyTestRequest(pyd.BaseModel):
     @classmethod
     def _normalize_columns(cls, values: List[str]) -> List[str]:
         normalized = [value.strip() for value in values if value.strip()]
-        if len(set(value.lower() for value in normalized)) != len(normalized):
+        if len(set(value.casefold() for value in normalized)) != len(normalized):
             raise ValueError("columns must not contain duplicates")
         return normalized
 
@@ -165,7 +165,9 @@ class PolicyTestResponse(pyd.BaseModel):
 
 
 class AuditEventPage(pyd.BaseModel):
-    source: Literal["jsonl", "disabled", "empty"]
+    # TODO.md item 137: "jsonl"/"jsonl_chained" discloses the actually
+    # configured backend rather than always reporting "jsonl".
+    source: Literal["jsonl", "jsonl_chained", "disabled", "empty"]
     events: List[Dict[str, Any]]
     total: int = pyd.Field(ge=0)
     malformed: int = pyd.Field(ge=0)
@@ -292,7 +294,11 @@ def _test_policy(request: PolicyTestRequest) -> PolicyTestResponse:
 
     filter_decisions: List[MandatoryFilterDecision] = []
     for row_filter in policy.mandatory_row_filters:
-        if request.table is not None and row_filter.table.lower() != request.table.lower():
+        # `.casefold()`, not `.lower()` (TODO.md item 150): `policy.table_allowed`/
+        # `column_allowed` a few lines above already casefold, so this simulator's
+        # mandatory-filter match must too, or it can report a simulated `allowed=True`
+        # verdict for a table/filter pair real execution would actually reject.
+        if request.table is not None and row_filter.table.casefold() != request.table.casefold():
             continue
         satisfied = True
         try:
@@ -368,6 +374,12 @@ def _audit_page(
     # first `cursor + limit` matches are retained — enough to serve this
     # page — but every match within the line-read bound is still counted
     # toward `total`.
+    ledger_key = resolve_ledger_key(cfg.audit_ledger_hmac_key)
+    # TODO.md item 137: on jsonl_chained, every persisted line MUST be a
+    # chain envelope, so a bare (non-enveloped) line is itself evidence of
+    # tampering/corruption, not a legitimate plain-jsonl line (found by
+    # `security-invariant-reviewer`, 2026-08-05).
+    require_envelope = cfg.audit_sink_backend.wraps_events_in_a_hash_chain_envelope()
     matches: List[Dict[str, Any]] = []
     total = 0
     malformed = 0
@@ -381,6 +393,14 @@ def _audit_page(
             lines_read += 1
             try:
                 raw = json.loads(line)
+                verified = verify_envelope_hash(raw, key=ledger_key)
+                if verified is False or (verified is None and require_envelope):
+                    # TODO.md item 137: a chain envelope whose own hash
+                    # doesn't match its contents, or (require_envelope) a
+                    # bare line on a backend where every line must be
+                    # enveloped — never display either as clean.
+                    malformed += 1
+                    continue
                 raw = unwrap_envelope(raw)
                 event = _AUDIT_EVENT_ADAPTER.validate_python(raw)
                 item = event.model_dump(mode="json", exclude_none=True)
@@ -406,7 +426,7 @@ def _audit_page(
     events = matches[cursor : cursor + limit]
     next_cursor = cursor + len(events) if total > cursor + len(events) else None
     return AuditEventPage(
-        source="jsonl",
+        source=cfg.audit_sink_backend.value,
         events=events,
         total=total,
         malformed=malformed,
@@ -478,7 +498,16 @@ def build_admin_ui_router(
 
     @router.get("/audit/events", response_model=AuditEventPage)
     async def browse_audit_events(
-        cursor: int = Query(default=0, ge=0, le=1_000_000),
+        # TODO.md item 140: the old ceiling (1_000_000) let one request
+        # allocate on the order of a gigabyte of fully-parsed event dicts
+        # before `_audit_page` ever slices its response page. Lowered rather
+        # than redesigning the pagination shape (recorded in
+        # docs/PRODUCT_GUIDE.md's Decision Log) — 5,000 pages of `limit=50`
+        # covers far deeper manual "load more" paging than any real admin UI
+        # session reaches, while bounding worst-case retained dicts per
+        # request to cursor + limit (~5,100), several orders of magnitude
+        # below the old bound.
+        cursor: int = Query(default=0, ge=0, le=5_000),
         limit: int = Query(default=50, ge=1, le=100),
         event_type: Optional[str] = Query(default=None),
         outcome: Optional[Literal["success", "rejected"]] = Query(default=None),

@@ -40,6 +40,7 @@ task. Small, incremental, accurate updates only.
 
 ## Table of contents
 
+0. [TL;DR — read this before a demo](#tldr--read-this-before-a-demo) — *status: populated*
 1. [What is QueryGate](#what-is-querygate) — *status: populated*
 2. [The Core Request Pipeline](#the-core-request-pipeline) — *status: populated*
 3. [Security Model](#security-model) — *status: populated*
@@ -53,15 +54,122 @@ task. Small, incremental, accurate updates only.
 
 ---
 
+## TL;DR — read this before a demo
+
+**Read time: about 3 minutes.** This section exists so you can walk into a
+demo or a hallway conversation and sound confident without having read the
+rest of this document. Everything here is explained in plain words on
+purpose — no jargon without a definition next to it. If a question goes
+deeper than this section, the [FAQ](#faq-for-marketingpositioning-conversations)
+below has a longer, more precise answer for almost anything you'll get asked.
+
+### The 10-second pitch
+
+**QueryGate lets an AI agent query your company's real database, but the
+agent can never send it a raw command — only a pre-checked, structured
+request. That one design choice is why it's safe.**
+
+Think of the difference between handing someone a blank check versus a form
+with fixed fields (amount, payee, date) that a teller checks before it's
+ever cashed. Most "AI talks to your database" tools hand the AI a blank
+check — a text box where it writes SQL (the language databases understand)
+and hope it behaves. QueryGate never gives it that text box. The AI can only
+fill out the form.
+
+### The problem, in one paragraph
+
+If you let an AI agent write its own SQL, you're trusting a system that
+sometimes makes things up, can be tricked by hidden instructions in the data
+it reads ("prompt injection"), and might phrase a legitimate-sounding
+request that happens to touch a table it should never see. A read-only
+database account doesn't fix this — it can still read *every* table it has
+access to and run something slow enough to hurt the database for everyone
+else. QueryGate closes that gap structurally: since the agent can never
+write SQL in the first place, there's no SQL string for a mistake or an
+attack to hide inside.
+
+### How it works, in four steps
+
+1. **The agent sends a request as data, not code** — a JSON object naming
+   which table, which columns, which filters. It looks like a form, not a
+   sentence.
+2. **QueryGate checks the request** against two things before touching the
+   database: does this table/column actually exist, and is this caller
+   *allowed* to see it (an admin-configured allow/deny list, per database,
+   sometimes per person).
+3. **Only if both checks pass**, QueryGate turns the request into real,
+   safe SQL and runs it — with a timeout and a cap on how many other queries
+   can run at once, so nothing can accidentally overload the database.
+4. **Every attempt is logged** — who asked, what they asked for, whether it
+   was allowed — without ever writing down the sensitive values themselves,
+   so the log is safe to store and safe to show an auditor.
+
+### What makes it hard to copy (the three-part story)
+
+Say these three points together — they're the whole pitch, and no single
+competitor does all three:
+
+1. **Structural safety.** Not "we scan the SQL for bad words" — there is no
+   SQL for the agent to write, so there's nothing to scan. This also lets us
+   enforce *shape* rules a scanner can't reach — "no more than 3 joins," "no
+   filters that would return under 5 rows" (protects against fishing for one
+   person's data one narrow query at a time).
+2. **It runs on your real, live database.** Not a copy, not a warehouse we
+   host, not a semantic layer that needs a modeling project first. It
+   connects to the operational database you already run, self-hosted inside
+   your own infrastructure — data and credentials never leave your network.
+3. **Proof, not just prevention.** Every access is tied to the actual human
+   behind it (not just "an API key"), and the audit log is tamper-evident —
+   there's a cryptographic way to prove afterward that nobody edited it.
+   That's the thing a security reviewer actually needs to sign off.
+
+### What it explicitly does *not* do (say this with confidence, don't dodge)
+
+These are deliberate choices, not gaps we haven't gotten to — if asked, say
+"that's on purpose" and move on:
+- No mode that lets an agent run a raw SQL string, ever.
+- No running AI-generated code of any kind.
+- No stored procedures / arbitrary procedural SQL.
+- No mandatory upfront modeling step before you can start querying — it
+  works against the schema you already have.
+- We don't host a database or a data warehouse ourselves.
+
+### Quick answers to the questions you'll actually get asked
+
+- **"What databases does it support?"** Postgres, SQL Server, and MySQL
+  today, tested against real servers. Snowflake and BigQuery can already
+  generate correct queries but aren't wired up for live connections yet —
+  say "in progress," not "supported."
+- **"Isn't this just a firewall that blocks bad SQL?"** No — a firewall
+  still has to accept a SQL string and guess whether it's dangerous.
+  QueryGate never accepts a SQL string, so there's nothing to guess about.
+- **"Can the AI ever break out and run something arbitrary?"** No — there is
+  no field or tool anywhere in the product that accepts raw SQL. It's not a
+  setting you could even turn on.
+- **"Does our data ever leave our network?"** No — QueryGate runs inside
+  your own infrastructure, next to your database.
+- **"Can we change the rules without downtime?"** Yes — policy changes
+  reload live, with a versioned history and one-click rollback.
+- **"How do you know the security claims actually hold?"** Every one of
+  them is backed by an automated test that runs on every code change,
+  including a dedicated suite whose whole job is to try to break the
+  access rules. Not a one-time audit — continuous enforcement.
+
+If you get a question this section doesn't cover, it's almost certainly in
+the [FAQ](#faq-for-marketingpositioning-conversations) further down — that
+section is written for exactly this purpose, just in more depth.
+
 ## What is QueryGate
 
 QueryGate is an **agent-safe database access gateway**: it lets you connect
-an AI agent to a real Postgres or MSSQL database, but the agent can never
-submit raw SQL — there is no `sql` field, tool, or endpoint anywhere in the
-codebase that would accept one. Every request goes in as a validated,
-structured JSON object instead, and QueryGate runs it inside your own
-infrastructure, next to your database, so credentials and data never leave
-your network.
+an AI agent to a real database — Postgres, SQL Server (MSSQL), or MySQL
+today, all verified against real servers, with Snowflake and BigQuery
+rendering-only for now (see the FAQ's "What databases does it support?") —
+but the agent can never submit raw SQL. There is no `sql` field, tool, or
+endpoint anywhere in the codebase that would accept one. Every request goes
+in as a validated, structured JSON object instead, and QueryGate runs it
+inside your own infrastructure, next to your database, so credentials and
+data never leave your network.
 
 ### The problem it solves
 
@@ -94,8 +202,8 @@ section of this guide.)
 ### Who it's for
 
 Teams building an internal agent, copilot, or automated workflow that needs
-controlled read access to a production Postgres or SQL Server database —
-typically in B2B software, fintech, healthcare, or any engineering
+controlled read access to a production database — typically in B2B software,
+fintech, healthcare, or any engineering
 organization where "let the model write SQL against prod" won't pass a
 security review. The people in the room are usually a platform/AI engineer
 building the integration, and a security or database owner who has to sign
@@ -254,13 +362,18 @@ result size even if the caller asked for something larger.
 
 **Dialect-specific logic lives behind one interface.**
 (`compiler/dialect_adapters.py`, TODO.md item 73, a compiler-scoped slice
-of item 57's "pluggable dialect adapter" plan.) QueryGate supports Postgres
-and MSSQL (SQLite is used only internally, for tests/examples — see
-`connections/models.py`'s `DatabaseDialect`). Almost the entire compiler is
-dialect-agnostic SQLAlchemy Core; the things that genuinely differ per
+of item 57's "pluggable dialect adapter" plan.) QueryGate supports Postgres,
+MSSQL, and MySQL in production, live-verified (item 19 phase 1), plus
+Snowflake and BigQuery at a rendering/compilation-only level that is **not**
+live-verified (item 19 phases 2/3 — see the "What databases does it
+support?" FAQ entry above and the 2026-08-06/2026-08-07 Decision Log entries
+for the honest caveat; SQLite is used only internally, for tests/examples —
+see `connections/models.py`'s `DatabaseDialect`). Almost the entire compiler
+is dialect-agnostic SQLAlchemy Core; the things that genuinely differ per
 database are each one method on a small `DialectAdapter` interface, with
 one concrete adapter class per dialect (`PostgresDialectAdapter`,
-`MSSQLDialectAdapter`, `SQLiteDialectAdapter`) rather than an `if dialect
+`MSSQLDialectAdapter`, `MySQLDialectAdapter`, `SnowflakeDialectAdapter`,
+`BigQueryDialectAdapter`, `SQLiteDialectAdapter`) rather than an `if dialect
 == ...` branch scattered at each call site. Today that's date bucketing
 (`date_bucket`) — a day/week/month/quarter/year truncation: Postgres has a
 native `date_trunc()` that handles every granularity directly, MSSQL has
@@ -1083,6 +1196,25 @@ logical writer owns the chain head, so it assumes a single replica (or a
 per-replica ledger file); see the [Decision Log](#decision-log) for why chaining
 lives at the sink/envelope layer rather than on the event model.
 
+**Compliance-grade WORM retention + managed search (opt-in).** The local
+hash-chained ledger proves nobody edited what was kept — it doesn't promise
+the file itself survives log rotation, disk loss, or years of retention.
+Set `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm` and the same redaction-safe
+events are *additionally* archived to S3 Object Lock (`audit/worm_sink.py`),
+genuinely undeletable for the configured window under `COMPLIANCE` mode —
+this composes with, never replaces, the local chain above, so both
+questions ("was it edited?" and "can you still produce it?") stay answered.
+`GET /api/v1/admin/observability/worm-search`
+(`admin:audit:worm-search` scope — deliberately its own, not implied by
+`admin:observability:read`) is the QueryGate-native way to search that
+archive: a required, capped time range plus `event_type`/`connection_id`/
+`principal_id` filters and cursor-based pagination, so "every query against
+`pii_customers` in the last 18 months" is answerable even once the local
+file has long since rotated that window out. Every bound (window width,
+objects scanned, wall-clock timeout, page size) is enforced server-side —
+an over-wide or missing range is rejected outright, a bound hit mid-scan
+degrades to a truncated, resumable page rather than an unbounded scan.
+
 **MCP as an OAuth 2.0 resource server (opt-in).** For deployments that put the
 MCP surface behind a real authorization server, QueryGate can run it as a
 conformant OAuth 2.0 *resource server* per the MCP `2026-07-28` spec (off by
@@ -1366,10 +1498,17 @@ the *actual, live* interfaces a caller sees, not just the model definition:
   equivalent check against every registered MCP tool's parameter and output
   schema.
 
+`ConnectionProfile` also validates that the declared `dialect` agrees with
+the backend actually named in `connection_string`'s URL scheme (TODO.md item
+158) — see the 2026-08-07 Decision Log entry for why that validator is
+specifically a `field_validator("dialect")`, not a whole-model validator or
+a validator scoped to `connection_string` itself: either of the latter two
+leaks the credential straight into `pydantic.ValidationError.input_value`.
+
 Why check the live schema instead of just trusting the model split above?
-Because a schema is a *derived* artifact — FastAPI and FastMCP both generate
-it automatically from whatever models are wired into a route or tool
-signature. It's possible to define `PublicConnectionInfo` correctly and
+Because a schema is a *derived* artifact — FastAPI and `MCPServer` both
+generate it automatically from whatever models are wired into a route or
+tool signature. It's possible to define `PublicConnectionInfo` correctly and
 still, months later, accidentally wire a new endpoint's response type to
 `ConnectionProfile` instead (a typo, a copy-pasted signature, a "just for
 now" shortcut). A test that only checks the model definition wouldn't catch
@@ -1416,6 +1555,53 @@ Because secrets are re-resolved from their reference on every config load —
 not cached forever after the first read — rotating a credential (a new
 Vault token, an updated environment variable) takes effect on the next
 config reload, without restarting QueryGate.
+
+That reload was, until item 135, always operator-pull: something had to call
+`POST /admin/reload-config` (or apply a config-governance version) after a
+credential rotated. For a short-TTL dynamic secret — the actual value
+proposition of Vault's dynamic secrets engines — that gap between "rotated"
+and "someone reloads" is a real outage window. `CredentialLeaseMonitor`
+(`src/querygate/config_reload.py`) closes it with a separate, optional
+`LeasedSecretResolver` protocol (`lease_expiry(reference) ->
+Optional[datetime]`) that a resolver backend implements only if it actually
+has a lease to report — `SecretResolver` itself is deliberately *not*
+widened with this, the same "compose, don't widen" shape
+`core/auth.py`'s `CompositeAuthenticator` already uses. `lease_expiry`
+deliberately never returns the resolved value itself: for a backend where
+"reading is issuing" (a Vault *dynamic* secrets engine, as opposed to the
+static KV v2 secrets this module implements today), fetching the value just
+to check its expiry would mint and immediately orphan a fresh privileged
+credential on every poll — an early draft of this item did exactly that,
+caught and fixed by a post-ship security review before it shipped.
+
+A background task (disabled by default; `CREDENTIAL_LEASE_REFRESH_ENABLED=true`)
+polls, on each iteration and offloaded via `asyncio.to_thread` (probing a
+leased resolver can be a real, slow network call — running it inline would
+stall the whole process, not just the poll), every currently-live
+connection's `connection_string` field for a `${scheme:reference}` whose
+resolver implements `LeasedSecretResolver`, and — when the soonest reported
+expiry falls inside `CREDENTIAL_LEASE_REFRESH_MARGIN_SECONDS` and hasn't
+already been acted on (hysteresis — otherwise a lease shorter than the
+margin, the normal case for a real dynamic credential, would trigger a
+reload on every single poll forever) — calls the exact same
+`reload_config()` the operator-triggered path already uses, so the same
+registry/policy swap and the same `_dispose_stale_engines` in-flight-safe
+disposal apply either way, and records an `audit_config_change` event so an
+automatic trigger is attributable like any other config change. "Currently
+live" is governance-aware: it prefers an active config-governance version's
+own files over the plain `connections.yaml`/`policy.yaml` paths, since
+governance's `apply()`/rollback never write an approved version's content
+back to those plain files — a monitor that ignored this would, the moment a
+lease came due, silently revert a four-eyes-approved policy tightening back
+to stale disk content. `VaultSecretResolver` implements the protocol by
+honestly reporting Vault's own `lease_duration` response field (rather than
+inventing a TTL) — since the shipped Vault integration reads KV v2 (static
+secrets) only, that value is typically `0` (no lease) today, so in practice
+the monitor currently activates once a registered resolver reads a path
+that genuinely carries a lease. A resolver with nothing to report (env, or a
+static Vault secret) is simply skipped every poll and stays reachable only
+through the existing `/admin/reload-config` path — this is strictly
+additive.
 
 ### 4. The threat model: what QueryGate defends against
 
@@ -1537,11 +1723,15 @@ The gates fall into three groups:
   history*, so we can affirmatively prove no credential was ever committed.
   Every one of these is deny-by-default: any finding fails the build. Where the
   dependency and image scans found real CVEs, they were **fixed by upgrading to
-  patched versions, not accepted** — the pip-audit allowlist and the Trivy
-  exception list (`.trivyignore`) are both **empty**, and `pip-audit` reports no
-  known vulnerabilities across the whole set. The only recorded exceptions are
-  dev-only secret-scan placeholders (`.gitleaks.toml`) and a few reviewed,
-  inline-justified SAST suppressions (`# nosec` / `# nosemgrep`) — never silent.
+  patched versions, not accepted** — the Trivy exception list (`.trivyignore`)
+  is **empty**, and the pip-audit allowlist (`security/dependency-audit-
+  allowlist.json`) holds exactly **one** reviewed entry (`PYSEC-2026-286`,
+  asyncmy — a SQL-injection CVE in a codepath SQLAlchemy's `mysql+asyncmy`
+  dialect never reaches, guarded by a regression test), with every other
+  previously-known CVE in the shipped set remediated by upgrade rather than
+  accepted. The only other recorded exceptions are dev-only secret-scan
+  placeholders (`.gitleaks.toml`) and a few reviewed, inline-justified SAST
+  suppressions (`# nosec` / `# nosemgrep`) — never silent.
 - **Reliability under real load.** Security guarantees must hold under
   concurrency, not just in isolation — so `make test-load`/`make test-soak` run
   the guardrails against a real Postgres and assert caps are never breached and
@@ -1984,7 +2174,42 @@ query if their resolved `Policy.join_group` values match (checked in
 described earlier in this guide) — a policy-level assertion of "these two
 databases are close enough / trusted enough to combine," not something a
 caller can request their way around by naming both connections in a join
-clause.
+clause. Being in the same `join_group` only settles *whether* a join is
+allowed, not *whose* `Policy` governs the joined-in table once it is: a
+joined table's column masks, mandatory row filters, and table/column
+deny-list are enforced from BOTH its own connection's `Policy` and the
+primary connection's, never one exclusively (TODO.md item 156) — the same
+per-connection resolution the catalog sensitivity-label approval trigger
+uses (item 155).
+
+### Purpose-bound access: a declared reason that narrows, never widens
+
+**File:** `src/querygate/policy/models.py`, `validation/policy_validation.py`
+(item 145, feature F7). `StructuredQuery.purpose` is a closed-set token — not
+free text like `intent` — a caller declares alongside a query (e.g.
+`"fraud_review"`). If `Policy.allowed_purposes` is empty (the default), a
+connection hasn't opted into purpose-gating and a declared purpose is
+accepted but inert, the same "empty allow-list = unrestricted" convention
+`allowed_tables` uses. Once `allowed_purposes` is non-empty, *every read
+query* on that connection must declare a purpose from the set, or it's
+rejected before any DB touch — the same posture as an unresolvable claim.
+Read-only: the gate runs in `policy_validation.py`, which the write pipeline
+never calls, so governed writes (item 93) are unaffected by this setting.
+
+A valid purpose narrows the effective policy via `Policy.purpose_policies`, a
+map from purpose token to a `PurposePolicyDelta`: additional
+`denied_tables`/`denied_columns`/`mandatory_row_filters`/`column_masks`
+unioned onto the connection's base `Policy`. There is deliberately no "allow"
+field on a delta — a purpose can only take away access the base policy
+already granted, never grant more, which makes "narrows never widens" true
+by construction rather than by convention. `validate_policy` returns this
+effective policy, and `execution/service.py` reuses it for compilation too
+(not just validation), so a purpose-added mandatory filter or column mask
+actually reaches the SQL — `explain()` and `verdict()` share the same
+choke point and get the same treatment. The declared purpose is persisted to
+the audit event (unlike `intent`, which is deliberately excluded): it's a
+fixed token from an operator-configured allow-list, not caller-authored
+prose, so recording it doesn't touch the redaction guarantee.
 
 ## Catalog / Semantic Layer
 
@@ -2699,18 +2924,19 @@ model-free test (`tests/integration/test_integration_examples.py`) keeps them
 honest by asserting every tool each example wires up is still a tool the MCP
 server actually registers.
 
-`mcp/server.py` builds one shared `FastMCP` instance (`mcp_server`) and, on
-startup, calls `discover_and_register_tools()` (`mcp/tools/__init__.py`),
-which imports every non-underscore-prefixed module under `mcp/tools/` —
-so registering a new tool is just adding a file there, decorated with
-`@mcp_server.tool(...)`. That server is exposed as its own ASGI app
-(`streamable_http_app()`), wrapped in `MCPAuthMiddleware`, and mounted into
-the main FastAPI app at `cfg.mcp_mount_path` (default `/mcp`) by
-`setup_mcp()`.
+`mcp/server.py` builds one shared `MCPServer` instance (`mcp_server` — `mcp`
+SDK v2, formerly `FastMCP`; TODO.md item 128's `2026-07-28` protocol
+conformance) and, on startup, calls `discover_and_register_tools()`
+(`mcp/tools/__init__.py`), which imports every non-underscore-prefixed
+module under `mcp/tools/` — so registering a new tool is just adding a file
+there, decorated with `@mcp_server.tool(...)`. That server is exposed as its
+own ASGI app (`streamable_http_app()`), wrapped in `MCPAuthMiddleware`, and
+mounted into the main FastAPI app at `cfg.mcp_mount_path` (default `/mcp`)
+by `setup_mcp()`.
 
 **Auth works differently here than in REST**, because MCP tool functions
 aren't FastAPI route handlers with a `Depends()` mechanism — they're plain
-async functions FastMCP calls directly. So `mcp/auth.py` authenticates at
+async functions `MCPServer` calls directly. So `mcp/auth.py` authenticates at
 the ASGI layer instead: `MCPAuthMiddleware` builds the same
 `CompositeAuthenticator` chain (API key → JWT → anonymous-if-local) used by
 REST, and on every incoming request extracts the bearer token, authenticates
@@ -2748,11 +2974,15 @@ request where a present header disagrees with the body (`400` +
 `-32020 HeaderMismatch`), because otherwise a gateway authorizing on the
 header while QueryGate executes the body is a confused deputy (e.g. a
 gateway permits `Mcp-Name: list_tables` for a low-privilege caller while the
-body actually invokes `run_structured_writes`). QueryGate currently speaks
-protocol `2025-11-25` (item 128), which doesn't define these headers, so this
-validates **if present**, not required — it fails closed the moment a
-gateway starts sending them, run strictly after the depth scan above (so a
-hostile deep body can't reach this check's own `json.loads` first). Base64
+body actually invokes `run_structured_writes`). QueryGate now speaks the
+final `2026-07-28` protocol revision (item 128, `mcp` SDK v2) that defines
+these headers; the gate still validates **if present**, not required — a
+direct MCP client has no reason to send transport-routing headers meant for
+a fronting gateway, so requiring them from every caller would be a
+conformance requirement the spec doesn't make — but it fails closed the
+moment any caller (gateway or otherwise) does send them, run strictly after
+the depth scan above (so a hostile deep body can't reach this check's own
+`json.loads` first). Base64
 "sentinel"-encoded header values (`=?base64?...?=`, used when a name isn't
 safely ASCII) are decoded before comparison; a header wearing the sentinel's
 markers that doesn't actually decode is rejected as malformed rather than
@@ -2762,6 +2992,58 @@ rejected as ambiguous rather than guessed at), and a routing header sent more
 than once — which has no single source of truth for an intermediary to agree
 with QueryGate about — is rejected outright rather than resolved by first
 match.
+
+**Gateway-native per-connection routing (TODO item 130).** Every tool's
+`connection` parameter carries the `2026-07-28` spec's `x-mcp-header`
+JSON-schema annotation (`inputSchema.properties.connection["x-mcp-header"] =
+"Connection"`), which a conforming client mirrors into an
+`Mcp-Param-Connection` HTTP header on the Streamable HTTP transport (the
+value lives at `params.arguments.connection` in the JSON-RPC body, since a
+`tools/call` request nests every tool argument under `arguments`). `id` is
+already public — `PublicConnectionInfo` returns it, and the spec only warns
+against annotating *sensitive* parameters — so a customer's existing gateway
+can enforce "this agent identity may only reach the `analytics` connection"
+at the edge, cheaply and natively, entirely without parsing the JSON-RPC
+body. `mcp/transport_guard.py`'s `MCPRequestGuardMiddleware` — the same
+guard item 127 built for `Mcp-Method`/`Mcp-Name` — is extended to this
+header too: a present `Mcp-Param-Connection` that disagrees with
+`params.arguments.connection` is rejected as `-32020 HeaderMismatch`,
+because the `2026-07-28` spec's "Server Validation" MUST-reject rule is
+written generically for any header a server mirrors via `x-mcp-header`, not
+only `Mcp-Method`/`Mcp-Name`.
+
+**This is still a routing hint, never an authoritative access decision.**
+The header/body agreement check stops a caller from lying to the gateway
+about which connection its own request targets; it does not, and cannot,
+make the gateway's decision correct or complete. Visibility/routing only —
+the actual authorization boundary is each tool's own call-time scope and
+policy check (`resolve_visible_connection`, `connections/visibility.py`);
+this annotation must never become a substitute for that check, the same
+posture `mcp/server.py`'s `_SCOPE_GATED_TOOLS` already documents for scoped
+tool listing. It is also deliberately **non-exhaustive** in two ways an
+operator writing an edge rule needs to know:
+
+- A read's top-level `connection` is not the only connection a request can
+  touch — every `JoinSpec` carries its own optional `connection` for a
+  same-instance cross-database join (`query_ast/models.py`), resolved at
+  schema-validation time against the `join_group` policy rule. No header
+  exists for a `JoinSpec`'s connection at all (only the top-level `connection`
+  argument is annotated), so a request headed `Mcp-Param-Connection:
+  analytics` may still legitimately join `crm` — the header/body agreement
+  check above only proves the header didn't lie about the *entry-point*
+  connection, not that the query touches nothing else. `join_group` policy is
+  what actually bounds cross-connection reach.
+- `list_connections`, `list_query_templates`, and `run_query_template` take
+  no `connection` argument at all (the last resolves it from the stored
+  template server-side), so no `Mcp-Param-Connection` header is ever emitted
+  for them. A gateway rule keyed on this header must decide explicitly how to
+  treat a header-less `tools/call` for one of these three tools — deny by
+  default, or gate on `Mcp-Name` (the tool name) instead — rather than assume
+  every request carries the header.
+
+Scope is deliberately narrow: only `connection` is annotated, never a
+query/write AST field — mirroring query internals into headers would leak
+query semantics to intermediaries and invert the confidentiality posture.
 
 The actual tools, one module per concern:
 
@@ -2777,7 +3059,50 @@ The actual tools, one module per concern:
   with `surface="mcp"` (REST passes `surface="rest"`) purely so downstream
   logging/audit can tell which transport a request came from — the
   validation/compile/execute pipeline itself doesn't branch on it.
+- `mcp/tools/write.py` — `run_structured_writes`, the governed-writes
+  equivalent of the read tool above (preview/execute/atomic).
 - `mcp/tools/help.py` — the guide/diagnostics tools (see below).
+- `mcp/tools/templates.py` — query-template listing/invocation tools.
+
+**The `io.github.agitmit/structured-query-ast` extension (`mcp/extensions.py`,
+TODO.md item 131, internal half).** The `2026-07-28` revision's SEP-2133
+extensions framework lets a server advertise a reverse-DNS-namespaced,
+versioned capability under `ServerCapabilities.extensions`. `mcp/server.py`
+passes a `StructuredQueryAstExtension` instance to `MCPServer(extensions=...)`,
+which declares the read `StructuredQuery` AST and the write
+`Insert`/`Update`/`Delete`/`Upsert` union as a citable JSON-Schema contract —
+generated from the live Pydantic models (never hand-written) into
+`docs/mcp_extensions/structured_query_ast.schema.json`, regenerated with
+`make mcp-extension-schema`. It is purely descriptive: the extension
+contributes no tool, resource, or JSON-RPC method, so `tools/call` against
+the tools above remains the only way to submit a query or write — see the
+Decision Log and `docs/mcp_extensions/structured_query_ast.md`'s "Non-goals"
+section for why a namespaced method here would be the same rejection class
+as `execute_sql`. External publication of the namespace is a separate,
+maintainer-gated decision not made as part of this.
+
+**In-query human approval over MCP (`mcp/elicitation.py`, items 92/93/128).**
+When a gated read or write trips the approval gate, `run_structured_queries`/
+`run_structured_writes` don't block waiting for a human — the `2026-07-28`
+protocol removed server-initiated mid-call requests entirely (Multi
+Round-Trip Requests, MRTR). Instead the tool returns `InputRequiredResult`
+(one `input_request` per gated item in the batch, keyed `"q0"`/`"w0"` etc.
+by position) and the client retries the *identical* tool call carrying
+`input_responses`/`request_state`. Both phases reuse
+`execution/approval.py`'s existing HMAC-signed token verbatim — no new
+crypto: a *pending* token (bound to the item's fingerprint, short TTL)
+travels in `request_state`; on retry, the tool re-derives each item's
+fingerprint from the *resubmitted* AST and compares it against the pending
+token's before ever looking at `input_responses` — the mutation-verified
+enforcement point that stops a caller from obtaining approval for a cheap
+query and replaying the granted state against an expensive one in the same
+batch slot. Only once that comparison passes and the human's response says
+`approve: true` does a real grant get minted and handed to
+`execute_many`/write `execute_many`'s existing `approval_tokens` map (the
+same parameter REST's out-of-band token flow already used). Off by default
+(`AppConfig.mcp_elicitation_approval_enabled`) — an elicitation response
+carries no authenticated approver identity, so treating it as an approval
+is an explicit operator decision that the client's human is trusted.
 
 Every tool is wrapped in `@safe_mcp_tool` (`mcp/exceptions.py`). MCP tool
 calls don't have HTTP status codes to raise on failure — a tool has to
@@ -2789,28 +3114,29 @@ logs it, and returns that instead of raising. This mirrors the REST layer's
 outcomes, different shape, because that's what each transport's protocol
 expects.
 
-**A real gotcha worth knowing if you touch these files:** three tool
-modules — `mcp/tools/connections.py`, `mcp/tools/schema.py`, and
-`mcp/tools/query.py` — deliberately do **not** start with `from __future__
+**A real gotcha worth knowing if you touch these files:** every tool
+module that declares a typed parameter needing resolution — `mcp/tools/
+connections.py`, `schema.py`, `query.py`, `write.py`, `help.py`,
+`templates.py` — deliberately does **not** start with `from __future__
 import annotations`, even though most of the codebase does. Here's why.
 With that import, Python stores a function's type annotations as plain
 strings instead of live objects (e.g. the annotation `StructuredQuery`
 becomes the string `"StructuredQuery"`, to be resolved later, lazily).
-FastMCP needs to resolve those annotations into real types to build each
-tool's input schema, and it does that resolution against the *wrapping*
-function's `__globals__` — because `safe_mcp_tool` uses `functools.wraps`,
-the object FastMCP actually inspects is the wrapper defined in
-`mcp/exceptions.py`, not the original tool function defined in, say,
-`query.py`. So when FastMCP tries to look up the string `"StructuredQuery"`
-in that wrapper's global namespace, it's looking in `mcp/exceptions.py`'s
-namespace — which never imported `StructuredQuery` — and resolution fails
-at server-startup registration time, not at call time, which makes it a
-confusing failure to debug if you don't know this is why. Keeping
-annotations as real (unstringified) objects in these three files sidesteps
-the problem entirely, because then there's nothing to resolve. If you add a
-new tool module with type annotations that need resolving, either skip
-`from __future__ import annotations` there too, or confirm FastMCP can
-still resolve them.
+`MCPServer` needs to resolve those annotations into real types to build
+each tool's input schema, and it does that resolution against the
+*wrapping* function's `__globals__` — because `safe_mcp_tool` uses
+`functools.wraps`, the object `MCPServer` actually inspects is the wrapper
+defined in `mcp/exceptions.py`, not the original tool function defined in,
+say, `query.py`. So when `MCPServer` tries to look up the string
+`"StructuredQuery"` in that wrapper's global namespace, it's looking in
+`mcp/exceptions.py`'s namespace — which never imported `StructuredQuery` —
+and resolution fails at server-startup registration time, not at call
+time, which makes it a confusing failure to debug if you don't know this is
+why. Keeping annotations as real (unstringified) objects in these files
+sidesteps the problem entirely, because then there's nothing to resolve. If
+you add a new tool module with type annotations that need resolving, either
+skip `from __future__ import annotations` there too, or confirm `MCPServer`
+can still resolve them.
 
 ### The `help/` module — a queryable product guide
 
@@ -3279,9 +3605,22 @@ only used in a `where` clause, not just in `select`. See
 [Core Request Pipeline](#the-core-request-pipeline).
 
 **"What databases does it support?"**
-Postgres and MSSQL in production. SQLite is used only internally for tests
-and examples — it's never a supported registry dialect for a real
-deployment. See [Core Request Pipeline](#the-core-request-pipeline).
+Postgres, MSSQL, and MySQL in production, verified against real servers
+(item 19 phase 1). Snowflake (item 19 phase 2) and BigQuery (item 19 phase 3)
+each have a real `DialectAdapter` (compiling its output against a real,
+installed `snowflake.sqlalchemy`/`sqlalchemy_bigquery` dialect object) and a
+`SessionDialectAdapter` (tested against recording fakes that assert the
+exact SQL it builds, not the real dialect compiler — its statements are
+built directly with `sa.text(...)`), but neither is production-ready the
+same way as the other three: there is no Snowflake or BigQuery instance to test against in
+this project's environment, and neither `snowflake-sqlalchemy`'s nor
+`sqlalchemy-bigquery`'s driver has async SQLAlchemy engine support, so
+`connections/engine.py` deliberately refuses to open a live connection to
+either today rather than connecting unverified — see the Decision Log
+entries below and TODO.md item 19's live-verification follow-up items.
+SQLite is used only internally for tests and examples — it's never a
+supported registry dialect for a real deployment.
+See [Core Request Pipeline](#the-core-request-pipeline).
 
 **"How does an agent connect — does it need a special client?"**
 Two transports, both backed by the exact same validation/execution pipeline
@@ -3365,6 +3704,1795 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-08-07 — A correlated subquery's `correlate` reference now resolves
+  through the same shared, case-insensitive table lookup everywhere, closing
+  a real cross-tenant `EXISTS`/scalar-subquery bypass (TODO.md item 169).**
+  This is a sibling of the item 167 bug just below: when a query joins a
+  table under one alias (say `"C"`) but also references it elsewhere with
+  different letter-casing (`"c"`), schema validation can end up holding two
+  separate Python objects for what should be one alias. Item 167 closed the
+  consumer of that duplication inside the compiler's mandatory-row-filter
+  step; this item found and closed a second, independent consumer: a child
+  `EXISTS`/scalar subquery's `correlate` field, which tells the compiler
+  which outer-query table the subquery should stay tied to. Reproducing the
+  exact shape (a joined `customers` table with a `mandatory_row_filter` on
+  `tenant_id`, and a child `EXISTS` correlating against the differently-cased
+  spelling) compiled to a subquery that silently dropped the correlation
+  entirely and scanned `customers` as an independent, unconditioned join —
+  a genuine cross-tenant boolean oracle a caller could use to test row
+  existence outside their own tenant's mandatory filter, not a hypothetical.
+  **Fix:** the same case-insensitive `_table_by_name` helper the compiler's
+  FROM/JOIN construction already used was relocated into
+  `validation/schema_validation.py` (as `table_by_name`/
+  `table_by_name_or_none`) so both the compiler and the schema validator
+  resolve every alias through the identical function over the identical
+  dict, instead of two independently-written lookups that could silently
+  drift apart. While verifying the fix, a second, related bug in the same
+  code region was found and closed in the same change: a child subquery's
+  own body referencing a correlated table with different case than its
+  `correlate` declaration used raised an unhandled `KeyError` instead of a
+  clean validation error (a crash, not a bypass, but the same root
+  duplication). The deeper structural option — preventing the duplicate
+  alias objects from ever being created in the first place — was
+  considered and deliberately not taken, for the same reason item 167 didn't
+  take it: it touches a function every query in the engine runs through, and
+  the narrower fix (routing every consumer through one shared lookup) fully
+  closes this class of bug for both known consumers today. The residual risk
+  is a future third consumer that indexes the table dict directly instead of
+  through the shared helper — worth remembering if you ever add a new place
+  that reads schema validation's resolved table map. See
+  [The Core Request Pipeline](#the-core-request-pipeline) and
+  [3. Compilation](#3-compilation--ast--policy-becomes-real-sql).
+
+- **2026-08-07 — Extended item 165's structural credential-safety fix to the
+  `querygate-validate-config` CLI and the config-governance dry-run path,
+  closing the one gap item 165 itself flagged as a follow-up (TODO.md item
+  168).** Item 165 (below) stopped the REST `/admin/reload-config` endpoint
+  from ever stringifying a raw pydantic/YAML exception into an HTTP error
+  body. But `cli.py`'s `load_config_context` — shared by the CLI and by the
+  admin config-governance "validate"/"preview" dry-run endpoints — still
+  built its own error messages the old, unsafe way, relying on a downstream
+  regex scrub (`_humanize_validation_errors`) that only ever ran on the HTTP
+  path, not on the CLI's own terminal/CI-log output. A malformed
+  `connections.yaml` carrying a real credential could still leak it straight
+  into an operator's terminal or CI log. **Fix:** the two structural helpers
+  item 165 introduced (`safe_pydantic_error_lines`, `safe_yaml_error_detail`)
+  moved to the neutral `core/exceptions.py` (both `cli.py` and
+  `admin/service.py` needed to import them, and `admin/service.py` already
+  imports from `cli.py`, so a shared home avoided a circular import), and
+  `load_config_context` now routes every one of its four file loads through
+  them instead of `f"{file}: {exc}"`. See
+  [2. Credential redaction is a tested invariant, not a habit](#2-credential-redaction-is-a-tested-invariant-not-a-habit).
+
+- **2026-08-07 — Closed the `is_connectable()` gap for the SECONDARY
+  connection in a cross-connection join (TODO.md item 163).** Some dialects
+  (Snowflake, BigQuery) support policy/rendering but can't actually be
+  connected to yet (`connections/engine.py` deliberately refuses to open a
+  live connection for them — see the BigQuery entry just below). That guard
+  was only ever checked for a query's *primary* connection. A join whose
+  *secondary* connection was one of these not-yet-connectable dialects
+  wasn't rejected up front the way the same attempt on a primary connection
+  already was — it instead failed later, deep in reflection, as an opaque,
+  masked `NoSuchTableError` (a raw 500, not a clean validation error). No
+  data ever leaked and no check was skipped (the join's `join_group`
+  membership and the joined connection's own policy were both still
+  enforced) — this was purely a confusing-error problem, not a security
+  bypass, but a bad one: an operator debugging a rejected join got no signal
+  about why. **Fix:** the same `is_connectable()` check `init_engine` already
+  runs for a primary connection now also runs for a join's secondary
+  connection, raising the identical, clearly-worded rejection. See
+  [Why policy is per-connection, not global](#why-policy-is-per-connection-not-global).
+
+- **2026-08-07 — Made `column_mask`'s HASH branch an explicit, exhaustive
+  check on all five `DialectAdapter`s, instead of an implicit "falls through
+  to HASH" default (TODO.md item 164).** Every dialect adapter's column-mask
+  renderer already treats an unrecognized date-part or interval unit as a
+  hard rejection (a deliberate exhaustiveness habit, so a future enum member
+  is a forced decision rather than a silent guess) — but the same discipline
+  wasn't applied to `ColumnMaskKind`: an unrecognized mask kind silently
+  rendered as the strongest mask (HASH) instead of raising. Not a live
+  disclosure risk today (`ColumnMaskKind` is a closed, stable four-member
+  enum, and "fails toward the strongest mask" never under-masks a column) —
+  but a gap worth closing on principle before a future fifth mask kind makes
+  it a real one. **Fix:** all five adapters
+  (Postgres/MSSQL/MySQL/Snowflake/BigQuery) now check for `HASH` explicitly
+  and raise a typed `QueryValidationError` for anything else, matching the
+  same pattern already used for date/interval maps.
+
+- **2026-08-07 — A case-different column reference to a joined alias could
+  leave a phantom second copy of that table, which a mandatory row filter
+  then turned into either an unconditioned cross join (duplicated rows) or,
+  under a different internal ordering, a silent bypass of the filter itself
+  (TODO.md item 167).** If a query joins a table under one alias spelling
+  (say `orders AS "O"`) but a column elsewhere in the query refers to it with
+  different letter-casing (`"o.id"`), schema validation's internal bookkeeping
+  ends up with two distinct table objects for what should be a single join
+  occurrence — one for `"O"`, one for the phantom `"o"`. The compiler's
+  mandatory-row-filter step used to walk *every* such name it found, not just
+  the ones the query's actual `FROM`/`JOIN` clause declared. Compiling the
+  exact shape confirmed real, measurable damage: the filter's `WHERE` clause
+  ended up applied to both the real alias and the phantom one, and because the
+  phantom alias was never part of the statement's own `FROM`/`JOIN`, SQL
+  silently added it as an unconditioned cartesian join — multiplying every
+  output row. A first, narrower fix (deduping by name alone) was caught by
+  review as *still* wrong under the opposite internal ordering: it could bind
+  the filter to the phantom object while the alias actually used in the query
+  went completely unfiltered — a real mandatory-row-filter bypass, worse than
+  the row-duplication bug it was meant to fix. **Fix, in two parts, both
+  required:** the mandatory-filter step now walks only the table names the
+  query itself declared in `FROM`/`JOIN` (never the extra casing variants),
+  and resolves each one through the same case-insensitive lookup the
+  `FROM`/`JOIN` clause construction already uses — guaranteeing the filter
+  always binds to the exact object that ends up in the compiled statement,
+  regardless of internal ordering. (Item 169, above, found and closed a
+  second, independent consumer of this same underlying duplication.) See
+  [3. Compilation](#3-compilation--ast--policy-becomes-real-sql).
+
+- **2026-08-07 — `/admin/reload-config`'s generic error handler could leak a
+  live credential in its HTTP 400 response body; fixed with a structural
+  guarantee, not a string scrub (TODO.md item 165).** The endpoint's
+  exception handling built its error message from Python's default
+  stringification of a validation failure — and pydantic's default rendering
+  of certain error kinds includes the *entire offending input*, connection
+  string and password included, truncated but often not enough to hide a
+  short host/password. A syntactically broken `connections.yaml` could leak
+  the same way through a YAML parser error, which embeds the literal
+  offending source line. Reachable by anyone holding the config-reload admin
+  scope. **Fix:** two dedicated exception handlers, ahead of the generic
+  catch-all, that build the error text from only the safe, structured parts
+  of the failure (field name and message — never the raw input value), so
+  the credential is never materialized into a string in the first place
+  rather than being scrubbed out after the fact. Both new regression tests
+  were confirmed to fail with the real credential visible when reverted to
+  the old behavior, then the fix restored — the standard mutation-verify
+  discipline for a new enforcement point. See
+  [2. Credential redaction is a tested invariant, not a habit](#2-credential-redaction-is-a-tested-invariant-not-a-habit).
+
+- **2026-08-07 — `ConnectionProfile.dialect` is now validated against
+  `connection_string`'s actual backend, and the fix itself is a case study
+  in why a whole-model Pydantic validator is the wrong tool near a
+  credential field (TODO.md item 158).** Nothing previously checked that
+  the declared `dialect` enum agreed with the backend named in
+  `connection_string`'s URL scheme — a `dialect: postgresql` profile
+  pointed at a real `mysql+asyncmy://...` string was accepted, and every
+  place that branches on the *declared* dialect rather than the live engine
+  would act on the wrong assumption. `connections/engine.py`'s
+  `session_scope` applies session guardrails (`SET LOCAL statement_timeout`,
+  etc.) keyed on the declared dialect, so a misdeclared profile's guardrail
+  SQL silently doesn't apply (`create_async_engine` still resolves the
+  actual driver from the URL regardless of what's declared, so the wire
+  protocol itself is always correct — but the guardrail is not). More
+  concretely security-relevant: `schema/reflection.py`'s
+  `list_live_tables()` selects its extra `INFORMATION_SCHEMA.TABLES` filter
+  via `SessionDialectAdapter.list_live_tables_extra_filter_sql()`, keyed on
+  the same declared dialect — MySQL's adapter appends `AND TABLE_SCHEMA =
+  DATABASE()` specifically because MySQL's `INFORMATION_SCHEMA.TABLES` is
+  server-wide (spans every database the connecting user can see), unlike
+  Postgres/MSSQL. A profile misdeclared `postgresql` over a real MySQL
+  backend would skip that filter (Postgres's adapter contributes none),
+  letting `list_tables()` leak *other* databases' table names to a caller
+  whose connection was only supposed to see one. Item 158 closes that
+  specific cross-database leak, not just the guardrail-text mismatch. It
+  also meant item 19 phase 2's Snowflake `is_connectable()` guard, which
+  keys on the declared dialect, couldn't be trusted to catch a misdeclared
+  Snowflake connection.
+
+  **Fix:** a `field_validator("dialect")` on `ConnectionProfile`
+  (`connections/models.py`) that parses `connection_string` with
+  `sa.engine.url.make_url(...).get_backend_name()` and rejects a mismatch,
+  naming both the declared dialect and the actual backend found.
+
+  **Why a field validator on `dialect`, not a whole-model validator or a
+  field validator on `connection_string` — the credential-leak catch.**
+  `ConnectionProfile`'s own docstring says its `connection_string` must
+  never end up "embedded in a validation error." A first draft used
+  `@model_validator(mode="after")`, and a direct check against a live
+  `pydantic.ValidationError` showed that when a model-level validator
+  raises `ValueError`, pydantic populates the error's `input_value` — in
+  both `str(ValidationError)` and `.errors()[0]["input"]` — with the
+  **entire raw input dict**, `connection_string` included. `api/routes.py`'s
+  `reload_config_endpoint` does `except Exception as exc: raise
+  HTTPException(..., detail=str(exc))`, so this would have handed a live
+  credential straight back in an HTTP 400 body the first time someone
+  reloaded a mismatched config. Scoping to `field_validator
+  ("connection_string")` instead doesn't fix it either — that field's own
+  raw value *is* the credential, so `input_value` is the leak. The actual
+  fix: reorder `ConnectionProfile`'s fields so `connection_string` is
+  declared before `dialect`, and scope the validator to
+  `field_validator("dialect")`, reading `connection_string` back out via
+  `info.data` (already-validated, since it's declared earlier). `dialect`'s
+  own value (e.g. `"postgresql"`) is all that ever lands in `input_value`
+  on rejection. If you touch this validator, keep it scoped to a field
+  whose own raw value is never the credential — don't "simplify" it back
+  into a model-level check.
+
+  **The "scheme is always literal" assumption in the item's own write-up
+  turned out to be false**, caught by running the full suite, not asserted
+  from the spec. Two integration tests failed:
+  `test_mcp_server.py::test_mcp_configuration_inspection_uses_request_application_config`
+  and `test_product_guide_api.py::test_configuration_summary_is_scope_gated_and_never_returns_raw_yaml`.
+  Both go through `help/service.py`'s `_redacted_connection`, which
+  deliberately builds a `ConnectionProfile` straight from a stored config
+  version's raw, never-interpolated YAML — it only wants typed
+  `dialect`/`id`/`known_tables`/`join_group` for an admin summary and never
+  resolves the real secret. `examples/connections.example.yaml` (the
+  default `connections_file`) confirmed the *whole* `connection_string`
+  value, not just its credentials, is commonly one `${VAR}`-shaped
+  reference with no literal scheme present at all. The validator now skips
+  the check (doesn't reject) when `make_url` can't parse a backend out of
+  the string at all — there's nothing to compare against, and it's not a
+  live bypass: `ConnectionRegistry.from_entries`, the one path that
+  actually opens a connection, always interpolates `connection_string`
+  before constructing `ConnectionProfile`, so the real check still runs
+  against the fully-resolved URL by the time a connection is opened.
+
+  **Two more real gaps surfaced by the `auditors` review of this same
+  change, both fixed before landing.** `make_url` doesn't only raise
+  `sa.exc.ArgumentError` on an unparseable string — a *templated port*
+  (`...@${DB_HOST}:${DB_PORT}/...`) raises a plain `ValueError` while
+  coercing the port to an int, which the original `except
+  sa.exc.ArgumentError:` missed, so a legitimately-templated profile could
+  have been wrongly rejected; fixed by widening the except clause to catch
+  both. And `_BACKEND_NAME_TO_DIALECT` (hand-maintained on purpose, so an
+  unsupported backend gets a clear rejection instead of a bare enum error)
+  had nothing forcing it to stay a superset of `DatabaseDialect`, so a
+  future fifth dialect added without a matching entry would silently
+  mis-reject every profile for it; fixed with a module-level `assert` that
+  fails at import time instead. A separate reviewer also found the
+  "interpolate-then-validate" claim two paragraphs up was asserted in prose
+  but never pinned by a test that actually goes through
+  `ConnectionRegistry.from_entries` — every test up to that point exercised
+  `ConnectionProfile` directly with already-resolved literals. Fixed with
+  `test_from_entries_rejects_a_dialect_mismatch_only_visible_after_interpolation`
+  in `tests/unit/test_connections_registry.py`.
+
+- **2026-08-07 — BigQuery ships as a rendering-level-only phase (TODO.md item
+  19 phase 3), following the Snowflake precedent's exact shape;
+  `connections/engine.py` refuses to actually open a BigQuery connection.**
+  `DatabaseDialect` gained a `bigquery` member with a real
+  `BigQueryDialectAdapter` (`compiler/dialect_adapters.py`) and
+  `BigQuerySessionAdapter` (`connections/dialects.py`), covering the same
+  primitive surface the other four dialects do — native `NULLS FIRST/LAST`,
+  sample-statistic `STDDEV`/`VARIANCE` (BigQuery's docs: both are documented
+  aliases of the `_SAMP` forms, matching Postgres/MSSQL/Snowflake, unlike
+  MySQL's population-default bare names), `STRING_AGG`, a genuine `ARRAY_AGG`
+  (BigQuery has a real native `ARRAY<T>` type), full ROWS/RANGE window frames
+  with numeric offsets, and distinct-only `INTERSECT`/`EXCEPT` (rejected with
+  `ALL`, the MSSQL/MySQL/Snowflake posture; `UNION`/`UNION ALL` are fully
+  supported — confirmed by compiling against the installed dialect object
+  that a bare `sa.union(...)` already renders `UNION DISTINCT`, not a bare
+  `UNION`, so the shared set-operation helper needed no BigQuery-specific
+  handling for that part). `PERCENTILE_CONT` is rejected, not emulated:
+  BigQuery's own syntax requires `OVER(...)` as part of the grammar (a
+  navigation/window function, not a `GROUP BY`-compatible aggregate) — the
+  same genuine gap as MSSQL's, documented as such in Google's docs rather
+  than assumed. Upsert is rejected, not emulated, for a reason stronger than
+  Snowflake's: BigQuery's only upsert idiom is `MERGE`, a multi-clause
+  statement with no single-target-constraint model the way
+  `conflict_columns`/`update_columns` express one, AND (confirmed against
+  Google's docs) BigQuery's `PRIMARY KEY`/`UNIQUE` constraints, even when
+  declared, are explicitly documented as **NOT ENFORCED** (query-optimizer
+  hints only) — so there is no database-enforced uniqueness for
+  `conflict_columns` to even name a real target against, a structurally
+  wider gap than Snowflake's.
+
+  **The one genuinely new mechanism this dialect needed, with no precedent
+  in the other four adapters.** BigQuery, uniquely, has no single
+  polymorphic date-truncate/date-add function — it has THREE strictly-typed
+  ones (`DATE_TRUNC`/`DATETIME_TRUNC`/`TIMESTAMP_TRUNC`,
+  `DATE_ADD`/`DATETIME_ADD`/`TIMESTAMP_ADD`), each accepting only its own
+  operand type and each with a DIFFERENT unit/date_part vocabulary (confirmed
+  against Google's docs, not assumed): `DATE_ADD` supports only
+  day/week/month/quarter/year (a `DATE` has no time-of-day); `TIMESTAMP_ADD`
+  supports only sub-day units, day/hour/minute/second (a `TIMESTAMP` is a
+  timezone-independent absolute instant, and BigQuery does not allow
+  calendar-relative arithmetic directly on one); `DATETIME_ADD` supports the
+  full range (a civil calendar value with both a date and a time-of-day).
+  `BigQueryDialectAdapter.date_bucket`/`date_add` dispatch on the operand's
+  SQLAlchemy Core `.type` for this reason (`_bq_temporal_kind`), and reject —
+  rather than guess — when that type cannot be determined. This surfaced a
+  genuinely new, honest product fact during this item's own integration into
+  `test_date_primitives.py`'s shared cross-dialect suite (the same suite
+  Snowflake's phase 2 did NOT get folded into, an architecture-boundary-
+  reviewer finding on that item this one does not repeat):
+  `date_add(now(), 'year', ...)` — a composition `NowExpr`'s own docstring
+  recommends — does NOT render on BigQuery, because `now()` renders as a
+  `TIMESTAMP` and `TIMESTAMP_ADD` genuinely lacks `week`/`month`/`year`. An
+  agent that needs calendar-unit arithmetic relative to "now" on BigQuery
+  must compose it from primitives QueryGate already exposes (cast the
+  `now()` expression, or reference a `DATETIME`-typed column directly)
+  rather than the engine silently picking a different function on the
+  caller's behalf — the same "reject and point at primitives, don't
+  synthesize" posture item 74 established.
+
+  **The deliberate exception to "add a dialect, register it, done": engine
+  wiring stops short of a live connection, for TWO independent reasons.**
+  First, the one Snowflake already established: `sqlalchemy_bigquery`'s
+  DBAPI has no async SQLAlchemy engine support — the same gap Snowflake's
+  driver has. Confirming it the SIMPLE way Snowflake's was confirmed (just
+  constructing an async engine and reading the resulting
+  `InvalidRequestError`) is not possible with no GCP credentials configured
+  in this project's environment, because of the second, genuinely-new-to-
+  BigQuery reason: `sqlalchemy_bigquery.BigQueryDialect.create_connect_args`
+  builds a real `google.cloud.bigquery.Client` (resolving Google
+  credentials) at ENGINE-CONSTRUCTION time, not connection time, and fails
+  there FIRST — confirmed directly by reading the installed package's
+  source and by observation: with no credentials configured, constructing
+  SQLAlchemy's async engine factory against a `bigquery://` URL raises
+  `google.auth.exceptions.DefaultCredentialsError` immediately inside
+  `create_connect_args`, before SQLAlchemy's own async-driver check ever
+  gets a chance to run. (With a syntactically valid, if fake, credentials
+  file supplied to get past that step, the identical `InvalidRequestError`
+  Snowflake's driver raises — "The asyncio extension requires an async
+  driver to be used. The loaded 'bigquery' is not async." — was also
+  confirmed for BigQuery's driver, but that is not the error either dialect
+  actually presents in this project's normal, credential-less environment.)
+  `connections/engine.py`'s `init_engine`
+  dispatches the refusal through `SessionDialectAdapter.is_connectable()`
+  (the same registered-capability seam Snowflake's phase established, per
+  its own 2026-08-06 architecture-boundary-reviewer finding — reused here,
+  not reinvented) and raises a clear, client-actionable
+  `ConfigValidationError` (422) naming the gap, pre-empting BOTH failure
+  modes before either can surface as a confusing library-internal error.
+  This also means none of `BigQuerySessionAdapter`'s methods are reachable
+  in production — and unlike Snowflake, BigQuery genuinely has no session-
+  scoped SQL statement at all to send even if it were reachable (no SET/
+  ALTER SESSION equivalent — a BigQuery "connection" issues independent,
+  stateless query jobs against Google's REST API), so
+  `apply_session_guardrails` is a real no-op rather than a rendered
+  statement, and `capture_session_identifier`/`cancel_session` raise rather
+  than fabricate a plausible-looking session identifier that was never
+  created — a genuine additional architecture gap beyond the missing async
+  driver, which the BigQuery live-verification follow-up item now also
+  tracks (BigQuery's real timeout/cancellation primitives are per-query-job,
+  `QueryJobConfig.job_timeout_ms`/`jobs.cancel`, a materially different
+  mechanism than every other adapter's session-level one).
+
+  **Nothing here is live-verified, the identical posture to Snowflake's
+  phase, not MySQL's item-19-phase-1 precedent.** There is no BigQuery
+  project or GCP credentials available in this project's environment,
+  unlike Postgres/MySQL/MSSQL which run in Docker — every BigQuery claim in
+  this change is backed by Google's public SQL reference docs and checked by
+  compiling against a real, installed `sqlalchemy_bigquery` dialect object
+  (`BigQueryDialectAdapter`, `tests/unit/test_dialect_adapters.py`'s
+  `TestBigQuery*` classes) or against recording fakes asserting exact SQL
+  text/params (`BigQuerySessionAdapter`, `tests/unit/test_dialects.py`'s
+  BigQuery session-adapter section) — the same two-different-ways split
+  Snowflake's entry above documents, for the same reason. Neither path is
+  ever run against a live server. Treat every BigQuery behavior claim in
+  this codebase as "renders/compiles as documented", not "confirmed correct
+  against a real project", until the live-verification follow-up item ships.
+  Item 19, which originally scoped "MySQL, Snowflake, BigQuery, …", is now
+  marked done: all three explicitly-named dialects have shipped (one fully
+  live-verified, two rendering-only and explicitly flagged as such); a new
+  open-ended item now separately tracks "further dialects beyond these
+  three" so the item doesn't stay open indefinitely on the strength of its
+  own trailing "…".
+
+- **2026-08-07 — TODO.md item 160 (item 156's own follow-up audit): two of
+  its four findings fixed, one left OPEN as an explicit maintainer decision,
+  one confirmed as already-accurate scope documentation. Item 160 is
+  therefore `✅ DONE (findings 1, 2, 4 addressed; finding 3 remains an open
+  design decision)`, not archived — see TODO.md's "partially-done items stay
+  inline" rule.**
+
+  **Finding 1 (fixed) — audit-vs-compiled-SQL Policy snapshot consistency.**
+  `resolve_table_policies`'s default resolver used to re-read the joined
+  connection's Policy from the live `PolicyStore` at every call site
+  (`validate_policy`, `compile_structured_query`, and again at `execute()`'s
+  post-execution `applied_column_masks` audit call) instead of resolving it
+  once and threading the same snapshot through, the way the primary Policy
+  already did via `_get_policy()`. `execution/service.py` gained
+  `StructuredQueryService._snapshot_connection_resolver`: given
+  `_validate_and_compile`'s already-computed `scope_connections` map, it
+  resolves each DISTINCT non-primary connection's Policy exactly once and
+  returns a `ConnectionResolver` closure over that fixed dict, threaded into
+  `validate_policy`, `compile_structured_query`, and the `applied_column_masks`
+  audit call — all three now agree with each other and with what was
+  actually compiled, even if an authorized `/admin/reload-config` changes the
+  joined connection's Policy while the query is executing. Mutation-verified:
+  dropping the audit call's `connection_resolver=connection_resolver` makes
+  `test_audit_masked_columns_reflects_the_snapshot_compiled_against_not_a_late_reload`
+  (`tests/unit/test_service.py`) fail exactly as expected — the audit event's
+  `masked_columns` reports the post-reload (unmasked) view instead of the
+  compiled one.
+
+  **Finding 2 (fixed, via extraction rather than relocation) — cap-ordering
+  restored.** `_validate_and_compile` used to compute `early_scope_connections`
+  (one `PolicyStore.get()` per cross-connection scope) BEFORE `validate_policy`
+  ran at all, ahead of the cheap `max_cte_count`/`max_subquery_depth` checks
+  the item's own docstring documents as deliberately cheap-bound-first. Fixed
+  by extracting those two checks into a new `validate_structural_caps(query,
+  policy)` in `validation/policy_validation.py`, called directly from
+  `_validate_and_compile` BEFORE `resolve_scope_connections` runs; `validate_
+  policy` also calls it internally afterward (unchanged behavior for every
+  OTHER caller). The item offered two options — move the map computation
+  inside `validate_policy` itself, or extract-and-call-early — and this
+  chose extraction deliberately over literally moving `resolve_scope_
+  connections`'s call inside `validate_policy`: doing that would have meant
+  `validate_policy` unconditionally self-deriving `scope_connections`
+  whenever a caller passes `connection_resolver`/`principal` but no explicit
+  map, which is finding 3's exact open question — extraction achieves the
+  same cap-before-lookup ordering without deciding it. Mutation-verified:
+  reordering the extracted call to run AFTER `resolve_scope_connections`
+  again makes `test_structural_caps_reject_before_any_per_scope_policy_lookup`
+  (`tests/unit/test_service.py`) fail — the test asserts, via a patched
+  `resolve_scope_connections` spy, that it is never called at all when the
+  cheap cap alone is enough to reject.
+
+  **Same-day correction (`security-invariant-reviewer`, 2026-08-07): the
+  redundant second structural-caps check is NOT guaranteed to agree with the
+  first, and an earlier version of this entry (and of `validate_
+  structural_caps`'s own docstring) claimed otherwise.** `max_cte_count`/
+  `max_subquery_depth` themselves genuinely never move under purpose
+  narrowing, but `validate_structural_caps` also runs `_validate_cte_
+  constraints`'s cte-name-shadowing and masked-cte-projection rules, which
+  DO read `denied_tables`/`denied_columns`/`mandatory_row_filters`/
+  `column_masks` — fields `Policy.for_purpose` narrows. Since `_validate_
+  and_compile`'s pre-check runs against the UN-narrowed Policy and `validate_
+  policy`'s own internal call runs AFTER narrowing, a purpose delta that adds
+  a new denied-table/mask entry can make the pre-check pass a query the
+  narrowed internal call correctly rejects. This is safe, not a bypass,
+  ONLY because `Policy.for_purpose` is additive-only (verified: every field
+  it touches is unioned/concatenated onto the base `Policy`, never replaced
+  or removed) — the un-narrowed pre-check's governed-name set is therefore
+  always a SUBSET of the narrowed one's, so the two calls can under-reject
+  relative to each other but never over-reject, and `validate_policy`'s own
+  call (the actual authority, run unconditionally on every code path) never
+  misses an enforcement because of it. Pinned by a new test,
+  `test_structural_caps_pre_check_can_under_reject_a_purpose_narrowed_cte_
+  shadow_but_validate_policy_still_catches_it`
+  (`tests/unit/test_policy_validation.py`), which constructs exactly that
+  disagreement (a cte named after a table only a purpose delta denies) and
+  asserts the pre-check alone passes while `validate_policy` still rejects.
+  If `PurposePolicyDelta` ever gains a subtractive field this monotonicity
+  argument breaks, and the redundant internal call in `validate_policy` must
+  never be removed on the assumption the pre-check makes it redundant.
+
+  **Second same-day correction (`security-invariant-reviewer`, 2026-08-07):
+  `_snapshot_connection_resolver`'s closure silently discarded its own
+  `principal` argument.** An earlier version always answered from the
+  snapshot resolved against `self._principal`, regardless of what `principal`
+  the `ConnectionResolver` contract's caller actually passed in — not
+  reachable through today's production call graph (every in-pipeline caller
+  passes `self._principal`), but this REPLACED a default resolver that DID
+  honor its `principal` argument, so a future caller threading a different
+  principal (item 90's delegated/on-behalf-of resolution, an admin dry-run
+  reusing the service, a per-scope principal) would have silently received a
+  stranger's cached per-principal Policy override with no error. Fixed: the
+  closure now serves the snapshot only when the caller's `principal` is
+  identical to `self._principal`; any other principal falls through to a
+  live `resolve_visible_connection` resolved against that actual principal.
+  Pinned by `test_snapshot_connection_resolver_honors_a_different_principal_
+  argument` (`tests/unit/test_service.py`), mutation-verified against the
+  prior (unconditional-cache) version.
+
+  **Finding 3 (left OPEN — a maintainer decision, not resolved here).**
+  Every `scope_connections`/`connection_resolver` parameter still defaults to
+  `None`, so a future call site that passes a `principal`/`connection_
+  resolver` but forgets `scope_connections` silently gets the weaker
+  pre-156 (primary-only) behavior rather than an error — the same shape that
+  let `admin/service.py`'s `simulate_candidate_policy` drift onto the weak
+  path before item 156 caught it. The open question — should `validate_
+  policy` self-derive the map in that situation, closing the footgun
+  structurally — was deliberately NOT decided under this item's own
+  time-boxed audit-response pass: it is a real design change to the shared
+  validation-layer contract (every caller of `validate_policy`, including
+  `admin/service.py`'s dry-run simulator and `security_benchmark.py`, would
+  need to be re-examined against a new default), not a mechanical fix, and
+  CLAUDE.md's working agreement reserves exactly this kind of judgment call
+  for an explicit decision rather than a default reached for under time
+  pressure. Recorded here so it stays visible rather than silently dropped
+  when item 160 is eventually closed; whoever makes the call should record
+  the outcome as its own Decision Log entry.
+
+  **Finding 4 (confirmed, no code change) — purpose narrowing/`min_group_
+  size`/row limits were never claimed to be cross-connection-resolved.**
+  `resolve_table_policies` returns the joined connection's Policy un-narrowed
+  by the query's declared `purpose`, and `min_group_size`/`max_limit`/
+  `default_limit` are read from the primary Policy only. Checked against both
+  `docs/THREAT_MODEL.md` QG-09 and this log's own item-156 entry above — both
+  already say "column masks, mandatory row filters, and the table/column
+  deny-list", never "all policy enforcement" — so no doc drift exists to fix.
+  Left as a documented residual and a candidate for its own future TODO.md
+  item if per-connection purpose/k-anonymity/limit resolution is ever
+  prioritized.
+- **2026-08-06 — `connection` gets the MCP `x-mcp-header` annotation;
+  query/write AST fields deliberately do not (TODO.md item 130).** The
+  `2026-07-28` spec lets a server mark a primitive tool parameter so
+  conforming clients mirror it into an `Mcp-Param-{Name}` HTTP header, so a
+  fronting gateway can route/authorize on it without parsing the body.
+  `connection` is the one parameter every tool shares that is (a) already
+  public (`PublicConnectionInfo` returns it) and (b) meaningful to a gateway's
+  own routing decision ("this identity may reach connection X"), so it's
+  annotated `x-mcp-header: "Connection"` in `mcp/tools/{query,schema,
+  write}.py`. Query/write AST content is deliberately never annotated —
+  mirroring AST internals into headers would leak query *semantics* (which
+  tables, columns, predicates a caller is touching) to every intermediary on
+  the path, inverting the confidentiality posture QueryGate exists to
+  enforce; the spec itself only clears primitive, already-non-sensitive
+  parameters for this treatment. The header is documented everywhere it
+  appears (this section, README.md, the field's own docstring in each tool
+  module) as a **routing hint, never an authoritative access decision** —
+  visibility/routing only, same posture as `_SCOPE_GATED_TOOLS` — and as
+  **non-exhaustive**: it mirrors `params.arguments.connection` alone, so it
+  says nothing about a `JoinSpec`'s own optional `connection` field for a
+  same-instance cross-database join (no header exists for that field at all),
+  which is bounded by `join_group` policy instead, not by anything a gateway
+  can see on the wire; and three tools (`list_connections`,
+  `list_query_templates`, `run_query_template`) take no `connection` argument
+  at all, so no header is ever emitted for them.
+
+  **A same-day `auditors` pass caught, and this item's own fix closed, a real
+  gap**: the annotation makes `connection` a spec-defined mirrored header for
+  the first time, and the `2026-07-28` spec's "Server Validation" MUST-reject
+  rule is written generically for *any* such header — not scoped to
+  `Mcp-Method`/`Mcp-Name`, the two item 127 originally implemented it for.
+  Shipping the annotation without extending that check would have told
+  clients (and any gateway trusting them) to rely on `Mcp-Param-Connection`
+  while QueryGate silently accepted a body whose actual `connection` argument
+  disagreed — the exact confused-deputy shape item 127 exists to prevent, now
+  reopened for the one header item 130 itself introduces. Fixed in the same
+  commit: `mcp/transport_guard.py`'s `_header_body_mismatch` (item 127's
+  guard) now also validates `Mcp-Param-Connection` against
+  `params.arguments.connection`, validate-if-present like the other two
+  headers, with its own regression tests in
+  `tests/security/test_malformed_input_fuzzing.py`. This ships independently
+  of item 128 (the `2026-07-28` transport/SDK migration): both the annotation
+  and the header check are inert/dormant under the protocol revision
+  QueryGate's own server currently negotiates, forward-compatible with that
+  migration rather than blocked on it.
+
+
+- **2026-08-06 — column masks, mandatory row filters, and the table/column
+  deny-list now consult a cross-connection join's table's OWN connection's
+  `Policy` too, not just the primary connection's (TODO.md item 156).**
+  Surfaced by the `security-invariant-reviewer` audit of item 155: that item
+  fixed the catalog sensitivity-label *approval trigger* to resolve a joined
+  table against its own connection's catalog, but `validation/
+  policy_validation.py`'s `validate_policy` and `compiler/
+  sqlalchemy_compiler.py`'s `compile_structured_query` still applied a single
+  `Policy` — the primary connection's — to every table in the query,
+  including one reached through a cross-connection join (`JoinSpec.connection`,
+  gated by policy's `join_group` rule). So a column masked under connection
+  B's own `Policy` was NOT masked when read via a query whose primary
+  connection was A joined to B, unless A's `Policy` happened to declare the
+  identical mask for B's table — the same gap for a mandatory row filter or a
+  deny-list entry.
+
+  **Fix: a reflection-free sibling of item 155's per-scope connection map,
+  threaded through both enforcement paths, unioned rather than replaced.**
+  `validation/schema_validation.py` gained `resolve_scope_connections` — the
+  same per-scope walk `validate_schema` performs, computing
+  `resolve_query_table_connections` per scope, but touching no database at
+  all (only the in-memory connection registry/policy store). This matters
+  because `policy_validation.py`'s own module docstring requires it to run
+  BEFORE schema validation ever reflects anything, so the per-table
+  connection map policy validation needs has to be computable before schema
+  validation runs, not reused from its output — `execution/service.py`'s
+  `_validate_and_compile` now computes this map first and passes it into
+  `validate_policy`, preserving that ordering, then separately reuses
+  `validate_schema`'s own (already-computed, for item 155) map when calling
+  the compiler. A second new shared primitive, `resolve_table_policies`,
+  returns `[policy]` alone when a table resolves to the primary connection
+  (byte-identical to the pre-156 shape) or `[policy, other_policy]` — the
+  PRIMARY connection first, the table's own connection second — when they
+  differ; NEVER a strict replacement of one for the other, applying item
+  155's own follow-up lesson directly rather than re-learning it. `validate_
+  policy`'s table/column allow-deny and masked-column-position checks, and
+  the compiler's mask/mandatory-row-filter application (including every
+  set-operation arm independently, since an arm — unlike a cte body or a
+  nested subquery — is allowed to cross-connection join on its own), compose
+  these candidates with the right direction for each rule — and the three
+  rules do NOT all compose the same way: `all()` across candidates for an
+  allow check (denied under either policy denies the query); a first-match
+  walk, PRIMARY-first, for a mask (governed under either applies, but when
+  BOTH connections mask the same column differently the primary's own mask
+  wins — a `security-invariant-reviewer` pass on this same item, 2026-08-06,
+  caught that an earlier version ordered the joined connection first, which
+  is a real weakening: the joined connection's mask would win even when it
+  is objectively less protective than the primary's own, which is worse than
+  the pre-156 default of only ever consulting the primary); and every
+  matching filter on every candidate, applied as a UNION (not a pick-one),
+  for a mandatory row filter — a joined-only filter and a primary-only
+  filter on different tables both apply simultaneously, and if both
+  connections happen to filter the SAME table they both apply as an AND, not
+  a choice between them. `_validate_cte_constraints`/`_validate_subquery_
+  constraints`'s own separate masked-projection checks were deliberately
+  left untouched — a cte body or nested subquery is structurally forced to
+  stay single-connection (`_reject_cross_connection_nesting`), so their
+  table's resolved connection can never actually differ from the primary.
+
+  **Mutation-verified.** Flipping the allow-check helpers from `all()` to
+  `any()` fails exactly the "enforced from X connection" tests (the
+  permissive direction lets a denied table/column through). Changing
+  `resolve_table_policies` to `[other_policy]` — a strict replacement, the
+  exact mistake item 155 itself had to correct — fails exactly the "still
+  enforced from the primary connection" tests, at both the policy-validation
+  and compiler layers. Collapsing the mask lookup to only check the first
+  candidate passed every test that existed at the time — a real gap this
+  item's own mutation pass caught and closed with a new test
+  (`test_cross_connection_join_masked_column_position_rule_still_enforced_
+  from_primary_connection`) before landing, exactly the self-review
+  discipline the working agreement asks for. Breaking the compiler's
+  per-table connection lookup, and dropping the early map from `_validate_
+  and_compile`'s call to `validate_policy`, each fail their respective
+  targeted tests too.
+
+  **Second pass, same day: a full four-reviewer `auditors` run surfaced four
+  confirmed defects, each fixed before this item shipped.** (1) The mask
+  ordering above was corrected same-day from an initial joined-first
+  ordering — see the paragraph above, already updated to describe the fixed
+  (primary-first) behavior; the joined-first version was a real regression
+  in the one untested case where both connections mask the same column
+  differently. (2) `admin/service.py`'s `simulate_candidate_policy` (the
+  `/admin/config/simulate` policy-preview endpoint) still called
+  `validate_policy` without the new map — a NEW divergence this item itself
+  created (production became correct, the simulator did not), fixed by
+  threading the same map through with the simulator's own isolated candidate
+  resolver, plus extending its mandatory-filter readiness report to walk a
+  joined connection's own filters too. (3) `_validate_correlation`'s own
+  item-156 change shipped with no direct test coverage; added (a correlated
+  reference into a cross-connection-joined outer table, mutation-verified).
+  (4) A weak assertion in one regression-pin test was tightened. Full
+  write-up with mutation-verification detail for all four:
+  `docs/TODO_ARCHIVE.md` (item 156). Full unit (2225) and security (472)
+  suites green after this pass.
+
+  **Known residual, not closed by this item:** the two cte/subquery masked-
+  projection checks noted above stay primary-policy-only; if the structural
+  single-connection restriction on those containers is ever relaxed, they
+  would need the same treatment this item gave `_validate_scope`. Two
+  smaller follow-ups filed as their own TODO.md items rather than fixed
+  under this item's own time-boxed audit-response pass: item 159 (a
+  pre-existing, unrelated case-sensitivity bug in schema reflection's
+  connection lookup, found by the same audit pass) and item 160 (four lower-
+  severity connection-resolution edge cases in this item's own design — an
+  audit/compile Policy-snapshot race under a concurrent reload, a cap-
+  ordering inversion, a fail-open-by-default parameter shape, and a purpose/
+  k-anonymity/limit scope clarification).
+
+- **2026-08-06 — Snowflake ships as a rendering-level-only phase 1 (TODO.md
+  item 19 phase 2); `connections/engine.py` refuses to actually open a
+  Snowflake connection.** `DatabaseDialect` gained a `snowflake` member with a
+  real `SnowflakeDialectAdapter` (`compiler/dialect_adapters.py`) and
+  `SnowflakeSessionAdapter` (`connections/dialects.py`), covering the same
+  primitive surface the other three dialects do — date bucketing/EXTRACT
+  (`DATE_TRUNC`, with `week` computed explicitly via `DAYOFWEEKISO` rather
+  than trusting the `WEEK_START`-session-dependent `DATE_TRUNC('week', ...)`),
+  native `NULLS FIRST/LAST` (unlike MSSQL/MySQL, Snowflake has it), sample-
+  statistic `STDDEV`/`VARIANCE` (matching Postgres, unlike MySQL's population-
+  default bare names), `LISTAGG`, a genuine `ARRAY_AGG` (real native ARRAY
+  type), `PERCENTILE_CONT ... WITHIN GROUP` as a plain aggregate (Snowflake's
+  `OVER(...)` is optional, unlike MSSQL's analytic-only restriction), full
+  ROWS/RANGE window frames, and distinct-only `INTERSECT`/`EXCEPT` (rejected
+  with `ALL`, the MSSQL/MySQL posture). Upsert is rejected, not emulated:
+  Snowflake's idiom is `MERGE`, a multi-clause statement with no single-
+  target-constraint model the way `conflict_columns`/`update_columns`
+  express one — synthesizing a `MERGE` from those two fields would be the
+  engine inventing statement structure the AST never asked for, the same
+  reject-don't-emulate posture as MySQL's `ON DUPLICATE KEY UPDATE` gap.
+
+  **The deliberate exception to "add a dialect, register it, done": engine
+  wiring stops short of a live connection.** `snowflake-sqlalchemy`'s DBAPI
+  has no async SQLAlchemy engine support (confirmed directly:
+  `create_async_engine("snowflake://...")` raises `sqlalchemy.exc.
+  InvalidRequestError: The asyncio extension requires an async driver to be
+  used. The loaded 'snowflake' is not async.`), and this codebase's entire
+  session/execution pipeline is built on `AsyncSession`/`AsyncEngine`
+  throughout (`execution/service.py`, `schema/reflection.py`,
+  `execution/cost_estimation.py`, ...) — there is no small patch for that.
+  Rather than let a Snowflake `ConnectionProfile` reach `create_async_engine`
+  and fail with a confusing library-internal error, `connections/engine.py`'s
+  `init_engine` checks for `DatabaseDialect.SNOWFLAKE` first and raises a
+  clear, explained `ValueError` naming the gap. This also means none of
+  `SnowflakeSessionAdapter`'s session-guardrail/cancel methods are reachable
+  in production yet — they're implemented for real, against Snowflake's
+  public SQL reference (`ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS`/
+  `LOCK_TIMEOUT`, `SYSTEM$CANCEL_ALL_QUERIES`), so the shape is reviewed and
+  ready, not invented later, but unverified against a live session.
+
+  **Nothing here is live-verified, unlike MySQL's item-19-phase-1 precedent.**
+  There is no Snowflake instance available in this project's environment (a
+  proprietary cloud service, unlike Postgres/MySQL/MSSQL, which run in
+  Docker) and no real account credentials — every Snowflake claim in this
+  change is backed by Snowflake's public SQL documentation, and the two
+  adapters are tested two different ways (2026-08-06 `claim-reviewer`
+  finding — an earlier draft of this entry described both as tested "against
+  a real, installed `snowflake.sqlalchemy` dialect object," which is true
+  only for one of them): `SnowflakeDialectAdapter`'s output is compiled
+  against that real, installed dialect object
+  (`tests/unit/test_dialect_adapters.py`'s `TestSnowflake*` classes);
+  `SnowflakeSessionAdapter` is tested against recording fakes that assert
+  the exact SQL text/params it builds (`tests/unit/test_dialects.py`'s
+  Snowflake session-adapter section), not compiled through any dialect
+  object, since its statements are built directly with `sa.text(...)`
+  rather than as SQLAlchemy Core expressions. Neither path is ever run
+  against a live server. Treat every Snowflake behavior claim in this
+  codebase as "renders/compiles as documented", not "confirmed correct
+  against a real account", until the live-verification follow-up item
+  ships. BigQuery shipped the same way one day later — see the 2026-08-07
+  Decision Log entry above.
+
+- **2026-08-06 — the catalog sensitivity-label approval trigger consults both
+  a joined table's own connection AND the query's top-level connection, not
+  either one exclusively (TODO.md item 155).** Surfaced by the
+  `security-invariant-reviewer` audit of item 151: `execution/approval.py`'s
+  `sensitivity_approval_reasons` looked up every column's table via
+  `store.get_table(connection_id, physical)` using a single top-level
+  `connection_id`, even for a table reached through a cross-connection join
+  (`JoinSpec.connection`, gated by policy's `join_group` rule). A query
+  joining connection `analytics`'s `orders` to connection `crm`'s `customers`,
+  where `customers.email` is labelled `pii` only in `crm`'s catalog, never
+  tripped the gate: the lookup searched `analytics`'s catalog for a
+  `customers` entry, found none, and silently treated the joined column as
+  unlabelled. Pre-existing and separate in scope from item 151 (which stops an
+  already-minted token from being redeemed against the wrong connection; this
+  stops the trigger itself from ever asking for one).
+
+  **Fix, shipped in two passes on the same day.** The first pass threaded
+  `validation/schema_validation.py`'s `resolve_query_table_connections` output
+  — the same per-scope table-to-connection map schema validation already
+  computes to decide which connection's schema to reflect a joined table
+  against — out of `validate_schema` (a new optional `scope_connections`
+  keyword, populated the same way the existing `scope_tables` out-param is)
+  and into `sensitivity_approval_reasons` (a new optional parameter, keyed by
+  `id(scope)`, each scope's map case-folded onto its effective table names),
+  and simply **replaced** the top-level `connection_id` lookup with the
+  table's resolved connection. A same-day `security-invariant-reviewer` pass
+  caught that this replacement reopens a mirror-image gap: connection catalogs
+  are curated independently (item 32's per-connection scoping —
+  `import_connection` exists specifically because labels do not propagate
+  automatically), so an operator may have labelled a table sensitive under
+  only the connection they curated *first*; once a query reaches that same
+  physical table through a *different*, cross-joined connection, a strict
+  replacement stops finding the label the same way the original bug did, just
+  on the other side. The lookup now consults **both** connections when they
+  differ and triggers on either hit — over-triggering on an unrelated
+  same-named table in the other catalog is the direction this module's own
+  fail-closed posture ("denies rather than admits on any ambiguity") already
+  commits to; under-triggering on a genuinely sensitive column is not.
+  Single-connection queries are unaffected either way: the outer FROM table is
+  always present in a real map (seeded with its own connection by
+  `resolve_query_table_connections`), a cte reference never reaches this
+  lookup at all (skipped earlier by the `cte_names` check), and a call site
+  with no map (every pre-155 caller) collapses the two candidate connections
+  into one.
+
+  **Mutation-verified, both passes.** Reverting the `approval.py` lookup to
+  ignore the map entirely, and separately reverting `schema_validation.py`'s
+  main-loop map population to an empty dict, each independently fail exactly
+  the same four map-consuming tests (`test_cross_connection_join_trips_
+  sensitivity_gate_when_scope_connections_threaded`, `test_cross_connection_
+  join_trips_the_gate_through_an_aliased_mixed_case_ref`, `test_enforce_
+  approval_gate_uses_the_real_cross_connection_map`, `test_execute_trips_the_
+  gate_for_a_cross_connection_join_end_to_end`) — the aliased/end-to-end tests
+  were added after an initial (narrower) mutation pass undercounted this, so
+  the count here is the one that was actually re-verified, not assumed.
+  Reverting the union check back to a strict replacement fails exactly
+  `test_cross_connection_join_still_trips_when_the_label_lives_only_on_the_
+  primary_side` (the one test built specifically to require both connections
+  be consulted). Swapping the lookup key from the alias/table token to the
+  physical name, and separately dropping either `.casefold()` call at the
+  `scope_connections` population sites, each fail exactly `test_cross_
+  connection_join_trips_the_gate_through_an_aliased_mixed_case_ref` — every
+  other cross-connection test uses an unaliased, all-lowercase table name, so
+  only that one test can tell the two conventions apart.
+
+  **Third pass, same day: the reason string names which connection actually
+  matched.** An `architecture-boundary-reviewer` pass on the union-check fix
+  above pointed out that "references pii-labelled column customers.email"
+  reads as if it describes the physical table the query actually reads, even
+  when the union check found the label on the OTHER candidate — an approver
+  reading the reason (or an auditor reading the persisted `approval.required`/
+  `approval.granted` log line) could reasonably draw the wrong conclusion
+  about which database the sensitive data lives in. The reason string now
+  appends `(connection '<id>')` naming the connection whose catalog entry
+  actually produced the hit, but only when there were genuinely two different
+  candidates to choose between — a single-connection query's reason text is
+  byte-identical to before, so no pre-155 caller's reason-string handling
+  changes. Mutation-verified: dropping the suffix unconditionally fails
+  exactly `test_cross_connection_join_still_trips_when_the_label_lives_only_
+  on_the_primary_side`'s added assertion, and no other test.
+
+  **Known residual, not closed by this item:** the map lookup is keyed by
+  `id(scope)` on the assumption that the exact same `StructuredQuery` object
+  flows unmutated from `_validate_and_compile` (where `scope_connections` is
+  built) to `_enforce_approval_gate` (where it's consumed) within one
+  `execute()` call — true today, verified by reading the call chain — but a
+  future change that re-parses or deep-copies the AST between those two points
+  would make every lookup miss silently, collapsing back to the pre-155
+  single-connection-only behavior rather than raising. Low severity (no
+  current call site does this) and left unfixed for now rather than adding a
+  speculative guard against a change that hasn't happened; worth revisiting if
+  `execute()`'s internal shape changes.
+
+- **2026-08-06 — the approval gate's token binds to connection + principal via
+  additive claims, not by folding either into the fingerprint hash; MCP's own
+  `RequestStateSecurity(bind_principal=...)` is deliberately not wired
+  (TODO.md item 151).** Surfaced by the `security-invariant-reviewer` audit of
+  items 19/128: `execution/approval.py`'s `query_fingerprint`/`write_fingerprint`
+  hash the AST alone, so a token approved for query `Q` on connection `staging`
+  verified unchanged for the byte-identical `Q` on `prod` — realistic, since
+  `prod` normally carries the catalog `sensitivity: pii` labels or row volumes
+  that actually trip the gate, while `staging` never does. Separately, neither
+  the REST token nor the MCP MRTR pending state (`mcp/elicitation.py`) was
+  bound to a principal at all, so a `request_state` handed from one agent
+  session to another was honored for the second principal's identical retry.
+  Four decisions:
+
+  **(1) `issue_approval_token`/`verify_approval_token` (`execution/approval.py`)
+  gained two new claims, `"cx"` (connection id) and `"sub_bind"` (bound
+  principal subject) — required keyword arguments (no default; pass `None`
+  explicitly to opt out), additive alongside the existing `fp`/`sub`/`exp` —
+  not absorbed into the fingerprint hash.** This keeps every already-issued
+  token's shape and any doc describing "the fingerprint is a hash of the AST"
+  stable; the fingerprint computation itself is untouched. Verification only
+  enforces a claim the token actually carries: a token minted with `cx`/
+  `sub_bind` is rejected unless the caller supplies a matching value (including
+  when the caller omits it), fail-closed the same way a fingerprint mismatch
+  is; a token minted without them (the pre-item-151 shape, still exercised by
+  low-level fingerprint-only tests, both explicitly passed as `None`) verifies
+  exactly as before. `"sub_bind"` binds to `Principal.subject` — the calling
+  principal's own identity, not a session id and not an agent-delegation
+  `actor`; two delegated sessions acting for the same human subject are not
+  distinguished, a deliberate, narrower scope than session-binding. `"sub_bind"`
+  is a field distinct from the pre-existing `"sub"` claim (the *approver's*
+  subject, recorded for audit only, unchanged) — reusing `"sub"` for
+  enforcement would have collided with MCP's real-grant minting, which already
+  writes an audit-distinctive `f"mcp-elicitation:{caller.subject}"` into
+  `"sub"` and would break an equality check against the raw subject. The
+  parameters were made required (not optional-with-`None`-default) after a
+  same-day `security-invariant-reviewer` follow-up pass on this same item
+  pointed out that an optional default is exactly the shape a *future* call
+  site could silently omit, reopening the unbound-token gap this item exists
+  to close — a `TypeError` on omission forces a deliberate choice instead.
+
+  **(2) The connection binding is always the query/write's own top-level
+  `connection_id`, never a cross-connection join's own `connection`
+  (`JoinSpec.connection`)** — item 130 (not yet implemented on this branch)
+  proposes a `Mcp-Param-Connection` gateway header that would need the same
+  scoping for its own reasons; this decision reaches that conclusion
+  independently, on its own merits, rather than by citing item 130 as
+  precedent. `StructuredQueryService`/
+  `WriteExecutionService` already carry `self._connection_id` as the top-level
+  connection, so no new parameter threading was needed at that layer; `_enforce_approval_gate`/
+  `_enforce_write_approval_gate` just pass it (and `self._principal_subject`)
+  into `verify_approval_token`. REST's `approve_query`/`approve_write`
+  (`api/routes.py`) mint with `connection_id=<path param>`,
+  `principal_subject=<the approver's own subject>` — meaning, after this
+  change, **the same principal that calls `POST /{connection}/query/approve`
+  must be the one that redeems the resulting token** via
+  `POST /{connection}/query`; a token handed to a different principal to
+  redeem is now rejected. This is a deliberate tightening of the REST
+  out-of-band flow: `/query/approve` has no way to know "the original
+  requester's" identity (only the query AST and the approver's own
+  credentials), so the only principal a REST-issued token can be soundly
+  bound to is the one that actually reviewed and approved it — the approver.
+  MCP's flow binds to a different, well-defined identity instead: the
+  *original calling* principal whose tool call tripped the pending
+  elicitation (`build_pending_input_required`'s new `caller`/`connection_id`
+  params), verified again when `resolve_approval_tokens_from_retry` resolves
+  the retry and mints the real grant — both ends of one MRTR round trip
+  necessarily share that same principal, so this closes the session-handoff
+  gap without changing legitimate usage.
+
+  **(3) MCP's own `RequestStateSecurity(bind_principal=...)`
+  (`mcp/server/request_state.py`, shipped in the v2 SDK) is deliberately NOT
+  wired into `mcp/server.py`'s `MCPServer` construction.** It reads
+  `mcp.server.auth.middleware.auth_context.get_access_token()` — the SDK's own
+  auth layer — but QueryGate authenticates independently in its own
+  `MCPAuthMiddleware` on top of `core/auth.py` and never populates that
+  context, so wiring the SDK mechanism would be dead code that appears to
+  enforce something it structurally cannot see. The claim-based check in (1)/(2),
+  sitting below the transport layer where QueryGate's own `Principal` is
+  actually available, is the correct enforcement point instead.
+
+  **(4) A same-day mandatory review found the shipped `cx`/`sub_bind` binding
+  closed the *connection/principal* replay but left two adjacent gaps in the
+  same token format — both closed with two more claims, additive again, not
+  a further redesign.** A pending MRTR elicitation token
+  (`build_pending_input_required`) carries a genuine `fp`/`cx`/`sub_bind` —
+  it is only ever an integrity-protected "this was asked about" marker, but
+  nothing stopped it being presented directly as a real grant. Fixed with a
+  `"k"` claim (`kind="grant"` default; the elicitation pending-mint site is
+  the only caller that passes `"pending"`; `verify_approval_token`'s
+  `expected_kind` parameter, default `"grant"`, is checked unconditionally —
+  not opt-in like `cx`/`sub_bind` — since a *missing* kind claim must fail
+  the same as a wrong one). Separately, an unconditional `"v"` (format
+  version) claim closes a rolling-deploy race: a token minted by a pod
+  running a pre-item-151 build (predating `cx`/`sub_bind`/`k`/`v` entirely)
+  must not be honored by a newer pod as "carries no binding claims, therefore
+  unbound and permissive" — `"v"` is checked first and rejects outright.
+
+- **2026-08-06 — the StructuredQuery AST is published as a namespaced MCP
+  extension declaring a contract, never a method, and the namespace is
+  `io.github.agitmit/structured-query-ast` rather than a not-yet-owned domain
+  (TODO.md item 131, internal half).** The `2026-07-28` protocol revision's
+  SEP-2133 extensions framework gives strategic play P2 ("open the contract",
+  `docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) a standards-blessed
+  vehicle: the read `StructuredQuery` AST and the write
+  `Insert`/`Update`/`Delete`/`Upsert` union can be declared as a named,
+  versioned artifact instead of just a product-specific JSON schema no one
+  outside QueryGate can cite. Four decisions:
+
+  **(1) Namespace: `io.github.agitmit/structured-query-ast`, not a branded
+  domain.** SEP-2133 requires a reverse-DNS-shaped prefix
+  (`mcp.shared.extension.validate_extension_identifier`); QueryGate does not
+  own a registered domain, and inventing one to *look* standards-grade would
+  misrepresent what's actually been reserved. `io.github.<owner>` mirrors the
+  real, verifiable location of this project (github.com/AGitmit/QueryGate) —
+  citable today, not aspirational.
+
+  **(2) The extension declares a contract, never a JSON-RPC method or a
+  `tools/call` interceptor — the identical rejection class as the GraphQL
+  decision below and as the permanent absence of `execute_sql`.** The
+  precedent this item's own scan cites, `io.modelcontextprotocol/tasks`,
+  *does* define request methods (`tasks/get`, etc.) — which makes it exactly
+  the wrong shape to imitate here: a namespaced method, or an interceptor
+  that answers a `tools/call` without reaching the real handler, would each
+  be a second query-execution path beside `tools/call` and the single
+  `StructuredQueryService` pipeline. `mcp/extensions.py`'s
+  `StructuredQueryAstExtension` overrides only `Extension.settings()` —
+  never `methods()`, `tools()`, `resources()`, or `intercept_tool_call()`
+  (the SDK's fourth contribution point) — so there is structurally nothing
+  for `MCPServer._apply_extension`/`_install_extension_interceptor` to
+  register or wrap beyond the settings dict.
+  `tests/unit/test_mcp_extensions.py::test_no_jsonrpc_method_registered_under_the_extension_namespace`
+  and `::test_extension_does_not_intercept_tool_calls` enforce this against a
+  real server's registered request handlers and installed extensions, not
+  just the module docstring's say-so — the latter was added after a
+  security review flagged that the first three tests covered three of the
+  SDK's four contribution points but not the interceptor, the one kind that
+  actually touches execution.
+
+  **(3) The published schema is generated from the live Pydantic AST models,
+  never hand-written — with the drift-guard test running the generator in a
+  fresh subprocess, not in-process.** `clients/typescript/src/types.ts` is
+  already a hand-mirrored second copy of the AST carrying known drift; a
+  hand-authored spec would be a third, and drift in a *published* standard is
+  a compatibility break, not just a local bug. `generate_structured_query_ast_schema()`
+  (`mcp/extensions.py`) calls `model_json_schema()`/`TypeAdapter(...).json_schema()`
+  directly on `query_ast.models.StructuredQuery` and the write union. Building
+  it surfaced a pydantic non-determinism worth recording, though not
+  independently root-caused against an upstream pydantic issue: `StructuredQuery`'s
+  recursive AST cycle (`CteSpec.query`, `SetOpSpec.arms`, `Predicate.value_subquery`,
+  ... all forward-referencing `StructuredQuery` itself — items 97/99/100/103/104/105)
+  has *multiple* fields that resolve to the same `$ref` target, and repeated
+  full-suite runs (2,100+ tests, many constructing their own
+  schemas/`TypeAdapter`s over the same model graph) during development showed
+  pydantic's JSON-schema generator occasionally misattaching a `$ref`'s
+  sibling `description` between two such occurrences — never reproduced in an
+  isolated interpreter across the same number of repeated runs. Rather than
+  chase that internal further, the fix matches how the schema is actually
+  produced in practice: `scripts/generate_mcp_extension_schema.py` always
+  runs as a standalone process (`make mcp-extension-schema`), so the
+  conformance test's drift guard now generates in a fresh subprocess too
+  (`test_mcp_extensions.py::_generate_schema_in_fresh_interpreter`), matching
+  that real invocation instead of trusting a shared process's ambient
+  pydantic schema-cache state. `generate_structured_query_ast_schema()`
+  itself force-rebuilds nothing — that would have made a general-purpose
+  library function mutate live, process-global pydantic state on every call,
+  a hazard flagged by the same security review, one feature (e.g. serving
+  the schema from a route) away from racing real request validation.
+  `query_ast/models.py`'s own recursive-cycle rebuild block was extracted
+  into a reusable, named `rebuild_recursive_ast_cycle()` function (previously
+  inline statements) precisely so the one place a *forced* rebuild is
+  actually needed — decision (4) below — doesn't have to hand-duplicate the
+  cycle's member list.
+
+  **(4) Tool registration also force-rebuilds the same recursive cycle, and
+  this one runs in the real server process, deliberately.** MCP tool schemas
+  (`run_structured_queries`'s `List[StructuredQuery]` argument,
+  `run_structured_writes`'s write-AST union) are built from the identical
+  model graph, by `Tool.from_function` at registration time inside
+  `discover_and_register_tools()` — and `create_app()`/`create_mcp_server()`
+  "legitimately runs more than once in the same process" (every test in this
+  suite; any production hot-reload/multi-instantiation path — see
+  `mcp/server.py`'s own `_install_scoped_tool_listing` docstring), which is
+  exactly the shared-process condition that produces the symptom in (3). Left
+  unguarded, the real `tools/list` schema served to MCP clients could
+  silently lose a description the same way. `discover_and_register_tools()`
+  (`mcp/tools/__init__.py`) now calls `rebuild_recursive_ast_cycle(force=True)`
+  once, before importing any tool module — at registration time only, never
+  per query — closing that gap without reintroducing the process-global
+  hazard decision (3) deliberately avoided in the schema generator itself.
+
+  **Explicitly not done, gated on the maintainer:** actually publishing this
+  as an adopted external standard — registering the namespace with any
+  outside body, announcing it, or committing to cross-version compatibility
+  for third parties. See `docs/mcp_extensions/structured_query_ast.md`'s
+  "Publication status" section and TODO.md item 131.
+
+- **2026-08-06 — proactive lease-driven credential re-resolution composes a
+  new optional protocol rather than widening `SecretResolver`, and a
+  same-day post-ship security review found one HIGH-severity gap before it
+  shipped (TODO.md item 135).** Item 13 already made a rotated
+  `${vault:...}` value take effect on the next `reload_config()` without a
+  restart; the residual gap was that the refresh was operator-pull only, so
+  a short-TTL dynamic credential could expire into failures between reloads
+  with nobody scheduling a reload. Three decisions:
+
+  **(1) `LeasedSecretResolver` (`secrets/resolvers.py`) is a separate,
+  `@runtime_checkable` Protocol with one method
+  (`lease_expiry(reference) -> Optional[datetime]`), probed via
+  `isinstance` — not an addition to `SecretResolver` itself.**
+  `SecretResolver`'s module docstring is explicit that its one-method shape
+  is deliberate; adding lease/TTL methods there would force every backend
+  (starting with `EnvSecretResolver`, which is genuinely leaseless — it
+  re-reads the environment on every `resolve()` instead) to answer a
+  question that doesn't apply to it. `CredentialLeaseMonitor`
+  (`config_reload.py`) composes the capability instead, mirroring
+  `core/auth.py`'s `CompositeAuthenticator` precedent for this repo's
+  "Protocol + one class per variant + registry, composition over widening"
+  rule. `lease_expiry` deliberately returns no value at all (an earlier
+  draft, `resolve_with_lease(reference) -> (value, expires_at)`, did) — for
+  a backend where "reading is issuing" (a Vault *dynamic* secrets engine,
+  this feature's actual motivation), fetching the value on every poll just
+  to check its expiry would mint and immediately orphan a fresh privileged
+  credential, a real design flaw the same review caught before shipping.
+
+  **(2) `VaultSecretResolver.lease_expiry` reports Vault's own
+  `lease_duration` response field verbatim (capped at a sane bound), never a
+  synthesized TTL.** An earlier draft of item 135 considered forcing every
+  Vault reference to report *some* expiry; that would have been exactly the
+  kind of invented structure this repo's engine-philosophy doctrine already
+  rejects for dialect adapters (see the MSSQL `nulls` precedent above),
+  applied here to secrets instead of SQL. The shipped Vault integration
+  reads KV v2 (static secrets) only, whose `lease_duration` is genuinely
+  `0` — so `lease_expiry` reports `None` for those today, and the monitor
+  correctly never fires for them. The trigger machinery is real and tested;
+  it activates automatically, with no further change, the moment a
+  registered resolver reads a path that actually carries a lease (a
+  dynamic-secrets-engine resolver was explicitly out of this item's scope).
+
+  **(3) The monitor resolves its source files through the same
+  governance-aware precedence `admin/service.py`'s `apply()` already uses,
+  not the plain `AppConfig` paths — found by the mandatory post-ship
+  `security-invariant-reviewer` audit, not self-review.** Config governance
+  (`admin/service.py`'s `apply()`/rollback) makes a staged, four-eyes-approved
+  version's own on-disk files the live truth and never writes that content
+  back to `cfg.connections_file` et al. The first cut of `CredentialLeaseMonitor`
+  always reloaded from the plain `cfg.*` paths — correct for the
+  operator-triggered `/admin/reload-config` endpoint, which behaves the same
+  way, but wrong for an *unattended* trigger: the moment a lease came due in
+  any deployment using config governance, it would have silently reverted
+  the live registry/policy back to stale disk content, discarding an
+  approved policy tightening with zero audit trail. Fixed before shipping by
+  preferring the active governed version's files
+  (`ConfigVersionStore.file_paths`) when one exists, and by recording an
+  `audit_config_change(action="lease_refresh", ...)` event on every
+  automatic trigger so it's attributable like any other config change.
+
+  The same review also found (and this item fixed pre-ship): unbounded
+  synchronous Vault I/O on the event loop (now `asyncio.to_thread` plus an
+  explicit 10s client timeout), no hysteresis (a lease shorter than the
+  refresh margin — the normal case for a real dynamic credential — would
+  have retriggered on every single poll forever), a resolver registry
+  pinned for the monitor's whole lifetime (a rotated `VAULT_TOKEN` would
+  never be picked up), and scanning the whole raw connections file instead
+  of just the `connection_string` field a reload actually resolves.
+  Mutation-verified: every one of these guards, plus the `isinstance` probe
+  and the monitor's per-iteration catch-all, was broken in turn and made a
+  specific test fail for that reason before being reverted. The
+  `isinstance` guard mutation initially passed silently (a surrounding
+  broad `except Exception` swallowed the resulting `AttributeError`) — a
+  genuine gap this process caught, closed by narrowing that except to
+  `ValueError` (matching `lease_expiry`'s documented contract).
+
+- **2026-08-06 — item 128 conformed the MCP surface to the final
+  `2026-07-28` protocol revision**, upgrading `mcp` 1.28.1 → 2.0.0 (the
+  Python SDK's own major rework for this revision). Scoped by reading the
+  installed v2 source directly, not the migration guide's prose alone —
+  several load-bearing details (below) only became clear that way, and each
+  was verified against the real SDK before being relied on.
+
+  **The security-critical boundary was already insulated.** `mcp/auth.py`
+  (RFC 8707 audience binding, RFC 6750 challenges) and
+  `mcp/oauth_metadata.py` (RFC 9728 metadata) import nothing from the `mcp`
+  package at all — QueryGate's MCP surface is a resource server only, and
+  those two files are pure Starlette/FastAPI built on `core.auth`. Same for
+  `mcp/transport_guard.py` (item 127's header-mismatch guard) and
+  `mcp/exceptions.py` (`safe_mcp_tool`). The actual code-change footprint
+  was three files: `mcp/server.py`, `mcp/tools/query.py`, `mcp/tools/write.py`,
+  plus a full rewrite of `mcp/elicitation.py` (below).
+
+  **`FastMCP` → `MCPServer`.** Transport settings (`streamable_http_path`,
+  `stateless_http`, `transport_security`) moved from the constructor to
+  `streamable_http_app()`. The v1 tool-listing filter
+  (`server._mcp_server.list_tools()(scoped_list_tools)`, a decorator-based
+  registration on the private low-level `Server`) no longer has an
+  equivalent — `_mcp_server` is gone. Verified directly (a throwaway script
+  against the real installed SDK, not assumed from the migration guide):
+  `MCPServer.list_tools` is a plain overridable `async def` method, and a
+  bare instance-attribute assignment (`server.list_tools = scoped_list_tools`)
+  is observed by the dispatcher's own `_handle_list_tools` too, so that's
+  the direct v2-idiomatic replacement — no decorator needed.
+
+  **The approval/elicitation port (items 92/93) was the one genuinely novel
+  design piece**, because `Context.elicit()` (the v1 blocking mid-call
+  round-trip) no longer exists in a form usable under the new Multi
+  Round-Trip Requests (MRTR) model — a server may no longer send a
+  JSON-RPC request mid-call at all. The SDK ships a sophisticated `Resolve`/
+  `Elicit` dependency-injection mechanism that handles MRTR pause/resume
+  automatically, but it fills *tool parameters* from a resolver run
+  *before* the tool body — QueryGate's approval trigger is decided
+  *mid-pipeline* (a cost estimate or sensitivity-label check inside
+  `execute()`), not from the raw arguments, so wiring it through that
+  mechanism would have meant either duplicating pipeline logic or teaching
+  `execution/service.py` about MRTR — both rejected. Verified directly that
+  a plain tool function CAN return `InputRequiredResult` on its own
+  (`mcp/server/mcpserver/tools/base.py` explicitly supports this path,
+  separate from `Resolve`), and that `Context.input_responses`/
+  `Context.request_state` (populated from `CallToolRequestParams` on a
+  retry) are readable from an ordinary `ctx: Context` tool parameter — so
+  the hand-rolled, tool-layer port the item's own write-up anticipated is
+  still the right shape in v2, just needed the exact mechanism confirmed
+  rather than assumed.
+
+  `mcp/elicitation.py`'s new two-phase design reuses
+  `execution/approval.py`'s existing HMAC token signing verbatim (no new
+  crypto): a *pending* token bound to each gated item's fingerprint travels
+  in `request_state`; on retry, the freshly re-derived fingerprint of the
+  *resubmitted* item is compared against it before `input_responses` is
+  even consulted (the mutation-verified enforcement point — confirmed a
+  naive implementation that skips this comparison lets a caller obtain
+  approval for one query and replay the granted state against a different
+  one in the same batch slot). `StructuredQueryService.execute_many`
+  already had a pre-supplied `approval_tokens` map (the REST out-of-band
+  flow's mechanism); `WriteExecutionService.execute_many` did not and
+  gained one, mirroring the read side exactly — both services also gained
+  typed `approval_fingerprint`/`approval_reasons` fields on their batch
+  item results (previously only visible in a free-text `error` string),
+  so the MCP layer can build `InputRequiredResult` without parsing
+  messages, and any other batch caller gets the same structured signal.
+
+  **Item 127's header-mismatch guard needed no code change** — it already
+  validated `Mcp-Method`/`Mcp-Name` "if present, not required" specifically
+  *because* the new headers weren't mandatory before 2026-07-28 shipped;
+  that posture is unchanged now that QueryGate speaks the revision that
+  defines them; only the doc explaining *why* needed updating.
+
+  **Scope, stated honestly:** no dual-path (old-protocol blocking `ctx.elicit()`
+  alongside the new MRTR path) was built — a client that negotiates an
+  older protocol revision loses the in-session elicitation channel and
+  falls back to the existing out-of-band REST token flow, the same
+  fail-closed default already documented for "client can't elicit." Given
+  the whole feature is opt-in and off by default, this was judged a
+  reasonable simplification rather than doubling the approval-flow surface
+  to support a deprecated transport.
+
+- **2026-08-06 — item 134 phase 1 added compliance-grade WORM audit
+  retention**, composing (never replacing) the item-91 local hash-chained
+  ledger with an additional S3 Object Lock archival copy —
+  `AuditSinkBackend.JSONL_CHAINED_S3_WORM`. Four judgment calls the item's
+  own write-up flagged as needing an explicit decision, made and recorded
+  here: **(1) backend** — S3 Object Lock only for phase 1 (the most common
+  self-hosted/cloud pairing), with the `AuditSink` Protocol kept narrow so a
+  future Azure immutable-blob variant is an additive class + registry entry,
+  not a redesign; **(2) fail-open, not fail-closed** — a WORM archival
+  failure never blocks or fails the query that triggered the underlying
+  event (the local chain sink already captured it for tamper-evidence), but
+  the failed batch is re-queued for retry rather than silently dropped, and
+  a dedicated metric (`querygate_audit_worm_flush_failures_total`) exists
+  for an operator to alert on — only a *sustained* outage past the buffer's
+  bound drops the oldest events, visibly; **(3) object granularity is one
+  batch ("segment") per flush, never one object per event** — S3 Object
+  Lock's retain-until timestamp is set per PUT, so per-event objects would
+  each expire at a slightly different moment as they age out, leaving the
+  archive's shape incoherent; segments that were written (and will
+  therefore retire) together keep it coherent instead; **(4) compose, don't
+  replace** — `audit/sinks.py`'s single global `_sink` would have *lost*
+  the local chain's tamper-evidence if WORM simply replaced it, the exact
+  opposite of "buyers ask for both by name" (per the item's own framing);
+  `CompositeAuditSink` (the `CompositeAuthenticator` shape) fans one event
+  out to both, with a failure in one sink never suppressing the other
+  (proven by mutation: a naive un-guarded loop that stops at the first
+  raised exception fails the test suite).
+
+  **Off the request path, by construction, not by convention:** `emit()` —
+  the `AuditSink` Protocol method `audit/logger.py` calls synchronously from
+  inside `async def execute()` — only ever appends to an in-process buffer
+  (`InProcessWormEventBuffer`, mirroring `catalog/usage.py`'s buffered-signal
+  precedent exactly, down to the module-level-singleton enqueue/drain split
+  with zero explicit wiring between the two sides). All real network I/O
+  (the S3 `PUT`, run via `asyncio.to_thread` since boto3 has no native async
+  client) lives in a separate `WormFlushMonitor` background task with its
+  own `start()`/`stop()` lifecycle, wired into `app.py`'s lifespan exactly
+  like `CatalogUsageLearningMonitor`/`CatalogRefreshMonitor` — proven end to
+  end (not just at the unit level) by `test_worm_audit_backend_wires_the_flush_monitor_end_to_end`,
+  which mutation-verified that a `WormFlushMonitor.start()` that's never
+  called fails the test's `is_running` assertion.
+
+  **`configure_audit_sink` converted to a real registry** (`audit/sinks.py`'s
+  `_SINK_FACTORIES`, mirroring `secrets/resolvers.py`'s
+  `build_secret_resolver_registry`), replacing the inline `if backend ==
+  "none"/"jsonl"/"jsonl_chained"` chain the item's own write-up correctly
+  flagged as the exact shape non-negotiable #6 forbids. Landing item 136's
+  capability-lookup pattern first (already shipped) is what made this safe:
+  the new backend just needed one addition each to
+  `AuditSinkBackend.is_locally_readable()` and a new sibling
+  `wraps_events_in_a_hash_chain_envelope()` (replacing the four scattered
+  `== AuditSinkBackend.JSONL_CHAINED` call sites `help_routes.py`/
+  `admin_observability_routes.py`/`admin_ui_routes.py` had), rather than
+  four call sites each needing to learn about a new backend individually —
+  proven by the same exhaustiveness-test pattern item 136 established
+  (`test_audit_sink_backend_envelope_wrapping_is_exhaustively_classified`
+  fails until every enum member is deliberately classified).
+
+  **Redaction safety (non-negotiable #3) holds by construction, not by a
+  second implementation that could drift**: the WORM sink never builds its
+  own event body — it serializes the exact same `PersistableEvent` the local
+  sinks already write, proven byte-identical in
+  `test_flushed_event_body_is_byte_identical_to_the_local_sink`.
+
+  **Scope, stated honestly (as of phase 1):** phase 2 (managed search over
+  the WORM archive) is not built — the archive is retrievable directly from
+  S3 today, not through a QueryGate query surface. Tested against a real,
+  faithful S3 Object Lock emulation (`moto`'s `mock_aws`, confirmed
+  separately to accept the same `ObjectLockMode`/`ObjectLockRetainUntilDate`
+  parameters a real bucket does) rather than a live AWS account, since no
+  real AWS credentials are available in this environment — this is a
+  materially different verification bar than item 19's live MySQL server,
+  and is named here rather than left implicit.
+
+- **2026-08-06 — item 134 phase 2 added managed search over the WORM
+  archive** (`audit/worm_search.py`), closing the gap phase 1 left open
+  above. `GET /api/v1/admin/observability/worm-search` answers the
+  compliance-review question phase 1's archive alone couldn't: "every query
+  against `pii_customers` in the last 18 months" — a window the *local*
+  hash-chained file (`admin/anomaly.py`'s reader and friends) has typically
+  long since rotated out, but the S3 archive still holds. Three judgment
+  calls made and recorded here: **(1) its own scope, not
+  `admin:observability:read`** — `ADMIN_AUDIT_WORM_SEARCH_SCOPE`
+  (`admin:audit:worm-search`) gates it, deliberately not implied by the
+  existing observability-read scope: the WORM archive is the durable,
+  potentially multi-year compliance copy, so a principal that can read
+  today's in-process trend aggregates should not automatically be able to
+  search years of retained history — proven by
+  `test_the_observability_read_scope_alone_is_not_sufficient`
+  (`tests/integration/test_worm_search_api.py`), not just asserted in the
+  scope's own comment; **(2) bounded, not unbounded, by construction** —
+  `start_time`/`end_time` are required on every request (no "search
+  everything" mode) and capped at `AUDIT_WORM_SEARCH_MAX_WINDOW_DAYS`
+  (default 730 days — wide enough for the 18-month scenario the feature
+  exists for, still a real enforced ceiling), and one request's actual S3
+  work is separately bounded by `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
+  `AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS` — a bound hit mid-scan
+  degrades to a truncated, resumable page (an opaque cursor encoding
+  `day`/`key`/`line` plus a fingerprint of the request's own filters, so
+  replaying a cursor against different filters is rejected rather than
+  silently returning a mismatched page) instead of continuing an
+  expensive/slow scan; **(3) exploits the archive's own key structure
+  instead of a full-bucket scan** — `WormFlushMonitor`'s segment keys
+  (`audit/worm_sink.py`'s `_segment_key`) are `<prefix>/YYYY/MM/DD/<ts>.jsonl`,
+  timestamp-first, so the search issues one `ListObjectsV2` per calendar day
+  in the (flush-interval-padded) requested window rather than one unbounded
+  listing over the whole prefix — the padding only widens which day
+  directories get listed, since every individual event is still filtered
+  against the caller's exact window by its own `occurred_at`, so it cannot
+  leak an out-of-window event into a result.
+
+  **Redaction safety holds the same way phase 1's did — by construction, not
+  a second implementation that could drift**: this module never constructs
+  its own event body, it validates each archived line against the identical
+  `extra="forbid"` `PersistableEvent` union (`AuditEvent`/`ConfigChangeEvent`/
+  `CatalogGovernanceEvent`/`ConnectionProbeEvent`) the local sinks already
+  write and `admin_ui_routes.py`'s own local reader already reuses for the
+  identical reason — one union deciding which event shapes exist, never two
+  that could drift (the module's first draft hand-duplicated this union;
+  `architecture-boundary-reviewer`'s 2026-08-06 pass caught it and it was
+  switched to direct reuse the same day). A returned event's TOP-LEVEL shape
+  can never carry more than a local audit-browser read already could; the one
+  field `extra="forbid"` cannot reach — `query_shape`, a plain
+  `Dict[str, Any]` — is separately screened for the same denylisted content
+  nested at any depth. Proven, not just asserted, by
+  `tests/security/test_worm_search_redaction.py`: a legitimate event with a
+  predicate referencing a sensitive value never surfaces that value (only
+  its structural shape does, matching `audit/events.py`'s existing
+  `_predicate_shape` posture); an S3 object tampered to carry a forbidden
+  `sql`/`row_data`/`connection_string` field alongside otherwise-valid fields
+  is rejected outright (counted as `malformed`, zero events returned) rather
+  than the extra field being silently dropped and the rest let through,
+  which would have been a different, still-bad failure mode; and the same
+  forgery nested two levels inside `query_shape` is rejected identically.
+
+  **Deliberately REST-only, not also an MCP tool**: no sibling read on
+  `admin_observability_routes.py` (overview/anomalies/config-changes/
+  history) has an MCP counterpart either, so adding one here would have
+  introduced a new REST/MCP asymmetry among admin observability reads
+  rather than following an existing pattern — left REST-only to stay
+  consistent with the surface as it already exists, not out of an oversight.
+
+  **Hardened by the same-day `security-invariant-reviewer` pass** beyond the
+  redaction/query_shape point above: a per-object size probe (`_MAX_OBJECT_
+  BYTES`, checked via a lightweight HEAD before the body is ever read into
+  memory) guards against a corrupted or adversarially oversized archive
+  object; the per-object line-count cap now TRUNCATES (discloses) rather than
+  silently drops content past it; `_list_day_keys`'s own S3 pagination is
+  bounded by the same deadline and by `MaxKeys`, so neither an unusually
+  large day directory nor a single oversized listing page can escape the
+  request's bounds; `WormSearchBounds` rejects a misconfigured `default_limit`
+  above `max_limit` at construction rather than silently exceeding the
+  documented page-size ceiling; and the route wraps its S3 call in
+  `mask_unexpected()` so a raw backend failure (bucket/endpoint/driver text)
+  can never leak to the client, matching every other REST route's posture.
+  **Recorded, not fixed here (TODO.md item 154):** unlike the local
+  hash-chained sink, WORM segments are written unenveloped, so this reader
+  can confirm a line matches a known redaction-safe SHAPE but not that
+  QueryGate itself wrote it — a principal holding `s3:PutObject` on the
+  archive prefix could plant a fabricated, schema-valid segment this reader
+  would return indistinguishably from a genuine one. Closing that needs
+  enveloping/hash-chaining WORM segments the way the local sink already
+  does — a phase-1 WRITE-FORMAT change with a migration question for
+  already-archived segments, an explicit design decision rather than
+  something a read-side module can decide unilaterally, tracked as its own
+  item instead of folded into this one. See `docs/THREAT_MODEL.md` QG-40 for
+  the full mitigation/residual statement.
+
+- **2026-08-06 — item 19 phase 1 added MySQL as a third registry dialect**,
+  purely additive per the item-57 adapter architecture: `MySQLDialectAdapter`
+  (`compiler/dialect_adapters.py`) and `MySQLSessionAdapter`
+  (`connections/dialects.py`), registered in their respective registries — no
+  existing dispatch site touched. Two genuine capability gaps, decided the
+  same reject-don't-emulate way as MSSQL's: (1) MySQL's bare
+  `STDDEV()`/`VARIANCE()` are the *population* statistic, a different number
+  from Postgres's/MSSQL's sample-statistic bare names — mapped to
+  `STDDEV_SAMP`/`VAR_SAMP` instead to preserve the cross-dialect semantic
+  contract, verified live; (2) MySQL's `ON DUPLICATE KEY UPDATE` fires on a
+  collision with *any* unique/PK constraint, with no way to name a specific
+  target the way `conflict_columns` declares one, so upsert is rejected with
+  its own accurate message (the generic "no ON CONFLICT clause" text would
+  have been factually wrong for MySQL, which does have an upsert idiom — just
+  not one that can honor a specific conflict target). Live testing against a
+  real MySQL 8.4 server (`tests/integration/test_mysql_live.py`,
+  `make test-mysql-live`) surfaced one real pre-existing gap unrelated to the
+  adapter itself: `schema/reflection.py`'s `list_live_tables()` excluded
+  Postgres's/MSSQL's system schemas but not MySQL's own two (`mysql`,
+  `performance_schema`), which would have leaked internal server tables into
+  `list_tables()` for any MySQL connection without an explicit `known_tables`
+  seed — fixed and covered by a regression test. **Scope, stated honestly:**
+  covered here are `dialect_adapters.py`/`dialects.py` unit tests (including
+  the item-102 exhaustive per-dialect date/time-primitive suite), a live
+  REST-to-real-server integration suite, and CI wiring
+  (`.github/workflows/ci.yml`'s `mysql-live` job, `docker-compose.yml`'s
+  `mysql` profile). *Not* extended in this pass: the several OTHER
+  exhaustive per-dialect unit-test files (`test_compiler.py`, `test_cte.py`,
+  `test_nonequi_joins.py`, `test_set_operations.py`, `test_column_masking.py`)
+  still parametrize only `postgresql`/`mssql`/`sqlite` — a real, open gap for
+  a future pass, not silently claimed as covered. `execution/cost_estimation.py`
+  has no MySQL estimator either (falls back to the existing documented
+  "any other dialect proceeds under the reactive guardrails" behavior,
+  unchanged). TODO.md item 19 stays open for the remaining dialects
+  (Snowflake, BigQuery, ...) it was always scoped to cover.
+
+- **2026-08-05 — item 150 closed the one gap item 149 deliberately deferred:
+  `mandatory_row_filters` (tenant-scoping) compared an AST-resolved table name
+  against an operator-configured `Policy` value using `.lower()`, while every
+  `Policy` method item 149 fixed now uses `.casefold()`.** The comparison's
+  AST-side input comes from `validation/schema_validation.py`'s
+  `effective_name_map`/`declared_cte_names`/`cte_source_names`, a subsystem
+  shared by policy validation, schema validation, `execution/approval.py`,
+  `execution/service.py`, and `compiler/sqlalchemy_compiler.py` — internally
+  self-consistent (every site agreed with every other), which is exactly why
+  it never showed up as a live bug until a `.casefold()`-side value
+  (`MandatoryRowFilter.table`) crossed into it. Fixed with a mechanical,
+  uniform sweep: every one of the subsystem's ~64 `.lower()` call sites (read
+  individually first, to confirm each is genuinely an identifier comparison
+  and not something unrelated) switched to `.casefold()` together, since
+  `.casefold()` is defined to equal `.lower()` for pure-ASCII input — the
+  overwhelming majority of real schemas — so the sweep preserves existing
+  behavior exactly while closing the Unicode-casing gap everywhere at once.
+  Confirmed by the full pre-existing unit suite (2012 tests) passing unchanged
+  after the sweep, with zero test needing an update for the ASCII case. Added
+  a regression test with a real physical table (`"STRASSE"` — the only
+  spelling reflectable at all, since `schema/reflection.py`'s
+  `VALID_TABLE_NAME` rejects any non-ASCII table name at load time, which is
+  exactly why this mismatch can only originate on the policy-configured side)
+  and a `mandatory_row_filters` entry configured `table="straße"`; mutation-
+  verified by reverting the specific comparison to `.lower()` and confirming
+  the new test failed for the exact reported reason.
+  **This item's own mandatory two-reviewer self-review then found a real
+  regression the sweep itself introduced:** `query_ast/models.py`'s
+  `_validate_table_aliases`/`_validate_cte_names` — the AST-layer uniqueness
+  checks `effective_name_map` relies on as its precondition — were still
+  `.lower()`-based, so the AST could accept two aliases as distinct (under
+  `.lower()`) that `effective_name_map` (now `.casefold()`) then silently
+  collapsed into one key, dropping a table from the query graph with no
+  error. Confirmed directly, fixed with the same substitution, verified the
+  reproduction is now correctly rejected. Two further leftover `.lower()`
+  sites in the same bug class were also found and fixed: `admin_ui_routes.py`'s
+  policy simulator (a simulated `allowed=True` verdict that omitted a
+  mandatory filter real execution would enforce) and
+  `write_schema_validation.py`'s WHERE-ref check (provably unreachable in
+  production — both sides are already ASCII-restricted by
+  `sanitize_table_name` before that comparison runs — fixed for consistency,
+  deliberately left untested since a test would require also bypassing that
+  restriction). Full unit (2014), integration (346), and security (463)
+  suites green on the final tree.
+
+- **2026-08-05 — items 148/149's own mandatory security reviews each found a
+  real defect one level deeper than the item's own scope, fixed same-day; one
+  (item 149's) was a fail-open human-approval-gate bypass.** Item 148 (diff
+  `Policy.column_masks`) shipped a `_diff_masks` implementation whose first
+  draft flattened the masks dict directly; both `security-invariant-reviewer`
+  and `architecture-boundary-reviewer` independently found it misclassified a
+  real loosening as a false tightening whenever a table-specific mask
+  shadowed a `"*"` wildcard entry — fixed by resolving through
+  `Policy.column_mask()` itself instead of reimplementing its precedence
+  rules (verified directly: `Policy.column_mask` evaluated against the
+  reproduction before any fix landed). The same review also found
+  `blast_radius.py`'s risk-priority table missing `column_mask` **and** the
+  pre-existing `purpose_access` (item 145) — both silently fell to the
+  lowest-priority bucket — fixed, plus an exhaustiveness test
+  (`typing.get_args(SemanticChangeCategory)` against the priority dict) so no
+  future category can repeat the gap silently.
+  Item 149 (standardize `Policy`'s case-insensitive lookups on `.casefold()`,
+  not `.lower()`) grew from a single-method fix into four sites once its own
+  `security-invariant-reviewer` pass ran: `WritePolicy.write_column_allowed`
+  looked up `denied_write_columns` via a literal `.get(table_name.lower(), [])`
+  — a plain exact-key dict lookup with **no** case-insensitive fallback at
+  all — so a deny-list key configured with any casing other than all-lowercase
+  never matched, regardless of the write statement's own table casing (write
+  deny-by-default silently inert; confirmed with a direct Python
+  reproduction before fixing). `catalog/models.py`'s `TableCatalogEntry.column`/
+  `ConnectionCatalog.table` used `.lower()` while this class's own uniqueness
+  validators already used `.casefold()`, so a catalog entry the module treats
+  as one unique table/column could fail to resolve — and an unresolved entry
+  means its sensitivity label silently never reaches the human-approval gate
+  (item 92 phase 2): a genuine fail-open bypass on a Unicode-casing edge case,
+  confirmed empirically before fixing. `admin/templates.py`'s policy-template
+  merge (item 46) matched table names with **no** case-folding at all — the
+  most reachable of the four, since it fails on any casing mismatch, not just
+  the exotic Unicode window — and could silently widen an existing allow-list
+  to empty (which `Policy.table_allowed` reads as *unrestricted*), directly
+  inverting that module's own stated "monotonically restrictive" guarantee.
+  All four were fixed with regression tests and mutation-verified (each
+  enforcement line broken deliberately, confirmed to fail for the reported
+  reason, restored). A fifth, related instance —
+  `compiler/sqlalchemy_compiler.py`'s `mandatory_row_filters` (tenant-scoping)
+  matching against `validation/schema_validation.py`'s `.lower()`-consistent
+  AST name-resolution subsystem — was found but deliberately **not** fixed in
+  the same change: it roots in a shared subsystem with several call sites
+  (`effective_name_map`/`declared_cte_names`/`cte_source_names`), not a
+  one-line fix, and was recorded as TODO.md item 150 for its own dedicated,
+  reviewed unit of work rather than a same-session patch under time pressure.
+  Full unit (2012), integration (345, excluding `real_db`), and security (463)
+  suites green on the final tree.
+
+- **2026-08-05 — mandatory post-session audit of items 137/139/140/145/146/147
+  found 6 real, confirmed defects across security-invariant, architecture, and
+  test-contract review; all fixed same-day, each with a regression test that
+  fails without the fix (mutation-verified).** Auditors ran in parallel
+  (`security-invariant-reviewer`, `architecture-boundary-reviewer`,
+  `test-contract-reviewer`, `claim-reviewer`; `ui-a11y-reviewer` N/A — no UI
+  files touched) over the full `main..HEAD` range. Findings and fixes, most
+  severe first:
+  1. **Declared `purpose` was persisted to the audit event even when
+     `Policy.allowed_purposes` is empty (the default)** — reopening the exact
+     free-text-in-audit-log channel `intent`'s exclusion exists to close, just
+     under a different field name, on every connection that hasn't opted into
+     purpose-gating. Fixed: `execution/service.py`'s 5 `audit_query(...)`
+     call sites now gate `purpose` on `policy.allowed_purposes` being
+     non-empty (`purpose=(query.purpose if policy is not None and
+     policy.allowed_purposes else None)`); a pre-try `policy: Optional[Policy]
+     = None` guard avoids `UnboundLocalError` in the two outer `except`
+     blocks where `self._get_policy()` itself may have failed.
+  2. **`Policy.for_purpose`'s `denied_columns`/`column_masks` merge used
+     literal (case-sensitive) dict keys**, so a case-mismatched table name
+     between the base policy and a purpose delta (e.g. `"customers"` vs.
+     `"Customers"`) could make `_ci_lookup`'s first-match-wins read see only
+     ONE side's entries — for `column_masks` this silently **unmasked** a
+     column the base policy protected (a real "narrows never widens"
+     violation); for `denied_columns` a delta's own added deny silently
+     failed to apply. Fixed with a new `Policy._merge_table_keyed` helper
+     that resolves table names to one canonical key across both sides before
+     merging, the same case-insensitive resolution `_ci_lookup` already uses
+     for reads.
+  3. **`admin/access_diff.py` never diffed `allowed_purposes`/
+     `purpose_policies` at all** — an operator could delete a connection's
+     entire purpose gate in a candidate config version and the semantic
+     access diff would report no change, the exact "loosening reported as
+     no change" governance blind spot item 40 exists to prevent. Fixed: a new
+     `_diff_purposes` function (mirroring `_diff_mandatory_filters`'s shape)
+     and a new `SemanticChangeCategory` member, `"purpose_access"`. Investigating
+     this surfaced a second, **pre-existing** instance of the same gap —
+     `column_masks` has never been diffed by `access_diff.py` at all, despite
+     an inline comment claiming otherwise since item 49 — filed as TODO.md
+     item 148 rather than fixed here (out of this session's scope; it
+     predates every item shipped today).
+  4. **`admin/service.py`'s candidate-policy simulation discarded
+     `validate_policy`'s purpose-narrowed return value**, so a purpose
+     delta's own `mandatory_row_filters` entry never appeared in the
+     simulation's readiness report — an operator could be told a
+     purpose-declaring principal was fully `ready` when a missing claim
+     would actually refuse at real execution time. Fixed with the identical
+     one-line reassignment `execution/service.py` already uses.
+  5. **A bare (non-enveloped) forged line on a `jsonl_chained` backend
+     bypassed verification entirely** — `verify_envelope_hash` correctly
+     returns `None` (not `False`) for a line with no envelope shape at all,
+     since that's exactly what a legitimate plain-`jsonl` line looks like,
+     but item 137's own stated goal was that a forged event must never
+     display as clean, and an attacker forging a bare line rather than a
+     malformed envelope defeated that. Fixed: a new `require_envelope: bool`
+     flag on both `JsonlAuditEventSource`/`JsonlChangeEventSource` and a local
+     in `_audit_page`, set `True` only when `cfg.audit_sink_backend ==
+     AuditSinkBackend.JSONL_CHAINED`; when true, `verified is None` is ALSO
+     counted malformed, since every line on that backend must be enveloped.
+  6. **The persisted `masked_columns` audit field was computed from the
+     un-narrowed policy**, understating which columns a purpose-added mask
+     actually protected (the mask itself was correctly APPLIED to the
+     compiled SQL either way — this was an audit-fidelity gap, not an access
+     bypass). Fixed: `_validate_and_compile`'s return type widened to
+     include the effective `Policy` (`Tuple[sa.Select, int, dict, str,
+     Policy]`), and `execute()` rebinds its own outer `policy` to it, so
+     `applied_column_masks(query, policy)` at the audit call site sees the
+     same narrowing the compiler used.
+
+  Additionally: two wording clarifications (item 145's "every query" language
+  in `docs/PRODUCT_GUIDE.md`/`examples/policy.example.yaml` narrowed to
+  "every READ query", since the gate never reaches governed writes; item
+  146's "non-sensitive columns" language changed to "not labeled sensitive in
+  the catalog", since a connection with no catalog labels at all would
+  otherwise read as a stronger guarantee than it is); seven test-contract
+  gaps closed (a TS `.purpose()` test, a Python `.purpose()` value assertion,
+  a tightened `_read_last_line` bound-test match string, direct
+  `verify_envelope_hash` unit tests including its `ValidationError` branch, a
+  trust-page version-drift assertion, six "accepted at exactly the cap"
+  companion tests for item 139's AST size caps, and a same-table-different-
+  column `column_masks` merge test); and two stale-claim corrections
+  (`docs/SECURITY_POSTURE.md`'s adversarial-suite test count corrected from a
+  pre-existing stale 310 to the actual 463, propagated into a regenerated
+  `docs/TRUST_EVIDENCE.md`; `docs/business/PRODUCT_SCORECARD.md`/
+  `MARKET_DOMINATION_ANALYSIS.md` marked stale where they described items
+  137/145 as open gaps that shipped the same day, without attempting a full
+  re-score — that's `product-scorecard`'s job, not a side effect of an audit
+  response). Full unit (1994), integration (345, excluding `real_db`),
+  security (463), and TypeScript (43) suites pass on the final tree; every
+  fix above was independently mutation-verified (revert the fix, confirm the
+  new test fails for the stated reason, restore).
+
+- **2026-08-05 — the quickstart is a standalone `querygate-quickstart` CLI, not
+  a `querygate quickstart` subcommand (TODO.md item 146).** The item's own
+  prose showed the invocation `querygate quickstart <connection>`, but
+  `querygate` (`[project.scripts]` → `querygate.run:main`) is the uvicorn
+  server entrypoint with no subcommand dispatcher — every other CLI in this
+  repo (`querygate-config`, `querygate-semantic-memory`, `querygate-audit`,
+  `querygate-security-benchmark`, `querygate-scope-catalog`,
+  `querygate-validate-config`) is its own top-level `querygate-*` script, so
+  a new subcommand dispatcher on `querygate` itself would be a second CLI
+  pattern for no benefit. `querygate-quickstart` matches the established
+  convention (and the item's own parenthetical: "mirroring the existing
+  `querygate-config`/`querygate-semantic-memory` CLI shape") — a thin,
+  authenticated `httpx` client over already-shipped read-only REST routes
+  (`GET /{connection}/tables`, `GET /{connection}/tables/{table}`), adding no
+  new server-side authority. Sensitivity filtering reuses
+  `TableDescription.columns[].catalog.sensitivity` (item 32) directly — no
+  second sensitivity check invented, and no `catalog/search` round trip
+  needed since `describe_table` already carries it per column. Verified live
+  against the real demo Postgres (`docker compose up` + the packaged
+  `examples/` config): all three generated `curl` commands and the printed
+  Python SDK snippets execute and return real rows, not just plausible-
+  looking text. Mutation-verified: short-circuiting the sensitivity check to
+  always return "safe" made the sensitive-column regression test fail for
+  the expected reason (a PII column appeared in a proposed query).
+
+- **2026-08-05 — the procurement evidence page is a checked-in generated doc,
+  not a live REST route (TODO.md item 147).** The item offered two shapes: "a
+  served page (candidate: a `/trust` REST route... or a static generator
+  invoked at release time)". A live route was the first instinct, but
+  `pyproject.toml`'s `packages` list and the `Dockerfile`'s `COPY` lines both
+  confirm `docs/` is **not** part of the installed package or the container
+  image — only `src/querygate` and `examples/` are. A runtime handler trying
+  to read `docs/SECURITY_POSTURE.md`/`docs/COMPLIANCE_MAPPING.md` etc. would
+  work in a dev checkout and 404/fail in the actually-shipped product, which
+  is exactly the kind of thing that must be reliable for a security-review
+  artifact. `scripts/generate_trust_page.py` (mirroring `scripts/
+  generate_sbom.py`'s shape) instead composes `docs/SECURITY_POSTURE.md`,
+  `docs/COMPLIANCE_MAPPING.md`, `docs/business/SECURITY_BENCHMARK.md`,
+  `SECURITY.md`'s disclosure section, and the live
+  `security/dependency-audit-allowlist.json` status into one generated,
+  git-committed `docs/TRUST_EVIDENCE.md` (`make trust-page`) — composes the
+  real docs **verbatim**, not a lossy summary, so no new evidence or claim is
+  introduced. A drift guard (`tests/unit/test_trust_page.py::
+  test_committed_doc_matches_generator`) fails if the checked-in file and the
+  generator disagree, so "always current" is enforced the same way item 95's
+  `docs/SCOPE_CATALOG.md` guard already is, not left as a habit to remember.
+  Deliberately no HTML/CSS page: the item's own scope explicitly rules out
+  this becoming a marketing page (that's `pitch-sync`/`GO_TO_MARKET.md`'s
+  job) — a generated Markdown doc is the evidentiary companion, not a
+  landing-page replacement for `landing/security.html`.
+
+- **2026-08-05 — purpose-bound access: declared, closed-set, narrows-only
+  (TODO.md item 145, feature F7).** `StructuredQuery.intent` was free text,
+  logged but never enforced; Immuta's purpose-based access — where a caller
+  must declare *why* it needs data and that purpose narrows what it can see —
+  was flagged as a real, unmatched gap in the 2026-08-05 competitive scan.
+  Four design choices, each recorded because a flipped default would have
+  been a real security regression:
+  1. **A new field, `StructuredQuery.purpose`, not a repurposed `intent`.**
+     `intent` is documented free text and deliberately excluded from the
+     persisted audit event (`audit/events.py`'s own docstring: "no SQL,
+     parameter, intent... fields"); conflating the two would have put
+     arbitrary caller-authored prose into a policy decision. `purpose` is a
+     closed-set token instead, checked against `Policy.allowed_purposes`.
+  2. **`allowed_purposes` empty means the connection hasn't opted into
+     purpose-gating at all — a declared purpose is accepted but inert.**
+     The same "empty allow-list = unrestricted" convention every other
+     `Policy` list already uses (`allowed_tables`, `allowed_columns`).
+     **Once non-empty, EVERY READ query on that connection must declare a
+     purpose from the set** — not just queries touching some enumerated
+     "purpose-gated" subset of tables/columns. The alternative (per-table
+     purpose-gating) would need a second concept (which tables require a
+     purpose) the item's own scope didn't ask for and that adds real
+     complexity for a security feature; connection-wide is simpler, harder
+     to misconfigure into a false sense of security, and matches how every
+     other Policy allow-list already reads (a list-level switch, not a
+     row/column-level one). **Scoped to reads only** (matching `intent`'s own
+     read-AST-only precedent): the gate runs in `validation/
+     policy_validation.py`, which the write pipeline never calls, and the
+     write AST has no `purpose` field — a purpose-gated connection's
+     governed writes (item 93) are entirely unaffected by this setting.
+     Extending the gate to writes is real additional scope, not attempted
+     here (found and scoped correctly by `security-invariant-reviewer`,
+     2026-08-05; tracked as a candidate follow-up, not built under review
+     pressure).
+  3. **`PurposePolicyDelta` has no "allow" field — only additional
+     `denied_tables`/`denied_columns`/`mandatory_row_filters`/`column_masks`,
+     unioned onto the base `Policy` (`Policy.for_purpose`).** This makes
+     "narrows never widens" true by construction rather than by convention:
+     there is no field a misconfigured delta could set to grant more than
+     the base policy already allows. For `column_masks` specifically, the
+     delta's own masks are checked FIRST (so a purpose-specific stricter
+     mask on an already-masked column actually takes effect), but a
+     base-level deny/mandatory-filter can never be removed by any delta,
+     empty or not — the field literally isn't there to remove it with.
+  4. **`validate_policy` now returns the (possibly purpose-narrowed)
+     effective `Policy`, and `execution/service.py`'s `_validate_and_compile`
+     rebinds its local `policy` to that return value**, rather than
+     resolving the purpose gate in `policy_validation.py` while the
+     compiler keeps reading the un-narrowed policy from `_get_policy()`.
+     Column masking and mandatory-row-filters are *compiled in*
+     (`compiler/sqlalchemy_compiler.py` reads `policy.column_mask`/
+     `policy.mandatory_row_filters` directly from whatever `Policy` object
+     it's handed) — resolving the purpose only inside `policy_validation.py`
+     without this one-line propagation fix would have made a purpose delta's
+     mandatory filter pass *validation* but never reach the SQL, silently
+     doing nothing. `explain()` and `verdict()` share the same
+     `_validate_and_compile` choke point, so both inherit the fix for free.
+     The purpose token is also persisted to the audit event (`AuditEvent
+     .purpose`) — unlike `intent`, it's a fixed allow-listed token, not
+     caller-authored prose, so this doesn't reopen the redaction guarantee.
+  New `Policy` fields (`allowed_purposes`, `purpose_policies`) are excluded
+  from `GUARDRAIL_FIELDS` (item 115's drift guard) with a stated reason —
+  structural access rules, not scalar caps, the same treatment
+  `allowed_tables`/`mandatory_row_filters` already get.
+  **Mutation-verified:** reverting the `denied_tables` union to
+  `delta.denied_tables` alone (dropping the base policy's own list) made both
+  the `Policy.for_purpose` unit test and the `validate_policy` integration
+  test fail on exactly the widened-access assertion; dropping
+  `_validate_and_compile`'s policy reassignment made the compiled-SQL test
+  fail (the purpose delta's mandatory filter silently never reached the
+  SQL); disabling the missing-purpose check made both the unit and
+  `service.execute` tests fail with the wrong (fallback) error message. All
+  three reverted; full unit (1950), integration (344, excluding `real_db`),
+  and security (463) suites pass on the final tree. The Python
+  (`client/builder.py`) and TypeScript (`clients/typescript/src/builder.ts`)
+  client SDKs both got a matching `.purpose(...)` builder method and the
+  shared kitchen-sink parity fixture was updated, keeping item 51's
+  cross-language parity guard green.
+
+- **2026-08-05 — `_audit_page`'s `cursor` ceiling lowered from 1,000,000 to
+  5,000, not redesigned (TODO.md item 140).** `GET /api/v1/admin/ui/audit/events`
+  retains up to `cursor + limit` fully-parsed event dicts before slicing the
+  response page, so a `cursor` near the old ceiling let one admin-scoped
+  request allocate on the order of a gigabyte. The item offered two options:
+  lower the ceiling, or redesign pagination to an opaque cursor keyed to file
+  position (avoiding the need to re-derive `cursor` matches from the start on
+  every page). Chose the lower ceiling — it closes the actual resource-
+  exhaustion gap with a one-line change and no API/response-shape
+  change, versus a cursor-shape redesign that's real scope growth for a
+  marginal further improvement once the ceiling itself is no longer six
+  figures. 5,000 pages of the default `limit=50` is far past any real "load
+  more" admin session, while bounding worst-case retained dicts per request
+  to ~5,100 (cursor + limit), several orders of magnitude below the old
+  bound. A cursor-shape redesign remains available later if 5,000 pages ever
+  proves insufficient for a real deployment's audit-browsing needs.
+  Mutation-verified: restoring the old ceiling made the new regression test
+  (asserting `cursor=5001` returns `422`) fail for the expected reason.
+
+- **2026-08-05 — hard structural size caps on the read AST's list fields, and
+  `audit/sinks.py`'s startup tail-read folded into the item-138 bounded
+  reader (TODO.md item 139).** `execution/service.py`'s `normalize_query_shape`
+  runs at the top of `execute()`/`explain()`/`verdict()`, before
+  `validate_policy` — so a syntactically valid but pathologically large
+  `StructuredQuery` (tens of thousands of `select`/`joins`/`group_by`/
+  `order_by`/`correlate`/`ctes`/`set_op.arms` entries) got its full shape
+  serialized into one audit-log line before policy's own
+  `max_select_columns`/`max_joins`/`max_group_by` caps ever had a chance to
+  reject the query. Following the item-100–106 precedent (this Decision Log
+  entry is the item's own first step), the decision is a **hard, non-operator-
+  tunable `max_length`** on each of `StructuredQuery.select` (1000),
+  `.joins` (200), `.group_by` (500), `.order_by` (500), `.correlate` (50),
+  `.ctes` (50), and `SetOpSpec.arms` (50) in `query_ast/models.py` — enforced
+  by Pydantic at request-parsing time, before any application code
+  (including `normalize_query_shape`) ever sees the payload, so a caller
+  never reaches the audit-log-amplification path at all. These are
+  deliberately **not** the same knob as the existing operator-tunable
+  `Policy.max_select_columns`/`max_joins`/`max_group_by` (checked later in
+  `validation/policy_validation.py`, defaults 30/5/10): the AST cap is a hard
+  ceiling generous enough that no realistic operator-raised policy cap would
+  ever hit it (10–100x headroom over each field's Policy default, or over a
+  sane maximum for fields with no Policy cap at all, like `order_by`), sized
+  only to bound the worst case rather than to enforce a product limit.
+  `correlate`/`ctes`/`SetOpSpec.arms` were added beyond the item's own three
+  named fields (`select`/`joins`/`group_by`/`order_by`) because reading
+  `normalize_query_shape` end to end (per CLAUDE.md's "measure the shape the
+  product actually emits" discipline) showed both are walked into the audit
+  shape exactly the same way, including recursively through nested CTE
+  bodies and set-op arms — `intent` was checked too and confirmed **already**
+  excluded from the audit event by design, so it needed no change.
+  Separately, `audit/sinks.py`'s `_read_last_line` (used once at process
+  startup to resume a `jsonl_chained` ledger's head) had the identical
+  unbounded-expanding-read shape item 138 fixed for every other audit
+  reader — `chunk = handle.read(size - pos)` re-reads a growing span for a
+  trailing region with no newline, worst case the whole file, once per boot.
+  It's now a thin wrapper over `audit.file_reader.iter_lines_reverse` (the
+  same bounded primitive the four read-only surfaces use), reusing the
+  composable read-path rather than carrying a second hand-rolled tail
+  scanner — a bound-exceeded read now raises the same "refuse to silently
+  fork the chain" `ValueError` `_recover_head` already raises for an
+  unparseable last line, rather than being misread as "file empty, start at
+  genesis" (which would have restarted the sequence at 0 over real prior
+  content). Mutation-verified: raising each cap by 100x (and separately,
+  short-circuiting `_read_last_line` to always return `None`) made the
+  corresponding new regression test fail for the expected reason; both
+  reverted and the full unit + integration + security suites pass on the
+  final tree.
+
+- **2026-08-05 — audit read surfaces both disclose the actual backend and
+  verify chain-envelope self-consistency (TODO.md item 137).** Item 136 made
+  the four durable read-only surfaces (`admin/anomaly.py`'s anomaly report,
+  `admin/config_trends.py`'s change-trend report, `/help/my-recent-denials`,
+  the admin UI `_audit_page` audit browser) accept `AUDIT_SINK_BACKEND=
+  jsonl_chained`, but they all still reported `source="jsonl"` regardless of
+  backend, and none of them checked whether a chain envelope's own `hash`
+  actually matched its contents — chain *linkage* was verify-only
+  (`querygate-audit verify`), so a forged record with a plausible `seq`/
+  `prev_hash` and an arbitrary `hash` would display as a genuine event.
+  Following the same precedent as items 100–106 (the Decision Log entry is
+  the item's own first step, not an external gate), the decision is **both**
+  options the item's TODO body offered, not one:
+  1. **Disclosure**: `source` on all four response models widens from
+     `Literal["jsonl", "disabled", ...]` to include `"jsonl_chained"`, and
+     each route now passes through the actually configured
+     `cfg.audit_sink_backend.value` instead of a hardcoded `"jsonl"` literal.
+  2. **Real per-record verification**: a new `audit/ledger.py` primitive,
+     `verify_envelope_hash(raw, key=...)`, recomputes `compute_record_hash`
+     over `{seq, prev_hash, event}` and compares in constant time against the
+     record's own `hash`. All three readers (`JsonlAuditEventSource`,
+     `JsonlChangeEventSource`, `_audit_page`) now call it before
+     `unwrap_envelope`, counting a self-inconsistent envelope as `malformed`
+     rather than displaying it — mirroring how item 136 itself consolidated
+     the envelope unwrap into one shared primitive. `resolve_ledger_key`
+     (also new, and now shared with `audit/sinks.py`'s write path) converts
+     the same `cfg.audit_ledger_hmac_key` string every route already reads.
+  **Stated honestly, not oversold**: this is self-consistency only, not full
+  chain-linkage verification — a windowed/reverse-order scan never walks the
+  whole file from genesis, so it cannot by itself prove no record was
+  *dropped*. It is real per-record forgery *detection* for the concrete
+  attack the item's report describes (`{"hash": "anything"}` with an
+  arbitrary `event` body), and — as `audit/ledger.py`'s own module docstring
+  already states for the write path — is only forgery-*infeasible* (not just
+  detectable) when `AUDIT_LEDGER_HMAC_KEY` is set; an unkeyed chain still
+  only detects tampering relative to a trusted external anchor. Full-file
+  chain-linkage verification remains `querygate-audit verify`'s job.
+  Regression: a genuine record followed by a hand-forged one (correct
+  `prev_hash`/`seq`, `hash: "anything"`) is counted `malformed` and excluded
+  from every one of the four surfaces, at both the unit (reader) and
+  integration (HTTP) level; mutation-verified — reverting the hash comparison
+  to an unconditional pass makes exactly those new tests fail.
 
 - **2026-07-28 — item 35 phase 3's four design-gated questions are resolved,
   maintainer-approved before build (TODO.md item 35).** Phases 1-2 shipped

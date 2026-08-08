@@ -39,3 +39,20 @@ def test_no_raw_sql_tool_registered():
 def test_server_name_is_querygate():
     server = create_mcp_server()
     assert server.name == "querygate"
+
+
+def test_repeated_create_mcp_server_does_not_rewrap_list_tools():
+    """`create_mcp_server()` installs the scoped-listing filter onto the
+    shared, process-wide `mcp_server` singleton. It is called once per
+    `create_app()`, and `create_app()` legitimately runs more than once in a
+    single process (every test in this suite, and any production
+    hot-reload/multi-instantiation path). Each call must be idempotent — a
+    naive install that closes over `server.list_tools` and reassigns it
+    would wrap the previous wrapper on every call, growing an unbounded
+    closure chain and adding an extra async hop per tools/list request for
+    the life of the process."""
+    server = create_mcp_server()
+    first = server.list_tools
+    create_mcp_server()
+    create_mcp_server()
+    assert server.list_tools is first

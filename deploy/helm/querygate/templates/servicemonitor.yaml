@@ -3,6 +3,9 @@ Requires the Prometheus Operator CRD (monitoring.coreos.com/v1) — leave
 metrics.serviceMonitor.enabled: false (the default) if your cluster doesn't
 run it. /metrics is reachable directly at the Service's port either way;
 this just automates discovery for Operator-managed Prometheus instances.
+/metrics requires the admin:metrics:read scope by default
+(AppConfig.metrics_require_auth) — set bearerTokenSecret below or the scrape
+will get 401s.
 */}}
 {{- if .Values.metrics.serviceMonitor.enabled }}
 apiVersion: monitoring.coreos.com/v1
@@ -22,4 +25,11 @@ spec:
     - port: http
       path: /metrics
       interval: {{ .Values.metrics.serviceMonitor.interval }}
+      {{- with .Values.metrics.serviceMonitor.bearerTokenSecret }}
+      {{- if .name }}
+      bearerTokenSecret:
+        name: {{ .name }}
+        key: {{ .key }}
+      {{- end }}
+      {{- end }}
 {{- end }}

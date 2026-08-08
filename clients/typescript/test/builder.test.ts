@@ -434,3 +434,12 @@ test("union/intersect/except are all expressible with order_by/limit on the carr
   const e = Query.from("a").select("a.x").except([arm()]).build();
   assert.equal(e.set_op!.op, "except");
 });
+
+test("purpose builder serializes the declared value", () => {
+  // TODO.md item 146 test-contract gap (found by `test-contract-reviewer`,
+  // 2026-08-05): the kitchen-sink parity fixture only ever leaves `purpose`
+  // unset (null), so a bug dropping `.purpose()`'s value would go
+  // undetected anywhere in this suite.
+  const built = Query.from("orders").select("orders.id").purpose("fraud_review").build();
+  assert.equal(built.purpose, "fraud_review");
+});

@@ -298,6 +298,32 @@ class TestCompiler:
         with pytest.raises(PolicyViolationError, match="order_status"):
             compile_structured_query(query, tables, policy, principal=principal)
 
+    def test_mandatory_row_filter_applies_despite_a_casefold_lower_disagreement_in_table_name(self):
+        # "STRASSE".lower() == "strasse" but "straße".lower() == "straße" (unchanged) --
+        # .casefold() unifies both to "strasse". `compile_mandatory_row_filters`'s
+        # table match used to compare via `.lower()` against `effective_name_map`'s
+        # own `.lower()`-keyed dict, so a policy configured with "straße" would
+        # silently skip filtering a query against a table named "STRASSE" -- the
+        # tenant-scoping filter would silently not apply (found while fixing
+        # TODO.md item 150).
+        metadata = sa.MetaData()
+        strasse = sa.Table(
+            "STRASSE",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("hausnummer", sa.String(20)),
+        )
+        tables = {"STRASSE": strasse}
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="straße", column="hausnummer", value="42")
+            ]
+        )
+        query = StructuredQuery(from_table="STRASSE", select=["STRASSE.id"], limit=5)
+        stmt, _ = compile_structured_query(query, tables, policy)
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "42" in compiled
+
     def test_coalesce_renders_on_postgres_and_mssql(self):
         tables = _make_tables()
         query = StructuredQuery(
@@ -960,6 +986,115 @@ class TestCompiler:
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert compiled.count("acme") == 2
 
+    @pytest.mark.parametrize("insertion_order", [("O", "o"), ("o", "O")])
+    def test_mandatory_row_filter_does_not_create_phantom_alias_for_case_different_ref(
+        self, insertion_order
+    ):
+        """Item 167: a case-different column ref to a joined alias (join declares
+        alias="O", a select ref spells it "o.id") used to leave a SECOND,
+        differently-cased `sa.Table.alias(...)` object in the `tables` dict
+        schema validation builds -- `tables["O"]` from the join's own declared
+        spelling, `tables["o"]` from the column ref's spelling -- both wrapping
+        the same physical `orders` table but as two DISTINCT alias objects.
+        `_apply_mandatory_row_filters` used to walk every key in `tables`, so a
+        `mandatory_row_filter` on `orders` applied its `.where()` against BOTH
+        alias objects; SQLAlchemy Core silently added the phantom "o" alias to
+        the FROM clause as an unconditioned comma-join -- a real cartesian
+        product (row duplication in the result set), confirmed by compiling
+        this exact shape (see TODO.md item 167's own repro).
+
+        Parametrized over BOTH `tables` dict insertion orders on purpose (a
+        post-fix review, QG-167-1, caught that iterating only the query's own
+        declared occurrence *names* wasn't enough: `tables[key]` was an exact
+        dict index, but the FROM/JOIN loop resolves through `_table_by_name`,
+        which is a case-INSENSITIVE, first-match-in-iteration-order search.
+        `needed` in `_reflect_and_validate_scope` is a Python `set`, so which
+        of "O"/"o" iterates first -- and therefore which object actually ends
+        up in the FROM/JOIN clause -- is hash-order dependent, not guaranteed
+        to be the declared spelling. The `("o", "O")` case reproduces that:
+        without routing the row-filter lookup through `_table_by_name` too, the
+        filter binds to an alias object ABSENT from the FROM/JOIN clause
+        (recreating the phantom comma-join) while the alias actually projected
+        goes completely unfiltered -- a mandatory-row-filter bypass, not just a
+        cartesian product.)"""
+        metadata = sa.MetaData()
+        customers = sa.Table(
+            "customers",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+        )
+        orders = sa.Table(
+            "orders",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("customer_id", sa.Integer),
+            sa.Column("status", sa.String(20)),
+        )
+        # Mirrors exactly what `_reflect_and_validate_scope` builds for this
+        # query: one entry for the join's declared alias ("O"), plus one
+        # phantom entry for the column ref's differently-cased spelling ("o")
+        # -- inserted in each parametrized order in turn.
+        tables = {"customers": customers}
+        for name in insertion_order:
+            tables[name] = orders.alias(name)
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="orders", column="status", value="active")
+            ]
+        )
+        query = StructuredQuery(
+            from_table="customers",
+            select=["customers.id", "o.id"],
+            joins=[JoinSpec(table="orders", alias="O", on=["customers.id", "O.customer_id"])],
+            limit=5,
+        )
+        stmt, _ = compile_structured_query(query, tables, policy)
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+
+        # `orders` must be named exactly once in the compiled statement: once
+        # via the real JOIN. A second, bare "orders" is the implicit,
+        # unconditioned comma-join that multiplies rows.
+        assert compiled.lower().count("orders") == 1, compiled
+        assert ", orders" not in compiled.lower(), compiled
+        # The filter must be applied exactly once...
+        assert compiled.count("active") == 1, compiled
+        # ...and specifically against whichever alias the REAL JOIN clause
+        # itself rendered -- not a same-name-but-different-object alias absent
+        # from FROM/JOIN. Slice up to the first comma so a reintroduced phantom
+        # comma-join (item 167's original bug) can't be mistaken for the real
+        # join alias by this assertion too -- it must fail on `count("orders")`
+        # above, not quietly pass here by reading the phantom's own alias.
+        real_join_clause = compiled.split("FROM", 1)[1].split("WHERE", 1)[0].split(",", 1)[0]
+        rendered_alias = "O" if '"O"' in real_join_clause else "o"
+        assert f"{rendered_alias}.status = 'active'" in compiled.replace('"', ""), compiled
+
+    def test_mandatory_row_filter_resolves_a_case_mismatched_tables_key_without_a_raw_keyerror(
+        self,
+    ):
+        """A `tables` key case-mismatched against the query's own from_table
+        spelling (e.g. `tables={"Orders": ...}` for `from_table="orders"`) must
+        still resolve through `_table_by_name` here, the same as it does for
+        the FROM/JOIN construction above -- not raise a raw `KeyError` that
+        would surface as an uncaught 500 instead of the usual typed
+        `QueryValidationError`/successful compile."""
+        metadata = sa.MetaData()
+        orders = sa.Table(
+            "Orders",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("status", sa.String(20)),
+        )
+        tables = {"Orders": orders}
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="orders", column="status", value="active")
+            ]
+        )
+        query = StructuredQuery(from_table="orders", select=["orders.id"], limit=5)
+        stmt, _ = compile_structured_query(query, tables, policy)
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "active" in compiled, compiled
+
     def test_query_level_distinct_renders(self):
         tables = _make_tables()
         query = StructuredQuery(
@@ -991,6 +1126,141 @@ class TestCompiler:
         )
         _, limit = compile_structured_query(query, tables, policy)
         assert limit == 500
+
+
+class TestCrossConnectionMandatoryRowFilters:
+    """A cross-connection join's table's mandatory row filters must be drawn
+    from ITS OWN resolved connection's Policy too, not just the primary
+    connection's (TODO.md item 156) — the same gap item 155 closed for the
+    catalog sensitivity-label trigger, applied here to
+    `_apply_mandatory_row_filters`. `orders` lives on the primary connection;
+    `customers` is joined in from connection `other`."""
+
+    def _query(self) -> StructuredQuery:
+        return StructuredQuery(
+            from_table="orders",
+            select=["orders.id", "customers.name"],
+            joins=[
+                JoinSpec(
+                    table="customers",
+                    on=["orders.customer_id", "customers.id"],
+                    connection="other",
+                )
+            ],
+            limit=5,
+        )
+
+    def _resolver(self, other_policy: Policy):
+        def resolve(connection_id, principal=None):
+            return None, other_policy
+
+        return resolve
+
+    def test_filter_configured_only_on_joined_connection_is_applied(self):
+        tables = _make_tables()
+        query = self._query()
+        scope_connections = {id(query): {"customers": "other"}}
+        other_policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="customers", column="country", value="US")
+            ]
+        )
+        stmt, _ = compile_structured_query(
+            query,
+            tables,
+            Policy(),  # the primary policy has no filter for `customers`
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=self._resolver(other_policy),
+        )
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "customers.country = 'US'" in compiled
+
+    def test_filter_configured_only_on_joined_connection_is_never_applied_without_the_map(self):
+        """Pins the pre-156 bug: omitting `connection_id`/`scope_connections`
+        (every call site before this item) resolves `mandatory_row_filters`
+        from the primary policy alone, so a joined-only filter never reaches
+        the compiled statement."""
+        tables = _make_tables()
+        query = self._query()
+        stmt, _ = compile_structured_query(query, tables, Policy())
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "customers.country" not in compiled
+
+    def test_filter_configured_only_on_primary_connection_still_applies(self):
+        """Mutation guard against a REPLACE-not-union mistake: the joined
+        connection has no filter at all, only the primary policy filters
+        `customers` — must still apply exactly as before item 156."""
+        tables = _make_tables()
+        query = self._query()
+        scope_connections = {id(query): {"customers": "other"}}
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="customers", column="country", value="US")
+            ]
+        )
+        stmt, _ = compile_structured_query(
+            query,
+            tables,
+            policy,
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=self._resolver(Policy()),
+        )
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "customers.country = 'US'" in compiled
+
+    def test_both_connections_apply_their_own_different_filters(self):
+        """Each connection filters a DIFFERENT table by its own rule, and
+        both must land in the compiled statement — the primary connection's
+        filter on `orders` and the joined connection's filter on `customers`,
+        independently."""
+        tables = _make_tables()
+        query = self._query()
+        scope_connections = {id(query): {"customers": "other"}}
+        primary_policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="orders", column="status", value="open")
+            ]
+        )
+        other_policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="customers", column="country", value="US")
+            ]
+        )
+        stmt, _ = compile_structured_query(
+            query,
+            tables,
+            primary_policy,
+            connection_id="primary",
+            scope_connections=scope_connections,
+            connection_resolver=self._resolver(other_policy),
+        )
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "orders.status = 'open'" in compiled
+        assert "customers.country = 'US'" in compiled
+
+    def test_single_connection_filtering_unaffected_by_the_new_parameters(self):
+        """Regression: a plain single-connection query must filter identically
+        whether or not `connection_id`/`scope_connections` are supplied."""
+        tables = _make_tables()
+        query = StructuredQuery(from_table="orders", select=["orders.id"], limit=5)
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="orders", column="status", value="open")
+            ]
+        )
+        stmt_old, _ = compile_structured_query(query, tables, policy)
+        stmt_new, _ = compile_structured_query(
+            query,
+            tables,
+            policy,
+            connection_id="demo",
+            scope_connections={id(query): {"orders": "demo"}},
+        )
+        compiled_old = str(stmt_old.compile(compile_kwargs={"literal_binds": True}))
+        compiled_new = str(stmt_new.compile(compile_kwargs={"literal_binds": True}))
+        assert compiled_old == compiled_new
 
 
 class TestCrossDialectRendering:

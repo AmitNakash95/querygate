@@ -24,11 +24,14 @@ from querygate.connections.dialects import (
     build_connect_args,
     build_engine_url,
     capture_session_identifier,
+    get_session_adapter,
+    not_connectable_explanation,
     register_query_timeout,
 )
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import get_registry
 from querygate.core.config import config as app_config
+from querygate.core.exceptions import ConfigValidationError
 from querygate.policy.models import Policy
 
 ENGINES: dict[str, AsyncEngine] = {}
@@ -49,11 +52,74 @@ def physical_db_name(connection_id: str) -> str:
 
 
 def init_engine(connection_id: str) -> AsyncEngine:
+    """TODO.md item 19 phases 2/3: a dialect whose `SessionDialectAdapter.
+    is_connectable()` returns `False` (today, `SnowflakeSessionAdapter` and
+    `BigQuerySessionAdapter`) is refused HERE, deliberately and explicitly,
+    rather than being allowed to reach `create_async_engine` below and fail
+    with a confusing library-internal error. Dispatched through the
+    registered `SessionDialectAdapter` interface (2026-08-06
+    `architecture-boundary-reviewer` finding — a prior version of this guard
+    compared `profile.dialect` to `DatabaseDialect.SNOWFLAKE` literally,
+    which is exactly the inline `if dialect == ...` branching the
+    composable-interface doctrine rules out; see `is_connectable`'s own
+    docstring in `connections/dialects.py` for the full rationale), so a
+    future dialect with a similar "registered but not yet connectable" gap
+    overrides that one method instead of this function growing a second
+    bespoke comparison.
+
+    Concretely, for Snowflake: `snowflake-sqlalchemy`'s DBAPI has no async
+    driver — confirmed directly: `create_async_engine("snowflake://...")`
+    raises `sqlalchemy.exc.InvalidRequestError: The asyncio extension
+    requires an async driver to be used. The loaded 'snowflake' is not
+    async.` For BigQuery: `sqlalchemy_bigquery`'s DBAPI has the identical
+    driver gap, but confirming it the SAME direct way is not possible with
+    no GCP credentials configured (this project's normal environment) —
+    `BigQueryDialect.create_connect_args` builds a real
+    `google.cloud.bigquery.Client` (resolving Google credentials) at
+    ENGINE-CONSTRUCTION time and fails there FIRST: confirmed directly, a
+    bare `create_async_engine("bigquery://...")` with no credentials
+    configured raises `google.auth.exceptions.DefaultCredentialsError`
+    immediately inside `create_connect_args`, before SQLAlchemy's own
+    async-driver check ever gets a chance to run. (With a fake-but-valid
+    credentials file supplied to get past that step, the identical
+    `InvalidRequestError` was also confirmed for BigQuery's driver.) Either
+    way, this guard's `is_connectable()` check above pre-empts both failure
+    modes with one clean, actionable error instead of either raw one.
+    This codebase's entire session/execution pipeline (`session_scope`
+    below, `execution/service.py`, `schema/reflection.py`,
+    `execution/cost_estimation.py`, ...) is built on `AsyncSession`/
+    `AsyncEngine` throughout, so there is no small patch here; wrapping a
+    sync engine for this pipeline (e.g. via `asyncio.to_thread`, the pattern
+    `catalog/repository.py` uses for a single lock-acquire call) would mean
+    either building an `AsyncSession`-compatible facade over a sync
+    `Session` or forking every call site by dialect — a real architecture
+    change, not a phase-1 slice, and out of scope for a connection type this
+    environment has no live server to verify against. See TODO.md's
+    Snowflake/BigQuery live-verification follow-up items.
+    """
     from querygate.policy.loader import get_policy
 
     profile = _profile(connection_id)
     if not profile.connection_string:
         raise ValueError(f"Connection string for {connection_id!r} is not set.")
+    if not get_session_adapter(profile.dialect).is_connectable():
+        # ConfigValidationError, not a bare ValueError (2026-08-06
+        # `security-invariant-reviewer` finding): `ValueError` is not in
+        # `api/_errors.py`'s `_ACTIONABLE` tuple, so it was being masked to
+        # an opaque REST 500 / MCP `INTERNAL` — silently defeating this
+        # guard's whole point of failing with an explained, actionable
+        # error rather than a confusing one. `ConfigValidationError` IS
+        # actionable (mapped to REST 422, returned verbatim), matching this
+        # exact "an admin caller needs to see exactly what's wrong with a
+        # candidate config" shape its own docstring describes. The message
+        # embeds only `connection_id`/`profile.dialect` — never a credential.
+        # The shared explanation clause lives in `not_connectable_explanation`
+        # (connections/dialects.py) so this and `resolve_query_table_connections`'s
+        # identical secondary-connection guard (TODO.md item 163) can't drift
+        # apart (2026-08-07 `architecture-boundary-reviewer` finding).
+        raise ConfigValidationError(
+            f"Connection {connection_id!r}: {not_connectable_explanation(profile.dialect)}"
+        )
     policy = get_policy(connection_id)
     engine = create_async_engine(
         url=build_engine_url(profile),

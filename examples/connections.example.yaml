@@ -70,3 +70,42 @@ connections:
   #   description: "Reporting warehouse (MSSQL)"
   #   join_group: reporting_instance
   #   known_tables: [FactSales, DimCustomer]
+
+  # A third example showing a MySQL connection (TODO.md item 19 phase 1) —
+  # uncomment and adapt once you have a real MySQL database. connection_string
+  # must use the mysql+asyncmy driver, e.g.
+  # mysql+asyncmy://user:pass@host:3306/dbname.
+  # - id: mysql_reporting
+  #   dialect: mysql
+  #   connection_string: ${QUERYGATE_MYSQL_REPORTING_DB_URL}
+  #   description: "Reporting warehouse (MySQL)"
+  #   known_tables: [orders, customers]
+
+  # A fourth example showing a Snowflake connection (TODO.md item 19 phase 2)
+  # — do NOT uncomment this in a real deployment yet. Snowflake's compiler/
+  # session adapters exist and are rendering-tested, but `connections/
+  # engine.py` refuses to actually open a Snowflake connection: snowflake-
+  # sqlalchemy's driver has no async SQLAlchemy engine support, which every
+  # other dialect here requires. Registering this connection will fail
+  # cleanly with that explanation the first time it's used, not silently
+  # misbehave — see TODO.md's Snowflake live-verification follow-up item.
+  # - id: snowflake_reporting
+  #   dialect: snowflake
+  #   connection_string: ${QUERYGATE_SNOWFLAKE_REPORTING_DB_URL}  # snowflake://user:pass@account/db/schema?warehouse=wh
+  #   description: "Reporting warehouse (Snowflake) — NOT yet connectable, see above"
+  #   known_tables: [orders, customers]
+
+  # A fifth example showing a BigQuery connection (TODO.md item 19 phase 3)
+  # — do NOT uncomment this in a real deployment yet, same reason as
+  # Snowflake above: sqlalchemy-bigquery's driver has no async SQLAlchemy
+  # engine support either, and BigQuery has a SECOND, independent reason its
+  # compiler/session adapters are rendering-only — its DBAPI resolves real
+  # Google credentials and builds a live client at engine-construction time,
+  # not connection time. Registering this connection will fail cleanly with
+  # that explanation the first time it's used, not silently misbehave — see
+  # TODO.md's BigQuery live-verification follow-up item.
+  # - id: bigquery_reporting
+  #   dialect: bigquery
+  #   connection_string: ${QUERYGATE_BIGQUERY_REPORTING_DB_URL}  # bigquery://gcp-project/dataset
+  #   description: "Reporting warehouse (BigQuery) — NOT yet connectable, see above"
+  #   known_tables: [orders, customers]

@@ -31,7 +31,7 @@ from querygate.execution import service as svc
 from querygate.execution.admission import QueueMode
 from querygate.execution.service import StructuredQueryService
 from querygate.policy.loader import PolicyStore, set_policy_store
-from querygate.policy.models import Policy
+from querygate.policy.models import ColumnMask, ColumnMaskKind, Policy, PurposePolicyDelta
 from querygate.query_ast.models import (
     ArrayAggSelectItem,
     CaseSelectItem,
@@ -504,10 +504,30 @@ def test_audit_sink_backend_locally_readable_is_exhaustively_classified():
         AuditSinkBackend.NONE: False,
         AuditSinkBackend.JSONL: True,
         AuditSinkBackend.JSONL_CHAINED: True,
+        AuditSinkBackend.JSONL_CHAINED_S3_WORM: True,
     }
     assert set(expected) == set(AuditSinkBackend)
     for backend, readable in expected.items():
         assert backend.is_locally_readable() is readable, backend
+
+
+def test_audit_sink_backend_envelope_wrapping_is_exhaustively_classified():
+    """The sibling capability lookup this item added alongside
+    is_locally_readable(): whether a backend's local file wraps events in a
+    hash-chain envelope readers must unwrap (TODO.md item 134's Decision
+    Log — every `require_envelope=...` call site must use this instead of
+    comparing against AuditSinkBackend.JSONL_CHAINED alone)."""
+    from querygate.core.config import AuditSinkBackend
+
+    expected = {
+        AuditSinkBackend.NONE: False,
+        AuditSinkBackend.JSONL: False,
+        AuditSinkBackend.JSONL_CHAINED: True,
+        AuditSinkBackend.JSONL_CHAINED_S3_WORM: True,
+    }
+    assert set(expected) == set(AuditSinkBackend)
+    for backend, wraps in expected.items():
+        assert backend.wraps_events_in_a_hash_chain_envelope() is wraps, backend
 
 
 def test_jsonl_sink_appends_versioned_events_with_private_file_mode(tmp_path):
@@ -721,6 +741,176 @@ async def test_non_delegated_request_has_no_actor_fields(tmp_path):
     # request carries no actor_id at all (never a misleading empty attribution).
     assert "actor_id" not in event
     assert event["delegation_chain"] == []
+
+
+def test_purpose_is_persisted_in_the_audit_event_unlike_intent(tmp_path):
+    """TODO.md item 145 (F7): `purpose` is a fixed token from an operator
+    allow-list, not caller-authored prose like `intent` — so, unlike
+    `intent`, it IS persisted to the audit sink."""
+    path = tmp_path / "purpose.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    audit_query(
+        connection_id="demo",
+        sql="SELECT 1",
+        intent="do not persist this",
+        purpose="fraud_review",
+        query_shape={"from": "customers"},
+        duration_ms=1,
+    )
+    event = json.loads(path.read_text())
+    assert event["purpose"] == "fraud_review"
+    assert "intent" not in event
+    assert "do not persist this" not in path.read_text()
+
+
+def test_audit_event_excludes_purpose_key_when_not_declared(tmp_path):
+    path = tmp_path / "no_purpose.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    audit_query(
+        connection_id="demo",
+        sql="SELECT 1",
+        query_shape={"from": "customers"},
+        duration_ms=1,
+    )
+    event = json.loads(path.read_text())
+    assert "purpose" not in event
+
+
+@pytest.mark.asyncio
+async def test_execute_persists_the_declared_purpose_end_to_end(tmp_path):
+    path = tmp_path / "e2e_purpose.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    table = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("email", sa.String(200)),
+    )
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1, "email": "x@example.com"}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    query = StructuredQuery(
+        from_table="customers", select=["customers.id"], limit=10, purpose="fraud_review"
+    )
+    set_policy_store(PolicyStore(default=Policy(allowed_purposes=["fraud_review"]), overrides={}))
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query)
+
+    event = json.loads(path.read_text())
+    assert event["purpose"] == "fraud_review"
+
+
+@pytest.mark.asyncio
+async def test_masked_columns_audit_field_reflects_a_purpose_added_mask(tmp_path):
+    """TODO.md item 145 regression (found by `security-invariant-reviewer`
+    2026-08-05): the compiler correctly applies a purpose delta's mask to
+    the compiled SQL either way, but `masked_columns` used to be computed
+    from the un-narrowed policy — understating which columns were actually
+    masked in the persisted audit trail."""
+    path = tmp_path / "masked_purpose.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    table = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("email", sa.String(200)),
+    )
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1, "email": "x@example.com"}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    query = StructuredQuery(
+        from_table="customers",
+        select=["customers.id", "customers.email"],
+        limit=10,
+        purpose="support",
+    )
+    set_policy_store(
+        PolicyStore(
+            default=Policy(
+                allowed_purposes=["support"],
+                purpose_policies={
+                    "support": PurposePolicyDelta(
+                        column_masks={
+                            "customers": [ColumnMask(column="email", kind=ColumnMaskKind.NULL)]
+                        }
+                    )
+                },
+            ),
+            overrides={},
+        )
+    )
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query)
+
+    event = json.loads(path.read_text())
+    assert event["masked_columns"] == ["email"]
+
+
+@pytest.mark.asyncio
+async def test_declared_purpose_is_not_persisted_on_a_connection_without_purpose_gating(tmp_path):
+    """TODO.md item 145 redaction regression (found by `security-invariant-reviewer`
+    2026-08-05): `Policy.allowed_purposes` empty means purpose-gating is off for
+    this connection — a declared `purpose` must be INERT, not merely unenforced.
+    Persisting it anyway turns `purpose` into exactly the free-text-into-the-
+    audit-log channel `intent` was deliberately excluded to close, just under a
+    different field name, on every connection that hasn't opted into the gate
+    (the default)."""
+    path = tmp_path / "unrestricted_purpose.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    table = sa.Table(
+        "customers",
+        sa.MetaData(),
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("email", sa.String(200)),
+    )
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = [{"id": 1, "email": "x@example.com"}]
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @asynccontextmanager
+    async def _scope(*args, **kwargs):
+        yield mock_session
+
+    query = StructuredQuery(
+        from_table="customers",
+        select=["customers.id"],
+        limit=10,
+        purpose="arbitrary caller-authored text, not from any allow-list",
+    )
+    # allowed_purposes is empty (the default) — this connection never opted
+    # into purpose-gating.
+    set_policy_store(PolicyStore(default=Policy(), overrides={}))
+    with (
+        patch.object(svc, "validate_schema", AsyncMock(return_value={"customers": table})),
+        patch.object(svc, "session_scope", _scope),
+    ):
+        service = StructuredQueryService(connection_id="demo")
+        await service.execute(query)
+
+    event = json.loads(path.read_text())
+    assert "purpose" not in event
+    assert "arbitrary caller-authored text" not in path.read_text()
 
 
 @pytest.mark.asyncio

@@ -1442,6 +1442,7 @@ class SetOpSpec(pyd.BaseModel):
     )
     arms: List["StructuredQuery"] = pyd.Field(
         min_length=1,
+        max_length=50,  # TODO.md item 139: see StructuredQuery.select's field for the rationale.
         description="The further queries to combine with this one, in order.",
     )
 
@@ -1518,6 +1519,16 @@ class StructuredQuery(pyd.BaseModel):
     )
     select: List[SelectItem] = pyd.Field(
         min_length=1,
+        # TODO.md item 139: a hard structural ceiling, not the operator-tunable
+        # Policy.max_select_columns (default 30) checked later in
+        # validation/policy_validation.py. This exists so a pathologically
+        # large list (tens of thousands of items) is rejected at request-
+        # parsing time — before execution/service.py's normalize_query_shape
+        # ever serializes it into one oversized audit-log line, regardless of
+        # whether the query would go on to be policy-rejected anyway. Sized
+        # with generous headroom over any realistic operator-raised policy
+        # cap, not tuned to it.
+        max_length=1000,
         description=(
             'Each item is EITHER a bare "Table.Column" string, OR an object: '
             "{fn, col, as} for an aggregate, or {col, granularity, as} for a date_bucket."
@@ -1527,7 +1538,10 @@ class StructuredQuery(pyd.BaseModel):
         default=False,
         description="De-duplicate result rows (SELECT DISTINCT) across the full select list.",
     )
-    joins: List[JoinSpec] = pyd.Field(default_factory=list)
+    joins: List[JoinSpec] = pyd.Field(
+        default_factory=list,
+        max_length=200,  # TODO.md item 139: see `select`'s field for the rationale.
+    )
     where: Optional[WhereNode] = pyd.Field(
         default=None,
         description=(
@@ -1537,6 +1551,7 @@ class StructuredQuery(pyd.BaseModel):
     )
     group_by: List[str] = pyd.Field(
         default_factory=list,
+        max_length=500,  # TODO.md item 139: see `select`'s field for the rationale.
         description="Table.Column refs, or a date_bucket select item's alias.",
     )
     having: Optional[WhereNode] = pyd.Field(
@@ -1552,6 +1567,7 @@ class StructuredQuery(pyd.BaseModel):
     )
     order_by: List[OrderBySpec] = pyd.Field(
         default_factory=list,
+        max_length=500,  # TODO.md item 139: see `select`'s field for the rationale.
         description="May reference a Table.Column or a select item's alias.",
     )
     limit: Optional[int] = pyd.Field(default=None, ge=1)
@@ -1569,6 +1585,7 @@ class StructuredQuery(pyd.BaseModel):
     )
     correlate: List[str] = pyd.Field(
         default_factory=list,
+        max_length=50,  # TODO.md item 139: see `select`'s field for the rationale.
         description=(
             "ONLY on a subquery (an exists_subquery or value_subquery): the outer "
             "Table.Column references this subquery is permitted to read, e.g. "
@@ -1582,6 +1599,7 @@ class StructuredQuery(pyd.BaseModel):
     )
     ctes: List[CteSpec] = pyd.Field(
         default_factory=list,
+        max_length=50,  # TODO.md item 139: see `select`'s field for the rationale.
         description=(
             "Named WITH blocks computed before this query and referred to by name in "
             "`from`/`joins[].table`, for multi-stage analysis in one statement "
@@ -1596,6 +1614,20 @@ class StructuredQuery(pyd.BaseModel):
         description=(
             "Brief natural-language summary of the ask that led to this query — logged "
             "with the compiled SQL for audit/debugging, never returned to the caller."
+        ),
+    )
+    purpose: Optional[str] = pyd.Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Closed-set purpose token this query is declared for (TODO.md item 145, "
+            "feature F7 — purpose-bound access), e.g. 'fraud_review'. Checked against "
+            "the connection's Policy.allowed_purposes and, if valid, narrows the "
+            "effective policy via Policy.purpose_policies — never widens it. Only the "
+            "TOP-LEVEL query's purpose is consulted; one set on a cte body, a set_op "
+            "arm, or a subquery is inert, the same as `intent`. Unlike `intent` (free "
+            "text, logged but never enforced), this is a fixed token from an "
+            "operator-configured allow-list, so it IS persisted in the audit event."
         ),
     )
 
@@ -1616,19 +1648,19 @@ class StructuredQuery(pyd.BaseModel):
         ]
         physical_counts: Dict[str, int] = {}
         for physical, _alias in occurrences:
-            key = physical.lower()
+            key = physical.casefold()
             physical_counts[key] = physical_counts.get(key, 0) + 1
 
         seen: Set[str] = set()
         for physical, alias in occurrences:
-            effective = (alias or physical).lower()
+            effective = (alias or physical).casefold()
             if effective in seen:
                 raise ValueError(
                     f"Duplicate table/alias {effective!r} — every from/join effective "
                     "name (its alias if given, else its table name) must be unique"
                 )
             seen.add(effective)
-            if physical_counts[physical.lower()] > 1 and alias is None:
+            if physical_counts[physical.casefold()] > 1 and alias is None:
                 raise ValueError(
                     f"Table {physical!r} is used more than once in this query "
                     "(a self-join) — every occurrence must have an explicit alias, "
@@ -1727,7 +1759,7 @@ class StructuredQuery(pyd.BaseModel):
         """
         seen: Set[str] = set()
         for spec in self.ctes:
-            key = spec.name.lower()
+            key = spec.name.casefold()
             if key in seen:
                 raise ValueError(
                     f"Duplicate cte name {spec.name!r} — every cte name must be unique"
@@ -1743,28 +1775,59 @@ class StructuredQuery(pyd.BaseModel):
 # CaseWhen -> WhereNode -> Predicate -> Expression). Rebuild every model in both
 # cycles once all names are defined so the forward refs resolve. Order matters
 # least once all names exist, but do the leaf types first.
-BinaryOpExpr.model_rebuild()
-FunctionExpr.model_rebuild()
-CastExpr.model_rebuild()
-ExtractExpr.model_rebuild()
-DateAddExpr.model_rebuild()
-CaseExpr.model_rebuild()
-AggregateSelectItem.model_rebuild()
-ExpressionSelectItem.model_rebuild()
-WindowCall.model_rebuild()
-WindowSelectItem.model_rebuild()
-WindowExpr.model_rebuild()
-Predicate.model_rebuild()
-WhereGroup.model_rebuild()
-CaseWhen.model_rebuild()
-CaseSelectItem.model_rebuild()
-# JoinSpec.condition is a WhereNode (item 103), so JoinSpec joins the cycle too —
-# it is declared before Predicate/WhereGroup and would otherwise keep an
-# unresolved forward ref, making every `condition` fail to validate at request time.
-JoinSpec.model_rebuild()
-# SetOpSpec.arms is a forward ref to StructuredQuery, which is declared after it
-# (item 104) — a third cycle into the same knot, resolved the same way.
-SetOpSpec.model_rebuild()
-# CteSpec.query is a forward ref to StructuredQuery for the same reason (item 105).
-CteSpec.model_rebuild()
-StructuredQuery.model_rebuild()
+#
+# Exposed as a named, re-callable function (not just inline statements) so a
+# consumer that generates a schema from these models in a shared process — the
+# `io.github.agitmit/structured-query-ast` MCP extension's schema generator
+# (`mcp/extensions.py`, TODO.md item 131) — can force a clean re-derivation of
+# every core schema in the cycle immediately before generating, rather than
+# trusting whatever schema-cache state these classes happen to hold at that
+# moment. `model_rebuild(force=True)` re-derives a class's core schema from its
+# own `model_fields`, so re-running this is always safe and idempotent.
+RECURSIVE_AST_CYCLE_MODELS: tuple[type[pyd.BaseModel], ...] = (
+    BinaryOpExpr,
+    FunctionExpr,
+    CastExpr,
+    ExtractExpr,
+    DateAddExpr,
+    CaseExpr,
+    AggregateSelectItem,
+    ExpressionSelectItem,
+    WindowCall,
+    WindowSelectItem,
+    WindowExpr,
+    Predicate,
+    WhereGroup,
+    CaseWhen,
+    CaseSelectItem,
+    # JoinSpec.condition is a WhereNode (item 103), so JoinSpec joins the cycle
+    # too — it is declared before Predicate/WhereGroup and would otherwise keep
+    # an unresolved forward ref, making every `condition` fail to validate at
+    # request time.
+    JoinSpec,
+    # SetOpSpec.arms is a forward ref to StructuredQuery, declared after it
+    # (item 104) — a third cycle into the same knot, resolved the same way.
+    SetOpSpec,
+    # CteSpec.query is a forward ref to StructuredQuery for the same reason
+    # (item 105).
+    CteSpec,
+    StructuredQuery,
+)
+
+
+def rebuild_recursive_ast_cycle(*, force: bool = False) -> None:
+    """(Re)resolve every forward ref in the recursive AST cycle above.
+
+    Called once, unforced, at import time (below) so the module always
+    imports with every forward ref already resolved. `force=True` re-derives
+    each class's core schema from its current `model_fields` regardless of
+    whether pydantic considers it already built — the generator this module
+    docstring's cycle note points at uses that to guarantee a canonical
+    schema regardless of other schema-generation activity elsewhere in a
+    shared process.
+    """
+    for model in RECURSIVE_AST_CYCLE_MODELS:
+        model.model_rebuild(force=force)
+
+
+rebuild_recursive_ast_cycle()

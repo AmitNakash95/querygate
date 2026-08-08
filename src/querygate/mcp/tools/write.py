@@ -11,18 +11,23 @@ Note: like the other tool modules, deliberately does NOT use
 `from __future__ import annotations` — see mcp/tools/connections.py.
 """
 
-from typing import Annotated, List, Literal, Optional, Union
+from typing import Annotated, Dict, List, Literal, Optional, Union
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
+from mcp.types import InputRequiredResult
 from pydantic import BaseModel, Field
 
+from querygate.execution.approval import write_fingerprint
 from querygate.execution.write_execution import (
     WriteBatchItemResult,
     WriteExecutionService,
 )
 from querygate.execution.write_preview import WritePreview, WritePreviewService
 from querygate.mcp.auth import get_mcp_caller, get_mcp_config
-from querygate.mcp.elicitation import build_elicitation_resolver
+from querygate.mcp.elicitation import (
+    build_pending_input_required,
+    resolve_approval_tokens_from_retry,
+)
 from querygate.mcp.exceptions import MCPErrorResult, safe_mcp_tool
 from querygate.mcp.server import mcp_server
 from querygate.policy.loader import get_policy
@@ -38,6 +43,14 @@ _WriteStatement = Annotated[
     Union[InsertStatement, UpdateStatement, DeleteStatement, UpsertStatement],
     Field(discriminator="op"),
 ]
+
+# TODO.md item 130: `x-mcp-header` annotation, mirrored into
+# `Mcp-Param-Connection` for a fronting gateway — see mcp/tools/query.py's
+# `_CONNECTION_FIELD` for the full rationale and the join-connection caveat.
+_CONNECTION_FIELD = Field(
+    description="Connection id from list_connections.",
+    json_schema_extra={"x-mcp-header": "Connection"},
+)
 
 
 class WritePreviewBatchResult(BaseModel):
@@ -71,7 +84,7 @@ class WriteExecuteBatchResult(BaseModel):
 )
 @safe_mcp_tool
 async def run_structured_writes(
-    connection: Annotated[str, Field(description="Connection id from list_connections.")],
+    connection: Annotated[str, _CONNECTION_FIELD],
     writes: Annotated[
         List[_WriteStatement],
         Field(min_length=1, description="One or more write ASTs to preview or execute, in order."),
@@ -95,7 +108,7 @@ async def run_structured_writes(
         ),
     ] = False,
     ctx: Context = None,
-) -> Union[WritePreviewBatchResult, WriteExecuteBatchResult, MCPErrorResult]:
+) -> Union[WritePreviewBatchResult, WriteExecuteBatchResult, InputRequiredResult, MCPErrorResult]:
     caller = get_mcp_caller()
     # Cap the batch before ANY statement is validated, compiled, previewed, or
     # run (item 109) — the read path's `validate_batch_size` equivalent, which
@@ -107,15 +120,40 @@ async def run_structured_writes(
         return WritePreviewBatchResult(results=previews)
 
     service = WriteExecutionService(connection_id=connection, principal=caller, surface="mcp")
-    # In-session human approval for a gated write (item 92 machinery, item 93):
-    # opt-in and off by default. When unavailable, a gated write stays fail-closed
-    # as that item's error. (Atomic mode fails closed on a gated write instead.)
-    resolver = (
-        None
-        if atomic
-        else (
-            build_elicitation_resolver(ctx, caller, get_mcp_config()) if ctx is not None else None
+    # In-session human approval for a gated write (item 92 machinery, item 93,
+    # ported to MRTR by item 128): opt-in and off by default. When
+    # unavailable, a gated write stays fail-closed as that item's error.
+    # Atomic mode fails closed on a gated write instead (no per-item token
+    # channel there — unchanged from before this port).
+    config = get_mcp_config()
+    approval_tokens: Dict[str, str] = {}
+    if ctx is not None and not atomic:
+        fingerprints_by_key = {f"w{i}": write_fingerprint(w) for i, w in enumerate(writes)}
+        approval_tokens = resolve_approval_tokens_from_retry(
+            ctx=ctx,
+            fingerprints_by_key=fingerprints_by_key,
+            caller=caller,
+            config=config,
+            connection_id=connection,
         )
-    )
-    results = await service.execute_many(writes, approval_resolver=resolver, atomic=atomic)
+    results = await service.execute_many(writes, approval_tokens=approval_tokens, atomic=atomic)
+    # Only offer in-session approval when NOTHING in the batch has actually
+    # committed yet. Each non-atomic item is its own already-committed
+    # transaction; MRTR's retry necessarily resubmits the identical `writes`
+    # argument, so once any item has run, returning InputRequiredResult here
+    # would re-run (and re-commit) it a second time on retry. A gated item in
+    # a partially-executed batch instead stays fail-closed with its existing
+    # approval_fingerprint/approval_reasons error, the same as when the
+    # channel is disabled.
+    if ctx is not None and not atomic and not any(r.executed for r in results):
+        pending = [
+            (f"w{i}", r.approval_fingerprint, r.approval_reasons or [])
+            for i, r in enumerate(results)
+            if r.approval_fingerprint is not None
+        ]
+        input_required = build_pending_input_required(
+            items=pending, config=config, caller=caller, connection_id=connection
+        )
+        if input_required is not None:
+            return input_required
     return WriteExecuteBatchResult(results=results)

@@ -107,8 +107,57 @@ def test_table_must_be_writable():
 
 def test_written_column_must_be_write_allowed():
     policy = _writable(denied_write_columns={"orders": ["status"]})
-    with pytest.raises(PolicyViolationError, match="not writable"):
+    # Match the column-check's own message, not just "not writable" -- that
+    # substring also matches `table_writable`'s rejection, so a match this
+    # loose can't tell the two checks apart (found by `test-contract-reviewer`
+    # while reviewing item 149's fix).
+    with pytest.raises(PolicyViolationError, match=r"Column orders\.status"):
         validate_write_policy(_update(), policy, _CONN)
+
+
+def test_denied_write_column_still_applies_when_the_configured_table_key_casing_differs():
+    # `WritePolicy.write_column_allowed` previously looked up `denied_write_columns`
+    # by an exact-match `.get(table_name.lower(), [])`, so a table key configured
+    # with any casing other than all-lowercase (e.g. "Orders", the same casing
+    # `allowed_tables` legitimately uses elsewhere in the same policy) never
+    # matched at all -- the deny list was silently inert regardless of the
+    # statement's own table casing. Found while fixing TODO.md item 149.
+    wp = WritePolicy(
+        enabled=True,
+        allowed_tables=["orders"],
+        allowed_operations=["update"],
+        denied_write_columns={"Orders": ["status"]},
+    )
+    policy = Policy(write=wp)
+    with pytest.raises(PolicyViolationError, match=r"Column orders\.status"):
+        validate_write_policy(_update(), policy, _CONN)
+
+
+def test_denied_write_column_wildcard_entry_applies_to_every_table():
+    # The "*" wildcard term in `write_column_allowed` (mirroring the read-side
+    # `denied_columns` convention) had no test at all -- deleting it left the
+    # suite green (found by `test-contract-reviewer` while reviewing item
+    # 149's fix).
+    wp = WritePolicy(
+        enabled=True,
+        allowed_tables=["orders"],
+        allowed_operations=["update"],
+        denied_write_columns={"*": ["status"]},
+    )
+    policy = Policy(write=wp)
+    with pytest.raises(PolicyViolationError, match=r"Column orders\.status"):
+        validate_write_policy(_update(), policy, _CONN)
+
+
+def test_table_writable_is_case_insensitive():
+    # `WritePolicy.table_writable`'s own case-insensitivity (independent of
+    # `write_column_allowed`) had no direct test -- replacing `.casefold()`
+    # with a bare `==` there would still pass every other test in this file
+    # (found by `test-contract-reviewer` while reviewing item 149's fix).
+    wp = WritePolicy(enabled=True, allowed_tables=["Orders"], allowed_operations=["update"])
+    assert wp.table_writable("orders") is True
+    assert wp.table_writable("ORDERS") is True
+    assert wp.table_writable("customers") is False
 
 
 def test_where_column_denied_by_read_policy_is_rejected():

@@ -23,8 +23,10 @@ from querygate.audit.ledger import (
     compute_record_hash,
     extract_receipt_for_event_id,
     make_record,
+    resolve_ledger_key,
     unwrap_envelope,
     verify_chain,
+    verify_envelope_hash,
     verify_receipt,
 )
 from querygate.audit.sinks import (
@@ -254,6 +256,27 @@ def test_sink_refuses_to_resume_a_corrupt_ledger(tmp_path):
         HashChainedAuditSink(str(ledger), key=b"k")
 
 
+def test_sink_refuses_to_resume_a_ledger_whose_tail_has_no_newline_within_bounds(tmp_path):
+    """TODO.md item 139: `_read_last_line` used to hand-roll its own tail
+    scan, growing its read window without bound for a trailing region with no
+    newline at all — worst case reading the whole file into memory once at
+    process startup. It now delegates to `audit.file_reader.iter_lines_reverse`
+    (item 138's bounded reader), so a tail this oversized fails loud instead —
+    the same "refuse to silently fork the chain" posture as an unparseable
+    last line, not a resource exhaustion risk on boot."""
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_bytes(b"x" * (2 * 1024 * 1024))  # no newline anywhere, > max_line_bytes (1 MiB)
+    # Matched against the BOUND-specific phrase, not just "Cannot resume" —
+    # found by `test-contract-reviewer` (2026-08-05): the pre-item-139
+    # hand-rolled reader would have read this whole file, then failed to
+    # parse it as a LedgerRecord and raised a *different* "Cannot resume...
+    # is not a valid ledger record" message, which also matches the looser
+    # pattern — so reverting the item-139 fix would NOT have failed this
+    # test under the old assertion.
+    with pytest.raises(ValueError, match="could not be read within the bounded-read limits"):
+        HashChainedAuditSink(str(ledger), key=b"k")
+
+
 def test_chained_envelope_adds_no_new_event_data(tmp_path):
     # Redaction invariant: the embedded event equals the plain event dump, and
     # the envelope adds only seq/prev_hash/hash — nothing derived from values.
@@ -321,3 +344,64 @@ def test_unwrap_envelope_does_not_unwrap_a_partial_envelope_only_event_and_hash(
     # genuine chain record — which always carries seq/prev_hash too — unwraps.
     partial = {"event": {"event_type": "query.execution"}, "hash": "deadbeef"}
     assert unwrap_envelope(partial) == partial
+
+
+# --- verify_envelope_hash (TODO.md item 137) — direct unit tests for its
+# three return states, found missing by `test-contract-reviewer` (2026-08-05):
+# every reader exercises this indirectly, but nothing pinned the primitive's
+# own contract, including its ValidationError branch. ------------------------
+
+
+def test_verify_envelope_hash_returns_none_for_a_plain_event_not_an_envelope():
+    event = _event("q1")
+    assert verify_envelope_hash(event) is None
+
+
+def test_verify_envelope_hash_returns_true_for_a_genuine_unkeyed_record():
+    record = make_record(0, GENESIS_PREV_HASH, _event("q1"))
+    raw = json.loads(record.model_dump_json())
+    assert verify_envelope_hash(raw) is True
+
+
+def test_verify_envelope_hash_returns_true_for_a_genuine_keyed_record():
+    record = make_record(0, GENESIS_PREV_HASH, _event("q1"), key=b"k")
+    raw = json.loads(record.model_dump_json())
+    assert verify_envelope_hash(raw, key=b"k") is True
+
+
+def test_verify_envelope_hash_returns_false_for_a_mismatched_hash():
+    record = make_record(0, GENESIS_PREV_HASH, _event("q1"))
+    raw = json.loads(record.model_dump_json())
+    raw["hash"] = "anything"
+    assert verify_envelope_hash(raw) is False
+
+
+def test_verify_envelope_hash_returns_false_when_verified_with_the_wrong_key():
+    record = make_record(0, GENESIS_PREV_HASH, _event("q1"), key=b"real-key")
+    raw = json.loads(record.model_dump_json())
+    assert verify_envelope_hash(raw, key=b"wrong-key") is False
+
+
+def test_verify_envelope_hash_returns_false_for_a_shape_valid_but_type_invalid_envelope():
+    """The `except pyd.ValidationError: return False` branch — a dict with
+    all four envelope keys (so it passes `unwrap_envelope`'s own shape check)
+    but a field of the wrong TYPE for `LedgerRecord` (a string `seq` instead
+    of an int). Removing this except and letting the exception propagate
+    uncaught would crash every reader's scan on one malformed line instead of
+    counting it `malformed`."""
+    raw = {
+        "seq": "not-an-int",
+        "prev_hash": GENESIS_PREV_HASH,
+        "event": {"event_type": "query.execution"},
+        "hash": "deadbeef",
+    }
+    assert verify_envelope_hash(raw) is False
+
+
+def test_resolve_ledger_key_converts_a_non_blank_string_to_bytes():
+    assert resolve_ledger_key("secret") == b"secret"
+
+
+def test_resolve_ledger_key_treats_blank_as_no_key():
+    assert resolve_ledger_key("") is None
+    assert resolve_ledger_key("   ") is None

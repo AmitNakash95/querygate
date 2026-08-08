@@ -8,7 +8,13 @@ import pytest
 
 from querygate.core.auth import Principal
 from querygate.core.exceptions import PolicyViolationError
-from querygate.policy.models import MandatoryRowFilter, Policy
+from querygate.policy.models import (
+    ColumnMask,
+    ColumnMaskKind,
+    MandatoryRowFilter,
+    Policy,
+    PurposePolicyDelta,
+)
 
 
 def test_requires_value_or_from_claim():
@@ -68,3 +74,166 @@ def test_min_group_size_rejects_k_below_two():
         Policy(min_group_size=1)
     with pytest.raises(ValueError):
         Policy(min_group_size=0)
+
+
+# --- Policy.for_purpose (TODO.md item 145, feature F7) ---------------------
+
+
+def test_for_purpose_none_returns_the_same_policy_unchanged():
+    policy = Policy(denied_tables=["secrets"])
+    assert policy.for_purpose(None) is policy
+
+
+def test_for_purpose_with_no_configured_delta_returns_the_same_policy_unchanged():
+    policy = Policy(allowed_purposes=["support"], denied_tables=["secrets"])
+    assert policy.for_purpose("support") is policy
+
+
+def test_for_purpose_unions_denied_tables():
+    policy = Policy(
+        denied_tables=["secrets"],
+        purpose_policies={"support": PurposePolicyDelta(denied_tables=["billing"])},
+    )
+    narrowed = policy.for_purpose("support")
+    assert set(narrowed.denied_tables) == {"secrets", "billing"}
+    # The base policy itself must be untouched — for_purpose returns a new
+    # object, never mutates the one it was called on.
+    assert policy.denied_tables == ["secrets"]
+
+
+def test_for_purpose_unions_denied_columns_per_table():
+    policy = Policy(
+        denied_columns={"orders": ["ssn"]},
+        purpose_policies={
+            "support": PurposePolicyDelta(denied_columns={"orders": ["credit_card"]})
+        },
+    )
+    narrowed = policy.for_purpose("support")
+    assert set(narrowed.denied_columns["orders"]) == {"ssn", "credit_card"}
+
+
+def test_for_purpose_appends_mandatory_row_filters():
+    base_filter = MandatoryRowFilter(table="orders", column="tenant_id", value="acme")
+    delta_filter = MandatoryRowFilter(table="orders", column="region", value="us")
+    policy = Policy(
+        mandatory_row_filters=[base_filter],
+        purpose_policies={"support": PurposePolicyDelta(mandatory_row_filters=[delta_filter])},
+    )
+    narrowed = policy.for_purpose("support")
+    assert narrowed.mandatory_row_filters == [base_filter, delta_filter]
+
+
+def test_for_purpose_adds_a_mask_to_a_previously_unmasked_column():
+    mask = ColumnMask(column="email", kind=ColumnMaskKind.NULL)
+    policy = Policy(
+        purpose_policies={"support": PurposePolicyDelta(column_masks={"users": [mask]})}
+    )
+    narrowed = policy.for_purpose("support")
+    assert narrowed.column_mask("users", "email") == mask
+    # The base (unnarrowed) policy must still see the column as unmasked.
+    assert policy.column_mask("users", "email") is None
+
+
+def test_for_purpose_mask_wins_over_a_base_mask_on_the_same_column():
+    base_mask = ColumnMask(column="ssn", kind=ColumnMaskKind.LAST, length=4)
+    purpose_mask = ColumnMask(column="ssn", kind=ColumnMaskKind.NULL)
+    policy = Policy(
+        column_masks={"users": [base_mask]},
+        purpose_policies={"support": PurposePolicyDelta(column_masks={"users": [purpose_mask]})},
+    )
+    narrowed = policy.for_purpose("support")
+    assert narrowed.column_mask("users", "ssn") == purpose_mask
+
+
+def test_for_purpose_never_removes_a_base_deny_or_mandatory_filter():
+    """The 'narrows never widens' invariant, stated as a test: whatever the
+    base Policy already restricts stays restricted after for_purpose."""
+    base_filter = MandatoryRowFilter(table="orders", column="tenant_id", value="acme")
+    policy = Policy(
+        denied_tables=["secrets"],
+        denied_columns={"orders": ["ssn"]},
+        mandatory_row_filters=[base_filter],
+        purpose_policies={"support": PurposePolicyDelta()},
+    )
+    narrowed = policy.for_purpose("support")
+    assert "secrets" in narrowed.denied_tables
+    assert "ssn" in narrowed.denied_columns["orders"]
+    assert base_filter in narrowed.mandatory_row_filters
+
+
+def test_column_allowed_table_key_matching_uses_casefold_not_lower():
+    # `.lower()` and `.casefold()` disagree on a handful of real Unicode
+    # identifiers: "STRASSE".lower() == "strasse" but "straße".lower() ==
+    # "straße" (unchanged, not "strasse") -- while .casefold() unifies both
+    # to "strasse". `Policy._ci_lookup` used to use `.lower()`, the one
+    # holdout against every other case-insensitive table-key comparison in
+    # this codebase (`Policy._merge_table_keyed`, every table-keyed helper in
+    # `admin/access_diff.py`) already using `.casefold()` (TODO.md item 149).
+    policy = Policy(denied_columns={"STRASSE": ["hausnummer"]})
+    assert policy.column_allowed("straße", "hausnummer") is False
+
+
+def test_table_allowed_table_key_matching_uses_casefold_not_lower():
+    policy = Policy(allowed_tables=["STRASSE"])
+    assert policy.table_allowed("straße") is True
+
+
+def test_column_mask_table_key_matching_uses_casefold_not_lower():
+    mask = ColumnMask(column="hausnummer", kind=ColumnMaskKind.NULL)
+    policy = Policy(column_masks={"STRASSE": [mask]})
+    assert policy.column_mask("straße", "hausnummer") is not None
+
+
+def test_for_purpose_mask_merge_is_case_insensitive_on_the_table_key():
+    """Found by `security-invariant-reviewer` (2026-08-05): a plain dict merge
+    keyed by literal table-name casing would let a case-mismatched delta key
+    (e.g. "Customers" vs base's "customers") silently DROP the base's own
+    mask for that table — `_ci_lookup`'s first-match-wins read would only
+    ever see whichever key it inserted last, unmasking a column the base
+    policy protects. Real column/table casing legitimately differs across
+    reflection sources (`_ci_lookup`'s own docstring: "table-name casing in
+    policy.yaml isn't guaranteed to match what schema reflection returns")."""
+    base_mask = ColumnMask(column="email", kind=ColumnMaskKind.NULL)
+    delta_mask = ColumnMask(column="phone", kind=ColumnMaskKind.NULL)
+    policy = Policy(
+        column_masks={"customers": [base_mask]},
+        purpose_policies={"support": PurposePolicyDelta(column_masks={"Customers": [delta_mask]})},
+    )
+    narrowed = policy.for_purpose("support")
+    # Both masks must survive under whichever casing was used — the base's
+    # email mask must not vanish just because the delta spelled the table
+    # differently.
+    assert narrowed.column_mask("customers", "email") == base_mask
+    assert narrowed.column_mask("Customers", "phone") == delta_mask
+
+
+def test_for_purpose_denied_columns_merge_is_case_insensitive_on_the_table_key():
+    """Same defect class as the mask test above, opposite direction: a
+    case-mismatched delta key must not make the delta's own added deny
+    silently fail to apply."""
+    policy = Policy(
+        denied_columns={"orders": ["ssn"]},
+        purpose_policies={
+            "support": PurposePolicyDelta(denied_columns={"Orders": ["credit_card"]})
+        },
+    )
+    narrowed = policy.for_purpose("support")
+    assert not narrowed.column_allowed("orders", "ssn")
+    assert not narrowed.column_allowed("Orders", "credit_card")
+
+
+def test_for_purpose_mask_merge_preserves_a_base_mask_on_a_different_column_same_table():
+    """A naive `dict.update()`-style merge (replace the whole per-table list
+    rather than union it) would drop this base mask just because the delta
+    also touches this table — even with matching casing. Distinct from the
+    case-mismatch tests above: this is the same-key merge-completeness
+    check."""
+    base_mask = ColumnMask(column="ssn", kind=ColumnMaskKind.NULL)
+    delta_mask = ColumnMask(column="email", kind=ColumnMaskKind.NULL)
+    policy = Policy(
+        column_masks={"users": [base_mask]},
+        purpose_policies={"support": PurposePolicyDelta(column_masks={"users": [delta_mask]})},
+    )
+    narrowed = policy.for_purpose("support")
+    assert narrowed.column_mask("users", "ssn") == base_mask
+    assert narrowed.column_mask("users", "email") == delta_mask

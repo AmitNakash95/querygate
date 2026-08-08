@@ -1075,6 +1075,144 @@ async def test_mcp_routing_header_present_over_non_object_json_body_fails_closed
 
 
 # --------------------------------------------------------------------------- #
+# TODO.md item 130: `connection` carries the `x-mcp-header` annotation, so a
+# conforming `2026-07-28` client mirrors it into `Mcp-Param-Connection`. The
+# spec's "Server Validation" MUST-reject rule is written generically ("the
+# values specified in the headers"), not scoped to `Mcp-Method`/`Mcp-Name`
+# alone — so the same confused-deputy defense item 127 built extends to this
+# header too: a gateway authorizing `Mcp-Param-Connection: analytics` while
+# the body's `params.arguments.connection` names a different connection must
+# be rejected, not silently executed against whatever the body says.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_mcp_param_connection_header_disagreeing_with_body_is_rejected():
+    """The literal confused-deputy scenario item 130 exists to let a gateway
+    prevent: a gateway that would only forward `Mcp-Param-Connection:
+    analytics` requests must not have that promise silently defeated by a
+    body whose actual `connection` argument names a different connection."""
+    _reset_mcp_session_manager()
+    arguments = {"connection": "prod_finance", "queries": [{"from": "customers", "select": ["x"]}]}
+    body = _mcp_call("run_structured_queries", arguments)
+    headers = {
+        **_MCP_HEADERS,
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "run_structured_queries",
+        "Mcp-Param-Connection": "analytics",
+    }
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", json=body, headers=headers)
+
+    assert resp.status_code == 400, f"got {resp.status_code}: {resp.text[:200]!r}"
+    payload = json.loads(resp.text)
+    assert payload["error"]["code"] == -32020, payload
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_matching_param_connection_header_passes_through():
+    """A caller (or gateway) that sends `Mcp-Param-Connection` in honest
+    agreement with the body's `connection` argument is unaffected — the
+    guard is a mismatch check, not a requirement to omit the header."""
+    _reset_mcp_session_manager()
+    arguments = {"connection": "demo", "queries": [{"from": "customers", "select": ["x"]}]}
+    body = _mcp_call("run_structured_queries", arguments)
+    headers = {
+        **_MCP_HEADERS,
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "run_structured_queries",
+        "Mcp-Param-Connection": "demo",
+    }
+    mock_result = StructuredQueryResult(rows=[], row_count=0, truncated=False, limit=50, offset=0)
+    app = create_app(_mcp_settings())
+    with patch(
+        f"{_SERVICE}.execute_many", new_callable=AsyncMock, return_value=[mock_result]
+    ) as m_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", json=body, headers=headers)
+
+    assert resp.status_code == 200, f"got {resp.status_code}: {resp.text[:200]!r}"
+    m_many.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mcp_param_connection_header_present_over_body_with_no_connection_argument_is_rejected():
+    """A header claiming a `connection` value when the body's arguments carry
+    none at all (e.g. a malformed/truncated body, or a tool that never had a
+    `connection` argument) must fail closed rather than compare against a
+    missing value and pass."""
+    _reset_mcp_session_manager()
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "list_connections", "arguments": {}},
+    }
+    headers = {**_MCP_HEADERS, "Mcp-Param-Connection": "analytics"}
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", json=body, headers=headers)
+
+    assert resp.status_code == 400, f"got {resp.status_code}: {resp.text[:200]!r}"
+    payload = json.loads(resp.text)
+    assert payload["error"]["code"] == -32020, payload
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_repeated_param_connection_header_is_rejected_not_first_match():
+    """Same first-match confused-deputy shape item 127 already closed for
+    `Mcp-Method`/`Mcp-Name`, extended to `Mcp-Param-Connection`: a repeated
+    header has no single source of truth for an intermediary to agree with
+    QueryGate about."""
+    _reset_mcp_session_manager()
+    arguments = {"connection": "demo", "queries": [{"from": "customers", "select": ["x"]}]}
+    body = _mcp_call("run_structured_queries", arguments)
+    headers = [(k, v) for k, v in _MCP_HEADERS.items()]
+    headers.append(("Mcp-Param-Connection", "demo"))
+    headers.append(("Mcp-Param-Connection", "something-else"))
+    app = create_app(_mcp_settings())
+    execute, explain, execute_many, explain_many = _patched_service()
+    with execute, explain, execute_many as m_many, explain_many:
+        async with (
+            app.router.lifespan_context(app),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url=_BASE_URL, follow_redirects=True
+            ) as client,
+        ):
+            resp = await client.post("/mcp/", json=body, headers=headers)
+
+    assert resp.status_code == 400, f"got {resp.status_code}: {resp.text[:200]!r}"
+    payload = json.loads(resp.text)
+    assert payload["error"]["code"] == -32020, payload
+    _assert_no_internal_leak(resp.text)
+    m_many.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------- #
 # The WRITE endpoints' deep-nesting boundary (gap found by item 116's audit: the
 # corpus above only ever pointed at the read routes, so a write filter's own
 # recursion depth was never fuzzed — and a write's WHERE is a different type since

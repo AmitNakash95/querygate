@@ -321,6 +321,58 @@ async def test_policy_simulation_uses_target_principal_and_redacts_filter_value(
 
 
 @pytest.mark.asyncio
+async def test_policy_simulation_mandatory_filter_match_survives_a_casefold_lower_disagreement(
+    tmp_path, monkeypatch
+):
+    # "STRASSE".casefold() == "straße".casefold() but "STRASSE".lower() != "straße".lower()
+    # (ß is not in .lower()'s ASCII-only fold). `policy.table_allowed`/`column_allowed`
+    # (called a few lines above the mandatory-filter match in `_test_policy`) already
+    # casefold, so the mandatory-filter match must too, or this simulator can report a
+    # simulated allowed=True verdict with no mandatory filter listed, for exactly the
+    # table/filter pair real execution would reject (TODO.md item 150).
+    set_policy_store(
+        PolicyStore(
+            default=Policy(enabled=False),
+            overrides={},
+            principal_overrides={
+                "reporting-agent": {
+                    "demo": {
+                        "enabled": True,
+                        "allowed_tables": ["STRASSE"],
+                        "mandatory_row_filters": [
+                            MandatoryRowFilter(
+                                table="straße", column="tenant_id", from_claim="tenant_id"
+                            ).model_dump()
+                        ],
+                    }
+                }
+            },
+        )
+    )
+    app = create_app(_settings(tmp_path, monkeypatch))
+    request = {
+        "principal": "reporting-agent",
+        "connection": "demo",
+        "table": "STRASSE",
+        "columns": [],
+        "claims": {},
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        response = await client.post("/api/v1/admin/ui/policy/test", json=request, headers=_auth())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mandatory_filters"] == [
+        {
+            "table": "straße",
+            "column": "tenant_id",
+            "source": "claim:tenant_id",
+            "satisfied": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_audit_browser_is_filtered_newest_first_and_redaction_safe(tmp_path, monkeypatch):
     audit_path = tmp_path / "audit.jsonl"
     events = [
@@ -376,6 +428,27 @@ async def test_audit_browser_is_filtered_newest_first_and_redaction_safe(tmp_pat
     assert page.json()["truncated"] is False
     assert "params" not in json.dumps(page.json())
     assert "rows" not in json.dumps(page.json())
+
+
+@pytest.mark.asyncio
+async def test_audit_browser_rejects_a_cursor_past_the_lowered_ceiling(tmp_path, monkeypatch):
+    """TODO.md item 140: the old cursor ceiling (1_000_000) let one request
+    retain on the order of a gigabyte of fully-parsed event dicts before
+    slicing the response page. Lowered to 5,000 — far past any real "load
+    more" admin session, but no longer six figures."""
+    app = create_app(_settings(tmp_path, monkeypatch))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        at_ceiling = await client.get(
+            "/api/v1/admin/ui/audit/events?cursor=5000",
+            headers=_auth(),
+        )
+        past_ceiling = await client.get(
+            "/api/v1/admin/ui/audit/events?cursor=5001",
+            headers=_auth(),
+        )
+
+    assert at_ceiling.status_code == 200
+    assert past_ceiling.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -451,10 +524,115 @@ async def test_audit_browser_reads_hash_chained_ledger(tmp_path, monkeypatch):
         )
 
     assert page.status_code == 200
-    assert page.json()["source"] == "jsonl"
+    assert page.json()["source"] == "jsonl_chained"
     assert page.json()["total"] == 1
     assert page.json()["malformed"] == 0
     assert page.json()["events"][0]["event_id"] == "query-1"
+
+
+@pytest.mark.asyncio
+async def test_audit_browser_rejects_a_forged_chain_record(tmp_path, monkeypatch):
+    """TODO.md item 137: a chain envelope whose own hash doesn't match its
+    contents (a record appended by an actor with file access, not derived from
+    a real emit) must never be displayed as a clean event — chain linkage
+    alone wouldn't catch this, since the forgery can still supply a
+    plausible-looking `prev_hash`/`seq`."""
+    from querygate.audit.ledger import GENESIS_PREV_HASH, LedgerRecord, make_record
+
+    audit_path = tmp_path / "audit.jsonl"
+    genuine = AuditEvent(
+        event_id="query-1",
+        connection_id="demo",
+        principal_id="agent-a",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "orders"},
+        duration_ms=4,
+    )
+    record = make_record(0, GENESIS_PREV_HASH, genuine.model_dump(mode="json", exclude_none=True))
+    forged_event = AuditEvent(
+        event_id="query-2",
+        connection_id="demo",
+        principal_id="agent-a",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "secret_table"},
+        duration_ms=4,
+    )
+    forged = LedgerRecord(
+        seq=1,
+        prev_hash=record.hash,
+        event=forged_event.model_dump(mode="json", exclude_none=True),
+        hash="anything",
+    )
+    audit_path.write_text(record.model_dump_json() + "\n" + forged.model_dump_json() + "\n")
+    app = create_app(
+        _settings(tmp_path, monkeypatch, audit_path=audit_path, audit_backend="jsonl_chained")
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        page = await client.get(
+            "/api/v1/admin/ui/audit/events?event_type=query.execution",
+            headers=_auth(),
+        )
+
+    assert page.status_code == 200
+    assert page.json()["source"] == "jsonl_chained"
+    assert page.json()["total"] == 1
+    assert page.json()["malformed"] == 1
+    assert page.json()["events"][0]["event_id"] == "query-1"
+    assert all(e["event_id"] != "query-2" for e in page.json()["events"])
+
+
+@pytest.mark.asyncio
+async def test_audit_browser_rejects_a_bare_envelope_less_line_on_a_chained_backend(
+    tmp_path, monkeypatch
+):
+    """TODO.md item 137 regression (found by `security-invariant-reviewer`,
+    2026-08-05): `verify_envelope_hash` correctly returns `None` (not
+    `False`) for a line with no envelope shape at all, since that's exactly
+    what a legitimate plain-`jsonl` line looks like. On a `jsonl_chained`
+    backend every persisted line MUST be an envelope, so a bare line is
+    itself the forgery/corruption signal and must not pass through
+    unverified."""
+    from querygate.audit.ledger import GENESIS_PREV_HASH, make_record
+
+    audit_path = tmp_path / "audit.jsonl"
+    genuine = AuditEvent(
+        event_id="query-1",
+        connection_id="demo",
+        principal_id="agent-a",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "orders"},
+        duration_ms=4,
+    )
+    record = make_record(0, GENESIS_PREV_HASH, genuine.model_dump(mode="json", exclude_none=True))
+    bare_event = AuditEvent(
+        event_id="query-2",
+        connection_id="demo",
+        principal_id="agent-a",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "secret_table"},
+        duration_ms=4,
+    )
+    audit_path.write_text(
+        record.model_dump_json() + "\n" + bare_event.model_dump_json(exclude_none=True) + "\n"
+    )
+    app = create_app(
+        _settings(tmp_path, monkeypatch, audit_path=audit_path, audit_backend="jsonl_chained")
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        page = await client.get(
+            "/api/v1/admin/ui/audit/events?event_type=query.execution",
+            headers=_auth(),
+        )
+
+    assert page.status_code == 200
+    assert page.json()["total"] == 1
+    assert page.json()["malformed"] == 1
+    assert page.json()["events"][0]["event_id"] == "query-1"
+    assert all(e["event_id"] != "query-2" for e in page.json()["events"])
 
 
 @pytest.mark.asyncio

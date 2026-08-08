@@ -68,6 +68,7 @@ _config_module.config = _config_module.AppConfig()
 from querygate.admin.store import ConfigVersionStore, set_config_version_store
 from querygate.audit.sinks import reset_audit_sink
 from querygate.catalog.loader import CatalogStore, set_catalog_store
+from querygate.audit.worm_sink import reset_worm_buffer
 from querygate.catalog.usage import reset_usage_signal_buffer
 from querygate.connections.engine import reset_engines
 from querygate.connections.models import ConnectionProfile
@@ -111,6 +112,7 @@ def reset_state(tmp_path):
     in_process_quota_limiter().clear()
     clear_redis_quota_limiter()
     reset_usage_signal_buffer()
+    reset_worm_buffer()
     async_execution_store().clear()
     yield
     reset_audit_sink()
@@ -120,4 +122,5 @@ def reset_state(tmp_path):
     in_process_quota_limiter().clear()
     clear_redis_quota_limiter()
     reset_usage_signal_buffer()
+    reset_worm_buffer()
     async_execution_store().clear()

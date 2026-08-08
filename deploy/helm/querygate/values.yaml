@@ -190,6 +190,7 @@ secrets:
   existingSecretName: ""
   env: {}
     # API_KEYS: '["change-me"]'
+    # API_KEY_SCOPES: '["admin:metrics:read"]'   # see metrics.serviceMonitor.bearerTokenSecret below
     # QUERYGATE_DATABASE_URL: "postgresql+asyncpg://user:pass@host:5432/db"
     # VAULT_TOKEN: ""
     # APPROVAL_TOKEN_HMAC_KEY: ""   # required only if a policy sets approval_max_estimated_* (item 92)
@@ -198,7 +199,17 @@ metrics:
   serviceMonitor:
     # Requires the Prometheus Operator CRD (monitoring.coreos.com/v1).
     # Leave disabled if your cluster doesn't run it — /metrics is still
-    # reachable directly at the Service's port either way.
+    # reachable directly at the Service's port either way (subject to the
+    # admin:metrics:read auth requirement below).
     enabled: false
     interval: 30s
     labels: {}
+    # /metrics requires the admin:metrics:read scope by default
+    # (AppConfig.metrics_require_auth, docs/THREAT_MODEL.md QG-36). Point
+    # this at a pre-existing Secret/key holding an API key granted that scope
+    # (see api.env's API_KEY_SCOPES comment above) — Prometheus Operator
+    # renders it as the endpoint's `bearerTokenSecret`. Leave the name empty
+    # only if metrics_require_auth is explicitly set to false.
+    bearerTokenSecret:
+      name: ""
+      key: "token"

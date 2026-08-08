@@ -155,7 +155,10 @@ class DialectAdapter(ABC):
         (TODO.md item 49). NULL/BUCKET render identically everywhere; HASH and
         LAST use each dialect's own function idiom. A dialect with no genuine
         equivalent for a kind raises QueryValidationError rather than emulating
-        it (see SQLiteDialectAdapter's HASH)."""
+        it (see SQLiteDialectAdapter's HASH). Every `mask.kind` branch is an
+        explicit `is` check, exhaustive against `ColumnMaskKind`, ending in a
+        `_missing_mask_kind` raise for anything unrecognized (TODO.md item
+        164) — never an implicit final `else`."""
 
 
 def _direction_expr(col_expr: Any, direction: Literal["asc", "desc"]) -> Any:
@@ -216,6 +219,18 @@ def _missing_unit(unit: str, dialect: str) -> QueryValidationError:
     and both must, or the exhaustiveness doctrine holds for half the surface —
     which is what the first version of this refactor actually shipped."""
     return QueryValidationError(f"interval unit {unit!r} is not supported on {dialect}")
+
+
+def _missing_mask_kind(kind: Any, dialect: str) -> QueryValidationError:
+    """The `column_mask` sibling of `_missing_part`/`_missing_unit` (TODO.md
+    item 164). Every `column_mask` implementation used to end on an
+    unconditional final branch that assumed HASH — an implicit else, not an
+    exhaustive match — so a future `ColumnMaskKind` member would have
+    silently rendered as a HASH transform instead of raising. This turns
+    that gap into the same typed 4xx the date-part/interval-unit maps
+    already raise, so a new enum member is a forced decision everywhere,
+    never a silent passthrough."""
+    return QueryValidationError(f"column_mask kind {kind!r} is not supported on {dialect}")
 
 
 # The `date_add` unit vocabulary per dialect, exhaustive for the same reason the
@@ -426,8 +441,10 @@ class PostgresDialectAdapter(DialectAdapter):
             return _bucket_mask(col_expr, mask)
         if mask.kind is ColumnMaskKind.LAST:
             return sa.func.right(sa.cast(col_expr, sa.Text), mask.length)
-        # HASH — deterministic md5 of the text form.
-        return sa.func.md5(sa.cast(col_expr, sa.Text))
+        if mask.kind is ColumnMaskKind.HASH:
+            # deterministic md5 of the text form.
+            return sa.func.md5(sa.cast(col_expr, sa.Text))
+        raise _missing_mask_kind(mask.kind, "Postgres")
 
 
 class MSSQLDialectAdapter(DialectAdapter):
@@ -606,12 +623,14 @@ class MSSQLDialectAdapter(DialectAdapter):
         text = sa.cast(col_expr, sa.Unicode)
         if mask.kind is ColumnMaskKind.LAST:
             return sa.func.RIGHT(text, mask.length)
-        # HASH — CONVERT the SHA2_256 HASHBYTES digest to a hex string (style 2).
-        return sa.func.CONVERT(
-            sa.literal_column("VARCHAR(64)"),
-            sa.func.HASHBYTES(sa.literal("SHA2_256"), text),
-            sa.literal(2),
-        )
+        if mask.kind is ColumnMaskKind.HASH:
+            # CONVERT the SHA2_256 HASHBYTES digest to a hex string (style 2).
+            return sa.func.CONVERT(
+                sa.literal_column("VARCHAR(64)"),
+                sa.func.HASHBYTES(sa.literal("SHA2_256"), text),
+                sa.literal(2),
+            )
+        raise _missing_mask_kind(mask.kind, "MSSQL")
 
 
 class SQLiteDialectAdapter(DialectAdapter):
@@ -784,9 +803,859 @@ class SQLiteDialectAdapter(DialectAdapter):
         )
 
 
+_MYSQL_EXTRACT_FIELDS: Dict[str, str] = {
+    "year": "year",
+    "quarter": "quarter",
+    "month": "month",
+    "day": "day",
+    "hour": "hour",
+    "minute": "minute",
+    "second": "second",
+}
+
+# DATE_ADD's unit keyword per IntervalUnit — exhaustive for the same reason
+# every other per-dialect unit map in this module is: a future unit reaching
+# an f-string unguarded would silently render an invalid keyword rather than
+# raising a typed error.
+_MYSQL_DATEADD_UNITS: Dict[str, str] = {
+    "year": "YEAR",
+    "month": "MONTH",
+    "week": "WEEK",
+    "day": "DAY",
+    "hour": "HOUR",
+    "minute": "MINUTE",
+    "second": "SECOND",
+}
+
+
+class MySQLDialectAdapter(DialectAdapter):
+    def date_bucket(self, col: Any, granularity: str) -> Any:
+        # MySQL has no DATE_TRUNC; each granularity gets its own idiom, all
+        # wrapped in DATE(...) so every branch zeroes the time-of-day the same
+        # way Postgres's date_trunc does — DATE_SUB alone leaves the original
+        # clock reading in place, which would silently disagree with Postgres/
+        # MSSQL for the exact same query (verified live: without the outer
+        # DATE(), 'week' returned a timestamp with the original time-of-day
+        # still attached).
+        if granularity == "day":
+            return sa.func.date(col)
+        if granularity == "week":
+            # WEEKDAY() is 0=Monday..6=Sunday, so this steps back to the
+            # Monday of the current week — the same ISO-week start Postgres's
+            # date_trunc('week', ...) uses. SUBDATE(date, days) — the
+            # 2-argument plain-integer form, not SUBDATE(date, INTERVAL ...)
+            # — is documented as exactly DATE_SUB(date, INTERVAL days DAY);
+            # using it (rather than an INTERVAL clause) lets the day count
+            # stay a normal composable expression (WEEKDAY(col)) instead of
+            # raw SQL text, since MySQL's INTERVAL clause has no bind-
+            # parameter or sub-expression form of its own for the count.
+            return sa.func.date(sa.func.subdate(col, sa.func.weekday(col)))
+        if granularity == "month":
+            return sa.func.str_to_date(sa.func.date_format(col, "%Y-%m-01"), "%Y-%m-%d")
+        if granularity == "quarter":
+            return sa.func.str_to_date(
+                sa.func.concat(
+                    sa.func.year(col),
+                    "-",
+                    sa.func.lpad((sa.func.quarter(col) - 1) * 3 + 1, 2, "0"),
+                    "-01",
+                ),
+                "%Y-%m-%d",
+            )
+        if granularity == "year":
+            return sa.func.str_to_date(sa.func.date_format(col, "%Y-01-01"), "%Y-%m-%d")
+        raise QueryValidationError(f"Unsupported date_bucket granularity: {granularity!r}")
+
+    def order_by_terms(
+        self,
+        col_expr: Any,
+        direction: Literal["asc", "desc"],
+        nulls: Optional[Literal["first", "last"]],
+    ) -> List[Any]:
+        expr = _direction_expr(col_expr, direction)
+        if nulls is None:
+            return [expr]
+        # MySQL has NO "NULLS FIRST/LAST" syntax at all (unlike Postgres/
+        # SQLite) — the same genuine gap as MSSQL, not a spelling difference,
+        # so this is a hard rejection rather than synthesizing the CASE-bucket
+        # workaround on the caller's behalf (item 74's reject-don't-emulate
+        # posture; see MSSQLDialectAdapter above for the identical reasoning).
+        raise QueryValidationError(
+            "nulls first/last ordering is not supported on MySQL: MySQL has no "
+            "NULLS FIRST/LAST syntax. Order by a CASE 0/1 'is null' bucket first "
+            "to place nulls explicitly."
+        )
+
+    def stat_fn(self, name: Literal["stddev", "variance"]) -> Callable[..., Any]:
+        # MySQL's bare STDDEV()/VARIANCE() are the POPULATION statistic
+        # (equivalent to STDDEV_POP/VAR_POP) — a genuinely different number
+        # from Postgres's bare stddev()/variance() (sample statistic, N-1
+        # denominator) and from MSSQL's STDEV()/VAR() (also sample). Using the
+        # bare names here would render fine and silently return a different
+        # value than the identical query on Postgres/MSSQL — exactly the
+        # "renders fine, breaks live" trap this module's date-part maps guard
+        # against, just for a number instead of a date. STDDEV_SAMP/VAR_SAMP
+        # are MySQL's real sample-statistic functions, matching the other two
+        # dialects' semantics exactly.
+        return {"stddev": sa.func.stddev_samp, "variance": sa.func.var_samp}[name]
+
+    def string_agg(self, col_expr: Any, delimiter: str) -> Any:
+        # MySQL's GROUP_CONCAT uses SEPARATOR as a keyword *inside* the call's
+        # parens (`GROUP_CONCAT(col SEPARATOR 'sep')`), not a comma-separated
+        # second argument — applying .op("SEPARATOR") to col_expr itself
+        # (before it becomes group_concat's argument) renders exactly that,
+        # verified against a live server.
+        return sa.func.group_concat(col_expr.op("SEPARATOR")(delimiter))
+
+    def array_agg(self, col_expr: Any) -> Any:
+        # MySQL has JSON_ARRAYAGG(), but — like SQLite's json_group_array() —
+        # it returns a JSON-encoded string, not a real array/collection type.
+        # Mapping it would be the exact forced-parity emulation CLAUDE.md's
+        # engine philosophy rules out, not a lucky shape match, so this stays
+        # a hard rejection the same way SQLite's does.
+        raise QueryValidationError(
+            "array_agg is not supported on MySQL: JSON_ARRAYAGG() returns a JSON "
+            "string, not a real array/collection type"
+        )
+
+    def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
+        # MySQL has no ordered-set aggregate support at all (no
+        # PERCENTILE_CONT, no WITHIN GROUP) — the same gap as SQLite, for the
+        # same reason.
+        raise QueryValidationError(
+            "percentile_cont is not supported on MySQL: MySQL has no ordered-set "
+            "aggregate (WITHIN GROUP) support"
+        )
+
+    def scalar_function(self, name: str, args: List[Any]) -> Any:
+        if name == "ceil":
+            return sa.func.ceil(args[0])
+        if name == "length":
+            # MySQL's LENGTH() returns the BYTE length (multi-byte characters
+            # count as more than one), unlike Postgres's character-counting
+            # length() — a genuine encoding-dependent difference, not a
+            # rendering choice; CHAR_LENGTH() would be the character-counting
+            # form if a caller needs that instead, but this AST primitive maps
+            # to the dialect's own "length" idiom the same way Postgres/MSSQL
+            # already do.
+            return sa.func.length(args[0])
+        if name == "substring":
+            return sa.func.substring(*args)
+        if name == "round":
+            # MySQL's ROUND(x) and ROUND(x, d) both work natively for any
+            # numeric type — no numeric-cast trap like Postgres's
+            # round(double precision, integer) gap.
+            return sa.func.round(args[0], args[1]) if len(args) == 2 else sa.func.round(args[0])
+        raise QueryValidationError(f"Unsupported scalar function {name!r} on MySQL")
+
+    def window_frame(
+        self, mode: Literal["rows", "range"], start: Optional[int], end: Optional[int]
+    ) -> Dict[str, Any]:
+        # MySQL 8.0+ supports the full window-frame grammar, including RANGE
+        # with a numeric offset — verified against a live server, unlike
+        # MSSQL's genuine RANGE-offset gap.
+        return _frame_kwargs(mode, start, end)
+
+    def set_operation(self, op: str, all_rows: bool, selects: List[Any]) -> Any:
+        # MySQL 8.0.31+ added native INTERSECT/EXCEPT, but — like MSSQL —
+        # only the distinct forms; there is no ALL variant of either.
+        # UNION ALL is fully supported.
+        if all_rows and op != "union":
+            raise _no_all_variant(op, "MySQL")
+        return _compound(op, all_rows, selects)
+
+    def extract_part(self, part: str, expr: Any) -> Any:
+        if part == "dayofweek":
+            # DAYOFWEEK() is 1=Sunday..7=Saturday; subtracting 1 gives
+            # Postgres's 0=Sunday..6=Saturday numbering exactly, with no
+            # server-config dependency (unlike MSSQL's DATEFIRST-relative
+            # DATEPART(weekday, ...), MySQL's DAYOFWEEK() is fixed regardless
+            # of session/server settings).
+            return sa.func.dayofweek(expr) - 1
+        if part == "week":
+            # WEEK(x, 3) is MySQL's mode-3 form: ISO 8601 week numbering
+            # (Monday-first, week 1 = the first week with 4+ days) — verified
+            # live to agree with Postgres's EXTRACT(week FROM ...) and
+            # MSSQL's DATEPART(iso_week, ...) for the same date.
+            return sa.func.week(expr, 3)
+        if part == "dayofyear":
+            return sa.func.dayofyear(expr)
+        field = _MYSQL_EXTRACT_FIELDS.get(part)
+        if field is None:
+            raise _missing_part(part, "MySQL")
+        # MySQL supports the SQL-standard EXTRACT(unit FROM expr) directly for
+        # these fields — verified live it returns a plain integer already, no
+        # PostgresDialectAdapter-style flooring/casting needed.
+        return sa.extract(field, expr)
+
+    def current_timestamp(self, kind: Literal["timestamp", "date"]) -> Any:
+        # UTC_TIMESTAMP(), not NOW()/SYSDATE(): those return the server's
+        # local wall clock. Like MSSQL, MySQL has no session time zone to pin
+        # the way Postgres does, so the UTC choice is made in the function
+        # itself rather than relying on session state.
+        if kind == "date":
+            return sa.cast(sa.func.utc_timestamp(), sa.Date)
+        return sa.func.utc_timestamp()
+
+    def date_add(self, expr: Any, unit: str, amount: int) -> Any:
+        # MySQL's DATE_ADD takes the unit as a keyword inside an INTERVAL
+        # clause, not a function argument — there is no parameterized form
+        # for the keyword (the same shape as MSSQL's DATEADD keyword arg).
+        # The keyword comes from an exhaustive map, never caller text; only
+        # `amount` is caller-supplied, and it binds as a real parameter via
+        # bindparams — no caller-derived content reaches the statement text.
+        keyword = _MYSQL_DATEADD_UNITS.get(unit)
+        if keyword is None:
+            raise _missing_unit(unit, "MySQL")
+        # `unique=True`, not the `amt=amount` kwarg shorthand (2026-08-07
+        # security-invariant-reviewer finding): a bare `:amt` bindparam name
+        # is NOT disambiguated across multiple `date_add` calls compiled
+        # into the same statement (e.g. two-sided window filter predicates
+        # like `col > date_add(now(), 'day', -30) AND col < date_add(now(),
+        # 'day', -1)`) — confirmed directly, compiling two such expressions
+        # together previously rendered two `:amt` placeholders that share
+        # ONE bound value (the last one silently wins, the first is lost),
+        # a silent-wrong-results bug, not a raised error. `unique=True`
+        # makes SQLAlchemy render distinct `amt_1`/`amt_2`-style names per
+        # occurrence, the same statement text otherwise unchanged.
+        # `# fmt: off` keeps the `# nosemgrep` on the `sa.text(...)` match line
+        # (semgrep anchors a multi-line match to its first line, not wherever
+        # the statement happens to close — a trailing-line comment silently
+        # stopped suppressing this once black wrapped the call across lines).
+        # fmt: off
+        interval = sa.text(f"INTERVAL :amt {keyword}").bindparams(sa.bindparam("amt", value=amount, unique=True))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        # fmt: on
+        return sa.func.date_add(expr, interval)
+
+    def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
+        if mask.kind is ColumnMaskKind.NULL:
+            return sa.null()
+        if mask.kind is ColumnMaskKind.BUCKET:
+            return _bucket_mask(col_expr, mask)
+        if mask.kind is ColumnMaskKind.LAST:
+            return sa.func.right(sa.cast(col_expr, sa.Text), mask.length)
+        if mask.kind is ColumnMaskKind.HASH:
+            # SHA2-256 hex digest of the text form.
+            return sa.func.sha2(sa.cast(col_expr, sa.Text), 256)
+        raise _missing_mask_kind(mask.kind, "MySQL")
+
+
+_SNOWFLAKE_EXTRACT_FIELDS: Dict[str, str] = {
+    "year": "year",
+    "quarter": "quarter",
+    "month": "month",
+    "day": "day",
+    "dayofyear": "dayofyear",
+    "hour": "hour",
+    "minute": "minute",
+    "second": "second",
+    # `week`/`dayofweek` are absent deliberately — both need the ISO-fixed
+    # function form, not a DATE_PART keyword; see extract_part below.
+}
+
+# DATEADD's unit keyword per IntervalUnit — exhaustive for the same reason
+# every other per-dialect unit map in this module is.
+_SNOWFLAKE_DATEADD_UNITS: Dict[str, str] = {
+    "year": "year",
+    "month": "month",
+    "week": "week",
+    "day": "day",
+    "hour": "hour",
+    "minute": "minute",
+    "second": "second",
+}
+
+
+class SnowflakeDialectAdapter(DialectAdapter):
+    """TODO.md item 19 phase 2 — rendering-level only, NOT live-verified
+    against a real Snowflake account (no Snowflake instance is available in
+    this sandboxed/CI environment, unlike Postgres/MySQL/MSSQL which run in
+    Docker). Every idiom below is backed by Snowflake's public SQL reference
+    docs and, where noted, checked by rendering the expression against a real
+    `snowflake.sqlalchemy` dialect object (the package IS installed — see
+    pyproject.toml — so this is at least "renders against the real compiler",
+    just never executed against a live server). See TODO.md's Snowflake
+    live-verification follow-up item for what closing that gap requires.
+    """
+
+    def date_bucket(self, col: Any, granularity: str) -> Any:
+        # Snowflake's DATE_TRUNC covers day/month/quarter/year directly and
+        # is session-independent for these — only its 'week' granularity is
+        # governed by the WEEK_START session parameter (Snowflake docs), so
+        # 'week' is computed explicitly below instead of trusting session
+        # config QueryGate doesn't control here (register_query_timeout/
+        # apply_session_guardrails cannot run for Snowflake in this phase —
+        # see connections/engine.py's init_engine guard).
+        if granularity in ("day", "month", "quarter", "year"):
+            return sa.func.date_trunc(granularity, col)
+        if granularity == "week":
+            # DAYOFWEEKISO is fixed ISO (1=Monday..7=Sunday) regardless of
+            # session parameters, unlike WEEK/WEEKOFYEAR — the same
+            # session-independence reasoning as extract_part's dayofweek
+            # below. Step back to the Monday of the current ISO week, then
+            # truncate to midnight the same way the other granularities do.
+            monday = sa.func.dateadd(
+                sa.literal_column("day"),
+                -(sa.func.dayofweekiso(col) - 1),
+                col,
+            )
+            return sa.func.date_trunc("day", monday)
+        raise QueryValidationError(f"Unsupported date_bucket granularity: {granularity!r}")
+
+    def order_by_terms(
+        self,
+        col_expr: Any,
+        direction: Literal["asc", "desc"],
+        nulls: Optional[Literal["first", "last"]],
+    ) -> List[Any]:
+        # Snowflake supports NULLS FIRST/LAST natively (verified: Snowflake's
+        # ORDER BY reference documents it, and it was rendered against the
+        # real snowflake.sqlalchemy dialect object during development of
+        # this adapter) — the Postgres/SQLite shape, not MSSQL/MySQL's gap.
+        expr = _direction_expr(col_expr, direction)
+        if nulls is None:
+            return [expr]
+        return [expr.nulls_first() if nulls == "first" else expr.nulls_last()]
+
+    def stat_fn(self, name: Literal["stddev", "variance"]) -> Callable[..., Any]:
+        # Unlike MySQL's bare STDDEV()/VARIANCE() (population statistic),
+        # Snowflake's bare STDDEV is documented as an alias for STDDEV_SAMP
+        # and bare VARIANCE as an alias for VAR_SAMP — the sample statistic,
+        # matching Postgres's/MSSQL's semantics exactly. Same names as
+        # Postgres, no _SAMP suffix needed.
+        return {"stddev": sa.func.stddev, "variance": sa.func.variance}[name]
+
+    def string_agg(self, col_expr: Any, delimiter: str) -> Any:
+        # LISTAGG(expr, delimiter) — the identical 2-argument comma shape as
+        # Postgres's string_agg, unlike MySQL's SEPARATOR-keyword form.
+        return sa.func.listagg(col_expr, delimiter)
+
+    def array_agg(self, col_expr: Any) -> Any:
+        # Unlike MySQL's/SQLite's JSON-string-returning array functions,
+        # Snowflake's ARRAY_AGG returns a genuine native ARRAY type — a real
+        # equivalent, not a forced-parity emulation.
+        return sa.func.array_agg(col_expr)
+
+    def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
+        # PERCENTILE_CONT(fraction) WITHIN GROUP (ORDER BY expr) works as a
+        # plain GROUP BY aggregate on Snowflake — the OVER(...) clause is
+        # optional, only needed for the window-function form — so this is
+        # the same shape as Postgres's, unlike MSSQL's analytic-only gap.
+        return sa.within_group(sa.func.percentile_cont(fraction), col_expr)
+
+    def scalar_function(self, name: str, args: List[Any]) -> Any:
+        if name == "ceil":
+            return sa.func.ceil(args[0])
+        if name == "length":
+            return sa.func.length(args[0])
+        if name == "substring":
+            # Snowflake's SUBSTRING/SUBSTR accepts the plain comma form
+            # SUBSTRING(base, start, len), the same shape MSSQL/MySQL use.
+            return sa.func.substring(*args)
+        if name == "round":
+            # ROUND(x, [scale]) works natively for any numeric type on
+            # Snowflake (including FLOAT) — no Postgres-style numeric-cast
+            # trap.
+            return sa.func.round(args[0], args[1]) if len(args) == 2 else sa.func.round(args[0])
+        raise QueryValidationError(f"Unsupported scalar function {name!r} on Snowflake")
+
+    def window_frame(
+        self, mode: Literal["rows", "range"], start: Optional[int], end: Optional[int]
+    ) -> Dict[str, Any]:
+        # Snowflake supports the full ROWS/RANGE frame grammar, including a
+        # numeric RANGE offset (RANGE BETWEEN <n> PRECEDING/FOLLOWING reached
+        # General Availability 2024-08-08 per Snowflake's release notes) —
+        # verified by rendering, not live execution; an account still on an
+        # older Snowflake release could genuinely lack it, which no
+        # rendering-only test can catch (the honest limitation this whole
+        # adapter carries).
+        return _frame_kwargs(mode, start, end)
+
+    def set_operation(self, op: str, all_rows: bool, selects: List[Any]) -> Any:
+        # Snowflake's INTERSECT and EXCEPT/MINUS are distinct-only — no ALL
+        # form of either — the same gap as MSSQL/MySQL. UNION ALL is fully
+        # supported.
+        if all_rows and op != "union":
+            raise _no_all_variant(op, "Snowflake")
+        return _compound(op, all_rows, selects)
+
+    def extract_part(self, part: str, expr: Any) -> Any:
+        if part == "dayofweek":
+            # Snowflake's plain DAYOFWEEK is governed by the WEEK_START
+            # session parameter (Snowflake docs) — a live server-config
+            # dependency QueryGate cannot pin for Snowflake in this phase
+            # (see date_bucket's 'week' comment above for why). DAYOFWEEKISO
+            # is fixed ISO numbering (1=Monday..7=Sunday) regardless of
+            # session parameters; `% 7` maps it onto the contract this
+            # primitive publishes (0=Sunday..6=Saturday): Monday 1->1 ...
+            # Saturday 6->6, Sunday 7->0 — the identical numbering
+            # Postgres's `dow` and MySQL's `DAYOFWEEK() - 1` return.
+            return sa.func.dayofweekiso(expr) % 7
+        if part == "week":
+            # WEEKISO, not WEEK: WEEK is WEEK_START-session-dependent (see
+            # date_bucket above); WEEKISO always returns the ISO-8601 week
+            # number regardless of session config, the same contract
+            # Postgres's plain `week`/MSSQL's `iso_week` publish.
+            return sa.func.weekiso(expr)
+        field = _SNOWFLAKE_EXTRACT_FIELDS.get(part)
+        if field is None:
+            raise _missing_part(part, "Snowflake")
+        # Snowflake's EXTRACT(part FROM expr) is documented as an alias for
+        # DATE_PART and returns a plain integer already for every field in
+        # this map — no Postgres-style numeric-cast/floor needed.
+        return sa.extract(field, expr)
+
+    def current_timestamp(self, kind: Literal["timestamp", "date"]) -> Any:
+        # SYSDATE(), not CURRENT_TIMESTAMP()/CURRENT_TIMESTAMP: those return
+        # TIMESTAMP_LTZ in the SESSION's time zone (Snowflake docs).
+        # SYSDATE() always returns the current time in UTC as TIMESTAMP_NTZ —
+        # the same UTC-always posture as MSSQL's SYSUTCDATETIME()/MySQL's
+        # UTC_TIMESTAMP(), and here it's load-bearing in a way it isn't for
+        # Postgres: there is no session guardrail step that can run for
+        # Snowflake in this phase to pin a session time zone even if one
+        # existed.
+        if kind == "date":
+            return sa.cast(sa.func.sysdate(), sa.Date)
+        return sa.func.sysdate()
+
+    def date_add(self, expr: Any, unit: str, amount: int) -> Any:
+        # DATEADD(unit, amount, expr) takes the unit as a keyword, the same
+        # shape as MSSQL's DATEADD — the keyword comes from an exhaustive
+        # map, never caller text; only `amount` is caller-supplied, and it
+        # binds as a real parameter.
+        keyword = _SNOWFLAKE_DATEADD_UNITS.get(unit)
+        if keyword is None:
+            raise _missing_unit(unit, "Snowflake")
+        return sa.func.dateadd(sa.literal_column(keyword), sa.literal(amount), expr)
+
+    def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
+        if mask.kind is ColumnMaskKind.NULL:
+            return sa.null()
+        if mask.kind is ColumnMaskKind.BUCKET:
+            return _bucket_mask(col_expr, mask)
+        if mask.kind is ColumnMaskKind.LAST:
+            return sa.func.right(sa.cast(col_expr, sa.Text), mask.length)
+        if mask.kind is ColumnMaskKind.HASH:
+            # SHA2 requires an explicit bit length; 256 matches the
+            # Postgres/MySQL adapters' choice of a SHA-256-class digest.
+            return sa.func.sha2(sa.cast(col_expr, sa.Text), 256)
+        raise _missing_mask_kind(mask.kind, "Snowflake")
+
+
+def _bq_temporal_kind(expr: Any) -> Optional[Literal["timestamp", "datetime", "date"]]:
+    """Which of BigQuery's three temporal types `expr` renders as, inferred
+    from its SQLAlchemy Core `.type` (every `ColumnElement` carries one,
+    defaulting to `NullType` when unknown).
+
+    This exists because BigQuery, uniquely among the five supported dialects,
+    has NO single polymorphic date-truncate/date-add function — it has THREE
+    (`DATE_TRUNC`/`DATETIME_TRUNC`/`TIMESTAMP_TRUNC`,
+    `DATE_ADD`/`DATETIME_ADD`/`TIMESTAMP_ADD`), each accepting only its own
+    operand type, and each with a DIFFERENT supported unit/date_part
+    vocabulary (documented as such in Google's BigQuery SQL reference — see
+    `date_bucket`'s and `date_add`'s own comments). Every other adapter's
+    date_bucket/date_add
+    is a single function name that accepts DATE, DATETIME, and TIMESTAMP
+    alike, so this dispatch has no precedent elsewhere in this module.
+
+    `isinstance(t, sa.TIMESTAMP)` must be checked BEFORE `isinstance(t,
+    sa.DateTime)`: `sqlalchemy_bigquery`'s own `TIMESTAMP`/`DATETIME`/`DATE`
+    type classes are (confirmed by inspecting the installed package) the
+    plain `sqlalchemy.sql.sqltypes.TIMESTAMP`/`DATETIME`/`DATE` classes
+    re-exported, not BigQuery-specific subclasses — and generic `sa.TIMESTAMP`
+    is itself a subclass of `sa.DateTime`, so the reverse check order would
+    misclassify every real BigQuery TIMESTAMP column as DATETIME.
+    """
+    t = getattr(expr, "type", None)
+    if isinstance(t, sa.TIMESTAMP):
+        return "timestamp"
+    if isinstance(t, sa.DateTime):
+        return "datetime"
+    if isinstance(t, sa.Date):
+        return "date"
+    return None
+
+
+def _bq_unknown_temporal_kind(primitive: str) -> QueryValidationError:
+    return QueryValidationError(
+        f"{primitive} could not determine whether this BigQuery expression is DATE, "
+        "DATETIME, or TIMESTAMP. BigQuery has three distinct functions for this "
+        "primitive (unlike every other supported dialect's single polymorphic "
+        "function) and rendering requires knowing the operand's concrete type. "
+        "Reference a schema column directly, or CAST the expression to a concrete "
+        "date/datetime/timestamp type first."
+    )
+
+
+_BQ_EXTRACT_FIELDS: Dict[str, str] = {
+    "year": "year",
+    "quarter": "quarter",
+    "month": "month",
+    "day": "day",
+    "dayofyear": "dayofyear",
+    "hour": "hour",
+    "minute": "minute",
+    "second": "second",
+    # `week`/`dayofweek` are absent deliberately — both need their own
+    # ISO-fixed field name, not this table; see extract_part below.
+}
+
+# DATE_TRUNC/DATETIME_TRUNC/TIMESTAMP_TRUNC all accept the identical
+# date_part keyword vocabulary (documented as such in Google's BigQuery SQL
+# reference: the same DAY, WEEK, WEEK(WEEKDAY), ISOWEEK, MONTH, QUARTER,
+# YEAR, ISOYEAR set for all three), so one map serves every BigQuery
+# temporal kind — unlike the ADD functions below, which genuinely differ
+# per kind.
+_BQ_TRUNC_KEYWORDS: Dict[str, str] = {
+    "day": "DAY",
+    # ISOWEEK, not WEEK: plain WEEK starts on Sunday (or a caller-chosen
+    # weekday via WEEK(WEEKDAY)); ISOWEEK is the Monday-start ISO-8601 week
+    # this primitive is defined as everywhere else (Postgres's date_trunc
+    # 'week', Snowflake's DAYOFWEEKISO-based computation).
+    "week": "ISOWEEK",
+    "month": "MONTH",
+    "quarter": "QUARTER",
+    "year": "YEAR",
+}
+
+# The three TRUNC/ADD function pairs, keyed by `_bq_temporal_kind`'s return
+# value. `_frame_kwargs`-style shared dispatch tables rather than an
+# `if kind == ...` chain repeated in both date_bucket and date_add.
+_BQ_TRUNC_FN: Dict[str, Callable[..., Any]] = {
+    "date": sa.func.date_trunc,
+    "datetime": sa.func.datetime_trunc,
+    "timestamp": sa.func.timestamp_trunc,
+}
+_BQ_TEMPORAL_TYPE: Dict[str, Any] = {
+    "date": sa.Date,
+    "datetime": sa.DateTime,
+    "timestamp": sa.TIMESTAMP,
+}
+_BQ_ADD_FN: Dict[str, Callable[..., Any]] = {
+    "date": sa.func.date_add,
+    "datetime": sa.func.datetime_add,
+    "timestamp": sa.func.timestamp_add,
+}
+
+# `date_add`'s unit vocabulary genuinely differs per BigQuery temporal kind —
+# documented as such in Google's BigQuery SQL reference, not assumed:
+#   * DATE_ADD:      DAY, WEEK, MONTH, QUARTER, YEAR only — a DATE has no
+#                     time-of-day component, so HOUR/MINUTE/SECOND are a
+#                     real capability gap, not a spelling difference.
+#   * DATETIME_ADD:  the full range (MICRO/MILLISECOND through YEAR) — a
+#                     DATETIME is a civil calendar value with both a date and
+#                     a time-of-day, so every IntervalUnit member applies.
+#   * TIMESTAMP_ADD: MICROSECOND through DAY only — a TIMESTAMP is a
+#                     timezone-independent absolute instant, and BigQuery
+#                     does not allow WEEK/MONTH/QUARTER/YEAR arithmetic
+#                     directly on one (those require an explicit civil
+#                     calendar/time zone a TIMESTAMP does not carry).
+# Exhaustive per kind, for the same reason every other per-dialect unit map
+# in this module is: a future IntervalUnit member must be a considered
+# decision for each BigQuery kind, not a silent passthrough.
+_BQ_DATE_ADD_UNITS: Dict[str, str] = {
+    "year": "YEAR",
+    "month": "MONTH",
+    "week": "WEEK",
+    "day": "DAY",
+}
+_BQ_DATETIME_ADD_UNITS: Dict[str, str] = {
+    "year": "YEAR",
+    "month": "MONTH",
+    "week": "WEEK",
+    "day": "DAY",
+    "hour": "HOUR",
+    "minute": "MINUTE",
+    "second": "SECOND",
+}
+_BQ_TIMESTAMP_ADD_UNITS: Dict[str, str] = {
+    "day": "DAY",
+    "hour": "HOUR",
+    "minute": "MINUTE",
+    "second": "SECOND",
+}
+
+
+class BigQueryDialectAdapter(DialectAdapter):
+    """TODO.md item 19 phase 3 — rendering-level only, NOT live-verified
+    against a real BigQuery project (no GCP project/credentials are available
+    in this sandboxed/CI environment, unlike Postgres/MySQL/MSSQL which run
+    in Docker). Every idiom below is backed by BigQuery's public SQL
+    reference docs (`cloud.google.com/bigquery/docs/reference/standard-sql/`)
+    and checked by compiling against a real, installed `sqlalchemy_bigquery`
+    dialect object (the package IS installed — see pyproject.toml — so this
+    is at least "renders against the real compiler", just never executed
+    against a live server). See TODO.md's BigQuery live-verification
+    follow-up item for what closing that gap requires.
+
+    BigQuery is architecturally further from the other four dialects than
+    Snowflake is: it has three distinct, strictly-typed temporal types
+    (DATE/DATETIME/TIMESTAMP) with three separate truncate/add function
+    families rather than one polymorphic function per operation — see
+    `_bq_temporal_kind`'s docstring. `date_bucket`/`date_add` below dispatch
+    on the operand's SQLAlchemy Core type for this reason; every other method
+    here is a direct mechanical translation the same shape as the other four
+    adapters.
+    """
+
+    def date_bucket(self, col: Any, granularity: str) -> Any:
+        kind = _bq_temporal_kind(col)
+        if kind is None:
+            raise _bq_unknown_temporal_kind("date_bucket")
+        keyword = _BQ_TRUNC_KEYWORDS.get(granularity)
+        if keyword is None:
+            raise QueryValidationError(f"Unsupported date_bucket granularity: {granularity!r}")
+        result = _BQ_TRUNC_FN[kind](col, sa.literal_column(keyword))
+        # type_coerce, not a no-op: DATE_TRUNC/DATETIME_TRUNC/TIMESTAMP_TRUNC
+        # each return the SAME temporal kind they were given, so preserving
+        # that type lets a caller nest date_bucket(date_add(...), ...) or
+        # date_add(date_bucket(...), ...) and still have the correct
+        # TRUNC/ADD function chosen at the next level — SQLAlchemy gives a
+        # bare `sa.func.x(...)` call NullType by default, which would make
+        # any such nesting hit the `_bq_unknown_temporal_kind` rejection.
+        return sa.type_coerce(result, _BQ_TEMPORAL_TYPE[kind])
+
+    def order_by_terms(
+        self,
+        col_expr: Any,
+        direction: Literal["asc", "desc"],
+        nulls: Optional[Literal["first", "last"]],
+    ) -> List[Any]:
+        # BigQuery supports NULLS FIRST/LAST natively (documented in
+        # Google's Query syntax reference) — the Postgres/SQLite/Snowflake
+        # shape, not MSSQL/MySQL's gap.
+        expr = _direction_expr(col_expr, direction)
+        if nulls is None:
+            return [expr]
+        return [expr.nulls_first() if nulls == "first" else expr.nulls_last()]
+
+    def stat_fn(self, name: Literal["stddev", "variance"]) -> Callable[..., Any]:
+        # BigQuery's bare STDDEV is documented as "An alias of STDDEV_SAMP"
+        # and bare VARIANCE as "An alias of VAR_SAMP" — the sample statistic,
+        # matching Postgres's/MSSQL's/Snowflake's semantics exactly (unlike
+        # MySQL's population-default bare names).
+        return {"stddev": sa.func.stddev, "variance": sa.func.variance}[name]
+
+    def string_agg(self, col_expr: Any, delimiter: str) -> Any:
+        # STRING_AGG(expr, delimiter) — the identical 2-argument comma shape
+        # as Postgres's string_agg/Snowflake's LISTAGG, unlike MySQL's
+        # SEPARATOR-keyword form.
+        return sa.func.string_agg(col_expr, delimiter)
+
+    def array_agg(self, col_expr: Any) -> Any:
+        # Unlike MySQL's/SQLite's JSON-string-returning array functions,
+        # BigQuery's ARRAY_AGG returns a genuine native ARRAY<T> type — a
+        # real equivalent, not a forced-parity emulation (the same posture
+        # as Snowflake's ARRAY_AGG).
+        return sa.func.array_agg(col_expr)
+
+    def percentile_cont(self, col_expr: Any, fraction: float) -> Any:
+        # BigQuery's PERCENTILE_CONT is documented as a "navigation function"
+        # whose syntax is `PERCENTILE_CONT(value, percentile) OVER
+        # over_clause` — an OVER(...) clause is part of the required syntax,
+        # not optional the way Postgres's/Snowflake's WITHIN GROUP form is.
+        # There is no GROUP BY-compatible aggregate form, the same genuine
+        # gap as MSSQL's analytic-only PERCENTILE_CONT. SQLAlchemy's
+        # within_group() compiles identical SQL text for the bigquery
+        # dialect with no guard of its own (verified), which would only
+        # fail at runtime against a real BigQuery project — the same
+        # "renders fine, breaks live" trap item 75 flagged for MSSQL before
+        # this method existed.
+        raise QueryValidationError(
+            "percentile_cont is not supported on BigQuery as a GROUP BY aggregate: "
+            "BigQuery's PERCENTILE_CONT is a navigation/window function that requires "
+            "an OVER(...) clause — there is no GROUP BY-compatible aggregate form, the "
+            "same restriction as MSSQL."
+        )
+
+    def scalar_function(self, name: str, args: List[Any]) -> Any:
+        if name == "ceil":
+            return sa.func.ceil(args[0])
+        if name == "length":
+            # BigQuery's LENGTH() is documented to return the length "in
+            # characters for STRING arguments" (BYTE_LENGTH is the separate
+            # byte-counting function) — matches Postgres's character-based
+            # length(), unlike MySQL's byte-counting LENGTH().
+            return sa.func.length(args[0])
+        if name == "substring":
+            # SUBSTR(value, position[, length]) is BigQuery's primary name;
+            # SUBSTRING is documented as "Alias for SUBSTR" with the
+            # identical comma-argument shape, so either renders correctly —
+            # SUBSTR is used here as the canonical spelling.
+            return sa.func.substr(*args)
+        if name == "round":
+            # ROUND(x, [digits]) works natively for FLOAT64/NUMERIC/
+            # BIGNUMERIC on BigQuery — no Postgres-style numeric-cast trap.
+            return sa.func.round(args[0], args[1]) if len(args) == 2 else sa.func.round(args[0])
+        raise QueryValidationError(f"Unsupported scalar function {name!r} on BigQuery")
+
+    def window_frame(
+        self, mode: Literal["rows", "range"], start: Optional[int], end: Optional[int]
+    ) -> Dict[str, Any]:
+        # BigQuery's window-frame grammar supports numeric PRECEDING/
+        # FOLLOWING offsets in both ROWS and RANGE (documented in Google's
+        # window-function-calls reference: the frame grammar includes
+        # `numeric_preceding`/`numeric_following`, not just UNBOUNDED/
+        # CURRENT ROW) — the full-support shape, unlike MSSQL's genuine
+        # numeric-RANGE gap.
+        return _frame_kwargs(mode, start, end)
+
+    def set_operation(self, op: str, all_rows: bool, selects: List[Any]) -> Any:
+        # BigQuery requires an explicit DISTINCT or ALL keyword on every set
+        # operation (confirmed: `sqlalchemy_bigquery`'s own compiler already
+        # renders a bare `sa.union(...)` as `UNION DISTINCT`, not a bare
+        # `UNION` — verified by compiling against the installed dialect
+        # object), so the shared `_compound` helper needs no BigQuery-
+        # specific handling for that part. What genuinely varies: BigQuery's
+        # INTERSECT and EXCEPT are DISTINCT-only — no ALL form of either
+        # (documented as such in Google's BigQuery SQL reference) — the same
+        # gap as MSSQL/MySQL/Snowflake. UNION ALL is fully supported.
+        if all_rows and op != "union":
+            raise _no_all_variant(op, "BigQuery")
+        return _compound(op, all_rows, selects)
+
+    def extract_part(self, part: str, expr: Any) -> Any:
+        # Unlike date_bucket/date_add, EXTRACT needs no type dispatch:
+        # BigQuery's EXTRACT(part FROM expr) is documented as accepting
+        # DATE, DATETIME, and TIMESTAMP expressions identically for every
+        # field used here.
+        if part == "dayofweek":
+            # EXTRACT(DAYOFWEEK FROM expr) returns [1,7] with Sunday=1
+            # (documented as such in Google's BigQuery SQL reference) —
+            # fixed, with no session/server-config dependency to normalize
+            # away (unlike Snowflake's
+            # WEEK_START-dependent plain DAYOFWEEK). Subtracting 1 gives the
+            # 0=Sunday..6=Saturday contract Postgres's `dow`/MySQL's
+            # `DAYOFWEEK() - 1` publish.
+            return sa.extract("dayofweek", expr) - 1
+        if part == "week":
+            # ISOWEEK, not WEEK: plain WEEK is Sunday-start and caller-
+            # configurable via WEEK(WEEKDAY); ISOWEEK always returns the
+            # Monday-start ISO-8601 week number, the same contract
+            # Postgres's plain `week`/MSSQL's `iso_week`/Snowflake's
+            # `weekiso()` publish.
+            return sa.extract("isoweek", expr)
+        field = _BQ_EXTRACT_FIELDS.get(part)
+        if field is None:
+            raise _missing_part(part, "BigQuery")
+        # BigQuery's EXTRACT returns INT64 directly for every field in this
+        # map (documented as such in Google's BigQuery SQL reference) — no
+        # Postgres-style numeric-cast/floor needed.
+        return sa.extract(field, expr)
+
+    def current_timestamp(self, kind: Literal["timestamp", "date"]) -> Any:
+        # CURRENT_TIMESTAMP() always returns the current time as an absolute
+        # UTC instant (BigQuery's TIMESTAMP type has no attached time zone —
+        # it stores a point in time, not a timezone-relative wall-clock
+        # reading) — the same UTC-always posture as MSSQL's
+        # SYSUTCDATETIME()/Snowflake's SYSDATE(), and here it is load-
+        # bearing in the same way it is for Snowflake: there is no session
+        # guardrail step that can run for BigQuery in this phase (BigQuery
+        # has no SET/ALTER SESSION statement at all — see
+        # BigQuerySessionAdapter) to pin a time zone even if one existed.
+        #
+        # CAST(... AS DATE) with no explicit time zone defaults to UTC
+        # (documented as such in Google's Conversion functions reference:
+        # "When no time zone is specified... the default time zone, UTC, is
+        # used"), so this needs no explicit AT TIME ZONE clause to be
+        # correct.
+        if kind == "date":
+            return sa.cast(sa.func.current_timestamp(), sa.Date)
+        # type_coerce, not a bare call: current_timestamp's own docstring
+        # documents `date_add(now(), ...)` as the intended composition, so
+        # this result must carry a concrete BigQuery temporal type for
+        # `date_add`'s `_bq_temporal_kind` dispatch to see anything other
+        # than NullType when it is nested directly inside one.
+        return sa.type_coerce(sa.func.current_timestamp(), sa.TIMESTAMP)
+
+    def date_add(self, expr: Any, unit: str, amount: int) -> Any:
+        kind = _bq_temporal_kind(expr)
+        if kind is None:
+            raise _bq_unknown_temporal_kind("date_add")
+        # Bare module-global lookups (not an indirection dict keyed by
+        # `kind`), deliberately: a dict built once at import time would
+        # freeze in the ORIGINAL `_BQ_DATE_ADD_UNITS`/etc. objects, so
+        # reassigning `dialect_adapters._BQ_DATETIME_ADD_UNITS` in a test
+        # (the same mutation-check technique
+        # `test_no_date_part_map_is_dead_code` uses for every other
+        # dialect's maps) would silently stop affecting this method — the
+        # exact "the map is dead code" failure mode that technique exists to
+        # catch. A direct name reference here is looked up dynamically at
+        # call time, the same way `_MSSQL_DATEADD_UNITS.get(unit)` etc. are.
+        if kind == "date":
+            units = _BQ_DATE_ADD_UNITS
+        elif kind == "datetime":
+            units = _BQ_DATETIME_ADD_UNITS
+        else:
+            units = _BQ_TIMESTAMP_ADD_UNITS
+        keyword = units.get(unit)
+        if keyword is None:
+            if kind == "date":
+                raise QueryValidationError(
+                    f"interval unit {unit!r} is not supported on BigQuery's DATE_ADD: "
+                    "a DATE has no time-of-day component to add hour/minute/second "
+                    "units to. Cast the expression to DATETIME first (a real civil "
+                    "calendar type) to add those units."
+                )
+            if kind == "timestamp":
+                raise QueryValidationError(
+                    f"interval unit {unit!r} is not supported on BigQuery's "
+                    "TIMESTAMP_ADD: a TIMESTAMP is a timezone-independent absolute "
+                    "instant, and BigQuery only allows sub-day (day/hour/minute/"
+                    "second) arithmetic directly on one — adding a calendar unit "
+                    "like week/month/year requires an explicit civil calendar, "
+                    "which a TIMESTAMP does not carry. Cast the expression to "
+                    "DATETIME first to add week/month/year units."
+                )
+            raise _missing_unit(unit, "BigQuery")  # pragma: no cover — kind is exhaustive above
+        # BigQuery's INTERVAL clause is not a function-argument position the
+        # way Snowflake's/MSSQL's DATEADD's is — the same shape as MySQL's
+        # DATE_ADD, so the same sa.text/bindparams pattern applies: the
+        # keyword comes from an exhaustive map, never caller text; only
+        # `amount` is caller-supplied, and it binds as a real parameter, no
+        # caller-derived content reaching the statement text. `unique=True`
+        # (not the `amt=amount` kwarg shorthand — see MySQL's `date_add`
+        # above for the full rationale and the confirmed collision this
+        # avoids): a bare `:amt` name is not disambiguated when this method
+        # is called more than once in the same compiled statement.
+        # `# fmt: off` keeps the `# nosemgrep` on the `sa.text(...)` match line
+        # (semgrep anchors a multi-line match to its first line, not wherever
+        # the statement happens to close — a trailing-line comment silently
+        # stopped suppressing this once black wrapped the call across lines).
+        # fmt: off
+        interval = sa.text(f"INTERVAL :amt {keyword}").bindparams(sa.bindparam("amt", value=amount, unique=True))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+        # fmt: on
+        result = _BQ_ADD_FN[kind](expr, interval)
+        # type_coerce for the same nesting reason as date_bucket above:
+        # DATE_ADD/DATETIME_ADD/TIMESTAMP_ADD each return the SAME temporal
+        # kind they were given.
+        return sa.type_coerce(result, _BQ_TEMPORAL_TYPE[kind])
+
+    def column_mask(self, col_expr: Any, mask: ColumnMask) -> Any:
+        if mask.kind is ColumnMaskKind.NULL:
+            return sa.null()
+        if mask.kind is ColumnMaskKind.BUCKET:
+            return _bucket_mask(col_expr, mask)
+        if mask.kind is ColumnMaskKind.LAST:
+            # BigQuery has a native RIGHT(value, length) (documented in
+            # Google's String functions reference) — the same shape as
+            # Postgres's/MySQL's/Snowflake's RIGHT().
+            return sa.func.right(sa.cast(col_expr, sa.Text), mask.length)
+        if mask.kind is ColumnMaskKind.HASH:
+            # SHA256 returns BYTES; TO_HEX converts it to a lowercase hex
+            # STRING (per a worked example in Google's docs: TO_HEX(
+            # SHA256("Hello")) -> "185f8db3...") — the BigQuery-native
+            # equivalent of Postgres's md5()/MySQL's sha2()-as-hex-string.
+            return sa.func.to_hex(sa.func.sha256(sa.cast(col_expr, sa.Text)))
+        raise _missing_mask_kind(mask.kind, "BigQuery")
+
+
 _ADAPTERS: Dict[str, DialectAdapter] = {
     DatabaseDialect.POSTGRESQL: PostgresDialectAdapter(),
     DatabaseDialect.MSSQL: MSSQLDialectAdapter(),
+    DatabaseDialect.MYSQL: MySQLDialectAdapter(),
+    DatabaseDialect.SNOWFLAKE: SnowflakeDialectAdapter(),
+    DatabaseDialect.BIGQUERY: BigQueryDialectAdapter(),
 }
 _FALLBACK = SQLiteDialectAdapter()
 

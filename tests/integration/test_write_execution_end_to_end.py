@@ -250,7 +250,13 @@ async def test_approval_gate_pauses_then_admits(sqlite_app, monkeypatch):
         from querygate.write_ast.models import InsertStatement
 
         assert fingerprint == write_fingerprint(InsertStatement(**statement))
-        token = issue_approval_token(fingerprint=fingerprint, approver_subject="human", key=_KEY)
+        token = issue_approval_token(
+            fingerprint=fingerprint,
+            approver_subject="human",
+            key=_KEY,
+            connection_id=None,
+            principal_subject=None,
+        )
         admitted = await client.post(
             "/api/v1/demo/write/execute",
             json=statement,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pydantic as pyd
 import pytest
 
 from querygate.admin import service as governance
@@ -18,6 +19,7 @@ from querygate.admin.store import (
     set_config_version_store,
 )
 from querygate.audit.sinks import JsonlAuditSink, reset_audit_sink, set_audit_sink
+from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import get_registry
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
@@ -109,6 +111,80 @@ def test_humanize_validation_errors_attributes_and_strips_pydantic_noise():
     assert "/tmp/xyzabc" not in cleaned
     assert "pydantic.dev" not in cleaned
     assert "input_type=" not in cleaned and "[type=" not in cleaned
+
+
+def test_safe_pydantic_error_lines_never_includes_input():
+    """Item 165: `safe_pydantic_error_lines` is the actual security-critical
+    function -- it's what guarantees a `pydantic.ValidationError` raised
+    against an already-`${...}`-interpolated `ConnectionProfile` entry (real
+    credential included) never leaks that credential through
+    `reload_config_endpoint`'s HTTP 400 body. The integration-level HTTP
+    tests in `test_rest_api.py` only prove this for the two specific dict
+    shapes they happen to construct (and one of those is deliberately tuned
+    to trip pydantic's own `str()` truncation window); this test exercises
+    the helper directly against several distinct pydantic error *kinds* --
+    `missing`, `value_error` (item 158's own dialect-mismatch validator),
+    and `extra_forbidden` -- each on a dict carrying a planted secret, and
+    asserts none of the returned lines contain the secret or any
+    `input`/`input_value` marker, independent of dict length or `str()`
+    truncation behavior."""
+    secret = "PlantedSecretMarker123"
+    cases: list[pyd.ValidationError] = []
+
+    # `missing`-type: a required field (`dialect`) omitted. Deliberately a
+    # LONG dict (long id, long host, long db name) -- str(ValidationError)'s
+    # truncation would hide the secret here, but safe_pydantic_error_lines
+    # must not rely on that; it must never see the secret at all.
+    try:
+        ConnectionProfile.model_validate(
+            {
+                "id": "unit-test-missing-dialect",
+                "connection_string": (
+                    f"postgresql+asyncpg://user:{secret}@a-fairly-long-hostname."
+                    "internal.example.com:5432/a_fairly_long_database_name"
+                ),
+                "known_tables": ["a", "b", "c"],
+            }
+        )
+        pytest.fail("expected a ValidationError for the missing dialect field")
+    except pyd.ValidationError as exc:
+        cases.append(exc)
+
+    # `value_error`-type: item 158's own dialect-mismatch field_validator.
+    try:
+        ConnectionProfile.model_validate(
+            {
+                "id": "unit-test-mismatch",
+                "dialect": "mssql",
+                "connection_string": f"postgresql+asyncpg://user:{secret}@host/db",
+            }
+        )
+        pytest.fail("expected a ValidationError for the dialect/backend mismatch")
+    except pyd.ValidationError as exc:
+        cases.append(exc)
+
+    # `extra_forbidden`-type: model_config forbids extra fields.
+    try:
+        ConnectionProfile.model_validate(
+            {
+                "id": "unit-test-extra",
+                "dialect": "postgresql",
+                "connection_string": f"postgresql+asyncpg://user:{secret}@host/db",
+                "not_a_real_field": "surprise",
+            }
+        )
+        pytest.fail("expected a ValidationError for the forbidden extra field")
+    except pyd.ValidationError as exc:
+        cases.append(exc)
+
+    assert len(cases) == 3
+    for exc in cases:
+        lines = governance.safe_pydantic_error_lines(exc)
+        assert lines
+        for line in lines:
+            assert secret not in line
+            assert "input_value=" not in line
+            assert "input=" not in line
 
 
 def test_preview_validates_and_reports_only_document_level_changes(tmp_path, monkeypatch):
@@ -346,6 +422,342 @@ default:
     assert [readiness.table for readiness in result.mandatory_filters] == ["orders"]
     assert result.mandatory_filters[0].ready is False
     assert "mandatory_claim_missing" in {reason.code for reason in result.reasons}
+
+
+def test_candidate_simulation_reflects_a_purpose_deltas_mandatory_filter(tmp_path, monkeypatch):
+    """TODO.md item 145 regression (found by `security-invariant-reviewer`/
+    `architecture-boundary-reviewer`, 2026-08-05): `simulate_candidate_policy`
+    discarded `validate_policy`'s purpose-narrowed effective Policy, so a
+    purpose delta's own `mandatory_row_filters` entry never showed up in the
+    readiness report at all — an operator was told a purpose-declaring
+    principal was fully `ready`, when a missing claim would actually refuse
+    at real execution time."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_policy = """
+default:
+  enabled: true
+  allowed_purposes: [support]
+  purpose_policies:
+    support:
+      mandatory_row_filters:
+        - table: orders
+          column: region
+          from_claim: region
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            # No `region` claim supplied — the purpose delta's filter can't resolve.
+            connection="fresh",
+            query={"from": "orders", "select": ["orders.id"], "purpose": "support"},
+        ),
+    )
+
+    assert [readiness.table for readiness in result.mandatory_filters] == ["orders"]
+    assert result.mandatory_filters[0].column == "region"
+    assert result.mandatory_filters[0].ready is False
+    assert "mandatory_claim_missing" in {reason.code for reason in result.reasons}
+
+
+_TWO_CONNECTIONS = """
+connections:
+  - id: fresh
+    dialect: postgresql
+    connection_string: ${TEST_ADMIN_URL}
+  - id: other
+    dialect: postgresql
+    connection_string: ${TEST_ADMIN_URL}
+"""
+
+
+def _cross_connection_join_query() -> dict:
+    return {
+        "from": "orders",
+        "select": ["orders.id", "customers.name"],
+        "joins": [
+            {
+                "table": "customers",
+                "on": ["orders.customer_id", "customers.id"],
+                "connection": "other",
+            }
+        ],
+    }
+
+
+def test_candidate_simulation_denies_a_cross_connection_query_the_joined_policy_denies(
+    tmp_path, monkeypatch
+):
+    """TODO.md item 156 follow-up (found by `architecture-boundary-reviewer`/
+    `security-invariant-reviewer`, 2026-08-06): before this fix,
+    `simulate_candidate_policy` called `validate_policy` without the
+    per-scope connection map, so a deny rule that exists ONLY on a
+    cross-connection join's JOINED connection's own candidate Policy was
+    invisible to the simulator — an operator previewing a candidate config
+    change would be told `allow` for a query real execution (which DOES
+    consult the joined connection's own Policy, since item 156) would refuse.
+    """
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_policy = """
+default:
+  enabled: true
+connections:
+  fresh:
+    join_group: shared
+  other:
+    join_group: shared
+    denied_tables: [customers]
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            connections_yaml=_TWO_CONNECTIONS,
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            connection="fresh",
+            query=_cross_connection_join_query(),
+        ),
+    )
+
+    assert result.decision == "deny"
+    assert result.query_allowed is False
+    assert "query_policy_denied" in {reason.code for reason in result.reasons}
+
+
+def test_candidate_simulation_allows_a_cross_connection_query_neither_policy_denies(
+    tmp_path, monkeypatch
+):
+    """Mutation guard / regression: with no deny rule on either connection's
+    candidate Policy, the same cross-connection join must still simulate as
+    `allow` — the item-156 wiring must not turn every cross-connection join
+    into a false-positive denial."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_policy = """
+default:
+  enabled: true
+connections:
+  fresh:
+    join_group: shared
+  other:
+    join_group: shared
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            connections_yaml=_TWO_CONNECTIONS,
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            connection="fresh",
+            query=_cross_connection_join_query(),
+        ),
+    )
+
+    assert result.decision == "allow"
+    assert result.query_allowed is True
+
+
+def test_candidate_simulation_reports_a_not_connectable_secondary_as_a_denial_not_a_500(
+    tmp_path, monkeypatch
+):
+    """Post-ship audit finding on TODO.md item 163's own fix (found by
+    `security-invariant-reviewer`, 2026-08-07): `resolve_scope_connections`/
+    `resolve_query_table_connections` now raise `ConfigValidationError` (not
+    just `NotFoundError`/`QueryValidationError`) for a candidate secondary
+    connection whose dialect isn't yet connectable (Snowflake/BigQuery).
+    `simulate_candidate_policy`'s two call sites only caught the original two
+    exception types, so the new one escaped past this function entirely —
+    the whole simulate request 422'd instead of reporting the same
+    `query_connection_denied` decision a `join_group` mismatch already
+    reports, and (see the sibling audit test below) skipped its audit event
+    too. This asserts the report shape; the audit test asserts the event."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_connections = """
+connections:
+  - id: fresh
+    dialect: postgresql
+    connection_string: ${TEST_ADMIN_URL}
+  - id: other
+    dialect: snowflake
+    connection_string: snowflake://user:pass@account/db
+"""
+    candidate_policy = """
+default:
+  enabled: true
+connections:
+  fresh:
+    join_group: shared
+  other:
+    join_group: shared
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            connections_yaml=candidate_connections,
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            connection="fresh",
+            query=_cross_connection_join_query(),
+        ),
+    )
+
+    assert result.decision == "deny"
+    assert result.query_allowed is False
+    assert "query_connection_denied" in {reason.code for reason in result.reasons}
+
+
+def test_candidate_simulation_still_emits_its_audit_event_for_a_not_connectable_secondary(
+    tmp_path, monkeypatch
+):
+    """Sibling to the test above: before the fix, the escaped
+    `ConfigValidationError` skipped `simulate_candidate_policy`'s own
+    `audit_config_change(action="simulate", ...)` call entirely, since it
+    never reached the end of the function — an admin could exercise the
+    simulator against a candidate config with a not-connectable secondary
+    without leaving a simulate record."""
+    audit_path = tmp_path / "simulation-not-connectable-audit.jsonl"
+    set_audit_sink(JsonlAuditSink(str(audit_path)))
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_connections = """
+connections:
+  - id: fresh
+    dialect: postgresql
+    connection_string: ${TEST_ADMIN_URL}
+  - id: other
+    dialect: snowflake
+    connection_string: snowflake://user:pass@account/db
+"""
+    candidate_policy = """
+default:
+  enabled: true
+connections:
+  fresh:
+    join_group: shared
+  other:
+    join_group: shared
+"""
+
+    governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            connections_yaml=candidate_connections,
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            connection="fresh",
+            query=_cross_connection_join_query(),
+        ),
+    )
+
+    event = json.loads(audit_path.read_text())
+    assert event["action"] == "simulate"
+    assert event["outcome"] == "success"
+
+
+def test_candidate_simulation_reports_a_mandatory_filter_declared_only_on_the_joined_connection(
+    tmp_path, monkeypatch
+):
+    """TODO.md item 156 follow-up: the mandatory-filter readiness report must
+    also walk a cross-connection join's table's OWN resolved connection's
+    filters, not just the request's own (`fresh`) connection's — otherwise an
+    operator is told a principal is fully `ready` when a missing claim on the
+    JOINED connection's own filter would actually refuse at real execution
+    time."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    candidate_policy = """
+default:
+  enabled: true
+connections:
+  fresh:
+    join_group: shared
+  other:
+    join_group: shared
+    mandatory_row_filters:
+      - table: customers
+        column: tenant_id
+        from_claim: tenant_id
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            connections_yaml=_TWO_CONNECTIONS,
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            # No `tenant_id` claim supplied — the joined connection's filter
+            # can't resolve.
+            connection="fresh",
+            query=_cross_connection_join_query(),
+        ),
+    )
+
+    assert {(item.table, item.column) for item in result.mandatory_filters} == {
+        ("customers", "tenant_id")
+    }
+    assert result.mandatory_filters[0].ready is False
+    assert "mandatory_claim_missing" in {reason.code for reason in result.reasons}
+
+
+@pytest.mark.security
+def test_candidate_simulation_does_not_reveal_a_joined_connections_filter_for_a_table_it_denies(
+    tmp_path, monkeypatch
+):
+    """The pre-existing single-connection guarantee (`test_candidate_
+    simulation_does_not_reveal_filters_for_denied_table`, below) extended to
+    a cross-connection join: a table denied ONLY by the joined connection's
+    own candidate Policy must not leak that same connection's mandatory-
+    filter column name into the readiness report either — a principal
+    already told `deny` for `customers` should not additionally learn there
+    is a `tenant_id` mandatory filter on it."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_config_version_store(ConfigVersionStore(str(tmp_path / "gov")))
+    hidden_column = "hidden_cross_connection_tenant_column"
+    candidate_policy = f"""
+default:
+  enabled: true
+connections:
+  fresh:
+    join_group: shared
+  other:
+    join_group: shared
+    denied_tables: [customers]
+    mandatory_row_filters:
+      - table: customers
+        column: {hidden_column}
+        value: some-value
+"""
+
+    result = governance.simulate_candidate_policy(
+        cfg,
+        _principal(),
+        CandidatePolicySimulationRequest(
+            connections_yaml=_TWO_CONNECTIONS,
+            policy_yaml=candidate_policy,
+            principal="reporting-agent",
+            connection="fresh",
+            query=_cross_connection_join_query(),
+        ),
+    )
+
+    assert result.decision == "deny"
+    assert result.mandatory_filters == []
+    serialized = result.model_dump_json()
+    assert hidden_column not in serialized
 
 
 @pytest.mark.security

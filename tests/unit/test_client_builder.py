@@ -93,6 +93,17 @@ def test_builder_matches_handwritten_wire_dict():
     }
 
 
+def test_purpose_builder_serializes_the_declared_value():
+    """TODO.md item 146 test-contract gap (found by `test-contract-reviewer`,
+    2026-08-05): `test_every_structuredquery_field_is_settable_by_the_builder`
+    only checks the KEY set, so a bug dropping `.purpose()`'s value (e.g.
+    assigning to the wrong attribute) would leave `purpose: null` present and
+    go undetected. This asserts the actual value, the same way `.intent()`
+    already has its own dedicated fidelity assertion above."""
+    built = Query.from_("orders").select("orders.id").purpose("fraud_review").to_dict()
+    assert built["purpose"] == "fraud_review"
+
+
 def test_aggregate_col_sugar_and_arg_parse_to_the_identical_model():
     """`col` is kept permanently as sugar for `arg` (2026-07-25 Decision Log).
     It is a SPELLING, not a second structural shape: both wire forms must
@@ -390,6 +401,7 @@ def test_every_structuredquery_field_is_settable_by_the_builder():
         .offset(2)
         .top_n(1, order_by=[desc("n")], partition_by=["e.name"])
         .intent("everything")
+        .purpose("audit")
     )
     dumped = q.build().model_dump(by_alias=True)  # no exclusions: every key present
 

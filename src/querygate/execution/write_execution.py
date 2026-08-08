@@ -31,7 +31,7 @@ The safety model (all enforced here, all tested):
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import pydantic as pyd
 import sqlalchemy as sa
@@ -50,7 +50,7 @@ from querygate.core.exceptions import (
     QueryValidationError,
     public_error_message,
 )
-from querygate.execution.approval import verify_approval_token, write_fingerprint
+from querygate.execution.approval import TOKEN_KIND_GRANT, verify_approval_token, write_fingerprint
 from querygate.execution.concurrency import concurrency_slot
 from querygate.policy.loader import get_policy
 from querygate.policy.models import WritePolicy
@@ -91,6 +91,10 @@ class WriteBatchItemResult(pyd.BaseModel):
     affected_rows: Optional[int] = None
     executed: bool = False
     error: Optional[str] = None
+    # Sibling of BatchQueryItemResult's identical fields (TODO.md item 128) —
+    # populated only when `error` is specifically an ApprovalRequiredError.
+    approval_fingerprint: Optional[str] = None
+    approval_reasons: Optional[List[str]] = None
 
 
 def _write_shape(statement: WriteStatement, table_name: str) -> dict:
@@ -184,13 +188,18 @@ class WriteExecutionService:
         self,
         statements: List[WriteStatement],
         *,
+        approval_tokens: Optional[Dict[str, str]] = None,
         approval_resolver: Optional["ApprovalResolver"] = None,
         atomic: bool = False,
     ) -> List[WriteBatchItemResult]:
         """Run a batch of writes. Default (`atomic=False`): each write is its own
         transaction — one failure (or a rejected approval) surfaces as that item's
-        `error` without dropping the rest; `approval_resolver` (MCP elicitation)
-        can obtain a token for a gated write and retry it once. `atomic=True`:
+        `error` without dropping the rest. `approval_tokens` maps a write
+        fingerprint to its pre-obtained approval token (TODO.md item 128's MCP
+        MRTR port — the write-side sibling of `StructuredQueryService.execute_many`'s
+        identical parameter), tried before any resolver; `approval_resolver` (an
+        older, still-supported in-process interactive path) gets one chance to
+        obtain a token when no pre-supplied one covers a gated write. `atomic=True`:
         **all-or-nothing** — every write runs in ONE transaction and any failure
         rolls the whole batch back (every item then reports the same error). An
         atomic batch is deny-by-default + capped like any write and fails closed on
@@ -204,7 +213,10 @@ class WriteExecutionService:
         )
         if atomic:
             return await self._execute_many_atomically(statements)
-        return [await self._execute_batch_item(s, approval_resolver) for s in statements]
+        return [
+            await self._execute_batch_item(s, approval_tokens, approval_resolver)
+            for s in statements
+        ]
 
     async def _execute_many_atomically(
         self, statements: List[WriteStatement]
@@ -279,16 +291,26 @@ class WriteExecutionService:
         return oks
 
     async def _execute_batch_item(
-        self, statement: WriteStatement, approval_resolver: Optional["ApprovalResolver"]
+        self,
+        statement: WriteStatement,
+        approval_tokens: Optional[Dict[str, str]],
+        approval_resolver: Optional["ApprovalResolver"],
     ) -> WriteBatchItemResult:
+        token = approval_tokens.get(write_fingerprint(statement)) if approval_tokens else None
         try:
-            return self._batch_ok(await self.execute(statement))
+            return self._batch_ok(await self.execute(statement, approval_token=token))
         except ApprovalRequiredError as exc:
+            # No pre-supplied token covered this write (or it was rejected). Give
+            # an injected resolver one chance to obtain a token interactively,
+            # then retry exactly once with it — mirrors
+            # StructuredQueryService._execute_batch_item's identical shape.
             if approval_resolver is not None:
-                token = await approval_resolver(statement, exc)
-                if token is not None:
+                resolved = await approval_resolver(statement, exc)
+                if resolved is not None:
                     try:
-                        return self._batch_ok(await self.execute(statement, approval_token=token))
+                        return self._batch_ok(
+                            await self.execute(statement, approval_token=resolved)
+                        )
                     except Exception as retry_exc:  # shaped into the item error below
                         exc = retry_exc  # type: ignore[assignment]
             return self._batch_error(statement, exc)
@@ -307,7 +329,13 @@ class WriteExecutionService:
     @staticmethod
     def _batch_error(statement: WriteStatement, exc: Exception) -> WriteBatchItemResult:
         return WriteBatchItemResult(
-            operation=statement.op, table=statement.table, error=public_error_message(exc)
+            operation=statement.op,
+            table=statement.table,
+            error=public_error_message(exc),
+            approval_fingerprint=(
+                exc.fingerprint if isinstance(exc, ApprovalRequiredError) else None
+            ),
+            approval_reasons=(exc.reasons if isinstance(exc, ApprovalRequiredError) else None),
         )
 
     async def _execute_in_transaction(
@@ -397,8 +425,17 @@ class WriteExecutionService:
         if threshold is None or affected <= threshold:
             return
         fingerprint = write_fingerprint(statement)
+        # TODO.md item 151: bound to this connection/principal, the write-side
+        # sibling of StructuredQueryService._enforce_approval_gate's binding —
+        # a token approved for this write on a different connection, or by/for
+        # a different principal, is rejected even though the fingerprint matches.
         if approval_token and verify_approval_token(
-            approval_token, fingerprint=fingerprint, key=app_config.approval_token_hmac_key
+            approval_token,
+            fingerprint=fingerprint,
+            key=app_config.approval_token_hmac_key,
+            connection_id=self._connection_id,
+            principal_subject=self._principal_subject,
+            expected_kind=TOKEN_KIND_GRANT,
         ):
             return
         raise ApprovalRequiredError(

@@ -38,6 +38,7 @@
       ]
     },
     "intent": "kitchen sink parity fixture \u2014 item 51 phase 2",
+    "purpose": null,
     "joins": [
       {
         "alias": "m",
@@ -310,6 +311,7 @@
     "group_by": [],
     "having": null,
     "intent": null,
+    "purpose": null,
     "joins": [],
     "limit": 100,
     "offset": 0,
@@ -336,6 +338,7 @@
           "group_by": [],
           "having": null,
           "intent": null,
+          "purpose": null,
           "joins": [],
           "limit": null,
           "offset": 0,
@@ -373,6 +376,7 @@
     "group_by": [],
     "having": null,
     "intent": null,
+    "purpose": null,
     "joins": [],
     "limit": null,
     "offset": 0,

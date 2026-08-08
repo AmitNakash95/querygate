@@ -210,6 +210,26 @@ class TestStructuredQueryModels:
                 joins=[JoinSpec(table="customers", alias="o", on=["o.customer_id", "o.id"])],
             )
 
+    def test_duplicate_effective_name_rejected_across_a_casefold_lower_disagreement(self):
+        # "STRASSE".lower() == "strasse" but "straße".lower() == "straße" (unchanged
+        # -- ß is not in .lower()'s ASCII-only fold), while .casefold() unifies both
+        # to "strasse". This validator must use the SAME fold as
+        # `schema_validation.effective_name_map`, or the AST could accept two
+        # "distinct" effective names that the compiler's name map then silently
+        # collapses into one -- losing a table from the query graph (found by
+        # `security-invariant-reviewer` while reviewing TODO.md item 150's fix).
+        with pytest.raises(ValueError, match="Duplicate table/alias"):
+            StructuredQuery(
+                from_table="customers",
+                from_alias="straße",
+                select=["straße.id", "STRASSE.id"],
+                joins=[
+                    JoinSpec(
+                        table="orders", alias="STRASSE", on=["straße.id", "STRASSE.customer_id"]
+                    )
+                ],
+            )
+
     def test_not_group_accepted(self):
         g = WhereGroup(not_terms=Predicate(col="orders.status", op="eq", value="x"))
         assert g.not_terms is not None
@@ -406,6 +426,177 @@ class TestStructuredQueryModels:
             StructuredQuery.model_validate(
                 {"from": "orders", "select": ["orders.id"], "entity_id": 42}
             )
+
+
+class TestAuditLineSizeCaps:
+    """TODO.md item 139: a hard structural ceiling on the AST's list fields,
+    independent of the operator-tunable Policy caps checked later in
+    validation/policy_validation.py — closes the gap where a pathologically
+    large (but syntactically valid) query would still have its full shape
+    serialized into one audit-log line by normalize_query_shape() before
+    policy validation ever runs, regardless of whether the query would go on
+    to be rejected anyway."""
+
+    def test_oversized_select_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="select"):
+            StructuredQuery.model_validate(
+                {"from": "orders", "select": [f"orders.c{i}" for i in range(1001)]}
+            )
+
+    def test_select_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {"from": "orders", "select": [f"orders.c{i}" for i in range(1000)]}
+        )
+        assert len(q.select) == 1000
+
+    def test_oversized_joins_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="joins"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "orders",
+                    "select": ["orders.id"],
+                    "joins": [
+                        {"table": f"t{i}", "alias": f"t{i}", "on": ["orders.id", f"t{i}.id"]}
+                        for i in range(201)
+                    ],
+                }
+            )
+
+    def test_oversized_group_by_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="group_by"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "orders",
+                    "select": ["orders.id"],
+                    "group_by": [f"orders.c{i}" for i in range(501)],
+                }
+            )
+
+    def test_oversized_order_by_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="order_by"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "orders",
+                    "select": ["orders.id"],
+                    "order_by": [{"col": f"orders.c{i}"} for i in range(501)],
+                }
+            )
+
+    def test_oversized_correlate_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="correlate"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "orders",
+                    "select": ["orders.id"],
+                    "correlate": [f"Customer.c{i}" for i in range(51)],
+                }
+            )
+
+    def test_oversized_ctes_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="ctes"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "totals",
+                    "select": ["totals.id"],
+                    "ctes": [
+                        {
+                            "name": f"cte{i}",
+                            "query": {"from": "orders", "select": ["orders.id"]},
+                        }
+                        for i in range(51)
+                    ],
+                }
+            )
+
+    def test_oversized_set_op_arms_is_rejected_at_parse_time(self):
+        with pytest.raises(ValueError, match="arms"):
+            StructuredQuery.model_validate(
+                {
+                    "from": "orders",
+                    "select": ["orders.id"],
+                    "set_op": {
+                        "op": "union",
+                        "arms": [{"from": "orders", "select": ["orders.id"]} for _ in range(51)],
+                    },
+                }
+            )
+
+    # Companion "accepted at exactly the cap" tests for the remaining six
+    # fields — `select`'s pair (test_oversized_select_.../test_select_at_
+    # the_cap_...) already covers this direction; the other six only tested
+    # rejection at N+1 (found by `test-contract-reviewer`, 2026-08-05). An
+    # off-by-one rejecting at N itself would slip through undetected without
+    # these, even though it's Pydantic's own `max_length` doing the
+    # enforcement.
+
+    def test_joins_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "joins": [
+                    {"table": f"t{i}", "alias": f"t{i}", "on": ["orders.id", f"t{i}.id"]}
+                    for i in range(200)
+                ],
+            }
+        )
+        assert len(q.joins) == 200
+
+    def test_group_by_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "group_by": [f"orders.c{i}" for i in range(500)],
+            }
+        )
+        assert len(q.group_by) == 500
+
+    def test_order_by_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "order_by": [{"col": f"orders.c{i}"} for i in range(500)],
+            }
+        )
+        assert len(q.order_by) == 500
+
+    def test_correlate_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "correlate": [f"Customer.c{i}" for i in range(50)],
+            }
+        )
+        assert len(q.correlate) == 50
+
+    def test_ctes_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {
+                "from": "totals",
+                "select": ["totals.id"],
+                "ctes": [
+                    {"name": f"cte{i}", "query": {"from": "orders", "select": ["orders.id"]}}
+                    for i in range(50)
+                ],
+            }
+        )
+        assert len(q.ctes) == 50
+
+    def test_set_op_arms_at_the_cap_is_accepted(self):
+        q = StructuredQuery.model_validate(
+            {
+                "from": "orders",
+                "select": ["orders.id"],
+                "set_op": {
+                    "op": "union",
+                    "arms": [{"from": "orders", "select": ["orders.id"]} for _ in range(50)],
+                },
+            }
+        )
+        assert len(q.set_op.arms) == 50
 
 
 class TestParseColumnRef:
