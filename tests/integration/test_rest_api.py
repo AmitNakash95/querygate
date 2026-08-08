@@ -767,6 +767,41 @@ async def test_health_endpoint_reports_degraded_when_connection_unreachable(app)
 
 
 @pytest.mark.asyncio
+async def test_worm_audit_backend_without_a_key_warns_at_startup(tmp_path, capsys):
+    # TODO.md item 154 (security-invariant-reviewer, WS-154-1): an unkeyed
+    # WORM chain detects corruption but not deliberate forgery — surfaced at
+    # startup, not just in docs, since it's the shipped default.
+    settings = _settings(
+        audit_sink_backend="jsonl_chained_s3_worm",
+        audit_jsonl_path=str(tmp_path / "chain.jsonl"),
+        audit_worm_s3_bucket="qg-worm-warn-test",
+        audit_worm_s3_region="us-east-1",
+        # audit_ledger_hmac_key intentionally left at its default ("").
+    )
+    app = create_app(settings)
+    with patch("querygate.health._ping", new_callable=AsyncMock):
+        async with app.router.lifespan_context(app):
+            pass
+    assert "audit.worm.unkeyed_chain" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_worm_audit_backend_with_a_key_does_not_warn_at_startup(tmp_path, capsys):
+    settings = _settings(
+        audit_sink_backend="jsonl_chained_s3_worm",
+        audit_jsonl_path=str(tmp_path / "chain.jsonl"),
+        audit_worm_s3_bucket="qg-worm-warn-test",
+        audit_worm_s3_region="us-east-1",
+        audit_ledger_hmac_key="a-real-key",
+    )
+    app = create_app(settings)
+    with patch("querygate.health._ping", new_callable=AsyncMock):
+        async with app.router.lifespan_context(app):
+            pass
+    assert "audit.worm.unkeyed_chain" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
 async def test_worm_audit_backend_wires_the_flush_monitor_end_to_end(tmp_path):
     """TODO.md item 134: the piece the unit tests (test_audit_worm_sink.py)
     can't cover — that app.py's lifespan actually starts a WormFlushMonitor

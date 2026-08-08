@@ -350,7 +350,12 @@ class TestForgedOrUnenvelopedSegmentsAreRejected:
             bounds=_bounds(),
         )
         assert result.events == []
-        assert result.malformed == 1
+        # TODO.md item 154 (security-invariant-reviewer, WS-154-2): an
+        # envelope-shaped-but-hash-mismatched line is `unverified`, not
+        # `malformed` — it's structurally a real envelope, just not one
+        # that verifies under the configured key.
+        assert result.unverified == 1
+        assert result.malformed == 0
 
     async def test_a_genuine_segment_still_verifies_and_is_returned(self, s3):
         # The control: the identical shape the two tests above attack, but
@@ -372,6 +377,69 @@ class TestForgedOrUnenvelopedSegmentsAreRejected:
         assert len(result.events) == 1
         assert result.malformed == 0
 
+    async def test_an_unkeyed_forged_segment_still_verifies_documented_residual(self, s3):
+        # TODO.md item 154 / docs/THREAT_MODEL.md QG-40 (security-invariant-
+        # reviewer, WS-154-1): pins the residual explicitly so a future doc
+        # edit can't quietly re-claim unconditional closure. An unkeyed
+        # (SHA-256) chain is a PUBLIC function — a forger with no HMAC key
+        # can compute a self-consistent envelope exactly like a genuine
+        # writer would, using nothing but the same public `make_record`.
+        # This is NOT a bug: it's the same limitation `audit/ledger.py`'s
+        # own docstring states for the local ledger's unkeyed mode.
+        forged_body = {
+            "connection_id": "attacker-forged",
+            "policy_decision": "allowed",
+            "outcome": "success",
+            "event_type": "query.execution",
+            "query_shape": {},
+            "duration_ms": 1,
+            "occurred_at": "2026-03-15T12:00:00+00:00",
+            "schema_version": "1",
+            "event_id": "11111111-1111-1111-1111-111111111111",
+        }
+        forger_record = make_record(0, GENESIS_PREV_HASH, forged_body)  # no key: public compute
+        _put_segment(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [forger_record.model_dump_json()],
+        )
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+            # ledger_key intentionally omitted — the shipped default.
+        )
+        assert len(result.events) == 1
+        assert result.events[0].connection_id == "attacker-forged"
+        assert result.malformed == 0
+        assert result.unverified == 0
+
+    async def test_unverified_lines_are_disclosed_in_the_note(self, s3):
+        # TODO.md item 154 (security-invariant-reviewer, WS-154-2): a
+        # non-zero `unverified` count must be named in the response `note`,
+        # not just a bare, unexplained number — the far more likely cause in
+        # practice is a rotated/mismatched key, not tampering.
+        _put_segment(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            _chain_lines([_event("a", minute=0)], key=b"a-different-key"),
+        )
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+        assert result.unverified == 1
+        assert "key" in result.note.lower()
+
     async def test_a_keyed_chain_is_rejected_when_the_reader_has_no_key(self, s3):
         # An unkeyed reader (ledger_key=None, the default) recomputes plain
         # SHA-256 — a segment that was actually HMAC-signed with a key the
@@ -392,7 +460,8 @@ class TestForgedOrUnenvelopedSegmentsAreRejected:
             # ledger_key intentionally omitted (defaults to None)
         )
         assert result.events == []
-        assert result.malformed == 1
+        assert result.unverified == 1
+        assert result.malformed == 0
 
     async def test_a_keyed_chain_verifies_with_the_matching_key(self, s3):
         _put_segment(
@@ -518,6 +587,63 @@ class TestPagination:
         assert result.objects_scanned == 1
         assert result.truncated is True
         assert result.next_cursor is not None
+
+    async def test_a_single_oversized_object_truncates_mid_object_on_the_deadline(
+        self, s3, monkeypatch
+    ):
+        # TODO.md item 154 (security-invariant-reviewer, WS-154-4): per-line
+        # envelope verification made this loop's body meaningfully more
+        # expensive, and — pre-existing, merely amplified — nothing inside a
+        # SINGLE object's line loop ever checked the wall-clock deadline
+        # before this fix; the two existing deadline tests above both fire
+        # BETWEEN objects. A single anomalous object at the line cap could
+        # block uninterrupted past request_timeout_seconds entirely. Proven
+        # with a real multi-thousand-line single object and a deadline that
+        # "expires" only after genuine per-line verification work has
+        # started (same decoupling-from-asyncio-internals technique as
+        # test_request_timeout_cap_truncates_mid_scan just above).
+        events = [_event("a", minute=(i % 60)) for i in range(2500)]
+        _put_events(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", events)
+
+        real_monotonic = time.monotonic()
+        state = {"verified": 0}
+        real_verify = worm_search_module.verify_envelope_hash
+
+        def counting_verify(parsed, *, key=None):
+            state["verified"] += 1
+            return real_verify(parsed, key=key)
+
+        def fake_monotonic():
+            return real_monotonic + 10_000 if state["verified"] >= 10 else real_monotonic
+
+        monkeypatch.setattr(worm_search_module, "verify_envelope_hash", counting_verify)
+        monkeypatch.setattr(time, "monotonic", fake_monotonic)
+
+        # default_limit/max_limit raised well past 2500 (the default is 50)
+        # so the pre-existing PAGE-SIZE cap can't be what truncates this —
+        # isolating the new mid-object DEADLINE check as the only possible
+        # cause. (Confirmed by mutation: without this override, deleting the
+        # new deadline check left this test passing for the wrong reason —
+        # the page filled at the default limit=50 regardless.)
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(default_limit=5000, max_limit=5000),
+        )
+        assert result.truncated is True
+        assert result.next_cursor is not None
+        # Truncated INSIDE the object, not just "ran out of objects" — only
+        # a fraction of the 2500 events made it into the page. The deadline
+        # check fires at line_no == 1000 (the first periodic checkpoint
+        # after the 10th verification call expires the fake clock), so
+        # exactly the first 1000 lines were consumed.
+        assert len(result.events) == 1000
+        assert result.malformed == 0
+        assert result.unverified == 0
 
     async def test_max_objects_scanned_cap_truncates_mid_scan(self, s3):
         _put_events(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", [_event("a")])

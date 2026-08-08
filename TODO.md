@@ -202,6 +202,7 @@ order-of-magnitude, not commitments.
 | 169 | ✅ A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an unfiltered scan | S–M | 106, 167 |
 | 170 | Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it | S–M | — |
 | 171 | The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart | M | 141 |
+| 172 | WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment | M | 154 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2886,4 +2887,50 @@ item 141's own tests already cover).
 
 **Effort:** M (mechanical but wide — a Protocol return-shape change with a
 real test-suite blast radius). **Depends on:** 141.
+
+### 172. WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment
+
+**Surfaced 2026-08-09 by `security-invariant-reviewer` and `test-contract-
+reviewer` auditing item 154's own commit, during that item's own mandatory
+completion gate.** Item 154 made `audit/worm_search.py` verify each
+`LedgerRecord`'s own hash (`verify_envelope_hash`) before returning it —
+closing the gap where a fabricated, schema-valid segment could be planted
+and returned indistinguishably from a genuine one. What it does NOT do:
+check that a segment's records form a genuine, complete chain. Concretely,
+against even a KEYED archive (where forging new content is infeasible
+without the HMAC key), a principal with `s3:PutObject` on the archive
+prefix can still: (a) copy a genuine segment object byte-for-byte to a
+second key inside the searched window — every record still verifies
+individually, so the reader returns every one of its events TWICE, with
+`malformed == 0` and `unverified == 0`, silently inflating counts in a
+compliance answer; (b) upload an object containing an arbitrary SUBSET of a
+genuine segment's records (e.g. drop the first record, or one from the
+middle) — because linkage (`seq` monotonicity, `prev_hash` continuity) is
+never checked, each surviving record verifies on its own and the omission
+produces no signal. Impact is bounded (the genuine object still exists
+under Object Lock, so events can be duplicated/relocated but not erased),
+which is why this is a follow-up, not a blocker on item 154 itself; both
+residuals are already named in `docs/THREAT_MODEL.md` QG-40.
+
+**What to do (when prioritized):** in `audit/worm_search.py`'s per-object
+line loop, carry `prev_verified_hash`/`prev_seq` across consumed lines; for
+the FIRST line actually consumed when starting fresh at an object
+(`consume_from == 0`), require `parsed["seq"] == 0` and
+`parsed["prev_hash"] == GENESIS_PREV_HASH`; for each subsequent consumed
+line require `parsed["prev_hash"] == prev_verified_hash` and
+`parsed["seq"] == prev_seq + 1`; on a linkage failure, count the line
+`unverified` and stop consuming that object (don't return partial-chain
+events past the break). Needs care around cursor-resumption: a scan
+resuming mid-object (`consume_from > 0`) legitimately cannot verify the
+incoming link to a line it never read, so linkage checking should start at
+the first CONSUMED line, not unconditionally at line 0. Closing the
+segment-duplication half fully (not just detecting a broken chain) needs a
+further design decision — binding a segment to its own S3 object key (e.g.
+deriving the genesis `prev_hash` from the key) is a write-format change
+with the same "explicit decision before implementation" shape item 154's
+own two decisions had; record that decision in the PRODUCT_GUIDE Decision
+Log as this item's own first step, not something to default into under
+time pressure.
+
+**Effort:** M. **Depends on:** 154.
 

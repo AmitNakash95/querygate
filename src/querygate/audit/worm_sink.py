@@ -44,20 +44,28 @@ that would make a redaction slip permanent (WORM's whole point) is caught
 by the same tests that guard the local sinks, not a second implementation
 that could drift.
 
-**Enveloped and per-segment hash-chained (TODO.md item 154, closing
-`docs/THREAT_MODEL.md` QG-40's residual).** Each flushed segment is written
-as a `LedgerRecord`-shaped line per event (`audit/ledger.py`, the same
-envelope the local `HashChainedAuditSink` uses), chained from a fresh
+**Enveloped and per-segment hash-chained (TODO.md item 154, honestly scoped
+against `docs/THREAT_MODEL.md` QG-40).** Each flushed segment is written as
+a `LedgerRecord`-shaped line per event (`audit/ledger.py`, the same envelope
+the local `HashChainedAuditSink` uses), chained from a fresh
 `GENESIS_PREV_HASH` at the start of every segment — deliberately a
 PER-SEGMENT chain, not one continuous chain across every segment ever
-written: it fully answers this control's actual threat ("was this segment
-tampered with after being written") without needing the flush monitor to
-persist/recover chain state across process restarts, or to coordinate a
-single writer across replicas the way a cross-segment chain would. A reader
-(`audit/worm_search.py`) that recomputes each record's hash can now tell a
-genuine QueryGate-written segment from a fabricated one — closing the gap
-where S3 Object Lock stops an existing object from being altered but never
-stopped a new, schema-valid, unverifiable one from being planted.
+written, so the flush monitor never needs to persist/recover chain state
+across process restarts or coordinate a single writer across replicas.
+**This is forgery-resistant only when `AUDIT_LEDGER_HMAC_KEY` is set —
+NOT the default.** An unkeyed (SHA-256) chain is a public function anyone
+with `s3:PutObject` on the archive prefix can compute themselves, so it
+detects accidental corruption and a careless forgery, not a deliberate one
+(the same limitation this module's own `verify_envelope_hash` docstring
+already states for the local ledger's unkeyed mode — except the WORM chain
+has no externally-anchored head hash to fall back on, since every segment
+restarts at genesis). `app.py`'s lifespan logs a startup warning when WORM
+is configured without a key. **Two further residuals, neither closed by
+this control:** a genuine segment can still be silently withheld from a
+listing, and this reader verifies each RECORD's hash but never the CHAIN's
+linkage within a segment, so a genuine segment can be duplicated to a
+second key or have interior records dropped without detection (TODO.md
+item 172).
 """
 
 from __future__ import annotations
