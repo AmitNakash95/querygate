@@ -3729,20 +3729,32 @@ reasoning behind them, newest first. Added to incrementally as work happens
   backfill/import tooling) legitimately calls `sink.emit()` directly with a
   synthetic, controlled `occurred_at` to seed historical fixtures, and
   forcing the sink to always overwrite it would silently break that
-  capability. With the dominant drift source closed, the residual risk is
-  sub-microsecond thread-scheduling jitter around lock acquisition for
-  concurrent writers to the same process's ledger file — real in principle,
-  negligible in practice. **Decision:** keep a `max_consecutive_out_of_window`
+  capability. `_persist` stamps `occurred_at` **before** calling `emit()`, not
+  inside the sink's write lock, so the residual is bounded by however long a
+  competing writer holds that lock (`os.open`/`os.write`/optional `os.fsync`),
+  not sub-microsecond jitter as an earlier draft of this entry and the
+  in-code comments claimed — corrected 2026-08-08 by the `auditors` gate on
+  this same item, independently caught by three of its four reviewers. It is
+  negligible in practice today only because every production `audit_*` caller
+  runs synchronously on the single asyncio event loop with no `await` between
+  event construction and `_persist`, not because of anything the tolerance
+  itself guarantees. **Decision:** keep a `max_consecutive_out_of_window`
   tolerance (default 5,000, counted only across the reader's own matching
-  event type) as defense-in-depth against that residual jitter, rather than
-  claiming a mathematical guarantee the multi-process case (an operator
-  setting `num_of_workers > 1` in one pod/replica, sharing one `AUDIT_JSONL_PATH`
+  event type) as defense-in-depth against that residual, rather than claiming
+  a mathematical guarantee the multi-process case (an operator setting
+  `num_of_workers > 1` in one pod/replica, sharing one `AUDIT_JSONL_PATH`
   across independent OS processes with no cross-process lock) can't actually
   back. That multi-worker/single-ledger-file configuration is a pre-existing,
-  undocumented gap (not introduced or worsened by this item) worth its own
-  follow-up; it isn't scoped here. See
+  undocumented gap (not introduced or worsened by this item), recorded as
+  `docs/THREAT_MODEL.md` QG-43 alongside the early-exit's own residual (a
+  merged/restored/multi-writer audit file can make this heuristic return a
+  confidently-wrong, undisclosed `truncated=False`); the operator-facing
+  tuning knob for the tolerance and the fuller fix (a disclosure field
+  threaded through both reports plus `help/personal_denials.py`, which
+  independently inherits the same gap) are tracked as TODO.md item 171,
+  deliberately not folded into this item's already-committed scope. See
   [Audit logging](#6-audit-logging--every-attempt-always) and
-  [pipeline step 6](#the-one-request-pipeline).
+  [the Core Request Pipeline](#the-core-request-pipeline).
 
 - **2026-08-07 — A correlated subquery's `correlate` reference now resolves
   through the same shared, case-insensitive table lookup everywhere, closing

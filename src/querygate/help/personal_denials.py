@@ -185,6 +185,7 @@ def build_recent_denials_report(
     lookback_seconds: float = 86400.0,
     max_events_scanned: int = 50_000,
     max_lines_read: int = 50_000,
+    max_consecutive_out_of_window: int = 5_000,
     limit: int = 20,
     backend_label: Literal["jsonl", "jsonl_chained"] = "jsonl",
 ) -> RecentDenialsReport:
@@ -209,6 +210,10 @@ def build_recent_denials_report(
         # AnomalyThresholds' own default, since this surface is reachable
         # with authentication only, no admin scope, by design (item 45).
         max_lines_read=max_lines_read,
+        # TODO.md item 141: same reasoning as max_lines_read above — kept
+        # independently tunable rather than silently inheriting
+        # AnomalyThresholds' own default (docs/THREAT_MODEL.md QG-43).
+        max_consecutive_out_of_window=max_consecutive_out_of_window,
     )
     events, malformed, truncated = source.load_query_events(now=now, thresholds=thresholds)
     denials = select_recent_denials(events, principal_id=principal_id, limit=limit)
