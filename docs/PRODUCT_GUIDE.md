@@ -3733,7 +3733,26 @@ reasoning behind them, newest first. Added to incrementally as work happens
   doesn't exist. Implementation: `audit/worm_sink.py`'s `_build_segment_body`
   chains `make_record` calls per drained batch; `audit/worm_search.py`
   verifies each record's hash before unwrapping, using the same
-  `AUDIT_LEDGER_HMAC_KEY` the local chain/reader use. See
+  `AUDIT_LEDGER_HMAC_KEY` the local chain/reader use.
+  **Corrected the same day, by this item's own `auditors` gate**: the first
+  version of this entry and of `docs/THREAT_MODEL.md`'s QG-40 row claimed
+  the gap was closed unconditionally. It is not — SHA-256 (the default,
+  unkeyed chain) is a public function, so a principal with `s3:PutObject`
+  can still forge a passing segment when `AUDIT_LEDGER_HMAC_KEY` is unset;
+  only a KEYED (HMAC) chain makes forgery infeasible, the same distinction
+  `audit/ledger.py`'s docstring already draws for the local ledger — except
+  the WORM chain has no externally-anchored head hash to fall back on for
+  the unkeyed case, since each segment restarts at genesis. `app.py` now
+  logs a startup warning when WORM is configured without a key. Two further
+  residuals recorded rather than glossed over: the reader verifies each
+  RECORD's hash but never the chain's LINKAGE within a segment, so a
+  genuine segment can be duplicated to a second key (returned twice) or
+  have interior records dropped without detection (TODO.md item 172,
+  deliberately out of this item's scope); and rotating the HMAC key makes
+  every previously-archived segment fail verification on the next search —
+  now surfaced as a distinct `unverified` count (not lumped into
+  `malformed`) so the response discloses a likely key mismatch rather than
+  returning a silently-empty, "nothing happened"-looking result. See
   [Audit logging](#6-audit-logging--every-attempt-always).
 
 - **2026-08-08 — Accepted a windowed early-exit for the tail-first audit
@@ -5100,18 +5119,18 @@ reasoning behind them, newest first. Added to incrementally as work happens
   documented page-size ceiling; and the route wraps its S3 call in
   `mask_unexpected()` so a raw backend failure (bucket/endpoint/driver text)
   can never leak to the client, matching every other REST route's posture.
-  **Recorded, not fixed here (TODO.md item 154):** unlike the local
-  hash-chained sink, WORM segments are written unenveloped, so this reader
-  can confirm a line matches a known redaction-safe SHAPE but not that
-  QueryGate itself wrote it — a principal holding `s3:PutObject` on the
-  archive prefix could plant a fabricated, schema-valid segment this reader
-  would return indistinguishably from a genuine one. Closing that needs
-  enveloping/hash-chaining WORM segments the way the local sink already
-  does — a phase-1 WRITE-FORMAT change with a migration question for
-  already-archived segments, an explicit design decision rather than
-  something a read-side module can decide unilaterally, tracked as its own
-  item instead of folded into this one. See `docs/THREAT_MODEL.md` QG-40 for
-  the full mitigation/residual statement.
+  **Superseded 2026-08-09 (item 154): the enveloping/hash-chaining gap named
+  below is closed for a keyed archive** — see that item's own Decision Log
+  entry above (search "WORM archive segments are now enveloped") and
+  `docs/THREAT_MODEL.md` QG-40 for the current, full mitigation/residual
+  statement (including what's still genuinely open: the unkeyed default,
+  intra-segment chain linkage, and key rotation). Original note, kept for
+  history: unlike the local hash-chained sink, WORM segments were written
+  unenveloped, so this reader could confirm a line matched a known
+  redaction-safe SHAPE but not that QueryGate itself wrote it — a principal
+  holding `s3:PutObject` on the archive prefix could plant a fabricated,
+  schema-valid segment this reader would return indistinguishably from a
+  genuine one.
 
 - **2026-08-06 — item 19 phase 1 added MySQL as a third registry dialect**,
   purely additive per the item-57 adapter architecture: `MySQLDialectAdapter`

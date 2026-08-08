@@ -453,6 +453,14 @@ claim when the work ships or before explicitly handing the item back.
   change (3-tuple → 4-tuple) across ~20 call sites in two production
   consumers and three test files — mechanical but wide, deliberately not
   folded into item 141 itself.* **Depends on 141.**
+- [ ] **172** — WORM archive segment verification checks each record's own
+  hash but never the chain's linkage within a segment (duplication/omission
+  undetectable, even against a keyed archive). *Surfaced 2026-08-09 by
+  `security-invariant-reviewer`/`test-contract-reviewer` auditing item 154's
+  own commit, during that item's own mandatory completion gate. Needs an
+  explicit design decision (recorded in the PRODUCT_GUIDE Decision Log) on
+  binding a segment to its own object key before the duplication half can be
+  fully closed, not just the linkage-break detection half.* **Depends on 154.**
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
