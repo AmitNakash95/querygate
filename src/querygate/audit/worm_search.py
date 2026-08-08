@@ -37,22 +37,27 @@ module additionally screens each event's `query_shape` (a `Dict[str, Any]`
 the top-level check catches, so a nested forgery is rejected the same way a
 top-level one is — see `_contains_forbidden_content` below.
 
-**Residual, not closed by this control (recorded 2026-08-06 by
-`security-invariant-reviewer`, TODO.md item 154):** unlike the LOCAL
-hash-chained sink, WORM segments are written unenveloped (`audit/worm_sink.py`
-serializes the bare `PersistableEvent` body, not a `LedgerRecord`), so this
-reader has no hash-chain to verify against — it can confirm a line matches a
-known REDACTION-SAFE SHAPE, but not that QueryGate itself actually wrote it.
-S3 Object Lock (COMPLIANCE mode) prevents deleting or overwriting an EXISTING
-object; it does not prevent adding a NEW, schema-valid one. A principal
-holding `s3:PutObject` on the archive prefix — necessarily including
-QueryGate's own AWS role, since `WormFlushMonitor` needs that permission to
-archive at all — could plant a fabricated, schema-valid segment that this
-reader would return indistinguishably from a real one. Closing this fully
-means enveloping/hash-chaining WORM segments the way the local sink already
-does, which is a phase-1 WRITE-FORMAT change with a migration question for
-already-archived segments — an explicit design decision, not something this
-read-side module can decide unilaterally. Tracked as TODO.md item 154.
+**Fixed (TODO.md item 154, closing `docs/THREAT_MODEL.md` QG-40's residual):**
+WORM segments are now enveloped and per-segment hash-chained
+(`audit/worm_sink.py`'s `_build_segment_body`), the same `LedgerRecord`
+envelope the local `HashChainedAuditSink` uses. This reader verifies each
+record's own hash before ever unwrapping it (`verify_envelope_hash`,
+`unwrap_envelope`) — a line that isn't envelope-shaped at all, or whose hash
+doesn't recompute, is counted as `malformed` and never returned, closing the
+gap where S3 Object Lock (COMPLIANCE mode) prevents altering an EXISTING
+object but never prevented a NEW, schema-valid, unverifiable one from being
+planted. **Deliberately per-segment, not cross-segment** (see
+`audit/worm_sink.py`'s module docstring): this proves a given segment wasn't
+tampered with after being written, which is the actual threat this control
+closes; it does not prove no segment was ever silently withheld from a
+result — a different, lower-severity residual (an attacker would need to
+suppress a genuine object from being listed, not forge one) left to the
+existing S3-listing/Object-Lock posture. **No legacy-segment migration
+question**: this feature has no production deployment predating this fix, so
+the reader requires an envelope unconditionally rather than supporting both
+shapes indefinitely — a bare line is treated as `malformed`, matching this
+module's existing "reject unenveloped/unverifiable, never leak" posture for
+every other forgery class below.
 
 **Bounds — enforced, not advisory (`WormSearchBounds`).** A request outside
 these is REJECTED (422, `QueryValidationError`) before any S3 call is made;
@@ -142,6 +147,7 @@ from typing import List, Literal, Optional, Tuple, get_args
 import pydantic as pyd
 
 from querygate.audit.events import PersistableEvent
+from querygate.audit.ledger import resolve_ledger_key, unwrap_envelope, verify_envelope_hash
 from querygate.core.exceptions import QueryValidationError
 from querygate.metrics import (
     AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL,
@@ -492,11 +498,17 @@ async def search_worm_archive(
     limit: Optional[int] = None,
     cursor: Optional[str] = None,
     bounds: WormSearchBounds,
+    ledger_key: Optional[bytes] = None,
 ) -> WormSearchResult:
     """Search the S3 WORM archive for events matching the given filters
     within `[start_time, end_time]` (both required, inclusive). Raises
     `QueryValidationError` (422 at the transport edge) for any out-of-bound
     request; never makes an S3 call for a request it is about to reject.
+
+    `ledger_key` (TODO.md item 154) verifies each segment's per-segment hash
+    chain — the same key `resolve_ledger_key(AUDIT_LEDGER_HMAC_KEY)` resolves
+    for the local hash-chained sink/reader. `None` verifies an unkeyed
+    (SHA-256) chain.
 
     Callers should route through `build_worm_search_result` (below), which
     additionally handles the "WORM archiving isn't configured on this
@@ -637,8 +649,22 @@ async def search_worm_archive(
                     events_scanned += 1
                     try:
                         parsed = json.loads(raw_line)
-                        event = _EVENT_ADAPTER.validate_python(parsed)
-                    except (json.JSONDecodeError, pyd.ValidationError):
+                    except json.JSONDecodeError:
+                        malformed += 1
+                        continue
+                    # TODO.md item 154: every segment is enveloped and
+                    # per-segment hash-chained now — a line that isn't
+                    # envelope-shaped at all (`None`) or whose hash doesn't
+                    # recompute (`False`) is a forged/corrupted segment, not
+                    # a legitimate QueryGate-written one. No legacy bare-line
+                    # shape to tolerate (docs/THREAT_MODEL.md QG-40).
+                    if verify_envelope_hash(parsed, key=ledger_key) is not True:
+                        malformed += 1
+                        continue
+                    unwrapped = unwrap_envelope(parsed)
+                    try:
+                        event = _EVENT_ADAPTER.validate_python(unwrapped)
+                    except pyd.ValidationError:
                         malformed += 1
                         continue
                     query_shape = getattr(event, "query_shape", None)
@@ -759,4 +785,8 @@ async def build_worm_search_result(
         limit=limit,
         cursor=cursor,
         bounds=bounds,
+        # TODO.md item 154: the same key the local hash-chained sink/reader
+        # resolve, so a WORM segment's chain is verified under the identical
+        # trust model.
+        ledger_key=resolve_ledger_key(cfg.audit_ledger_hmac_key),
     )

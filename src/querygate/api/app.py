@@ -22,6 +22,7 @@ from querygate.api.auth import build_principal_dependency
 from querygate.api.catalog_governance_routes import build_catalog_governance_router
 from querygate.api.help_routes import build_help_router
 from querygate.api.routes import build_router
+from querygate.audit.ledger import resolve_ledger_key
 from querygate.audit.sinks import configure_audit_sink, reset_audit_sink
 from querygate.catalog.refresh import CatalogRefreshMonitor
 from querygate.catalog.usage import CatalogUsageLearningMonitor
@@ -60,6 +61,7 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 retention_mode=conf.audit_worm_retention_mode,
                 retention_days=conf.audit_worm_retention_days,
                 interval_seconds=conf.audit_worm_flush_interval_seconds,
+                ledger_key=resolve_ledger_key(conf.audit_ledger_hmac_key),
             )
             await worm_flush_monitor.start()
         app.state.worm_flush_monitor = worm_flush_monitor

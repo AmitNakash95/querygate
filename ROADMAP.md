@@ -326,7 +326,7 @@ claim when the work ships or before explicitly handing the item back.
   (MySQL) or 134 (WORM retention). *Surfaced 2026-08-06 by `claim-reviewer`
   while auditing item 152 — a documentation gap, not a claim-accuracy defect;
   deliberately left out of item 152's own scope.*
-- [ ] **154** — WORM archive segments are unenveloped, so managed search
+- [x] **154** — WORM archive segments are unenveloped, so managed search
   (item 134 phase 2) cannot verify a segment was actually written by
   QueryGate. *Surfaced 2026-08-06 by `security-invariant-reviewer` auditing
   item 134 phase 2 — a phase-1 write-format change with a migration question

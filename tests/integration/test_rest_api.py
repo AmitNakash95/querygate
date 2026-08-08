@@ -788,6 +788,11 @@ async def test_worm_audit_backend_wires_the_flush_monitor_end_to_end(tmp_path):
             audit_jsonl_path=str(tmp_path / "chain.jsonl"),
             audit_worm_s3_bucket="qg-worm-it-test",
             audit_worm_s3_region="us-east-1",
+            # TODO.md item 154: proves app.py's lifespan actually threads
+            # AppConfig's ledger key into WormFlushMonitor, not just the
+            # local HashChainedAuditSink — asserted below via
+            # verify_envelope_hash under this exact key.
+            audit_ledger_hmac_key="worm-it-test-key",
         )
         app = create_app(settings)
         with patch("querygate.health._ping", new_callable=AsyncMock):
@@ -813,6 +818,19 @@ async def test_worm_audit_backend_wires_the_flush_monitor_end_to_end(tmp_path):
             "Body"
         ].read()
         assert b'"connection_id":"demo"' in body
+
+        # TODO.md item 154: the segment verifies under the configured key
+        # and NOT under no key at all — proving the HMAC key genuinely
+        # reached WormFlushMonitor through app.py's lifespan wiring, not
+        # just an unkeyed default chain that happens to also produce a
+        # valid-looking envelope.
+        import json as _json
+
+        from querygate.audit.ledger import verify_envelope_hash
+
+        record = _json.loads(body.decode("utf-8").strip().splitlines()[0])
+        assert verify_envelope_hash(record, key=b"worm-it-test-key") is True
+        assert verify_envelope_hash(record, key=None) is False
 
         # Local hash-chained ledger still got the same event — WORM composes,
         # it doesn't replace.

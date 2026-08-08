@@ -3705,6 +3705,37 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-09 — WORM archive segments are now enveloped and per-segment
+  hash-chained, closing `docs/THREAT_MODEL.md` QG-40's residual (TODO.md
+  item 154).** The local hash-chained sink (item 91) wraps every event in a
+  `LedgerRecord` a reader can verify; the WORM sink (item 134) wrote the bare
+  event body instead, so a principal with `s3:PutObject` on the archive
+  prefix — necessarily including QueryGate's own AWS role — could plant a
+  fabricated, schema-valid segment the search reader would return
+  indistinguishably from a genuine one. Two decisions were needed before
+  building, made explicitly rather than assumed: **(1) per-segment chain,
+  not cross-segment** — each flushed batch gets its own chain restarting at
+  `GENESIS_PREV_HASH`/seq 0, rather than one continuous chain across every
+  segment ever written. This fully answers the actual threat (was this
+  segment altered after being written) without `WormFlushMonitor` needing to
+  persist/recover chain state across restarts or coordinate a single writer
+  across replicas — the same complexity a cross-segment design would add
+  that item 141 already flagged as disproportionate for a comparable case.
+  The trade-off is real and stated, not hidden: a per-segment chain cannot
+  prove no segment was ever silently withheld from a result, only that a
+  *returned* segment wasn't altered — a different, lower-severity residual
+  left to the existing S3-listing/Object-Lock posture. **(2) No
+  legacy-segment tolerance** — the reader now requires an envelope
+  unconditionally (a bare line is `malformed`, not accepted as a weaker
+  historical shape), because this feature has no production deployment
+  predating the fix; the "support both shapes indefinitely" alternative
+  would have added permanent reader complexity for a migration case that
+  doesn't exist. Implementation: `audit/worm_sink.py`'s `_build_segment_body`
+  chains `make_record` calls per drained batch; `audit/worm_search.py`
+  verifies each record's hash before unwrapping, using the same
+  `AUDIT_LEDGER_HMAC_KEY` the local chain/reader use. See
+  [Audit logging](#6-audit-logging--every-attempt-always).
+
 - **2026-08-08 — Accepted a windowed early-exit for the tail-first audit
   readers (`admin/anomaly.py`, `admin/config_trends.py`), after first closing
   the dominant source of the ordering risk it depends on (TODO.md item
