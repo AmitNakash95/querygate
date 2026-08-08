@@ -10058,6 +10058,73 @@ final tree.
 **Effort:** S (lower the ceiling — the cursor-redesign alternative, M, was
 not chosen). **Depends on:** 138.
 
+### 141. Convert audit-reader line caps into practically-tight window-based early exits ✅ DONE
+
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138;
+deliberately not built as part of that item.** `admin/anomaly.py` and
+`admin/config_trends.py` both scan tail-first (item 138), which makes a
+targeted optimization possible: once the scan has seen a long consecutive run
+of matching-type events whose `occurred_at` is at or before `window_start`,
+every remaining, physically-earlier line is also out of window — but only if
+physical write order actually tracks `occurred_at` order. `occurred_at` was
+set at event **construction** time, before the (possibly later) write, so
+under concurrent request handling two events' physical write order and their
+`occurred_at` order were not *guaranteed* identical. The item as originally
+scoped proposed a tolerance for that gap; a bounded chance of silently
+missing borderline events, in exchange for speed on a long-running
+deployment's history.
+
+**Shipped 2026-08-08 (maintainer-approved, PRODUCT_GUIDE Decision Log).**
+Investigating whether the gap could be closed outright — not just
+bounded — found the real fix: the dominant source of drift was not
+concurrency itself but the arbitrary work (a `log.info` call, and any future
+code) that ran *between* event construction and the durable write. A new
+`_persist` helper in `audit/logger.py` re-stamps `occurred_at` immediately
+before calling the sink's `emit()`, closing that gap for the actual
+production write path. A fully unconditional version — moving the stamp into
+the sink's own `emit()` under its write lock, so no caller could ever see a
+different value — was considered and rejected: the audit test suite (and any
+future backfill/import tooling) legitimately calls `sink.emit()` directly
+with a synthetic, controlled `occurred_at` to seed historical fixtures, and
+forcing the sink to always overwrite it would silently break that capability.
+The one duplicated try/except block across `audit_query`/`audit_config_change`/
+`audit_connection_probe`/`audit_catalog_governance` was folded into
+`_persist` in the same change (a genuine simplification, not scope creep —
+the four blocks were already byte-identical apart from one, and the fix
+belonged in exactly one place).
+
+**Remaining tolerance.** With the dominant drift source closed, the residual
+risk is sub-microsecond thread-scheduling jitter around lock acquisition —
+real in principle, negligible in practice. `AnomalyThresholds`/
+`ChangeTrendThresholds` both gained `max_consecutive_out_of_window` (default
+5,000, counted only across the reader's own matching event type — other
+event types neither advance nor reset the counter, since they say nothing
+about this stream's recency); once the threshold is crossed the scan breaks
+without setting `stopped_early`/`truncated`, since the window has genuinely
+ended as far as the tolerance allows. Not claimed as a mathematical
+guarantee: an operator setting `num_of_workers > 1` in one pod/replica would
+have multiple independent OS processes appending to the same
+`AUDIT_JSONL_PATH` with no cross-process lock, which the fix's guarantee
+doesn't cover. That's a pre-existing, undocumented gap — not introduced or
+worsened by this item — left for its own follow-up.
+
+**Coverage.** `test_audit.py` gained two `_persist`-level unit tests: one
+proving a stale, explicitly-set `occurred_at` gets overwritten with the real
+write-time value, one proving `_persist` doesn't mutate the caller's own
+event object. `test_anomaly.py`/`test_config_trends.py` each gained three
+reader-level tests, all using the same technique — a malformed JSON sentinel
+placed at the physical start of the file (oldest, read last tail-first) — to
+prove: (1) the early exit fires and the sentinel is never reached
+(`malformed == 0`), (2) an in-window event mid-run resets the counter so the
+scan does NOT exit early (`malformed == 1`, sentinel reached), and (3) a
+non-matching event type inside a run neither advances nor resets the counter.
+**Mutation-verified:** each of the three enforcement points (the break
+condition, the counter reset, and the `_persist` re-stamp itself) was
+deliberately removed in turn; the corresponding test failed for the expected
+reason each time, then the fix was restored and the full suite re-run green.
+
+**Effort:** S. **Depends on:** 138.
+
 ### 142. `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats ✅ DONE
 
 **Surfaced 2026-08-01/02 by the `claim-reviewer`/`security-invariant-reviewer`

@@ -93,6 +93,19 @@ class AnomalyThresholds(pyd.BaseModel):
     # own `max_line_bytes`/`max_total_bytes` are the hard backstop beneath
     # this line-count budget.
     max_lines_read: int = pyd.Field(default=200_000, ge=1)
+    # TODO.md item 141 (PRODUCT_GUIDE Decision Log): `audit/logger.py`'s
+    # `_persist` now stamps `occurred_at` under the sink's own write-order
+    # lock, so physical write order tracks `occurred_at` order for normal
+    # production traffic — closing the dominant source of drift (arbitrary
+    # work between event construction and the durable write). A residual,
+    # effectively-negligible scheduling-jitter risk remains under lock
+    # contention, which this tolerance absorbs: once this many consecutive
+    # `query.execution` lines in a row are all at-or-before `window_start`,
+    # the scan stops WITHOUT setting `truncated` — the window has genuinely
+    # ended, as far as the tolerance allows. Lines of other event types
+    # (config/catalog governance, probes) don't reset or advance this
+    # counter; they say nothing about this stream's recency.
+    max_consecutive_out_of_window: int = pyd.Field(default=5_000, ge=1)
     # Report caps — keep one response bounded regardless of principal count.
     max_principals_reported: int = pyd.Field(default=100, ge=1)
     max_new_connections_per_principal: int = pyd.Field(default=10, ge=1)
@@ -377,6 +390,7 @@ class JsonlAuditEventSource:
         malformed = 0
         lines_read = 0
         stopped_early = False
+        consecutive_out_of_window = 0
         if not self.path.exists():
             return [], 0, False
         try:
@@ -416,7 +430,17 @@ class JsonlAuditEventSource:
                 occurred = event.occurred_at
                 if occurred.tzinfo is None:
                     occurred = occurred.replace(tzinfo=timezone.utc)
-                if occurred <= window_start or occurred > now:
+                if occurred <= window_start:
+                    # TODO.md item 141: a run of this length is treated as
+                    # proof the window has genuinely ended (see
+                    # `max_consecutive_out_of_window`'s docstring) — stop
+                    # without setting `stopped_early`/`truncated`.
+                    consecutive_out_of_window += 1
+                    if consecutive_out_of_window >= thresholds.max_consecutive_out_of_window:
+                        break
+                    continue
+                consecutive_out_of_window = 0
+                if occurred > now:
                     continue
                 kept.append(event)
         except AuditFileReadBounded:

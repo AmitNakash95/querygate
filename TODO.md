@@ -171,7 +171,7 @@ order-of-magnitude, not commitments.
 | 138 | ✅ Audit read surfaces scan the entire persisted file on every request, unbounded by lines read | S–M | — |
 | 139 | ✅ Bound audit-line size at the source (AST list caps + audit/sinks.py's own unbounded-read defect) | M | 138 |
 | 140 | ✅ `_audit_page` pagination can still materialize ~1M dicts per request | S–M | 138 |
-| 141 | Convert audit-reader line caps into practically-tight window-based early exits | S | 138 |
+| 141 | ✅ Convert audit-reader line caps into practically-tight window-based early exits | S | 138 |
 | 142 | ✅ `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats | XS | — |
 | 143 | ✅ `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step | XS–S | — |
 | 144 | ✅ `verdict()` emits no query metrics, and `/metrics` is unauthenticated | S | — |
@@ -2152,41 +2152,24 @@ worst-case retained dicts per request to ~5,100 instead of ~1,000,050.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 140).
 
-### 141. Convert audit-reader line caps into practically-tight window-based early exits
+### 141. Convert audit-reader line caps into practically-tight window-based early exits ✅ DONE
 
-**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138;
-deliberately not built as part of that item.** `admin/anomaly.py` and
-`admin/config_trends.py` both scan tail-first now (item 138), which makes a
-targeted optimization possible that wasn't before: once the scan has seen a
-long consecutive run of matching-type events whose `occurred_at` is at or
-before `window_start`, it is very likely (though not certain — see below) that
-every remaining, physically-earlier line is also out of window, since the
-audit sink only appends and writes are lock-serialized within a process. Item
-138 deliberately did not build this: `occurred_at` is set at event
-**construction** time, before the (possibly slightly later) write, so under
-concurrent request handling two events' physical write order and their
-`occurred_at` order are not *guaranteed* identical — only overwhelmingly
-likely for realistic concurrency levels. An early exit on this basis is a
-correctness/performance tradeoff (a bounded chance of silently reporting
-`truncated=False` while actually missing a handful of borderline events),
-not a pure hardening, and item 138 already ships a strictly-safe bound
-(`max_lines_read`/`max_line_bytes`/`max_total_bytes`, all fail-closed to
-`truncated=True`) — this item would only make that existing safe bound
-*tighter in the common case*, not fix a live gap.
-
-**What to do, if approved:** add a `max_consecutive_out_of_window` threshold
-(e.g. default 5,000 — tunable slack for reordering/clock skew) to
-`AnomalyThresholds`/`ChangeTrendThresholds`; track a consecutive-out-of-window
-counter across only the caller's own matching event type (not lines of other
-types, which say nothing about this stream's recency); break once the
-threshold is hit, **without** setting `stopped_early`/`truncated` (the window
-genuinely ended, as far as the tolerance allows). Record the accepted
-ordering-tolerance assumption explicitly in the PRODUCT_GUIDE Decision Log
-before building — this is exactly the kind of judgment call CLAUDE.md's
-working agreement reserves for the maintainer, not a default an agent should
-reach for under time pressure.
-
-**Effort:** S once approved. **Depends on:** 138.
+**Shipped 2026-08-08** (maintainer-approved, PRODUCT_GUIDE Decision Log).
+Investigating the original proposal (a tolerance for a bounded chance of
+missing borderline events) found the real fix instead: `audit/logger.py`'s
+new `_persist` helper re-stamps `occurred_at` immediately before the sink's
+write call, closing the dominant source of drift (the `log.info` call and any
+other work between event construction and the durable write) rather than just
+tolerating it. `admin/anomaly.py`/`admin/config_trends.py` still carry a
+`max_consecutive_out_of_window` tolerance (default 5,000, counted only across
+the reader's own matching event type) as defense-in-depth against the
+residual sub-microsecond scheduling-jitter risk under lock contention — real
+in principle, negligible in practice — rather than claiming a guarantee a
+misconfigured multi-worker-per-ledger-file deployment can't back. Mutation-
+verified: the break condition, the counter-reset-on-in-window-event, and the
+non-matching-type-doesn't-count rule each have a dedicated regression test
+that fails when that specific rule is removed.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 141).
 
 ### 142. `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats ✅ DONE
 
