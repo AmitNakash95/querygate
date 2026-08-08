@@ -203,6 +203,7 @@ order-of-magnitude, not commitments.
 | 170 | Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it | S–M | — |
 | 171 | The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart | M | 141 |
 | 172 | WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment | M | 154 |
+| 173 | Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives | S | 160 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2831,4 +2832,34 @@ Log as this item's own first step, not something to default into under
 time pressure.
 
 **Effort:** M. **Depends on:** 154.
+
+### 173. Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives
+
+**Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 160's own
+commit, during that item's own mandatory completion gate (SIR-160F3-4).**
+Pre-existing since item 156, not introduced by item 160 — but item 160 added
+three new call sites (`validate_policy`, `compile_structured_query`,
+`applied_column_masks`) that can each now independently self-derive
+`scope_connections` via `resolve_scope_connections` when a caller supplies
+`connection_resolver` without it, and the request pipeline
+(`execution/service.py`) calls into more than one of those functions per
+request. Each self-derivation walks every join in the query and calls the
+resolver (`resolve_visible_connection` in production, hitting the
+`ConnectionRegistry`/`PolicyStore`) once per referenced connection, with no
+caching across the calls within a single request — so a query with N
+cross-connection joins now redoes that resolution work 2-3x per request
+instead of once. Not a correctness bug (each resolution is independently
+correct) and not unbounded (bounded by the policy's `max_joins` cap), so it's
+a performance follow-up, not a blocker on item 160 itself.
+
+**What to do (when prioritized):** memoize inside `resolve_scope_connections`
+(`validation/schema_validation.py`) via a per-call dict cache keyed by
+`(connection_id, id(principal))`, or thread a single resolved
+`scope_connections` map through `StructuredQueryService`'s pipeline once per
+request instead of letting each stage self-derive independently — the latter
+is the more thorough fix but changes call-site plumbing beyond this item's
+resolver function, so record which approach is chosen in the PRODUCT_GUIDE
+Decision Log before implementing.
+
+**Effort:** S. **Depends on:** 160.
 

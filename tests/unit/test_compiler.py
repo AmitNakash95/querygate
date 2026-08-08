@@ -1220,6 +1220,24 @@ class TestCrossConnectionMandatoryRowFilters:
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "customers.country = 'US'" in compiled
 
+    def test_connection_resolver_without_connection_id_is_rejected_not_silently_ignored(self):
+        """Security-invariant-reviewer, 2026-08-09 (SIR-160F3-2): the
+        self-derive guard requires `connection_id` too — a caller that
+        passes `connection_resolver` but omits BOTH `connection_id` and
+        `scope_connections` must be rejected outright, not silently
+        reproduce the pre-156 primary-only behavior (the same footgun
+        finding 3 closes for the "connection_id given" case)."""
+        tables = _make_tables()
+        query = self._query()
+        with pytest.raises(QueryValidationError, match="connection_resolver"):
+            compile_structured_query(
+                query,
+                tables,
+                Policy(),
+                connection_resolver=self._resolver(Policy()),
+                # connection_id AND scope_connections both intentionally omitted.
+            )
+
     def test_filter_configured_only_on_joined_connection_is_never_applied_without_the_map(self):
         """Pins the pre-156 bug: omitting `connection_id`/`scope_connections`
         (every call site before this item) resolves `mandatory_row_filters`
@@ -1301,6 +1319,42 @@ class TestCrossConnectionMandatoryRowFilters:
             policy,
             connection_id="demo",
             scope_connections={id(query): {"orders": "demo"}},
+        )
+        compiled_old = str(stmt_old.compile(compile_kwargs={"literal_binds": True}))
+        compiled_new = str(stmt_new.compile(compile_kwargs={"literal_binds": True}))
+        assert compiled_old == compiled_new
+
+    def test_single_connection_query_self_derives_as_a_no_op_when_only_the_resolver_is_given(self):
+        """test-contract-reviewer, 2026-08-09 (item 160 finding-3 follow-up):
+        the test above only ever calls with `{}` or with `scope_connections`+
+        `connection_resolver` TOGETHER — neither exercises `connection_resolver`
+        alone (`scope_connections` omitted) on a query with no cross-connection
+        join. Pin that self-derivation on a single-connection query is a no-op
+        that still filters identically."""
+        tables = _make_tables()
+        query = StructuredQuery(from_table="orders", select=["orders.id"], limit=5)
+        policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="orders", column="status", value="open")
+            ]
+        )
+        profile = ConnectionProfile(
+            id="demo",
+            dialect="postgresql",
+            connection_string="postgresql+asyncpg://user:pass@host/demo_db",
+        )
+
+        def resolver(connection_id, principal=None):
+            return profile, policy
+
+        stmt_old, _ = compile_structured_query(query, tables, policy)
+        stmt_new, _ = compile_structured_query(
+            query,
+            tables,
+            policy,
+            connection_id="demo",
+            connection_resolver=resolver,
+            # scope_connections intentionally omitted.
         )
         compiled_old = str(stmt_old.compile(compile_kwargs={"literal_binds": True}))
         compiled_new = str(stmt_new.compile(compile_kwargs={"literal_binds": True}))
