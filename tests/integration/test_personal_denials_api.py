@@ -270,3 +270,48 @@ async def test_my_recent_denials_respects_configured_max_lines_read(tmp_path):
     # another principal; a line-read cap of 5 stops well before reaching it.
     assert body["denials"] == []
     assert body["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_my_recent_denials_respects_configured_max_consecutive_out_of_window(tmp_path):
+    # TODO.md item 141 (security-review follow-up, docs/THREAT_MODEL.md
+    # QG-43): personal_denials_max_consecutive_out_of_window must be
+    # independently operator-configurable and actually reach the reader
+    # through this route, the same requirement item 138 established for
+    # max_lines_read above (`tests/unit/test_personal_denials.py`'s
+    # `test_report_respects_configured_max_consecutive_out_of_window` pins
+    # the same behavior one layer down, directly against
+    # `build_recent_denials_report`; this test pins the REST route's own
+    # config wiring into that function, which nothing else here exercises).
+    # Unlike max_lines_read, crossing this cap does NOT set `truncated=True`
+    # — TODO.md item 171 tracks giving this surface its own disclosure.
+    path = tmp_path / "audit.jsonl"
+    now = datetime.now(timezone.utc)
+    # Physically first (oldest write position) = the reader's own, in-window
+    # denial; physically after it = a run of out-of-window events from
+    # another principal. A tail-first scan reads the out-of-window run
+    # first — with the cap set low enough to cross it, the scan stops
+    # before ever reaching the reader's own denial.
+    _write_events(
+        path,
+        [_event(at=now - timedelta(seconds=100), principal="reader")]
+        + [_event(at=now - timedelta(seconds=50_000), principal="someone-else") for _ in range(3)],
+    )
+    app = create_app(
+        _settings(
+            api_keys=["reader-key"],
+            api_key_subject="reader",
+            audit_sink_backend="jsonl",
+            audit_jsonl_path=str(path),
+            personal_denials_lookback_seconds=3600.0,
+            personal_denials_max_consecutive_out_of_window=3,
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        resp = await client.get(
+            "/api/v1/help/my-recent-denials", headers={"Authorization": "Bearer reader-key"}
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["denials"] == []
+    assert body["truncated"] is False

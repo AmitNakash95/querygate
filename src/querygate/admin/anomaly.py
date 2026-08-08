@@ -25,11 +25,17 @@ reads only `event_type == "query.execution"` events and ignores their
 
 **Bounded by construction.** The reader (`audit.file_reader.iter_lines_reverse`,
 TODO.md item 138) reads the file tail-first and stops once either the
-retained-event cap or a hard lines-read cap is hit, so a long-running
-deployment's entire audit history can never make one request allocate
-unbounded memory or do unbounded work; the report also caps the number of
-principals and the per-principal new-connection list, and flags `truncated`
-when any cap was hit.
+retained-event cap (`max_events_scanned`) or a hard lines-read cap
+(`max_lines_read`) is hit, so a long-running deployment's entire audit
+history can never make one request allocate unbounded memory or do
+unbounded work; the report also caps the number of principals and the
+per-principal new-connection list, and flags `truncated` when either cap was
+hit. TODO.md item 141 added a THIRD stop condition
+(`max_consecutive_out_of_window`, see its own docstring) that does NOT set
+`truncated` — it is a heuristic "the window has genuinely ended" exit, not a
+resource bound, and it relies on an assumption (physical write order tracks
+`occurred_at` order) that a merged/restored/multi-writer audit file can
+violate. See `docs/THREAT_MODEL.md` QG-43 for the residual risk this leaves.
 """
 
 from __future__ import annotations
@@ -94,17 +100,30 @@ class AnomalyThresholds(pyd.BaseModel):
     # this line-count budget.
     max_lines_read: int = pyd.Field(default=200_000, ge=1)
     # TODO.md item 141 (PRODUCT_GUIDE Decision Log): `audit/logger.py`'s
-    # `_persist` now stamps `occurred_at` under the sink's own write-order
-    # lock, so physical write order tracks `occurred_at` order for normal
-    # production traffic — closing the dominant source of drift (arbitrary
-    # work between event construction and the durable write). A residual,
-    # effectively-negligible scheduling-jitter risk remains under lock
-    # contention, which this tolerance absorbs: once this many consecutive
-    # `query.execution` lines in a row are all at-or-before `window_start`,
-    # the scan stops WITHOUT setting `truncated` — the window has genuinely
-    # ended, as far as the tolerance allows. Lines of other event types
-    # (config/catalog governance, probes) don't reset or advance this
-    # counter; they say nothing about this stream's recency.
+    # `_persist` now stamps `occurred_at` immediately before calling the
+    # sink's `emit()` — NOT under the sink's own write lock (that stronger
+    # version was considered and rejected, since it would break the audit
+    # test suite's established pattern of seeding synthetic history via a
+    # direct `sink.emit()` call with a controlled `occurred_at`). This closes
+    # the dominant source of drift (arbitrary work — a `log.info` call, any
+    # future code — between event construction and the durable write) for
+    # every production caller, which today all run synchronously on the
+    # single asyncio event loop with no `await` between construction and
+    # `_persist`. The residual is bounded by however long a competing writer
+    # holds the sink's lock (`os.open`/`os.write`/optional `os.fsync`), not
+    # sub-microsecond jitter — negligible today only because of that
+    # single-event-loop shape, not because of anything this tolerance itself
+    # guarantees. Once this many consecutive `query.execution` lines in a row
+    # are all at-or-before `window_start`, the scan stops WITHOUT setting
+    # `truncated` — this is a heuristic "the window probably ended" exit, not
+    # a proof: a merged/restored/multi-writer audit file (e.g. concatenated
+    # replica ledgers, a restored WORM segment, `num_of_workers > 1` sharing
+    # one file with no cross-process lock) can make physical order disagree
+    # with `occurred_at` order at scale, in which case this exit can return a
+    # confidently-wrong, undisclosed `truncated=False`. See
+    # `docs/THREAT_MODEL.md` QG-43. Lines of other event types (config/
+    # catalog governance, probes) don't reset or advance this counter; they
+    # say nothing about this stream's recency.
     max_consecutive_out_of_window: int = pyd.Field(default=5_000, ge=1)
     # Report caps — keep one response bounded regardless of principal count.
     max_principals_reported: int = pyd.Field(default=100, ge=1)
@@ -158,8 +177,13 @@ class AnomalyReport(pyd.BaseModel):
     baseline_window_seconds: float
     events_scanned: int = 0
     malformed: int = 0
-    # True when a cap (max_events_scanned or max_principals_reported) was hit,
-    # so the report is a bounded view rather than the whole picture.
+    # True when a resource bound (max_events_scanned, max_lines_read, or
+    # max_principals_reported) was hit, so the report is a bounded view
+    # rather than the whole picture. Does NOT cover the third, heuristic
+    # early-exit (`max_consecutive_out_of_window`) — that one can end the
+    # scan without setting this flag even when its ordering assumption is
+    # violated; see `AnomalyThresholds.max_consecutive_out_of_window` and
+    # `docs/THREAT_MODEL.md` QG-43.
     truncated: bool = False
     note: str = _REPORT_NOTE
     principals: List[PrincipalAnomaly] = pyd.Field(default_factory=list)
@@ -342,9 +366,14 @@ class AuditEventSource(Protocol):
         self, *, now: datetime, thresholds: AnomalyThresholds
     ) -> Tuple[List[AuditEvent], int, bool]:
         """Return (events, malformed_line_count, truncated). `truncated` is True
-        when the scan stopped early — either `max_events_scanned` in-window
-        events were already found, or `max_lines_read` lines were read —
-        before it could be sure no more recent-window events remained."""
+        when the scan stopped on a resource bound — either `max_events_scanned`
+        in-window events were already found, or `max_lines_read` lines were
+        read — before it could be SURE no more recent-window events remained.
+        A fourth, undisclosed way the scan can end early: `thresholds.
+        max_consecutive_out_of_window` (TODO.md item 141) is a heuristic exit
+        that returns `truncated=False` on the assumption the window has
+        genuinely ended — an assumption a merged/restored/multi-writer audit
+        file can violate. See `docs/THREAT_MODEL.md` QG-43."""
         ...
 
 

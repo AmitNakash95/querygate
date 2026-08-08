@@ -296,6 +296,28 @@ def test_jsonl_source_early_exit_stops_before_reading_older_lines(tmp_path):
     assert truncated is False  # the window genuinely ended, not a bound firing
 
 
+def test_jsonl_source_early_exit_fires_at_exactly_the_threshold(tmp_path):
+    # Pins the `>=` boundary specifically: EXACTLY `max_consecutive_out_of_window`
+    # out-of-window events, no slack, with the malformed sentinel immediately
+    # behind them. A `>` bug (needing one MORE event than the threshold) would
+    # never break out of the loop — there is no 4th out-of-window event to
+    # supply it — so the scan would reach the sentinel and malformed would be
+    # 1, not 0. Complements (not a duplicate of)
+    # test_jsonl_source_early_exit_stops_before_reading_older_lines, which
+    # uses slack (5 available vs. threshold 3) and so can't distinguish `>=`
+    # from `>`.
+    th = _thresholds(max_consecutive_out_of_window=3)
+    path = tmp_path / "audit.jsonl"
+    out_of_window = _spread(3, start=_NOW - timedelta(seconds=50_000), span_seconds=100)
+    lines = ["{not json"] + [e.model_dump_json(exclude_none=True) for e in out_of_window]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    source = JsonlAuditEventSource(str(path))
+    loaded, malformed, truncated = source.load_query_events(now=_NOW, thresholds=th)
+    assert loaded == []
+    assert malformed == 0  # the sentinel was never reached
+    assert truncated is False
+
+
 def test_jsonl_source_early_exit_counter_resets_on_an_in_window_event(tmp_path):
     # A run of out-of-window events shorter than the threshold, interrupted
     # by one in-window event, must NOT trigger the early exit — the counter
@@ -590,6 +612,7 @@ def test_report_is_redaction_safe():
         {"max_events_scanned": 0},
         {"max_principals_reported": 0},
         {"max_new_connections_per_principal": 0},
+        {"max_consecutive_out_of_window": 0},
     ],
 )
 def test_thresholds_reject_out_of_range_values(overrides):
@@ -694,6 +717,7 @@ def test_route_helpers_map_config_to_thresholds_and_source(tmp_path):
         anomaly_volume_spike_ratio=4.5,
         anomaly_max_principals_reported=33,
         anomaly_max_lines_read=77,
+        anomaly_max_consecutive_out_of_window=42,
     )
     th = _anomaly_thresholds(cfg)
     assert th.recent_window_seconds == 1200.0
@@ -705,6 +729,11 @@ def test_route_helpers_map_config_to_thresholds_and_source(tmp_path):
     # independently operator-configurable, not silently stuck at the
     # pydantic-model class default.
     assert th.max_lines_read == 77
+    # TODO.md item 141 (security-review follow-up, docs/THREAT_MODEL.md
+    # QG-43): same requirement for the early-exit tolerance — an operator who
+    # knows their deployment is merged/multi-writer must be able to raise or
+    # disable it without a code change.
+    assert th.max_consecutive_out_of_window == 42
 
     source = _anomaly_source(cfg)
     assert isinstance(source, JsonlAuditEventSource)

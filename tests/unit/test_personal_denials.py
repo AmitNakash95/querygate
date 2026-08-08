@@ -232,6 +232,43 @@ def test_report_is_empty_but_still_jsonl_when_stream_is_quiet(tmp_path):
     assert report.denials == []
 
 
+def test_report_respects_configured_max_consecutive_out_of_window(tmp_path):
+    # TODO.md item 141 (security-review follow-up, docs/THREAT_MODEL.md
+    # QG-43): this reader reuses `JsonlAuditEventSource.load_query_events`
+    # (item 59), which gained a windowed early-exit — this surface must not
+    # silently inherit `AnomalyThresholds`' own class default, the same
+    # requirement item 138 already established for `max_lines_read`
+    # (`_write_jsonl` above mirrors `tests/unit/test_anomaly.py`'s file-order
+    # convention: physically-first = written first). The caller's own
+    # in-window denial sits physically BEFORE a run of out-of-window events
+    # from another principal — an inverted/merged-file shape, deliberately
+    # simulating the QG-43 threat, not a normal single-writer stream — so a
+    # low tolerance stops the scan before ever reaching it, while the
+    # (much larger) class default does not.
+    path = tmp_path / "audit.jsonl"
+    _write_jsonl(
+        path,
+        [_event(at=_NOW - timedelta(seconds=100), principal="user-a")]
+        + [_event(at=_NOW - timedelta(seconds=50_000), principal="someone-else") for _ in range(5)],
+    )
+    default_report = build_recent_denials_report(
+        JsonlAuditEventSource(str(path)),
+        principal_id="user-a",
+        now=_NOW,
+        lookback_seconds=3600.0,
+    )
+    assert default_report.own_denials_found == 1
+
+    tight_report = build_recent_denials_report(
+        JsonlAuditEventSource(str(path)),
+        principal_id="user-a",
+        now=_NOW,
+        lookback_seconds=3600.0,
+        max_consecutive_out_of_window=3,
+    )
+    assert tight_report.own_denials_found == 0
+
+
 def test_report_never_leaks_another_principals_denial(tmp_path):
     path = tmp_path / "audit.jsonl"
     _write_jsonl(path, [_event(at=_NOW, principal="someone-else", connection="secret-conn")])
