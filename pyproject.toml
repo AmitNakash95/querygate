@@ -18,6 +18,7 @@ querygate-audit = "querygate.audit_cli:main"
 querygate-security-benchmark = "querygate.security_benchmark_cli:main"
 querygate-scope-catalog = "querygate.scope_catalog_cli:main"
 querygate-config = "querygate.config_cli:main"
+querygate-quickstart = "querygate.quickstart_cli:main"
 
 [project.urls]
 Repository = "https://github.com/AGitmit/QueryGate"
@@ -47,8 +48,10 @@ fastapi = ">=0.119.0"
 starlette = ">=1.3.1"
 python-dotenv = ">=1.2.2"
 asyncpg = "^0.30.0"
-# mcp >=1.28.1 fixes CVE-2025-66416 / CVE-2026-52869 / CVE-2026-59950.
-mcp = ">=1.28.1"
+# mcp >=2.0.0 (TODO item 128): the `2026-07-28` protocol revision, `MCPServer`
+# (formerly `FastMCP`) SDK. Also carries forward the CVE-2025-66416 /
+# CVE-2026-52869 / CVE-2026-59950 fixes from the 1.28.1 floor it replaces.
+mcp = ">=2.0.0"
 httpx = "^0.28.1"
 loguru = "^0.7.3"
 PyYAML = "^6.0"
@@ -62,6 +65,8 @@ cryptography = ">=44.0.1"
 redis = "^8.0.1"
 hvac = "^2.4.0"
 defusedxml = "^0.7.1"
+asyncmy = "^0.2.11"
+boto3 = "^1.43.65"
 
 [tool.poetry.group.dev.dependencies]
 # Test stack floored at CVE-fixed versions (pytest PYSEC-2026-1845); pytest 9
@@ -84,6 +89,34 @@ bandit = "^1.8.0"
 # DAST runs it from its official Docker image instead — like Trivy/gitleaks/
 # Semgrep — so a dev testing tool never constrains the shipped dependency graph.
 # See scripts/run_dast.py and TODO item 89.
+moto = "^5.2.2"
+# Dev-only, unlike pymysql/aiomysql/pyodbc above (2026-08-06
+# security-invariant-reviewer finding, TODO item 19 phase 2): no module under
+# src/querygate/ imports snowflake.sqlalchemy or snowflake.connector —
+# SnowflakeDialectAdapter builds only generic sqlalchemy.func expressions, and
+# connections/engine.py's init_engine refuses to open a Snowflake connection
+# at all (SessionDialectAdapter.is_connectable() returns False for it), so
+# create_async_engine never resolves the "snowflake" dialect entry point in
+# production. Only tests/unit/test_dialect_adapters.py imports it, to compile
+# against the real dialect object. Shipping snowflake-connector-python's own
+# TLS/crypto stack (pyopenssl, asn1crypto) in the release container/package
+# for a code path that cannot execute would be unnecessary attack surface and
+# an unnecessary CVE-tracking obligation for a self-hosted security gateway.
+snowflake-sqlalchemy = "^1.11.0"
+# Dev-only, for the identical reason snowflake-sqlalchemy above is (2026-08-07,
+# TODO item 19 phase 3): no module under src/querygate/ imports
+# sqlalchemy_bigquery or google.cloud.bigquery — BigQueryDialectAdapter builds
+# only generic sqlalchemy.func expressions, and connections/engine.py's
+# init_engine refuses to open a BigQuery connection at all
+# (SessionDialectAdapter.is_connectable() returns False for it, the same
+# guard Snowflake uses), so create_async_engine never resolves the "bigquery"
+# dialect entry point in production. Only tests/unit/test_dialect_adapters.py
+# and tests/unit/test_date_primitives.py import it, to compile against the
+# real dialect object. Shipping
+# google-cloud-bigquery's own gRPC/auth stack in the release container/package
+# for a code path that cannot execute would be unnecessary attack surface and
+# an unnecessary CVE-tracking obligation for a self-hosted security gateway.
+sqlalchemy-bigquery = "^1.17.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -108,6 +141,7 @@ markers = [
     "real_db: needs a real database running (see make compose-up) — excluded from the default run",
     "postgres_live: needs a real Postgres server (see TODO.md item 3) — also marked real_db",
     "mssql_live: needs a real MSSQL server (see TODO.md item 2) — also marked real_db",
+    "mysql_live: needs a real MySQL server (see TODO.md item 19) — also marked real_db",
     "load: concurrent load/soak verification against a real database (see docs/LOAD_TESTING.md)",
 ]
 

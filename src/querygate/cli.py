@@ -17,12 +17,50 @@ import sys
 from dataclasses import dataclass
 from typing import Optional
 
+import pydantic as pyd
+import yaml
+
 from querygate.catalog.loader import CatalogStore
 from querygate.connections.registry import ConnectionRegistry
+from querygate.core.exceptions import safe_pydantic_error_lines, safe_yaml_error_detail
 from querygate.policy.loader import PolicyStore
 from querygate.secrets.resolvers import SecretResolverRegistry
 from querygate.templates.binding import validate_template_structure
 from querygate.templates.loader import TemplateStore
+
+
+def _describe_load_error(file_label: str, exc: Exception) -> str:
+    """Build a safe `"<file>: <detail>"` error line for any exception one of
+    `load_config_context`'s file loads can raise.
+
+    `ConnectionRegistry.from_file` validates each entry with
+    `ConnectionProfile.model_validate()` *after* `${...}` interpolation, so a
+    `pydantic.ValidationError` it raises is validating an object that may
+    already carry a live, resolved credential -- `str(exc)` (and
+    `error["input"]`/`error["input_value"]`) can embed that whole object for
+    some error kinds (e.g. a `missing`-type error). YAML parsing itself can
+    also fail on a `connections.yaml` whose `connection_string` is a literal
+    (non-`${...}`) credential -- config-governance drafts explicitly permit
+    that -- in which case PyYAML's own `Mark.__str__()` embeds the offending
+    SOURCE LINE verbatim, before pydantic ever runs. Route both through the
+    same structural-safety helpers item 165 built for the REST
+    `/admin/reload-config` handler (`safe_pydantic_error_lines`,
+    `safe_yaml_error_detail`) instead of ever stringifying the raw exception
+    for these two types -- this is item 168's fix, closing the same gap at
+    the `load_config_context` source used by both the `querygate-validate-
+    config` CLI (`main()`) and the config-governance dry-run endpoints
+    (`admin/service.py`'s `validate_candidate_content`). `policy_file`/
+    `catalog_file`/`template_file` loads never see a connection string (their
+    loaders don't resolve or touch one), so this same, uniform handling for
+    them is defense-in-depth/consistency, not a proven leak fix. Every other
+    exception type (missing file, duplicate id, unresolved secret reference,
+    ...) keeps the plain `f"{file}: {exc}"` shape unchanged -- none of those
+    messages are built from an already-interpolated object."""
+    if isinstance(exc, pyd.ValidationError):
+        return f"{file_label}: " + "; ".join(safe_pydantic_error_lines(exc))
+    if isinstance(exc, yaml.YAMLError):
+        return f"{file_label}: {safe_yaml_error_detail(exc)}"
+    return f"{file_label}: {exc}"
 
 
 @dataclass(frozen=True)
@@ -55,13 +93,13 @@ def load_config_context(
             connections_file, resolver_registry=resolver_registry
         )
     except Exception as exc:
-        errors.append(f"{connections_file}: {exc}")
+        errors.append(_describe_load_error(connections_file, exc))
 
     policy_store: PolicyStore | None = None
     try:
         policy_store = PolicyStore.from_file(policy_file)
     except Exception as exc:
-        errors.append(f"{policy_file}: {exc}")
+        errors.append(_describe_load_error(policy_file, exc))
 
     if registry is not None and policy_store is not None:
         known_ids = set(registry.all_ids())
@@ -78,7 +116,7 @@ def load_config_context(
             catalog_store = CatalogStore.from_file(catalog_file)
         except Exception as exc:
             catalog_store = None
-            errors.append(f"{catalog_file}: {exc}")
+            errors.append(_describe_load_error(catalog_file, exc))
 
     if registry is not None and catalog_store is not None:
         known_ids = set(registry.all_ids())
@@ -94,7 +132,7 @@ def load_config_context(
         try:
             template_store = TemplateStore.from_file(template_file)
         except Exception as exc:
-            errors.append(f"{template_file}: {exc}")
+            errors.append(_describe_load_error(template_file, exc))
         if template_store is not None:
             for template in template_store.list():
                 structural_error = validate_template_structure(template)

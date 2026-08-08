@@ -26,12 +26,12 @@ that weakened any of them would fail the build.
 |---|---|---|---|---|
 | **Core guarantee** | No raw-SQL path; validated-AST-only | Structured AST + Pydantic `forbid`; enforced by tests | ✅ Enforced | `make test-security` |
 | **SAST** | Static security analysis of source | **Bandit** + **Semgrep OSS** (`p/python`, `p/security-audit`, `p/owasp-top-ten`) | ✅ Clean (deny-by-default) | `make sast` + `make semgrep` |
-| **Dependencies** | Known-CVE audit of the exact shipped set | **pip-audit** against `poetry.lock` `main` group | ✅ Clean — **0 allowlisted** (all fixed) | `make sbom` |
+| **Dependencies** | Known-CVE audit of the exact shipped set | **pip-audit** against `poetry.lock` `main` group | ✅ Clean — **1 reviewed allowlist entry** (asyncmy, unreachable codepath) | `make sbom` |
 | **SBOM** | Software bill of materials | **CycloneDX** | ✅ Generated per release | `make sbom` |
 | **Container image** | OS + library CVEs, secrets, misconfig | **Trivy** on the shipped image | ✅ **0 HIGH/CRITICAL** (no exceptions) | `make scan-image` |
 | **Secrets** | No credential ever committed | **gitleaks** over full git history | ✅ Clean | `make scan-secrets` |
 | **DAST** | Fuzz the API for validation bypass / crashes | **Schemathesis** against the live OpenAPI schema | ✅ 0 server errors, 0 bypass | `make test-dast` |
-| **Adversarial suite** | Known bypass classes as regressions | Purpose-built pytest suite (`-m security`) | ✅ 310 tests | `make test-security` |
+| **Adversarial suite** | Known bypass classes as regressions | Purpose-built pytest suite (`-m security`) | ✅ 463 tests | `make test-security` |
 | **Reliability** | Guardrails hold under real concurrent load | Real-Postgres soak/load gates | ✅ Enforced in CI | `make test-load` / `make test-soak` |
 | **Credential isolation** | No secret on any returned model | Asserted against live OpenAPI + MCP schemas | ✅ Enforced | `pytest tests/unit/test_credential_redaction.py` |
 | **Best-practices self-assessment** | OpenSSF criteria maturity | **OpenSSF Best Practices** criteria (self-assessed) | 🟡 Self-assessed | see [below](#external-attestations) |
@@ -98,10 +98,15 @@ CI job: **SAST (Bandit + Semgrep OSS)**.
   the `main` group of `poetry.lock`, reproduced in a scratch venv — against the
   vulnerability database. The gate is **deny-by-default**: any known
   vulnerability without a reviewed entry in
-  `security/dependency-audit-allowlist.json` fails the build. That allowlist is
-  currently **empty**: every previously-known CVE in the shipped set was
-  *remediated by upgrading to a fixed version* (fastapi/starlette, mcp,
-  python-dotenv, click, idna), not accepted with a compensating control.
+  `security/dependency-audit-allowlist.json` fails the build. That allowlist
+  currently holds **one entry**: `PYSEC-2026-286` (asyncmy, the MySQL driver
+  added by item 19) — a SQL-injection CVE in a codepath (dict-keyed pyformat
+  parameters) SQLAlchemy's `mysql+asyncmy` dialect never reaches, since it
+  always hands the driver positional parameters; see the allowlist file's own
+  entry for the full reasoning and the regression test that guards it. Every
+  other previously-known CVE in the shipped set was *remediated by upgrading
+  to a fixed version* (fastapi/starlette, mcp, python-dotenv, click, idna),
+  not accepted with a compensating control.
 - **CycloneDX SBOM** is generated for that same set, alongside a SHA-256
   manifest of the built artifacts.
 
@@ -161,7 +166,7 @@ hand-written adversarial suite.
 ## Adversarial regression suite
 
 Beyond automated fuzzing, QueryGate carries a purpose-built adversarial suite
-(310 tests, `pytest -m security`) encoding specific known bypass classes:
+(463 tests, `pytest -m security`) encoding specific known bypass classes:
 denied-column inference, undeclared-table smuggling, predicate-as-SQL,
 schema-discovery leaks, policy-cap boundary breaches, and audit no-leak checks.
 New attack vectors are added here as regressions (see the `adversarial-probe`
@@ -185,7 +190,7 @@ schema and MCP tool schemas**, so it catches drift, not just convention.
 
 ## Threat model
 
-[docs/THREAT_MODEL.md](THREAT_MODEL.md) enumerates 35 threats (QG-01…QG-35),
+[docs/THREAT_MODEL.md](THREAT_MODEL.md) enumerates 40 threats (QG-01…QG-40),
 each mapped to its compensating control and the test(s) that enforce it. The
 gates on this page are the automated, continuously-run backbone of that model.
 

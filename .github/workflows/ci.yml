@@ -228,6 +228,48 @@ jobs:
       - name: pytest -m "mssql_live and not postgres_live"
         run: poetry run pytest -m "mssql_live and not postgres_live"
 
+  mysql-live:
+    name: Real-MySQL tests (TODO.md item 19)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: "QueryGate_Test_Pw1" # dev-only, matches setup_mysql_test_db.py's default
+          MYSQL_DATABASE: querygate_demo
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pQueryGate_Test_Pw1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      QUERYGATE_TEST_MYSQL_HOST: localhost
+      QUERYGATE_TEST_MYSQL_PORT: "3306"
+      QUERYGATE_TEST_MYSQL_ROOT_PASSWORD: "QueryGate_Test_Pw1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry==2.4.1
+
+      # Unlike MSSQL, asyncmy needs no system-level client driver install —
+      # it's a pure pip dependency, so this job is a plain service-container
+      # job with no apt step.
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      - name: Set up MySQL test database
+        run: poetry run python tests/integration/setup_mysql_test_db.py
+
+      - name: pytest -m mysql_live
+        run: poetry run pytest -m mysql_live
+
   cross-dialect-differential:
     name: Cross-dialect differential tests (Postgres + MSSQL)
     runs-on: ubuntu-latest

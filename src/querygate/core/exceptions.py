@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pydantic as pyd
+import yaml
+
 PUBLIC_INTERNAL_ERROR = "An unexpected error occurred."
 
 
@@ -240,3 +243,65 @@ def public_error_message(exc: Exception) -> str:
     ):
         return str(exc)
     return PUBLIC_INTERNAL_ERROR
+
+
+def safe_pydantic_error_lines(exc: pyd.ValidationError) -> list[str]:
+    """Turn a `pydantic.ValidationError` into safe, human-readable lines built
+    strictly from each error's `loc`/`msg` -- never `input`/`input_value`.
+
+    Any caller that validates a model built from already-`${...}`-interpolated
+    config -- e.g. `ConnectionProfile.model_validate()` on a `connections.yaml`
+    entry -- must never surface `str(exc)` or `error["input"]`/
+    `error["input_value"]` directly: those can embed the *entire* validated
+    object, including a live credential, for certain pydantic error kinds
+    (e.g. a `missing`-type error). The actual guarantee is that this function
+    only ever reads `loc`/`msg` from each error dict -- `include_input=False`
+    is a belt-and-braces request to pydantic to not even materialize
+    `input`/`input_value` in the first place, on top of (not instead of) that.
+
+    Neutral module (item 168): shared by `admin/service.py` (item 165's
+    `/admin/reload-config` and config-governance dry-run fix) and `cli.py`
+    (`load_config_context`, item 168's fix for the same gap in the
+    `querygate-validate-config` CLI and its callers) -- `admin/service.py`
+    imports from `cli.py`, so this can't live in either module without a
+    cycle.
+    """
+    lines: list[str] = []
+    for error in exc.errors(include_url=False, include_context=False, include_input=False):
+        loc = ".".join(str(part) for part in error.get("loc", ()))
+        msg = error.get("msg", "")
+        lines.append(f"{loc}: {msg}" if loc else msg)
+    return lines
+
+
+def safe_yaml_error_detail(exc: yaml.YAMLError) -> str:
+    """Turn a `yaml.YAMLError` into a safe, human-readable summary that never
+    calls `str()` on the exception itself, or on its `.problem_mark`/
+    `.context_mark`.
+
+    PyYAML's `Mark.__str__` embeds `get_snippet()` -- the literal offending
+    SOURCE LINE -- which for a `connections.yaml` parse failure can be a line
+    containing a live credential (either an already-interpolated `${...}`
+    reference, or a literal credential written directly -- config-governance
+    drafts explicitly permit both). Only the plain string fields
+    (`.context`/`.problem`/`.note`) and the mark's integer `.line`/`.column`
+    are used -- never the mark's own `__str__`, and never `.name` (which can
+    be a caller-controlled stream/file label). See `safe_pydantic_error_lines`
+    above for the module-placement rationale.
+    """
+    parts: list[str] = []
+    context = getattr(exc, "context", None)
+    if context:
+        parts.append(str(context))
+    problem = getattr(exc, "problem", None)
+    if problem:
+        parts.append(str(problem))
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    if mark is not None:
+        parts.append(f"at line {mark.line + 1}, column {mark.column + 1}")
+    note = getattr(exc, "note", None)
+    if note:
+        parts.append(str(note))
+    if not parts:
+        parts.append("Invalid YAML syntax")
+    return "; ".join(parts)

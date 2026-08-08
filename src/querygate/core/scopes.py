@@ -46,6 +46,27 @@ ADMIN_CONNECTIONS_TEST_SCOPE = "admin:connections:test"
 # principal — but a per-connection breakdown is still admin-gated per item 44.
 ADMIN_OBSERVABILITY_READ_SCOPE = "admin:observability:read"
 
+# Managed search over the WORM (compliance-grade, S3 Object Lock) audit
+# archive (TODO.md item 134 phase 2, audit/worm_search.py). Deliberately its
+# OWN scope rather than reuse of ADMIN_OBSERVABILITY_READ_SCOPE: the WORM
+# archive is the durable, long-retention compliance copy — potentially
+# covering years a locally-rotated file no longer holds — so a principal that
+# can read the in-process anomaly/observability aggregates should not
+# automatically be able to search that archive too. A deployment that wants
+# both grants both scopes explicitly (see the Compliance Auditor role bundle
+# below); holding one never implies the other.
+ADMIN_AUDIT_WORM_SEARCH_SCOPE = "admin:audit:worm-search"
+
+# Raw Prometheus scrape endpoint (TODO.md item 144). Its own scope, distinct
+# from admin:observability:read: the scraper (Prometheus, a sidecar) is a
+# different consumer than an admin-UI operator reading aggregated trends, and
+# /metrics exposes lower-level, higher-cardinality-adjacent signal (per-reason
+# rejection counters) that a dedicated least-privilege credential should gate
+# rather than folding into the observability-dashboard scope. Enforced only
+# when AppConfig.metrics_require_auth is true (the default; see
+# docs/THREAT_MODEL.md QG-36).
+ADMIN_METRICS_READ_SCOPE = "admin:metrics:read"
+
 # Catalog governance (TODO.md item 32B) — least-privilege, split by
 # operation rather than one broad "catalog admin" scope.
 CATALOG_GENERATE_SCOPE = "catalog:generate"
@@ -142,6 +163,16 @@ SCOPE_CATALOG: Tuple[ScopeInfo, ...] = (
         "Read aggregated query/rejection/pressure trends",
     ),
     ScopeInfo(
+        ADMIN_METRICS_READ_SCOPE,
+        "Admin · Observability",
+        "Scrape the raw Prometheus /metrics endpoint",
+    ),
+    ScopeInfo(
+        ADMIN_AUDIT_WORM_SEARCH_SCOPE,
+        "Admin · Observability",
+        "Search the durable WORM (S3 Object Lock) compliance audit archive",
+    ),
+    ScopeInfo(
         CATALOG_GENERATE_SCOPE, "Catalog governance", "Generate draft catalog entries for review"
     ),
     ScopeInfo(
@@ -197,12 +228,14 @@ ROLE_BUNDLES: Tuple[RoleBundle, ...] = (
     ),
     RoleBundle(
         "Operator",
-        "Day-2 operations: reload config, check connection health, read trends.",
+        "Day-2 operations: reload config, check connection health, read trends "
+        "and scrape Prometheus metrics.",
         (
             ADMIN_RELOAD_CONFIG_SCOPE,
             ADMIN_CONNECTIONS_READ_SCOPE,
             ADMIN_CONNECTIONS_TEST_SCOPE,
             ADMIN_OBSERVABILITY_READ_SCOPE,
+            ADMIN_METRICS_READ_SCOPE,
         ),
     ),
     RoleBundle(
@@ -251,5 +284,13 @@ ROLE_BUNDLES: Tuple[RoleBundle, ...] = (
         "Steps in to cancel another principal's stuck or runaway async query. "
         "A caller can always cancel their own query without this scope.",
         (QUERY_CANCEL_SCOPE,),
+    ),
+    RoleBundle(
+        "Compliance Auditor",
+        "Searches the durable WORM audit archive for a security/compliance "
+        "review. Kept separate from the Operator bundle: this reaches a "
+        "long-retention copy an Operator's day-2 observability access does "
+        "not need.",
+        (ADMIN_AUDIT_WORM_SEARCH_SCOPE,),
     ),
 )

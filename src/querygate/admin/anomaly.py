@@ -43,7 +43,7 @@ import pydantic as pyd
 
 from querygate.audit.events import AuditEvent
 from querygate.audit.file_reader import AuditFileReadBounded, iter_lines_reverse
-from querygate.audit.ledger import unwrap_envelope
+from querygate.audit.ledger import unwrap_envelope, verify_envelope_hash
 
 AnomalyKind = Literal["volume_spike", "rejection_rate_spike", "new_connection_access"]
 
@@ -135,9 +135,11 @@ class PrincipalAnomaly(pyd.BaseModel):
 class AnomalyReport(pyd.BaseModel):
     """Bounded, redaction-safe anomaly report over the audit stream."""
 
-    # "jsonl": read the persisted stream (0 events is still "jsonl", not an
-    # error). "disabled": no persisted sink is configured, nothing to read.
-    source: Literal["jsonl", "disabled"] = "jsonl"
+    # "jsonl"/"jsonl_chained": read the persisted stream under the actually
+    # configured backend (0 events is still a "jsonl*" source, not an error;
+    # TODO.md item 137 disclosed which backend, previously always "jsonl").
+    # "disabled": no persisted sink is configured, nothing to read.
+    source: Literal["jsonl", "jsonl_chained", "disabled"] = "jsonl"
     generated_at: str
     recent_window_seconds: float
     baseline_window_seconds: float
@@ -346,8 +348,24 @@ class JsonlAuditEventSource:
     fatal — the same tolerance as item 44's audit viewer.
     """
 
-    def __init__(self, path: str) -> None:
+    def __init__(
+        self, path: str, *, ledger_key: Optional[bytes] = None, require_envelope: bool = False
+    ) -> None:
         self.path = Path(path)
+        # TODO.md item 137: the hash-chained ledger's HMAC key, when the
+        # configured backend is `jsonl_chained` with a key set — lets this
+        # reader recompute each envelope's own hash rather than trusting it.
+        # `None` on a plain `jsonl` backend, or an unkeyed chain.
+        self.ledger_key = ledger_key
+        # True only when the configured backend is `jsonl_chained`: every
+        # persisted line MUST be a chain envelope, so a bare (non-enveloped)
+        # line is itself evidence of tampering or corruption, not a
+        # legitimate plain-`jsonl` line that happens to share this file
+        # (found by `security-invariant-reviewer`, 2026-08-05 — a forged
+        # line with no envelope at all previously passed through untouched,
+        # since `verify_envelope_hash` correctly returns `None`, not `False`,
+        # for "not shaped like an envelope").
+        self.require_envelope = require_envelope
 
     def load_query_events(
         self, *, now: datetime, thresholds: AnomalyThresholds
@@ -373,6 +391,16 @@ class JsonlAuditEventSource:
                 try:
                     raw = json.loads(line)
                 except json.JSONDecodeError:
+                    malformed += 1
+                    continue
+                verified = verify_envelope_hash(raw, key=self.ledger_key)
+                if verified is False or (verified is None and self.require_envelope):
+                    # False: a chain envelope whose own hash doesn't match its
+                    # contents — chain linkage alone wouldn't catch this
+                    # (TODO.md item 137). None-but-required: this backend is
+                    # jsonl_chained, so a line with no envelope at all is
+                    # itself the forgery/corruption signal. Never display
+                    # either as a clean event.
                     malformed += 1
                     continue
                 raw = unwrap_envelope(raw)
@@ -404,9 +432,12 @@ def build_anomaly_report(
     *,
     now: Optional[datetime] = None,
     thresholds: Optional[AnomalyThresholds] = None,
+    backend_label: Literal["jsonl", "jsonl_chained"] = "jsonl",
 ) -> AnomalyReport:
     """Assemble a full report from a source. `source=None` means the persisted
-    sink is disabled — reported honestly as `source="disabled"`, not an error."""
+    sink is disabled — reported honestly as `source="disabled"`, not an error.
+    `backend_label` (TODO.md item 137) is the actually configured backend, so a
+    reader can tell a tamper-evident chain read from a plain one."""
     thresholds = thresholds or AnomalyThresholds()
     now = now or datetime.now(timezone.utc)
     base = dict(
@@ -420,7 +451,7 @@ def build_anomaly_report(
     events, malformed, scan_truncated = source.load_query_events(now=now, thresholds=thresholds)
     principals, principal_truncated = detect_anomalies(events, now=now, thresholds=thresholds)
     return AnomalyReport(
-        source="jsonl",
+        source=backend_label,
         events_scanned=len(events),
         malformed=malformed,
         truncated=scan_truncated or principal_truncated,

@@ -141,8 +141,13 @@ test-mssql-live: compose-up compose-up-mssql ## Run tests needing a real MSSQL s
 	poetry run python tests/integration/setup_mssql_test_db.py
 	poetry run pytest -m mssql_live
 
+.PHONY: test-mysql-live
+test-mysql-live: compose-up-mysql ## Run tests needing a real MySQL server (starts + seeds the database for you)
+	poetry run python tests/integration/setup_mysql_test_db.py
+	poetry run pytest -m mysql_live
+
 .PHONY: test-real-db
-test-real-db: ## Run every test needing a real database (Postgres + MSSQL)
+test-real-db: ## Run every test needing a real database (Postgres + MSSQL + MySQL)
 	poetry run pytest -m real_db
 
 .PHONY: test-cov
@@ -243,6 +248,14 @@ security-scan: ## Run the batchable local security gates (Bandit + Semgrep SAST,
 product-guide-html: ## Render docs/PRODUCT_GUIDE.md into the browsable docs/product-guide.html
 	poetry run python scripts/generate_product_guide_html.py
 
+.PHONY: trust-page
+trust-page: ## Regenerate docs/TRUST_EVIDENCE.md, the composed procurement evidence page (item 147)
+	poetry run python scripts/generate_trust_page.py
+
+.PHONY: mcp-extension-schema
+mcp-extension-schema: ## Regenerate the io.github.agitmit/structured-query-ast MCP extension schema (item 131)
+	poetry run python scripts/generate_mcp_extension_schema.py
+
 # ─── Release ──────────────────────────────────────────────────────────────────
 .PHONY: sbom
 sbom: ## Generate a CycloneDX SBOM, dependency vulnerability report, and SHA256SUMS from dist/ (run `poetry build` first)
@@ -280,9 +293,13 @@ compose-up: ## Start the local demo Postgres and Redis services (detached and he
 compose-up-mssql: ## Start the real SQL Server used by the mssql_live suite (profile-gated; amd64 emulation on Apple Silicon, allow ~1 min to boot)
 	docker compose --profile mssql up -d --wait querygate-mssql
 
+.PHONY: compose-up-mysql
+compose-up-mysql: ## Start the real MySQL server used by the mysql_live suite (profile-gated; multi-arch, no emulation needed)
+	docker compose --profile mysql up -d --wait querygate-mysql
+
 .PHONY: compose-down
-compose-down: ## Stop and remove the local demo infrastructure containers (including the mssql profile)
-	docker compose --profile mssql down
+compose-down: ## Stop and remove the local demo infrastructure containers (including the mssql/mysql profiles)
+	docker compose --profile mssql --profile mysql down
 
 .PHONY: compose-logs
 compose-logs: ## Tail logs from the local demo infrastructure

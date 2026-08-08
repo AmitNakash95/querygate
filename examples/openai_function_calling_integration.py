@@ -70,7 +70,7 @@ def mcp_tool_to_openai_function(
 ) -> Dict[str, Any]:
     """Convert one MCP tool definition into an OpenAI function-calling tool schema.
 
-    Pure and framework-free: an MCP tool's ``inputSchema`` is already a JSON
+    Pure and framework-free: an MCP tool's ``input_schema`` is already a JSON
     Schema object, which is exactly what OpenAI's ``function.parameters`` field
     expects, so the mapping is a direct lift. A tool with no input schema becomes
     an empty-object parameter schema (a valid no-argument function).
@@ -105,7 +105,7 @@ async def discover_openai_tools(
     allow = set(QUERYGATE_TOOLS) if allowed is None else allowed
     listed = await session.list_tools()
     return [
-        mcp_tool_to_openai_function(tool.name, tool.description, tool.inputSchema)
+        mcp_tool_to_openai_function(tool.name, tool.description, tool.input_schema)
         for tool in listed.tools
         if tool.name in allow
     ]

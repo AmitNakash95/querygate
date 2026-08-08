@@ -7,6 +7,7 @@ from typing import Callable, Literal
 from fastapi import APIRouter, Depends, Query
 
 from querygate.admin.anomaly import JsonlAuditEventSource
+from querygate.audit.ledger import resolve_ledger_key
 from querygate.core.auth import Principal
 from querygate.core.config import AppConfig
 from querygate.help.models import (
@@ -71,7 +72,11 @@ def build_help_router(
     async def describe_my_recent_denials(principal: Principal = Depends(get_principal)):
         source = None
         if cfg.audit_sink_backend.is_locally_readable():
-            source = JsonlAuditEventSource(cfg.audit_jsonl_path)
+            source = JsonlAuditEventSource(
+                cfg.audit_jsonl_path,
+                ledger_key=resolve_ledger_key(cfg.audit_ledger_hmac_key),
+                require_envelope=cfg.audit_sink_backend.wraps_events_in_a_hash_chain_envelope(),
+            )
         return build_recent_denials_report(
             source,
             principal_id=principal.subject,
@@ -79,6 +84,7 @@ def build_help_router(
             max_events_scanned=cfg.personal_denials_max_events_scanned,
             max_lines_read=cfg.personal_denials_max_lines_read,
             limit=cfg.personal_denials_limit,
+            backend_label=cfg.audit_sink_backend.value,
         )
 
     @router.get("/configuration", response_model=RedactedConfiguration)

@@ -9,8 +9,10 @@ from __future__ import annotations
 from typing import Annotated, Callable, List, Optional, Union
 
 import pydantic as pyd
+import yaml
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 
+from querygate.admin.service import safe_pydantic_error_lines, safe_yaml_error_detail
 from querygate.api._errors import admission_headers, mask_unexpected, require_scope
 from querygate.config_reload import ReloadResult, reload_config
 from querygate.catalog.retrieval import CatalogSearchResponse
@@ -382,11 +384,18 @@ def build_router(
     ):
         """Grant an approval token for a query that tripped the in-query
         human-in-the-loop gate (TODO.md item 92). Requires the `query:approve`
-        scope — deliberately distinct from query execution, so an agent cannot
-        approve its own sensitive/expensive read. Returns a short-lived,
-        HMAC-signed token bound to this exact query's fingerprint; the requester
-        re-submits the identical query with it in the `X-QueryGate-Approval`
-        header. Stateless: no approval is stored server-side.
+        scope — deliberately a distinct scope from query execution, so a
+        principal that only ever holds an execution-capable scope can never
+        mint its own approval. Returns a short-lived, HMAC-signed token bound
+        to this exact query's fingerprint, connection, and this call's own
+        principal (TODO.md item 151); **that same principal** — not a
+        different requester — is the only one who can redeem it, by
+        re-submitting the identical query against this same connection with it
+        in the `X-QueryGate-Approval` header. This means the only configuration
+        that can self-approve is one principal deliberately granted both
+        `query:approve` and execution scope — a deployment choice, not a gap
+        this endpoint can close on its own. Stateless: no approval is stored
+        server-side.
         """
         require_scope(principal, QUERY_APPROVE_SCOPE)
         _require_connection(connection, principal)
@@ -404,6 +413,8 @@ def build_router(
             fingerprint=fingerprint,
             approver_subject=principal.subject,
             key=app_config.approval_token_hmac_key,
+            connection_id=connection,
+            principal_subject=principal.subject,
         )
         return ApprovalGrant(fingerprint=fingerprint, approval_token=token)
 
@@ -477,11 +488,17 @@ def build_router(
     ):
         """Grant an approval token for a write that tripped the governed-writes
         approval gate (TODO.md item 93 phase 2). Requires the `query:approve`
-        scope — the same separation of duties as read approval, so an agent
-        cannot approve its own sensitive/large write. Returns a short-lived,
-        HMAC-signed token bound to this exact write's fingerprint; resubmit the
-        identical write with it in the `X-QueryGate-Approval` header. Stateless:
-        no approval is stored server-side."""
+        scope — the same scope split as read approval, so a principal that
+        only ever holds an execution-capable scope can never mint its own
+        approval. Returns a short-lived, HMAC-signed token bound to this exact
+        write's fingerprint, connection, and this call's own principal
+        (TODO.md item 151); **that same principal** redeems it by resubmitting
+        the identical write against this same connection with it in the
+        `X-QueryGate-Approval` header. The only configuration that can
+        self-approve is one principal deliberately granted both
+        `query:approve` and execution scope — a deployment choice, not a gap
+        this endpoint can close on its own. Stateless: no approval is stored
+        server-side."""
         require_scope(principal, QUERY_APPROVE_SCOPE)
         _require_connection(connection, principal)
         if not app_config.approval_token_hmac_key:
@@ -494,6 +511,8 @@ def build_router(
             fingerprint=fingerprint,
             approver_subject=principal.subject,
             key=app_config.approval_token_hmac_key,
+            connection_id=connection,
+            principal_subject=principal.subject,
         )
         return ApprovalGrant(fingerprint=fingerprint, approval_token=token)
 
@@ -593,6 +612,29 @@ def build_router(
                 catalog_file=cfg.catalog_file,
                 template_file=cfg.template_file,
                 resolver_registry=build_secret_resolver_registry(cfg),
+            )
+        except pyd.ValidationError as exc:
+            # A malformed connections.yaml entry is validated by
+            # ConnectionProfile.model_validate() *after* ${...} interpolation,
+            # so the object pydantic is validating already carries a live
+            # credential. str(exc) (and error["input"]/["input_value"]) can
+            # embed that whole object for some error kinds (e.g. a
+            # `missing`-type error on a required field) -- never surface the
+            # raw exception here. Build detail from loc/msg only. See item 165.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="; ".join(safe_pydantic_error_lines(exc)),
+            )
+        except yaml.YAMLError as exc:
+            # A syntactically-broken connections.yaml (e.g. an unterminated
+            # quote on a connection_string: line) raises before pydantic
+            # ever runs, on the SAME already-interpolated content -- so the
+            # line PyYAML points at can itself contain the live credential.
+            # str(exc) calls Mark.__str__(), which embeds that source line
+            # verbatim; never surface it. See item 165.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=safe_yaml_error_detail(exc),
             )
         except Exception as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
