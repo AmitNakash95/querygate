@@ -11079,6 +11079,90 @@ low-risk-docs-task framing.
 task's own instruction to check for other genuinely-missing entries).
 **Depends on:** 19 (phase 1 shipped), 134 (phase 1 and 2 shipped).
 
+### 154. WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate ✅ DONE
+
+**Surfaced 2026-08-06 by `security-invariant-reviewer` auditing item 134
+phase 2's managed search.** The LOCAL hash-chained sink
+(`audit/sinks.py`'s `HashChainedAuditSink`) wraps every persisted event in a
+`LedgerRecord` envelope a reader can verify. The WORM sink
+(`audit/worm_sink.py`'s `WormFlushMonitor.flush_once`) wrote the bare
+`PersistableEvent` body instead — deliberate for phase 1, but it meant
+`audit/worm_search.py` had no hash-chain to check a line against. S3 Object
+Lock (COMPLIANCE mode) stops an existing object from being deleted or
+overwritten before its retention date; it never stopped a NEW, schema-valid
+object from being added to the archive prefix. Any principal holding
+`s3:PutObject` on that prefix — necessarily including QueryGate's own AWS
+role — could plant a fabricated segment indistinguishable from a genuine one.
+
+**Two decisions needed before implementation, both made explicitly by the
+maintainer (2026-08-08) rather than assumed:**
+
+1. **Per-segment chain, not cross-segment.** Each flushed batch gets its own
+   self-contained chain (`seq` restarts at 0, `prev_hash` restarts at
+   `GENESIS_PREV_HASH`, for every segment), rather than one continuous chain
+   spanning every segment ever written. This fully closes the actual threat
+   (was THIS segment tampered with after being written) without needing
+   `WormFlushMonitor` to persist/recover chain state across process
+   restarts, or coordinate a single writer across replicas — the same
+   complexity class item 141 flagged for a hypothetical cross-process local
+   ledger. Trade-off, recorded rather than glossed over: a per-segment chain
+   cannot prove no segment was ever silently withheld from a search result —
+   only that a returned segment wasn't altered. That's a different, lower-
+   severity residual (suppressing a genuine object from being listed is a
+   materially harder attack than forging a new one) left to the existing
+   S3-listing/Object-Lock posture, not claimed as closed by this fix.
+2. **No legacy-segment tolerance.** The reader requires an envelope
+   unconditionally — a bare (pre-fix-shaped) line is `malformed`, not
+   accepted as a weaker-but-legitimate historical shape. Chosen because this
+   feature (item 134) has no production deployment predating this fix, so
+   the "support both shapes indefinitely" alternative would have added
+   permanent reader complexity for a migration case that doesn't exist yet.
+
+**Shipped.** `audit/worm_sink.py` gained `_build_segment_body` (chains
+`make_record` calls per event in a drained batch) and `WormFlushMonitor`
+gained a `ledger_key` parameter — the same `AUDIT_LEDGER_HMAC_KEY` the local
+chained sink/reader use, wired through `app.py`'s lifespan
+(`resolve_ledger_key(conf.audit_ledger_hmac_key)`). `audit/worm_search.py`'s
+scan loop now calls `verify_envelope_hash` before ever unwrapping a line —
+`None` (not envelope-shaped) or `False` (hash mismatch) both count as
+`malformed`, mirroring the local reader's identical posture — and
+`build_worm_search_result`/`search_worm_archive` both gained a `ledger_key`
+parameter threaded the same way. `docs/THREAT_MODEL.md`'s QG-40 row and
+`audit/worm_search.py`'s/`audit/worm_sink.py`'s module docstrings were
+updated from "residual, not closed" to "fixed," recording both decisions
+above and the residual that's still genuinely open (segment withholding).
+
+**Coverage.** `tests/unit/test_audit_worm_sink.py` gained
+`test_flushed_segment_is_a_valid_per_segment_hash_chain`,
+`test_two_flushes_each_start_their_own_chain_at_genesis` (pins decision 1
+directly — the second segment's first record does NOT link to the first
+segment's last hash), and a rewritten
+`test_flushed_event_body_is_byte_identical_to_the_local_chained_sink`
+(compares the embedded `event` body, not the whole file, since the two are
+no longer byte-identical as files once each has its own independent chain
+state). `tests/unit/test_worm_search.py` gained a new
+`TestForgedOrUnenvelopedSegmentsAreRejected` class: a bare unenveloped line,
+a `LedgerRecord`-shaped line with a mismatched hash, a genuine-segment
+control, and a keyed chain verified with/without the matching key — plus a
+`build_worm_search_result`-level test proving the config key actually
+reaches verification. `tests/security/test_worm_search_redaction.py`'s four
+existing tampered-segment tests were upgraded from bare tampered JSON (which
+would now be rejected at the envelope gate, no longer exercising the
+`extra="forbid"` schema gate they claim to test) to validly-enveloped
+tampered bodies — closing a test-quality gap this item's own fix would
+otherwise have silently introduced, not just adapting fixtures mechanically.
+`tests/integration/test_rest_api.py`'s existing WORM end-to-end test was
+extended to assert the archived segment verifies under the configured HMAC
+key and fails to verify under no key, proving `app.py`'s lifespan wiring.
+**Mutation-verified:** the envelope-verification gate itself, the `app.py`
+key wiring, and the `build_worm_search_result` key wiring were each
+deliberately removed in turn; the corresponding tests failed for the
+expected reason each time, then the fix was restored and the full suite
+re-run green.
+
+**Effort:** M. **Depends on:** 91 (the local chain this mirrors), 134 (phase
+1's WORM sink, phase 2's search surface).
+
 ### 155. `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection ✅ DONE
 
 **Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item

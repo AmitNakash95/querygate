@@ -19,6 +19,7 @@ from moto import mock_aws
 
 from querygate.audit import worm_search as worm_search_module
 from querygate.audit.events import AuditEvent, ConnectionProbeEvent
+from querygate.audit.ledger import GENESIS_PREV_HASH, make_record
 from querygate.audit.worm_search import (
     WormSearchBounds,
     build_worm_search_result,
@@ -73,8 +74,23 @@ def _put_segment(client, key: str, lines: list) -> None:
     )
 
 
+def _chain_lines(events: list, *, key: bytes = None) -> list:
+    # TODO.md item 154: the same enveloped, per-segment-chained shape a real
+    # WormFlushMonitor.flush_once() writes (audit/worm_sink.py's
+    # _build_segment_body) — every test fixture that plants a "legitimate"
+    # segment must match this shape now that the reader verifies it.
+    prev_hash = GENESIS_PREV_HASH
+    lines = []
+    for seq, event in enumerate(events):
+        body = event.model_dump(mode="json", exclude_none=True)
+        record = make_record(seq, prev_hash, body, key=key)
+        lines.append(record.model_dump_json())
+        prev_hash = record.hash
+    return lines
+
+
 def _put_events(client, key: str, events: list) -> None:
-    _put_segment(client, key, [e.model_dump_json(exclude_none=True) for e in events])
+    _put_segment(client, key, _chain_lines(events))
 
 
 @pytest.fixture
@@ -216,7 +232,7 @@ class TestSearchAndFilter:
         _put_segment(
             s3,
             f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
-            [_event("a", minute=0).model_dump_json(exclude_none=True), "{not valid json"],
+            [*_chain_lines([_event("a", minute=0)]), "{not valid json"],
         )
         result = await search_worm_archive(
             bucket=_BUCKET,
@@ -263,6 +279,139 @@ class TestSearchAndFilter:
             bounds=_bounds(),
         )
         assert len(result.events) == 1
+
+
+class TestForgedOrUnenvelopedSegmentsAreRejected:
+    """TODO.md item 154, docs/THREAT_MODEL.md QG-40: the actual threat this
+    item closes — a segment planted by anyone with `s3:PutObject` on the
+    archive prefix (necessarily including QueryGate's own AWS role) that
+    isn't a genuine QueryGate-written, correctly-chained segment must be
+    rejected as malformed, never returned indistinguishably from a real one.
+    `TestTamperedSegmentIsRejectedNotLeaked` in
+    tests/security/test_worm_search_redaction.py covers the deeper,
+    schema-level (`extra="forbid"`) gate for a VALIDLY-enveloped forgery;
+    these tests cover the new, shallower gate item 154 actually adds: the
+    envelope itself."""
+
+    async def test_a_bare_unenveloped_line_is_rejected_as_malformed(self, s3):
+        # The pre-item-154 shape (a bare event body, no LedgerRecord
+        # wrapper) — what every WORM segment looked like before this item,
+        # and what a forger with no knowledge of the envelope format at all
+        # would produce. No legacy-segment tolerance (recorded decision,
+        # module docstring): this is malformed now, not a weaker-but-
+        # accepted read.
+        event = _event("a", minute=0)
+        _put_segment(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [event.model_dump_json(exclude_none=True)],
+        )
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+        assert result.events == []
+        assert result.malformed == 1
+
+    async def test_an_envelope_whose_hash_does_not_match_its_contents_is_rejected(self, s3):
+        # A forger who understands the envelope SHAPE (seq/prev_hash/event/
+        # hash) but cannot compute a correct hash — e.g. edited an event's
+        # content after copying a real envelope's structure, or simply
+        # supplied a plausible-looking `hash` without recomputing it. Chain
+        # linkage alone would never catch this (a forger can supply a
+        # plausible prev_hash too) — only recomputing this record's own
+        # hash does, mirroring the local reader's identical
+        # test_jsonl_source_rejects_a_forged_chain_record.
+        from querygate.audit.ledger import LedgerRecord
+
+        forged = LedgerRecord(
+            seq=0,
+            prev_hash=GENESIS_PREV_HASH,
+            event=_event("a", minute=0).model_dump(mode="json", exclude_none=True),
+            hash="anything",
+        )
+        _put_segment(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [forged.model_dump_json()],
+        )
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+        assert result.events == []
+        assert result.malformed == 1
+
+    async def test_a_genuine_segment_still_verifies_and_is_returned(self, s3):
+        # The control: the identical shape the two tests above attack, but
+        # with a REAL matching hash, must still verify and return the event
+        # — proving the rejection above is about the hash mismatch/missing
+        # envelope specifically, not some other accidental difference.
+        _put_events(
+            s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", [_event("a", minute=0)]
+        )
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+        assert len(result.events) == 1
+        assert result.malformed == 0
+
+    async def test_a_keyed_chain_is_rejected_when_the_reader_has_no_key(self, s3):
+        # An unkeyed reader (ledger_key=None, the default) recomputes plain
+        # SHA-256 — a segment that was actually HMAC-signed with a key the
+        # reader doesn't have must not verify under the wrong algorithm.
+        _put_segment(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            _chain_lines([_event("a", minute=0)], key=b"secret-key"),
+        )
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+            # ledger_key intentionally omitted (defaults to None)
+        )
+        assert result.events == []
+        assert result.malformed == 1
+
+    async def test_a_keyed_chain_verifies_with_the_matching_key(self, s3):
+        _put_segment(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            _chain_lines([_event("a", minute=0)], key=b"secret-key"),
+        )
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+            ledger_key=b"secret-key",
+        )
+        assert len(result.events) == 1
+        assert result.malformed == 0
 
 
 class TestPagination:
@@ -776,3 +925,22 @@ class TestBuildWormSearchResult:
         )
         assert result.source == "s3_worm"
         assert len(result.events) == 1
+
+    async def test_enabled_backend_wires_the_ledger_key_through_to_verification(self, s3):
+        # TODO.md item 154: build_worm_search_result must resolve
+        # cfg.audit_ledger_hmac_key and pass it through to
+        # search_worm_archive's ledger_key — proven by a segment that is
+        # HMAC-signed and therefore ONLY verifies under that exact key.
+        _put_segment(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            _chain_lines([_event("a")], key=b"cfg-wired-key"),
+        )
+        cfg = self._config(audit_ledger_hmac_key="cfg-wired-key")
+        result = await build_worm_search_result(
+            cfg,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+        )
+        assert len(result.events) == 1
+        assert result.malformed == 0

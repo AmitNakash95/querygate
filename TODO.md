@@ -184,7 +184,7 @@ order-of-magnitude, not commitments.
 | 151 | ✅ Bind the in-query approval gate's token to a connection and principal, not just an AST fingerprint | M | 92, 128 |
 | 152 | ✅ Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM retention) shipping | S | 19, 134 |
 | 153 | ✅ `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention) | S | 19, 134 |
-| 154 | WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate | M | 91, 134 |
+| 154 | ✅ WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate | M | 91, 134 |
 | 155 | ✅ `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection | M | 151 |
 | 156 | ✅ A cross-connection join's joined table is governed only by the primary connection's Policy — masks/row filters/deny-lists never apply from the joined connection's own Policy | M/L | 155 |
 | 157 | Snowflake live-server verification and deeper feature parity (item 19 phase 2 residual) | L–XL | 19 |
@@ -2309,47 +2309,18 @@ Added 17 `[Unreleased]` entries to `CHANGELOG.md` covering items 19, 134
 separate, larger follow-up. **Full write-up:**
 [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 153).
 
-### 154. WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate
+### 154. WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate ✅ DONE
 
-**Surfaced 2026-08-06 by `security-invariant-reviewer` auditing item 134
-phase 2's managed search.** The LOCAL hash-chained sink
-(`audit/sinks.py`'s `HashChainedAuditSink`) wraps every persisted event in a
-`LedgerRecord` envelope a reader can verify (`audit/ledger.py`'s
-`verify_envelope_hash`). The WORM sink (`audit/worm_sink.py`'s
-`WormFlushMonitor.flush_once`) writes the bare `PersistableEvent` body
-instead — deliberate for phase 1 (the archive's job was durability/
-retrievability, not tamper-evidence; the local chain already owns that
-question) but it means phase 2's `audit/worm_search.py` has no hash-chain to
-check a line against. S3 Object Lock (COMPLIANCE mode) stops an existing
-object from being deleted or overwritten before its retention date — it does
-**not** stop a NEW, schema-valid object from being added to the archive
-prefix. Any principal holding `s3:PutObject` on that prefix — necessarily
-including QueryGate's own AWS role, since `WormFlushMonitor` needs the same
-permission to archive at all — could plant a fabricated segment that passes
-every check `worm_search.py` runs (redaction-safe schema, no forbidden
-`query_shape` content) and is returned by a search indistinguishably from a
-genuine one.
-
-**What to do (when prioritized):** envelope/hash-chain WORM segments the way
-the local sink already does — e.g. wrap each flushed batch (or each event
-within it) in a `LedgerRecord`-shaped structure with its own chain, and have
-`worm_search.py` verify it the same way `admin_ui_routes.py`'s local reader
-already does (`verify_envelope_hash` → `unwrap_envelope`, counting an
-unverifiable line as `malformed`). This is a **phase-1 write-format change**,
-not a phase-2 read-side fix: it needs an explicit decision on (a) whether the
-chain is per-segment or spans segments (a per-segment chain is simpler and
-matches "one batch, one flush" semantics but means chain continuity resets on
-every flush; a cross-segment chain needs the flush monitor to carry state
-across restarts) and (b) what happens to already-archived, unenveloped
-segments under retention today (they cannot be rewritten — Object Lock — so
-either the reader must support BOTH shapes indefinitely, or existing archives
-are accepted as a permanently weaker-verified tail). Until this ships,
-`audit/worm_search.py`'s module docstring and `docs/THREAT_MODEL.md`'s QG-40
-row carry this residual explicitly rather than overclaiming parity with the
-local reader.
-
-**Effort:** M. **Depends on:** 91 (the local chain this mirrors), 134 (phase
-1's WORM sink, phase 2's search surface).
+**Shipped 2026-08-09** (maintainer decisions: per-segment chain, no
+legacy-segment tolerance — no production deployment predates this fix).
+`audit/worm_sink.py`'s `WormFlushMonitor.flush_once` now writes each
+flushed batch as a fresh `LedgerRecord`-shaped chain (seq 0, `GENESIS_PREV_
+HASH`), the same envelope the local `HashChainedAuditSink` uses;
+`audit/worm_search.py` verifies each record's own hash before ever
+unwrapping it, counting an unverifiable or unenveloped line as `malformed`.
+Closes `docs/THREAT_MODEL.md` QG-40's residual (a forged, schema-valid
+segment used to be returned indistinguishably from a genuine one).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 154).
 
 ### 155. `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection ✅ DONE
 
