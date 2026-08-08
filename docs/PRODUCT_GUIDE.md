@@ -3705,6 +3705,36 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-09 — `validate_policy`/`compile_structured_query`/
+  `applied_column_masks` now self-derive `scope_connections` from a given
+  `connection_resolver`, closing item 160's finding 3 footgun (TODO.md item
+  160, fully closed).** Every `scope_connections`/`connection_resolver`
+  parameter these three functions gained under item 156 defaulted to `None`
+  — meaning a caller that passed a `connection_resolver` (able to resolve
+  cross-connection joins) but forgot the explicit `scope_connections` map
+  silently fell back to primary-only enforcement, with no error or warning.
+  This is the exact shape that let `admin/service.py`'s
+  `simulate_candidate_policy` drift onto the weak path before item 156
+  caught it, and item 160's own audit-response pass (2026-08-07) deliberately
+  left the "should we self-derive" question open as a maintainer decision
+  rather than defaulting into it under time pressure. **Decision: yes,
+  self-derive**, made only after auditing every call site that exists today:
+  `execution/service.py` and `admin/service.py` (the two production callers)
+  and every internal recursive compiler call (subquery, EXISTS, CTE) already
+  pass `scope_connections` and `connection_resolver` together, via item 160
+  finding 1's snapshot; the three benchmark-harness callers
+  (`security_benchmark.py` x2, `catalog/adaptive_learning_benchmark.py`) pass
+  neither. So the fix is a no-op for every caller in the codebase today — it
+  only protects a future one from repeating the exact mistake item 156 fixed.
+  Implementation calls the existing `resolve_scope_connections`
+  (`validation/schema_validation.py`) when `scope_connections is None and
+  connection_resolver is not None` (plus `connection_id is not None` for the
+  two compiler functions, which allow an unset connection_id).
+  In `validate_policy`, this runs AFTER `validate_structural_caps`,
+  preserving finding 2's cheap-bound-first ordering, since
+  `resolve_scope_connections` touches the connection registry/policy store.
+  Mutation-verified in all three functions.
+
 - **2026-08-09 — WORM archive segments are now enveloped and per-segment
   hash-chained, closing `docs/THREAT_MODEL.md` QG-40's residual (TODO.md
   item 154).** The local hash-chained sink (item 91) wraps every event in a

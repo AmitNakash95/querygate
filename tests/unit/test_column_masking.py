@@ -386,6 +386,44 @@ class TestCrossConnectionMasking:
         # Omitting the map reproduces the pre-156 shape: nothing reported.
         assert applied_column_masks(query, Policy()) == []
 
+    def test_applied_column_masks_self_derives_the_map_from_the_resolver(self):
+        """TODO.md item 160 finding 3 (maintainer-approved 2026-08-09): a
+        caller that passes `connection_resolver`/`connection_id` but forgets
+        `scope_connections` now gets it self-derived, so the joined-only
+        mask is still reported — unlike the bare-resolver-less call just
+        above, which correctly still reports nothing (there's no resolver to
+        derive from)."""
+        from querygate.connections.models import ConnectionProfile
+
+        query = self._query()
+        other_policy = Policy(column_masks={"customers": [ColumnMask(column="phone", kind="null")]})
+        profiles = {
+            "primary": ConnectionProfile(
+                id="primary",
+                dialect="postgresql",
+                connection_string="postgresql+asyncpg://user:pass@host/primary_db",
+                join_group="grp",
+            ),
+            "other": ConnectionProfile(
+                id="other",
+                dialect="postgresql",
+                connection_string="postgresql+asyncpg://user:pass@host/other_db",
+                join_group="grp",
+            ),
+        }
+        policies = {"primary": Policy(join_group="grp"), "other": other_policy}
+
+        def resolver(connection_id, principal=None):
+            return profiles[connection_id], policies[connection_id]
+
+        assert applied_column_masks(
+            query,
+            policies["primary"],
+            connection_id="primary",
+            connection_resolver=resolver,
+            # scope_connections intentionally omitted.
+        ) == ["phone"]
+
     def test_single_connection_masking_unaffected_by_the_new_parameters(self):
         """Regression: a plain single-connection query must mask identically
         whether or not `connection_id`/`scope_connections` are supplied."""

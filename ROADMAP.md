@@ -367,7 +367,7 @@ claim when the work ships or before explicitly handing the item back.
   auditing item 156 — pre-existing and unrelated to that item's own change;
   small, mechanical fix (case-fold the lookup, mirroring `resolve_scope_
   connections`).*
-- [ ] **160** — item 156 follow-up: harden four smaller connection-resolution
+- [x] **160** — item 156 follow-up: harden four smaller connection-resolution
   edge cases (audit-vs-compiled-SQL snapshot consistency under a concurrent
   reload, a cap-ordering inversion, a fail-open-by-default parameter shape,
   and a purpose/k-anonymity/limit scope clarification). *Surfaced 2026-08-06
