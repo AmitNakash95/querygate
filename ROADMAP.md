@@ -147,7 +147,7 @@ claim when the work ships or before explicitly handing the item back.
   of defect item 138 exists to fix. Needs a maintainer decision on the
   cursor-ceiling/pagination-shape tradeoff, recorded as the item's own first
   step.* **Depends on 138.**
-- [ ] **141** — Convert audit-reader line caps into practically-tight
+- [x] **141** — Convert audit-reader line caps into practically-tight
   window-based early exits. *Surfaced 2026-08-01 by the
   `security-invariant-reviewer` audit of item 138; deliberately not built as
   part of it. Trades a bounded ordering-tolerance assumption for speed on an

@@ -9,6 +9,7 @@ shared without becoming a data-exfiltration surface itself.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from querygate.audit.events import (
@@ -20,9 +21,33 @@ from querygate.audit.events import (
     ConfigChangeAction,
     ConfigChangeEvent,
     ConnectionProbeEvent,
+    PersistableEvent,
 )
 from querygate.audit.sinks import get_audit_sink
-from querygate.core.logging import get_logger
+from querygate.core.logging import ContextLogger, get_logger
+
+
+def _persist(event: PersistableEvent, log: ContextLogger) -> None:
+    """Re-stamp `occurred_at` immediately before the durable write.
+
+    Closes the gap between event construction and the sink's write-order
+    lock — the dominant source of drift between physical write order and
+    `occurred_at` order (TODO.md item 141, PRODUCT_GUIDE Decision Log): an
+    arbitrary amount of work (structured logging, future additions here) can
+    run between building the event and this call. Direct `sink.emit()`
+    callers — the audit test suite's synthetic-history fixtures — are
+    unaffected; only this production write path re-stamps.
+    """
+    event = event.model_copy(update={"occurred_at": datetime.now(timezone.utc)})
+    try:
+        get_audit_sink().emit(event)
+    except Exception as exc:
+        log.error(
+            "audit.sink.write_failed",
+            audit_event_id=event.event_id,
+            sink_type=type(get_audit_sink()).__name__,
+            error=f"{type(exc).__name__}: {exc}",
+        )
 
 
 def audit_query(
@@ -107,18 +132,11 @@ def audit_query(
         admission_state=admission_state,
         masked_columns=masked_columns,
     )
-    try:
-        get_audit_sink().emit(event)
-    except Exception as exc:
-        # A persistence outage must be visible but cannot turn a successfully
-        # executed read into a misleading client error after the DB work has
-        # already happened. Operators should alert on this log event.
-        log.error(
-            "audit.sink.write_failed",
-            audit_event_id=event.event_id,
-            sink_type=type(get_audit_sink()).__name__,
-            error=f"{type(exc).__name__}: {exc}",
-        )
+    # A persistence outage must be visible but cannot turn a successfully
+    # executed read into a misleading client error after the DB work has
+    # already happened — `_persist` logs, never raises. Operators should
+    # alert on the resulting log event.
+    _persist(event, log)
 
 
 def audit_config_change(
@@ -169,15 +187,7 @@ def audit_config_change(
         outcome=event.outcome,
         error_category=error_category,
     )
-    try:
-        get_audit_sink().emit(event)
-    except Exception as exc:
-        log.error(
-            "audit.sink.write_failed",
-            audit_event_id=event.event_id,
-            sink_type=type(get_audit_sink()).__name__,
-            error=f"{type(exc).__name__}: {exc}",
-        )
+    _persist(event, log)
 
 
 def audit_connection_probe(
@@ -227,15 +237,7 @@ def audit_connection_probe(
         failure_category=failure_category,
         error_category=error_category,
     )
-    try:
-        get_audit_sink().emit(event)
-    except Exception as exc:
-        log.error(
-            "audit.sink.write_failed",
-            audit_event_id=event.event_id,
-            sink_type=type(get_audit_sink()).__name__,
-            error=f"{type(exc).__name__}: {exc}",
-        )
+    _persist(event, log)
 
 
 def audit_catalog_governance(
@@ -288,12 +290,4 @@ def audit_catalog_governance(
         outcome=event.outcome,
         error_category=error_category,
     )
-    try:
-        get_audit_sink().emit(event)
-    except Exception as exc:
-        log.error(
-            "audit.sink.write_failed",
-            audit_event_id=event.event_id,
-            sink_type=type(get_audit_sink()).__name__,
-            error=f"{type(exc).__name__}: {exc}",
-        )
+    _persist(event, log)

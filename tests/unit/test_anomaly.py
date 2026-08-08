@@ -274,6 +274,79 @@ def test_jsonl_source_filters_out_of_window_events(tmp_path):
     assert len(loaded) == 4
 
 
+def test_jsonl_source_early_exit_stops_before_reading_older_lines(tmp_path):
+    # TODO.md item 141: once `max_consecutive_out_of_window` matching-type
+    # lines in a row are all before `window_start`, the scan stops WITHOUT
+    # reading further back — proven here by a malformed sentinel placed at
+    # the physical start of the file (the oldest possible line, read last in
+    # a tail-first scan): if the early exit didn't fire, the scan would
+    # eventually reach it and `malformed` would be 1, not 0.
+    th = _thresholds(max_consecutive_out_of_window=3)
+    path = tmp_path / "audit.jsonl"
+    out_of_window = _spread(5, start=_NOW - timedelta(seconds=50_000), span_seconds=1000)
+    in_window = _spread(2, start=_NOW - timedelta(seconds=500), span_seconds=100)
+    lines = ["{not json"] + [
+        e.model_dump_json(exclude_none=True) for e in out_of_window + in_window
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    source = JsonlAuditEventSource(str(path))
+    loaded, malformed, truncated = source.load_query_events(now=_NOW, thresholds=th)
+    assert len(loaded) == 2
+    assert malformed == 0  # the sentinel was never reached
+    assert truncated is False  # the window genuinely ended, not a bound firing
+
+
+def test_jsonl_source_early_exit_counter_resets_on_an_in_window_event(tmp_path):
+    # A run of out-of-window events shorter than the threshold, interrupted
+    # by one in-window event, must NOT trigger the early exit — the counter
+    # resets. Proven the same way: a malformed sentinel at the physical start
+    # of the file is reached (malformed == 1) only if the scan read the whole
+    # file, i.e. never wrongly exited early.
+    th = _thresholds(max_consecutive_out_of_window=3)
+    path = tmp_path / "audit.jsonl"
+    old_run = _spread(2, start=_NOW - timedelta(seconds=50_000), span_seconds=100)
+    interrupter = _spread(1, start=_NOW - timedelta(seconds=400), span_seconds=1)
+    more_old = _spread(2, start=_NOW - timedelta(seconds=40_000), span_seconds=100)
+    lines = (
+        ["{not json"]
+        + [e.model_dump_json(exclude_none=True) for e in old_run]
+        + [e.model_dump_json(exclude_none=True) for e in interrupter]
+        + [e.model_dump_json(exclude_none=True) for e in more_old]
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    source = JsonlAuditEventSource(str(path))
+    loaded, malformed, truncated = source.load_query_events(now=_NOW, thresholds=th)
+    assert len(loaded) == 1  # only the interrupter is in-window
+    assert malformed == 1  # the sentinel WAS reached: no premature exit
+    assert truncated is False
+
+
+def test_jsonl_source_early_exit_counter_ignores_other_event_types(tmp_path):
+    # A non-matching-type line (e.g. config.governance) sitting inside an
+    # out-of-window run must neither advance nor reset the counter — it says
+    # nothing about this stream's recency. Threshold 3, with 2 matching
+    # out-of-window events either side of an unrelated event type: the
+    # consecutive *matching-type* count reaches 4 without ever being broken,
+    # so the early exit must still fire before the sentinel.
+    th = _thresholds(max_consecutive_out_of_window=3)
+    path = tmp_path / "audit.jsonl"
+    old_a = _spread(2, start=_NOW - timedelta(seconds=50_000), span_seconds=100)
+    old_b = _spread(2, start=_NOW - timedelta(seconds=40_000), span_seconds=100)
+    other_type = json.dumps({"event_type": "config.governance", "action": "apply"})
+    lines = (
+        ["{not json"]
+        + [e.model_dump_json(exclude_none=True) for e in old_a]
+        + [other_type]
+        + [e.model_dump_json(exclude_none=True) for e in old_b]
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    source = JsonlAuditEventSource(str(path))
+    loaded, malformed, truncated = source.load_query_events(now=_NOW, thresholds=th)
+    assert len(loaded) == 0
+    assert malformed == 0  # the sentinel was never reached
+    assert truncated is False
+
+
 def test_jsonl_source_bounds_and_reports_truncation(tmp_path):
     th = _thresholds(max_events_scanned=3)
     path = tmp_path / "audit.jsonl"
