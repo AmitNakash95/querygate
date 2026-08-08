@@ -10,6 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import mssql, postgresql, sqlite
 
 from querygate.compiler.sqlalchemy_compiler import clamp_limit, compile_structured_query
+from querygate.connections.models import ConnectionProfile
 from querygate.core.auth import Principal
 from querygate.core.exceptions import PolicyViolationError, QueryValidationError
 from querygate.policy.models import MandatoryRowFilter, Policy
@@ -1172,6 +1173,49 @@ class TestCrossConnectionMandatoryRowFilters:
             connection_id="primary",
             scope_connections=scope_connections,
             connection_resolver=self._resolver(other_policy),
+        )
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "customers.country = 'US'" in compiled
+
+    def test_filter_configured_only_on_joined_connection_is_self_derived_from_the_resolver(self):
+        """TODO.md item 160 finding 3 (maintainer-approved 2026-08-09): a
+        caller that passes `connection_resolver`/`connection_id` but forgets
+        `scope_connections` now gets it self-derived, so the joined-only
+        filter still applies — unlike the pre-160 pinned regression just
+        below, which passes NEITHER and correctly still doesn't filter."""
+        tables = _make_tables()
+        query = self._query()
+        other_policy = Policy(
+            mandatory_row_filters=[
+                MandatoryRowFilter(table="customers", column="country", value="US")
+            ]
+        )
+        profiles = {
+            "primary": ConnectionProfile(
+                id="primary",
+                dialect="postgresql",
+                connection_string="postgresql+asyncpg://user:pass@host/primary_db",
+                join_group="grp",
+            ),
+            "other": ConnectionProfile(
+                id="other",
+                dialect="postgresql",
+                connection_string="postgresql+asyncpg://user:pass@host/other_db",
+                join_group="grp",
+            ),
+        }
+        policies = {"primary": Policy(join_group="grp"), "other": other_policy}
+
+        def resolver(connection_id, principal=None):
+            return profiles[connection_id], policies[connection_id]
+
+        stmt, _ = compile_structured_query(
+            query,
+            tables,
+            policies["primary"],
+            connection_id="primary",
+            connection_resolver=resolver,
+            # scope_connections intentionally omitted.
         )
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "customers.country = 'US'" in compiled
