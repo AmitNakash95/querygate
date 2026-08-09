@@ -386,6 +386,91 @@ class TestCrossConnectionMasking:
         # Omitting the map reproduces the pre-156 shape: nothing reported.
         assert applied_column_masks(query, Policy()) == []
 
+    def test_applied_column_masks_self_derives_the_map_from_the_resolver(self):
+        """TODO.md item 160 finding 3 (maintainer-approved 2026-08-09): a
+        caller that passes `connection_resolver`/`connection_id` but forgets
+        `scope_connections` now gets it self-derived, so the joined-only
+        mask is still reported — unlike the bare-resolver-less call just
+        above, which correctly still reports nothing (there's no resolver to
+        derive from)."""
+        from querygate.connections.models import ConnectionProfile
+
+        query = self._query()
+        other_policy = Policy(column_masks={"customers": [ColumnMask(column="phone", kind="null")]})
+        profiles = {
+            "primary": ConnectionProfile(
+                id="primary",
+                dialect="postgresql",
+                connection_string="postgresql+asyncpg://user:pass@host/primary_db",
+                join_group="grp",
+            ),
+            "other": ConnectionProfile(
+                id="other",
+                dialect="postgresql",
+                connection_string="postgresql+asyncpg://user:pass@host/other_db",
+                join_group="grp",
+            ),
+        }
+        policies = {"primary": Policy(join_group="grp"), "other": other_policy}
+
+        def resolver(connection_id, principal=None):
+            return profiles[connection_id], policies[connection_id]
+
+        assert applied_column_masks(
+            query,
+            policies["primary"],
+            connection_id="primary",
+            connection_resolver=resolver,
+            # scope_connections intentionally omitted.
+        ) == ["phone"]
+
+    def test_applied_column_masks_rejects_a_resolver_given_without_connection_id(self):
+        """Security-invariant-reviewer, 2026-08-09 (SIR-160F3-2): mirrors the
+        identical guard in `compile_structured_query` — a caller that passes
+        `connection_resolver` but omits BOTH `connection_id` and
+        `scope_connections` must be rejected outright, not silently
+        reproduce the pre-156 primary-only behavior."""
+        query = self._query()
+        with pytest.raises(QueryValidationError, match="connection_resolver"):
+            applied_column_masks(
+                query,
+                Policy(),
+                connection_resolver=self._resolver(Policy()),
+                # connection_id AND scope_connections both intentionally omitted.
+            )
+
+    def test_a_resolver_failure_during_self_derivation_propagates_not_fail_soft(self):
+        """Security-invariant-reviewer, 2026-08-09 (SIR-160F3-3): self-
+        derivation can now raise a connection-resolution error
+        (`NotFoundError` for an unknown/disabled connection, among others)
+        from inside `applied_column_masks` — pinned as INTENDED behavior so
+        a future "make this fail-soft" change is a visible, deliberate
+        decision, not silent drift. Failing soft (returning `[]`/whatever
+        masks the derivation got before failing) would silently UNDER-report
+        masking in the audit trail, directly contradicting this function's
+        own "over-states protection rather than under-states it" contract —
+        the only safe failure mode here is to propagate, matching the
+        posture `execution/service.py`'s audit call site already requires
+        (an explicit `scope_connections`, never self-derivation, precisely
+        so a connection removed between compile and audit can't turn a
+        successfully executed query into a silently-incomplete audit
+        record)."""
+        from querygate.core.exceptions import NotFoundError
+
+        query = self._query()
+
+        def failing_resolver(connection_id, principal=None):
+            raise NotFoundError(f"connection {connection_id!r} not found")
+
+        with pytest.raises(NotFoundError):
+            applied_column_masks(
+                query,
+                Policy(),
+                connection_id="primary",
+                connection_resolver=failing_resolver,
+                # scope_connections intentionally omitted, forcing self-derivation.
+            )
+
     def test_single_connection_masking_unaffected_by_the_new_parameters(self):
         """Regression: a plain single-connection query must mask identically
         whether or not `connection_id`/`scope_connections` are supplied."""
@@ -399,6 +484,43 @@ class TestCrossConnectionMasking:
             dialect="postgresql",
             connection_id="demo",
             scope_connections={id(query): {"customers": "demo"}},
+        )
+        compiled_old = str(stmt_old.compile(compile_kwargs={"literal_binds": True}))
+        compiled_new = str(stmt_new.compile(compile_kwargs={"literal_binds": True}))
+        assert compiled_old == compiled_new
+
+    def test_single_connection_masking_self_derives_as_a_no_op_when_only_the_resolver_is_given(
+        self,
+    ):
+        """test-contract-reviewer, 2026-08-09 (item 160 finding-3 follow-up):
+        the test above only ever calls with `{}` or with `scope_connections`+
+        `connection_resolver` TOGETHER — neither exercises `connection_resolver`
+        alone (`scope_connections` omitted) on a query with no cross-connection
+        join. Pin that self-derivation on a single-connection query is a no-op
+        that still masks identically."""
+        from querygate.connections.models import ConnectionProfile
+
+        query = StructuredQuery(from_table="customers", select=["customers.id", "customers.phone"])
+        tables = self._tables()
+        policy = _mask_policy()
+        profile = ConnectionProfile(
+            id="demo",
+            dialect="postgresql",
+            connection_string="postgresql+asyncpg://user:pass@host/demo_db",
+        )
+
+        def resolver(connection_id, principal=None):
+            return profile, policy
+
+        stmt_old, _ = compile_structured_query(query, tables, policy, dialect="postgresql")
+        stmt_new, _ = compile_structured_query(
+            query,
+            tables,
+            policy,
+            dialect="postgresql",
+            connection_id="demo",
+            connection_resolver=resolver,
+            # scope_connections intentionally omitted.
         )
         compiled_old = str(stmt_old.compile(compile_kwargs={"literal_binds": True}))
         compiled_new = str(stmt_new.compile(compile_kwargs={"literal_binds": True}))

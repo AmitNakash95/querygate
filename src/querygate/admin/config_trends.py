@@ -28,10 +28,15 @@ schemas (themselves redaction-safe by construction) already hold.
 
 **Bounded by construction.** The reader (`audit.file_reader.iter_lines_reverse`,
 TODO.md item 138) reads the file tail-first and stops once either the
-retained-event cap or a hard lines-read cap is hit, so a long-running
-deployment's entire audit history can never make one request allocate
-unbounded memory or do unbounded work; `truncated` flags when either cap was
-hit.
+retained-event cap (`max_events_scanned`) or a hard lines-read cap
+(`max_lines_read`) is hit, so a long-running deployment's entire audit
+history can never make one request allocate unbounded memory or do
+unbounded work; `truncated` flags when either cap was hit. TODO.md item 141
+added a THIRD stop condition (`max_consecutive_out_of_window`, see its own
+docstring) that does NOT set `truncated` — a heuristic "the window has
+genuinely ended" exit, not a resource bound, relying on an assumption
+(physical write order tracks `occurred_at` order) a merged/restored/
+multi-writer audit file can violate. See `docs/THREAT_MODEL.md` QG-43.
 
 Deliberately still deferred (item 44's remaining phase-2 scope, unchanged by
 this slice): time-window trend *charts* over stored history, and querying an
@@ -76,6 +81,12 @@ class ChangeTrendThresholds(pyd.BaseModel):
     # of how many are retained — see `admin.anomaly.AnomalyThresholds.max_lines_read`
     # for the full rationale (same reader shape, tail-first scan).
     max_lines_read: int = pyd.Field(default=200_000, ge=1)
+    # TODO.md item 141 — see `admin.anomaly.AnomalyThresholds.
+    # max_consecutive_out_of_window` for the full rationale (same reader
+    # shape, tail-first scan). Counted across both matching types
+    # (`config.governance`, `catalog.governance`) together, since this
+    # stream treats them as one aggregation.
+    max_consecutive_out_of_window: int = pyd.Field(default=5_000, ge=1)
 
     model_config = pyd.ConfigDict(extra="forbid")
 
@@ -114,6 +125,11 @@ class ConfigCatalogChangeTrend(pyd.BaseModel):
     baseline_window_seconds: float
     events_scanned: int = 0
     malformed: int = 0
+    # True when a resource bound (max_events_scanned or max_lines_read) was
+    # hit. Does NOT cover the third, heuristic early-exit
+    # (`max_consecutive_out_of_window`) — see
+    # `ChangeTrendThresholds.max_consecutive_out_of_window` and
+    # `docs/THREAT_MODEL.md` QG-43.
     truncated: bool = False
     note: str = _REPORT_NOTE
 
@@ -224,9 +240,14 @@ class ChangeEventSource(Protocol):
         self, *, now: datetime, thresholds: ChangeTrendThresholds
     ) -> Tuple[List[ChangeEvent], int, bool]:
         """Return (events, malformed_line_count, truncated). `truncated` is True
-        when the scan stopped early — either `max_events_scanned` in-window
-        events were already found, or `max_lines_read` lines were read —
-        before it could be sure no more recent-window events remained."""
+        when the scan stopped on a resource bound — either `max_events_scanned`
+        in-window events were already found, or `max_lines_read` lines were
+        read — before it could be SURE no more recent-window events remained.
+        A fourth, undisclosed way the scan can end early:
+        `thresholds.max_consecutive_out_of_window` (TODO.md item 141) is a
+        heuristic exit that returns `truncated=False` on the assumption the
+        window has genuinely ended — an assumption a merged/restored/
+        multi-writer audit file can violate. See `docs/THREAT_MODEL.md` QG-43."""
         ...
 
 
@@ -253,6 +274,7 @@ class JsonlChangeEventSource:
         malformed = 0
         lines_read = 0
         stopped_early = False
+        consecutive_out_of_window = 0
         if not self.path.exists():
             return [], 0, False
         try:
@@ -295,7 +317,16 @@ class JsonlChangeEventSource:
                 occurred = event.occurred_at
                 if occurred.tzinfo is None:
                     occurred = occurred.replace(tzinfo=timezone.utc)
-                if occurred <= window_start or occurred > now:
+                if occurred <= window_start:
+                    # TODO.md item 141: a run this long is treated as proof
+                    # the window has genuinely ended — stop without setting
+                    # `stopped_early`/`truncated`.
+                    consecutive_out_of_window += 1
+                    if consecutive_out_of_window >= thresholds.max_consecutive_out_of_window:
+                        break
+                    continue
+                consecutive_out_of_window = 0
+                if occurred > now:
                     continue
                 kept.append(event)
         except AuditFileReadBounded:

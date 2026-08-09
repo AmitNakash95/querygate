@@ -54,6 +54,7 @@ from querygate.validation.schema_validation import (
     iter_set_op_arms,
     parse_column_ref,
     resolve_column,
+    resolve_scope_connections,
     resolve_table_policies,
     table_by_name as _table_by_name,
 )
@@ -1016,7 +1017,36 @@ def applied_column_masks(
     under-stating it, so it can never claim a raw value was masked when the
     opposite is what happened. Reporting per-arm instead would need a shape change
     to the persisted event, which is not worth it for this distinction.
+
+    TODO.md item 160 finding 3 (maintainer-approved 2026-08-09): self-derives
+    `scope_connections` when given `connection_resolver`/`connection_id` but
+    not the map itself — see `validate_policy`'s identical comment for the
+    full rationale. A no-op for the current (only) production caller, which
+    already passes both together. `connection_resolver` without
+    `connection_id` is rejected outright (security-invariant-reviewer,
+    2026-08-09, SIR-160F3-2) rather than silently reproducing the pre-156
+    primary-only behavior — that silent half of the same footgun finding 3
+    closed for the "both given" case would otherwise stay open for this one.
+    Since `resolve_scope_connections` can now run, this function can raise
+    connection-resolution errors it never could before (`QueryValidationError`
+    for a `join_group` mismatch, `ConfigValidationError` for a non-connectable
+    secondary dialect, `NotFoundError` for an unknown/disabled connection) —
+    an audit-path caller (`execution/service.py`) MUST keep passing an
+    explicit `scope_connections`, never rely on self-derivation here, so a
+    connection removed between compile and audit can't turn a successfully
+    executed query into a lost audit event.
     """
+    if scope_connections is None and connection_resolver is not None:
+        if connection_id is None:
+            raise QueryValidationError(
+                "applied_column_masks: connection_resolver was given without connection_id "
+                "or an explicit scope_connections map — cannot resolve cross-connection "
+                "policies without knowing the primary connection."
+            )
+        scope_connections = resolve_scope_connections(
+            query, connection_id, principal=principal, connection_resolver=connection_resolver
+        )
+
     arms = list(iter_set_op_arms(query))
     output_names = [_projection_output_name(item) for item in arms[0].select]
     masked: List[str] = []
@@ -1172,7 +1202,31 @@ def compile_structured_query(
     are drawn from its OWN resolved connection's Policy too, not just the
     primary `policy`. `None` (every pre-156 caller) reproduces the exact
     pre-156 single-Policy behavior throughout.
+
+    TODO.md item 160 finding 3 (maintainer-approved 2026-08-09): a caller
+    that passes `connection_resolver` and `connection_id` but omits
+    `scope_connections` gets it self-derived here, closing the same footgun
+    `validate_policy` closes — see that function's identical comment for the
+    full rationale. A no-op for every current caller (each already passes
+    both together, or neither — the recursive calls below always thread the
+    same snapshot from `ctx`/the outer call's own resolved map).
+    `connection_resolver` without `connection_id` is rejected outright
+    (security-invariant-reviewer, 2026-08-09, SIR-160F3-2) — see
+    `applied_column_masks`'s identical comment for why silently reproducing
+    the pre-156 primary-only behavior here would leave half the same footgun
+    open.
     """
+    if scope_connections is None and connection_resolver is not None:
+        if connection_id is None:
+            raise QueryValidationError(
+                "compile_structured_query: connection_resolver was given without "
+                "connection_id or an explicit scope_connections map — cannot resolve "
+                "cross-connection policies without knowing the primary connection."
+            )
+        scope_connections = resolve_scope_connections(
+            query, connection_id, principal=principal, connection_resolver=connection_resolver
+        )
+
     if cte_objects is None and query.ctes:
         cte_objects = {}
         for spec in query.ctes:

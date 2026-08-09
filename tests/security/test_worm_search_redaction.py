@@ -25,6 +25,7 @@ import pytest
 from moto import mock_aws
 
 from querygate.audit.events import AuditEvent, normalize_query_shape
+from querygate.audit.ledger import GENESIS_PREV_HASH, make_record
 from querygate.audit.worm_search import WormSearchBounds, search_worm_archive
 from querygate.query_ast.models import Predicate, StructuredQuery, WhereGroup
 
@@ -54,6 +55,20 @@ def _put(client, key: str, lines: list) -> None:
         ObjectLockMode="COMPLIANCE",
         ObjectLockRetainUntilDate=datetime.now(timezone.utc) + timedelta(days=1),
     )
+
+
+def _enveloped(event_body: dict) -> str:
+    # TODO.md item 154: a single-record, validly-signed segment (genesis
+    # seq=0) wrapping `event_body` as-is — including when `event_body` is
+    # deliberately tampered/forged content. This is the realistic threat
+    # model post-item-154: a writer able to produce a self-consistent
+    # envelope (e.g. a compromised process with the same signing key, or an
+    # unkeyed chain anyone with bucket write access can sign) that still
+    # tries to smuggle a forbidden field inside the embedded event — the
+    # envelope alone is not the only defense, extra="forbid" schema
+    # validation on the UNWRAPPED body is the second, independent gate these
+    # tests exist to prove.
+    return make_record(0, GENESIS_PREV_HASH, event_body).model_dump_json()
 
 
 @pytest.fixture
@@ -100,7 +115,7 @@ class TestLegitimateEventCarriesNoLiteralValue:
         _put(
             s3,
             f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
-            [event.model_dump_json(exclude_none=True)],
+            [_enveloped(event.model_dump(mode="json", exclude_none=True))],
         )
 
         result = await _search()
@@ -137,7 +152,7 @@ class TestTamperedSegmentIsRejectedNotLeaked:
         _put(
             s3,
             f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
-            [json.dumps(tampered)],
+            [_enveloped(tampered)],
         )
 
         result = await _search()
@@ -178,7 +193,7 @@ class TestTamperedSegmentIsRejectedNotLeaked:
         _put(
             s3,
             f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
-            [json.dumps(tampered)],
+            [_enveloped(tampered)],
         )
 
         result = await _search()
@@ -202,7 +217,7 @@ class TestTamperedSegmentIsRejectedNotLeaked:
         _put(
             s3,
             f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
-            [json.dumps(forged)],
+            [_enveloped(forged)],
         )
 
         result = await _search()
@@ -225,7 +240,7 @@ class TestTamperedSegmentIsRejectedNotLeaked:
         _put(
             s3,
             f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
-            [json.dumps(tampered)],
+            [_enveloped(tampered)],
         )
 
         result = await _search()

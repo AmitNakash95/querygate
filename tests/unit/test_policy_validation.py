@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
+from querygate.connections.models import ConnectionProfile
 from querygate.core.exceptions import PolicyViolationError
 from querygate.policy.models import ColumnMask, MandatoryRowFilter, Policy, PurposePolicyDelta
 from querygate.query_ast.models import JoinSpec, Predicate, StructuredQuery, WhereGroup
+from querygate.validation import policy_validation
 from querygate.validation.policy_validation import (
     resolve_purpose_policy,
     validate_batch_size,
@@ -85,6 +89,105 @@ def test_cross_connection_join_denied_table_never_enforced_without_the_map():
     query = _cross_connection_query()
     primary_policy = Policy()
     validate_policy(query, primary_policy, connection_id="primary")  # no raise
+
+
+def test_cross_connection_join_denied_table_self_derived_when_only_the_resolver_is_given():
+    """TODO.md item 160 finding 3 (maintainer-approved 2026-08-09): unlike
+    the test above (which passes NEITHER `scope_connections` nor
+    `connection_resolver`, and correctly still doesn't raise — there is
+    nothing to derive from), a caller that passes `connection_resolver` but
+    forgets `scope_connections` is the actual footgun this finding closes.
+    The map is now self-derived from the resolver, so the joined
+    connection's deny rule is enforced exactly as if the caller had passed
+    `scope_connections` explicitly."""
+    query = _cross_connection_query()
+    primary_policy = Policy()
+    other_policy = Policy(denied_tables=["customers"])
+    # Unlike _connection_resolver (whose profile half is always None, fine
+    # for tests that supply scope_connections directly), self-derivation
+    # exercises resolve_query_table_connections for real, which needs a
+    # genuine ConnectionProfile to check join_group/dialect against.
+    profiles = {
+        "primary": ConnectionProfile(
+            id="primary",
+            dialect="postgresql",
+            connection_string="postgresql+asyncpg://user:pass@host/primary_db",
+            join_group="grp",
+        ),
+        "other": ConnectionProfile(
+            id="other",
+            dialect="postgresql",
+            connection_string="postgresql+asyncpg://user:pass@host/other_db",
+            join_group="grp",
+        ),
+    }
+    policies = {"primary": primary_policy, "other": other_policy}
+
+    def resolver(connection_id, principal=None):
+        return profiles[connection_id], policies[connection_id]
+
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(
+            query,
+            primary_policy,
+            connection_id="primary",
+            connection_resolver=resolver,
+            # scope_connections intentionally omitted.
+        )
+
+
+def test_self_derivation_runs_after_the_cheap_structural_caps_not_before():
+    """Security-invariant-reviewer, 2026-08-09 (SIR-160F3-1): the self-derive
+    call in `validate_policy` must run AFTER `validate_structural_caps`
+    (`max_cte_count`/`max_subquery_depth`) — the cheap, connection-registry-
+    free bound — never before it, mirroring the ordering
+    `test_structural_caps_reject_before_any_per_scope_policy_lookup`
+    (tests/unit/test_service.py) already pins one layer up at the service
+    level. That test alone doesn't cover this: on the service path
+    `scope_connections` is always already resolved, so `validate_policy`'s
+    OWN derive branch never executes there regardless of where it sits in
+    the function body. Pinned directly here with a call-count assertion, not
+    timing: an over-cap query must be rejected WITHOUT
+    `resolve_scope_connections` ever being called."""
+    query = StructuredQuery(
+        ctes=[{"name": "totals", "query": {"from": "orders", "select": ["orders.id"]}}],
+        from_table="totals",
+        select=["totals.id"],
+    )
+    policy = Policy(max_cte_count=0)
+    resolver = _connection_resolver({})  # would KeyError if ever called
+
+    with patch.object(policy_validation, "resolve_scope_connections", MagicMock()) as mock_resolve:
+        with pytest.raises(PolicyViolationError, match="ctes exceeds max of 0"):
+            validate_policy(query, policy, connection_id="primary", connection_resolver=resolver)
+
+    mock_resolve.assert_not_called()
+
+
+def test_an_empty_scope_connections_map_is_not_treated_as_missing():
+    """Security-invariant-reviewer, 2026-08-09 (test-contract F3): the
+    self-derive guard is `scope_connections is None`, deliberately NOT a
+    falsy check — `admin/service.py`'s `simulate_candidate_policy` passes
+    `scope_connections={}` (not `None`) after catching a resolution failure,
+    specifically so `validate_policy` runs against "no map" rather than
+    re-deriving with the same resolver that already failed. A future
+    simplification to `if not scope_connections and connection_resolver...`
+    would silently break that call site by re-invoking the resolver. Pinned
+    directly: an explicit `{}` must never reach the resolver, even though it
+    is falsy exactly like `None`."""
+    query = _cross_connection_query()
+    policy = Policy()
+
+    def resolver(connection_id, principal=None):
+        raise AssertionError("resolver must not be called when scope_connections={} is explicit")
+
+    # No PolicyViolationError: with an explicit (empty) map, `customers`
+    # resolves against no override at all, i.e. exactly the primary policy —
+    # which has no opinion on `customers`, so this must not raise, and must
+    # not call the resolver either.
+    validate_policy(
+        query, policy, connection_id="primary", scope_connections={}, connection_resolver=resolver
+    )
 
 
 def test_cross_connection_join_denied_table_still_enforced_from_primary_connection():
@@ -193,6 +296,42 @@ def test_single_connection_query_unaffected_by_scope_connections_threading():
     for kwargs in ({}, {"scope_connections": scope_connections, "connection_resolver": resolver}):
         with pytest.raises(PolicyViolationError, match="not accessible"):
             validate_policy(query, policy, connection_id="primary", **kwargs)
+
+
+def test_single_connection_query_self_derives_as_a_no_op_when_only_the_resolver_is_given(
+    monkeypatch,
+):
+    """test-contract-reviewer, 2026-08-09 (item 160 finding-3 follow-up):
+    the three pre-existing 'unaffected by threading' tests only ever call
+    with `{}` or with `scope_connections`+`connection_resolver` TOGETHER —
+    none exercises `connection_resolver` alone (`scope_connections` omitted)
+    on a query with no cross-connection join, which is exactly the case
+    `validate_policy`'s new self-derivation branch now handles. Pin that a
+    single-connection query still self-derives correctly (as a no-op,
+    collapsing to `[policy]`) rather than only being covered by the
+    multi-connection self-derive tests elsewhere in this file."""
+    query = StructuredQuery(from_table="orders", select=["orders.id"])
+    # `join_group` is set so `resolve_query_table_connections`'s
+    # `policy.join_group or primary.effective_join_group()` short-circuits
+    # without touching the resolver's profile half, which `_connection_resolver`
+    # never populates (see its own docstring) — there's no cross-connection
+    # join here for the group to matter for.
+    policy = Policy(denied_columns={"orders": ["id"]}, join_group="grp")
+    resolver = _connection_resolver({"primary": policy})
+
+    calls = []
+    real_resolve = policy_validation.resolve_scope_connections
+
+    def _spy(*args, **kwargs):
+        calls.append(True)
+        return real_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(policy_validation, "resolve_scope_connections", _spy)
+
+    with pytest.raises(PolicyViolationError, match="not accessible"):
+        validate_policy(query, policy, connection_id="primary", connection_resolver=resolver)
+
+    assert calls, "self-derivation must run when connection_resolver is given alone"
 
 
 # --------------------------------------------------------------------------- #

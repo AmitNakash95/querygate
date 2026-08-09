@@ -401,6 +401,13 @@ class AppConfig(BaseSettings):
     # TODO.md item 138: hard bound on total *lines read from disk*, independent
     # of how many are retained — see `admin.anomaly.AnomalyThresholds.max_lines_read`.
     anomaly_max_lines_read: int = pyd.Field(default=200_000, ge=1)
+    # TODO.md item 141: see `admin.anomaly.AnomalyThresholds.
+    # max_consecutive_out_of_window`'s own docstring for the full rationale
+    # and residual risk (docs/THREAT_MODEL.md QG-43). Exposed as its own
+    # config field (rather than only the model default) so an operator who
+    # knows their deployment is merged/multi-writer can raise it or set it to
+    # a very large value to effectively disable the early exit.
+    anomaly_max_consecutive_out_of_window: int = pyd.Field(default=5_000, ge=1)
     anomaly_max_principals_reported: int = pyd.Field(default=100, ge=1)
 
     # Config/catalog-change trend surfacing over the persisted audit stream
@@ -415,6 +422,9 @@ class AppConfig(BaseSettings):
     # TODO.md item 138: hard bound on total *lines read from disk*, independent
     # of how many are retained — see `admin.config_trends.ChangeTrendThresholds.max_lines_read`.
     change_trend_max_lines_read: int = pyd.Field(default=200_000, ge=1)
+    # TODO.md item 141: see `anomaly_max_consecutive_out_of_window` above for
+    # the full rationale — same knob, independently tunable for this reader.
+    change_trend_max_consecutive_out_of_window: int = pyd.Field(default=5_000, ge=1)
 
     # Time-windowed metrics history for the observability dashboard (TODO.md
     # item 44, phase 2 remainder) — queries an *operator-configured* external
@@ -447,6 +457,10 @@ class AppConfig(BaseSettings):
     # admin-scoped surfaces, since this is the one reachable with
     # authentication only, no admin scope, by design (item 45).
     personal_denials_max_lines_read: int = pyd.Field(default=50_000, ge=1)
+    # TODO.md item 141: same rationale as `anomaly_max_consecutive_out_of_window`
+    # — kept independently tunable for the same reason `max_lines_read` above
+    # is (this surface is reachable with authentication only, no admin scope).
+    personal_denials_max_consecutive_out_of_window: int = pyd.Field(default=5_000, ge=1)
     personal_denials_limit: int = pyd.Field(default=20, ge=1)
 
     # Config-governance version history (querygate/admin/) — staged/applied/

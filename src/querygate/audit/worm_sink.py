@@ -43,6 +43,29 @@ exact same `PersistableEvent` the local sinks already write, so anything
 that would make a redaction slip permanent (WORM's whole point) is caught
 by the same tests that guard the local sinks, not a second implementation
 that could drift.
+
+**Enveloped and per-segment hash-chained (TODO.md item 154, honestly scoped
+against `docs/THREAT_MODEL.md` QG-40).** Each flushed segment is written as
+a `LedgerRecord`-shaped line per event (`audit/ledger.py`, the same envelope
+the local `HashChainedAuditSink` uses), chained from a fresh
+`GENESIS_PREV_HASH` at the start of every segment — deliberately a
+PER-SEGMENT chain, not one continuous chain across every segment ever
+written, so the flush monitor never needs to persist/recover chain state
+across process restarts or coordinate a single writer across replicas.
+**This is forgery-resistant only when `AUDIT_LEDGER_HMAC_KEY` is set —
+NOT the default.** An unkeyed (SHA-256) chain is a public function anyone
+with `s3:PutObject` on the archive prefix can compute themselves, so it
+detects accidental corruption and a careless forgery, not a deliberate one
+(the same limitation this module's own `verify_envelope_hash` docstring
+already states for the local ledger's unkeyed mode — except the WORM chain
+has no externally-anchored head hash to fall back on, since every segment
+restarts at genesis). `app.py`'s lifespan logs a startup warning when WORM
+is configured without a key. **Two further residuals, neither closed by
+this control:** a genuine segment can still be silently withheld from a
+listing, and this reader verifies each RECORD's hash but never the CHAIN's
+linkage within a segment, so a genuine segment can be duplicated to a
+second key or have interior records dropped without detection (TODO.md
+item 172).
 """
 
 from __future__ import annotations
@@ -53,6 +76,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Deque, List, Optional
 
 from querygate.audit.events import PersistableEvent
+from querygate.audit.ledger import GENESIS_PREV_HASH, make_record
 from querygate.core.logging import get_logger
 from querygate.metrics import (
     AUDIT_WORM_BUFFER_DROPPED_TOTAL,
@@ -153,6 +177,26 @@ def _segment_key(prefix: str, now: datetime) -> str:
     return f"{prefix.rstrip('/')}/{stamp}-{now.microsecond:06d}.jsonl"
 
 
+def _build_segment_body(events: List[PersistableEvent], *, key: Optional[bytes]) -> bytes:
+    """Serialize one drained batch as a fresh, self-contained hash chain
+    (TODO.md item 154) — one `LedgerRecord` line per event, `seq` starting
+    at 0 and `prev_hash` starting at `GENESIS_PREV_HASH` for every segment,
+    deliberately not continuing from any earlier segment's chain (see the
+    module docstring for why per-segment rather than cross-segment). The
+    embedded `event` is exactly the same `model_dump(mode="json",
+    exclude_none=True)` body the local `HashChainedAuditSink` wraps — never
+    reconstructed, never more or less than what the local chain would carry
+    for the identical event."""
+    prev_hash = GENESIS_PREV_HASH
+    lines: List[str] = []
+    for seq, event in enumerate(events):
+        body = event.model_dump(mode="json", exclude_none=True)
+        record = make_record(seq, prev_hash, body, key=key)
+        lines.append(record.model_dump_json())
+        prev_hash = record.hash
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
 class WormFlushMonitor:
     """Background job: drains the buffer on a timer and PUTs one Object-Lock
     -protected segment per non-empty drain. Independent start()/stop()
@@ -169,6 +213,7 @@ class WormFlushMonitor:
         retention_days: int,
         interval_seconds: float,
         buffer: Optional[InProcessWormEventBuffer] = None,
+        ledger_key: Optional[bytes] = None,
     ) -> None:
         if not bucket.strip():
             raise ValueError(
@@ -181,6 +226,11 @@ class WormFlushMonitor:
         self._retention_mode = retention_mode
         self._retention_days = retention_days
         self._interval = interval_seconds
+        # TODO.md item 154: the same HMAC key the local hash-chained sink
+        # uses (`AUDIT_LEDGER_HMAC_KEY`), so a WORM segment's chain carries
+        # the identical trust model — `None` for an unkeyed (SHA-256-only)
+        # chain, matching the local sink's own default.
+        self._ledger_key = ledger_key
         self._stop = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._client = None
@@ -249,9 +299,7 @@ class WormFlushMonitor:
         if not drained:
             return
         AUDIT_WORM_FLUSHES_TOTAL.inc()
-        body = ("\n".join(e.model_dump_json(exclude_none=True) for e in drained) + "\n").encode(
-            "utf-8"
-        )
+        body = _build_segment_body(drained, key=self._ledger_key)
         now = datetime.now(timezone.utc)
         key = _segment_key(self._prefix, now)
         retain_until = now + timedelta(days=self._retention_days)

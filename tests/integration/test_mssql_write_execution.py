@@ -16,8 +16,9 @@ from __future__ import annotations
 import os
 
 import pytest
+import pytest_asyncio
 
-from querygate.connections.engine import reset_engines
+from querygate.connections.engine import ENGINES, reset_engines
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.execution.service import StructuredQueryService
@@ -42,6 +43,24 @@ _PORT = os.environ.get("QUERYGATE_TEST_MSSQL_PORT", "14330")
 _SA_PASSWORD = os.environ.get("QUERYGATE_TEST_MSSQL_SA_PASSWORD", "QueryGate_Test_Pw1!")
 _ODBC_DRIVER = os.environ.get("QUERYGATE_TEST_MSSQL_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
 _DEMO_URL = f"mssql+aioodbc://sa:{_SA_PASSWORD}@{_HOST}:{_PORT}/querygate_demo"
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _dispose_real_mssql_engines_after_each_test():
+    """`reset_engines()` (called by `_use_writable_policy` at the start of
+    every test in this file) just drops the cached-engine references
+    without awaiting `dispose()` — harmless for most of the test suite,
+    which never creates a real engine, but this file opens a real aioodbc
+    connection pool every test, so failing to dispose here leaks it (the
+    same real, if cosmetic, resource-lifecycle gap `test_mssql_live.py`'s
+    `mssql_app` fixture found and fixed the same way, TODO.md item 2).
+    Autouse + function-scoped so every test gets its own disposal, not just
+    "before the next test's setup runs" — the difference matters for the
+    LAST test in the file, which has no "next test" to trigger a reset."""
+    yield
+    for engine in list(ENGINES.values()):
+        await engine.dispose()
+    reset_engines()
 
 
 def _use_writable_policy(**write_overrides) -> None:

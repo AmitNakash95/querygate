@@ -217,6 +217,117 @@ def test_jsonl_source_filters_out_of_window_events(tmp_path):
     assert len(loaded) == 4
 
 
+def test_jsonl_source_early_exit_stops_before_reading_older_lines(tmp_path):
+    # TODO.md item 141: mirrors test_anomaly.py's identical scenario for this
+    # reader's own threshold/counter. A malformed sentinel at the physical
+    # start of the file (oldest, read last tail-first) proves the scan
+    # stopped without reaching it once the consecutive out-of-window run
+    # crossed the threshold.
+    th = _thresholds(max_consecutive_out_of_window=3)
+    path = tmp_path / "audit.jsonl"
+    out_of_window = _spread(
+        5, start=_NOW - timedelta(seconds=50_000), span_seconds=1000, kind="config"
+    )
+    in_window = _spread(2, start=_NOW - timedelta(seconds=500), span_seconds=100, kind="config")
+    lines = ["{not json"] + [
+        e.model_dump_json(exclude_none=True) for e in out_of_window + in_window
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    source = JsonlChangeEventSource(str(path))
+    loaded, malformed, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    assert len(loaded) == 2
+    assert malformed == 0  # the sentinel was never reached
+    assert truncated is False
+
+
+def test_jsonl_source_early_exit_fires_at_exactly_the_threshold(tmp_path):
+    # Pins the `>=` boundary specifically — see test_anomaly.py's identical
+    # scenario for the full rationale. EXACTLY `max_consecutive_out_of_window`
+    # out-of-window events, no slack, sentinel immediately behind them.
+    th = _thresholds(max_consecutive_out_of_window=3)
+    path = tmp_path / "audit.jsonl"
+    out_of_window = _spread(
+        3, start=_NOW - timedelta(seconds=50_000), span_seconds=100, kind="config"
+    )
+    lines = ["{not json"] + [e.model_dump_json(exclude_none=True) for e in out_of_window]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    source = JsonlChangeEventSource(str(path))
+    loaded, malformed, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    assert loaded == []
+    assert malformed == 0  # the sentinel was never reached
+    assert truncated is False
+
+
+def test_jsonl_source_early_exit_counter_shared_across_both_matching_types(tmp_path):
+    # TODO.md item 141: config.governance and catalog.governance are counted
+    # toward ONE shared counter (this reader treats them as one aggregation).
+    # Threshold 3 with 2 config + 2 catalog out-of-window events (4 total,
+    # alternating types) must still cross the threshold and fire the early
+    # exit — a bug that scoped the counter per-type instead of sharing it
+    # would never reach 3 of either type alone, so the scan would continue
+    # to the sentinel and malformed would be 1, not 0.
+    th = _thresholds(max_consecutive_out_of_window=3)
+    path = tmp_path / "audit.jsonl"
+    mixed = [
+        _config_event(at=_NOW - timedelta(seconds=50_000)),
+        _catalog_event(at=_NOW - timedelta(seconds=49_000)),
+        _config_event(at=_NOW - timedelta(seconds=48_000)),
+        _catalog_event(at=_NOW - timedelta(seconds=47_000)),
+    ]
+    lines = ["{not json"] + [e.model_dump_json(exclude_none=True) for e in mixed]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    source = JsonlChangeEventSource(str(path))
+    loaded, malformed, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    assert loaded == []
+    assert malformed == 0  # the sentinel was never reached
+    assert truncated is False
+
+
+def test_jsonl_source_early_exit_counter_resets_on_an_in_window_event(tmp_path):
+    th = _thresholds(max_consecutive_out_of_window=3)
+    path = tmp_path / "audit.jsonl"
+    old_run = _spread(2, start=_NOW - timedelta(seconds=50_000), span_seconds=100, kind="config")
+    interrupter = _spread(1, start=_NOW - timedelta(seconds=400), span_seconds=1, kind="config")
+    more_old = _spread(2, start=_NOW - timedelta(seconds=40_000), span_seconds=100, kind="config")
+    lines = (
+        ["{not json"]
+        + [e.model_dump_json(exclude_none=True) for e in old_run]
+        + [e.model_dump_json(exclude_none=True) for e in interrupter]
+        + [e.model_dump_json(exclude_none=True) for e in more_old]
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    source = JsonlChangeEventSource(str(path))
+    loaded, malformed, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    assert len(loaded) == 1  # only the interrupter is in-window
+    assert malformed == 1  # the sentinel WAS reached: no premature exit
+    assert truncated is False
+
+
+def test_jsonl_source_early_exit_counter_ignores_other_event_types(tmp_path):
+    # A non-matching-type line (query.execution) inside an out-of-window run
+    # must neither advance nor reset the counter. Threshold 3, with 2
+    # matching out-of-window events either side of an unrelated event type:
+    # the consecutive *matching-type* count reaches 4 without ever being
+    # broken, so the early exit must still fire before the sentinel.
+    th = _thresholds(max_consecutive_out_of_window=3)
+    path = tmp_path / "audit.jsonl"
+    old_a = _spread(2, start=_NOW - timedelta(seconds=50_000), span_seconds=100, kind="config")
+    old_b = _spread(2, start=_NOW - timedelta(seconds=40_000), span_seconds=100, kind="config")
+    other_type = json.dumps({"event_type": "query.execution", "outcome": "success"})
+    lines = (
+        ["{not json"]
+        + [e.model_dump_json(exclude_none=True) for e in old_a]
+        + [other_type]
+        + [e.model_dump_json(exclude_none=True) for e in old_b]
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    source = JsonlChangeEventSource(str(path))
+    loaded, malformed, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    assert len(loaded) == 0
+    assert malformed == 0  # the sentinel was never reached
+    assert truncated is False
+
+
 def test_jsonl_source_bounds_and_reports_truncation(tmp_path):
     th = _thresholds(max_events_scanned=3)
     path = tmp_path / "audit.jsonl"
@@ -446,6 +557,7 @@ def test_jsonl_source_with_no_in_window_events_is_empty_but_still_jsonl(tmp_path
         {"recent_window_seconds": 0},
         {"baseline_window_seconds": -1},
         {"max_events_scanned": 0},
+        {"max_consecutive_out_of_window": 0},
     ],
 )
 def test_thresholds_reject_out_of_range_values(overrides):
@@ -473,6 +585,7 @@ def test_route_helpers_map_config_to_thresholds_and_source(tmp_path):
         change_trend_baseline_window_seconds=48000.0,
         change_trend_max_events_scanned=33,
         change_trend_max_lines_read=77,
+        change_trend_max_consecutive_out_of_window=42,
     )
     th = _change_trend_thresholds(cfg)
     assert th.recent_window_seconds == 1200.0
@@ -482,6 +595,9 @@ def test_route_helpers_map_config_to_thresholds_and_source(tmp_path):
     # independently operator-configurable, not silently stuck at the
     # pydantic-model class default.
     assert th.max_lines_read == 77
+    # TODO.md item 141 (security-review follow-up, docs/THREAT_MODEL.md
+    # QG-43): same requirement for the early-exit tolerance.
+    assert th.max_consecutive_out_of_window == 42
 
     source = _change_trend_source(cfg)
     assert isinstance(source, _JsonlSource)

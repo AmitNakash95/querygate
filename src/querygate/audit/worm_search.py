@@ -37,22 +37,31 @@ module additionally screens each event's `query_shape` (a `Dict[str, Any]`
 the top-level check catches, so a nested forgery is rejected the same way a
 top-level one is — see `_contains_forbidden_content` below.
 
-**Residual, not closed by this control (recorded 2026-08-06 by
-`security-invariant-reviewer`, TODO.md item 154):** unlike the LOCAL
-hash-chained sink, WORM segments are written unenveloped (`audit/worm_sink.py`
-serializes the bare `PersistableEvent` body, not a `LedgerRecord`), so this
-reader has no hash-chain to verify against — it can confirm a line matches a
-known REDACTION-SAFE SHAPE, but not that QueryGate itself actually wrote it.
-S3 Object Lock (COMPLIANCE mode) prevents deleting or overwriting an EXISTING
-object; it does not prevent adding a NEW, schema-valid one. A principal
-holding `s3:PutObject` on the archive prefix — necessarily including
-QueryGate's own AWS role, since `WormFlushMonitor` needs that permission to
-archive at all — could plant a fabricated, schema-valid segment that this
-reader would return indistinguishably from a real one. Closing this fully
-means enveloping/hash-chaining WORM segments the way the local sink already
-does, which is a phase-1 WRITE-FORMAT change with a migration question for
-already-archived segments — an explicit design decision, not something this
-read-side module can decide unilaterally. Tracked as TODO.md item 154.
+**Partially fixed (TODO.md item 154), honestly scoped against
+`docs/THREAT_MODEL.md` QG-40:** WORM segments are now enveloped and
+per-segment hash-chained (`audit/worm_sink.py`'s `_build_segment_body`), the
+same `LedgerRecord` envelope the local `HashChainedAuditSink` uses. This
+reader verifies each record's own hash before ever unwrapping it
+(`verify_envelope_hash`, `unwrap_envelope`) — a line that isn't
+envelope-shaped at all is `malformed`; an envelope-shaped line whose hash
+doesn't recompute is `unverified` (kept distinct from `malformed`, since the
+far more likely cause in practice is a rotated/mismatched
+`AUDIT_LEDGER_HMAC_KEY`, not tampering — disclosed in the response `note`).
+**Forgery-resistant only when a key is configured** — the default unkeyed
+chain is a public SHA-256 function anyone with `s3:PutObject` can compute,
+so it catches corruption and careless forgery, not a deliberate one (see
+`audit/worm_sink.py`'s module docstring for the full statement). **Two
+further residuals, neither closed by this control:** a genuine segment can
+still be silently withheld from a listing (left to the existing
+S3-listing/Object-Lock posture); and this reader verifies each RECORD's hash
+but never the CHAIN's linkage within a segment, so a genuine segment can be
+duplicated to a second key (returned twice) or have interior records dropped
+(silently omitted) without detection (TODO.md item 172). **No legacy-segment
+migration question**: this feature has no production deployment predating
+this fix, so the reader requires an envelope unconditionally rather than
+supporting both shapes indefinitely — a bare line is treated as `malformed`,
+matching this module's existing "reject unenveloped/unverifiable, never
+leak" posture for every other forgery class below.
 
 **Bounds — enforced, not advisory (`WormSearchBounds`).** A request outside
 these is REJECTED (422, `QueryValidationError`) before any S3 call is made;
@@ -74,7 +83,11 @@ established for the local reader:
   response is truncated with a cursor to resume from exactly where it
   stopped — never a full-archive linear scan in one request.
 - `request_timeout_seconds` — wall-clock budget for one request's S3 work,
-  checked between (never mid-) object fetches and day-prefix listings, so a
+  checked between object fetches and day-prefix listings, AND periodically
+  (every 1,000 lines) inside a single object's own line loop (TODO.md item
+  154, security-invariant-reviewer WS-154-4 — per-line envelope verification
+  raised the cost of that loop enough that a single anomalous object at the
+  line cap could otherwise block uninterrupted past this bound), so a
   request degrades to a truncated, resumable page rather than hanging.
 - `max_limit`/`default_limit` — page-size bounds on returned events.
 
@@ -142,6 +155,7 @@ from typing import List, Literal, Optional, Tuple, get_args
 import pydantic as pyd
 
 from querygate.audit.events import PersistableEvent
+from querygate.audit.ledger import resolve_ledger_key, unwrap_envelope, verify_envelope_hash
 from querygate.core.exceptions import QueryValidationError
 from querygate.metrics import (
     AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL,
@@ -291,7 +305,20 @@ class WormSearchResult(pyd.BaseModel):
     end_time: Optional[str] = None
     objects_scanned: int = 0
     events_scanned: int = 0
+    # Not JSON, not envelope-shaped at all, or the unwrapped body fails
+    # PersistableEvent schema validation — garbage/corruption, independent
+    # of any key.
     malformed: int = 0
+    # TODO.md item 154: envelope-shaped (has seq/prev_hash/event/hash) but
+    # the hash does not recompute under the configured ledger_key — either
+    # genuine tampering, or (the far more likely cause in practice) the
+    # archive was written under a DIFFERENT AUDIT_LEDGER_HMAC_KEY than the
+    # one this search is verifying against (a rotated or newly-set key).
+    # Kept distinct from `malformed` so a caller isn't left reading a
+    # silently-empty, "nothing happened"-looking result when the real cause
+    # is a key mismatch — see the `note` field, which names this explicitly
+    # when non-zero.
+    unverified: int = 0
     # True whenever next_cursor is set — the scan of the requested window is
     # NOT yet complete (a safety bound fired, or the page simply filled),
     # exactly the "next_cursor implies truncated" invariant this module
@@ -492,11 +519,17 @@ async def search_worm_archive(
     limit: Optional[int] = None,
     cursor: Optional[str] = None,
     bounds: WormSearchBounds,
+    ledger_key: Optional[bytes] = None,
 ) -> WormSearchResult:
     """Search the S3 WORM archive for events matching the given filters
     within `[start_time, end_time]` (both required, inclusive). Raises
     `QueryValidationError` (422 at the transport edge) for any out-of-bound
     request; never makes an S3 call for a request it is about to reject.
+
+    `ledger_key` (TODO.md item 154) verifies each segment's per-segment hash
+    chain — the same key `resolve_ledger_key(AUDIT_LEDGER_HMAC_KEY)` resolves
+    for the local hash-chained sink/reader. `None` verifies an unkeyed
+    (SHA-256) chain.
 
     Callers should route through `build_worm_search_result` (below), which
     additionally handles the "WORM archiving isn't configured on this
@@ -542,6 +575,7 @@ async def search_worm_archive(
 
     events: List[PersistableEvent] = []
     malformed = 0
+    unverified = 0
     events_scanned = 0
     objects_scanned = 0
     deadline = time.monotonic() + bounds.request_timeout_seconds
@@ -551,6 +585,16 @@ async def search_worm_archive(
         # actually succeeds — reversed order would double-count a request as
         # both "ok" and "error" if the model itself somehow failed to build
         # (security-invariant-reviewer, 2026-08-06, WS-7).
+        note = _NOTE
+        if unverified:
+            # TODO.md item 154: disclose a likely key mismatch rather than
+            # leaving the caller to read a bare count with no explanation.
+            note = (
+                f"{_NOTE} {unverified} line(s) were envelope-shaped but did not verify "
+                "under the configured AUDIT_LEDGER_HMAC_KEY — this usually means the "
+                "archive was written under a different (or since-rotated) key, not "
+                "necessarily tampering."
+            )
         result = WormSearchResult(
             source="s3_worm",
             generated_at=datetime.now(timezone.utc).isoformat(),
@@ -559,8 +603,10 @@ async def search_worm_archive(
             objects_scanned=objects_scanned,
             events_scanned=events_scanned,
             malformed=malformed,
+            unverified=unverified,
             truncated=truncated,
             next_cursor=next_cursor,
+            note=note,
             events=events,
         )
         AUDIT_WORM_SEARCH_REQUESTS_TOTAL.labels(outcome="ok").inc()
@@ -631,14 +677,48 @@ async def search_worm_archive(
                 consume_from = resume_line if (day == current_day and key == resume_key) else 0
                 last_line = min(len(lines), _MAX_LINES_PER_OBJECT)
                 for line_no in range(consume_from, last_line):
+                    # TODO.md item 154 (security-invariant-reviewer, WS-154-4):
+                    # per-line envelope verification made this loop's body
+                    # meaningfully more expensive than the plain JSON-parse +
+                    # schema-validate it replaced, and — pre-existing, merely
+                    # amplified — nothing inside a single object's line loop
+                    # ever checked the wall-clock deadline before this. A
+                    # single anomalous object at the line cap could block the
+                    # event loop for seconds. Checked every 1000 lines, not
+                    # every line, so the check itself doesn't dominate cost.
+                    if line_no % 1000 == 0 and time.monotonic() >= deadline:
+                        return _finalize(
+                            truncated=True,
+                            next_cursor=_encode_cursor(day, key, line_no, fingerprint),
+                        )
                     raw_line = lines[line_no]
                     if not raw_line.strip():
                         continue
                     events_scanned += 1
                     try:
                         parsed = json.loads(raw_line)
-                        event = _EVENT_ADAPTER.validate_python(parsed)
-                    except (json.JSONDecodeError, pyd.ValidationError):
+                    except json.JSONDecodeError:
+                        malformed += 1
+                        continue
+                    # TODO.md item 154: every segment is enveloped and
+                    # per-segment hash-chained now. `None` (not envelope-
+                    # shaped at all) is garbage/corruption, counted
+                    # `malformed`. `False` (envelope-shaped, hash doesn't
+                    # recompute) is kept as a DISTINCT `unverified` count —
+                    # it's just as likely to be a key rotation as tampering,
+                    # and conflating the two with `malformed` would hide that
+                    # explanation from the caller (docs/THREAT_MODEL.md QG-40).
+                    verified = verify_envelope_hash(parsed, key=ledger_key)
+                    if verified is None:
+                        malformed += 1
+                        continue
+                    if verified is False:
+                        unverified += 1
+                        continue
+                    unwrapped = unwrap_envelope(parsed)
+                    try:
+                        event = _EVENT_ADAPTER.validate_python(unwrapped)
+                    except pyd.ValidationError:
                         malformed += 1
                         continue
                     query_shape = getattr(event, "query_shape", None)
@@ -759,4 +839,8 @@ async def build_worm_search_result(
         limit=limit,
         cursor=cursor,
         bounds=bounds,
+        # TODO.md item 154: the same key the local hash-chained sink/reader
+        # resolve, so a WORM segment's chain is verified under the identical
+        # trust model.
+        ledger_key=resolve_ledger_key(cfg.audit_ledger_hmac_key),
     )

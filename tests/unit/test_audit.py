@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import stat
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,7 +14,7 @@ import sqlalchemy as sa
 import asyncio
 
 from querygate.audit.events import AuditEvent, normalize_query_shape
-from querygate.audit.logger import audit_connection_probe, audit_query
+from querygate.audit.logger import _persist, audit_connection_probe, audit_query
 from querygate.audit.sinks import (
     JsonlAuditSink,
     NullAuditSink,
@@ -658,6 +659,58 @@ async def test_service_persists_redacted_event_with_identity_surface_and_request
     assert event["admission_id"]
     assert event["queue_wait_ms"] is not None
     assert event["admission_state"] == "completed"
+
+
+def test_persist_restamps_occurred_at_at_write_time(tmp_path):
+    # TODO.md item 141 (PRODUCT_GUIDE Decision Log): `_persist` closes the
+    # dominant source of drift between physical write order and
+    # `occurred_at` order — the gap between event construction and the
+    # actual durable write, previously spanning at least the `log.info` call
+    # in between. Construct an event with a stale, explicitly-set
+    # `occurred_at` (as any caller of `AuditEvent(...)` directly could) and
+    # confirm `_persist` overwrites it with the real write-time timestamp,
+    # not the construction-time one, before it ever reaches the sink.
+    from querygate.core.logging import get_logger
+
+    path = tmp_path / "events.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    stale = datetime.now(timezone.utc) - timedelta(hours=1)
+    event = AuditEvent(
+        occurred_at=stale,
+        connection_id="demo",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "customers"},
+        duration_ms=1,
+    )
+    before = datetime.now(timezone.utc)
+    _persist(event, get_logger())
+    after = datetime.now(timezone.utc)
+
+    persisted = json.loads(path.read_text().splitlines()[0])
+    persisted_at = datetime.fromisoformat(persisted["occurred_at"])
+    assert persisted_at != stale
+    assert before <= persisted_at <= after
+
+
+def test_persist_does_not_mutate_the_caller_s_event_object(tmp_path):
+    # `_persist` must rebind a local copy, not mutate the event object a
+    # caller (e.g. `audit_query`) still holds a reference to after the call.
+    from querygate.core.logging import get_logger
+
+    path = tmp_path / "events.jsonl"
+    set_audit_sink(JsonlAuditSink(str(path)))
+    stale = datetime.now(timezone.utc) - timedelta(hours=1)
+    event = AuditEvent(
+        occurred_at=stale,
+        connection_id="demo",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "customers"},
+        duration_ms=1,
+    )
+    _persist(event, get_logger())
+    assert event.occurred_at == stale
 
 
 def test_sink_failure_is_logged_but_does_not_raise():

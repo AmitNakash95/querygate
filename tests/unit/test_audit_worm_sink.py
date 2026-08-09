@@ -21,7 +21,6 @@ from querygate.audit.events import AuditEvent
 from querygate.audit.sinks import (
     CompositeAuditSink,
     HashChainedAuditSink,
-    JsonlAuditSink,
     NullAuditSink,
     configure_audit_sink,
     get_audit_sink,
@@ -192,14 +191,65 @@ class TestWormFlushMonitorFlush:
         assert obj["ObjectLockRetainUntilDate"] is not None
         lines = obj["Body"].read().decode("utf-8").strip().splitlines()
         assert len(lines) == 2
-        assert json.loads(lines[0])["connection_id"] == "a"
-        assert json.loads(lines[1])["connection_id"] == "b"
+        assert json.loads(lines[0])["event"]["connection_id"] == "a"
+        assert json.loads(lines[1])["event"]["connection_id"] == "b"
 
-    async def test_flushed_event_body_is_byte_identical_to_the_local_sink(self, tmp_path):
+    async def test_flushed_segment_is_a_valid_per_segment_hash_chain(self):
+        # TODO.md item 154: each segment is its own self-contained chain,
+        # starting fresh at GENESIS_PREV_HASH/seq=0 — not continuing from any
+        # earlier segment's chain (the module docstring's "per-segment, not
+        # cross-segment" decision).
+        from querygate.audit.ledger import verify_chain
+
+        bucket = self._bucket()
+        buffer = InProcessWormEventBuffer(max_size=100)
+        monitor = self._monitor(bucket, buffer=buffer)
+        buffer.enqueue(_event("a"))
+        buffer.enqueue(_event("b"))
+        buffer.enqueue(_event("c"))
+
+        await monitor.flush_once()
+
+        client = boto3.client("s3", region_name="us-east-1")
+        key = client.list_objects_v2(Bucket=bucket)["Contents"][0]["Key"]
+        lines = client.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
+        result = verify_chain(lines.splitlines())
+        assert result.ok
+        assert result.records_checked == 3
+
+    async def test_two_flushes_each_start_their_own_chain_at_genesis(self):
+        # The "per-segment, not cross-segment" decision, proven directly:
+        # the second segment's first record must NOT link to the first
+        # segment's last hash — it starts over at GENESIS_PREV_HASH/seq=0.
+        from querygate.audit.ledger import GENESIS_PREV_HASH
+
+        bucket = self._bucket()
+        buffer = InProcessWormEventBuffer(max_size=100)
+        monitor = self._monitor(bucket, buffer=buffer)
+        buffer.enqueue(_event("a"))
+        await monitor.flush_once()
+        buffer.enqueue(_event("b"))
+        await monitor.flush_once()
+
+        client = boto3.client("s3", region_name="us-east-1")
+        keys = sorted(o["Key"] for o in client.list_objects_v2(Bucket=bucket)["Contents"])
+        assert len(keys) == 2
+        for key in keys:
+            line = client.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
+            record = json.loads(line.strip().splitlines()[0])
+            assert record["seq"] == 0
+            assert record["prev_hash"] == GENESIS_PREV_HASH
+
+    async def test_flushed_event_body_is_byte_identical_to_the_local_chained_sink(self, tmp_path):
         """Redaction-safety (non-negotiable #3) must hold identically here:
-        WORM never constructs its own event body, so anything the local
-        JsonlAuditSink would write is exactly what gets archived — never
-        more, never less."""
+        WORM never constructs its own event body, so the `event` embedded in
+        each chain record is exactly what the local HashChainedAuditSink
+        would embed for the identical event — never more, never less. (The
+        WORM segment and the local chained ledger are no longer byte-
+        identical as whole files since item 154 — each has its own
+        independent per-segment/per-file chain state — but the embedded
+        event body itself must still match exactly, the same invariant
+        `test_chained_envelope_adds_no_new_event_data` pins locally.)"""
         bucket = self._bucket()
         buffer = InProcessWormEventBuffer(max_size=10)
         monitor = self._monitor(bucket, buffer=buffer)
@@ -207,15 +257,18 @@ class TestWormFlushMonitorFlush:
         buffer.enqueue(event)
 
         local_path = tmp_path / "local.jsonl"
-        JsonlAuditSink(str(local_path)).emit(event)
+        HashChainedAuditSink(str(local_path)).emit(event)
 
         await monitor.flush_once()
 
         client = boto3.client("s3", region_name="us-east-1")
         key = client.list_objects_v2(Bucket=bucket)["Contents"][0]["Key"]
-        archived_line = client.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
-        local_line = local_path.read_text()
-        assert archived_line == local_line
+        archived_record = json.loads(
+            client.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8").strip()
+        )
+        local_record = json.loads(local_path.read_text(encoding="utf-8").strip())
+        assert archived_record["event"] == local_record["event"]
+        assert archived_record["event"] == event.model_dump(mode="json", exclude_none=True)
 
     async def test_multiple_flushes_write_distinct_non_colliding_keys(self):
         bucket = self._bucket()
