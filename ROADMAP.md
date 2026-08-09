@@ -436,7 +436,7 @@ claim when the work ships or before explicitly handing the item back.
   table. *Surfaced 2026-08-07 by `security-invariant-reviewer`'s post-fix
   re-review of item 167 — same root cause, a different consumer; needs a real
   compiled repro before landing a fix, the same way item 167 required one.*
-- [ ] **170** — cross-connection joins are reflected as if both connections
+- [x] **170** — cross-connection joins are reflected as if both connections
   are always on the same physical server instance, with nothing that
   actually checks it. *Surfaced 2026-08-07 by `security-invariant-reviewer`
   auditing item 163's own fix — pre-existing, not caused by that item;
