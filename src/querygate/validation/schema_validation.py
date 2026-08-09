@@ -28,7 +28,7 @@ import sqlalchemy as sa
 from querygate.core.auth import Principal
 from querygate.connections.dialects import get_session_adapter, not_connectable_explanation
 from querygate.connections.engine import get_engine, physical_db_name
-from querygate.connections.models import ConnectionProfile
+from querygate.connections.models import ConnectionProfile, connection_host_port
 from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.exceptions import ConfigValidationError, QueryValidationError
 from querygate.policy.models import Policy
@@ -965,6 +965,46 @@ def resolve_query_table_connections(
                 raise ConfigValidationError(
                     f"cross-connection join: {join.table!r} is in connection "
                     f"{join_connection_id!r}: {not_connectable_explanation(other.dialect)}"
+                )
+            # TODO.md item 170 (security-invariant-reviewer /
+            # architecture-boundary-reviewer, 2026-08-09): `connections/
+            # registry.py`'s config-load-time join_group host check only
+            # ever sees `ConnectionProfile.join_group` — it can't see a
+            # `Policy.join_group` override (default, per-connection, or
+            # per-principal), which is what `primary_group`/`other_group`
+            # above are ACTUALLY resolved from. A Policy-level join_group
+            # can unite two connections whose own profiles disagree or are
+            # unset, entirely invisibly to that config-time check. This is
+            # the one point that sees the fully-resolved (and possibly
+            # per-principal) join_group, so it's the load-bearing version of
+            # the same check, not a redundant second copy of it.
+            primary_host = connection_host_port(primary)
+            other_host = connection_host_port(other)
+            # Host and port are compared separately, not as a single tuple:
+            # an omitted port must not be treated as a mismatch against an
+            # explicit one for the SAME host (the same QG170-4 false
+            # positive `_validate_join_group_hosts` guards against).
+            hosts_disagree = (
+                primary_host is not None
+                and other_host is not None
+                and (
+                    primary_host[0] != other_host[0]
+                    or (
+                        primary_host[1] is not None
+                        and other_host[1] is not None
+                        and primary_host[1] != other_host[1]
+                    )
+                )
+            )
+            if hosts_disagree:
+                raise ConfigValidationError(
+                    f"cross-connection join: {join.table!r} is in connection "
+                    f"{join_connection_id!r}, which shares join_group {other_group!r} with "
+                    f"primary connection {connection_id!r} but is not the same physical "
+                    "server instance — the join is reflected through the primary "
+                    "connection's own engine and would silently read the wrong database. "
+                    "Split them into separate join_groups if they are genuinely different "
+                    "hosts."
                 )
         table_connection[join.alias or join.table] = join_connection_id
     return table_connection

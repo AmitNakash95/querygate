@@ -200,7 +200,7 @@ order-of-magnitude, not commitments.
 | 167 | ✅ A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed) | S | 159 |
 | 168 | ✅ Config-governance dry-run's credential-safety net is a post-hoc regex scrub, not structural, and the validate-config CLI's stderr isn't scrubbed at all | S–M | 165 |
 | 169 | ✅ A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an unfiltered scan | S–M | 106, 167 |
-| 170 | Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it | S–M | — |
+| 170 | ✅ Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it | S–M | — |
 | 171 | The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart | M | 141 |
 | 172 | WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment | M | 154 |
 | 173 | Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives | S | 160 |
@@ -2645,45 +2645,14 @@ described, and a second, closely related crash bug found in the same code
 region was fixed alongside it. **Full write-up:**
 [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 169).
 
-### 170. Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it
+### 170. Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it ✅ DONE
 
-**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 163's
-own fix** (pre-existing; not introduced or closed by that item — item 163
-only added the `is_connectable()` check to the same function this
-observation is about). `validation/schema_validation.py`'s `_load_table`
-always reflects a cross-connection join's table through the PRIMARY
-connection's own engine, qualified with a schema string built from
-`connections/engine.py`'s `physical_db_name(table_connection)` — i.e. it
-assumes the joined ("secondary") connection is a same-instance,
-cross-database sibling of the primary (e.g. two databases on one MSSQL
-server), never a genuinely separate host. The only gate on whether two
-connections may cross-connection-join at all is `join_group` string
-equality (`resolve_query_table_connections`); nothing compares host/instance
-identity between the two connections' connection strings. Two connections
-placed in the same `join_group` that actually point at *different* physical
-hosts would not be rejected at validation time — instead, if a same-named
-database happens to exist on the primary's host, the query would silently
-read that unrelated database instead of the joined connection's real one;
-if no such database exists, it fails with the same masked `NoSuchTableError`
-item 163 already documents for a different cause. This requires an operator
-misconfiguration (placing two unrelated-host connections in one
-`join_group`) — no caller-supplied input can trigger it — so exploitability
-is low, but the failure mode (a silent wrong-database read rather than an
-error) is worse than a masked error.
+`ConnectionRegistry.from_entries` now rejects a `join_group` whose members
+resolve to different hosts (or the same host with different ports) at
+config-load/hot-reload time, instead of silently reading an unrelated
+same-named database on the primary's host.
 
-**What to do:** either (a) validate that every connection sharing a
-`join_group` resolves to the same host/instance at config-load or
-hot-reload time (parsing both connection strings' host component, similar
-in spirit to item 158's dialect-vs-connection_string check), rejecting a
-`join_group` membership that spans hosts, or (b) if same-host is not meant
-to be a hard requirement, document the assumption explicitly in
-`join_group`'s own docstring/example config and in `docs/THREAT_MODEL.md`
-rather than leaving it implicit in `physical_db_name`'s docstring alone.
-Add a regression test once the direction is picked.
-
-**Effort:** S–M (a validator akin to item 158's, or a documentation-only
-fix if same-host is accepted as a deliberate operator responsibility).
-**Depends on:** none.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 170).
 
 ### 171. The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart
 

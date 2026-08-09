@@ -3705,6 +3705,38 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-09 — a `join_group` spanning different physical hosts is now
+  rejected, both at config-load time and (the load-bearing layer) at request
+  time (TODO.md item 170).** Cross-connection joins reflect the joined table
+  through the PRIMARY connection's own engine, under a same-instance
+  cross-database schema qualifier — an assumption that two connections
+  sharing a `join_group` are the same physical server instance, never
+  genuinely separate hosts, that nothing previously checked. **Decision:
+  validate, don't just document.** The first draft (`ConnectionRegistry.
+  from_entries` comparing `ConnectionProfile.join_group` members' `(host,
+  port)`) was found incomplete by this item's own `auditors` gate
+  (security-invariant-reviewer and architecture-boundary-reviewer,
+  independently): the join_group actually consulted at request time is
+  `policy.join_group or profile.effective_join_group()`, and a
+  `Policy.join_group` override (default, per-connection, or per-principal)
+  can unite two connections invisibly to a config-load-only check, since
+  `Policy` lives in a separate file. `validation/schema_validation.py`'s
+  `resolve_query_table_connections` — the one place that sees the
+  fully-resolved, possibly-per-principal value — now carries the same host
+  check too; the config-load-time layer stays as a fast, common-case
+  backstop, not the sole enforcement point. Both layers share one function,
+  `connections/models.py`'s `connection_host_port`, which never returns the
+  full connection string. The same audit pass also found and fixed two
+  narrower gaps in that function: an un-encoded `@` in a password used to
+  bleed into the parsed "host" (SQLAlchemy splits userinfo at the FIRST `@`,
+  so the rejection message could carry a password fragment — now stripped to
+  the LAST `@`), and a driver that packs the real host into a `?host=` query
+  parameter instead of the URL's own host component used to silently escape
+  the comparison — now falls back to the query parameter. Full write-up,
+  including the corrected (and previously-wrong) comparison to item 158's
+  own scoping, is in `docs/TODO_ARCHIVE.md` (item 170). Mutation-verified,
+  each enforcement point independently.
+
 - **2026-08-09 — a cross-connection self-join now reflects each alias
   against its own declared connection, instead of both silently collapsing
   onto whichever alias reflected first (TODO.md item 166).** A self-join

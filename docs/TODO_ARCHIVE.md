@@ -12743,3 +12743,140 @@ passed) suites are green.
 and a second, adjacent bug found in the same region took the effort past a
 pure S). **Depends on:** 106 (correlated subqueries, shipped), 167 (shipped —
 same root cause, first consumer fixed).
+
+### 170. Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it ✅ DONE
+
+**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 163's
+own fix** (pre-existing; not introduced or closed by that item — item 163
+only added the `is_connectable()` check to the same function this
+observation is about). `validation/schema_validation.py`'s `_load_table`
+always reflects a cross-connection join's table through the PRIMARY
+connection's own engine, qualified with a schema string built from
+`connections/engine.py`'s `physical_db_name(table_connection)` — i.e. it
+assumes the joined ("secondary") connection is a same-instance,
+cross-database sibling of the primary (e.g. two databases on one MSSQL
+server), never a genuinely separate host. The only gate on whether two
+connections may cross-connection-join at all was `join_group` string
+equality (`resolve_query_table_connections`); nothing compared host/instance
+identity between the two connections' connection strings. Two connections
+placed in the same `join_group` that actually point at *different* physical
+hosts would not have been rejected at validation time — instead, if a
+same-named database happened to exist on the primary's host, the query would
+silently read that unrelated database instead of the joined connection's
+real one; if no such database existed, it failed with the same masked
+`NoSuchTableError` item 163 already documents for a different cause. This
+required an operator misconfiguration (placing two unrelated-host
+connections in one `join_group`) — no caller-supplied input could trigger it
+— so exploitability was low, but the failure mode (a silent wrong-database
+read rather than an error) was worse than a masked error.
+
+**Decision (maintainer-approved 2026-08-09):** validate, don't just
+document — reject a `join_group` that spans different hosts, rather than
+leaving same-host as an implicit, undocumented-until-now operator
+responsibility.
+
+**Shipped, two layers — this item's own `auditors` gate found the first
+draft (config-load-time only) incomplete, both independently by
+`security-invariant-reviewer` and `architecture-boundary-reviewer`:**
+
+1. **Config-load-time (fast, catches the common case early):**
+   `connections/registry.py` gained `_validate_join_group_hosts`, called once
+   from `ConnectionRegistry.from_entries` (and therefore `from_file`, and
+   everything built on it — `config_reload.py`'s hot reload, `cli.py`'s
+   `querygate-validate-config`/config-governance dry-run) after every profile
+   in the batch has been built. It groups profiles by `effective_
+   join_group()` and, for any group with 2+ ENABLED members (a disabled
+   connection can never be resolved as a join's secondary — QG170-5), checks
+   host and port as separate sets (an omitted port must not collide with an
+   explicit one for the same host — QG170-4) and rejects with a clear
+   `ValueError` if they don't all agree.
+2. **Request-time (load-bearing — this is the one that actually closes the
+   gap):** `validation/schema_validation.py`'s `resolve_query_table_
+   connections`, immediately after its existing `join_group`-equality and
+   `is_connectable()` checks, now also compares `primary`'s and `other`'s
+   host/port and raises `ConfigValidationError` on a mismatch. **Why a
+   second layer was necessary** (QG170-1 / 170-A, the item's own headline
+   auditors finding): the config-load-time check only ever sees
+   `ConnectionProfile.join_group` — but the join_group actually consulted at
+   request time is `policy.join_group or profile.effective_join_group()`,
+   and `Policy.join_group` (set in `policy.yaml`, possibly scoped per
+   principal) can unite two connections whose OWN profiles disagree or are
+   unset, entirely invisibly to the config-load check, since `Policy` lives
+   in a separate file that function never sees. Only the request-time check
+   sees the fully-resolved, possibly-per-principal value.
+
+Both layers share one parsing/redaction function,
+`connections/models.py`'s `connection_host_port`, so there is exactly one
+place this logic can drift. It never returns the full connection string —
+the error message is built from host/port alone, so it can never leak a
+credential even though `cli.py`'s `_describe_load_error` passes an
+unrecognized `ValueError` straight through unredacted — and closes two
+credential/coverage gaps this item's own audit found empirically:
+**(QG170-3)** SQLAlchemy's URL parser splits userinfo at the FIRST `@`, so
+an un-encoded `@` in a password (routine — operators frequently don't
+percent-encode) used to bleed its tail into `url.host` itself, meaning the
+rejection message could carry a password fragment; now stripped to the LAST
+`@` before use. **(QG170-2)** a driver that packs the real host into a query
+parameter instead of the URL's own host component
+(`postgresql+asyncpg://user:pass@/db?host=...`, the unix-socket/PgBouncer
+idiom) used to silently opt that member out of the comparison (`url.host`
+alone is empty); now falls back to `url.query.get("host")`. A connection
+string that still can't be parsed as a URL at all, or genuinely carries no
+host component anywhere (e.g. an MSSQL DSN-style `odbc_connect=...` string),
+is still skipped rather than rejected — the same posture item 158's own
+validator takes for an unresolved `${VAR}` template, no basis to assert a
+mismatch either way.
+
+Config-load-time is checked at the file-driven boundary (`from_entries`),
+not inside `ConnectionRegistry.__init__` itself, so a raw dict-of-profiles
+built directly (test fixtures, `catalog/adaptive_learning_benchmark.py`) is
+unaffected. **Correction (2026-08-09, `claim-reviewer`):** this scoping is
+NOT, as originally written here, "the same precedent" item 158's
+dialect-vs-connection_string check sets — item 158 is a `field_validator`
+that runs on EVERY `ConnectionProfile` construction, including a direct one
+(its own docstring's "this isn't a live bypass" paragraph says so
+explicitly); a raw dict-of-profiles is NOT exempt from it. This item's
+config-load-time check is a genuinely different kind of check (batch-scoped
+across multiple profiles, which no single-model validator can express) with
+no real precedent to lean on — accepted as config-load-boundary-only on its
+own terms, backstopped by the request-time layer for exactly the cases a
+raw/direct construction could otherwise miss.
+
+**Coverage:** `TestJoinGroupHostValidation` (`tests/unit/test_connections_
+registry.py`, 13 tests) — different hosts rejected; different ports on the
+same host rejected; one port omitted on the same host allowed (QG170-4); a
+spelling-only host-case difference allowed; connections with no shared
+`join_group` unaffected; a disabled connection on a different host doesn't
+trip the check (QG170-5); an unparseable connection string doesn't trip the
+check; a host packed into a `?host=` query parameter is still compared
+(QG170-2); direct `ConnectionRegistry(...)` construction bypasses the check
+by design; a 3-member group with one odd host out is rejected (not just a
+clean 2-vs-2 split); a dedicated test confirming the rejection message never
+contains the raw connection string; and a dedicated pair confirming an
+un-encoded `@` in a password never leaks into the message while two
+same-host connections with different `@`-containing passwords still load
+cleanly (QG170-3). `TestCrossConnectionJoins`'s
+`test_policy_join_group_spanning_different_hosts_is_rejected` and
+`test_policy_join_group_on_the_same_host_with_one_port_omitted_is_allowed`
+(`tests/unit/test_schema_validation.py`) cover the request-time layer: two
+connections on different hosts, NEITHER setting `ConnectionProfile.
+join_group` (so the config-load check is a no-op — each is its own 1-member
+group), united only by a `Policy.join_group` override — asserts
+`ConfigValidationError`; and the same port-omission false positive
+`_validate_join_group_hosts` guards against, pinned again at this SECOND
+enforcement point (a first draft of the request-time check compared
+`(host, port)` as a single tuple, which would have reintroduced QG170-4 at
+this layer — caught and fixed before commit, not after). Mutation-verified,
+each enforcement point independently: removing `_validate_join_group_hosts`'s
+call site, its disabled-connection skip, and its separate host/port
+comparison; removing the request-time host check in `resolve_query_table_
+connections` and, separately, its own host/port-separation logic; removing
+`connection_host_port`'s `?host=` fallback; and removing its `@`-stripping —
+each mutation makes exactly the test(s) built to catch it fail, and only
+those, with every other test staying green. Full unit (2198 passed),
+non-real-db integration (365 passed), and security (480 passed) suites green
+on the final tree; `black --check` clean.
+
+**Effort:** S–M (a validator akin to item 158's for the first layer, plus a
+second, load-bearing layer this item's own audit found necessary, plus
+regression tests). **Depends on:** none.
