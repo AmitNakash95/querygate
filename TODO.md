@@ -205,6 +205,7 @@ order-of-magnitude, not commitments.
 | 172 | WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment | M | 154 |
 | 173 | Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives | S | 160 |
 | 174 | A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch | S | 163 |
+| 175 | ✅ `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" | S | 2 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2820,4 +2821,12 @@ masked `NoSuchTableError`.
 
 **Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped),
 163 (shipped — same `is_connectable()` seam this reuses).
+
+### 175. `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" ✅ DONE
+
+An autouse, function-scoped fixture now disposes every cached engine after
+each test, mirroring `test_mssql_live.py`'s own already-shipped fix for the
+identical `reset_engines()`-doesn't-dispose gap (item 2).
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 175).
 
