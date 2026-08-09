@@ -1,7 +1,7 @@
 <!-- GENERATED FILE — do not hand-edit. Regenerate with `make trust-page` (scripts/generate_trust_page.py). -->
 # QueryGate — Trust & Evidence Packet
 
-*Generated 2026-08-06 for QueryGate 0.1.0. Composed, read-only, from the checked-in docs and dependency-audit results below (TODO.md item 147) — this file asserts no claim of its own; every statement here is backed by the cited source doc and, where named, a reproducible `make` command. It does not imply any control, certification, or third-party attestation that isn't explicitly stated in a source doc.*
+*Generated 2026-08-08 for QueryGate 0.1.0. Composed, read-only, from the checked-in docs and dependency-audit results below (TODO.md item 147) — this file asserts no claim of its own; every statement here is backed by the cited source doc and, where named, a reproducible `make` command. It does not imply any control, certification, or third-party attestation that isn't explicitly stated in a source doc.*
 
 ## Current dependency audit status
 
@@ -205,7 +205,7 @@ schema and MCP tool schemas**, so it catches drift, not just convention.
 
 ## Threat model
 
-[docs/THREAT_MODEL.md](THREAT_MODEL.md) enumerates 40 threats (QG-01…QG-40),
+[docs/THREAT_MODEL.md](THREAT_MODEL.md) enumerates 43 threats (QG-01…QG-43),
 each mapped to its compensating control and the test(s) that enforce it. The
 gates on this page are the automated, continuously-run backbone of that model.
 

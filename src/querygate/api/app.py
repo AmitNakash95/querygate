@@ -22,6 +22,7 @@ from querygate.api.auth import build_principal_dependency
 from querygate.api.catalog_governance_routes import build_catalog_governance_router
 from querygate.api.help_routes import build_help_router
 from querygate.api.routes import build_router
+from querygate.audit.ledger import resolve_ledger_key
 from querygate.audit.sinks import configure_audit_sink, reset_audit_sink
 from querygate.catalog.refresh import CatalogRefreshMonitor
 from querygate.catalog.usage import CatalogUsageLearningMonitor
@@ -53,6 +54,23 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         if conf.audit_sink_backend == AuditSinkBackend.JSONL_CHAINED_S3_WORM:
             from querygate.audit.worm_sink import WormFlushMonitor
 
+            worm_ledger_key = resolve_ledger_key(conf.audit_ledger_hmac_key)
+            if worm_ledger_key is None:
+                # TODO.md item 154 / docs/THREAT_MODEL.md QG-40: an unkeyed
+                # (SHA-256) chain detects accidental corruption but not a
+                # deliberate forgery — anyone with s3:PutObject on the
+                # archive prefix can compute a valid unkeyed envelope
+                # themselves. Surfaced at startup, not just in docs, since
+                # this is the shipped default and easy to miss.
+                log.warning(
+                    "audit.worm.unkeyed_chain",
+                    detail=(
+                        "AUDIT_LEDGER_HMAC_KEY is unset: WORM archive segments will be "
+                        "chained unkeyed (SHA-256), which detects corruption but not a "
+                        "deliberate forgery by anyone with s3:PutObject on the archive "
+                        "prefix. Set AUDIT_LEDGER_HMAC_KEY for forgery-resistant segments."
+                    ),
+                )
             worm_flush_monitor = WormFlushMonitor(
                 bucket=conf.audit_worm_s3_bucket,
                 prefix=conf.audit_worm_s3_prefix,
@@ -60,6 +78,7 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 retention_mode=conf.audit_worm_retention_mode,
                 retention_days=conf.audit_worm_retention_days,
                 interval_seconds=conf.audit_worm_flush_interval_seconds,
+                ledger_key=worm_ledger_key,
             )
             await worm_flush_monitor.start()
         app.state.worm_flush_monitor = worm_flush_monitor

@@ -16,6 +16,7 @@ from moto import mock_aws
 
 from querygate.api.app import create_app
 from querygate.audit.events import AuditEvent
+from querygate.audit.ledger import GENESIS_PREV_HASH, make_record
 from querygate.core.config import AppConfig
 
 pytestmark = pytest.mark.integration
@@ -55,7 +56,10 @@ async def _get(app, params=None, key=_ADMIN_KEY):
 
 
 def _put_event(client, key: str, event: AuditEvent) -> None:
-    body = (event.model_dump_json(exclude_none=True) + "\n").encode("utf-8")
+    # TODO.md item 154: a single-record, validly-signed segment (genesis
+    # seq=0) — the shape a real WormFlushMonitor.flush_once() writes.
+    record = make_record(0, GENESIS_PREV_HASH, event.model_dump(mode="json", exclude_none=True))
+    body = (record.model_dump_json() + "\n").encode("utf-8")
     client.put_object(
         Bucket=_BUCKET,
         Key=key,

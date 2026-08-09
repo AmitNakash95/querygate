@@ -28,7 +28,7 @@ import sqlalchemy as sa
 from querygate.core.auth import Principal
 from querygate.connections.dialects import get_session_adapter, not_connectable_explanation
 from querygate.connections.engine import get_engine, physical_db_name
-from querygate.connections.models import ConnectionProfile
+from querygate.connections.models import ConnectionProfile, connection_host_port
 from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.exceptions import ConfigValidationError, QueryValidationError
 from querygate.policy.models import Policy
@@ -966,6 +966,46 @@ def resolve_query_table_connections(
                     f"cross-connection join: {join.table!r} is in connection "
                     f"{join_connection_id!r}: {not_connectable_explanation(other.dialect)}"
                 )
+            # TODO.md item 170 (security-invariant-reviewer /
+            # architecture-boundary-reviewer, 2026-08-09): `connections/
+            # registry.py`'s config-load-time join_group host check only
+            # ever sees `ConnectionProfile.join_group` — it can't see a
+            # `Policy.join_group` override (default, per-connection, or
+            # per-principal), which is what `primary_group`/`other_group`
+            # above are ACTUALLY resolved from. A Policy-level join_group
+            # can unite two connections whose own profiles disagree or are
+            # unset, entirely invisibly to that config-time check. This is
+            # the one point that sees the fully-resolved (and possibly
+            # per-principal) join_group, so it's the load-bearing version of
+            # the same check, not a redundant second copy of it.
+            primary_host = connection_host_port(primary)
+            other_host = connection_host_port(other)
+            # Host and port are compared separately, not as a single tuple:
+            # an omitted port must not be treated as a mismatch against an
+            # explicit one for the SAME host (the same QG170-4 false
+            # positive `_validate_join_group_hosts` guards against).
+            hosts_disagree = (
+                primary_host is not None
+                and other_host is not None
+                and (
+                    primary_host[0] != other_host[0]
+                    or (
+                        primary_host[1] is not None
+                        and other_host[1] is not None
+                        and primary_host[1] != other_host[1]
+                    )
+                )
+            )
+            if hosts_disagree:
+                raise ConfigValidationError(
+                    f"cross-connection join: {join.table!r} is in connection "
+                    f"{join_connection_id!r}, which shares join_group {other_group!r} with "
+                    f"primary connection {connection_id!r} but is not the same physical "
+                    "server instance — the join is reflected through the primary "
+                    "connection's own engine and would silently read the wrong database. "
+                    "Split them into separate join_groups if they are genuinely different "
+                    "hosts."
+                )
         table_connection[join.alias or join.table] = join_connection_id
     return table_connection
 
@@ -1595,7 +1635,15 @@ async def _reflect_and_validate_scope(
         )
 
     tables: Dict[str, sa.Table] = {}
-    physical_tables: Dict[str, sa.Table] = {}
+    # Keyed by (resolved connection, physical name), not physical name alone
+    # (item 166): a cross-connection self-join declares the same physical
+    # table name twice but resolves each alias to a DIFFERENT connection via
+    # `table_connection_cf`. A name-only key would let whichever alias
+    # reflects first win the memo slot, silently compiling the second
+    # alias's occurrences against the first alias's connection instead of
+    # its own declared one. A same-connection self-join still collapses to
+    # one reflection, because both aliases produce the same key.
+    physical_tables: Dict[Tuple[str, str], sa.Table] = {}
     for name in needed:
         # A declared correlated name binds to the PARENT's own table object, not a
         # fresh reflection of the same table. Identity is what makes the compiled
@@ -1623,15 +1671,29 @@ async def _reflect_and_validate_scope(
         # `_load_table` would (correctly) fail to find a table by that name. This is
         # also the only place a cte reference is turned into something columns
         # resolve against, so a scope that was handed no `cte_tables` cannot see one.
+        # cte lookups stay keyed by name alone: a cte is computed once per
+        # statement regardless of connection, never reflected per-alias.
         source = (cte_tables or {}).get(physical_key)
         if source is None:
-            if physical_key not in physical_tables:
-                physical_tables[physical_key] = await _load_table(
-                    connection_id,
-                    physical_name,
-                    table_connection_cf.get(name.casefold(), connection_id),
+            # security-invariant-reviewer, 2026-08-09 (SIR-166-3): the fallback
+            # to `connection_id` (primary) on a miss is unreachable via the
+            # public `validate_schema` entrypoint — `table_connection_cf`'s key
+            # set is exactly `name_to_physical`'s key set (both built from the
+            # same from/join declarations, casefolded), and `undeclared_tables`
+            # above already rejects any `needed` name outside that set. It
+            # stays a fallback, not an assert, only because this private
+            # helper is also called directly (e.g. from a test) with a
+            # hand-supplied PARTIAL `table_connection` map. If either of those
+            # two invariants ever changes, this must fail closed, not default
+            # to the primary connection — defaulting is the wrong direction
+            # for a value that decides which connection's data gets reflected.
+            table_cx = table_connection_cf.get(name.casefold(), connection_id)
+            reflection_key = (table_cx, physical_key)
+            if reflection_key not in physical_tables:
+                physical_tables[reflection_key] = await _load_table(
+                    connection_id, physical_name, table_cx
                 )
-            source = physical_tables[physical_key]
+            source = physical_tables[reflection_key]
         tables[name] = source if name.casefold() == physical_key else source.alias(name)
 
     _validate_select_columns(query, tables)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
-from typing import Optional
+from typing import Optional, Tuple
 
 import pydantic as pyd
 import sqlalchemy as sa
@@ -126,7 +126,15 @@ class ConnectionProfile(pyd.BaseModel):
     join_group: Optional[str] = pyd.Field(
         default=None,
         description="Connections sharing a join_group may be joined cross-connection "
-        "in one query. Defaults to this connection's own id (no cross-connection joins).",
+        "in one query. Defaults to this connection's own id (no cross-connection joins). "
+        "Members of a join_group (including any Policy-level override) must be the same "
+        "physical server instance (a cross-database sibling of the primary, e.g. two "
+        "databases on one MSSQL server) -- the join is reflected and executed through the "
+        "primary connection's own engine, never the secondary's. `ConnectionRegistry."
+        "from_entries` rejects a join_group whose members resolve to different hosts (or "
+        "the same host with different ports) at config-load time, and request-time "
+        "validation rejects it again against the fully-resolved join_group, including a "
+        "Policy-level or per-principal override (TODO.md item 170).",
     )
 
     model_config = pyd.ConfigDict(extra="forbid")
@@ -245,6 +253,49 @@ class ConnectionProfile(pyd.BaseModel):
 
     def effective_join_group(self) -> str:
         return self.join_group or self.id
+
+
+def connection_host_port(profile: ConnectionProfile) -> Optional[Tuple[str, Optional[int]]]:
+    """Best-effort `(host, port)` for a same-instance identity comparison —
+    never the full connection string, so this never risks surfacing a
+    credential in a validation error. TODO.md item 170: both `connections/
+    registry.py`'s config-load-time `join_group` check and `validation/
+    schema_validation.py`'s request-time counterpart (which also has to
+    account for a `Policy.join_group` override, including a per-principal
+    one, that config-load time can't see) call this SAME function, so there
+    is exactly one place this parsing/redaction logic can drift.
+
+    Returns `None` when no host can be determined at all — either the string
+    can't be parsed as a URL (the same "unresolved `${VAR}` template" case
+    `_dialect_matches_connection_string`'s docstring documents, item 158 —
+    no basis to assert a mismatch either way, so the caller skips rather than
+    rejects) or it parses but genuinely carries no host component (e.g. an
+    MSSQL DSN-style `odbc_connect=...SERVER=...` string).
+    """
+    try:
+        url = sa.engine.url.make_url(profile.connection_string)
+    except (sa.exc.ArgumentError, ValueError):
+        return None
+    # A driver that packs the real host into a query parameter instead of the
+    # URL's own host component (seen for `postgresql+asyncpg://user:pass@/db
+    # ?host=...`, the unix-socket/PgBouncer idiom) still carries a real,
+    # comparable host (security-invariant-reviewer, 2026-08-09, QG170-2).
+    host = url.host or url.query.get("host")
+    if not host:
+        return None
+    if isinstance(host, tuple):
+        # `URL.query` values are a `str` or `tuple[str, ...]` for a
+        # repeated key; a repeated `?host=` has no single value to compare.
+        return None
+    # SQLAlchemy's URL parser splits userinfo from the rest at the FIRST
+    # '@', so an un-encoded '@' in the password (routine — operators
+    # frequently don't percent-encode) bleeds its tail into `url.host`
+    # (security-invariant-reviewer, 2026-08-09, QG170-3 — verified directly:
+    # "postgresql+asyncpg://svc:P@ssw0rd@host/db" parses with
+    # `host == "ssw0rd@host"`). Strip everything up to the LAST '@' before
+    # this value ever reaches an error message.
+    host = host.rsplit("@", 1)[-1]
+    return (host.casefold(), url.port)
 
 
 class PublicConnectionInfo(pyd.BaseModel):

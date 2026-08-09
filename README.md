@@ -162,6 +162,16 @@ lost. Requires `AUDIT_WORM_S3_BUCKET` (with Object Lock enabled on the
 bucket — an S3 prerequisite this feature can't turn on for you) and
 `AUDIT_WORM_S3_REGION`.
 
+Each archived segment is enveloped and hash-chained (a fresh chain per
+segment, mirroring the local ledger's own envelope) so managed search can
+tell a genuine QueryGate-written segment from a planted one. **Set
+`AUDIT_LEDGER_HMAC_KEY`** (the same variable the local chained ledger uses)
+**for that check to resist deliberate forgery** — without it, the chain is
+plain SHA-256, a public function anyone with write access to the archive
+bucket can compute themselves, so it only catches corruption and a careless
+forgery. QueryGate logs a startup warning when WORM is enabled without a
+key.
+
 Archival is buffered and flushed off the request path (`AUDIT_WORM_FLUSH_INTERVAL_SECONDS`,
 default 60s) as one batched object per flush, never one object per event.
 It fails open by design: a flush failure never blocks or fails the query

@@ -59,6 +59,16 @@ class LedgerRecord(pyd.BaseModel):
     ``event`` is the unmodified redaction-safe audit event body. ``hash`` is the
     digest over ``{seq, prev_hash, event}`` in canonical form; ``prev_hash`` is
     the previous record's ``hash`` (or ``GENESIS_PREV_HASH`` for the first).
+
+    ``seq``/``prev_hash`` continuity is owned by the WRITER, not by this
+    envelope shape — the same shape is written by two independent owners with
+    different continuity guarantees: ``audit/sinks.py``'s
+    ``HashChainedAuditSink`` carries ``seq``/``prev_hash`` across every write
+    to one file, forever; ``audit/worm_sink.py``'s ``WormFlushMonitor``
+    deliberately restarts at ``seq=0``/``GENESIS_PREV_HASH`` on every flush
+    (TODO.md item 154 — a per-segment, not cross-segment, chain). Do not
+    assume ``seq`` is a global counter across files/segments without checking
+    which writer produced them.
     """
 
     seq: int = pyd.Field(ge=0)
