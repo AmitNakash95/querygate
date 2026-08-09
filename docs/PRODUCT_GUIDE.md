@@ -3705,6 +3705,49 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-09 — a cross-connection self-join now reflects each alias
+  against its own declared connection, instead of both silently collapsing
+  onto whichever alias reflected first (TODO.md item 166).** A self-join
+  (the same physical table name declared twice) where the join names a
+  DIFFERENT `connection` than the primary is a shape `StructuredQuery`
+  already permits — `_validate_table_aliases` only requires an alias per
+  repeated name, not that both occurrences share a connection. But
+  `_reflect_and_validate_scope`'s `physical_tables` reflection memo
+  (`validation/schema_validation.py`) was keyed by the casefolded physical
+  name alone, so both aliases shared one memo slot: whichever alias's name
+  won the `needed` set's iteration order reflected the table once against
+  its own connection, and the other alias silently reused that same
+  `sa.Table` object — compiling and executing against the wrong connection
+  despite its own declared one. **Not merely a coin flip** (found by this
+  item's own `security-invariant-reviewer` audit pass): the caller chooses
+  both alias strings and can observe from the returned data which direction
+  the race went, so it was adaptively steerable; the exploitable direction
+  is the PRIMARY alias losing its own slot, since it then silently read
+  data reflected under the SECONDARY connection's schema while its masks/
+  filters/deny-list still resolved against only the PRIMARY's Policy — see
+  the full write-up in `docs/TODO_ARCHIVE.md` (item 166) for the other
+  direction's weaker, over-enforcing failure mode. **Decision: fix the memo
+  key, don't reject the shape** — key `physical_tables` by `(table_cx,
+  physical_key)` instead of `physical_key` alone, so two aliases only share
+  a reflection when they actually resolve to the same connection
+  (byte-identical for every single-connection query, including a
+  same-connection self-join). Chosen over rejecting cross-connection
+  self-joins outright because the AST already allows the shape and it has a
+  legitimate use (the same table name existing on two different databases)
+  — narrowing what a caller can express because one code path handled it
+  incorrectly runs against the "expose primitives, don't spoon-feed"
+  posture the engine otherwise holds. One disclosed side effect: a
+  cross-connection self-join against a non-MSSQL secondary now fails
+  deterministically instead of racing between a masked failure and a silent
+  wrong-connection success, since the secondary alias's reflection always
+  runs into the pre-existing MSSQL-only `.dbo` schema-qualifier gap (tracked
+  separately as TODO.md item 174, not introduced or closed by this item).
+  Mutation-verified: reverting the key change makes the regression test fail
+  with `assert 1 == 2` (only one reflection recorded instead of two); the
+  test also asserts each alias binds to its OWN connection's reflected
+  `sa.Table` (not just that both `_load_table` calls happened), closing a
+  gap the same audit pass found in the first version of the test.
+
 - **2026-08-09 — `validate_policy`/`compile_structured_query`/
   `applied_column_masks` now self-derive `scope_connections` from a given
   `connection_resolver`, closing item 160's finding 3 footgun (TODO.md item

@@ -12303,6 +12303,132 @@ on the final tree; `black --check` clean.
 **Effort:** S (one route's exception handling; the stripping precedent
 already existed in `admin/service.py` to extend). **Depends on:** none.
 
+### 166. Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo is keyed by table name alone, not by which connection a name resolves to ✅ DONE
+
+**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 159's own
+fix** (pre-existing; not introduced or closed by that item — item 159's fix
+only changes which STRING key is used to look up `table_connection`; this is
+a separate defect in what happens to that lookup's result). `_reflect_and_
+validate_scope`'s `physical_tables` reflection cache
+(`validation/schema_validation.py`) was keyed by `physical_key` alone (the
+casefolded physical table name), not by which connection that occurrence
+resolves to:
+
+```python
+if physical_key not in physical_tables:
+    physical_tables[physical_key] = await _load_table(
+        connection_id, physical_name,
+        table_connection_cf.get(name.casefold(), connection_id),
+    )
+source = physical_tables[physical_key]
+```
+
+For a same-connection self-join
+(`test_self_join_reflects_physical_table_once_and_aliases_both`), this is
+correct and deliberate — the physical table is genuinely identical for both
+aliases, so reflecting once and re-aliasing (`source.alias(name)`) is right
+and cheaper than reflecting twice. But `StructuredQuery` also permits a
+CROSS-CONNECTION self-join: the same physical table name, joined to itself,
+with the join declaring a DIFFERENT `connection` than the primary
+(`_validate_table_aliases` in `query_ast/models.py` only requires an alias
+per occurrence of a repeated physical name — it does not forbid the two
+occurrences from naming different connections). In that shape, `physical_key`
+was identical for both aliases even though their resolved `table_cx` values
+differ (alias `a` → primary connection, alias `b` → `connection="other"`).
+Whichever alias's name happened to be processed first (the `needed` set's
+iteration order) reflected the table once, against ITS OWN connection — the
+SECOND alias then silently reused that same `sa.Table` object, so it compiled
+and executed against the FIRST alias's connection instead of its own declared
+one. **This was not merely a coin flip outside the caller's control**
+(security-invariant-reviewer, 2026-08-09, SIR-166-4): the caller freely
+chooses both alias strings, `needed` is a Python `set` built directly from
+those exact spellings, and the query's results disclose which direction the
+race went — so a caller could adaptively probe alias-name pairs until the
+iteration order landed the way they wanted. **The exploitable direction is
+the PRIMARY alias losing its own memo slot**: it then silently read data
+reflected under the SECONDARY connection's schema qualifier, while
+`resolve_table_policies` still resolved its masks/mandatory-row-filters/
+deny-list against only the PRIMARY connection's Policy — `table_connection`
+still declared that alias primary regardless of which `sa.Table` it ended up
+bound to — so the secondary connection's Policy was never applied to data
+actually read from it. (The other direction — the secondary alias silently
+reading the primary's table — was checked against the STRICTER
+`[primary, other]` policy union item 156 produces for a declared
+cross-connection alias, so it was over-, not under-, enforced.) The compiled
+SQL for the "losing" alias never actually reached the connection the caller
+named for it.
+
+Unlike item 159 itself, this was NOT fixed by case-folding the lookup: the
+per-alias lookup (via `table_connection_cf`) was already correct; the bug was
+that its result was discarded by the memo's coarser key. Item 156's mask/
+filter/deny-list resolution was unaffected in the sense that it reads a
+separately-computed, correctly-per-alias `scope_connections` map — so the
+POLICY CHECK still ran against the right connection's Policy for each alias
+— but the DATA the compiled query actually read did not correspond to that
+check for whichever alias lost the race, which is arguably worse than a
+masking gap: the query silently read a different physical table than the one
+its own Policy was just evaluated against.
+
+**Decision (maintainer-approved 2026-08-09):** fix the memo key rather than
+reject the shape — a cross-connection self-join is a legitimate AST-permitted
+query (the same physical table name existing on two different connections),
+and QueryGate's engine philosophy is to expose primitives the AST already
+allows, not to narrow them because one code path handled them incorrectly.
+
+**Shipped:** `physical_tables` is now keyed by `(table_cx, physical_key)` —
+the resolved connection alongside the casefolded physical name — instead of
+`physical_key` alone, in `_reflect_and_validate_scope`
+(`validation/schema_validation.py`). Two aliases of the same physical table
+name now only share a reflection when they actually resolve to the same
+connection; a same-connection self-join is byte-identical to before (both
+aliases produce the same key), and a cross-connection self-join now reflects
+each alias against its own declared connection. The now-unreachable
+`table_connection_cf.get(name.casefold(), connection_id)` fallback (its
+reachability argument: `table_connection_cf`'s key set always matches
+`name_to_physical`'s, and `undeclared_tables` already rejects anything
+outside it) is left as documented dead-man's code rather than an assert,
+since `_reflect_and_validate_scope` is also called directly by tests with a
+hand-supplied partial map — but the comment now states which two invariants
+must keep holding for that to stay true (security-invariant-reviewer,
+2026-08-09, SIR-166-3).
+
+**Behavior change, disclosed:** on a non-MSSQL secondary connection, a
+cross-connection self-join now fails DETERMINISTICALLY (the secondary
+alias's reflection is always attempted, and its hardcoded MSSQL-only
+`f"{db}.dbo"` schema qualifier — a pre-existing gap, not introduced here —
+doesn't resolve on Postgres/MySQL) rather than the pre-fix coin flip between
+a masked failure and a silent wrong-connection success. Strictly better
+(fail closed, not a race), but worth naming since it's operator-visible
+(security-invariant-reviewer, 2026-08-09, SIR-166-5). The missing dialect
+dispatch for that schema qualifier is tracked separately as TODO.md item 174
+(SIR-166-2) — pre-existing, not introduced or closed by this item.
+
+**Coverage:** `test_cross_connection_self_join_reflects_each_alias_against_
+its_own_connection` (`tests/unit/test_schema_validation.py`,
+`TestCrossConnectionJoins`) — a self-join across two connections in the same
+`join_group`, with distinguishable per-connection `sa.Table` objects (not
+`_patch_load_table`'s shared fake, which returns one object for both
+connections and would mask exactly this) so the test can assert not just
+that both `_load_table` calls happened, but that each alias actually BINDS
+to its own connection's reflection (`resolved["o1"].element is
+primary_orders`, `resolved["o2"].element is other_orders`,
+`.schema is None` vs. `.schema == "other_db.dbo"`) — closing a gap
+security-invariant-reviewer's own audit of this item found in the first
+version of the test (SIR-166-1: asserting only on `_load_table`'s recorded
+call arguments proves reflection happened but not that binding is correct,
+a real bug class already shipped once in this region, items 167/169).
+Mutation-verified: reverting the memo-key change makes the strengthened test
+fail with `assert 1 == 2` (only one `_load_table` call recorded instead of
+two) — the exact race the fix closes; the pre-existing
+`test_self_join_reflects_physical_table_once_and_aliases_both` guards the
+opposite direction (a same-connection self-join must still collapse to one
+reflection, `assert 2 == 1` if it doesn't). Full unit suite (2184 passed, 2
+skipped) green on the final tree; `black --check` clean.
+
+**Effort:** S–M (mechanical memo-key fix plus one regression test).
+**Depends on:** cross-connection joins/`join_group` (shipped), 159 (shipped —
+same code path; this is what remained after that fix).
+
 ### 167. A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed by compiling the shape — row duplication, not just cost) ✅ DONE
 
 **Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 159's
