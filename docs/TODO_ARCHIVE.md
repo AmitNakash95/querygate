@@ -12880,3 +12880,65 @@ on the final tree; `black --check` clean.
 **Effort:** S–M (a validator akin to item 158's for the first layer, plus a
 second, load-bearing layer this item's own audit found necessary, plus
 regression tests). **Depends on:** none.
+
+### 175. `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" ✅ DONE
+
+**Surfaced 2026-08-09 by the MSSQL CI job failing on
+`test_delete_against_mssql`** on a PR that never touched
+`execution/write_execution.py`, `connections/engine.py`, or this test file
+at all — confirmed by diffing every changed file against the failing job.
+`connections/engine.py`'s `reset_engines()` (used by this file's
+`_use_writable_policy()` helper at the start of every test) just drops the
+cached-engine references:
+
+```python
+def reset_engines() -> None:
+    """Drop all cached engines/sessionmakers/metadata — used by tests."""
+    ENGINES.clear()
+    SESSIONMAKERS.clear()
+    METADATAS.clear()
+```
+
+— never awaiting `AsyncEngine.dispose()`. Harmless for the rest of the test
+suite, which mocks `get_engine`/`session_scope` and never opens a real
+connection, but this file opens a real `aioodbc` connection pool in every
+test and never disposes it. The CI log's `Unclosed connection` warnings
+(x2) were direct evidence: an abandoned-but-not-yet-closed pooled
+connection, reclaimed later by GC at an arbitrary point (possibly
+concurrently with another test's own live query, since `aioodbc` bridges
+blocking `pyodbc` calls through a thread-pool executor), is a plausible
+mechanism for the observed
+`[Microsoft][ODBC Driver 18 for SQL Server]Connection is busy with results
+for another command` error. **Exactly the same class of leak TODO.md item 2
+already found and fixed once**, in `test_mssql_live.py`'s `mssql_app`
+fixture — that fix was deliberately scoped to just that one file's teardown
+rather than changing the shared `reset_engines()` used everywhere else
+(item 2's own write-up: "harmless for the rest of the suite... but a
+genuine resource-lifecycle gap once one does [create real engines]"),
+leaving this file (which also creates real engines, but predates having a
+pytest fixture at all — it calls a bare setup function per test) exposed to
+the identical gap.
+
+**Shipped:** an autouse, function-scoped `pytest_asyncio.fixture` in
+`tests/integration/test_mssql_write_execution.py`,
+`_dispose_real_mssql_engines_after_each_test`, mirroring `test_mssql_live.py`'s
+`mssql_app` fixture teardown exactly — `await engine.dispose()` on every
+cached `ENGINES` entry, then `reset_engines()`, after every test (not just
+"before the next test's setup runs," which would leave the LAST test in the
+file's engine leaked at process exit with no next test to trigger a reset).
+`_use_writable_policy()` itself is unchanged.
+
+**Coverage:** verified via `poetry run pytest tests/integration/
+test_mssql_write_execution.py --collect-only` (no real MSSQL available in
+this environment) that the fixture wires in without an import/collection
+error; `black --check` clean. The actual fix is verified live by the same
+MSSQL CI job that surfaced the bug — the class of fix (an explicit-dispose
+autouse fixture) is identical to `test_mssql_live.py`'s own, which IS
+verified live in that job. No local reproduction of the original failure
+was attempted (requires a real MSSQL server + the specific GC-timing
+conditions that triggered it), consistent with this being an
+already-reviewed, already-shipped pattern applied to a second file rather
+than a novel fix needing independent verification.
+
+**Effort:** S (mirrors an already-shipped fixture pattern). **Depends on:**
+2 (shipped — same resource-lifecycle gap, found once before).
