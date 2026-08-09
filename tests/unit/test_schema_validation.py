@@ -449,6 +449,88 @@ class TestCrossConnectionJoins:
         with pytest.raises(ValueError, match="cross-connection"):
             await sv.validate_schema(query, connection_id="primary")
 
+    async def test_policy_join_group_spanning_different_hosts_is_rejected(self, monkeypatch):
+        """TODO.md item 170 (security-invariant-reviewer / architecture-
+        boundary-reviewer, 2026-08-09, QG170-1/170-A, both independently
+        found the same gap): `connections/registry.py`'s config-load-time
+        join_group host check only ever sees `ConnectionProfile.join_group`
+        — neither connection here sets one (each defaults to its own id, a
+        1-member group the config-load check never compares), so that check
+        is a no-op for this shape. A `Policy.join_group` override — set
+        here at the `default` level, exactly as an operator could in
+        policy.yaml — unites the two connections at REQUEST time regardless,
+        via `policy.join_group or profile.effective_join_group()`
+        (`resolve_query_table_connections`). Without the request-time host
+        check, this cross-connection join would be silently allowed and
+        `_load_table` would reflect `other`'s table through `primary`'s own
+        engine as if they were the same physical server, despite genuinely
+        different hosts."""
+        primary = ConnectionProfile(
+            id="primary",
+            dialect="mssql",
+            connection_string="mssql+aioodbc://user:pass@host-a/primary_db",
+        )
+        other = ConnectionProfile(
+            id="other",
+            dialect="mssql",
+            connection_string="mssql+aioodbc://user:pass@host-b/other_db",
+        )
+        set_registry(ConnectionRegistry({"primary": primary, "other": other}))
+        set_policy_store(PolicyStore(default=Policy(join_group="shared"), overrides={}))
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            joins=[
+                JoinSpec(
+                    table="customers",
+                    on=["orders.customer_id", "customers.id"],
+                    connection="other",
+                )
+            ],
+            limit=5,
+        )
+        with pytest.raises(ConfigValidationError, match="not the same physical"):
+            await sv.validate_schema(query, connection_id="primary")
+
+    async def test_policy_join_group_on_the_same_host_with_one_port_omitted_is_allowed(
+        self, monkeypatch
+    ):
+        """Companion regression: the request-time host check must compare
+        host and port separately, the same way `_validate_join_group_hosts`
+        does (QG170-4) — a caller comparing `(host, port)` as a single tuple
+        would falsely reject two databases on the SAME Postgres server just
+        because one connection string omits the (default) port and the
+        other states it explicitly."""
+        primary = ConnectionProfile(
+            id="primary",
+            dialect="mssql",
+            connection_string="mssql+aioodbc://user:pass@host/primary_db",
+        )
+        other = ConnectionProfile(
+            id="other",
+            dialect="mssql",
+            connection_string="mssql+aioodbc://user:pass@host:1433/other_db",
+        )
+        set_registry(ConnectionRegistry({"primary": primary, "other": other}))
+        set_policy_store(PolicyStore(default=Policy(join_group="shared"), overrides={}))
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            joins=[
+                JoinSpec(
+                    table="customers",
+                    on=["orders.customer_id", "customers.id"],
+                    connection="other",
+                )
+            ],
+            limit=5,
+        )
+        await sv.validate_schema(query, connection_id="primary")
+
     @pytest.mark.parametrize("secondary_dialect", ["snowflake", "bigquery"])
     async def test_secondary_connection_not_connectable_rejected_at_validation_time(
         self, secondary_dialect
