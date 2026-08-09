@@ -196,7 +196,7 @@ order-of-magnitude, not commitments.
 | 163 | ✅ A not-connectable dialect (Snowflake/BigQuery) as the SECONDARY side of a cross-connection join never reaches the `is_connectable()` guard | S–M | — |
 | 164 | ✅ `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s | S | — |
 | 165 | ✅ `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body | S | — |
-| 166 | Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo ignores which connection a name resolves to | S–M | 159 |
+| 166 | ✅ Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo ignores which connection a name resolves to | S–M | 159 |
 | 167 | ✅ A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed) | S | 159 |
 | 168 | ✅ Config-governance dry-run's credential-safety net is a post-hoc regex scrub, not structural, and the validate-config CLI's stderr isn't scrubbed at all | S–M | 165 |
 | 169 | ✅ A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an unfiltered scan | S–M | 106, 167 |
@@ -204,6 +204,7 @@ order-of-magnitude, not commitments.
 | 171 | The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart | M | 141 |
 | 172 | WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment | M | 154 |
 | 173 | Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives | S | 160 |
+| 174 | A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch | S | 163 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2602,78 +2603,14 @@ itself to never materialize `input`/`input_value` — never a credential.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 165).
 
-### 166. Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo is keyed by table name alone, not by which connection a name resolves to
+### 166. Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo is keyed by table name alone, not by which connection a name resolves to ✅ DONE
 
-**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 159's own
-fix** (pre-existing; not introduced or closed by that item — item 159's fix
-only changes which STRING key is used to look up `table_connection`; this is
-a separate defect in what happens to that lookup's result). `_reflect_and_
-validate_scope`'s `physical_tables` reflection cache
-(`validation/schema_validation.py`) is keyed by `physical_key` alone (the
-casefolded physical table name), not by which connection that occurrence
-resolves to:
+`physical_tables` is now keyed by `(table_cx, physical_key)` instead of the
+physical name alone, so a cross-connection self-join reflects each alias
+against its own declared connection rather than collapsing onto whichever
+alias's reflection ran first.
 
-```python
-if physical_key not in physical_tables:
-    physical_tables[physical_key] = await _load_table(
-        connection_id, physical_name,
-        table_connection_cf.get(name.casefold(), connection_id),
-    )
-source = physical_tables[physical_key]
-```
-
-For a same-connection self-join
-(`test_self_join_reflects_physical_table_once_and_aliases_both`), this is
-correct and deliberate — the physical table is genuinely identical for both
-aliases, so reflecting once and re-aliasing (`source.alias(name)`) is right
-and cheaper than reflecting twice. But `StructuredQuery` also permits a
-CROSS-CONNECTION self-join: the same physical table name, joined to itself,
-with the join declaring a DIFFERENT `connection` than the primary
-(`_validate_table_aliases` in `query_ast/models.py` only requires an alias
-per occurrence of a repeated physical name — it does not forbid the two
-occurrences from naming different connections). In that shape, `physical_key`
-is identical for both aliases even though their resolved `table_cx` values
-differ (alias `a` → primary connection, alias `b` → `connection="other"`).
-Whichever alias's name happens to be processed first (the `needed` set's
-hash-randomized iteration order — the same nondeterminism item 159 fixed for
-the lookup key) reflects the table once, against ITS OWN connection — the
-SECOND alias then silently reuses that same `sa.Table` object, so it is
-compiled and executed against the FIRST alias's connection instead of its own
-declared one. The compiled SQL for the "losing" alias never actually reaches
-the connection the caller named for it.
-
-Unlike item 159 itself, this is NOT fixed by case-folding the lookup: the
-per-alias lookup (via `table_connection_cf`) is already correct; the bug is
-that its result is discarded by the memo's coarser key. Item 156's mask/
-filter/deny-list resolution is unaffected in the sense that it reads a
-separately-computed, correctly-per-alias `scope_connections` map — so the
-POLICY CHECK still runs against the right connection's Policy for each alias
-— but the DATA the compiled query actually reads does not correspond to that
-check for whichever alias lost the race, which is arguably worse than a
-masking gap: the query silently reads a different physical table than the
-one its own Policy was just evaluated against.
-
-**What to do:** key `physical_tables` by `(table_cx, physical_key)` instead
-of `physical_key` alone, so two aliases of the same physical table name only
-share a reflection when they actually resolve to the same connection
-(byte-identical to today for every single-connection query, including
-same-connection self-joins). Alternatively, if a cross-connection self-join
-is judged not worth supporting, reject it explicitly (in `resolve_query_
-table_connections`, where the `join_group` check already lives) rather than
-silently collapsing to one connection — a deliberate product decision either
-way, not one to make silently under this write-up. Add a regression test: a
-self-join where the from-table and the join name the same physical table but
-different connections in the same `join_group`, patching `_load_table` and
-asserting BOTH connection arguments are recorded (one per alias, matching
-each alias's own declared connection) —
-`test_self_join_reflects_physical_table_once_and_aliases_both` already pins
-the single-connection case as reflecting once; this needs the
-cross-connection sibling asserting two.
-
-**Effort:** S–M (mechanical memo-key fix, or a rejection guard, plus one
-regression test; the judgment call is which of the two approaches to take).
-**Depends on:** cross-connection joins/`join_group` (shipped), 159 (shipped —
-same code path; this is what remained after that fix).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 166).
 
 ### 167. A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed by compiling the shape — row duplication, not just cost) ✅ DONE
 
@@ -2862,4 +2799,56 @@ resolver function, so record which approach is chosen in the PRODUCT_GUIDE
 Decision Log before implementing.
 
 **Effort:** S. **Depends on:** 160.
+
+### 174. A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch
+
+**Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 166's own
+commit, during that item's own mandatory completion gate (SIR-166-2).**
+Pre-existing since cross-connection joins/`join_group` first shipped, not
+introduced or closed by item 166. `_load_table`
+(`validation/schema_validation.py`) reflects a joined table on a SECONDARY
+connection through the PRIMARY connection's own engine, qualified by a
+hardcoded schema string:
+
+```python
+schema = f"{physical_db_name(table_connection)}.dbo"
+```
+
+This is CLAUDE.md non-negotiable 6 territory (dialect differences go behind a
+Protocol + one class per variant + registry, never an inline assumption at a
+call site) — but there is not even an `if dialect == ...` branch here; one
+dialect's idiom (MSSQL's `<database>.dbo.<table>` three-part naming) is
+hardcoded unconditionally. `grep -rn "dbo" src/querygate/` returns only this
+line and `schema/reflection.py`'s already-documented `[None, "dbo"]` fallback
+list. A cross-connection join whose SECONDARY connection is Postgres or MySQL
+reflects under a schema qualifier that dialect cannot resolve, producing a
+masked `NoSuchTableError` that names neither the real cause nor the dialect —
+the same failure shape item 163 was raised specifically to eliminate for a
+not-connectable secondary, now reappearing one layer downstream for a
+connectable-but-wrong-idiom one. It fails closed (no data reaches the
+caller), so this is a robustness/clarity gap, not a policy bypass — but it
+means only an MSSQL secondary has ever actually worked in this configuration,
+silently.
+
+**What to do:** add a method to `connections/dialects.py`'s
+`SessionDialectAdapter` — e.g. `cross_database_schema_qualifier(db_name: str)
+-> Optional[str]` — returning `f"{db_name}.dbo"` for the MSSQL adapter and
+`None` for every other dialect's adapter (its default/base implementation).
+At the `_load_table` call site (`schema_validation.py`, the `schema =
+f"{physical_db_name(table_connection)}.dbo"` line), dispatch through
+`get_session_adapter(...)` (the same seam `resolve_query_table_connections`
+already uses for its `is_connectable()` check) instead of the hardcoded
+f-string; when the adapter returns `None`, raise a `QueryValidationError`
+naming the dialect and explaining that a cross-connection secondary of that
+dialect isn't supported yet — the same reject-don't-emulate posture item 74
+set for MSSQL's missing `NULLS FIRST/LAST`, rather than guessing at that
+dialect's own cross-database naming convention (which varies: Postgres has no
+true equivalent without `dblink`/`postgres_fdw`, MySQL uses a bare
+`<database>.<table>` with no third segment). Add a regression test: a
+cross-connection join with a Postgres secondary in a shared `join_group`,
+asserting a clean `QueryValidationError` naming the dialect rather than a
+masked `NoSuchTableError`.
+
+**Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped),
+163 (shipped — same `is_connectable()` seam this reuses).
 

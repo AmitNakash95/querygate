@@ -665,6 +665,77 @@ class TestCrossConnectionJoins:
         table_connection_map = {name: table_conn for _, name, table_conn in calls}
         assert table_connection_map["orders"] == "other"
 
+    async def test_cross_connection_self_join_reflects_each_alias_against_its_own_connection(
+        self, monkeypatch
+    ):
+        """TODO.md item 166 (maintainer-approved 2026-08-09: fix the reflection
+        memo key rather than reject the shape). A self-join — the same physical
+        table name declared twice, with the join naming a DIFFERENT `connection`
+        than the primary — used to collapse onto ONE connection:
+        `_reflect_and_validate_scope`'s `physical_tables` memo was keyed by
+        physical table name alone, so whichever alias's reflection ran first won
+        the memo slot and the SECOND alias silently reused that same `sa.Table`
+        object — compiled and executed against the first alias's connection
+        despite its own declared `connection` naming the other one. Unlike the
+        item-159 casing race this class also covers, both aliases here share the
+        identical casefolded name ("orders"/"orders"), so which alias's
+        reflection call WINS the single pre-fix memo slot depends on `needed`'s
+        (a `set`) iteration order — but the test's own PASS/FAIL outcome does not:
+        `len(calls) == 2` and the two identity/schema assertions below all fail
+        deterministically regardless of which alias wins, since exactly one
+        `_load_table` call (and one bound schema) is missing either way. Post-fix
+        both calls happen and each alias binds to ITS OWN reflection, because the
+        memo key includes the resolved connection, not just the name.
+
+        security-invariant-reviewer, 2026-08-09 (SIR-166-1): the first version of
+        this test only asserted on `_load_table`'s recorded call arguments, which
+        proves both connections were REFLECTED but not that each alias actually
+        BINDS to its own reflection rather than to whichever one happened to win
+        a downstream lookup — a real, already-shipped bug class in this same
+        region (items 167/169). The `.element is`/`.schema` assertions below
+        close that gap by giving each connection's `_load_table` call a
+        distinguishable table (unlike `_patch_load_table`'s shared fake, which
+        returns the same object for both, masking exactly this)."""
+        self._two_connections(group_a="shared", group_b="shared")
+        primary_orders = sa.Table("orders", sa.MetaData(), sa.Column("id", sa.Integer))
+        other_orders = sa.Table(
+            "orders", sa.MetaData(), sa.Column("id", sa.Integer), schema="other_db.dbo"
+        )
+        calls = []
+
+        async def fake_load_table(connection_id, table_name, table_connection):
+            calls.append((connection_id, table_name, table_connection))
+            return other_orders if table_connection == "other" else primary_orders
+
+        monkeypatch.setattr(sv, "_load_table", fake_load_table)
+        query = StructuredQuery(
+            from_table="orders",
+            from_alias="o1",
+            select=["o1.id", "o2.id"],
+            joins=[
+                JoinSpec(
+                    table="orders",
+                    alias="o2",
+                    on=["o1.id", "o2.id"],
+                    connection="other",
+                )
+            ],
+            limit=5,
+        )
+        resolved = await sv.validate_schema(query, connection_id="primary")
+        assert set(resolved) == {"o1", "o2"}
+        # Both aliases must be reflected -- one per connection -- not collapsed
+        # onto whichever alias's reflection happened to run first.
+        assert len(calls) == 2
+        table_connections = {table_conn for _, _, table_conn in calls}
+        assert table_connections == {"primary", "other"}
+        # And each alias must BIND to its own connection's reflection, not just
+        # trigger the right `_load_table` call in passing (SIR-166-1).
+        assert resolved["o1"].element is primary_orders
+        assert resolved["o2"].element is other_orders
+        assert resolved["o1"].element.schema is None
+        assert resolved["o2"].element.schema == "other_db.dbo"
+
 
 def test_aggregate_default_alias_matches_the_compilers_for_an_unaliased_column_aggregate():
     """`top_n` resolves its refs against the names `_aggregate_alias` returns,

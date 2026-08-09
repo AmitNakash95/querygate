@@ -411,7 +411,7 @@ claim when the work ships or before explicitly handing the item back.
   verified safe); a safe stripping precedent already exists in
   `admin/service.py`'s `_humanize_validation_errors` to reuse or adapt; small,
   self-contained fix to one route's exception handling.*
-- [ ] **166** — cross-connection self-join reflects both aliases against ONE
+- [x] **166** — cross-connection self-join reflects both aliases against ONE
   connection: the `physical_tables` reflection memo is keyed by table name
   alone, ignoring which connection a name resolves to. *Surfaced 2026-08-07
   by `security-invariant-reviewer` auditing item 159's own fix — pre-existing,
