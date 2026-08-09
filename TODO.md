@@ -171,7 +171,7 @@ order-of-magnitude, not commitments.
 | 138 | ✅ Audit read surfaces scan the entire persisted file on every request, unbounded by lines read | S–M | — |
 | 139 | ✅ Bound audit-line size at the source (AST list caps + audit/sinks.py's own unbounded-read defect) | M | 138 |
 | 140 | ✅ `_audit_page` pagination can still materialize ~1M dicts per request | S–M | 138 |
-| 141 | Convert audit-reader line caps into practically-tight window-based early exits | S | 138 |
+| 141 | ✅ Convert audit-reader line caps into practically-tight window-based early exits | S | 138 |
 | 142 | ✅ `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats | XS | — |
 | 143 | ✅ `cryptography` 49.0.0 has an unreviewed CVE, blocking `make release-check`'s SBOM step | XS–S | — |
 | 144 | ✅ `verdict()` emits no query metrics, and `/metrics` is unauthenticated | S | — |
@@ -184,7 +184,7 @@ order-of-magnitude, not commitments.
 | 151 | ✅ Bind the in-query approval gate's token to a connection and principal, not just an AST fingerprint | M | 92, 128 |
 | 152 | ✅ Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM retention) shipping | S | 19, 134 |
 | 153 | ✅ `CHANGELOG.md` has no `[Unreleased]` entry for items 19 (MySQL) or 134 (WORM retention) | S | 19, 134 |
-| 154 | WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate | M | 91, 134 |
+| 154 | ✅ WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate | M | 91, 134 |
 | 155 | ✅ `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection | M | 151 |
 | 156 | ✅ A cross-connection join's joined table is governed only by the primary connection's Policy — masks/row filters/deny-lists never apply from the joined connection's own Policy | M/L | 155 |
 | 157 | Snowflake live-server verification and deeper feature parity (item 19 phase 2 residual) | L–XL | 19 |
@@ -196,11 +196,16 @@ order-of-magnitude, not commitments.
 | 163 | ✅ A not-connectable dialect (Snowflake/BigQuery) as the SECONDARY side of a cross-connection join never reaches the `is_connectable()` guard | S–M | — |
 | 164 | ✅ `column_mask`'s HASH branch is an implicit `else`, not an exhaustive match, on all five `DialectAdapter`s | S | — |
 | 165 | ✅ `/admin/reload-config`'s generic exception handler can leak a live credential in its HTTP 400 body | S | — |
-| 166 | Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo ignores which connection a name resolves to | S–M | 159 |
+| 166 | ✅ Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo ignores which connection a name resolves to | S–M | 159 |
 | 167 | ✅ A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed) | S | 159 |
 | 168 | ✅ Config-governance dry-run's credential-safety net is a post-hoc regex scrub, not structural, and the validate-config CLI's stderr isn't scrubbed at all | S–M | 165 |
 | 169 | ✅ A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an unfiltered scan | S–M | 106, 167 |
-| 170 | Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it | S–M | — |
+| 170 | ✅ Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it | S–M | — |
+| 171 | The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart | M | 141 |
+| 172 | WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment | M | 154 |
+| 173 | Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives | S | 160 |
+| 174 | A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch | S | 163 |
+| 175 | ✅ `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" | S | 2 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2152,41 +2157,24 @@ worst-case retained dicts per request to ~5,100 instead of ~1,000,050.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 140).
 
-### 141. Convert audit-reader line caps into practically-tight window-based early exits
+### 141. Convert audit-reader line caps into practically-tight window-based early exits ✅ DONE
 
-**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138;
-deliberately not built as part of that item.** `admin/anomaly.py` and
-`admin/config_trends.py` both scan tail-first now (item 138), which makes a
-targeted optimization possible that wasn't before: once the scan has seen a
-long consecutive run of matching-type events whose `occurred_at` is at or
-before `window_start`, it is very likely (though not certain — see below) that
-every remaining, physically-earlier line is also out of window, since the
-audit sink only appends and writes are lock-serialized within a process. Item
-138 deliberately did not build this: `occurred_at` is set at event
-**construction** time, before the (possibly slightly later) write, so under
-concurrent request handling two events' physical write order and their
-`occurred_at` order are not *guaranteed* identical — only overwhelmingly
-likely for realistic concurrency levels. An early exit on this basis is a
-correctness/performance tradeoff (a bounded chance of silently reporting
-`truncated=False` while actually missing a handful of borderline events),
-not a pure hardening, and item 138 already ships a strictly-safe bound
-(`max_lines_read`/`max_line_bytes`/`max_total_bytes`, all fail-closed to
-`truncated=True`) — this item would only make that existing safe bound
-*tighter in the common case*, not fix a live gap.
-
-**What to do, if approved:** add a `max_consecutive_out_of_window` threshold
-(e.g. default 5,000 — tunable slack for reordering/clock skew) to
-`AnomalyThresholds`/`ChangeTrendThresholds`; track a consecutive-out-of-window
-counter across only the caller's own matching event type (not lines of other
-types, which say nothing about this stream's recency); break once the
-threshold is hit, **without** setting `stopped_early`/`truncated` (the window
-genuinely ended, as far as the tolerance allows). Record the accepted
-ordering-tolerance assumption explicitly in the PRODUCT_GUIDE Decision Log
-before building — this is exactly the kind of judgment call CLAUDE.md's
-working agreement reserves for the maintainer, not a default an agent should
-reach for under time pressure.
-
-**Effort:** S once approved. **Depends on:** 138.
+**Shipped 2026-08-08** (maintainer-approved, PRODUCT_GUIDE Decision Log).
+Investigating the original proposal (a tolerance for a bounded chance of
+missing borderline events) found the real fix instead: `audit/logger.py`'s
+new `_persist` helper re-stamps `occurred_at` immediately before the sink's
+write call, closing the dominant source of drift (the `log.info` call and any
+other work between event construction and the durable write) rather than just
+tolerating it. `admin/anomaly.py`/`admin/config_trends.py` still carry a
+`max_consecutive_out_of_window` tolerance (default 5,000, counted only across
+the reader's own matching event type) as defense-in-depth against the
+residual sub-microsecond scheduling-jitter risk under lock contention — real
+in principle, negligible in practice — rather than claiming a guarantee a
+misconfigured multi-worker-per-ledger-file deployment can't back. Mutation-
+verified: the break condition, the counter-reset-on-in-window-event, and the
+non-matching-type-doesn't-count rule each have a dedicated regression test
+that fails when that specific rule is removed.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 141).
 
 ### 142. `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats ✅ DONE
 
@@ -2325,47 +2313,18 @@ Added 17 `[Unreleased]` entries to `CHANGELOG.md` covering items 19, 134
 separate, larger follow-up. **Full write-up:**
 [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 153).
 
-### 154. WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate
+### 154. WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate ✅ DONE
 
-**Surfaced 2026-08-06 by `security-invariant-reviewer` auditing item 134
-phase 2's managed search.** The LOCAL hash-chained sink
-(`audit/sinks.py`'s `HashChainedAuditSink`) wraps every persisted event in a
-`LedgerRecord` envelope a reader can verify (`audit/ledger.py`'s
-`verify_envelope_hash`). The WORM sink (`audit/worm_sink.py`'s
-`WormFlushMonitor.flush_once`) writes the bare `PersistableEvent` body
-instead — deliberate for phase 1 (the archive's job was durability/
-retrievability, not tamper-evidence; the local chain already owns that
-question) but it means phase 2's `audit/worm_search.py` has no hash-chain to
-check a line against. S3 Object Lock (COMPLIANCE mode) stops an existing
-object from being deleted or overwritten before its retention date — it does
-**not** stop a NEW, schema-valid object from being added to the archive
-prefix. Any principal holding `s3:PutObject` on that prefix — necessarily
-including QueryGate's own AWS role, since `WormFlushMonitor` needs the same
-permission to archive at all — could plant a fabricated segment that passes
-every check `worm_search.py` runs (redaction-safe schema, no forbidden
-`query_shape` content) and is returned by a search indistinguishably from a
-genuine one.
-
-**What to do (when prioritized):** envelope/hash-chain WORM segments the way
-the local sink already does — e.g. wrap each flushed batch (or each event
-within it) in a `LedgerRecord`-shaped structure with its own chain, and have
-`worm_search.py` verify it the same way `admin_ui_routes.py`'s local reader
-already does (`verify_envelope_hash` → `unwrap_envelope`, counting an
-unverifiable line as `malformed`). This is a **phase-1 write-format change**,
-not a phase-2 read-side fix: it needs an explicit decision on (a) whether the
-chain is per-segment or spans segments (a per-segment chain is simpler and
-matches "one batch, one flush" semantics but means chain continuity resets on
-every flush; a cross-segment chain needs the flush monitor to carry state
-across restarts) and (b) what happens to already-archived, unenveloped
-segments under retention today (they cannot be rewritten — Object Lock — so
-either the reader must support BOTH shapes indefinitely, or existing archives
-are accepted as a permanently weaker-verified tail). Until this ships,
-`audit/worm_search.py`'s module docstring and `docs/THREAT_MODEL.md`'s QG-40
-row carry this residual explicitly rather than overclaiming parity with the
-local reader.
-
-**Effort:** M. **Depends on:** 91 (the local chain this mirrors), 134 (phase
-1's WORM sink, phase 2's search surface).
+**Shipped 2026-08-09** (maintainer decisions: per-segment chain, no
+legacy-segment tolerance — no production deployment predates this fix).
+`audit/worm_sink.py`'s `WormFlushMonitor.flush_once` now writes each
+flushed batch as a fresh `LedgerRecord`-shaped chain (seq 0, `GENESIS_PREV_
+HASH`), the same envelope the local `HashChainedAuditSink` uses;
+`audit/worm_search.py` verifies each record's own hash before ever
+unwrapping it, counting an unverifiable or unenveloped line as `malformed`.
+Closes `docs/THREAT_MODEL.md` QG-40's residual (a forged, schema-valid
+segment used to be returned indistinguishably from a genuine one).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 154).
 
 ### 155. `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection ✅ DONE
 
@@ -2478,118 +2437,16 @@ primary connection.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 159).
 
-### 160. Item 156 follow-up: harden the connection-resolution edge cases a full security-invariant audit surfaced ✅ DONE (findings 1, 2, 4 addressed; finding 3 remains an open design decision)
+### 160. Item 156 follow-up: harden the connection-resolution edge cases a full security-invariant audit surfaced ✅ DONE
 
-**Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item
-156 itself** (distinct from item 159, which is an unrelated pre-existing
-schema-reflection bug the same audit pass happened to find). Four smaller,
-lower-severity gaps in item 156's own design, none a live bypass, each cheap
-individually but grouped here since a real fix to any one likely touches the
-same `_validate_and_compile`/`resolve_table_policies` call sites as the
-others:
-
-1. **Audit-vs-compiled-SQL snapshot consistency.** `resolve_table_policies`'s
-   default resolver re-reads the joined connection's Policy from the live
-   `PolicyStore` at every call site (`policy_validation.py`,
-   `sqlalchemy_compiler.py`, and again at the post-execution
-   `applied_column_masks` audit call in `execution/service.py`) rather than
-   resolving it once and threading the same snapshot through, the way the
-   PRIMARY policy already is (`self._get_policy()`, read once in
-   `_validate_and_compile`). An authorized `/admin/reload-config` landing
-   between compile and the audit call could make `masked_columns` describe a
-   Policy the compiled statement wasn't actually built against. Narrow
-   (requires an authorized actor's concurrent action) but real. Fix: resolve
-   each distinct non-primary connection's Policy once in
-   `_validate_and_compile`, return the map alongside `scope_connections`, and
-   thread a `connection_resolver` closure over that fixed snapshot into both
-   `compile_structured_query` and the `applied_column_masks` audit call.
-2. **Cap-ordering inversion.** `_validate_and_compile` now computes
-   `early_scope_connections` (which walks every scope and does a
-   `PolicyStore.get()` per scope) before `validate_policy` runs at all — ahead
-   of `_validate_cte_constraints`'s cheap `max_cte_count` check and
-   `max_subquery_depth`, inverting the "cheap bound first" ordering that
-   function's own docstring documents as deliberate (chosen so a malformed
-   AST can't make the validator do O(N × tree) work before being told a cap
-   exists). Bounded by `concurrency_slot`, so Low severity, but worth
-   restoring: either move the map computation inside `validate_policy` itself
-   (after the structural caps, before `_validate_scope`), or accept the
-   current ordering explicitly with a one-line Decision Log note.
-3. **Fail-open-by-default design question.** Every new `scope_connections`/
-   `connection_resolver` parameter (on `validate_policy`,
-   `compile_structured_query`, `applied_column_masks`) defaults to `None` —
-   i.e., the SAFE (per-connection) behavior is opt-in and the pre-156
-   (primary-only) behavior is what a forgetful call site silently gets, with
-   no type error or warning. This is exactly the shape that let
-   `admin/service.py`'s `simulate_candidate_policy` (fixed same-day, see item
-   156's archive entry) drift onto the weaker path in the first place, and
-   nothing stops a FUTURE call site from making the identical mistake. Needs
-   an explicit decision (record in this guide's Decision Log): should
-   `validate_policy` self-derive the map when given a `principal`/
-   `connection_resolver` but no explicit `scope_connections`, closing the
-   footgun structurally? That's a real design change (and interacts with
-   finding 2's ordering question), not a mechanical fix — hence recorded here
-   rather than done under this item's own time-boxed audit-response pass.
-4. **Purpose narrowing, `min_group_size`, and row limits are not
-   cross-connection-resolved.** Item 156's scope, both as filed and as
-   shipped, is explicitly column masks, mandatory row filters, and the
-   table/column deny-list — `resolve_table_policies` returns the joined
-   connection's Policy un-narrowed by the query's declared `purpose` (so a
-   `purpose_policies` delta configured on the JOINED connection never
-   applies), and the k-anonymity floor (`min_group_size`) and row limits
-   (`max_limit`/`default_limit`) are read from the primary Policy only,
-   never the joined connection's. This was never claimed otherwise in the
-   shipped docs (`docs/THREAT_MODEL.md` QG-09 and this guide's item-156
-   entry both say "column masks, mandatory row filters, and the table/column
-   deny-list", not "all policy enforcement") — recorded here so a future
-   reader doesn't assume silently the residual doesn't exist, and as a
-   candidate for a follow-up item if per-connection purpose/k-anonymity/limit
-   resolution is ever prioritized.
-
-**Effort:** M (findings 1–2 are mechanical; finding 3 is a design decision;
-finding 4 is scope confirmation only, no code change, unless later
-prioritized). **Depends on:** 156 (shipped — this is entirely about hardening
-its own edges).
-
-**Status (2026-08-07): findings 1, 2, and 4 shipped; finding 3 deliberately
-left open.** Finding 1 — `execution/service.py` gained `StructuredQueryService.
-_snapshot_connection_resolver`: `_validate_and_compile` now resolves each
-distinct non-primary connection's Policy exactly once and threads the same
-`ConnectionResolver` snapshot into `validate_policy`, `compile_structured_query`,
-and the `applied_column_masks` audit call, so all three agree even under a
-concurrent `/admin/reload-config`. Finding 2 — the cheap `max_cte_count`/
-`max_subquery_depth` checks were extracted into `validation/policy_validation.
-validate_structural_caps` and are now called directly from `_validate_and_
-compile` BEFORE `resolve_scope_connections` (the `PolicyStore.get()`-touching
-step), restoring cheap-bound-first ordering; `validate_policy` still calls the
-same extracted function internally afterward for every other caller. Both
-mutation-verified — see `tests/unit/test_service.py`'s
-`test_audit_masked_columns_reflects_the_snapshot_compiled_against_not_a_late_reload`
-and `test_structural_caps_reject_before_any_per_scope_policy_lookup`. Finding 4
-— confirmed `docs/THREAT_MODEL.md` QG-09 and the item-156 Decision Log entry
-already scope the fix accurately (no doc drift); left as a documented residual.
-**Finding 3 is still OPEN** — whether `validate_policy` should self-derive
-`scope_connections` when given a `connection_resolver`/`principal` but no
-explicit map remains an unmade maintainer decision (full reasoning in
-`docs/PRODUCT_GUIDE.md`'s Decision Log, 2026-08-07 entry). This item stays
-inline (not archived) until that decision is made and finding 3 is resolved
-one way or the other.
-
-**Same-day audit correction (`security-invariant-reviewer`, 2026-08-07):**
-the redundant second `validate_structural_caps` call inside `validate_policy`
-is NOT a provably-safe no-op the way an earlier version of this note (and of
-the function's own docstring) claimed — `max_cte_count`/`max_subquery_depth`
-never move under purpose narrowing, but the same function also runs
-`_validate_cte_constraints`'s deny-list/mask-aware cte-shadowing rules, which
-DO. The two calls can legitimately disagree (the un-narrowed pre-check can
-under-reject a purpose-narrowed case the internal, narrowed call still
-correctly rejects); this is safe only because `Policy.for_purpose` is
-additive-only, never subtractive. Pinned by a new test in
-`tests/unit/test_policy_validation.py` and corrected in both the function's
-own docstring and this item's PRODUCT_GUIDE.md Decision Log entry. A second,
-unrelated finding in the same pass — `_snapshot_connection_resolver`'s
-closure silently discarding its own `principal` argument — was also fixed and
-pinned with its own regression test; see the PRODUCT_GUIDE.md entry for full
-detail on both.
+Four connection-resolution edge cases from item 156's own audit, all now
+shipped: a fixed-snapshot `ConnectionResolver` so audit/compile can't
+disagree under a concurrent reload, restored cheap-bound-first ordering,
+`scope_connections` self-derivation from a given `connection_resolver`
+(closing the footgun that caused item 156's own `simulate_candidate_policy`
+bug), and confirmation that purpose/k-anonymity/row-limit resolution was
+never claimed to be cross-connection-resolved.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 160).
 
 ### 161. BigQuery live-server verification and deeper feature parity (item 19 phase 3 residual)
 
@@ -2747,78 +2604,14 @@ itself to never materialize `input`/`input_value` — never a credential.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 165).
 
-### 166. Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo is keyed by table name alone, not by which connection a name resolves to
+### 166. Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo is keyed by table name alone, not by which connection a name resolves to ✅ DONE
 
-**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 159's own
-fix** (pre-existing; not introduced or closed by that item — item 159's fix
-only changes which STRING key is used to look up `table_connection`; this is
-a separate defect in what happens to that lookup's result). `_reflect_and_
-validate_scope`'s `physical_tables` reflection cache
-(`validation/schema_validation.py`) is keyed by `physical_key` alone (the
-casefolded physical table name), not by which connection that occurrence
-resolves to:
+`physical_tables` is now keyed by `(table_cx, physical_key)` instead of the
+physical name alone, so a cross-connection self-join reflects each alias
+against its own declared connection rather than collapsing onto whichever
+alias's reflection ran first.
 
-```python
-if physical_key not in physical_tables:
-    physical_tables[physical_key] = await _load_table(
-        connection_id, physical_name,
-        table_connection_cf.get(name.casefold(), connection_id),
-    )
-source = physical_tables[physical_key]
-```
-
-For a same-connection self-join
-(`test_self_join_reflects_physical_table_once_and_aliases_both`), this is
-correct and deliberate — the physical table is genuinely identical for both
-aliases, so reflecting once and re-aliasing (`source.alias(name)`) is right
-and cheaper than reflecting twice. But `StructuredQuery` also permits a
-CROSS-CONNECTION self-join: the same physical table name, joined to itself,
-with the join declaring a DIFFERENT `connection` than the primary
-(`_validate_table_aliases` in `query_ast/models.py` only requires an alias
-per occurrence of a repeated physical name — it does not forbid the two
-occurrences from naming different connections). In that shape, `physical_key`
-is identical for both aliases even though their resolved `table_cx` values
-differ (alias `a` → primary connection, alias `b` → `connection="other"`).
-Whichever alias's name happens to be processed first (the `needed` set's
-hash-randomized iteration order — the same nondeterminism item 159 fixed for
-the lookup key) reflects the table once, against ITS OWN connection — the
-SECOND alias then silently reuses that same `sa.Table` object, so it is
-compiled and executed against the FIRST alias's connection instead of its own
-declared one. The compiled SQL for the "losing" alias never actually reaches
-the connection the caller named for it.
-
-Unlike item 159 itself, this is NOT fixed by case-folding the lookup: the
-per-alias lookup (via `table_connection_cf`) is already correct; the bug is
-that its result is discarded by the memo's coarser key. Item 156's mask/
-filter/deny-list resolution is unaffected in the sense that it reads a
-separately-computed, correctly-per-alias `scope_connections` map — so the
-POLICY CHECK still runs against the right connection's Policy for each alias
-— but the DATA the compiled query actually reads does not correspond to that
-check for whichever alias lost the race, which is arguably worse than a
-masking gap: the query silently reads a different physical table than the
-one its own Policy was just evaluated against.
-
-**What to do:** key `physical_tables` by `(table_cx, physical_key)` instead
-of `physical_key` alone, so two aliases of the same physical table name only
-share a reflection when they actually resolve to the same connection
-(byte-identical to today for every single-connection query, including
-same-connection self-joins). Alternatively, if a cross-connection self-join
-is judged not worth supporting, reject it explicitly (in `resolve_query_
-table_connections`, where the `join_group` check already lives) rather than
-silently collapsing to one connection — a deliberate product decision either
-way, not one to make silently under this write-up. Add a regression test: a
-self-join where the from-table and the join name the same physical table but
-different connections in the same `join_group`, patching `_load_table` and
-asserting BOTH connection arguments are recorded (one per alias, matching
-each alias's own declared connection) —
-`test_self_join_reflects_physical_table_once_and_aliases_both` already pins
-the single-connection case as reflecting once; this needs the
-cross-connection sibling asserting two.
-
-**Effort:** S–M (mechanical memo-key fix, or a rejection guard, plus one
-regression test; the judgment call is which of the two approaches to take).
-**Depends on:** cross-connection joins/`join_group` (shipped), 159 (shipped —
-same code path; this is what remained after that fix).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 166).
 
 ### 167. A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed by compiling the shape — row duplication, not just cost) ✅ DONE
 
@@ -2853,43 +2646,187 @@ described, and a second, closely related crash bug found in the same code
 region was fixed alongside it. **Full write-up:**
 [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 169).
 
-### 170. Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it
+### 170. Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it ✅ DONE
 
-**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 163's
-own fix** (pre-existing; not introduced or closed by that item — item 163
-only added the `is_connectable()` check to the same function this
-observation is about). `validation/schema_validation.py`'s `_load_table`
-always reflects a cross-connection join's table through the PRIMARY
-connection's own engine, qualified with a schema string built from
-`connections/engine.py`'s `physical_db_name(table_connection)` — i.e. it
-assumes the joined ("secondary") connection is a same-instance,
-cross-database sibling of the primary (e.g. two databases on one MSSQL
-server), never a genuinely separate host. The only gate on whether two
-connections may cross-connection-join at all is `join_group` string
-equality (`resolve_query_table_connections`); nothing compares host/instance
-identity between the two connections' connection strings. Two connections
-placed in the same `join_group` that actually point at *different* physical
-hosts would not be rejected at validation time — instead, if a same-named
-database happens to exist on the primary's host, the query would silently
-read that unrelated database instead of the joined connection's real one;
-if no such database exists, it fails with the same masked `NoSuchTableError`
-item 163 already documents for a different cause. This requires an operator
-misconfiguration (placing two unrelated-host connections in one
-`join_group`) — no caller-supplied input can trigger it — so exploitability
-is low, but the failure mode (a silent wrong-database read rather than an
-error) is worse than a masked error.
+`ConnectionRegistry.from_entries` now rejects a `join_group` whose members
+resolve to different hosts (or the same host with different ports) at
+config-load/hot-reload time, instead of silently reading an unrelated
+same-named database on the primary's host.
 
-**What to do:** either (a) validate that every connection sharing a
-`join_group` resolves to the same host/instance at config-load or
-hot-reload time (parsing both connection strings' host component, similar
-in spirit to item 158's dialect-vs-connection_string check), rejecting a
-`join_group` membership that spans hosts, or (b) if same-host is not meant
-to be a hard requirement, document the assumption explicitly in
-`join_group`'s own docstring/example config and in `docs/THREAT_MODEL.md`
-rather than leaving it implicit in `physical_db_name`'s docstring alone.
-Add a regression test once the direction is picked.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 170).
 
-**Effort:** S–M (a validator akin to item 158's, or a documentation-only
-fix if same-host is accepted as a deliberate operator responsibility).
-**Depends on:** none.
+### 171. The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart
+
+**Surfaced 2026-08-08 by three of the four `auditors` reviewers auditing item
+141's own commit** (security-invariant, architecture-boundary, and
+claim-reviewer independently), during that item's own mandatory completion
+gate — not a later external report. Item 141 added a `max_consecutive_out_of_
+window` early-exit to `admin/anomaly.py`/`admin/config_trends.py`'s tail-first
+audit-log scans (and `help/personal_denials.py`, which reuses the same
+reader): once enough consecutive matching-type lines are all before the
+report's window start, the scan stops WITHOUT setting `truncated`, on the
+assumption that physical write order tracks `occurred_at` order. Item 141
+also shipped a real fix for the dominant source of that assumption's risk
+(`audit/logger.py`'s `_persist` now re-stamps `occurred_at` immediately
+before the sink's `emit()`) and disclosed the residual in every relevant
+docstring/comment plus `docs/THREAT_MODEL.md` QG-43, and added an
+operator-facing config knob (`anomaly_max_consecutive_out_of_window`/
+`change_trend_max_consecutive_out_of_window`/`personal_denials_max_
+consecutive_out_of_window`) so a deployment that knows it's at risk can raise
+or disable the tolerance. What's still open, deliberately scoped out of item
+141 itself:
+
+**What to do:** add a disclosure field (e.g. `scan_ended_on_out_of_window_run:
+bool`) to `AnomalyReport`, `ConfigCatalogChangeTrend`, and
+`RecentDenialsReport` distinguishing "genuinely complete" from "heuristically
+stopped early" — the affected surface is a public REST response shape used
+by three separate consumers. This requires widening `AuditEventSource.
+load_query_events`'s and `ChangeEventSource.load_change_events`'s Protocol
+return type from a 3-tuple to a 4-tuple (or an equivalent named/typed
+result), which touches ~20 call sites across `tests/unit/test_anomaly.py`,
+`tests/unit/test_config_trends.py`, `tests/unit/test_personal_denials.py`,
+and the three `build_*_report` functions — real, mechanical work, not a
+one-line change, which is why it was deliberately not folded into item 141's
+already-committed scope. Add a regression test exercising the disclosed
+merged/multi-writer failure mode itself (not just the happy-path early exit
+item 141's own tests already cover).
+
+**Effort:** M (mechanical but wide — a Protocol return-shape change with a
+real test-suite blast radius). **Depends on:** 141.
+
+### 172. WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment
+
+**Surfaced 2026-08-09 by `security-invariant-reviewer` and `test-contract-
+reviewer` auditing item 154's own commit, during that item's own mandatory
+completion gate.** Item 154 made `audit/worm_search.py` verify each
+`LedgerRecord`'s own hash (`verify_envelope_hash`) before returning it —
+closing the gap where a fabricated, schema-valid segment could be planted
+and returned indistinguishably from a genuine one. What it does NOT do:
+check that a segment's records form a genuine, complete chain. Concretely,
+against even a KEYED archive (where forging new content is infeasible
+without the HMAC key), a principal with `s3:PutObject` on the archive
+prefix can still: (a) copy a genuine segment object byte-for-byte to a
+second key inside the searched window — every record still verifies
+individually, so the reader returns every one of its events TWICE, with
+`malformed == 0` and `unverified == 0`, silently inflating counts in a
+compliance answer; (b) upload an object containing an arbitrary SUBSET of a
+genuine segment's records (e.g. drop the first record, or one from the
+middle) — because linkage (`seq` monotonicity, `prev_hash` continuity) is
+never checked, each surviving record verifies on its own and the omission
+produces no signal. Impact is bounded (the genuine object still exists
+under Object Lock, so events can be duplicated/relocated but not erased),
+which is why this is a follow-up, not a blocker on item 154 itself; both
+residuals are already named in `docs/THREAT_MODEL.md` QG-40.
+
+**What to do (when prioritized):** in `audit/worm_search.py`'s per-object
+line loop, carry `prev_verified_hash`/`prev_seq` across consumed lines; for
+the FIRST line actually consumed when starting fresh at an object
+(`consume_from == 0`), require `parsed["seq"] == 0` and
+`parsed["prev_hash"] == GENESIS_PREV_HASH`; for each subsequent consumed
+line require `parsed["prev_hash"] == prev_verified_hash` and
+`parsed["seq"] == prev_seq + 1`; on a linkage failure, count the line
+`unverified` and stop consuming that object (don't return partial-chain
+events past the break). Needs care around cursor-resumption: a scan
+resuming mid-object (`consume_from > 0`) legitimately cannot verify the
+incoming link to a line it never read, so linkage checking should start at
+the first CONSUMED line, not unconditionally at line 0. Closing the
+segment-duplication half fully (not just detecting a broken chain) needs a
+further design decision — binding a segment to its own S3 object key (e.g.
+deriving the genesis `prev_hash` from the key) is a write-format change
+with the same "explicit decision before implementation" shape item 154's
+own two decisions had; record that decision in the PRODUCT_GUIDE Decision
+Log as this item's own first step, not something to default into under
+time pressure.
+
+**Effort:** M. **Depends on:** 154.
+
+### 173. Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives
+
+**Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 160's own
+commit, during that item's own mandatory completion gate (SIR-160F3-4).**
+Pre-existing since item 156, not introduced by item 160 — but item 160 added
+three new call sites (`validate_policy`, `compile_structured_query`,
+`applied_column_masks`) that can each now independently self-derive
+`scope_connections` via `resolve_scope_connections` when a caller supplies
+`connection_resolver` without it, and the request pipeline
+(`execution/service.py`) calls into more than one of those functions per
+request. Each self-derivation walks every join in the query and calls the
+resolver (`resolve_visible_connection` in production, hitting the
+`ConnectionRegistry`/`PolicyStore`) once per referenced connection, with no
+caching across the calls within a single request — so a query with N
+cross-connection joins now redoes that resolution work 2-3x per request
+instead of once. Not a correctness bug (each resolution is independently
+correct) and not unbounded (bounded by the policy's `max_joins` cap), so it's
+a performance follow-up, not a blocker on item 160 itself.
+
+**What to do (when prioritized):** memoize inside `resolve_scope_connections`
+(`validation/schema_validation.py`) via a per-call dict cache keyed by
+`(connection_id, id(principal))`, or thread a single resolved
+`scope_connections` map through `StructuredQueryService`'s pipeline once per
+request instead of letting each stage self-derive independently — the latter
+is the more thorough fix but changes call-site plumbing beyond this item's
+resolver function, so record which approach is chosen in the PRODUCT_GUIDE
+Decision Log before implementing.
+
+**Effort:** S. **Depends on:** 160.
+
+### 174. A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch
+
+**Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 166's own
+commit, during that item's own mandatory completion gate (SIR-166-2).**
+Pre-existing since cross-connection joins/`join_group` first shipped, not
+introduced or closed by item 166. `_load_table`
+(`validation/schema_validation.py`) reflects a joined table on a SECONDARY
+connection through the PRIMARY connection's own engine, qualified by a
+hardcoded schema string:
+
+```python
+schema = f"{physical_db_name(table_connection)}.dbo"
+```
+
+This is CLAUDE.md non-negotiable 6 territory (dialect differences go behind a
+Protocol + one class per variant + registry, never an inline assumption at a
+call site) — but there is not even an `if dialect == ...` branch here; one
+dialect's idiom (MSSQL's `<database>.dbo.<table>` three-part naming) is
+hardcoded unconditionally. `grep -rn "dbo" src/querygate/` returns only this
+line and `schema/reflection.py`'s already-documented `[None, "dbo"]` fallback
+list. A cross-connection join whose SECONDARY connection is Postgres or MySQL
+reflects under a schema qualifier that dialect cannot resolve, producing a
+masked `NoSuchTableError` that names neither the real cause nor the dialect —
+the same failure shape item 163 was raised specifically to eliminate for a
+not-connectable secondary, now reappearing one layer downstream for a
+connectable-but-wrong-idiom one. It fails closed (no data reaches the
+caller), so this is a robustness/clarity gap, not a policy bypass — but it
+means only an MSSQL secondary has ever actually worked in this configuration,
+silently.
+
+**What to do:** add a method to `connections/dialects.py`'s
+`SessionDialectAdapter` — e.g. `cross_database_schema_qualifier(db_name: str)
+-> Optional[str]` — returning `f"{db_name}.dbo"` for the MSSQL adapter and
+`None` for every other dialect's adapter (its default/base implementation).
+At the `_load_table` call site (`schema_validation.py`, the `schema =
+f"{physical_db_name(table_connection)}.dbo"` line), dispatch through
+`get_session_adapter(...)` (the same seam `resolve_query_table_connections`
+already uses for its `is_connectable()` check) instead of the hardcoded
+f-string; when the adapter returns `None`, raise a `QueryValidationError`
+naming the dialect and explaining that a cross-connection secondary of that
+dialect isn't supported yet — the same reject-don't-emulate posture item 74
+set for MSSQL's missing `NULLS FIRST/LAST`, rather than guessing at that
+dialect's own cross-database naming convention (which varies: Postgres has no
+true equivalent without `dblink`/`postgres_fdw`, MySQL uses a bare
+`<database>.<table>` with no third segment). Add a regression test: a
+cross-connection join with a Postgres secondary in a shared `join_group`,
+asserting a clean `QueryValidationError` naming the dialect rather than a
+masked `NoSuchTableError`.
+
+**Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped),
+163 (shipped — same `is_connectable()` seam this reuses).
+
+### 175. `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" ✅ DONE
+
+An autouse, function-scoped fixture now disposes every cached engine after
+each test, mirroring `test_mssql_live.py`'s own already-shipped fix for the
+identical `reset_engines()`-doesn't-dispose gap (item 2).
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 175).
 

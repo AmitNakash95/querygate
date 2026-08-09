@@ -147,7 +147,7 @@ claim when the work ships or before explicitly handing the item back.
   of defect item 138 exists to fix. Needs a maintainer decision on the
   cursor-ceiling/pagination-shape tradeoff, recorded as the item's own first
   step.* **Depends on 138.**
-- [ ] **141** — Convert audit-reader line caps into practically-tight
+- [x] **141** — Convert audit-reader line caps into practically-tight
   window-based early exits. *Surfaced 2026-08-01 by the
   `security-invariant-reviewer` audit of item 138; deliberately not built as
   part of it. Trades a bounded ordering-tolerance assumption for speed on an
@@ -326,7 +326,7 @@ claim when the work ships or before explicitly handing the item back.
   (MySQL) or 134 (WORM retention). *Surfaced 2026-08-06 by `claim-reviewer`
   while auditing item 152 — a documentation gap, not a claim-accuracy defect;
   deliberately left out of item 152's own scope.*
-- [ ] **154** — WORM archive segments are unenveloped, so managed search
+- [x] **154** — WORM archive segments are unenveloped, so managed search
   (item 134 phase 2) cannot verify a segment was actually written by
   QueryGate. *Surfaced 2026-08-06 by `security-invariant-reviewer` auditing
   item 134 phase 2 — a phase-1 write-format change with a migration question
@@ -367,7 +367,7 @@ claim when the work ships or before explicitly handing the item back.
   auditing item 156 — pre-existing and unrelated to that item's own change;
   small, mechanical fix (case-fold the lookup, mirroring `resolve_scope_
   connections`).*
-- [ ] **160** — item 156 follow-up: harden four smaller connection-resolution
+- [x] **160** — item 156 follow-up: harden four smaller connection-resolution
   edge cases (audit-vs-compiled-SQL snapshot consistency under a concurrent
   reload, a cap-ordering inversion, a fail-open-by-default parameter shape,
   and a purpose/k-anonymity/limit scope clarification). *Surfaced 2026-08-06
@@ -411,7 +411,7 @@ claim when the work ships or before explicitly handing the item back.
   verified safe); a safe stripping precedent already exists in
   `admin/service.py`'s `_humanize_validation_errors` to reuse or adapt; small,
   self-contained fix to one route's exception handling.*
-- [ ] **166** — cross-connection self-join reflects both aliases against ONE
+- [x] **166** — cross-connection self-join reflects both aliases against ONE
   connection: the `physical_tables` reflection memo is keyed by table name
   alone, ignoring which connection a name resolves to. *Surfaced 2026-08-07
   by `security-invariant-reviewer` auditing item 159's own fix — pre-existing,
@@ -436,7 +436,7 @@ claim when the work ships or before explicitly handing the item back.
   table. *Surfaced 2026-08-07 by `security-invariant-reviewer`'s post-fix
   re-review of item 167 — same root cause, a different consumer; needs a real
   compiled repro before landing a fix, the same way item 167 required one.*
-- [ ] **170** — cross-connection joins are reflected as if both connections
+- [x] **170** — cross-connection joins are reflected as if both connections
   are always on the same physical server instance, with nothing that
   actually checks it. *Surfaced 2026-08-07 by `security-invariant-reviewer`
   auditing item 163's own fix — pre-existing, not caused by that item;
@@ -444,6 +444,23 @@ claim when the work ships or before explicitly handing the item back.
   can), but the failure mode is a silent wrong-database read rather than an
   error; needs a design call (validate same-host at config-load time vs.
   document the assumption) before implementation.*
+- [ ] **171** — the audit windowed early-exit (item 141) can silently
+  under-report on a merged/multi-writer file, with no disclosure field or way
+  to tell caller-facing consumers apart. *Surfaced 2026-08-08 by three of the
+  four `auditors` reviewers auditing item 141's own commit, during that
+  item's own mandatory completion gate. The dominant risk and the operator
+  knob are already shipped (item 141); what remains is a Protocol return-shape
+  change (3-tuple → 4-tuple) across ~20 call sites in two production
+  consumers and three test files — mechanical but wide, deliberately not
+  folded into item 141 itself.* **Depends on 141.**
+- [ ] **172** — WORM archive segment verification checks each record's own
+  hash but never the chain's linkage within a segment (duplication/omission
+  undetectable, even against a keyed archive). *Surfaced 2026-08-09 by
+  `security-invariant-reviewer`/`test-contract-reviewer` auditing item 154's
+  own commit, during that item's own mandatory completion gate. Needs an
+  explicit design decision (recorded in the PRODUCT_GUIDE Decision Log) on
+  binding a segment to its own object key before the duplication half can be
+  fully closed, not just the linkage-break detection half.* **Depends on 154.**
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 

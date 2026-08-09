@@ -83,6 +83,7 @@ def build_help_router(
             lookback_seconds=cfg.personal_denials_lookback_seconds,
             max_events_scanned=cfg.personal_denials_max_events_scanned,
             max_lines_read=cfg.personal_denials_max_lines_read,
+            max_consecutive_out_of_window=cfg.personal_denials_max_consecutive_out_of_window,
             limit=cfg.personal_denials_limit,
             backend_label=cfg.audit_sink_backend.value,
         )

@@ -33,6 +33,7 @@ from querygate.validation.schema_validation import (
     iter_column_refs,
     iter_expression_nodes,
     iter_join_condition_predicates,
+    resolve_scope_connections,
     iter_join_conditions,
     iter_query_scopes,
     iter_scope_case_conditions,
@@ -1050,6 +1051,25 @@ def validate_policy(
     # pass (max_cte_count, max_subquery_depth) — see its own docstring for why
     # `_validate_and_compile` also calls it, earlier, on its own.
     scoped, cte_names = validate_structural_caps(query, policy)
+
+    # TODO.md item 160 finding 3 (maintainer-approved 2026-08-09): a caller
+    # that passes a `connection_resolver` (meaning it CAN resolve
+    # cross-connection joins) but forgets `scope_connections` used to
+    # silently fall back to primary-only enforcement — the exact shape that
+    # let `admin/service.py`'s `simulate_candidate_policy` drift onto the
+    # weak path before item 156 caught it. Self-deriving here closes that
+    # footgun structurally rather than relying on every future call site to
+    # remember. Placed AFTER `validate_structural_caps` (finding 2's
+    # cheap-bound-first ordering) since `resolve_scope_connections` touches
+    # the connection registry/policy store, not before it — a malformed AST
+    # still gets rejected by the cheap caps before this runs. Every current
+    # caller already passes both together or neither, so this is a no-op
+    # change in behavior today; it only protects a future caller.
+    if scope_connections is None and connection_resolver is not None:
+        scope_connections = resolve_scope_connections(
+            query, connection_id, principal=principal, connection_resolver=connection_resolver
+        )
+
     _validate_subquery_constraints(scoped, policy)
     _validate_correlation(
         query,

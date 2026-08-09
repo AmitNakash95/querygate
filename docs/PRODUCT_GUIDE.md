@@ -3705,6 +3705,212 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-09 — a `join_group` spanning different physical hosts is now
+  rejected, both at config-load time and (the load-bearing layer) at request
+  time (TODO.md item 170).** Cross-connection joins reflect the joined table
+  through the PRIMARY connection's own engine, under a same-instance
+  cross-database schema qualifier — an assumption that two connections
+  sharing a `join_group` are the same physical server instance, never
+  genuinely separate hosts, that nothing previously checked. **Decision:
+  validate, don't just document.** The first draft (`ConnectionRegistry.
+  from_entries` comparing `ConnectionProfile.join_group` members' `(host,
+  port)`) was found incomplete by this item's own `auditors` gate
+  (security-invariant-reviewer and architecture-boundary-reviewer,
+  independently): the join_group actually consulted at request time is
+  `policy.join_group or profile.effective_join_group()`, and a
+  `Policy.join_group` override (default, per-connection, or per-principal)
+  can unite two connections invisibly to a config-load-only check, since
+  `Policy` lives in a separate file. `validation/schema_validation.py`'s
+  `resolve_query_table_connections` — the one place that sees the
+  fully-resolved, possibly-per-principal value — now carries the same host
+  check too; the config-load-time layer stays as a fast, common-case
+  backstop, not the sole enforcement point. Both layers share one function,
+  `connections/models.py`'s `connection_host_port`, which never returns the
+  full connection string. The same audit pass also found and fixed two
+  narrower gaps in that function: an un-encoded `@` in a password used to
+  bleed into the parsed "host" (SQLAlchemy splits userinfo at the FIRST `@`,
+  so the rejection message could carry a password fragment — now stripped to
+  the LAST `@`), and a driver that packs the real host into a `?host=` query
+  parameter instead of the URL's own host component used to silently escape
+  the comparison — now falls back to the query parameter. Full write-up,
+  including the corrected (and previously-wrong) comparison to item 158's
+  own scoping, is in `docs/TODO_ARCHIVE.md` (item 170). Mutation-verified,
+  each enforcement point independently.
+
+- **2026-08-09 — a cross-connection self-join now reflects each alias
+  against its own declared connection, instead of both silently collapsing
+  onto whichever alias reflected first (TODO.md item 166).** A self-join
+  (the same physical table name declared twice) where the join names a
+  DIFFERENT `connection` than the primary is a shape `StructuredQuery`
+  already permits — `_validate_table_aliases` only requires an alias per
+  repeated name, not that both occurrences share a connection. But
+  `_reflect_and_validate_scope`'s `physical_tables` reflection memo
+  (`validation/schema_validation.py`) was keyed by the casefolded physical
+  name alone, so both aliases shared one memo slot: whichever alias's name
+  won the `needed` set's iteration order reflected the table once against
+  its own connection, and the other alias silently reused that same
+  `sa.Table` object — compiling and executing against the wrong connection
+  despite its own declared one. **Not merely a coin flip** (found by this
+  item's own `security-invariant-reviewer` audit pass): the caller chooses
+  both alias strings and can observe from the returned data which direction
+  the race went, so it was adaptively steerable; the exploitable direction
+  is the PRIMARY alias losing its own slot, since it then silently read
+  data reflected under the SECONDARY connection's schema while its masks/
+  filters/deny-list still resolved against only the PRIMARY's Policy — see
+  the full write-up in `docs/TODO_ARCHIVE.md` (item 166) for the other
+  direction's weaker, over-enforcing failure mode. **Decision: fix the memo
+  key, don't reject the shape** — key `physical_tables` by `(table_cx,
+  physical_key)` instead of `physical_key` alone, so two aliases only share
+  a reflection when they actually resolve to the same connection
+  (byte-identical for every single-connection query, including a
+  same-connection self-join). Chosen over rejecting cross-connection
+  self-joins outright because the AST already allows the shape and it has a
+  legitimate use (the same table name existing on two different databases)
+  — narrowing what a caller can express because one code path handled it
+  incorrectly runs against the "expose primitives, don't spoon-feed"
+  posture the engine otherwise holds. One disclosed side effect: a
+  cross-connection self-join against a non-MSSQL secondary now fails
+  deterministically instead of racing between a masked failure and a silent
+  wrong-connection success, since the secondary alias's reflection always
+  runs into the pre-existing MSSQL-only `.dbo` schema-qualifier gap (tracked
+  separately as TODO.md item 174, not introduced or closed by this item).
+  Mutation-verified: reverting the key change makes the regression test fail
+  with `assert 1 == 2` (only one reflection recorded instead of two); the
+  test also asserts each alias binds to its OWN connection's reflected
+  `sa.Table` (not just that both `_load_table` calls happened), closing a
+  gap the same audit pass found in the first version of the test.
+
+- **2026-08-09 — `validate_policy`/`compile_structured_query`/
+  `applied_column_masks` now self-derive `scope_connections` from a given
+  `connection_resolver`, closing item 160's finding 3 footgun (TODO.md item
+  160, fully closed).** Every `scope_connections`/`connection_resolver`
+  parameter these three functions gained under item 156 defaulted to `None`
+  — meaning a caller that passed a `connection_resolver` (able to resolve
+  cross-connection joins) but forgot the explicit `scope_connections` map
+  silently fell back to primary-only enforcement, with no error or warning.
+  This is the exact shape that let `admin/service.py`'s
+  `simulate_candidate_policy` drift onto the weak path before item 156
+  caught it, and item 160's own audit-response pass (2026-08-07) deliberately
+  left the "should we self-derive" question open as a maintainer decision
+  rather than defaulting into it under time pressure. **Decision: yes,
+  self-derive**, made only after auditing every call site that exists today:
+  `execution/service.py` and `admin/service.py` (the two production callers)
+  and every internal recursive compiler call (subquery, EXISTS, CTE) already
+  pass `scope_connections` and `connection_resolver` together, via item 160
+  finding 1's snapshot; the three benchmark-harness callers
+  (`security_benchmark.py` x2, `catalog/adaptive_learning_benchmark.py`) pass
+  neither. So the fix is a no-op for every caller in the codebase today — it
+  only protects a future one from repeating the exact mistake item 156 fixed.
+  Implementation calls the existing `resolve_scope_connections`
+  (`validation/schema_validation.py`) when `scope_connections is None and
+  connection_resolver is not None` (plus `connection_id is not None` for the
+  two compiler functions, which allow an unset connection_id).
+  In `validate_policy`, this runs AFTER `validate_structural_caps`,
+  preserving finding 2's cheap-bound-first ordering, since
+  `resolve_scope_connections` touches the connection registry/policy store.
+  Mutation-verified in all three functions.
+
+- **2026-08-09 — WORM archive segments are now enveloped and per-segment
+  hash-chained, closing `docs/THREAT_MODEL.md` QG-40's residual (TODO.md
+  item 154).** The local hash-chained sink (item 91) wraps every event in a
+  `LedgerRecord` a reader can verify; the WORM sink (item 134) wrote the bare
+  event body instead, so a principal with `s3:PutObject` on the archive
+  prefix — necessarily including QueryGate's own AWS role — could plant a
+  fabricated, schema-valid segment the search reader would return
+  indistinguishably from a genuine one. Two decisions were needed before
+  building, made explicitly rather than assumed: **(1) per-segment chain,
+  not cross-segment** — each flushed batch gets its own chain restarting at
+  `GENESIS_PREV_HASH`/seq 0, rather than one continuous chain across every
+  segment ever written. This fully answers the actual threat (was this
+  segment altered after being written) without `WormFlushMonitor` needing to
+  persist/recover chain state across restarts or coordinate a single writer
+  across replicas — the same complexity a cross-segment design would add
+  that item 141 already flagged as disproportionate for a comparable case.
+  The trade-off is real and stated, not hidden: a per-segment chain cannot
+  prove no segment was ever silently withheld from a result, only that a
+  *returned* segment wasn't altered — a different, lower-severity residual
+  left to the existing S3-listing/Object-Lock posture. **(2) No
+  legacy-segment tolerance** — the reader now requires an envelope
+  unconditionally (a bare line is `malformed`, not accepted as a weaker
+  historical shape), because this feature has no production deployment
+  predating the fix; the "support both shapes indefinitely" alternative
+  would have added permanent reader complexity for a migration case that
+  doesn't exist. Implementation: `audit/worm_sink.py`'s `_build_segment_body`
+  chains `make_record` calls per drained batch; `audit/worm_search.py`
+  verifies each record's hash before unwrapping, using the same
+  `AUDIT_LEDGER_HMAC_KEY` the local chain/reader use.
+  **Corrected the same day, by this item's own `auditors` gate**: the first
+  version of this entry and of `docs/THREAT_MODEL.md`'s QG-40 row claimed
+  the gap was closed unconditionally. It is not — SHA-256 (the default,
+  unkeyed chain) is a public function, so a principal with `s3:PutObject`
+  can still forge a passing segment when `AUDIT_LEDGER_HMAC_KEY` is unset;
+  only a KEYED (HMAC) chain makes forgery infeasible, the same distinction
+  `audit/ledger.py`'s docstring already draws for the local ledger — except
+  the WORM chain has no externally-anchored head hash to fall back on for
+  the unkeyed case, since each segment restarts at genesis. `app.py` now
+  logs a startup warning when WORM is configured without a key. Two further
+  residuals recorded rather than glossed over: the reader verifies each
+  RECORD's hash but never the chain's LINKAGE within a segment, so a
+  genuine segment can be duplicated to a second key (returned twice) or
+  have interior records dropped without detection (TODO.md item 172,
+  deliberately out of this item's scope); and rotating the HMAC key makes
+  every previously-archived segment fail verification on the next search —
+  now surfaced as a distinct `unverified` count (not lumped into
+  `malformed`) so the response discloses a likely key mismatch rather than
+  returning a silently-empty, "nothing happened"-looking result. See
+  [Audit logging](#6-audit-logging--every-attempt-always).
+
+- **2026-08-08 — Accepted a windowed early-exit for the tail-first audit
+  readers (`admin/anomaly.py`, `admin/config_trends.py`), after first closing
+  the dominant source of the ordering risk it depends on (TODO.md item
+  141).** Both readers scan the audit log tail-first (newest line first) and,
+  before this item, always read until a hard line/byte cap fired — correct,
+  but wasteful on a long-running deployment's history once the caller's
+  requested time window has clearly been left behind. The item as originally
+  scoped proposed trading a *bounded chance of silently missing a handful of
+  borderline events* for that speed, because `occurred_at` was stamped at
+  event **construction** time, before an arbitrary amount of intervening work
+  (structured logging, and any future code added between construction and
+  the write) — so under concurrent load, two events' physical write order
+  and their `occurred_at` order were not strictly guaranteed to agree.
+  Investigating whether that risk could be closed outright (not just bounded)
+  found the real fix: `audit/logger.py` now re-stamps `occurred_at` inside a
+  new `_persist` helper, immediately before calling the sink's `emit()` —
+  removing the dominant, effectively-unbounded-under-load source of drift
+  (the gap between construction and the write). A fully unconditional
+  version of this — moving the stamp into the sink's own `emit()` under its
+  write lock, so *no* caller could ever see a different value — was
+  considered and rejected: the audit test suite (and any future
+  backfill/import tooling) legitimately calls `sink.emit()` directly with a
+  synthetic, controlled `occurred_at` to seed historical fixtures, and
+  forcing the sink to always overwrite it would silently break that
+  capability. `_persist` stamps `occurred_at` **before** calling `emit()`, not
+  inside the sink's write lock, so the residual is bounded by however long a
+  competing writer holds that lock (`os.open`/`os.write`/optional `os.fsync`),
+  not sub-microsecond jitter as an earlier draft of this entry and the
+  in-code comments claimed — corrected 2026-08-08 by the `auditors` gate on
+  this same item, independently caught by three of its four reviewers. It is
+  negligible in practice today only because every production `audit_*` caller
+  runs synchronously on the single asyncio event loop with no `await` between
+  event construction and `_persist`, not because of anything the tolerance
+  itself guarantees. **Decision:** keep a `max_consecutive_out_of_window`
+  tolerance (default 5,000, counted only across the reader's own matching
+  event type) as defense-in-depth against that residual, rather than claiming
+  a mathematical guarantee the multi-process case (an operator setting
+  `num_of_workers > 1` in one pod/replica, sharing one `AUDIT_JSONL_PATH`
+  across independent OS processes with no cross-process lock) can't actually
+  back. That multi-worker/single-ledger-file configuration is a pre-existing,
+  undocumented gap (not introduced or worsened by this item), recorded as
+  `docs/THREAT_MODEL.md` QG-43 alongside the early-exit's own residual (a
+  merged/restored/multi-writer audit file can make this heuristic return a
+  confidently-wrong, undisclosed `truncated=False`); the operator-facing
+  tuning knob for the tolerance and the fuller fix (a disclosure field
+  threaded through both reports plus `help/personal_denials.py`, which
+  independently inherits the same gap) are tracked as TODO.md item 171,
+  deliberately not folded into this item's already-committed scope. See
+  [Audit logging](#6-audit-logging--every-attempt-always) and
+  [the Core Request Pipeline](#the-core-request-pipeline).
+
 - **2026-08-07 — A correlated subquery's `correlate` reference now resolves
   through the same shared, case-insensitive table lookup everywhere, closing
   a real cross-tenant `EXISTS`/scalar-subquery bypass (TODO.md item 169).**
@@ -5018,18 +5224,18 @@ reasoning behind them, newest first. Added to incrementally as work happens
   documented page-size ceiling; and the route wraps its S3 call in
   `mask_unexpected()` so a raw backend failure (bucket/endpoint/driver text)
   can never leak to the client, matching every other REST route's posture.
-  **Recorded, not fixed here (TODO.md item 154):** unlike the local
-  hash-chained sink, WORM segments are written unenveloped, so this reader
-  can confirm a line matches a known redaction-safe SHAPE but not that
-  QueryGate itself wrote it — a principal holding `s3:PutObject` on the
-  archive prefix could plant a fabricated, schema-valid segment this reader
-  would return indistinguishably from a genuine one. Closing that needs
-  enveloping/hash-chaining WORM segments the way the local sink already
-  does — a phase-1 WRITE-FORMAT change with a migration question for
-  already-archived segments, an explicit design decision rather than
-  something a read-side module can decide unilaterally, tracked as its own
-  item instead of folded into this one. See `docs/THREAT_MODEL.md` QG-40 for
-  the full mitigation/residual statement.
+  **Superseded 2026-08-09 (item 154): the enveloping/hash-chaining gap named
+  below is closed for a keyed archive** — see that item's own Decision Log
+  entry above (search "WORM archive segments are now enveloped") and
+  `docs/THREAT_MODEL.md` QG-40 for the current, full mitigation/residual
+  statement (including what's still genuinely open: the unkeyed default,
+  intra-segment chain linkage, and key rotation). Original note, kept for
+  history: unlike the local hash-chained sink, WORM segments were written
+  unenveloped, so this reader could confirm a line matched a known
+  redaction-safe SHAPE but not that QueryGate itself wrote it — a principal
+  holding `s3:PutObject` on the archive prefix could plant a fabricated,
+  schema-valid segment this reader would return indistinguishably from a
+  genuine one.
 
 - **2026-08-06 — item 19 phase 1 added MySQL as a third registry dialect**,
   purely additive per the item-57 adapter architecture: `MySQLDialectAdapter`

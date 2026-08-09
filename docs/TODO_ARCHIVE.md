@@ -10058,6 +10058,73 @@ final tree.
 **Effort:** S (lower the ceiling — the cursor-redesign alternative, M, was
 not chosen). **Depends on:** 138.
 
+### 141. Convert audit-reader line caps into practically-tight window-based early exits ✅ DONE
+
+**Surfaced 2026-08-01 by the `security-invariant-reviewer` audit of item 138;
+deliberately not built as part of that item.** `admin/anomaly.py` and
+`admin/config_trends.py` both scan tail-first (item 138), which makes a
+targeted optimization possible: once the scan has seen a long consecutive run
+of matching-type events whose `occurred_at` is at or before `window_start`,
+every remaining, physically-earlier line is also out of window — but only if
+physical write order actually tracks `occurred_at` order. `occurred_at` was
+set at event **construction** time, before the (possibly later) write, so
+under concurrent request handling two events' physical write order and their
+`occurred_at` order were not *guaranteed* identical. The item as originally
+scoped proposed a tolerance for that gap; a bounded chance of silently
+missing borderline events, in exchange for speed on a long-running
+deployment's history.
+
+**Shipped 2026-08-08 (maintainer-approved, PRODUCT_GUIDE Decision Log).**
+Investigating whether the gap could be closed outright — not just
+bounded — found the real fix: the dominant source of drift was not
+concurrency itself but the arbitrary work (a `log.info` call, and any future
+code) that ran *between* event construction and the durable write. A new
+`_persist` helper in `audit/logger.py` re-stamps `occurred_at` immediately
+before calling the sink's `emit()`, closing that gap for the actual
+production write path. A fully unconditional version — moving the stamp into
+the sink's own `emit()` under its write lock, so no caller could ever see a
+different value — was considered and rejected: the audit test suite (and any
+future backfill/import tooling) legitimately calls `sink.emit()` directly
+with a synthetic, controlled `occurred_at` to seed historical fixtures, and
+forcing the sink to always overwrite it would silently break that capability.
+The one duplicated try/except block across `audit_query`/`audit_config_change`/
+`audit_connection_probe`/`audit_catalog_governance` was folded into
+`_persist` in the same change (a genuine simplification, not scope creep —
+the four blocks were already byte-identical apart from one, and the fix
+belonged in exactly one place).
+
+**Remaining tolerance.** With the dominant drift source closed, the residual
+risk is sub-microsecond thread-scheduling jitter around lock acquisition —
+real in principle, negligible in practice. `AnomalyThresholds`/
+`ChangeTrendThresholds` both gained `max_consecutive_out_of_window` (default
+5,000, counted only across the reader's own matching event type — other
+event types neither advance nor reset the counter, since they say nothing
+about this stream's recency); once the threshold is crossed the scan breaks
+without setting `stopped_early`/`truncated`, since the window has genuinely
+ended as far as the tolerance allows. Not claimed as a mathematical
+guarantee: an operator setting `num_of_workers > 1` in one pod/replica would
+have multiple independent OS processes appending to the same
+`AUDIT_JSONL_PATH` with no cross-process lock, which the fix's guarantee
+doesn't cover. That's a pre-existing, undocumented gap — not introduced or
+worsened by this item — left for its own follow-up.
+
+**Coverage.** `test_audit.py` gained two `_persist`-level unit tests: one
+proving a stale, explicitly-set `occurred_at` gets overwritten with the real
+write-time value, one proving `_persist` doesn't mutate the caller's own
+event object. `test_anomaly.py`/`test_config_trends.py` each gained three
+reader-level tests, all using the same technique — a malformed JSON sentinel
+placed at the physical start of the file (oldest, read last tail-first) — to
+prove: (1) the early exit fires and the sentinel is never reached
+(`malformed == 0`), (2) an in-window event mid-run resets the counter so the
+scan does NOT exit early (`malformed == 1`, sentinel reached), and (3) a
+non-matching event type inside a run neither advances nor resets the counter.
+**Mutation-verified:** each of the three enforcement points (the break
+condition, the counter reset, and the `_persist` re-stamp itself) was
+deliberately removed in turn; the corresponding test failed for the expected
+reason each time, then the fix was restored and the full suite re-run green.
+
+**Effort:** S. **Depends on:** 138.
+
 ### 142. `docs/THREAT_MODEL.md` uses the ID `QG-32` for two unrelated threats ✅ DONE
 
 **Surfaced 2026-08-01/02 by the `claim-reviewer`/`security-invariant-reviewer`
@@ -11012,6 +11079,90 @@ low-risk-docs-task framing.
 task's own instruction to check for other genuinely-missing entries).
 **Depends on:** 19 (phase 1 shipped), 134 (phase 1 and 2 shipped).
 
+### 154. WORM archive segments are unenveloped, so managed search cannot verify a segment was actually written by QueryGate ✅ DONE
+
+**Surfaced 2026-08-06 by `security-invariant-reviewer` auditing item 134
+phase 2's managed search.** The LOCAL hash-chained sink
+(`audit/sinks.py`'s `HashChainedAuditSink`) wraps every persisted event in a
+`LedgerRecord` envelope a reader can verify. The WORM sink
+(`audit/worm_sink.py`'s `WormFlushMonitor.flush_once`) wrote the bare
+`PersistableEvent` body instead — deliberate for phase 1, but it meant
+`audit/worm_search.py` had no hash-chain to check a line against. S3 Object
+Lock (COMPLIANCE mode) stops an existing object from being deleted or
+overwritten before its retention date; it never stopped a NEW, schema-valid
+object from being added to the archive prefix. Any principal holding
+`s3:PutObject` on that prefix — necessarily including QueryGate's own AWS
+role — could plant a fabricated segment indistinguishable from a genuine one.
+
+**Two decisions needed before implementation, both made explicitly by the
+maintainer (2026-08-08) rather than assumed:**
+
+1. **Per-segment chain, not cross-segment.** Each flushed batch gets its own
+   self-contained chain (`seq` restarts at 0, `prev_hash` restarts at
+   `GENESIS_PREV_HASH`, for every segment), rather than one continuous chain
+   spanning every segment ever written. This fully closes the actual threat
+   (was THIS segment tampered with after being written) without needing
+   `WormFlushMonitor` to persist/recover chain state across process
+   restarts, or coordinate a single writer across replicas — the same
+   complexity class item 141 flagged for a hypothetical cross-process local
+   ledger. Trade-off, recorded rather than glossed over: a per-segment chain
+   cannot prove no segment was ever silently withheld from a search result —
+   only that a returned segment wasn't altered. That's a different, lower-
+   severity residual (suppressing a genuine object from being listed is a
+   materially harder attack than forging a new one) left to the existing
+   S3-listing/Object-Lock posture, not claimed as closed by this fix.
+2. **No legacy-segment tolerance.** The reader requires an envelope
+   unconditionally — a bare (pre-fix-shaped) line is `malformed`, not
+   accepted as a weaker-but-legitimate historical shape. Chosen because this
+   feature (item 134) has no production deployment predating this fix, so
+   the "support both shapes indefinitely" alternative would have added
+   permanent reader complexity for a migration case that doesn't exist yet.
+
+**Shipped.** `audit/worm_sink.py` gained `_build_segment_body` (chains
+`make_record` calls per event in a drained batch) and `WormFlushMonitor`
+gained a `ledger_key` parameter — the same `AUDIT_LEDGER_HMAC_KEY` the local
+chained sink/reader use, wired through `app.py`'s lifespan
+(`resolve_ledger_key(conf.audit_ledger_hmac_key)`). `audit/worm_search.py`'s
+scan loop now calls `verify_envelope_hash` before ever unwrapping a line —
+`None` (not envelope-shaped) or `False` (hash mismatch) both count as
+`malformed`, mirroring the local reader's identical posture — and
+`build_worm_search_result`/`search_worm_archive` both gained a `ledger_key`
+parameter threaded the same way. `docs/THREAT_MODEL.md`'s QG-40 row and
+`audit/worm_search.py`'s/`audit/worm_sink.py`'s module docstrings were
+updated from "residual, not closed" to "fixed," recording both decisions
+above and the residual that's still genuinely open (segment withholding).
+
+**Coverage.** `tests/unit/test_audit_worm_sink.py` gained
+`test_flushed_segment_is_a_valid_per_segment_hash_chain`,
+`test_two_flushes_each_start_their_own_chain_at_genesis` (pins decision 1
+directly — the second segment's first record does NOT link to the first
+segment's last hash), and a rewritten
+`test_flushed_event_body_is_byte_identical_to_the_local_chained_sink`
+(compares the embedded `event` body, not the whole file, since the two are
+no longer byte-identical as files once each has its own independent chain
+state). `tests/unit/test_worm_search.py` gained a new
+`TestForgedOrUnenvelopedSegmentsAreRejected` class: a bare unenveloped line,
+a `LedgerRecord`-shaped line with a mismatched hash, a genuine-segment
+control, and a keyed chain verified with/without the matching key — plus a
+`build_worm_search_result`-level test proving the config key actually
+reaches verification. `tests/security/test_worm_search_redaction.py`'s four
+existing tampered-segment tests were upgraded from bare tampered JSON (which
+would now be rejected at the envelope gate, no longer exercising the
+`extra="forbid"` schema gate they claim to test) to validly-enveloped
+tampered bodies — closing a test-quality gap this item's own fix would
+otherwise have silently introduced, not just adapting fixtures mechanically.
+`tests/integration/test_rest_api.py`'s existing WORM end-to-end test was
+extended to assert the archived segment verifies under the configured HMAC
+key and fails to verify under no key, proving `app.py`'s lifespan wiring.
+**Mutation-verified:** the envelope-verification gate itself, the `app.py`
+key wiring, and the `build_worm_search_result` key wiring were each
+deliberately removed in turn; the corresponding tests failed for the
+expected reason each time, then the fix was restored and the full suite
+re-run green.
+
+**Effort:** M. **Depends on:** 91 (the local chain this mirrors), 134 (phase
+1's WORM sink, phase 2's search surface).
+
 ### 155. `sensitivity_approval_reasons` looks up every table in the query's top-level connection's catalog, never a cross-connection join's own connection ✅ DONE
 
 **Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item
@@ -11701,6 +11852,133 @@ only observable under set-iteration-order variance.
 
 **Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped).
 
+### 160. Item 156 follow-up: harden the connection-resolution edge cases a full security-invariant audit surfaced ✅ DONE
+
+**Surfaced 2026-08-06 by `security-invariant-reviewer` while auditing item
+156 itself** (distinct from item 159, which is an unrelated pre-existing
+schema-reflection bug the same audit pass happened to find). Four smaller,
+lower-severity gaps in item 156's own design, none a live bypass, each cheap
+individually but grouped here since a real fix to any one likely touches the
+same `_validate_and_compile`/`resolve_table_policies` call sites as the
+others:
+
+1. **Audit-vs-compiled-SQL snapshot consistency.** `resolve_table_policies`'s
+   default resolver re-reads the joined connection's Policy from the live
+   `PolicyStore` at every call site (`policy_validation.py`,
+   `sqlalchemy_compiler.py`, and again at the post-execution
+   `applied_column_masks` audit call in `execution/service.py`) rather than
+   resolving it once and threading the same snapshot through, the way the
+   PRIMARY policy already is (`self._get_policy()`, read once in
+   `_validate_and_compile`). An authorized `/admin/reload-config` landing
+   between compile and the audit call could make `masked_columns` describe a
+   Policy the compiled statement wasn't actually built against. Narrow
+   (requires an authorized actor's concurrent action) but real. Fix: resolve
+   each distinct non-primary connection's Policy once in
+   `_validate_and_compile`, return the map alongside `scope_connections`, and
+   thread a `connection_resolver` closure over that fixed snapshot into both
+   `compile_structured_query` and the `applied_column_masks` audit call.
+2. **Cap-ordering inversion.** `_validate_and_compile` now computes
+   `early_scope_connections` (which walks every scope and does a
+   `PolicyStore.get()` per scope) before `validate_policy` runs at all — ahead
+   of `_validate_cte_constraints`'s cheap `max_cte_count` check and
+   `max_subquery_depth`, inverting the "cheap bound first" ordering that
+   function's own docstring documents as deliberate (chosen so a malformed
+   AST can't make the validator do O(N × tree) work before being told a cap
+   exists). Bounded by `concurrency_slot`, so Low severity, but worth
+   restoring: either move the map computation inside `validate_policy` itself
+   (after the structural caps, before `_validate_scope`), or accept the
+   current ordering explicitly with a one-line Decision Log note.
+3. **Fail-open-by-default design question.** Every new `scope_connections`/
+   `connection_resolver` parameter (on `validate_policy`,
+   `compile_structured_query`, `applied_column_masks`) defaults to `None` —
+   i.e., the SAFE (per-connection) behavior is opt-in and the pre-156
+   (primary-only) behavior is what a forgetful call site silently gets, with
+   no type error or warning. This is exactly the shape that let
+   `admin/service.py`'s `simulate_candidate_policy` (fixed same-day, see item
+   156's archive entry) drift onto the weaker path in the first place, and
+   nothing stops a FUTURE call site from making the identical mistake. Needs
+   an explicit decision (record in this guide's Decision Log): should
+   `validate_policy` self-derive the map when given a `principal`/
+   `connection_resolver` but no explicit `scope_connections`, closing the
+   footgun structurally? That's a real design change (and interacts with
+   finding 2's ordering question), not a mechanical fix — hence recorded here
+   rather than done under this item's own time-boxed audit-response pass.
+4. **Purpose narrowing, `min_group_size`, and row limits are not
+   cross-connection-resolved.** Item 156's scope, both as filed and as
+   shipped, is explicitly column masks, mandatory row filters, and the
+   table/column deny-list — `resolve_table_policies` returns the joined
+   connection's Policy un-narrowed by the query's declared `purpose` (so a
+   `purpose_policies` delta configured on the JOINED connection never
+   applies), and the k-anonymity floor (`min_group_size`) and row limits
+   (`max_limit`/`default_limit`) are read from the primary Policy only,
+   never the joined connection's. This was never claimed otherwise in the
+   shipped docs (`docs/THREAT_MODEL.md` QG-09 and this guide's item-156
+   entry both say "column masks, mandatory row filters, and the table/column
+   deny-list", not "all policy enforcement") — recorded here so a future
+   reader doesn't assume silently the residual doesn't exist, and as a
+   candidate for a follow-up item if per-connection purpose/k-anonymity/limit
+   resolution is ever prioritized.
+
+**Effort:** M (findings 1–2 are mechanical; finding 3 is a design decision;
+finding 4 is scope confirmation only, no code change, unless later
+prioritized). **Depends on:** 156 (shipped — this is entirely about hardening
+its own edges).
+
+**Status (2026-08-07): findings 1, 2, and 4 shipped; finding 3 deliberately
+left open.** Finding 1 — `execution/service.py` gained `StructuredQueryService.
+_snapshot_connection_resolver`: `_validate_and_compile` now resolves each
+distinct non-primary connection's Policy exactly once and threads the same
+`ConnectionResolver` snapshot into `validate_policy`, `compile_structured_query`,
+and the `applied_column_masks` audit call, so all three agree even under a
+concurrent `/admin/reload-config`. Finding 2 — the cheap `max_cte_count`/
+`max_subquery_depth` checks were extracted into `validation/policy_validation.
+validate_structural_caps` and are now called directly from `_validate_and_
+compile` BEFORE `resolve_scope_connections` (the `PolicyStore.get()`-touching
+step), restoring cheap-bound-first ordering; `validate_policy` still calls the
+same extracted function internally afterward for every other caller. Both
+mutation-verified — see `tests/unit/test_service.py`'s
+`test_audit_masked_columns_reflects_the_snapshot_compiled_against_not_a_late_reload`
+and `test_structural_caps_reject_before_any_per_scope_policy_lookup`. Finding 4
+— confirmed `docs/THREAT_MODEL.md` QG-09 and the item-156 Decision Log entry
+already scope the fix accurately (no doc drift); left as a documented residual.
+**Finding 3 resolved 2026-08-09 (maintainer-approved): self-derive.**
+`validate_policy`, `compile_structured_query`, and `applied_column_masks`
+all now self-derive `scope_connections` (via `resolve_scope_connections`)
+when given a `connection_resolver` but no explicit map, closing the footgun
+structurally. Before implementing, every existing call site in the codebase
+was audited: `execution/service.py` and `admin/service.py` (the only two
+production callers) and every internal recursive compiler call (subquery,
+EXISTS, CTE) already pass both together via finding 1's snapshot; the three
+benchmark-harness call sites (`security_benchmark.py` x2,
+`catalog/adaptive_learning_benchmark.py`) pass neither. So this is a no-op
+change in behavior for every caller that exists today — it only protects a
+future one. Placed after `validate_structural_caps` in `validate_policy` to
+preserve finding 2's cheap-bound-first ordering (`resolve_scope_connections`
+touches the connection registry/policy store). Mutation-verified in all
+three functions — see `tests/unit/test_policy_validation.py`'s
+`test_cross_connection_join_denied_table_self_derived_when_only_the_resolver_is_given`,
+`tests/unit/test_compiler.py`'s
+`test_filter_configured_only_on_joined_connection_is_self_derived_from_the_resolver`,
+and `tests/unit/test_column_masking.py`'s
+`test_applied_column_masks_self_derives_the_map_from_the_resolver`.
+
+**Same-day audit correction (`security-invariant-reviewer`, 2026-08-07):**
+the redundant second `validate_structural_caps` call inside `validate_policy`
+is NOT a provably-safe no-op the way an earlier version of this note (and of
+the function's own docstring) claimed — `max_cte_count`/`max_subquery_depth`
+never move under purpose narrowing, but the same function also runs
+`_validate_cte_constraints`'s deny-list/mask-aware cte-shadowing rules, which
+DO. The two calls can legitimately disagree (the un-narrowed pre-check can
+under-reject a purpose-narrowed case the internal, narrowed call still
+correctly rejects); this is safe only because `Policy.for_purpose` is
+additive-only, never subtractive. Pinned by a new test in
+`tests/unit/test_policy_validation.py` and corrected in both the function's
+own docstring and this item's PRODUCT_GUIDE.md Decision Log entry. A second,
+unrelated finding in the same pass — `_snapshot_connection_resolver`'s
+closure silently discarding its own `principal` argument — was also fixed and
+pinned with its own regression test; see the PRODUCT_GUIDE.md entry for full
+detail on both.
+
 ### 163. A not-connectable dialect (Snowflake/BigQuery) as the SECONDARY side of a cross-connection join never reaches the `is_connectable()` guard ✅ DONE
 
 **Shipped 2026-08-07:** `validation/schema_validation.py`'s
@@ -12025,6 +12303,132 @@ on the final tree; `black --check` clean.
 **Effort:** S (one route's exception handling; the stripping precedent
 already existed in `admin/service.py` to extend). **Depends on:** none.
 
+### 166. Cross-connection self-join reflects both aliases against ONE connection — the `physical_tables` reflection memo is keyed by table name alone, not by which connection a name resolves to ✅ DONE
+
+**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 159's own
+fix** (pre-existing; not introduced or closed by that item — item 159's fix
+only changes which STRING key is used to look up `table_connection`; this is
+a separate defect in what happens to that lookup's result). `_reflect_and_
+validate_scope`'s `physical_tables` reflection cache
+(`validation/schema_validation.py`) was keyed by `physical_key` alone (the
+casefolded physical table name), not by which connection that occurrence
+resolves to:
+
+```python
+if physical_key not in physical_tables:
+    physical_tables[physical_key] = await _load_table(
+        connection_id, physical_name,
+        table_connection_cf.get(name.casefold(), connection_id),
+    )
+source = physical_tables[physical_key]
+```
+
+For a same-connection self-join
+(`test_self_join_reflects_physical_table_once_and_aliases_both`), this is
+correct and deliberate — the physical table is genuinely identical for both
+aliases, so reflecting once and re-aliasing (`source.alias(name)`) is right
+and cheaper than reflecting twice. But `StructuredQuery` also permits a
+CROSS-CONNECTION self-join: the same physical table name, joined to itself,
+with the join declaring a DIFFERENT `connection` than the primary
+(`_validate_table_aliases` in `query_ast/models.py` only requires an alias
+per occurrence of a repeated physical name — it does not forbid the two
+occurrences from naming different connections). In that shape, `physical_key`
+was identical for both aliases even though their resolved `table_cx` values
+differ (alias `a` → primary connection, alias `b` → `connection="other"`).
+Whichever alias's name happened to be processed first (the `needed` set's
+iteration order) reflected the table once, against ITS OWN connection — the
+SECOND alias then silently reused that same `sa.Table` object, so it compiled
+and executed against the FIRST alias's connection instead of its own declared
+one. **This was not merely a coin flip outside the caller's control**
+(security-invariant-reviewer, 2026-08-09, SIR-166-4): the caller freely
+chooses both alias strings, `needed` is a Python `set` built directly from
+those exact spellings, and the query's results disclose which direction the
+race went — so a caller could adaptively probe alias-name pairs until the
+iteration order landed the way they wanted. **The exploitable direction is
+the PRIMARY alias losing its own memo slot**: it then silently read data
+reflected under the SECONDARY connection's schema qualifier, while
+`resolve_table_policies` still resolved its masks/mandatory-row-filters/
+deny-list against only the PRIMARY connection's Policy — `table_connection`
+still declared that alias primary regardless of which `sa.Table` it ended up
+bound to — so the secondary connection's Policy was never applied to data
+actually read from it. (The other direction — the secondary alias silently
+reading the primary's table — was checked against the STRICTER
+`[primary, other]` policy union item 156 produces for a declared
+cross-connection alias, so it was over-, not under-, enforced.) The compiled
+SQL for the "losing" alias never actually reached the connection the caller
+named for it.
+
+Unlike item 159 itself, this was NOT fixed by case-folding the lookup: the
+per-alias lookup (via `table_connection_cf`) was already correct; the bug was
+that its result was discarded by the memo's coarser key. Item 156's mask/
+filter/deny-list resolution was unaffected in the sense that it reads a
+separately-computed, correctly-per-alias `scope_connections` map — so the
+POLICY CHECK still ran against the right connection's Policy for each alias
+— but the DATA the compiled query actually read did not correspond to that
+check for whichever alias lost the race, which is arguably worse than a
+masking gap: the query silently read a different physical table than the one
+its own Policy was just evaluated against.
+
+**Decision (maintainer-approved 2026-08-09):** fix the memo key rather than
+reject the shape — a cross-connection self-join is a legitimate AST-permitted
+query (the same physical table name existing on two different connections),
+and QueryGate's engine philosophy is to expose primitives the AST already
+allows, not to narrow them because one code path handled them incorrectly.
+
+**Shipped:** `physical_tables` is now keyed by `(table_cx, physical_key)` —
+the resolved connection alongside the casefolded physical name — instead of
+`physical_key` alone, in `_reflect_and_validate_scope`
+(`validation/schema_validation.py`). Two aliases of the same physical table
+name now only share a reflection when they actually resolve to the same
+connection; a same-connection self-join is byte-identical to before (both
+aliases produce the same key), and a cross-connection self-join now reflects
+each alias against its own declared connection. The now-unreachable
+`table_connection_cf.get(name.casefold(), connection_id)` fallback (its
+reachability argument: `table_connection_cf`'s key set always matches
+`name_to_physical`'s, and `undeclared_tables` already rejects anything
+outside it) is left as documented dead-man's code rather than an assert,
+since `_reflect_and_validate_scope` is also called directly by tests with a
+hand-supplied partial map — but the comment now states which two invariants
+must keep holding for that to stay true (security-invariant-reviewer,
+2026-08-09, SIR-166-3).
+
+**Behavior change, disclosed:** on a non-MSSQL secondary connection, a
+cross-connection self-join now fails DETERMINISTICALLY (the secondary
+alias's reflection is always attempted, and its hardcoded MSSQL-only
+`f"{db}.dbo"` schema qualifier — a pre-existing gap, not introduced here —
+doesn't resolve on Postgres/MySQL) rather than the pre-fix coin flip between
+a masked failure and a silent wrong-connection success. Strictly better
+(fail closed, not a race), but worth naming since it's operator-visible
+(security-invariant-reviewer, 2026-08-09, SIR-166-5). The missing dialect
+dispatch for that schema qualifier is tracked separately as TODO.md item 174
+(SIR-166-2) — pre-existing, not introduced or closed by this item.
+
+**Coverage:** `test_cross_connection_self_join_reflects_each_alias_against_
+its_own_connection` (`tests/unit/test_schema_validation.py`,
+`TestCrossConnectionJoins`) — a self-join across two connections in the same
+`join_group`, with distinguishable per-connection `sa.Table` objects (not
+`_patch_load_table`'s shared fake, which returns one object for both
+connections and would mask exactly this) so the test can assert not just
+that both `_load_table` calls happened, but that each alias actually BINDS
+to its own connection's reflection (`resolved["o1"].element is
+primary_orders`, `resolved["o2"].element is other_orders`,
+`.schema is None` vs. `.schema == "other_db.dbo"`) — closing a gap
+security-invariant-reviewer's own audit of this item found in the first
+version of the test (SIR-166-1: asserting only on `_load_table`'s recorded
+call arguments proves reflection happened but not that binding is correct,
+a real bug class already shipped once in this region, items 167/169).
+Mutation-verified: reverting the memo-key change makes the strengthened test
+fail with `assert 1 == 2` (only one `_load_table` call recorded instead of
+two) — the exact race the fix closes; the pre-existing
+`test_self_join_reflects_physical_table_once_and_aliases_both` guards the
+opposite direction (a same-connection self-join must still collapse to one
+reflection, `assert 2 == 1` if it doesn't). Full unit suite (2184 passed, 2
+skipped) green on the final tree; `black --check` clean.
+
+**Effort:** S–M (mechanical memo-key fix plus one regression test).
+**Depends on:** cross-connection joins/`join_group` (shipped), 159 (shipped —
+same code path; this is what remained after that fix).
+
 ### 167. A case-different column ref to a joined alias leaves a phantom second `sa.Table` alias that a mandatory row filter turns into an implicit cross join (confirmed by compiling the shape — row duplication, not just cost) ✅ DONE
 
 **Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 159's
@@ -12339,3 +12743,202 @@ passed) suites are green.
 and a second, adjacent bug found in the same region took the effort past a
 pure S). **Depends on:** 106 (correlated subqueries, shipped), 167 (shipped —
 same root cause, first consumer fixed).
+
+### 170. Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it ✅ DONE
+
+**Surfaced 2026-08-07 by `security-invariant-reviewer` auditing item 163's
+own fix** (pre-existing; not introduced or closed by that item — item 163
+only added the `is_connectable()` check to the same function this
+observation is about). `validation/schema_validation.py`'s `_load_table`
+always reflects a cross-connection join's table through the PRIMARY
+connection's own engine, qualified with a schema string built from
+`connections/engine.py`'s `physical_db_name(table_connection)` — i.e. it
+assumes the joined ("secondary") connection is a same-instance,
+cross-database sibling of the primary (e.g. two databases on one MSSQL
+server), never a genuinely separate host. The only gate on whether two
+connections may cross-connection-join at all was `join_group` string
+equality (`resolve_query_table_connections`); nothing compared host/instance
+identity between the two connections' connection strings. Two connections
+placed in the same `join_group` that actually point at *different* physical
+hosts would not have been rejected at validation time — instead, if a
+same-named database happened to exist on the primary's host, the query would
+silently read that unrelated database instead of the joined connection's
+real one; if no such database existed, it failed with the same masked
+`NoSuchTableError` item 163 already documents for a different cause. This
+required an operator misconfiguration (placing two unrelated-host
+connections in one `join_group`) — no caller-supplied input could trigger it
+— so exploitability was low, but the failure mode (a silent wrong-database
+read rather than an error) was worse than a masked error.
+
+**Decision (maintainer-approved 2026-08-09):** validate, don't just
+document — reject a `join_group` that spans different hosts, rather than
+leaving same-host as an implicit, undocumented-until-now operator
+responsibility.
+
+**Shipped, two layers — this item's own `auditors` gate found the first
+draft (config-load-time only) incomplete, both independently by
+`security-invariant-reviewer` and `architecture-boundary-reviewer`:**
+
+1. **Config-load-time (fast, catches the common case early):**
+   `connections/registry.py` gained `_validate_join_group_hosts`, called once
+   from `ConnectionRegistry.from_entries` (and therefore `from_file`, and
+   everything built on it — `config_reload.py`'s hot reload, `cli.py`'s
+   `querygate-validate-config`/config-governance dry-run) after every profile
+   in the batch has been built. It groups profiles by `effective_
+   join_group()` and, for any group with 2+ ENABLED members (a disabled
+   connection can never be resolved as a join's secondary — QG170-5), checks
+   host and port as separate sets (an omitted port must not collide with an
+   explicit one for the same host — QG170-4) and rejects with a clear
+   `ValueError` if they don't all agree.
+2. **Request-time (load-bearing — this is the one that actually closes the
+   gap):** `validation/schema_validation.py`'s `resolve_query_table_
+   connections`, immediately after its existing `join_group`-equality and
+   `is_connectable()` checks, now also compares `primary`'s and `other`'s
+   host/port and raises `ConfigValidationError` on a mismatch. **Why a
+   second layer was necessary** (QG170-1 / 170-A, the item's own headline
+   auditors finding): the config-load-time check only ever sees
+   `ConnectionProfile.join_group` — but the join_group actually consulted at
+   request time is `policy.join_group or profile.effective_join_group()`,
+   and `Policy.join_group` (set in `policy.yaml`, possibly scoped per
+   principal) can unite two connections whose OWN profiles disagree or are
+   unset, entirely invisibly to the config-load check, since `Policy` lives
+   in a separate file that function never sees. Only the request-time check
+   sees the fully-resolved, possibly-per-principal value.
+
+Both layers share one parsing/redaction function,
+`connections/models.py`'s `connection_host_port`, so there is exactly one
+place this logic can drift. It never returns the full connection string —
+the error message is built from host/port alone, so it can never leak a
+credential even though `cli.py`'s `_describe_load_error` passes an
+unrecognized `ValueError` straight through unredacted — and closes two
+credential/coverage gaps this item's own audit found empirically:
+**(QG170-3)** SQLAlchemy's URL parser splits userinfo at the FIRST `@`, so
+an un-encoded `@` in a password (routine — operators frequently don't
+percent-encode) used to bleed its tail into `url.host` itself, meaning the
+rejection message could carry a password fragment; now stripped to the LAST
+`@` before use. **(QG170-2)** a driver that packs the real host into a query
+parameter instead of the URL's own host component
+(`postgresql+asyncpg://user:pass@/db?host=...`, the unix-socket/PgBouncer
+idiom) used to silently opt that member out of the comparison (`url.host`
+alone is empty); now falls back to `url.query.get("host")`. A connection
+string that still can't be parsed as a URL at all, or genuinely carries no
+host component anywhere (e.g. an MSSQL DSN-style `odbc_connect=...` string),
+is still skipped rather than rejected — the same posture item 158's own
+validator takes for an unresolved `${VAR}` template, no basis to assert a
+mismatch either way.
+
+Config-load-time is checked at the file-driven boundary (`from_entries`),
+not inside `ConnectionRegistry.__init__` itself, so a raw dict-of-profiles
+built directly (test fixtures, `catalog/adaptive_learning_benchmark.py`) is
+unaffected. **Correction (2026-08-09, `claim-reviewer`):** this scoping is
+NOT, as originally written here, "the same precedent" item 158's
+dialect-vs-connection_string check sets — item 158 is a `field_validator`
+that runs on EVERY `ConnectionProfile` construction, including a direct one
+(its own docstring's "this isn't a live bypass" paragraph says so
+explicitly); a raw dict-of-profiles is NOT exempt from it. This item's
+config-load-time check is a genuinely different kind of check (batch-scoped
+across multiple profiles, which no single-model validator can express) with
+no real precedent to lean on — accepted as config-load-boundary-only on its
+own terms, backstopped by the request-time layer for exactly the cases a
+raw/direct construction could otherwise miss.
+
+**Coverage:** `TestJoinGroupHostValidation` (`tests/unit/test_connections_
+registry.py`, 13 tests) — different hosts rejected; different ports on the
+same host rejected; one port omitted on the same host allowed (QG170-4); a
+spelling-only host-case difference allowed; connections with no shared
+`join_group` unaffected; a disabled connection on a different host doesn't
+trip the check (QG170-5); an unparseable connection string doesn't trip the
+check; a host packed into a `?host=` query parameter is still compared
+(QG170-2); direct `ConnectionRegistry(...)` construction bypasses the check
+by design; a 3-member group with one odd host out is rejected (not just a
+clean 2-vs-2 split); a dedicated test confirming the rejection message never
+contains the raw connection string; and a dedicated pair confirming an
+un-encoded `@` in a password never leaks into the message while two
+same-host connections with different `@`-containing passwords still load
+cleanly (QG170-3). `TestCrossConnectionJoins`'s
+`test_policy_join_group_spanning_different_hosts_is_rejected` and
+`test_policy_join_group_on_the_same_host_with_one_port_omitted_is_allowed`
+(`tests/unit/test_schema_validation.py`) cover the request-time layer: two
+connections on different hosts, NEITHER setting `ConnectionProfile.
+join_group` (so the config-load check is a no-op — each is its own 1-member
+group), united only by a `Policy.join_group` override — asserts
+`ConfigValidationError`; and the same port-omission false positive
+`_validate_join_group_hosts` guards against, pinned again at this SECOND
+enforcement point (a first draft of the request-time check compared
+`(host, port)` as a single tuple, which would have reintroduced QG170-4 at
+this layer — caught and fixed before commit, not after). Mutation-verified,
+each enforcement point independently: removing `_validate_join_group_hosts`'s
+call site, its disabled-connection skip, and its separate host/port
+comparison; removing the request-time host check in `resolve_query_table_
+connections` and, separately, its own host/port-separation logic; removing
+`connection_host_port`'s `?host=` fallback; and removing its `@`-stripping —
+each mutation makes exactly the test(s) built to catch it fail, and only
+those, with every other test staying green. Full unit (2198 passed),
+non-real-db integration (365 passed), and security (480 passed) suites green
+on the final tree; `black --check` clean.
+
+**Effort:** S–M (a validator akin to item 158's for the first layer, plus a
+second, load-bearing layer this item's own audit found necessary, plus
+regression tests). **Depends on:** none.
+
+### 175. `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" ✅ DONE
+
+**Surfaced 2026-08-09 by the MSSQL CI job failing on
+`test_delete_against_mssql`** on a PR that never touched
+`execution/write_execution.py`, `connections/engine.py`, or this test file
+at all — confirmed by diffing every changed file against the failing job.
+`connections/engine.py`'s `reset_engines()` (used by this file's
+`_use_writable_policy()` helper at the start of every test) just drops the
+cached-engine references:
+
+```python
+def reset_engines() -> None:
+    """Drop all cached engines/sessionmakers/metadata — used by tests."""
+    ENGINES.clear()
+    SESSIONMAKERS.clear()
+    METADATAS.clear()
+```
+
+— never awaiting `AsyncEngine.dispose()`. Harmless for the rest of the test
+suite, which mocks `get_engine`/`session_scope` and never opens a real
+connection, but this file opens a real `aioodbc` connection pool in every
+test and never disposes it. The CI log's `Unclosed connection` warnings
+(x2) were direct evidence: an abandoned-but-not-yet-closed pooled
+connection, reclaimed later by GC at an arbitrary point (possibly
+concurrently with another test's own live query, since `aioodbc` bridges
+blocking `pyodbc` calls through a thread-pool executor), is a plausible
+mechanism for the observed
+`[Microsoft][ODBC Driver 18 for SQL Server]Connection is busy with results
+for another command` error. **Exactly the same class of leak TODO.md item 2
+already found and fixed once**, in `test_mssql_live.py`'s `mssql_app`
+fixture — that fix was deliberately scoped to just that one file's teardown
+rather than changing the shared `reset_engines()` used everywhere else
+(item 2's own write-up: "harmless for the rest of the suite... but a
+genuine resource-lifecycle gap once one does [create real engines]"),
+leaving this file (which also creates real engines, but predates having a
+pytest fixture at all — it calls a bare setup function per test) exposed to
+the identical gap.
+
+**Shipped:** an autouse, function-scoped `pytest_asyncio.fixture` in
+`tests/integration/test_mssql_write_execution.py`,
+`_dispose_real_mssql_engines_after_each_test`, mirroring `test_mssql_live.py`'s
+`mssql_app` fixture teardown exactly — `await engine.dispose()` on every
+cached `ENGINES` entry, then `reset_engines()`, after every test (not just
+"before the next test's setup runs," which would leave the LAST test in the
+file's engine leaked at process exit with no next test to trigger a reset).
+`_use_writable_policy()` itself is unchanged.
+
+**Coverage:** verified via `poetry run pytest tests/integration/
+test_mssql_write_execution.py --collect-only` (no real MSSQL available in
+this environment) that the fixture wires in without an import/collection
+error; `black --check` clean. The actual fix is verified live by the same
+MSSQL CI job that surfaced the bug — the class of fix (an explicit-dispose
+autouse fixture) is identical to `test_mssql_live.py`'s own, which IS
+verified live in that job. No local reproduction of the original failure
+was attempted (requires a real MSSQL server + the specific GC-timing
+conditions that triggered it), consistent with this being an
+already-reviewed, already-shipped pattern applied to a second file rather
+than a novel fix needing independent verification.
+
+**Effort:** S (mirrors an already-shipped fixture pattern). **Depends on:**
+2 (shipped — same resource-lifecycle gap, found once before).
