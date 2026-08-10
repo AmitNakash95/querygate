@@ -3705,6 +3705,49 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-10 — `GET /help/my-recent-denials` now carries a per-principal
+  cooldown (TODO.md item 126).** This is the only self-service (no
+  `admin:observability:read`) surface that triggers `admin/anomaly.py`'s
+  `JsonlAuditEventSource`'s O(file-size) scan of the persisted audit JSONL —
+  every other reader of that source requires the admin scope. Surfaced
+  2026-07-30 as consistent with (not worse than) the rest of the codebase's
+  no-REST-rate-limiting posture, and deliberately left open pending a
+  throttling-design decision rather than fixed unprompted. **Decision:** add
+  `AppConfig.personal_denials_cooldown_seconds` (default 5s, `0` disables) and
+  a `PersonalDenialsCooldown` tracker (`help/personal_denials.py`) — a plain
+  closure-scoped `Dict[principal_id, float]`, mirroring item 43's
+  `HealthMonitor._last_manual_test` cooldown shape but keyed by principal
+  instead of connection. A second call within the window gets `429` with
+  `Retry-After`. Kept as one router-closure instance (not a module-global
+  singleton) so each app build — including every test's own `create_app()` —
+  starts with a clean cooldown, the same reasoning `tests/conftest.py`'s
+  `in_process_limiter().clear()` gotcha documents for other in-process state,
+  without needing a new autouse-fixture reset.
+
+  **Hardened same-day by this item's own mandatory `security-invariant-reviewer`
+  gate**, which found the first cut real but under-disclosed and under-tested:
+  the cooldown is genuinely per-WORKER-PROCESS (undisclosed — `num_of_workers
+  > 1`/multiple replicas multiply the effective ceiling, the same limitation
+  `execution/quota.py`'s in-process limiter already documents for the
+  identical shape) and its bucket is `principal.subject`, which every
+  statically configured API key shares one of (docs/THREAT_MODEL.md QG-33
+  already documents the identical coupling for this endpoint's *data*
+  isolation — extended to note it now also covers the *rate limit*). Neither
+  is a bypass — both only make the limit stronger or more coarse, never
+  weaker — but both needed writing down, not just holding informally. Also
+  found and fixed: the cooldown map grew one permanent entry per distinct
+  principal ever seen with no eviction (`record_request` now prunes every
+  entry whose own cooldown has already elapsed on each call — behavior-
+  preserving, since an expired entry is semantically identical to an absent
+  one); and the 429 path was invisible to observability (added
+  `querygate_personal_denials_rate_limited_total`, a single unlabeled
+  counter — deliberately a metric, not a persisted audit event, since an
+  audit event per 429 would let a caller inflate the very file this endpoint
+  scans, a self-amplifying feedback loop). `tests/unit/test_personal_denials.py`
+  now exercises `PersonalDenialsCooldown` directly (first-call-allowed,
+  second-blocked, per-principal isolation, zero disables, pruning), and
+  `test_personal_denials_api.py` gained a shared-API-key-shares-one-bucket
+  regression test pinning the documented QG-33 coupling.
 - **2026-08-09 — a `join_group` spanning different physical hosts is now
   rejected, both at config-load time and (the load-bearing layer) at request
   time (TODO.md item 170).** Cross-connection joins reflect the joined table
@@ -7915,7 +7958,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   line is actually yielded. Measured: at the shipped 2,000,000-line default,
   a realistic ~800-byte audit line put per-request cost at ~1.6 GB read and
   10-40s of blocking work on `/help/my-recent-denials` — authenticated-only,
-  no admin scope, no rate limit — which is a bound in the formal sense and
+  no admin scope, no rate limit at the time — which is a bound in the formal sense and
   not one in the practical sense. Fixed with two new independent bounds
   inside `iter_lines_reverse` itself, both raising a typed
   `AuditFileReadBounded` rather than returning silently (so every caller's

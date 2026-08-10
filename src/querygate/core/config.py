@@ -462,6 +462,19 @@ class AppConfig(BaseSettings):
     # is (this surface is reachable with authentication only, no admin scope).
     personal_denials_max_consecutive_out_of_window: int = pyd.Field(default=5_000, ge=1)
     personal_denials_limit: int = pyd.Field(default=20, ge=1)
+    # TODO.md item 126: this is the only self-service (no-admin-scope) REST
+    # surface whose handler does an O(file-size) scan of the persisted audit
+    # JSONL per call — bound repeated calls per-caller the same way item 43's
+    # admin_connection_test_cooldown_seconds bounds "test now" probes. 0
+    # disables the cooldown (every other self-service endpoint's posture).
+    # Disclosed limits (2026-08-10 security-invariant-reviewer, item 126's own
+    # completion gate): the cooldown is per-WORKER-PROCESS (num_of_workers > 1
+    # or multiple replicas multiply the effective ceiling — same limitation
+    # execution/quota.py's in-process limiter has), and its bucket is
+    # `principal.subject`, which every statically configured API key shares
+    # one of (see docs/THREAT_MODEL.md QG-33) — real per-caller granularity
+    # needs JWT auth.
+    personal_denials_cooldown_seconds: float = pyd.Field(default=5.0, ge=0)
 
     # Config-governance version history (querygate/admin/) — staged/applied/
     # rolled-back snapshots of connections.yaml/policy.yaml/catalog.yaml,

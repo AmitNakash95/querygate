@@ -156,7 +156,7 @@ order-of-magnitude, not commitments.
 | 123 | ✅ A select-item `CASE`'s conditions are absent from the audit shape | S | 120 |
 | 124 | ✅ Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
 | 125 | ✅ ★ A window function as an `Expression` operand (bar row 15 → 16/16) | XL | 100, 101 |
-| 126 | No per-caller rate limit on `GET /help/my-recent-denials` | S | 45 |
+| 126 | ✅ No per-caller rate limit on `GET /help/my-recent-denials` | S | 45 |
 | 127 | ✅ Reject an MCP request whose routing headers disagree with its body | S–M | 86 |
 | 128 | ✅ Conform to the final MCP `2026-07-28` protocol revision | L | 90, 92, 93 |
 | 129 | ✅ Never advertise a principal-varying MCP result as shared-cacheable | S | 128 |
@@ -1911,35 +1911,14 @@ pillar's success criterion. 4/4 enforcement points mutation-verified.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 125).
 
-### 126. No per-caller rate limit on `GET /help/my-recent-denials`
+### 126. No per-caller rate limit on `GET /help/my-recent-denials` ✅ DONE
 
-**Surfaced 2026-07-30 by the `auditors` security-invariant review of item 45
-phase 2, not a regression in this pass.** `GET /api/v1/help/my-recent-denials`
-requires only authentication (no scope, matching `/help/my-access`'s posture),
-and its handler calls `admin/anomaly.py`'s `JsonlAuditEventSource`, which reads
-and JSON-parses every line of the audit JSONL file per call (the
-`max_events_scanned` cap only bounds what's *kept in memory*, not how much of
-the file is scanned). Every other caller of that reader (`GET
-/admin/observability/anomalies`) requires `admin:observability:read`; this is
-the first time the same O(file-size) scan becomes triggerable by *any*
-authenticated caller, and there is no REST-level rate limit anywhere in the
-codebase to bound repeated calls.
+A per-principal cooldown (`PersonalDenialsCooldown`,
+`AppConfig.personal_denials_cooldown_seconds`) now bounds repeated calls,
+with a metrics counter on the 429 path and disclosed per-process/shared-API-
+key-bucket limitations.
 
-**Why not fixed inline:** the review explicitly judged this consistent with —
-not worse than — the existing posture of every other self-service endpoint
-(`/help/my-access`, schema browsing), none of which are rate-limited either;
-adding a new throttling mechanism is a deliberate product/design decision
-(scope, default interval, whether it should be per-endpoint or
-codebase-wide), not a small safe fix to make unprompted.
-
-**What to do (when prioritized):** either (a) add a lightweight per-principal
-cooldown scoped to this endpoint, mirroring item 43's existing
-`admin_connection_test_cooldown_seconds` precedent (a new
-`personal_denials_cooldown_seconds` config field + a 429/Retry-After response
-inside the window), or (b) make a recorded decision that the existing
-no-REST-rate-limiting posture is acceptable for this class of bounded local
-file read and close this as will-not-build. Either resolves it; doing neither
-leaves the residual undocumented.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 126).
 
 ### 127. Reject an MCP request whose routing headers disagree with its body (gateway confused-deputy) ✅ DONE
 

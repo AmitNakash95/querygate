@@ -461,6 +461,8 @@ claim when the work ships or before explicitly handing the item back.
   explicit design decision (recorded in the PRODUCT_GUIDE Decision Log) on
   binding a segment to its own object key before the duplication half can be
   fully closed, not just the linkage-break detection half.* **Depends on 154.**
+- [x] **126** — no per-caller rate limit on `GET /help/my-recent-denials`.
+  ✅ **Shipped** (per-principal cooldown + config knob + metrics counter).
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 

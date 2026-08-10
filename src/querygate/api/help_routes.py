@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Callable, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from querygate.admin.anomaly import JsonlAuditEventSource
 from querygate.audit.ledger import resolve_ledger_key
@@ -19,14 +19,23 @@ from querygate.help.models import (
     RedactedConfiguration,
     SetupChecklistResponse,
 )
-from querygate.help.personal_denials import RecentDenialsReport, build_recent_denials_report
+from querygate.help.personal_denials import (
+    PersonalDenialsCooldown,
+    RecentDenialsReport,
+    build_recent_denials_report,
+)
 from querygate.help.service import get_guide_service
+from querygate.metrics import PERSONAL_DENIALS_RATE_LIMITED_TOTAL
 
 
 def build_help_router(
     get_principal: Callable[..., Principal], cfg: AppConfig, prefix: str = "/api/v1"
 ) -> APIRouter:
     router = APIRouter(prefix=f"{prefix}/help", tags=["product-guide"])
+    # TODO.md item 126: per-principal, closure-scoped (one instance per router
+    # build, so a fresh app/test gets a fresh cooldown — no global state to
+    # reset between tests).
+    denials_cooldown = PersonalDenialsCooldown()
 
     # Static product guidance is intentionally public. It contains only the
     # packaged corpus and never touches deployment-specific state.
@@ -70,6 +79,18 @@ def build_help_router(
 
     @router.get("/my-recent-denials", response_model=RecentDenialsReport)
     async def describe_my_recent_denials(principal: Principal = Depends(get_principal)):
+        remaining = denials_cooldown.seconds_until_allowed(
+            principal.subject, cfg.personal_denials_cooldown_seconds
+        )
+        if remaining > 0:
+            PERSONAL_DENIALS_RATE_LIMITED_TOTAL.inc()
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many requests; retry after the cooldown.",
+                headers={"Retry-After": str(int(remaining) + 1)},
+            )
+        denials_cooldown.record_request(principal.subject, cfg.personal_denials_cooldown_seconds)
+
         source = None
         if cfg.audit_sink_backend.is_locally_readable():
             source = JsonlAuditEventSource(
