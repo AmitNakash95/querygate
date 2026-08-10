@@ -13003,6 +13003,105 @@ each `break` makes every one of the above fail for exactly that reason.
 **Effort:** M (mechanical but wide — a Protocol return-shape change with a
 real test-suite blast radius). **Depends on:** 141.
 
+### 172. WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment ✅ DONE
+
+**Surfaced 2026-08-09 by `security-invariant-reviewer` and `test-contract-
+reviewer` auditing item 154's own commit, during that item's own mandatory
+completion gate.** Item 154 made `audit/worm_search.py` verify each
+`LedgerRecord`'s own hash (`verify_envelope_hash`) before returning it —
+closing the gap where a fabricated, schema-valid segment could be planted
+and returned indistinguishably from a genuine one. What it did NOT do: check
+that a segment's records form a genuine, complete chain. Concretely, against
+even a KEYED archive (where forging new content is infeasible without the
+HMAC key), a principal with `s3:PutObject` on the archive prefix could still
+upload an object containing an arbitrary SUBSET of a genuine segment's
+records (drop the first record, or one from the middle) — because linkage
+(`seq` monotonicity, `prev_hash` continuity) was never checked, each
+surviving record verified on its own and the omission produced no signal.
+
+**Decision (this item's own first step, per its TODO.md scoping):**
+implement linkage-break detection now; defer the harder, separate problem —
+a genuine segment copied WHOLESALE to a second S3 key, undetectable by any
+linkage check since a full copy is itself a valid chain — to a future item,
+since closing it needs binding a segment to its own object key (a
+write-format change), not something to default into alongside this item's
+narrower, well-specified fix.
+
+**Shipped 2026-08-10.** `search_worm_archive`'s per-object line loop tracks
+`prev_verified_hash`/`prev_seq` across consumed lines, scoped to one object
+(each WORM segment restarts its own chain at `seq=0`/`GENESIS_PREV_HASH` —
+a per-segment, not cross-segment, design). The first line consumed when
+starting fresh at an object (`consume_from == 0`) must be the genuine
+genesis; every subsequent consumed line must continue `seq`/`prev_hash` from
+the one before it. On a break, the breaking line is counted `unverified`
+plus a new, distinct `WormSearchResult.chain_breaks` field, and the scan
+stops consuming that object entirely — routed around the existing
+per-object line-cap truncation path so a cursor doesn't resume back into an
+already-broken chain.
+
+**Hardened same-day by this item's own mandatory `security-invariant-reviewer`
+gate**, which found the first cut's resumed-page handling genuinely weaker
+than claimed: a cursor resuming mid-object (`consume_from > 0` — which the
+SERVER itself issues at every ordinary page boundary, not just a
+hand-crafted cursor) unconditionally accepted the incoming link of the first
+record consumed on that page. The draft's own reasoning ("mirrors
+`audit/ledger.py`'s `verify_chain` carve-out for a rotated ledger file") did
+not hold: that carve-out exists because a rotated file's true predecessor
+lives in a DIFFERENT file the verifier doesn't have, whereas here the whole
+object — predecessor line included — was already fetched into memory.
+**Fix:** before the line loop, when `consume_from > 0`, seed
+`prev_verified_hash`/`prev_seq` from the nearest preceding non-blank line
+that itself verifies, so the first record consumed on ANY page has its
+incoming link checked like every other record; the accept-as-given carve-out
+now applies only when the predecessor line itself didn't verify. Also found
+and fixed: a broken chain silently suppressed every remaining line in that
+object with no disclosure of HOW MANY — added
+`WormSearchResult.lines_skipped_after_chain_break`; and the key-rotation
+note sentence was miscounting a chain-break line (whose hash DID verify) as
+a hash-mismatch candidate — the note now separates `hash_mismatches =
+unverified - chain_breaks` for that sentence and gives the chain-break
+sentence its own, explicitly-not-a-key-mismatch wording. Also documented,
+not fixed (a genuinely separate residual): records dropped from the TAIL
+(not interior) of a segment leave a self-contained valid prefix chain with
+nothing to fail a continuity check against — filed as TODO.md item 177 for
+the missing metrics counter, and pinned as a known non-detection by a
+dedicated test rather than left undocumented.
+
+**A second review pass on the WS-172-1 fix itself (same day) caught one more
+issue: the fix introduced a crash.** The backward-seeding loop indexed
+`lines[back]` starting from `consume_from - 1` with no upper bound relative
+to the object's actual length — but `consume_from` is a cursor's own `line`
+field, which the module's documented cursor contract already treats as
+untrustworthy ("a resumption hint, not a promise the archive is
+unchanged"). A cursor whose `line` exceeds the object's real current length
+(hand-edited, or an object legitimately replaced by a shorter one since the
+cursor was issued — Object Lock prevents deleting a version, not PUTting a
+new one) raised `IndexError`, masked to a generic 500 by the route's
+`mask_unexpected()` — availability/contract-breakage, not disclosure, but a
+real regression against "degrade rather than error." **Fix (WS-172-7):**
+clamp the seed loop's start index to `min(consume_from, len(lines))`, so a
+too-large offset yields nothing to seed from (falls back to the pre-existing
+accept-as-given carve-out) instead of indexing out of range.
+
+**Coverage.** `tests/unit/test_worm_search.py`'s `TestChainLinkageVerification`
+(10 tests): a record dropped from the middle is detected; a forged non-genesis
+first record is detected; a genuinely intact multi-segment chain reports zero
+breaks (the control); resuming mid-segment on an intact chain doesn't
+false-positive; resuming exactly at a break still detects it (the WS-172-1
+regression); a break below a lowered line cap isn't misreported as a
+capacity truncation; the note discloses how many lines a break skipped
+(WS-172-2); the key-rotation sentence excludes chain-break lines (WS-172-4);
+and a dedicated test pins the tail-omission residual as a documented
+non-detection (WS-172-3). `TestPagination` gained
+`test_a_cursor_pointing_past_the_end_of_an_object_does_not_crash`
+(WS-172-7). Mutation-verified: the genesis/linkage check, the resumed-page
+seeding fix, the object-level truncation-misreporting guard, the
+skipped-lines counter, and the out-of-range clamp were each individually
+reverted and confirmed to make the corresponding test fail for exactly that
+reason, then restored.
+
+**Effort:** M. **Depends on:** 154.
+
 ### 174. A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch ✅ DONE
 
 **Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 166's own

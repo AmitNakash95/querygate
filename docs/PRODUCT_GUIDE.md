@@ -3705,6 +3705,87 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-10 — The WORM archive reader now verifies a segment's internal
+  chain linkage, not just each record's own hash (TODO.md item 172).**
+  Item 154 made `audit/worm_search.py` verify each `LedgerRecord`'s own hash
+  before returning it, closing the gap where a fabricated, schema-valid
+  segment could be planted and returned indistinguishably from a genuine
+  one — but it never checked that a segment's records form a genuine,
+  complete chain. Against even a KEYED archive (where forging new content
+  is infeasible without the HMAC key), a principal with `s3:PutObject` on
+  the archive prefix could still upload an object containing an arbitrary
+  SUBSET of a genuine segment's records (drop the first, or one from the
+  middle) — each surviving record still verified individually, so the
+  omission produced no signal. Surfaced 2026-08-09 by
+  `security-invariant-reviewer`/`test-contract-reviewer` auditing item 154's
+  own commit. **Decision (this item's own first step, per its TODO.md
+  scoping):** implement linkage-break detection now; defer the harder,
+  separate problem — a genuine segment copied WHOLESALE to a second S3 key,
+  undetectable by any linkage check since a full copy is itself a valid
+  chain — to a future item, since closing it needs binding a segment to its
+  own object key (a write-format change with the same "explicit decision
+  before implementation" shape item 154's own two decisions had), not
+  something to default into alongside this item's narrower, well-specified
+  fix. **Fix:** `search_worm_archive`'s per-object line loop now tracks
+  `prev_verified_hash`/`prev_seq` across consumed lines, scoped to one
+  object (each WORM segment restarts its own chain at
+  `seq=0`/`GENESIS_PREV_HASH` — a per-segment, not cross-segment, design).
+  The first line actually CONSUMED when starting fresh at an object
+  (`consume_from == 0`) must be the genuine genesis; every subsequent
+  consumed line must continue `seq`/`prev_hash` from the one before it. On
+  a break, the breaking line is counted `unverified` (still envelope-shaped
+  and self-consistent — just not linked) plus a new, distinct
+  `WormSearchResult.chain_breaks` field (a stronger signal than an ordinary
+  hash mismatch, which is more often a key rotation than tampering), and the
+  scan stops consuming that object entirely — deliberately routed around the
+  existing per-object line-cap truncation path, since a cursor resuming into
+  an already-broken chain would just re-encounter the identical break.
+
+  **Hardened same-day by this item's own mandatory `security-invariant-reviewer`
+  gate**, which found the first cut's resumed-page handling genuinely
+  weaker than claimed: a cursor resuming mid-object (`consume_from > 0`,
+  which the SERVER itself issues at every ordinary page boundary, not just
+  a hand-crafted cursor) unconditionally accepted the incoming link of the
+  first record consumed on that page — the Decision Log's own draft
+  reasoning claimed this "mirrors `audit/ledger.py`'s `verify_chain`
+  carve-out for a rotated ledger file," which does not hold: `verify_chain`'s
+  carve-out exists because a rotated file's true predecessor lives in a
+  DIFFERENT file the verifier doesn't have, whereas here the whole object
+  (predecessor line included) was already fetched into memory. **Fix:**
+  before the line loop, when `consume_from > 0`, seed `prev_verified_hash`/
+  `prev_seq` from the nearest preceding non-blank line that itself verifies
+  — so the first record consumed on ANY page, resumed or not, has its
+  incoming link checked like every other record; the accept-as-given
+  carve-out now applies only in the one case it's actually unavoidable (the
+  predecessor line itself didn't verify). Also found and fixed: a broken
+  chain silently suppressed every remaining line in that object with no
+  disclosure of HOW MANY — added `WormSearchResult.
+  lines_skipped_after_chain_break`, summed across every broken object in
+  the scan and named in the response `note`; and the pre-existing
+  key-rotation sentence was miscounting a chain-break line (whose hash DID
+  verify) as a hash-mismatch candidate — the note now separates
+  `hash_mismatches = unverified - chain_breaks` for that sentence and gives
+  the chain-break sentence its own, explicitly-not-a-key-mismatch wording.
+  Also documented, not fixed (a genuinely separate residual, not swept into
+  this item): records dropped from the TAIL (not interior) of a segment
+  leave a self-contained valid prefix chain with nothing to fail a
+  continuity check against — unlike `verify_chain`'s `expected_head`
+  parameter, no per-segment head anchor exists outside the object to
+  compare against; pinned by a dedicated test asserting the current
+  non-detection so a future fix updates it deliberately rather than it
+  silently starting to pass.
+
+  **A second review pass on this same-day hardening caught one more
+  issue in the fix itself: it introduced a crash.** The resumed-page
+  seeding loop indexed `lines[back]` from `consume_from - 1` with no upper
+  bound against the object's actual current length — but `consume_from` is
+  a cursor's own `line` field, which this module's cursor contract already
+  treats as untrustworthy (a hand-edited cursor, or one whose target
+  object was legitimately replaced by a shorter body since issuance,
+  reaches the same unbounded index). Clamped to
+  `min(consume_from, len(lines))` so an out-of-range offset degrades
+  (nothing to seed from) instead of raising `IndexError`. See
+  [Security Model](#security-model).
 - **2026-08-10 — The audit windowed early-exit (item 141) now discloses
   itself on the report, instead of looking identical to a genuinely complete
   scan (TODO.md item 171).** Item 141 added `max_consecutive_out_of_window`
