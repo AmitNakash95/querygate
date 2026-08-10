@@ -3705,6 +3705,44 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-10 — A cross-connection join's secondary-connection schema
+  qualifier now dispatches through the registered dialect, instead of a
+  hardcoded MSSQL idiom (TODO.md item 174).** `validation/schema_validation.py`'s
+  `_load_table` reflects a joined table on a SECONDARY connection through the
+  PRIMARY connection's own engine (see item 163/170's entries below for why),
+  and used to qualify it with an unconditional `f"{db_name}.dbo"` — T-SQL's
+  three-part naming, hardcoded regardless of the secondary's actual dialect.
+  Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 166's own
+  commit: literal CLAUDE.md non-negotiable #6 territory (dialect differences
+  behind a Protocol + one class per variant + registry, never an inline
+  assumption at a call site) — and there wasn't even an `if dialect == ...`
+  branch, just the bare MSSQL idiom applied unconditionally. A cross-connection
+  join whose secondary is Postgres or MySQL reflected under a schema qualifier
+  neither dialect understands, failing closed with a masked `NoSuchTableError`
+  that named neither the real cause nor the dialect — a robustness/clarity
+  gap, not a policy bypass (no data ever reached the caller), but it meant
+  only an MSSQL secondary had ever actually worked in this configuration,
+  silently. **Fix:** `connections/dialects.py`'s `SessionDialectAdapter` gained
+  `cross_database_schema_qualifier(db_name) -> Optional[str]` (default `None`
+  — Postgres has no true cross-database reference without an extension, MySQL's
+  is a bare `<db>.<table>` with no schema segment, so guessing at either would
+  be exactly the "synthesize structure the caller never asked for" the engine
+  philosophy rules out); `MSSQLSessionAdapter` overrides it with the real
+  `<db>.dbo.<table>` naming. `_load_table` now dispatches through
+  `get_session_adapter(...)` and raises `QueryValidationError` naming the
+  dialect when the adapter returns `None`, the same reject-don't-emulate
+  posture item 74 set for MSSQL's missing `NULLS FIRST/LAST`, rather than
+  guessing at a convention that varies per dialect. **`QueryValidationError`
+  chosen over `ConfigValidationError`, reviewed and confirmed reasonable but
+  a nit (2026-08-10 `architecture-boundary-reviewer`):** `resolve_query_table_
+  connections`'s sibling checks (`is_connectable`, host-mismatch) use
+  `ConfigValidationError` for a deployment-wide fact true of every query
+  against that secondary; this one instead follows the item-74/`array_agg`
+  "dialect lacks a requested capability" precedent from
+  `compiler/dialect_adapters.py`. Both types currently map to the same HTTP
+  422 and no caller distinguishes them, so this is a documented judgment
+  call, not left ambiguous. See
+  [Why policy is per-connection, not global](#why-policy-is-per-connection-not-global).
 - **2026-08-10 — `GET /help/my-recent-denials` now carries a per-principal
   cooldown (TODO.md item 126).** This is the only self-service (no
   `admin:observability:read`) surface that triggers `admin/anomaly.py`'s

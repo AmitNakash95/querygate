@@ -463,6 +463,13 @@ claim when the work ships or before explicitly handing the item back.
   fully closed, not just the linkage-break detection half.* **Depends on 154.**
 - [x] **126** — no per-caller rate limit on `GET /help/my-recent-denials`.
   ✅ **Shipped** (per-principal cooldown + config knob + metrics counter).
+- [x] **174** — a cross-connection join's secondary-connection schema
+  qualifier is a hardcoded MSSQL `.dbo` idiom with zero dialect dispatch.
+  ✅ **Shipped** (`SessionDialectAdapter.cross_database_schema_qualifier`,
+  reject-don't-emulate for Postgres/MySQL).
+- [ ] **173** — cross-connection connection-resolution is unmemoized, redone
+  on every call site that self-derives it. *Same subsystem as 174, perf-only
+  not a correctness gap.* **Depends on 160.**
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
