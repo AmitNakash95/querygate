@@ -13102,6 +13102,57 @@ reason, then restored.
 
 **Effort:** M. **Depends on:** 154.
 
+### 173. Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives ✅ DONE
+
+**Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 160's own
+commit, during that item's own mandatory completion gate (SIR-160F3-4).**
+Pre-existing since item 156, not introduced by item 160 — but item 160 added
+three new call sites (`validate_policy`, `compile_structured_query`,
+`applied_column_masks`) that can each now independently self-derive
+`scope_connections` via `resolve_scope_connections` when a caller supplies
+`connection_resolver` without it, and the request pipeline
+(`execution/service.py`) calls into more than one of those functions per
+request. Each self-derivation walks every join in the query and calls the
+resolver (`resolve_visible_connection` in production, hitting the
+`ConnectionRegistry`/`PolicyStore`) once per referenced connection, with no
+caching across the calls within a single request — so a query with N
+cross-connection joins redid that resolution work 2-3x per request instead
+of once. Not a correctness bug (each resolution is independently correct)
+and not unbounded (bounded by the policy's `max_joins` cap), so a
+performance follow-up, not a blocker on item 160 itself.
+
+**Decision (recorded per this item's own scoping requirement):** thread the
+existing per-request `connection_resolver` snapshot (item 160's
+`_snapshot_connection_resolver`, already proven correct and TOCTOU-safe)
+through `validate_schema` rather than add a second, parallel memoization
+mechanism (a per-call dict cache keyed by `(connection_id, id(principal))`
+was the item's other named option) — the snapshot already exists and a
+second cache would be a second solution to the same problem.
+
+**Shipped 2026-08-10.** `validate_schema` gained an optional
+`connection_resolver` parameter, threaded to both of its own internal
+`resolve_query_table_connections` calls (the CTE-body walk and the
+outer/nested-scope walk); `execution/service.py`'s `_validate_and_compile`
+now passes its already-built `connection_resolver` into its `validate_schema`
+call. `None` (every other caller — `admin/service.py`'s template-binding
+validator, and every existing test) falls back to the exact pre-173
+live-resolution behavior; strictly additive, no wire-shape change.
+
+**Coverage.** `tests/unit/test_schema_validation.py`'s
+`test_connection_resolver_snapshot_is_reused_not_rederived` patches the live
+`resolve_visible_connection` to raise if called at all, then supplies a
+`connection_resolver` for a cross-connection join query — proving both the
+primary and joined connection resolve through the supplied snapshot
+exclusively, never the live path. Mutation-verified: reverting the threading
+makes the test fail on the patched-to-raise live lookup, then restored.
+`tests/unit/test_service.py`'s existing
+`test_validate_schema_receives_principal_context` updated to assert the new
+`connection_resolver` kwarg is passed through end-to-end. Full unit
+(2221 passed), security (480 passed), and non-real-db integration
+(370 passed) suites green on the final tree.
+
+**Effort:** S. **Depends on:** 160.
+
 ### 174. A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch ✅ DONE
 
 **Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 166's own

@@ -458,9 +458,9 @@ claim when the work ships or before explicitly handing the item back.
   qualifier is a hardcoded MSSQL `.dbo` idiom with zero dialect dispatch.
   ✅ **Shipped** (`SessionDialectAdapter.cross_database_schema_qualifier`,
   reject-don't-emulate for Postgres/MySQL).
-- [ ] **173** — cross-connection connection-resolution is unmemoized, redone
-  on every call site that self-derives it. *Same subsystem as 174, perf-only
-  not a correctness gap.* **Depends on 160.**
+- [x] **173** — cross-connection connection-resolution is unmemoized, redone
+  on every call site that self-derives it. ✅ **Shipped** (`validate_schema`
+  reuses item 160's per-request `connection_resolver` snapshot).
 - [ ] **177** — `WormSearchResult.chain_breaks`/`unverified` have no
   Prometheus counter, so the strongest WORM-archive tamper signal isn't
   alertable. *Surfaced 2026-08-10 by `security-invariant-reviewer` auditing

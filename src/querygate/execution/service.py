@@ -535,17 +535,19 @@ class StructuredQueryService:
         # connection a cross-connection join's table reflects against — so the
         # approval gate's catalog sensitivity-label trigger can look a joined
         # table up in the connection it actually resolved to, not just this
-        # query's top-level `self._connection_id`. Recomputed here (rather than
-        # reusing `early_scope_connections` above) because `validate_schema` is
-        # the authority that pairs this map with the reflected `sa.Table`
-        # objects it also produces; the two calls are deterministic pure
-        # resolutions over the same AST and registry state, so they always
-        # agree — `test_schema_validation.py`/`test_policy_validation.py`
-        # exercise each independently. `connection_resolver` (item 160) is
-        # NOT rebuilt from this second map: it is already a complete snapshot
-        # of every non-primary connection this query can possibly touch,
-        # built above from `early_scope_connections`, which agrees with this
-        # one for the same reason.
+        # query's top-level `self._connection_id`. This MAP is still built
+        # fresh here (rather than reusing `early_scope_connections` above)
+        # because `validate_schema` is the authority that pairs it with the
+        # reflected `sa.Table` objects it also produces; the two calls are
+        # deterministic pure resolutions over the same AST and registry
+        # state, so they always agree — `test_schema_validation.py`/
+        # `test_policy_validation.py` exercise each independently. The
+        # underlying RESOLUTION WORK behind that map is no longer redone,
+        # though (TODO.md item 173): `connection_resolver` below is the same
+        # fixed snapshot built above from `early_scope_connections`, so this
+        # call's own internal walk looks up each non-primary connection's
+        # Policy from that snapshot instead of re-deriving it from the live
+        # registry/store a second time in the same request.
         scope_connections: Dict[int, Dict[str, str]] = {}
         tables = await validate_schema(
             query,
@@ -553,6 +555,7 @@ class StructuredQueryService:
             principal=self._principal,
             scope_tables=scope_tables,
             scope_connections=scope_connections,
+            connection_resolver=connection_resolver,
         )
         # Derived from the live engine, not ConnectionProfile.dialect — the
         # engine's own dialect is what actually executes the compiled SQL,

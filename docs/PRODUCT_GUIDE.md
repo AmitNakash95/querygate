@@ -3705,6 +3705,40 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-10 — `validate_schema` reuses the per-request connection-resolver
+  snapshot instead of re-deriving cross-connection resolution a second time
+  (TODO.md item 173).** Item 160 already built one fixed snapshot per
+  request (`_validate_and_compile`'s `connection_resolver`, via
+  `_snapshot_connection_resolver`) and threaded it into `validate_policy`
+  and `compile_structured_query` — but `validate_schema`'s own internal
+  `resolve_query_table_connections` walk had no way to receive it, so it
+  always fell through to a fresh live `resolve_visible_connection` lookup
+  for every non-primary connection a query's joins touch. Not a correctness
+  bug (each resolution was independently correct, and TOCTOU-safe within
+  its own call), just the same connection/Policy resolution work redone a
+  second time in one request — surfaced 2026-08-09 by
+  `security-invariant-reviewer` auditing item 160's own commit as a
+  performance follow-up, deliberately not folded into that item. **Decision
+  (recorded per this item's own scoping requirement):** thread the existing
+  snapshot through rather than add a second, parallel memoization
+  mechanism (a per-call dict cache keyed by `(connection_id, id(principal))`
+  was the item's other named option) — the snapshot already exists, is
+  already proven correct and TOCTOU-safe by item 160's own tests, and a
+  second cache would be a second solution to the same problem the codebase
+  already solved once. **Fix:** `validate_schema` gained an optional
+  `connection_resolver` parameter, threaded to both of its own internal
+  `resolve_query_table_connections` calls; `execution/service.py`'s
+  `_validate_and_compile` now passes its already-built `connection_resolver`
+  into its `validate_schema` call, so both the CTE-body and outer/nested-scope
+  resolution walks reuse the snapshot. `None` (every other caller —
+  `admin/service.py`'s template-binding validator, and every existing test)
+  falls back to the exact pre-173 live-resolution behavior; strictly
+  additive. `tests/unit/test_schema_validation.py`'s
+  `test_connection_resolver_snapshot_is_reused_not_rederived` patches the
+  live `resolve_visible_connection` to raise if called at all, proving both
+  the primary and joined connection resolve through the supplied snapshot
+  exclusively — mutation-verified (reverting the threading makes the test
+  fail on the patched-to-raise live lookup).
 - **2026-08-10 — The WORM archive reader now verifies a segment's internal
   chain linkage, not just each record's own hash (TODO.md item 172).**
   Item 154 made `audit/worm_search.py` verify each `LedgerRecord`'s own hash

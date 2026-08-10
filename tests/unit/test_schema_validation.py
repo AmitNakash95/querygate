@@ -430,6 +430,59 @@ class TestCrossConnectionJoins:
         assert table_connection_map["orders"] == "primary"
         assert table_connection_map["customers"] == "other"
 
+    async def test_connection_resolver_snapshot_is_reused_not_rederived(self, monkeypatch):
+        """TODO.md item 173: `validate_schema`'s own internal
+        `resolve_query_table_connections` walk used to always fall through
+        to a fresh live `resolve_visible_connection` lookup regardless of
+        whether the caller already built a resolver snapshot (the one
+        `execution/service.py`'s `_validate_and_compile` builds via
+        `_snapshot_connection_resolver`, item 160) — redoing the same
+        connection/policy resolution a second time in the same request.
+        Passing `connection_resolver` must route every lookup through the
+        supplied snapshot instead of ever touching the live registry/store."""
+        from querygate.connections.registry import get_registry
+
+        self._two_connections(group_a="shared", group_b="shared")
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+
+        primary_profile = get_registry().get("primary")
+        other_profile = get_registry().get("other")
+        policy = Policy()
+        calls: List[str] = []
+
+        def snapshot_resolver(connection_id, principal):
+            calls.append(connection_id)
+            profile = primary_profile if connection_id == "primary" else other_profile
+            return profile, policy
+
+        def _unexpected_live_lookup(*args, **kwargs):
+            raise AssertionError(
+                "resolve_visible_connection must not be called when a full "
+                "connection_resolver snapshot is supplied"
+            )
+
+        monkeypatch.setattr(sv, "resolve_visible_connection", _unexpected_live_lookup)
+
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id", "customers.name"],
+            joins=[
+                JoinSpec(
+                    table="customers",
+                    on=["orders.customer_id", "customers.id"],
+                    connection="other",
+                )
+            ],
+            limit=5,
+        )
+        await sv.validate_schema(
+            query, connection_id="primary", connection_resolver=snapshot_resolver
+        )
+        # Both the primary and the joined connection resolve through the
+        # supplied snapshot — never the live resolver patched to raise above.
+        assert set(calls) == {"primary", "other"}
+
     async def test_different_join_group_rejected(self, monkeypatch):
         self._two_connections(group_a="group-a", group_b="group-b")
         tables = _make_tables()
