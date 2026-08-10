@@ -587,6 +587,16 @@ parameters, whether it's confirmed read-only) rather than a generic
 pass-through, matching the "safe stored procedure/tool catalog pattern"
 called out as a goal but intentionally not attempted in v1.
 
+**Scoping/design proposal (2026-08-11, not yet approved for implementation):**
+[docs/STORED_PROCEDURE_CATALOG_PLAN.md](docs/STORED_PROCEDURE_CATALOG_PLAN.md)
+— why this can't reuse `catalog/`'s reflection-backed pattern, a proposed
+model/registry shape mirroring `connections/`+`policy/`, a proposed 3-4 phase
+breakdown, and five explicit open decisions (risk classification granularity,
+approval-token reuse, whether any preview/dry-run concept is safe for an
+arbitrary procedure, whether the declaration itself needs a review gate,
+multi-result-set procedures) that need resolving before implementation
+starts, not defaults to reach for mid-build.
+
 ### 19. Additional dialects (MySQL, Snowflake, BigQuery) ✅ DONE
 
 MySQL shipped fully live-verified (phase 1); Snowflake and BigQuery shipped
