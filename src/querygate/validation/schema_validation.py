@@ -29,6 +29,7 @@ from querygate.core.auth import Principal
 from querygate.connections.dialects import get_session_adapter, not_connectable_explanation
 from querygate.connections.engine import get_engine, physical_db_name
 from querygate.connections.models import ConnectionProfile, connection_host_port
+from querygate.connections.registry import get_registry
 from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.exceptions import ConfigValidationError, QueryValidationError
 from querygate.policy.models import Policy
@@ -890,7 +891,24 @@ async def _load_table(connection_id: str, table_name: str, table_connection: str
     engine = get_engine(connection_id)
     if table_connection == connection_id:
         return await get_table_schema(table_name, connection_id, engine)
-    schema = f"{physical_db_name(table_connection)}.dbo"
+    # TODO.md item 174: the SECONDARY connection's own dialect decides its
+    # same-instance cross-database naming convention — never a hardcoded
+    # assumption at this call site (CLAUDE.md non-negotiable 6). A dialect
+    # without one (see `cross_database_schema_qualifier`'s docstring) is
+    # rejected here, not guessed at, the same reject-don't-emulate posture
+    # `is_connectable` above already applies to a not-yet-connectable
+    # secondary.
+    other_dialect = get_registry().get(table_connection).dialect
+    schema = get_session_adapter(other_dialect).cross_database_schema_qualifier(
+        physical_db_name(table_connection)
+    )
+    if schema is None:
+        raise QueryValidationError(
+            f"cross-connection join: connection {table_connection!r} is a "
+            f"{other_dialect} dialect, which has no supported same-instance "
+            "cross-database naming convention for QueryGate to reflect a "
+            "table under yet."
+        )
     return await get_table_schema(table_name, connection_id, engine, schema=schema)
 
 
