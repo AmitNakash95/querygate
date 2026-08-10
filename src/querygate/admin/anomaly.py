@@ -185,6 +185,15 @@ class AnomalyReport(pyd.BaseModel):
     # violated; see `AnomalyThresholds.max_consecutive_out_of_window` and
     # `docs/THREAT_MODEL.md` QG-43.
     truncated: bool = False
+    # TODO.md item 171: True when the scan stopped on the heuristic
+    # `max_consecutive_out_of_window` early-exit (item 141) rather than
+    # reaching the true start of the window — distinguishes "genuinely
+    # complete" from "heuristically stopped early" for a caller-facing
+    # consumer. Independent of `truncated`: a scan can end on this heuristic
+    # without ever hitting a resource bound, or vice versa. See
+    # `docs/THREAT_MODEL.md` QG-43 for the merged/multi-writer risk this
+    # discloses.
+    scan_ended_on_out_of_window_run: bool = False
     note: str = _REPORT_NOTE
     principals: List[PrincipalAnomaly] = pyd.Field(default_factory=list)
 
@@ -364,16 +373,18 @@ class AuditEventSource(Protocol):
 
     def load_query_events(
         self, *, now: datetime, thresholds: AnomalyThresholds
-    ) -> Tuple[List[AuditEvent], int, bool]:
-        """Return (events, malformed_line_count, truncated). `truncated` is True
-        when the scan stopped on a resource bound — either `max_events_scanned`
-        in-window events were already found, or `max_lines_read` lines were
-        read — before it could be SURE no more recent-window events remained.
-        A fourth, undisclosed way the scan can end early: `thresholds.
+    ) -> Tuple[List[AuditEvent], int, bool, bool]:
+        """Return (events, malformed_line_count, truncated,
+        scan_ended_on_out_of_window_run). `truncated` is True when the scan
+        stopped on a resource bound — either `max_events_scanned` in-window
+        events were already found, or `max_lines_read` lines were read —
+        before it could be SURE no more recent-window events remained.
+        `scan_ended_on_out_of_window_run` (TODO.md item 171) is a DIFFERENT,
+        independent way the scan can end early: `thresholds.
         max_consecutive_out_of_window` (TODO.md item 141) is a heuristic exit
-        that returns `truncated=False` on the assumption the window has
-        genuinely ended — an assumption a merged/restored/multi-writer audit
-        file can violate. See `docs/THREAT_MODEL.md` QG-43."""
+        that stops on the assumption the window has genuinely ended — an
+        assumption a merged/restored/multi-writer audit file can violate. See
+        `docs/THREAT_MODEL.md` QG-43."""
         ...
 
 
@@ -411,7 +422,7 @@ class JsonlAuditEventSource:
 
     def load_query_events(
         self, *, now: datetime, thresholds: AnomalyThresholds
-    ) -> Tuple[List[AuditEvent], int, bool]:
+    ) -> Tuple[List[AuditEvent], int, bool, bool]:
         window_start = now - timedelta(
             seconds=thresholds.recent_window_seconds + thresholds.baseline_window_seconds
         )
@@ -419,9 +430,10 @@ class JsonlAuditEventSource:
         malformed = 0
         lines_read = 0
         stopped_early = False
+        ended_on_out_of_window_run = False
         consecutive_out_of_window = 0
         if not self.path.exists():
-            return [], 0, False
+            return [], 0, False, False
         try:
             for line in iter_lines_reverse(self.path):
                 if len(kept) >= thresholds.max_events_scanned:
@@ -463,9 +475,12 @@ class JsonlAuditEventSource:
                     # TODO.md item 141: a run of this length is treated as
                     # proof the window has genuinely ended (see
                     # `max_consecutive_out_of_window`'s docstring) — stop
-                    # without setting `stopped_early`/`truncated`.
+                    # without setting `stopped_early`/`truncated`. TODO.md
+                    # item 171: this IS disclosed separately, via
+                    # `ended_on_out_of_window_run`.
                     consecutive_out_of_window += 1
                     if consecutive_out_of_window >= thresholds.max_consecutive_out_of_window:
+                        ended_on_out_of_window_run = True
                         break
                     continue
                 consecutive_out_of_window = 0
@@ -477,7 +492,7 @@ class JsonlAuditEventSource:
             # the file changing size mid-scan) fired before the scan reached
             # the start of the file — must not be reported as complete.
             stopped_early = True
-        return kept, malformed, stopped_early
+        return kept, malformed, stopped_early, ended_on_out_of_window_run
 
 
 def build_anomaly_report(
@@ -501,13 +516,16 @@ def build_anomaly_report(
     if source is None:
         return AnomalyReport(source="disabled", **base)
 
-    events, malformed, scan_truncated = source.load_query_events(now=now, thresholds=thresholds)
+    events, malformed, scan_truncated, ended_on_out_of_window_run = source.load_query_events(
+        now=now, thresholds=thresholds
+    )
     principals, principal_truncated = detect_anomalies(events, now=now, thresholds=thresholds)
     return AnomalyReport(
         source=backend_label,
         events_scanned=len(events),
         malformed=malformed,
         truncated=scan_truncated or principal_truncated,
+        scan_ended_on_out_of_window_run=ended_on_out_of_window_run,
         principals=principals,
         **base,
     )
