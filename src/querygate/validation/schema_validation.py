@@ -1229,6 +1229,7 @@ async def validate_schema(
     *,
     scope_tables: Optional[Dict[int, Dict[str, sa.Table]]] = None,
     scope_connections: Optional[Dict[int, Dict[str, str]]] = None,
+    connection_resolver: Optional[ConnectionResolver] = None,
 ) -> Dict[str, sa.Table]:
     """Reflect + verify every table/column the query — every nested
     value_subquery (item 97) and every set-operation arm (item 104) — references
@@ -1256,7 +1257,17 @@ async def validate_schema(
     argument below) — threaded out here rather than recomputed later so the
     approval gate's view of "which connection does this table actually live in"
     can never drift from the one schema validation already enforced the
-    `join_group` rule against."""
+    `join_group` rule against.
+
+    `connection_resolver` (TODO.md item 173): the same fixed per-request
+    snapshot `_validate_and_compile` already builds via `resolve_scope_
+    connections`/`_snapshot_connection_resolver` (item 160) and threads
+    into `validate_policy`/`compile_structured_query` — passed here too so
+    this call's own internal `resolve_query_table_connections` walk reuses
+    that snapshot instead of re-deriving every non-primary connection's
+    Policy from the live registry/store a second time in the same request.
+    `None` (every other caller, and every existing test) falls back to a
+    fresh live resolution exactly as before — this is strictly additive."""
     outer_tables: Optional[Dict[str, sa.Table]] = None
     # Always collected, even when the caller passes no `scope_tables`: the
     # cross-arm type check below compares scopes against EACH OTHER, so it needs
@@ -1273,7 +1284,11 @@ async def validate_schema(
     for spec in query.ctes:
         _reject_cross_connection_nesting(spec.query, connection_id, f"cte {spec.name!r}")
         table_connection = resolve_query_table_connections(
-            spec.query, connection_id, principal=principal, cte_names=set(cte_tables)
+            spec.query,
+            connection_id,
+            principal=principal,
+            connection_resolver=connection_resolver,
+            cte_names=set(cte_tables),
         )
         if scope_connections is not None:
             scope_connections[id(spec.query)] = {
@@ -1306,7 +1321,11 @@ async def validate_schema(
                 "a nested scope (an IN (subquery), or a set-operation arm within one)",
             )
         table_connection = resolve_query_table_connections(
-            scope, connection_id, principal=principal, cte_names=set(cte_tables)
+            scope,
+            connection_id,
+            principal=principal,
+            connection_resolver=connection_resolver,
+            cte_names=set(cte_tables),
         )
         if scope_connections is not None:
             scope_connections[id(scope)] = {

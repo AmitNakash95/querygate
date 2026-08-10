@@ -203,7 +203,7 @@ order-of-magnitude, not commitments.
 | 170 | ✅ Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it | S–M | — |
 | 171 | ✅ The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart | M | 141 |
 | 172 | ✅ WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment | M | 154 |
-| 173 | Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives | S | 160 |
+| 173 | ✅ Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives | S | 160 |
 | 174 | ✅ A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch | S | 163 |
 | 175 | ✅ `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" | S | 2 |
 | 176 | Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line: `sales/index.html`'s guardrails still forbid claiming managed search, `CUSTOMER_README.md` flatly denies it exists, and `TODO.md`'s own Quick-scan row for item 134 says phase 2 "not started" | S | 134 |
@@ -2654,35 +2654,13 @@ duplication to a second S3 key remains a separate, undecided residual.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 172).
 
-### 173. Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives
+### 173. Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives ✅ DONE
 
-**Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 160's own
-commit, during that item's own mandatory completion gate (SIR-160F3-4).**
-Pre-existing since item 156, not introduced by item 160 — but item 160 added
-three new call sites (`validate_policy`, `compile_structured_query`,
-`applied_column_masks`) that can each now independently self-derive
-`scope_connections` via `resolve_scope_connections` when a caller supplies
-`connection_resolver` without it, and the request pipeline
-(`execution/service.py`) calls into more than one of those functions per
-request. Each self-derivation walks every join in the query and calls the
-resolver (`resolve_visible_connection` in production, hitting the
-`ConnectionRegistry`/`PolicyStore`) once per referenced connection, with no
-caching across the calls within a single request — so a query with N
-cross-connection joins now redoes that resolution work 2-3x per request
-instead of once. Not a correctness bug (each resolution is independently
-correct) and not unbounded (bounded by the policy's `max_joins` cap), so it's
-a performance follow-up, not a blocker on item 160 itself.
+`validate_schema` now accepts and reuses the per-request `connection_resolver`
+snapshot item 160 already built, instead of re-deriving cross-connection
+resolution a second time internally.
 
-**What to do (when prioritized):** memoize inside `resolve_scope_connections`
-(`validation/schema_validation.py`) via a per-call dict cache keyed by
-`(connection_id, id(principal))`, or thread a single resolved
-`scope_connections` map through `StructuredQueryService`'s pipeline once per
-request instead of letting each stage self-derive independently — the latter
-is the more thorough fix but changes call-site plumbing beyond this item's
-resolver function, so record which approach is chosen in the PRODUCT_GUIDE
-Decision Log before implementing.
-
-**Effort:** S. **Depends on:** 160.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 173).
 
 ### 174. A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch ✅ DONE
 

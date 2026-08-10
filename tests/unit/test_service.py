@@ -156,10 +156,17 @@ async def test_validate_schema_receives_principal_context():
 
     # scope_tables (item 97) is a fresh per-call dict threaded to the compiler for
     # IN (subquery) rendering; scope_connections (item 155) is the analogous
-    # per-scope table-to-connection map threaded to the approval gate. The
+    # per-scope table-to-connection map threaded to the approval gate.
+    # connection_resolver (item 173) is the per-request snapshot built earlier
+    # in _validate_and_compile, reused here instead of re-derived. The
     # principal context still flows through unchanged.
     validate_schema.assert_awaited_once_with(
-        query, connection_id="demo", principal=principal, scope_tables=ANY, scope_connections=ANY
+        query,
+        connection_id="demo",
+        principal=principal,
+        scope_tables=ANY,
+        scope_connections=ANY,
+        connection_resolver=ANY,
     )
 
 
