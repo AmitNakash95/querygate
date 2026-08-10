@@ -3705,6 +3705,33 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-10 — The audit windowed early-exit (item 141) now discloses
+  itself on the report, instead of looking identical to a genuinely complete
+  scan (TODO.md item 171).** Item 141 added `max_consecutive_out_of_window`
+  as a heuristic early-exit to the three tail-first audit readers
+  (`admin/anomaly.py`, `admin/config_trends.py`, `help/personal_denials.py`,
+  the last reusing the first's reader) — once enough consecutive
+  matching-type lines are all before the report's window start, the scan
+  stops on the assumption physical write order tracks `occurred_at` order,
+  an assumption a merged/restored/multi-writer audit file can violate (see
+  `docs/THREAT_MODEL.md` QG-43). Surfaced 2026-08-08 by three of the four
+  `auditors` reviewers auditing item 141's own commit: the stop didn't set
+  `truncated`, so a caller-facing consumer had no way to distinguish "no
+  more matches exist" from "the scan gave up early on a heuristic." **Fix:**
+  `AuditEventSource.load_query_events`/`ChangeEventSource.load_change_events`
+  widened from a 3-tuple `(events, malformed, truncated)` to a 4-tuple
+  `(events, malformed, truncated, scan_ended_on_out_of_window_run)` —
+  mechanical but wide, touching both `Jsonl*EventSource` implementations,
+  both `build_*_report` functions, and ~20 call sites across
+  `tests/unit/test_anomaly.py`, `tests/unit/test_config_trends.py`, and
+  `tests/unit/test_personal_denials.py`, exactly as item 141's own
+  deferral scoped it. `AnomalyReport`, `ConfigCatalogChangeTrend`, and
+  `RecentDenialsReport` each gained the matching
+  `scan_ended_on_out_of_window_run: bool` field, deliberately independent of
+  `truncated` (a resource-bound stop and a heuristic stop are different
+  facts, and either can fire without the other — both directions are
+  regression-tested). See
+  [Security Model](#security-model).
 - **2026-08-10 — A cross-connection join's secondary-connection schema
   qualifier now dispatches through the registered dialect, instead of a
   hardcoded MSSQL idiom (TODO.md item 174).** `validation/schema_validation.py`'s

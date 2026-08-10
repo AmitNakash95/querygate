@@ -201,7 +201,7 @@ order-of-magnitude, not commitments.
 | 168 | ✅ Config-governance dry-run's credential-safety net is a post-hoc regex scrub, not structural, and the validate-config CLI's stderr isn't scrubbed at all | S–M | 165 |
 | 169 | ✅ A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an unfiltered scan | S–M | 106, 167 |
 | 170 | ✅ Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it | S–M | — |
-| 171 | The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart | M | 141 |
+| 171 | ✅ The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart | M | 141 |
 | 172 | WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment | M | 154 |
 | 173 | Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives | S | 160 |
 | 174 | ✅ A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch | S | 163 |
@@ -2635,44 +2635,14 @@ same-named database on the primary's host.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 170).
 
-### 171. The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart
+### 171. The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart ✅ DONE
 
-**Surfaced 2026-08-08 by three of the four `auditors` reviewers auditing item
-141's own commit** (security-invariant, architecture-boundary, and
-claim-reviewer independently), during that item's own mandatory completion
-gate — not a later external report. Item 141 added a `max_consecutive_out_of_
-window` early-exit to `admin/anomaly.py`/`admin/config_trends.py`'s tail-first
-audit-log scans (and `help/personal_denials.py`, which reuses the same
-reader): once enough consecutive matching-type lines are all before the
-report's window start, the scan stops WITHOUT setting `truncated`, on the
-assumption that physical write order tracks `occurred_at` order. Item 141
-also shipped a real fix for the dominant source of that assumption's risk
-(`audit/logger.py`'s `_persist` now re-stamps `occurred_at` immediately
-before the sink's `emit()`) and disclosed the residual in every relevant
-docstring/comment plus `docs/THREAT_MODEL.md` QG-43, and added an
-operator-facing config knob (`anomaly_max_consecutive_out_of_window`/
-`change_trend_max_consecutive_out_of_window`/`personal_denials_max_
-consecutive_out_of_window`) so a deployment that knows it's at risk can raise
-or disable the tolerance. What's still open, deliberately scoped out of item
-141 itself:
+`scan_ended_on_out_of_window_run: bool` now distinguishes "genuinely
+complete" from "heuristically stopped early" on `AnomalyReport`,
+`ConfigCatalogChangeTrend`, and `RecentDenialsReport`, independent of
+`truncated`.
 
-**What to do:** add a disclosure field (e.g. `scan_ended_on_out_of_window_run:
-bool`) to `AnomalyReport`, `ConfigCatalogChangeTrend`, and
-`RecentDenialsReport` distinguishing "genuinely complete" from "heuristically
-stopped early" — the affected surface is a public REST response shape used
-by three separate consumers. This requires widening `AuditEventSource.
-load_query_events`'s and `ChangeEventSource.load_change_events`'s Protocol
-return type from a 3-tuple to a 4-tuple (or an equivalent named/typed
-result), which touches ~20 call sites across `tests/unit/test_anomaly.py`,
-`tests/unit/test_config_trends.py`, `tests/unit/test_personal_denials.py`,
-and the three `build_*_report` functions — real, mechanical work, not a
-one-line change, which is why it was deliberately not folded into item 141's
-already-committed scope. Add a regression test exercising the disclosed
-merged/multi-writer failure mode itself (not just the happy-path early exit
-item 141's own tests already cover).
-
-**Effort:** M (mechanical but wide — a Protocol return-shape change with a
-real test-suite blast radius). **Depends on:** 141.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 171).
 
 ### 172. WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment
 

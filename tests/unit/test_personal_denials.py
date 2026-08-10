@@ -259,6 +259,7 @@ def test_report_respects_configured_max_consecutive_out_of_window(tmp_path):
         lookback_seconds=3600.0,
     )
     assert default_report.own_denials_found == 1
+    assert default_report.scan_ended_on_out_of_window_run is False
 
     tight_report = build_recent_denials_report(
         JsonlAuditEventSource(str(path)),
@@ -268,6 +269,13 @@ def test_report_respects_configured_max_consecutive_out_of_window(tmp_path):
         max_consecutive_out_of_window=3,
     )
     assert tight_report.own_denials_found == 0
+    # TODO.md item 171: this is precisely the disclosure this item adds — a
+    # caller-facing consumer can now tell `own_denials_found == 0` here means
+    # "the scan heuristically stopped early on a merged/multi-writer-shaped
+    # file", not "this caller genuinely has no denials in the window". Before
+    # this field existed, `tight_report` and a genuinely-empty result were
+    # indistinguishable over the wire.
+    assert tight_report.scan_ended_on_out_of_window_run is True
 
 
 def test_report_never_leaks_another_principals_denial(tmp_path):
@@ -297,7 +305,7 @@ def test_report_is_redaction_safe():
 
     class _Source:
         def load_query_events(self, *, now, thresholds):
-            return [_event(at=_NOW, principal="user-a")], 0, False
+            return [_event(at=_NOW, principal="user-a")], 0, False, False
 
     report = build_recent_denials_report(_Source(), principal_id="user-a", now=_NOW)
     blob = report.model_dump_json()

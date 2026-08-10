@@ -40,7 +40,11 @@ same signal `admin/observability.py`'s `rejections_by_reason` already exposes
 in aggregate to admins. This module attaches one fixed, human-readable
 explanation per category and never surfaces `AuditEvent.query_shape` (which,
 while already values-free, is more internal detail than a "why was this
-rejected" explanation needs).
+rejected" explanation needs). `RecentDenialsReport.scan_ended_on_out_of_
+window_run` (item 171) is the same category of field as the pre-existing
+`truncated`: a scan-level fact about how far back the reader looked, never a
+fleet-wide count or another principal's activity — safe on this no-admin-
+scope surface for the same reason `truncated` already was.
 
 **One deliberate exception: `operation="query_verdict"` events are excluded
 entirely** (`_is_own_denial`), not just relabeled. `StructuredQueryService.
@@ -202,6 +206,20 @@ class RecentDenialsReport(pyd.BaseModel):
             "incomplete as a result."
         ),
     )
+    # TODO.md item 171: True when the scan stopped on the heuristic
+    # max_consecutive_out_of_window early-exit (item 141) rather than
+    # reaching the true start of the window — distinguishes "genuinely
+    # complete" from "heuristically stopped early". Independent of
+    # `truncated`. See `docs/THREAT_MODEL.md` QG-43.
+    scan_ended_on_out_of_window_run: bool = pyd.Field(
+        default=False,
+        description=(
+            "True when the scan stopped on a heuristic assumption that the "
+            "window had genuinely ended, rather than reaching its true start "
+            "— this caller's own denial list may be incomplete as a result, "
+            "independent of `truncated`."
+        ),
+    )
     note: str = _REPORT_NOTE
     denials: List[DenialEvent] = pyd.Field(default_factory=list)
 
@@ -291,7 +309,9 @@ def build_recent_denials_report(
         # AnomalyThresholds' own default (docs/THREAT_MODEL.md QG-43).
         max_consecutive_out_of_window=max_consecutive_out_of_window,
     )
-    events, malformed, truncated = source.load_query_events(now=now, thresholds=thresholds)
+    events, malformed, truncated, ended_on_out_of_window_run = source.load_query_events(
+        now=now, thresholds=thresholds
+    )
     denials = select_recent_denials(events, principal_id=principal_id, limit=limit)
     own_denials_found = sum(1 for e in events if _is_own_denial(e, principal_id))
     return RecentDenialsReport(
@@ -299,6 +319,7 @@ def build_recent_denials_report(
         own_denials_found=own_denials_found,
         malformed=malformed,
         truncated=truncated,
+        scan_ended_on_out_of_window_run=ended_on_out_of_window_run,
         denials=denials,
         **base,
     )
