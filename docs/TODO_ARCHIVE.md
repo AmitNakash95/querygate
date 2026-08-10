@@ -8507,6 +8507,68 @@ the window computed nothing.
 **Effort: XL. Priority: high** (closes the ★ flagship pillar's success criterion).
 Depends on: items 100, 101.
 
+### 126. No per-caller rate limit on `GET /help/my-recent-denials` ✅ DONE
+
+**Surfaced 2026-07-30 by the `auditors` security-invariant review of item 45
+phase 2, not a regression in that pass.** `GET /api/v1/help/my-recent-denials`
+requires only authentication (no scope, matching `/help/my-access`'s posture),
+and its handler calls `admin/anomaly.py`'s `JsonlAuditEventSource`, which reads
+and JSON-parses every line of the audit JSONL file per call (the
+`max_events_scanned` cap only bounds what's *kept in memory*, not how much of
+the file is scanned). Every other caller of that reader (`GET
+/admin/observability/anomalies`) requires `admin:observability:read`; this was
+the first time the same O(file-size) scan became triggerable by *any*
+authenticated caller, with no REST-level rate limit anywhere in the codebase
+to bound repeated calls.
+
+**Decision:** add a lightweight per-principal cooldown scoped to this
+endpoint, mirroring item 43's existing `admin_connection_test_cooldown_seconds`
+precedent — `AppConfig.personal_denials_cooldown_seconds` (default 5s, `0`
+disables) plus a 429/`Retry-After` response inside the window.
+
+**Shipped 2026-08-10.** `PersonalDenialsCooldown` (`help/personal_denials.py`)
+is a plain per-principal `Dict[subject, float]`, closure-scoped inside
+`build_help_router` (one instance per app build, so every test's own
+`create_app()` starts clean with no autouse-fixture reset needed) — the same
+cooldown shape `health.py`'s item-43 `HealthMonitor._last_manual_test` already
+established, keyed by principal instead of connection. The check runs as the
+first statement of the handler, strictly before the expensive audit-JSONL
+scan.
+
+**Hardened same-day by this item's own mandatory `security-invariant-reviewer`
+gate**, which found the first cut real but under-disclosed and under-tested:
+the cooldown is genuinely per-WORKER-PROCESS (undisclosed — `num_of_workers >
+1`/multiple replicas multiply the effective ceiling, the same limitation
+`execution/quota.py`'s in-process limiter already documents for the identical
+shape — now written into the class docstring, the config field comment, and
+`docs/THREAT_MODEL.md` QG-33) and its bucket is `principal.subject`, which
+every statically configured API key shares one of (QG-33 already documented
+the identical coupling for this endpoint's *data* isolation — extended to
+note it now also covers the *rate limit*). Neither is a bypass — both only
+make the limit stronger or more coarse, never weaker — but both needed
+writing down. Also found and fixed: the cooldown map grew one permanent entry
+per distinct principal ever seen with no eviction (`record_request` now
+prunes every entry whose own cooldown has already elapsed on each call —
+behavior-preserving, since an expired entry is semantically identical to an
+absent one); and the 429 path was invisible to observability (added
+`querygate_personal_denials_rate_limited_total`, a single unlabeled
+counter — deliberately a metric, not a persisted audit event, since an audit
+event per 429 would let a caller inflate the very file this endpoint scans, a
+self-amplifying feedback loop). A second reviewer pass re-verified all four
+fixes against the final tree and found each one closed.
+
+**Coverage.** `tests/unit/test_personal_denials.py`'s `TestPersonalDenialsCooldown`
+exercises the class directly (first-call-allowed, second-blocked, per-principal
+isolation, zero disables, disabled-records-nothing, pruning — mutation-verified
+against the pruning logic and the metrics increment).
+`tests/integration/test_personal_denials_api.py` adds the REST-level
+second-call-429-with-Retry-After case, a cooldown-disabled-at-zero case, a
+per-principal (two distinct JWT subjects) isolation case, the documented
+shared-static-API-key-bucket case, and the metrics-counter-increments case.
+
+**Effort:** S. **Depends on:** 43 (cooldown-shape precedent), 45 (the
+endpoint itself).
+
 ### 127. Reject an MCP request whose routing headers disagree with its body (gateway confused-deputy) ✅ DONE
 
 **Surfaced 2026-07-30 by `competitive-scan`.** The MCP `2026-07-28`
