@@ -1113,8 +1113,11 @@ upgrade rather than accepted (see the CVE-remediation bullet).
   `.gitleaks.toml`. Backs the credential-isolation invariant. Verified: no leaks.
 - **DAST** — **Schemathesis** fuzzes the live OpenAPI surface via
   `scripts/run_dast.py` (`make test-dast`, `dast` CI job), gating
-  `not_a_server_error` + `negative_data_rejection`. Latest: 678/678 checks across
-  59 operations, 0 server errors, 0 accepted malformed payloads. The recursive
+  `not_a_server_error` + `negative_data_rejection`. Latest: 1755/1755 checks
+  across 72 operations, 0 server errors, 0 accepted malformed payloads (see
+  `docs/SECURITY_POSTURE.md`'s "Dynamic analysis (DAST)" section for the
+  current figure — this number drifts as the API surface grows, don't quote
+  it from memory). The recursive
   query-executing endpoints are excluded (Schemathesis #947 recursion limit) —
   not a gap, they get deeper coverage from `test_malformed_input_fuzzing.py`
   (item 36 phase 2a). Schemathesis runs from its **pinned Docker image**, not a
