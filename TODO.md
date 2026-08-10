@@ -204,7 +204,7 @@ order-of-magnitude, not commitments.
 | 171 | The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart | M | 141 |
 | 172 | WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment | M | 154 |
 | 173 | Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives | S | 160 |
-| 174 | A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch | S | 163 |
+| 174 | ✅ A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch | S | 163 |
 | 175 | ✅ `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" | S | 2 |
 | 176 | Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line: `sales/index.html`'s guardrails still forbid claiming managed search, `CUSTOMER_README.md` flatly denies it exists, and `TODO.md`'s own Quick-scan row for item 134 says phase 2 "not started" | S | 134 |
 
@@ -2750,57 +2750,13 @@ Decision Log before implementing.
 
 **Effort:** S. **Depends on:** 160.
 
-### 174. A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch
+### 174. A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch ✅ DONE
 
-**Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 166's own
-commit, during that item's own mandatory completion gate (SIR-166-2).**
-Pre-existing since cross-connection joins/`join_group` first shipped, not
-introduced or closed by item 166. `_load_table`
-(`validation/schema_validation.py`) reflects a joined table on a SECONDARY
-connection through the PRIMARY connection's own engine, qualified by a
-hardcoded schema string:
+`SessionDialectAdapter.cross_database_schema_qualifier` now dispatches per
+dialect (MSSQL's real `<db>.dbo.<table>`; Postgres/MySQL rejected, not
+emulated), replacing the hardcoded MSSQL-only f-string in `_load_table`.
 
-```python
-schema = f"{physical_db_name(table_connection)}.dbo"
-```
-
-This is CLAUDE.md non-negotiable 6 territory (dialect differences go behind a
-Protocol + one class per variant + registry, never an inline assumption at a
-call site) — but there is not even an `if dialect == ...` branch here; one
-dialect's idiom (MSSQL's `<database>.dbo.<table>` three-part naming) is
-hardcoded unconditionally. `grep -rn "dbo" src/querygate/` returns only this
-line and `schema/reflection.py`'s already-documented `[None, "dbo"]` fallback
-list. A cross-connection join whose SECONDARY connection is Postgres or MySQL
-reflects under a schema qualifier that dialect cannot resolve, producing a
-masked `NoSuchTableError` that names neither the real cause nor the dialect —
-the same failure shape item 163 was raised specifically to eliminate for a
-not-connectable secondary, now reappearing one layer downstream for a
-connectable-but-wrong-idiom one. It fails closed (no data reaches the
-caller), so this is a robustness/clarity gap, not a policy bypass — but it
-means only an MSSQL secondary has ever actually worked in this configuration,
-silently.
-
-**What to do:** add a method to `connections/dialects.py`'s
-`SessionDialectAdapter` — e.g. `cross_database_schema_qualifier(db_name: str)
--> Optional[str]` — returning `f"{db_name}.dbo"` for the MSSQL adapter and
-`None` for every other dialect's adapter (its default/base implementation).
-At the `_load_table` call site (`schema_validation.py`, the `schema =
-f"{physical_db_name(table_connection)}.dbo"` line), dispatch through
-`get_session_adapter(...)` (the same seam `resolve_query_table_connections`
-already uses for its `is_connectable()` check) instead of the hardcoded
-f-string; when the adapter returns `None`, raise a `QueryValidationError`
-naming the dialect and explaining that a cross-connection secondary of that
-dialect isn't supported yet — the same reject-don't-emulate posture item 74
-set for MSSQL's missing `NULLS FIRST/LAST`, rather than guessing at that
-dialect's own cross-database naming convention (which varies: Postgres has no
-true equivalent without `dblink`/`postgres_fdw`, MySQL uses a bare
-`<database>.<table>` with no third segment). Add a regression test: a
-cross-connection join with a Postgres secondary in a shared `join_group`,
-asserting a clean `QueryValidationError` naming the dialect rather than a
-masked `NoSuchTableError`.
-
-**Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped),
-163 (shipped — same `is_connectable()` seam this reuses).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 174).
 
 ### 175. `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" ✅ DONE
 

@@ -12943,6 +12943,67 @@ on the final tree; `black --check` clean.
 second, load-bearing layer this item's own audit found necessary, plus
 regression tests). **Depends on:** none.
 
+### 174. A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch ✅ DONE
+
+**Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 166's own
+commit, during that item's own mandatory completion gate (SIR-166-2).**
+Pre-existing since cross-connection joins/`join_group` first shipped, not
+introduced or closed by item 166. `_load_table`
+(`validation/schema_validation.py`) reflected a joined table on a SECONDARY
+connection through the PRIMARY connection's own engine, qualified by a
+hardcoded schema string (`f"{physical_db_name(table_connection)}.dbo"`) —
+literal CLAUDE.md non-negotiable 6 territory (dialect differences go behind a
+Protocol + one class per variant + registry, never an inline assumption at a
+call site), and there wasn't even an `if dialect == ...` branch: one
+dialect's idiom (MSSQL's `<database>.dbo.<table>` three-part naming) was
+hardcoded unconditionally. A cross-connection join whose SECONDARY connection
+was Postgres or MySQL reflected under a schema qualifier that dialect cannot
+resolve, producing a masked `NoSuchTableError` naming neither the real cause
+nor the dialect — the same failure shape item 163 was raised specifically to
+eliminate for a not-connectable secondary, reappearing one layer downstream
+for a connectable-but-wrong-idiom one. Failed closed (no data reached the
+caller), so a robustness/clarity gap, not a policy bypass — but it meant only
+an MSSQL secondary had ever actually worked in this configuration, silently.
+
+**Shipped 2026-08-10.** `connections/dialects.py`'s `SessionDialectAdapter`
+gained a new concrete method `cross_database_schema_qualifier(db_name: str)
+-> Optional[str]`, default `None` (unsupported — Postgres has no true
+cross-database reference without an extension like `dblink`/`postgres_fdw`,
+MySQL uses a bare `<database>.<table>` with no schema segment, so guessing at
+either would synthesize structure the caller never asked for);
+`MSSQLSessionAdapter` overrides it with the real `<db>.dbo.<table>` naming.
+`_load_table` now dispatches through `get_session_adapter(...)` (the same
+seam `resolve_query_table_connections` already uses for its `is_connectable()`
+check) instead of the hardcoded f-string, raising `QueryValidationError`
+naming the dialect when the adapter returns `None` — the same
+reject-don't-emulate posture item 74 set for MSSQL's missing
+`NULLS FIRST/LAST`.
+
+**Reviewed by `architecture-boundary-reviewer` (2026-08-10):** confirmed
+clean on pipeline ownership, Protocol/registry dispatch, mechanical-not-
+spoon-fed dialect translation, model consistency, and async call sites/state
+lifecycle; confirmed the new `get_registry().get(table_connection).dialect`
+lookup cannot leak connection existence/dialect to an unauthorized caller
+(visibility is already resolved upstream in `resolve_query_table_connections`
+before `_load_table` is ever reached). One documented nit, not fixed:
+`QueryValidationError` (chosen, following item 74's precedent) vs.
+`ConfigValidationError` (used by this function's sibling checks) — both map
+to the same HTTP 422 today and no caller distinguishes them, so left as a
+reasoned judgment call rather than churned.
+
+**Coverage.** `tests/unit/test_schema_validation.py` adds
+`test_load_table_rejects_unsupported_secondary_dialect` (Postgres secondary,
+`_load_table` called directly, asserts `QueryValidationError` naming the
+dialect and that `get_table_schema` — the actual reflection I/O — is never
+reached) and `test_load_table_mssql_secondary_still_uses_dbo_qualifier` (a
+regression guard confirming the previously-working MSSQL case still resolves
+`<db>.dbo`). Mutation-verified: reverting the rejection to a silent fallback
+(`schema = f"{physical_db_name(table_connection)}.dbo"`) makes the negative
+test fail for exactly that reason.
+
+**Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped),
+163 (shipped — same `is_connectable()` seam this reuses).
+
 ### 175. `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" ✅ DONE
 
 **Surfaced 2026-08-09 by the MSSQL CI job failing on

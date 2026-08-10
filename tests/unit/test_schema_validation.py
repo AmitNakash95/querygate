@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.auth import Principal
-from querygate.core.exceptions import ConfigValidationError, NotFoundError
+from querygate.core.exceptions import ConfigValidationError, NotFoundError, QueryValidationError
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
 from querygate.compiler.sqlalchemy_compiler import compile_structured_query
@@ -589,6 +589,67 @@ class TestCrossConnectionJoins:
         )
         with pytest.raises(ConfigValidationError, match="cannot yet open a live connection"):
             await sv.validate_schema(query, connection_id="primary")
+
+    async def test_load_table_rejects_unsupported_secondary_dialect(self, monkeypatch):
+        """TODO.md item 174. `_load_table`'s SECONDARY-connection schema
+        qualifier used to be a hardcoded MSSQL `.dbo` idiom (`f"{db}.dbo"`)
+        applied unconditionally, regardless of the secondary connection's
+        actual dialect — a Postgres or MySQL secondary would silently
+        reflect under a schema qualifier neither dialect understands,
+        producing a masked `NoSuchTableError` that names neither the real
+        cause nor the dialect. It must now dispatch through
+        `SessionDialectAdapter.cross_database_schema_qualifier` and reject
+        cleanly, naming the dialect, before the engine is ever touched for
+        reflection."""
+        primary = ConnectionProfile(
+            id="primary",
+            dialect="mssql",
+            connection_string="mssql+aioodbc://user:pass@host/primary_db",
+        )
+        other = ConnectionProfile(
+            id="other",
+            dialect="postgresql",
+            connection_string="postgresql+asyncpg://user:pass@host/other_db",
+        )
+        set_registry(ConnectionRegistry({"primary": primary, "other": other}))
+        # `get_table_schema` (the actual reflection I/O) must never be
+        # reached — the whole point is a clean rejection before any
+        # reflection is attempted. `get_engine` itself is sync (just looks up
+        # or lazily builds a connection-pool object, no I/O) and legitimately
+        # runs first in `_load_table`, so it is left real rather than mocked.
+        monkeypatch.setattr(
+            sv,
+            "get_table_schema",
+            AsyncMock(side_effect=AssertionError("get_table_schema must not be called")),
+        )
+        with pytest.raises(QueryValidationError, match="postgresql"):
+            await sv._load_table("primary", "orders", "other")
+
+    async def test_load_table_mssql_secondary_still_uses_dbo_qualifier(self, monkeypatch):
+        """Same-shape positive case: an MSSQL secondary (the one dialect this
+        has always worked for) must keep reflecting under `<db>.dbo` after
+        the dispatch — a regression guard for item 174's fix."""
+        primary = ConnectionProfile(
+            id="primary",
+            dialect="postgresql",
+            connection_string="postgresql+asyncpg://user:pass@host/primary_db",
+        )
+        other = ConnectionProfile(
+            id="other",
+            dialect="mssql",
+            connection_string="mssql+aioodbc://user:pass@host/other_db",
+        )
+        set_registry(ConnectionRegistry({"primary": primary, "other": other}))
+        monkeypatch.setattr(sv, "get_engine", lambda connection_id: object())
+        captured = {}
+
+        async def fake_get_table_schema(table_name, connection_id, engine, *, schema=None):
+            captured["schema"] = schema
+            return sa.Table(table_name, sa.MetaData(), schema=schema)
+
+        monkeypatch.setattr(sv, "get_table_schema", fake_get_table_schema)
+        await sv._load_table("primary", "orders", "other")
+        assert captured["schema"] == "other_db.dbo"
 
     async def test_join_group_uses_per_principal_policy(self, monkeypatch):
         self._two_connections(group_a="shared", group_b="shared")
