@@ -12943,6 +12943,66 @@ on the final tree; `black --check` clean.
 second, load-bearing layer this item's own audit found necessary, plus
 regression tests). **Depends on:** none.
 
+### 171. The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart ✅ DONE
+
+**Surfaced 2026-08-08 by three of the four `auditors` reviewers auditing item
+141's own commit** (security-invariant, architecture-boundary, and
+claim-reviewer independently), during that item's own mandatory completion
+gate — not a later external report. Item 141 added a `max_consecutive_out_of_
+window` early-exit to `admin/anomaly.py`/`admin/config_trends.py`'s tail-first
+audit-log scans (and `help/personal_denials.py`, which reuses the same
+reader): once enough consecutive matching-type lines are all before the
+report's window start, the scan stops WITHOUT setting `truncated`, on the
+assumption that physical write order tracks `occurred_at` order. Item 141
+also shipped a real fix for the dominant source of that assumption's risk
+(`audit/logger.py`'s `_persist` now re-stamps `occurred_at` immediately
+before the sink's `emit()`) and disclosed the residual in every relevant
+docstring/comment plus `docs/THREAT_MODEL.md` QG-43, and added an
+operator-facing config knob (`anomaly_max_consecutive_out_of_window`/
+`change_trend_max_consecutive_out_of_window`/`personal_denials_max_
+consecutive_out_of_window`) so a deployment that knows it's at risk can raise
+or disable the tolerance. What remained open, deliberately scoped out of item
+141 itself: a disclosure field on the report so a caller-facing consumer
+could tell "genuinely complete" from "heuristically stopped early".
+
+**Shipped 2026-08-10.** `AuditEventSource.load_query_events` and
+`ChangeEventSource.load_change_events` widened from a 3-tuple `(events,
+malformed, truncated)` to a 4-tuple `(events, malformed, truncated,
+scan_ended_on_out_of_window_run)`, threaded through both
+`JsonlAuditEventSource`/`JsonlChangeEventSource`, both `build_*_report`
+functions, and `help/personal_denials.py`'s direct reuse of the anomaly
+reader — ~20 call sites across `tests/unit/test_anomaly.py`,
+`tests/unit/test_config_trends.py`, and `tests/unit/test_personal_denials.py`,
+plus the three production consumers, exactly as scoped. `AnomalyReport`,
+`ConfigCatalogChangeTrend`, and `RecentDenialsReport` each gained
+`scan_ended_on_out_of_window_run: bool`, set `True` only when the loop broke
+on the `max_consecutive_out_of_window` heuristic — deliberately independent
+of `truncated` (a resource-bound stop and a heuristic stop are different
+facts; either can fire without the other).
+
+**Coverage.** Every existing `test_jsonl_source_early_exit_*` test in both
+`test_anomaly.py` and `test_config_trends.py` now asserts
+`scan_ended_on_out_of_window_run` directly — `True` on each heuristic-exit
+path, `False` where the counter reset before the threshold (proving it isn't
+just always-True). `test_jsonl_source_bounds_and_reports_truncation` in both
+files asserts the opposite direction (`truncated=True`,
+`scan_ended_on_out_of_window_run=False`), pinning independence. A new
+`test_report_discloses_the_heuristic_early_exit` in both files confirms the
+reader's 4th value actually reaches the caller-facing report, not just the
+reader. `test_personal_denials.py`'s existing
+`test_report_respects_configured_max_consecutive_out_of_window` — already
+exercising the exact disclosed merged/multi-writer failure mode (a caller's
+own in-window denial sitting physically behind a run of out-of-window events
+from another principal) — now asserts the field distinguishes the tight
+(heuristically-stopped, `own_denials_found=0`) case from the default
+(genuinely-complete, `own_denials_found=1`) case, closing the "regression
+test exercising the disclosed failure mode itself" requirement. Mutation-
+verified: reverting the `ended_on_out_of_window_run = True` assignment before
+each `break` makes every one of the above fail for exactly that reason.
+
+**Effort:** M (mechanical but wide — a Protocol return-shape change with a
+real test-suite blast radius). **Depends on:** 141.
+
 ### 174. A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch ✅ DONE
 
 **Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 166's own
