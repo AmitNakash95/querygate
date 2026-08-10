@@ -447,14 +447,11 @@ claim when the work ships or before explicitly handing the item back.
 - [x] **171** — the audit windowed early-exit (item 141) can silently
   under-report on a merged/multi-writer file. ✅ **Shipped**
   (`scan_ended_on_out_of_window_run` disclosure field on all three reports).
-- [ ] **172** — WORM archive segment verification checks each record's own
-  hash but never the chain's linkage within a segment (duplication/omission
-  undetectable, even against a keyed archive). *Surfaced 2026-08-09 by
-  `security-invariant-reviewer`/`test-contract-reviewer` auditing item 154's
-  own commit, during that item's own mandatory completion gate. Needs an
-  explicit design decision (recorded in the PRODUCT_GUIDE Decision Log) on
-  binding a segment to its own object key before the duplication half can be
-  fully closed, not just the linkage-break detection half.* **Depends on 154.**
+- [x] **172** — WORM archive segment verification checks each record's own
+  hash but never the chain's linkage within a segment. ✅ **Shipped**
+  (`seq`/`prev_hash` continuity check + `chain_breaks` field; segment
+  duplication to a second key remains a separate, undecided residual —
+  see item 177 for the follow-up metrics-counter gap it also surfaced).
 - [x] **126** — no per-caller rate limit on `GET /help/my-recent-denials`.
   ✅ **Shipped** (per-principal cooldown + config knob + metrics counter).
 - [x] **174** — a cross-connection join's secondary-connection schema
@@ -464,6 +461,10 @@ claim when the work ships or before explicitly handing the item back.
 - [ ] **173** — cross-connection connection-resolution is unmemoized, redone
   on every call site that self-derives it. *Same subsystem as 174, perf-only
   not a correctness gap.* **Depends on 160.**
+- [ ] **177** — `WormSearchResult.chain_breaks`/`unverified` have no
+  Prometheus counter, so the strongest WORM-archive tamper signal isn't
+  alertable. *Surfaced 2026-08-10 by `security-invariant-reviewer` auditing
+  item 172's own commit.* **Depends on 172.**
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
