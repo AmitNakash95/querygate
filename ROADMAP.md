@@ -483,6 +483,20 @@ claim when the work ships or before explicitly handing the item back.
   alone deliberately. **Verify against a real Redis before changing production**
   — under real Redis the reply may be flat, making this a test-double artifact
   rather than a shipped bug.* **Depends on 50.**
+- [ ] **182** — observe mode for the disclosure budget: record what *would* have
+  been refused without refusing it. *Closes item 179's one honest gap — no
+  threshold is recommended because none has been calibrated, so an operator
+  enabling it today picks an unvalidated number. Follows `CostEstimationMode.OBSERVE`'s
+  shipped precedent exactly. Note the non-cosmetic design question in the item
+  body: item 179's charge is all-or-nothing, so a naive wrap-the-call-site
+  observe mode stops measuring at the cap and never learns how far past it real
+  traffic goes.* **Depends on 179, 26.**
+- [ ] **183** — suggest a disclosure-budget threshold from observed behavior,
+  for human approval. *Nice-to-have; a client can use or ignore it. Stays inside
+  the 32C boundary (propose only, never self-publish, 32B review path). The trap
+  is in the item body: a prober active during the observation window poisons the
+  baseline, so suggest from a percentile and present the distribution rather than
+  a bare number.* **Depends on 182.**
 - [ ] **180** — escalate an exhausted disclosure budget into item 92's approval
   gate instead of rejecting. *Deliberately deferred from item 179: better UX,
   but risks becoming "click here to buy unlimited disclosure", and item 179's
