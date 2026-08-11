@@ -2756,25 +2756,26 @@ own WS-172-8 follow-up commit (WS-172-9), during that follow-up's own
 mandatory completion gate.** Pre-existing since item 154/172, not introduced
 by the WS-172-8 fix — the reviewer found it while reading the surrounding
 code the fix touches. `audit/worm_search.py` reads `parsed.get("seq")` as a
-raw, unvalidated dict value in three places (`_seed_chain_state_from_
-predecessor`, and the main line loop's own `seq`/`prev_seq` tracking) after
-`verify_envelope_hash` has confirmed the envelope's hash recomputes —but
-`verify_envelope_hash` only proves the hash matches what was signed, not
-that `seq` is the `int` `LedgerRecord.seq` is typed as. A crafted line whose
-`seq` is (for example) the *string* `"3"` can still have a self-consistent
-hash (`compute_record_hash` digests whatever `seq` value is present,
-coerced or not) and passes `verify_envelope_hash`, but the downstream
-`seq == prev_seq + 1` comparison then raises `TypeError` (`str` + `int`),
-which escapes to the route's `mask_unexpected()` as a generic 500 —
-availability/contract-breakage, not disclosure (no credential/bucket/driver
-text leaks), but a real regression against this module's own "malformed/
-unverified, never an unhandled exception" posture for a crafted line.
+raw, unvalidated dict value at two sites (`_seed_chain_state_from_
+predecessor`'s `seed_parsed.get("seq")`, and the main line loop's own
+`seq = parsed.get("seq")`) after `verify_envelope_hash` has confirmed the
+envelope's hash recomputes — but `verify_envelope_hash` only proves the hash
+matches what was signed, not that `seq` is the `int` `LedgerRecord.seq` is
+typed as. A crafted line whose `seq` is (for example) the *string* `"3"` can
+still have a self-consistent hash (`compute_record_hash` digests whatever
+`seq` value is present, coerced or not) and passes `verify_envelope_hash`,
+but the downstream `seq == prev_seq + 1` comparison then raises `TypeError`
+(`str` + `int`), which escapes to the route's `mask_unexpected()` as a
+generic 500 — availability/contract-breakage, not disclosure (no
+credential/bucket/driver text leaks), but a real regression against this
+module's own "malformed/unverified, never an unhandled exception" posture
+for a crafted line.
 
 **What to do (when prioritized):** read the *validated* record via
 `LedgerRecord.model_validate(parsed)` (or an explicit
 `isinstance(seq, int) and not isinstance(seq, bool)` guard, treating a
 non-int as `unverified` and stopping consumption of that object) at each of
-the three raw-dict `seq` reads, so a type-confused-but-hash-valid line is
+the two raw-dict `seq` reads, so a type-confused-but-hash-valid line is
 counted like any other forgery class instead of raising.
 
 **Effort:** S. **Depends on:** 172 (shipped).
