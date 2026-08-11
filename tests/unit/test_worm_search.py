@@ -7,10 +7,13 @@ behavior, not just that the function is callable.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import pathlib
 import time
 from datetime import date, datetime, timedelta, timezone
+from unittest.mock import patch
 
 import boto3
 import pydantic as pyd
@@ -27,7 +30,11 @@ from querygate.audit.worm_search import (
 )
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import QueryValidationError
-from querygate.metrics import REGISTRY
+from querygate.metrics import (
+    AUDIT_WORM_SEARCH_CHAIN_BREAKS_TOTAL,
+    AUDIT_WORM_SEARCH_UNVERIFIED_TOTAL,
+    REGISTRY,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -1648,6 +1655,404 @@ class TestMetrics:
         )
         after = _sample("querygate_audit_worm_search_objects_scanned_total", {})
         assert after == before + 2
+
+    # TODO.md item 177: the two integrity signals must be alertable, not just
+    # visible to whoever runs an ad-hoc search over the right window.
+
+    async def test_a_chain_break_increments_both_integrity_counters(self, s3):
+        # The same middle-record-removed fixture TestChainLinkage uses: the
+        # break is one segment (chain_breaks) whose breaking line is also
+        # counted unverified, exactly mirroring the result model's own
+        # relationship between the two fields.
+        lines = _chain_lines([_event("a", minute=0), _event("b", minute=1), _event("c", minute=2)])
+        del lines[1]
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+        before_breaks = _sample("querygate_audit_worm_search_chain_breaks_total", {})
+        before_unverified = _sample("querygate_audit_worm_search_unverified_total", {})
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+
+        assert result.chain_breaks == 1
+        assert result.unverified == 1
+        # The counters must agree with the response the same request returned —
+        # a counter that drifts from the disclosed result is worse than none.
+        assert _sample("querygate_audit_worm_search_chain_breaks_total", {}) == (
+            before_breaks + result.chain_breaks
+        )
+        assert _sample("querygate_audit_worm_search_unverified_total", {}) == (
+            before_unverified + result.unverified
+        )
+
+    async def test_a_hash_mismatch_increments_unverified_but_not_chain_breaks(self, s3):
+        # A key mismatch (the common, benign cause) must not light up the
+        # chain-break counter — the whole point of publishing them separately
+        # is that one is alertable and the other is usually a rotated key.
+        lines = _chain_lines([_event("a", minute=0)], key=b"a-different-ledger-key")
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+        before_breaks = _sample("querygate_audit_worm_search_chain_breaks_total", {})
+        before_unverified = _sample("querygate_audit_worm_search_unverified_total", {})
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+
+        assert result.unverified == 1
+        assert result.chain_breaks == 0
+        assert _sample("querygate_audit_worm_search_unverified_total", {}) == before_unverified + 1
+        assert _sample("querygate_audit_worm_search_chain_breaks_total", {}) == before_breaks
+
+    async def test_the_counters_carry_the_real_magnitude_not_just_a_boolean(self, s3):
+        # Every other test in this class produces exactly 0 or 1 of each signal,
+        # so `.inc(1 if chain_breaks else 0)` / `.inc(min(unverified, 1))` would
+        # pass all of them AND the rest of the suite — leaving the documented
+        # `unverified_total - chain_breaks_total` arithmetic and the whole
+        # magnitude story resting on nothing. Two broken segments plus one
+        # key-mismatched segment give chain_breaks=2, unverified=3.
+        broken_a = _chain_lines(
+            [_event("a", minute=0), _event("b", minute=1), _event("c", minute=2)]
+        )
+        del broken_a[1]
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", broken_a)
+        broken_b = _chain_lines(
+            [_event("d", minute=3), _event("e", minute=4), _event("f", minute=5)]
+        )
+        del broken_b[1]
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120100-000001.jsonl", broken_b)
+        _put_segment(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120200-000001.jsonl",
+            _chain_lines([_event("g", minute=6)], key=b"a-different-ledger-key"),
+        )
+        before_breaks = _sample("querygate_audit_worm_search_chain_breaks_total", {})
+        before_unverified = _sample("querygate_audit_worm_search_unverified_total", {})
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+
+        assert result.chain_breaks == 2
+        # Two chain-break lines (whose own hashes verified) + one true hash
+        # mismatch — the documented `unverified ⊇ chain_breaks` relationship.
+        assert result.unverified == 3
+        assert _sample("querygate_audit_worm_search_chain_breaks_total", {}) == before_breaks + 2
+        assert _sample("querygate_audit_worm_search_unverified_total", {}) == before_unverified + 3
+        # The subtraction the metric help text and PRODUCT_GUIDE both document
+        # as "the part actually likely to be a key mismatch" — asserted on the
+        # COUNTER deltas, not on the two response fields above (that form would
+        # be pure arithmetic on assertions already made three lines up, and
+        # could not fail independently).
+        breaks_delta = _sample("querygate_audit_worm_search_chain_breaks_total", {}) - before_breaks
+        unverified_delta = (
+            _sample("querygate_audit_worm_search_unverified_total", {}) - before_unverified
+        )
+        assert unverified_delta - breaks_delta == 1
+
+    async def test_malformed_lines_move_neither_integrity_counter(self, s3):
+        # `malformed` (not envelope-shaped at all — garbage/corruption) is a
+        # deliberately DISTINCT class from `unverified` (item 154), because the
+        # latter usually means a rotated key. `.inc(unverified + malformed)`
+        # would be green everywhere else in this file, and would page an
+        # operator with a "hash didn't recompute" rate driven by ordinary
+        # corruption — exactly the conflation that split exists to prevent.
+        _put_segment(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [json.dumps({"not": "an envelope"})],
+        )
+        before_breaks = _sample("querygate_audit_worm_search_chain_breaks_total", {})
+        before_unverified = _sample("querygate_audit_worm_search_unverified_total", {})
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+
+        assert result.malformed == 1
+        assert result.unverified == 0
+        assert result.chain_breaks == 0
+        assert _sample("querygate_audit_worm_search_chain_breaks_total", {}) == before_breaks
+        assert _sample("querygate_audit_worm_search_unverified_total", {}) == before_unverified
+
+    async def test_the_same_break_is_counted_once_per_scan_not_once_per_segment(self, s3):
+        # Pins the deliberate semantics the help text now discloses: the
+        # counters count FINDINGS PER SCAN, not distinct broken segments. A WORM
+        # object is immutable, so a genuine break is permanent and every later
+        # search over that window re-counts it. Recorded as a test so a future
+        # change to per-segment dedup has to be a conscious decision with a doc
+        # update, rather than a silent "fix".
+        lines = _chain_lines([_event("a", minute=0), _event("b", minute=1), _event("c", minute=2)])
+        del lines[1]
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+        before_breaks = _sample("querygate_audit_worm_search_chain_breaks_total", {})
+
+        for _ in range(2):
+            await search_worm_archive(
+                bucket=_BUCKET,
+                prefix=_PREFIX,
+                region="us-east-1",
+                flush_interval_seconds=60,
+                start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+                bounds=_bounds(),
+            )
+
+        assert _sample("querygate_audit_worm_search_chain_breaks_total", {}) == before_breaks + 2
+
+    async def test_an_intact_archive_leaves_both_integrity_counters_untouched(self, s3):
+        # The control: without this, both assertions above would also pass if
+        # the counters incremented on every request regardless of findings.
+        _put_events(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [_event("a", minute=0), _event("b", minute=1)],
+        )
+        before_breaks = _sample("querygate_audit_worm_search_chain_breaks_total", {})
+        before_unverified = _sample("querygate_audit_worm_search_unverified_total", {})
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+
+        assert result.chain_breaks == 0
+        assert result.unverified == 0
+        # `_sample` returns `or 0.0`, so an equality-to-`before` assertion alone
+        # would also pass if the series did not exist at all (a renamed or
+        # misspelled metric). Pin existence separately.
+        assert (
+            REGISTRY.get_sample_value("querygate_audit_worm_search_chain_breaks_total") is not None
+        )
+        assert REGISTRY.get_sample_value("querygate_audit_worm_search_unverified_total") is not None
+        assert _sample("querygate_audit_worm_search_chain_breaks_total", {}) == before_breaks
+        assert _sample("querygate_audit_worm_search_unverified_total", {}) == before_unverified
+
+    def test_both_integrity_counters_carry_no_labels(self):
+        # The no-label shape is a SECURITY claim (docs/THREAT_MODEL.md QG-40,
+        # CHANGELOG): a `connection`/`principal` label would be caller-chosen
+        # cardinality and a weak per-principal activity oracle over the audit
+        # archive to anyone who can read /metrics. Until now it was backed only
+        # incidentally — by the fact that the other tests sample with `{}` and
+        # `.inc()` on a labelled metric raises. Assert the property directly so
+        # adding a label is a deliberate, visibly-failing decision.
+        #
+        # Via the PUBLIC registry API rather than `Counter._labelnames`: a
+        # labelled Counter has no child until `.labels()` is called and can
+        # never emit a sample whose label dict is empty, so an empty-label
+        # sample existing is exactly "this metric is unlabelled" — same
+        # property, no private attribute to break on a library upgrade.
+        assert (
+            REGISTRY.get_sample_value("querygate_audit_worm_search_chain_breaks_total", {})
+            is not None
+        )
+        assert (
+            REGISTRY.get_sample_value("querygate_audit_worm_search_unverified_total", {})
+            is not None
+        )
+
+    async def test_a_result_that_fails_to_build_counts_the_signals_once_not_twice(self, s3):
+        # The invariant that justified DELETING the idempotence guard from
+        # `_count_integrity_signals` (TODO.md item 177): the served path and the
+        # error path are mutually exclusive, because `_finalize` does nothing
+        # that can raise between counting and returning.
+        #
+        # This pins the invariant BEHAVIOURALLY rather than by inspecting source
+        # shape. Make `WormSearchResult` construction itself raise — the one
+        # statement inside `_finalize` that precedes the counters — and the
+        # request must reach the `except Exception` handler having counted
+        # ZERO times, then count exactly once. If a future edit moves
+        # `_count_integrity_signals()` above the construction (the WS-7 hazard
+        # the ordering comment exists to prevent), or inserts any fallible
+        # statement after it, this fails with +2.
+        #
+        # The fixture deliberately returns via the PAGE-FILLED call site, which
+        # is inside the `try` — that is the only place the double-count hazard
+        # exists. (The final `return _finalize(...)` after the loop sits OUTSIDE
+        # the `try`, so a construction failure there propagates having counted
+        # nothing at all, not even `outcome="error"`. That asymmetry is
+        # pre-existing and equally true of the request counter; it is a
+        # not-counted case, never a double-counted one.) So: a broken first
+        # segment (counted, then skipped) followed by an intact segment whose
+        # event fills the page at limit=2.
+        broken = _chain_lines([_event("a", minute=0), _event("b", minute=1), _event("c", minute=2)])
+        del broken[1]
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", broken)
+        _put_events(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120100-000001.jsonl",
+            [_event("d", minute=3), _event("e", minute=4)],
+        )
+        before_breaks = _sample("querygate_audit_worm_search_chain_breaks_total", {})
+        before_unverified = _sample("querygate_audit_worm_search_unverified_total", {})
+        before_ok = _sample("querygate_audit_worm_search_requests_total", {"outcome": "ok"})
+        before_errors = _sample("querygate_audit_worm_search_requests_total", {"outcome": "error"})
+
+        def exploding_result(**kwargs):
+            raise RuntimeError("result model failed to build")
+
+        with patch.object(worm_search_module, "WormSearchResult", exploding_result):
+            with pytest.raises(RuntimeError, match="result model failed to build"):
+                await search_worm_archive(
+                    bucket=_BUCKET,
+                    prefix=_PREFIX,
+                    region="us-east-1",
+                    flush_interval_seconds=60,
+                    start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                    end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+                    limit=2,
+                    bounds=_bounds(),
+                )
+
+        assert _sample("querygate_audit_worm_search_chain_breaks_total", {}) == before_breaks + 1
+        assert _sample("querygate_audit_worm_search_unverified_total", {}) == before_unverified + 1
+        # And the pre-existing WS-7 ordering rationale, which had never had a
+        # test either: a request whose model fails to build is counted "error",
+        # never also "ok".
+        assert _sample("querygate_audit_worm_search_requests_total", {"outcome": "ok"}) == before_ok
+        assert (
+            _sample("querygate_audit_worm_search_requests_total", {"outcome": "error"})
+            == before_errors + 1
+        )
+
+    async def test_a_cancelled_scan_counts_nothing(self, s3):
+        # README and docs/THREAT_MODEL.md QG-40 both state that a request
+        # cancelled by client disconnect or shutdown counts nothing, because
+        # `asyncio.CancelledError` derives from `BaseException` and the handler
+        # catches `Exception`. That is a deliberate documented limit, so it
+        # needs a test: widening the handler to `except BaseException:` (a
+        # plausible "always record something" edit) would silently contradict
+        # two shipped documents with the whole suite green.
+        lines = _chain_lines([_event("a", minute=0), _event("b", minute=1), _event("c", minute=2)])
+        del lines[1]
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+        _put_events(s3, f"{_PREFIX}2026/03/16/20260316T120000-000001.jsonl", [_event("d")])
+        before_breaks = _sample("querygate_audit_worm_search_chain_breaks_total", {})
+        before_unverified = _sample("querygate_audit_worm_search_unverified_total", {})
+        before_errors = _sample("querygate_audit_worm_search_requests_total", {"outcome": "error"})
+
+        real_get = s3.get_object
+        seen = {"n": 0}
+
+        def cancelling_get_object(**kwargs):
+            # Let the broken segment be read, then cancel the request.
+            seen["n"] += 1
+            if seen["n"] > 1:
+                raise asyncio.CancelledError()
+            return real_get(**kwargs)
+
+        with patch.object(s3, "get_object", side_effect=cancelling_get_object):
+            with patch("boto3.client", return_value=s3):
+                with pytest.raises(asyncio.CancelledError):
+                    await search_worm_archive(
+                        bucket=_BUCKET,
+                        prefix=_PREFIX,
+                        region="us-east-1",
+                        flush_interval_seconds=60,
+                        start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                        end_time=datetime(2026, 3, 17, tzinfo=timezone.utc),
+                        bounds=_bounds(),
+                    )
+
+        assert _sample("querygate_audit_worm_search_chain_breaks_total", {}) == before_breaks
+        assert _sample("querygate_audit_worm_search_unverified_total", {}) == before_unverified
+        assert (
+            _sample("querygate_audit_worm_search_requests_total", {"outcome": "error"})
+            == before_errors
+        )
+
+    def test_the_worm_search_has_exactly_one_production_call_site(self):
+        # The narrowed scope claim on four surfaces ("QueryGate does not scan
+        # the archive on a schedule") rests entirely on there being no caller
+        # other than the scope-gated REST route. Pin it, mirroring
+        # test_create_async_engine_has_exactly_one_production_call_site — so
+        # adding a background verifier or an MCP tool forces the disclosed
+        # limitation to be revisited instead of silently going stale.
+        src = pathlib.Path(worm_search_module.__file__).resolve().parents[1]
+        callers = []
+        for path in src.rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                stripped = line.strip()
+                if stripped.startswith("#") or "def build_worm_search_result" in stripped:
+                    continue
+                if "build_worm_search_result(" in stripped:
+                    callers.append(f"{path.name}:{lineno}")
+        assert callers == ["admin_observability_routes.py:229"], callers
+
+    async def test_a_chain_break_found_before_a_mid_scan_failure_is_still_counted(self, s3):
+        # The path the ok-only placement would lose: a scan that finds a break
+        # and THEN fails against S3 never reaches _finalize, so without the
+        # error-path call the strongest tamper signal this surface produces
+        # would be swallowed by the exception.
+        lines = _chain_lines([_event("a", minute=0), _event("b", minute=1), _event("c", minute=2)])
+        del lines[1]
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+        _put_events(s3, f"{_PREFIX}2026/03/16/20260316T120000-000001.jsonl", [_event("d")])
+        before_breaks = _sample("querygate_audit_worm_search_chain_breaks_total", {})
+        before_unverified = _sample("querygate_audit_worm_search_unverified_total", {})
+        before_errors = _sample("querygate_audit_worm_search_requests_total", {"outcome": "error"})
+
+        real_get = s3.get_object
+        seen = {"n": 0}
+
+        def exploding_get_object(**kwargs):
+            # Let the first (broken) segment be read, then fail the scan.
+            seen["n"] += 1
+            if seen["n"] > 1:
+                raise RuntimeError("s3 went away mid-scan")
+            return real_get(**kwargs)
+
+        with patch.object(s3, "get_object", side_effect=exploding_get_object):
+            with patch("boto3.client", return_value=s3):
+                with pytest.raises(RuntimeError, match="s3 went away mid-scan"):
+                    await search_worm_archive(
+                        bucket=_BUCKET,
+                        prefix=_PREFIX,
+                        region="us-east-1",
+                        flush_interval_seconds=60,
+                        start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                        end_time=datetime(2026, 3, 17, tzinfo=timezone.utc),
+                        bounds=_bounds(),
+                    )
+
+        assert (
+            _sample("querygate_audit_worm_search_requests_total", {"outcome": "error"})
+            == before_errors + 1
+        )
+        assert _sample("querygate_audit_worm_search_chain_breaks_total", {}) == before_breaks + 1
+        # BOTH counters must survive the failure — README/CHANGELOG claim both,
+        # and the two increments only share a closure today, which is an
+        # implementation detail, not the contract.
+        assert _sample("querygate_audit_worm_search_unverified_total", {}) == before_unverified + 1
 
 
 class TestBuildWormSearchResult:

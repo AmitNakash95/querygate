@@ -3705,6 +3705,69 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-11 — The WORM archive's two integrity signals are now Prometheus
+  counters, so a broken hash chain is alertable rather than merely
+  inspectable (TODO.md item 177).** Item 172 added
+  `WormSearchResult.chain_breaks` — the strongest tamper/omission signal this
+  surface produces, stronger than an ordinary `unverified` hash mismatch
+  because the record's own hash still verified — but it was only ever visible
+  to whoever happened to run an ad-hoc
+  `GET /api/v1/admin/observability/worm-search` over the right window.
+  Nobody was paged. Since the Proof pillar is a product claim, that made
+  "detected" mean "detectable on demand" rather than "monitored": an operator
+  on the normal dashboards/alerts posture would never learn a chain broke.
+  **Decision:** `querygate_audit_worm_search_chain_breaks_total` and
+  `querygate_audit_worm_search_unverified_total` in `metrics.py`, incremented
+  in `audit/worm_search.py`'s `_finalize` alongside the existing
+  `AUDIT_WORM_SEARCH_REQUESTS_TOTAL`/`..._OBJECTS_SCANNED_TOTAL` pattern.
+  Both are **unlabelled**, matching item 126's
+  `PERSONAL_DENIALS_RATE_LIMITED_TOTAL` precedent — a `connection`/
+  `principal` label here would be caller-chosen cardinality and a weak
+  activity oracle over the audit archive itself, on a surface whose whole
+  point is that reading it is privileged. `unverified_total` deliberately
+  includes each chain break's own breaking line, mirroring the result model's
+  field relationship exactly, so `unverified_total - chain_breaks_total` is
+  the count actually likely to be a key rotation — the same split the
+  response `note` already makes in prose.
+  **Two decisions beyond the item's literal scope, both deliberate:**
+  (1) the counters also fire on the **mid-scan S3 failure** path, not only
+  the served path — a chain break found just before S3 died is a real
+  discovery, and letting the exception swallow it would reproduce the exact
+  silent-signal failure this item exists to close; the item's own text said
+  only "in `_finalize`", which would have left that hole. (2) An idempotence
+  guard drafted for the two call sites was **removed** rather than shipped:
+  mutation testing confirmed it was unreachable (every `_finalize` call site
+  is a `return`, and `_finalize` cannot raise after counting) and therefore
+  untestable — the same call item 114 made on its fifth hand-rolled predicate
+  enumerator. The reasoning is recorded in a comment at the site, and the
+  invariant it rested on is now pinned *behaviourally* by
+  `test_a_result_that_fails_to_build_counts_the_signals_once_not_twice`, which
+  makes the result-model construction raise and asserts the signals are counted
+  once, not twice. (A first attempt guarded this by string-matching `_finalize`
+  call sites in the module source; the audit's second pass showed that proxy
+  false-passed on the one edit that genuinely double-counts — moving the
+  counting call above the model construction — and false-failed on a docstring
+  mentioning `_finalize(`, so it was replaced. The behavioural test also covers
+  the WS-7 "build the response first, count only after construction succeeds"
+  ordering, comment-only since item 134 phase 2.)
+  **Scope corrected by this item's own `auditors` gate, before commit.**
+  Reviewers independently flagged that the first draft's framing —
+  "detected" becomes "monitored" — overstated what shipped: nothing in
+  QueryGate scans the archive on a schedule (`search_worm_archive` has exactly
+  one production caller, the scope-gated REST route), so the counters only
+  advance while a search actually runs. A segment tampered inside a window
+  nobody searches still produces no signal. What this item delivers is
+  precisely that a finding becomes *reachable by alerting* rather than only
+  readable in a response body; genuine monitoring additionally requires the
+  operator to schedule a periodic search, which README/THREAT_MODEL now say.
+  A false sense of coverage would have been worse than the gap it replaced, so
+  the claim was narrowed on every surface rather than the code widened. The
+  same gate also established that the counters count findings **per scan**,
+  not distinct segments (a WORM object is immutable, so a real break is
+  permanent and re-counted by every later search that reaches it) — hence the
+  guidance to alert on the first non-zero increase, not on a magnitude. A
+  scheduled verifier, if wanted, is a new item rather than a doc edit.
+  See [Security Model](#security-model).
 - **2026-08-10 — `validate_schema` reuses the per-request connection-resolver
   snapshot instead of re-deriving cross-connection resolution a second time
   (TODO.md item 173).** Item 160 already built one fixed snapshot per
