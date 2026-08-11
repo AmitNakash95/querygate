@@ -212,6 +212,8 @@ order-of-magnitude, not commitments.
 | 179 | ✅ Cumulative disclosure budget: bound multi-query differencing per purpose — the one structural form of "governing intent" | L | 88, 145 |
 | 180 | Escalate an exhausted disclosure budget into the item-92 approval gate instead of rejecting | M | 92, 179 |
 | 181 | `redis_quota.py`'s `Retry-After` is always the full window — the Lua indexes a nested `WITHSCORES` reply | S | 50 |
+| 182 | Observe mode for the disclosure budget — measure before you enforce | S–M | 179, 26 |
+| 183 | Suggest a disclosure-budget threshold from observed behavior, for human approval | M | 182 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2871,3 +2873,84 @@ are unaffected — this is Redis-backend-only.
 3. Check `execution/redis_concurrency.py` for the same pattern while there.
 
 **Effort:** S. **Depends on:** 50 (shipped).
+
+### 182. Observe mode for the disclosure budget — measure before you enforce
+
+**Opened 2026-08-11**, immediately after item 179 shipped, because that item
+left one honest gap: **no threshold is recommended anywhere, because none has
+been calibrated.** An operator enabling `max_shape_repeats_per_window` today is
+choosing a number nobody has validated against real traffic, and choosing it
+too low turns an analyst iterating on filters into a refused caller. This is
+the piece that makes item 179 deployable rather than theoretical.
+
+**The precedent is exact.** `CostEstimationMode.OBSERVE` (item 26) exists for
+the identical problem and states the identical reasoning in its own docstring:
+records what *would* have been rejected without blocking, "use it to calibrate
+thresholds against real traffic before switching a connection over to ENFORCE,
+since a threshold copied from documentation is a guess, not a measurement." It
+ships `querygate_cost_estimation_would_reject_total` and a
+`cost_estimation.observed_would_reject` log line. Follow that shape rather than
+inventing a second one.
+
+**What to do:**
+
+1. `Policy.disclosure_budget_mode: enforce | observe`, defaulting to `enforce`
+   for consistency with `cost_estimation_mode` — but with the docs saying
+   plainly that a first deployment should start in `observe`. Off-by-default
+   still holds either way: with no caps configured neither mode does anything.
+2. In `observe`, a charge past its cap increments a new
+   `querygate_disclosure_budget_would_reject_total{connection,budget_kind}` and
+   emits a `disclosure_budget.observed_would_reject` log line, and the query
+   **runs**.
+3. **The one real design question, and it is not cosmetic.** Item 179's
+   `reserve()` is all-or-nothing: a refused charge records *nothing*, so a
+   naive "catch the exception and continue" observe mode would stop
+   accumulating the moment the cap is first crossed — and you would measure
+   only the run-up to the threshold, never how far past it real traffic goes.
+   That is precisely the number needed for calibration. Observe mode must keep
+   recording past the cap, which means threading the mode into
+   `DisclosureBudgetLimiter.reserve` (and the Lua) rather than wrapping the
+   call site. Decide this deliberately; wrapping is the tempting wrong answer.
+4. Both backends, since a single-replica measurement generalises badly to the
+   fleet the operator will actually enforce on.
+
+**Effort:** S–M. **Depends on:** 179 (shipped), 26 (shipped — the precedent).
+
+### 183. Suggest a disclosure-budget threshold from observed behavior, for human approval
+
+**Opened 2026-08-11 (maintainer proposal).** Once item 182 is producing real
+distributions, propose a threshold rather than making every operator derive one
+from raw metrics. Framed as a nice-to-have: a client can use it or ignore it,
+and the budget must remain fully configurable by hand.
+
+**Stay inside the 32C boundary, which already governs exactly this.** CLAUDE.md:
+typed redaction-safe signals only, per-customer/connection partitioning, no
+feedback loops, and learned content "must go through the existing 32B review
+path — it can never publish itself." A suggestion is a proposal, never an
+applied policy. `admin/anomaly.py` is likewise committed in its own docstring to
+being read-only and non-feedback — a suggestion surface may sit alongside it but
+must not turn it into an enforcement path.
+
+**The trap that makes this non-trivial — do not skip it.** If the threshold is
+derived from observed behavior and a prober is *already* active during the
+observation window, the recommendation is calibrated to comfortably accommodate
+the attack. The baseline is poisoned by the very thing the budget exists to
+catch, and the more patient the attacker, the more normal they look. Two
+consequences for the design:
+
+- **Suggest from a percentile of typical behavior, never the observed maximum.**
+  The maximum is exactly where an attacker sits.
+- **Present the distribution, not a number.** The approval surface should show
+  the shape of observed re-run counts and its tail, so a human is approving a
+  judgement they can see, not rubber-stamping an integer. An unexplained
+  recommended number invites habituated clicking — the same failure mode item
+  180 records for approval-gated budget grants.
+
+**What to do (when prioritized):** read item 182's observed distribution per
+(principal, connection, purpose, table); compute a percentile-based candidate
+plus the tail beyond it; surface both through the 32B review path as a proposal
+an operator approves, edits or discards. Never auto-apply, never on a schedule
+that could apply without a human, and never suggest a *loosening* of a
+threshold an operator has already set by hand without saying so explicitly.
+
+**Effort:** M. **Depends on:** 182, 179 (shipped), 32B/32C (shipped).
