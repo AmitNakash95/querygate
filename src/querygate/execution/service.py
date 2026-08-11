@@ -48,6 +48,7 @@ from querygate.core.exceptions import (
     ApprovalRequiredError,
     CapacityTimeoutError,
     ConcurrencyLimitError,
+    DisclosureBudgetExceededError,
     NotFoundError,
     PolicyViolationError,
     QueryValidationError,
@@ -73,6 +74,7 @@ from querygate.execution.cost_estimation import (
     estimate_mssql_query_cost,
     estimate_postgres_query_cost,
 )
+from querygate.execution.disclosure_budget import enforce_disclosure_budget
 from querygate.execution.quota import (
     QuotaReservation,
     enforce_query_quota,
@@ -80,6 +82,7 @@ from querygate.execution.quota import (
 )
 from querygate.metrics import (
     COST_ESTIMATION_WOULD_REJECT_TOTAL,
+    DISCLOSURE_BUDGET_REJECTIONS_TOTAL,
     QUERIES_REJECTED_TOTAL,
     QUERIES_TOTAL,
     QUERY_DURATION_SECONDS,
@@ -949,6 +952,34 @@ class StructuredQueryService:
                             self._enforce_approval_gate(
                                 estimate, policy, query, approval_token, scope_connections
                             )
+                        # Cumulative disclosure budget (TODO.md item 179) — the
+                        # multi-query counterpart to the compiler's
+                        # `min_group_size` k-floor, charged per (principal,
+                        # connection, purpose, table).
+                        #
+                        # Placed AFTER the approval gate, deliberately: a query
+                        # that pauses for approval raises out of here and is
+                        # retried as a second `execute()` call (item 107). The
+                        # quota handles that by threading its reservation
+                        # through `_reserved_quota`; charging the budget only
+                        # once the query is actually about to run gets the same
+                        # no-double-charge result with no extra parameter — a
+                        # paused attempt spends nothing, and the retry spends
+                        # exactly one unit.
+                        #
+                        # It reads the purpose-narrowed `policy` rebound by
+                        # `_validate_and_compile` above, for consistency with
+                        # what the compiler actually used. Note `min_group_size`
+                        # is NOT purpose-narrowable today (`PurposePolicyDelta`
+                        # carries only deny/filter/mask lists), so the budget's
+                        # k-floor coupling resolves identically either way —
+                        # stated because the reverse would be easy to assume.
+                        await enforce_disclosure_budget(
+                            query,
+                            policy,
+                            connection_id=self._connection_id,
+                            principal_subject=self._principal_subject,
+                        )
                         try:
                             result = await session.execute(stmt)
                         except (DataError, ProgrammingError) as exc:
@@ -1112,7 +1143,17 @@ class StructuredQueryService:
             QUERIES_REJECTED_TOTAL.labels(
                 connection=self._connection_id, reason=classify_rejection(exc)
             ).inc()
-            if isinstance(exc, QuotaExceededError):
+            # Checked before the quota branch: DisclosureBudgetExceededError
+            # subclasses QuotaExceededError (so it inherits the 429/RATE_LIMITED
+            # caller contract), but the two answer different operator questions
+            # — "this caller is running too many queries" vs. "this caller is
+            # probing one table's aggregates" — so each has its own counter and
+            # neither pollutes the other's meaning.
+            if isinstance(exc, DisclosureBudgetExceededError):
+                DISCLOSURE_BUDGET_REJECTIONS_TOTAL.labels(
+                    connection=self._connection_id, budget_kind=exc.quota_kind
+                ).inc()
+            elif isinstance(exc, QuotaExceededError):
                 QUERY_QUOTA_REJECTIONS_TOTAL.labels(
                     connection=self._connection_id, quota_kind=exc.quota_kind
                 ).inc()

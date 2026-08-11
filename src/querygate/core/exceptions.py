@@ -158,6 +158,26 @@ class QuotaExceededError(PolicyViolationError):
         self.retry_after_seconds = retry_after_seconds
 
 
+class DisclosureBudgetExceededError(QuotaExceededError):
+    """A principal's cumulative *disclosure* budget for one table over a rolling
+    window (TODO.md item 179) is exhausted, so this aggregate query is refused
+    before it runs.
+
+    Subclasses `QuotaExceededError` rather than `PolicyViolationError` directly
+    so it inherits, unchanged, the REST 429 + `Retry-After` mapping, the MCP
+    `RATE_LIMITED` code, and `metrics.classify_rejection`'s `quota` bucket — the
+    caller-visible contract is identical to any other budget rejection ("you
+    have spent an allowance; retry later"), and inventing a second one would
+    tell an attacker which guardrail they tripped.
+
+    `quota_kind` is `"disclosure_shape"` (one query shape re-run too many times
+    — the differencing-probe signature) or `"disclosure_table"` (too many
+    aggregate queries against one table however the shape varied). The message
+    deliberately names neither the table nor the shape: which table is close to
+    its budget is itself a disclosure channel.
+    """
+
+
 class ApprovalRequiredError(PolicyViolationError):
     """A read tripped the in-query human-in-the-loop approval gate (TODO.md item
     92): its pre-execution estimate exceeded a policy approval threshold and no

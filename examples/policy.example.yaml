@@ -162,8 +162,9 @@ default:
   # principal). A caller past either cap is refused before its query touches
   # the database — REST answers 429 with a Retry-After header; MCP returns a
   # RATE_LIMITED error. Set a tighter quota for a specific noisy agent under
-  # `principals:` below. Enforcement is in-process (correct for a single
-  # instance); a Redis-backed cross-replica quota is item 50 phase 2.
+  # `principals:` below. Enforcement defaults to in-process (correct for a
+  # single instance); with CONCURRENCY_BACKEND=redis the window becomes one
+  # shared cross-replica budget (item 50 phase 2).
   # max_requests_per_window: 600
   # max_response_bytes_per_window: 104857600
   # quota_window_seconds: 60
@@ -256,6 +257,28 @@ connections:
     # would inflate it — such a join is refused on an aggregate query while this
     # is set (item 118). Joining onto a primary key or unique column is fine.
     # min_group_size: 5
+
+    # Cumulative disclosure budget (item 179) — bounds the multi-query
+    # differencing `min_group_size` alone does not: a prober re-runs ONE
+    # aggregate shape with a sliding constant (`salary > 50000`, `> 60000`, …)
+    # and differences the answers. Because the recorded query shape is
+    # literal-free, those are all one shape, so the budget counts re-runs.
+    #
+    # Both caps are per (principal, connection, declared purpose, table), both
+    # are off unless set, and BOTH require `min_group_size` above to be set —
+    # with no k-floor there is nothing to difference around. Only `execute`
+    # spends budget; `explain`/`verdict` return no rows and so disclose nothing.
+    #
+    # There is no recommended value. We have not calibrated these against real
+    # traffic, so treat them as a control you tune from your own audit stream,
+    # starting generous and tightening — set too low, a legitimate analyst
+    # iterating on filters looks exactly like a prober.
+    # Placeholders, NOT recommendations — pick your own from your audit stream.
+    # Both caps also require min_group_size above to be set; a policy that
+    # configures a budget without a k-floor is rejected at load time.
+    # max_shape_repeats_per_window: <n>       # one shape, re-run n times
+    # max_aggregate_queries_per_window: <n>   # any aggregate on the table
+    # disclosure_budget_window_seconds: 3600  # the one real default
 
   # ── retail: the broad operational view of the large demo domain ──────────
   # Everything except `staff` (the walled-off HR/PII table). PII-shaped
