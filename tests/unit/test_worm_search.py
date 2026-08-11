@@ -844,9 +844,12 @@ class TestChainLinkageVerification:
         # security-invariant-reviewer, 2026-08-10): a long blank run between
         # two real records must not make resuming mid-object expensive —
         # this is the integration-level correctness check that a resume
-        # landing immediately after a real record (the ordinary case: the
-        # cursor's `line` is always `last-consumed-index + 1`, so the seed
-        # walk's own predecessor lookup is a single, trivial step) still
+        # landing immediately after a real record (the ordinary case: a
+        # genuine segment has ZERO blank lines at all — see
+        # `_seed_chain_state_from_predecessor`'s docstring — so any
+        # cursor position issued against a real archive, however it was
+        # issued, is always distance 1 from its predecessor, making the
+        # seed walk's own predecessor lookup a single, trivial step) still
         # returns the right event once the FORWARD loop has skipped a large
         # blank run to reach it, with the true, intact chain correctly
         # confirmed (no false-positive break). This shape does not drive the
@@ -1005,6 +1008,31 @@ class TestSeedChainStateFromPredecessor:
         parsed_a = json.loads(events[0])
         assert prev_hash == parsed_a["hash"]
         assert prev_seq == parsed_a["seq"]
+        assert exhausted is False
+
+    def test_the_ledger_key_is_actually_passed_through_to_verification(self):
+        # test-contract-reviewer, 2026-08-11: every other test in this class
+        # uses ledger_key=None (matching the shipped default), which cannot
+        # catch a swapped/dropped `key=` argument in the extracted helper —
+        # a broken passthrough would silently misclassify every resumed page
+        # on an HMAC-keyed deployment as a chain break. Pin the keyed case
+        # directly: seeding with the SAME key the chain was written with
+        # must find the predecessor; the WRONG key must not.
+        key = b"a-real-hmac-key"
+        events = _chain_lines([_event("a", minute=0), _event("b", minute=1)], key=key)
+        parsed_a = json.loads(events[0])
+
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            events, 1, ledger_key=key
+        )
+        assert prev_hash == parsed_a["hash"]
+        assert prev_seq == parsed_a["seq"]
+        assert exhausted is False
+
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            events, 1, ledger_key=b"the-wrong-key"
+        )
+        assert (prev_hash, prev_seq) == (None, None)
         assert exhausted is False
 
     def test_a_predecessor_that_does_not_verify_yields_nothing_to_seed_from(self):
