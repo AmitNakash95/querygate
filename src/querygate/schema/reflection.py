@@ -92,6 +92,23 @@ def _lock_for(connection_id: str) -> asyncio.Lock:
     return _METADATA_LOCKS[connection_id]
 
 
+def clear_metadata_locks(connection_id: Optional[str] = None) -> None:
+    """Drop the cached reflection lock(s) this module owns.
+
+    `connections/engine.py` calls this from `reset_engines()` (all
+    connections) and `dispose_engine()` (one connection) so a lock created in
+    one event loop is never reused after its owning engine/metadata is torn
+    down — an `asyncio.Lock` raises "bound to a different event loop" if
+    reused from another loop. Exposed here rather than left for callers to
+    reach into `_METADATA_LOCKS` directly, since this module is the one that
+    owns the dict.
+    """
+    if connection_id is None:
+        _METADATA_LOCKS.clear()
+    else:
+        _METADATA_LOCKS.pop(connection_id, None)
+
+
 async def get_table_schema(
     table_name: str,
     connection_id: str,
