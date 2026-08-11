@@ -156,7 +156,7 @@ order-of-magnitude, not commitments.
 | 123 | ✅ A select-item `CASE`'s conditions are absent from the audit shape | S | 120 |
 | 124 | ✅ Most of `tests/unit/` is not selected by `pytest -m unit` | S | — |
 | 125 | ✅ ★ A window function as an `Expression` operand (bar row 15 → 16/16) | XL | 100, 101 |
-| 126 | No per-caller rate limit on `GET /help/my-recent-denials` | S | 45 |
+| 126 | ✅ No per-caller rate limit on `GET /help/my-recent-denials` | S | 45 |
 | 127 | ✅ Reject an MCP request whose routing headers disagree with its body | S–M | 86 |
 | 128 | ✅ Conform to the final MCP `2026-07-28` protocol revision | L | 90, 92, 93 |
 | 129 | ✅ Never advertise a principal-varying MCP result as shared-cacheable | S | 128 |
@@ -201,11 +201,14 @@ order-of-magnitude, not commitments.
 | 168 | ✅ Config-governance dry-run's credential-safety net is a post-hoc regex scrub, not structural, and the validate-config CLI's stderr isn't scrubbed at all | S–M | 165 |
 | 169 | ✅ A correlated subquery's `correlate` ref binds to a phantom alias object by exact dict index, which can silently turn an EXISTS/scalar subquery into an unfiltered scan | S–M | 106, 167 |
 | 170 | ✅ Cross-connection joins are reflected as if both connections are always on the same physical server instance, with nothing that actually checks it | S–M | — |
-| 171 | The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart | M | 141 |
-| 172 | WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment | M | 154 |
-| 173 | Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives | S | 160 |
-| 174 | A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch | S | 163 |
+| 171 | ✅ The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart | M | 141 |
+| 172 | ✅ WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment | M | 154 |
+| 173 | ✅ Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives | S | 160 |
+| 174 | ✅ A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch | S | 163 |
 | 175 | ✅ `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" | S | 2 |
+| 176 | Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line: `sales/index.html`'s guardrails still forbid claiming managed search, `CUSTOMER_README.md` flatly denies it exists, and `TODO.md`'s own Quick-scan row for item 134 says phase 2 "not started" | S | 134 |
+| 177 | `WormSearchResult.chain_breaks`/`unverified` have no Prometheus counter, so the strongest WORM-archive tamper signal isn't alertable — only visible to whoever happens to run an ad-hoc search over the right window | S | 172 |
+| 178 | A hash-verified WORM record with a non-int `seq` (type-confused, not corrupt) raises `TypeError` instead of being counted `unverified` | S | 172 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -584,6 +587,16 @@ model — each exposed procedure individually declared (name, typed
 parameters, whether it's confirmed read-only) rather than a generic
 pass-through, matching the "safe stored procedure/tool catalog pattern"
 called out as a goal but intentionally not attempted in v1.
+
+**Scoping/design proposal (2026-08-11, not yet approved for implementation):**
+[docs/STORED_PROCEDURE_CATALOG_PLAN.md](docs/STORED_PROCEDURE_CATALOG_PLAN.md)
+— why this can't reuse `catalog/`'s reflection-backed pattern, a proposed
+model/registry shape mirroring `connections/`+`policy/`, a proposed 3-4 phase
+breakdown, and five explicit open decisions (risk classification granularity,
+approval-token reuse, whether any preview/dry-run concept is safe for an
+arbitrary procedure, whether the declaration itself needs a review gate,
+multi-result-set procedures) that need resolving before implementation
+starts, not defaults to reach for mid-build.
 
 ### 19. Additional dialects (MySQL, Snowflake, BigQuery) ✅ DONE
 
@@ -1111,8 +1124,11 @@ upgrade rather than accepted (see the CVE-remediation bullet).
   `.gitleaks.toml`. Backs the credential-isolation invariant. Verified: no leaks.
 - **DAST** — **Schemathesis** fuzzes the live OpenAPI surface via
   `scripts/run_dast.py` (`make test-dast`, `dast` CI job), gating
-  `not_a_server_error` + `negative_data_rejection`. Latest: 678/678 checks across
-  59 operations, 0 server errors, 0 accepted malformed payloads. The recursive
+  `not_a_server_error` + `negative_data_rejection`. Latest: 1755/1755 checks
+  across 72 operations, 0 server errors, 0 accepted malformed payloads (see
+  `docs/SECURITY_POSTURE.md`'s "Dynamic analysis (DAST)" section for the
+  current figure — this number drifts as the API surface grows, don't quote
+  it from memory). The recursive
   query-executing endpoints are excluded (Schemathesis #947 recursion limit) —
   not a gap, they get deeper coverage from `test_malformed_input_fuzzing.py`
   (item 36 phase 2a). Schemathesis runs from its **pinned Docker image**, not a
@@ -1910,35 +1926,14 @@ pillar's success criterion. 4/4 enforcement points mutation-verified.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 125).
 
-### 126. No per-caller rate limit on `GET /help/my-recent-denials`
+### 126. No per-caller rate limit on `GET /help/my-recent-denials` ✅ DONE
 
-**Surfaced 2026-07-30 by the `auditors` security-invariant review of item 45
-phase 2, not a regression in this pass.** `GET /api/v1/help/my-recent-denials`
-requires only authentication (no scope, matching `/help/my-access`'s posture),
-and its handler calls `admin/anomaly.py`'s `JsonlAuditEventSource`, which reads
-and JSON-parses every line of the audit JSONL file per call (the
-`max_events_scanned` cap only bounds what's *kept in memory*, not how much of
-the file is scanned). Every other caller of that reader (`GET
-/admin/observability/anomalies`) requires `admin:observability:read`; this is
-the first time the same O(file-size) scan becomes triggerable by *any*
-authenticated caller, and there is no REST-level rate limit anywhere in the
-codebase to bound repeated calls.
+A per-principal cooldown (`PersonalDenialsCooldown`,
+`AppConfig.personal_denials_cooldown_seconds`) now bounds repeated calls,
+with a metrics counter on the 429 path and disclosed per-process/shared-API-
+key-bucket limitations.
 
-**Why not fixed inline:** the review explicitly judged this consistent with —
-not worse than — the existing posture of every other self-service endpoint
-(`/help/my-access`, schema browsing), none of which are rate-limited either;
-adding a new throttling mechanism is a deliberate product/design decision
-(scope, default interval, whether it should be per-endpoint or
-codebase-wide), not a small safe fix to make unprompted.
-
-**What to do (when prioritized):** either (a) add a lightweight per-principal
-cooldown scoped to this endpoint, mirroring item 43's existing
-`admin_connection_test_cooldown_seconds` precedent (a new
-`personal_denials_cooldown_seconds` config field + a 429/Retry-After response
-inside the window), or (b) make a recorded decision that the existing
-no-REST-rate-limiting posture is acceptable for this class of bounded local
-file read and close this as will-not-build. Either resolves it; doing neither
-leaves the residual undocumented.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 126).
 
 ### 127. Reject an MCP request whose routing headers disagree with its body (gateway confused-deputy) ✅ DONE
 
@@ -2655,172 +2650,39 @@ same-named database on the primary's host.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 170).
 
-### 171. The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart
+### 171. The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart ✅ DONE
 
-**Surfaced 2026-08-08 by three of the four `auditors` reviewers auditing item
-141's own commit** (security-invariant, architecture-boundary, and
-claim-reviewer independently), during that item's own mandatory completion
-gate — not a later external report. Item 141 added a `max_consecutive_out_of_
-window` early-exit to `admin/anomaly.py`/`admin/config_trends.py`'s tail-first
-audit-log scans (and `help/personal_denials.py`, which reuses the same
-reader): once enough consecutive matching-type lines are all before the
-report's window start, the scan stops WITHOUT setting `truncated`, on the
-assumption that physical write order tracks `occurred_at` order. Item 141
-also shipped a real fix for the dominant source of that assumption's risk
-(`audit/logger.py`'s `_persist` now re-stamps `occurred_at` immediately
-before the sink's `emit()`) and disclosed the residual in every relevant
-docstring/comment plus `docs/THREAT_MODEL.md` QG-43, and added an
-operator-facing config knob (`anomaly_max_consecutive_out_of_window`/
-`change_trend_max_consecutive_out_of_window`/`personal_denials_max_
-consecutive_out_of_window`) so a deployment that knows it's at risk can raise
-or disable the tolerance. What's still open, deliberately scoped out of item
-141 itself:
+`scan_ended_on_out_of_window_run: bool` now distinguishes "genuinely
+complete" from "heuristically stopped early" on `AnomalyReport`,
+`ConfigCatalogChangeTrend`, and `RecentDenialsReport`, independent of
+`truncated`.
 
-**What to do:** add a disclosure field (e.g. `scan_ended_on_out_of_window_run:
-bool`) to `AnomalyReport`, `ConfigCatalogChangeTrend`, and
-`RecentDenialsReport` distinguishing "genuinely complete" from "heuristically
-stopped early" — the affected surface is a public REST response shape used
-by three separate consumers. This requires widening `AuditEventSource.
-load_query_events`'s and `ChangeEventSource.load_change_events`'s Protocol
-return type from a 3-tuple to a 4-tuple (or an equivalent named/typed
-result), which touches ~20 call sites across `tests/unit/test_anomaly.py`,
-`tests/unit/test_config_trends.py`, `tests/unit/test_personal_denials.py`,
-and the three `build_*_report` functions — real, mechanical work, not a
-one-line change, which is why it was deliberately not folded into item 141's
-already-committed scope. Add a regression test exercising the disclosed
-merged/multi-writer failure mode itself (not just the happy-path early exit
-item 141's own tests already cover).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 171).
 
-**Effort:** M (mechanical but wide — a Protocol return-shape change with a
-real test-suite blast radius). **Depends on:** 141.
+### 172. WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment ✅ DONE
 
-### 172. WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment
+`search_worm_archive` now verifies `seq`/`prev_hash` continuity within a
+segment, not just each record's own hash; a broken link stops consuming
+that object and is counted in a new `chain_breaks` field. Segment
+duplication to a second S3 key remains a separate, undecided residual.
 
-**Surfaced 2026-08-09 by `security-invariant-reviewer` and `test-contract-
-reviewer` auditing item 154's own commit, during that item's own mandatory
-completion gate.** Item 154 made `audit/worm_search.py` verify each
-`LedgerRecord`'s own hash (`verify_envelope_hash`) before returning it —
-closing the gap where a fabricated, schema-valid segment could be planted
-and returned indistinguishably from a genuine one. What it does NOT do:
-check that a segment's records form a genuine, complete chain. Concretely,
-against even a KEYED archive (where forging new content is infeasible
-without the HMAC key), a principal with `s3:PutObject` on the archive
-prefix can still: (a) copy a genuine segment object byte-for-byte to a
-second key inside the searched window — every record still verifies
-individually, so the reader returns every one of its events TWICE, with
-`malformed == 0` and `unverified == 0`, silently inflating counts in a
-compliance answer; (b) upload an object containing an arbitrary SUBSET of a
-genuine segment's records (e.g. drop the first record, or one from the
-middle) — because linkage (`seq` monotonicity, `prev_hash` continuity) is
-never checked, each surviving record verifies on its own and the omission
-produces no signal. Impact is bounded (the genuine object still exists
-under Object Lock, so events can be duplicated/relocated but not erased),
-which is why this is a follow-up, not a blocker on item 154 itself; both
-residuals are already named in `docs/THREAT_MODEL.md` QG-40.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 172).
 
-**What to do (when prioritized):** in `audit/worm_search.py`'s per-object
-line loop, carry `prev_verified_hash`/`prev_seq` across consumed lines; for
-the FIRST line actually consumed when starting fresh at an object
-(`consume_from == 0`), require `parsed["seq"] == 0` and
-`parsed["prev_hash"] == GENESIS_PREV_HASH`; for each subsequent consumed
-line require `parsed["prev_hash"] == prev_verified_hash` and
-`parsed["seq"] == prev_seq + 1`; on a linkage failure, count the line
-`unverified` and stop consuming that object (don't return partial-chain
-events past the break). Needs care around cursor-resumption: a scan
-resuming mid-object (`consume_from > 0`) legitimately cannot verify the
-incoming link to a line it never read, so linkage checking should start at
-the first CONSUMED line, not unconditionally at line 0. Closing the
-segment-duplication half fully (not just detecting a broken chain) needs a
-further design decision — binding a segment to its own S3 object key (e.g.
-deriving the genesis `prev_hash` from the key) is a write-format change
-with the same "explicit decision before implementation" shape item 154's
-own two decisions had; record that decision in the PRODUCT_GUIDE Decision
-Log as this item's own first step, not something to default into under
-time pressure.
+### 173. Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives ✅ DONE
 
-**Effort:** M. **Depends on:** 154.
+`validate_schema` now accepts and reuses the per-request `connection_resolver`
+snapshot item 160 already built, instead of re-deriving cross-connection
+resolution a second time internally.
 
-### 173. Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 173).
 
-**Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 160's own
-commit, during that item's own mandatory completion gate (SIR-160F3-4).**
-Pre-existing since item 156, not introduced by item 160 — but item 160 added
-three new call sites (`validate_policy`, `compile_structured_query`,
-`applied_column_masks`) that can each now independently self-derive
-`scope_connections` via `resolve_scope_connections` when a caller supplies
-`connection_resolver` without it, and the request pipeline
-(`execution/service.py`) calls into more than one of those functions per
-request. Each self-derivation walks every join in the query and calls the
-resolver (`resolve_visible_connection` in production, hitting the
-`ConnectionRegistry`/`PolicyStore`) once per referenced connection, with no
-caching across the calls within a single request — so a query with N
-cross-connection joins now redoes that resolution work 2-3x per request
-instead of once. Not a correctness bug (each resolution is independently
-correct) and not unbounded (bounded by the policy's `max_joins` cap), so it's
-a performance follow-up, not a blocker on item 160 itself.
+### 174. A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch ✅ DONE
 
-**What to do (when prioritized):** memoize inside `resolve_scope_connections`
-(`validation/schema_validation.py`) via a per-call dict cache keyed by
-`(connection_id, id(principal))`, or thread a single resolved
-`scope_connections` map through `StructuredQueryService`'s pipeline once per
-request instead of letting each stage self-derive independently — the latter
-is the more thorough fix but changes call-site plumbing beyond this item's
-resolver function, so record which approach is chosen in the PRODUCT_GUIDE
-Decision Log before implementing.
+`SessionDialectAdapter.cross_database_schema_qualifier` now dispatches per
+dialect (MSSQL's real `<db>.dbo.<table>`; Postgres/MySQL rejected, not
+emulated), replacing the hardcoded MSSQL-only f-string in `_load_table`.
 
-**Effort:** S. **Depends on:** 160.
-
-### 174. A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch
-
-**Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 166's own
-commit, during that item's own mandatory completion gate (SIR-166-2).**
-Pre-existing since cross-connection joins/`join_group` first shipped, not
-introduced or closed by item 166. `_load_table`
-(`validation/schema_validation.py`) reflects a joined table on a SECONDARY
-connection through the PRIMARY connection's own engine, qualified by a
-hardcoded schema string:
-
-```python
-schema = f"{physical_db_name(table_connection)}.dbo"
-```
-
-This is CLAUDE.md non-negotiable 6 territory (dialect differences go behind a
-Protocol + one class per variant + registry, never an inline assumption at a
-call site) — but there is not even an `if dialect == ...` branch here; one
-dialect's idiom (MSSQL's `<database>.dbo.<table>` three-part naming) is
-hardcoded unconditionally. `grep -rn "dbo" src/querygate/` returns only this
-line and `schema/reflection.py`'s already-documented `[None, "dbo"]` fallback
-list. A cross-connection join whose SECONDARY connection is Postgres or MySQL
-reflects under a schema qualifier that dialect cannot resolve, producing a
-masked `NoSuchTableError` that names neither the real cause nor the dialect —
-the same failure shape item 163 was raised specifically to eliminate for a
-not-connectable secondary, now reappearing one layer downstream for a
-connectable-but-wrong-idiom one. It fails closed (no data reaches the
-caller), so this is a robustness/clarity gap, not a policy bypass — but it
-means only an MSSQL secondary has ever actually worked in this configuration,
-silently.
-
-**What to do:** add a method to `connections/dialects.py`'s
-`SessionDialectAdapter` — e.g. `cross_database_schema_qualifier(db_name: str)
--> Optional[str]` — returning `f"{db_name}.dbo"` for the MSSQL adapter and
-`None` for every other dialect's adapter (its default/base implementation).
-At the `_load_table` call site (`schema_validation.py`, the `schema =
-f"{physical_db_name(table_connection)}.dbo"` line), dispatch through
-`get_session_adapter(...)` (the same seam `resolve_query_table_connections`
-already uses for its `is_connectable()` check) instead of the hardcoded
-f-string; when the adapter returns `None`, raise a `QueryValidationError`
-naming the dialect and explaining that a cross-connection secondary of that
-dialect isn't supported yet — the same reject-don't-emulate posture item 74
-set for MSSQL's missing `NULLS FIRST/LAST`, rather than guessing at that
-dialect's own cross-database naming convention (which varies: Postgres has no
-true equivalent without `dblink`/`postgres_fdw`, MySQL uses a bare
-`<database>.<table>` with no third segment). Add a regression test: a
-cross-connection join with a Postgres secondary in a shared `join_group`,
-asserting a clean `QueryValidationError` naming the dialect rather than a
-masked `NoSuchTableError`.
-
-**Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped),
-163 (shipped — same `is_connectable()` seam this reuses).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 174).
 
 ### 175. `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" ✅ DONE
 
@@ -2829,4 +2691,92 @@ each test, mirroring `test_mssql_live.py`'s own already-shipped fix for the
 identical `reset_engines()`-doesn't-dispose gap (item 2).
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 175).
+
+### 176. Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line
+
+**Surfaced 2026-08-10 by `claim-reviewer` auditing the item-1 landing-copy fix**
+(`landing/security.html`'s "Audit durability and search" line, corrected to
+describe the now-shipped `GET /api/v1/admin/observability/worm-search`
+endpoint). The reviewer confirmed that fix is accurate, but found three other
+surfaces describing the same item-134-phase-2 capability that still say it
+doesn't exist:
+
+1. `sales/index.html`'s "Safe to claim now" / "Do not claim yet" guardrail
+   list (around lines 494 and 498) still tells sales staff there is no
+   managed search over the WORM archive — last touched by item 152
+   (2026-08-06, before phase 2 shipped later the same day) and never updated
+   afterward.
+2. `CUSTOMER_README.md:399` states "There is still no managed search
+   interface over either sink" — directly false now.
+3. `TODO.md`'s own Quick-scan table row for item 134 (line 167) reads "phase
+   2: managed search not started," contradicting its own `✅ DONE` heading
+   (no trailing qualifier) two thousand lines later and the full write-up in
+   `docs/TODO_ARCHIVE.md`. `scripts/check_worklist.py` only reconciles the
+   ✅ checkmark against the heading, not this free-text description, so the
+   drift is invisible to the automated gate.
+
+**What to do:** update all three to describe the shipped endpoint (scope,
+required time window, `event_type`/`connection_id`/`principal_id` filters),
+matching the wording now used in `landing/security.html`, `README.md`, and
+`docs/PRODUCT_GUIDE.md`. For (1), move the claim from "Do not claim yet" to
+"Safe to claim now." For (3), trim the Quick-scan row's free-text to match
+the archived-stub convention rather than restating stale phase status.
+
+**Effort:** S. **Depends on:** 134 (shipped).
+
+### 177. `WormSearchResult.chain_breaks`/`unverified` have no Prometheus counter, so the strongest WORM-archive tamper signal isn't alertable
+
+**Surfaced 2026-08-10 by `security-invariant-reviewer` auditing item 172's
+own commit (WS-172-6), during that item's own mandatory completion gate.**
+Item 172 added `chain_breaks` (a segment-level chain-linkage-break count) to
+`WormSearchResult` — the strongest tamper/omission signal the WORM search
+surface can produce, stronger than an ordinary `unverified` hash mismatch —
+but it is only ever visible to whoever happens to run an ad-hoc
+`GET /api/v1/admin/observability/worm-search` request over the right window.
+Nobody is paged. Given the Proof pillar is a product claim, "detected" here
+means "detectable on demand", not "monitored" — an operator relying on
+dashboards/alerts (the normal operational posture) would never learn a
+chain broke.
+
+**What to do (when prioritized):** add a
+`querygate_audit_worm_search_chain_breaks_total` counter (and an
+`..._unverified_total` sibling, if not already covered) in `metrics.py`,
+incremented in `audit/worm_search.py`'s `_finalize` alongside the existing
+`AUDIT_WORM_SEARCH_REQUESTS_TOTAL`/`AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL`
+pattern. No labels beyond what those two already carry (avoid a
+caller-chosen-cardinality/activity-oracle risk on an admin-scoped surface,
+matching item 126's `PERSONAL_DENIALS_RATE_LIMITED_TOTAL` precedent).
+
+**Effort:** S. **Depends on:** 172 (shipped).
+
+### 178. A hash-verified WORM record with a non-int `seq` (type-confused, not corrupt) raises instead of being counted `unverified`
+
+**Surfaced 2026-08-11 by `security-invariant-reviewer` auditing item 172's
+own WS-172-8 follow-up commit (WS-172-9), during that follow-up's own
+mandatory completion gate.** Pre-existing since item 154/172, not introduced
+by the WS-172-8 fix — the reviewer found it while reading the surrounding
+code the fix touches. `audit/worm_search.py` reads `parsed.get("seq")` as a
+raw, unvalidated dict value at two sites (`_seed_chain_state_from_
+predecessor`'s `seed_parsed.get("seq")`, and the main line loop's own
+`seq = parsed.get("seq")`) after `verify_envelope_hash` has confirmed the
+envelope's hash recomputes — but `verify_envelope_hash` only proves the hash
+matches what was signed, not that `seq` is the `int` `LedgerRecord.seq` is
+typed as. A crafted line whose `seq` is (for example) the *string* `"3"` can
+still have a self-consistent hash (`compute_record_hash` digests whatever
+`seq` value is present, coerced or not) and passes `verify_envelope_hash`,
+but the downstream `seq == prev_seq + 1` comparison then raises `TypeError`
+(`str` + `int`), which escapes to the route's `mask_unexpected()` as a
+generic 500 — availability/contract-breakage, not disclosure (no
+credential/bucket/driver text leaks), but a real regression against this
+module's own "malformed/unverified, never an unhandled exception" posture
+for a crafted line.
+
+**What to do (when prioritized):** read the *validated* record via
+`LedgerRecord.model_validate(parsed)` (or an explicit
+`isinstance(seq, int) and not isinstance(seq, bool)` guard, treating a
+non-int as `unverified` and stopping consumption of that object) at each of
+the two raw-dict `seq` reads, so a type-confused-but-hash-valid line is
+counted like any other forgery class instead of raising.
+
+**Effort:** S. **Depends on:** 172 (shipped).
 

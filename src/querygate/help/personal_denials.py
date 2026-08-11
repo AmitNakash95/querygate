@@ -40,7 +40,11 @@ same signal `admin/observability.py`'s `rejections_by_reason` already exposes
 in aggregate to admins. This module attaches one fixed, human-readable
 explanation per category and never surfaces `AuditEvent.query_shape` (which,
 while already values-free, is more internal detail than a "why was this
-rejected" explanation needs).
+rejected" explanation needs). `RecentDenialsReport.scan_ended_on_out_of_
+window_run` (item 171) is the same category of field as the pre-existing
+`truncated`: a scan-level fact about how far back the reader looked, never a
+fleet-wide count or another principal's activity — safe on this no-admin-
+scope surface for the same reason `truncated` already was.
 
 **One deliberate exception: `operation="query_verdict"` events are excluded
 entirely** (`_is_own_denial`), not just relabeled. `StructuredQueryService.
@@ -53,6 +57,7 @@ response deliberately withheld from them.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from typing import Dict, List, Literal, Optional, Tuple
 
@@ -60,6 +65,81 @@ import pydantic as pyd
 
 from querygate.admin.anomaly import AnomalyThresholds, JsonlAuditEventSource
 from querygate.audit.events import AuditEvent
+
+
+class PersonalDenialsCooldown:
+    """Per-principal rate limit for `GET /help/my-recent-denials` (TODO.md
+    item 126). Every other caller of `admin/anomaly.py`'s
+    `JsonlAuditEventSource` requires `admin:observability:read`; this
+    endpoint requires only authentication, making its O(file-size) audit-JSONL
+    scan the first such read triggerable by *any* authenticated caller. Mirrors
+    `health.py`'s `HealthMonitor._last_manual_test`/
+    `seconds_until_manual_test_allowed` cooldown shape (item 43), keyed by
+    principal instead of connection. Deliberately a plain closure-scoped dict,
+    not a registered variant — this is one stateless in-process cooldown, not
+    a backend/dialect/strategy that varies (see CLAUDE.md's composable-
+    interfaces "don't over-apply this" note).
+
+    **Scope, disclosed (2026-08-10 `security-invariant-reviewer` finding on
+    this item's own completion gate, mirroring `execution/quota.py`'s own
+    disclosure for the identical shape):** correct for a single worker
+    process. Under `AppConfig.num_of_workers > 1` or multiple replicas behind
+    a load balancer, each process holds its own independent instance, so the
+    effective ceiling is (workers × replicas) calls per window, not one — the
+    same limitation `health.py`'s item-43 cooldown this mirrors already has,
+    and the same one `execution/quota.py`'s in-process limiter documents and
+    solves with an optional Redis-backed variant. This endpoint's traffic
+    doesn't currently warrant that machinery; if it ever does, follow
+    `execution/quota.py`'s `QuotaLimiter` Protocol shape rather than
+    special-casing this class.
+
+    **Bucket is `principal.subject`, not a per-human identity** (same
+    finding; see `docs/THREAT_MODEL.md` QG-33, which already documents the
+    identical coupling for this endpoint's *data* isolation): every
+    statically configured API key maps to one shared `api_key_subject`
+    (`core/auth.py`'s `ApiKeyAuthenticator`), so distinct callers sharing a
+    key also share one cooldown bucket — a caller's request can 429 another
+    holder of the same key. This only ever makes the limit stronger, never
+    bypassable; JWT auth (a real per-caller `sub`) gets real per-caller
+    granularity.
+    """
+
+    def __init__(self) -> None:
+        self._last_request: Dict[str, float] = {}
+
+    def seconds_until_allowed(self, principal_id: str, cooldown_seconds: float) -> float:
+        """0 if a request is currently allowed for this principal, otherwise
+        the remaining cooldown in seconds. `cooldown_seconds <= 0` always
+        returns 0 (cooldown disabled)."""
+        if cooldown_seconds <= 0:
+            return 0.0
+        last = self._last_request.get(principal_id)
+        if last is None:
+            return 0.0
+        remaining = cooldown_seconds - (time.monotonic() - last)
+        return max(0.0, remaining)
+
+    def record_request(self, principal_id: str, cooldown_seconds: float) -> None:
+        """Records now for `principal_id`, and prunes every entry whose own
+        cooldown has already elapsed (TODO.md item 126 follow-up: an
+        unpruned map grows one permanent entry per distinct principal ever
+        seen, unbounded over the process lifetime — a real gap under a JWT
+        deployment whose IdP mints many/per-session subjects). An expired
+        entry is semantically identical to an absent one, so pruning here is
+        behavior-preserving, not just cleanup. `cooldown_seconds <= 0`
+        (disabled) records nothing at all — `seconds_until_allowed` never
+        consults the map in that case, so retaining entries would only grow
+        the map for no behavioral effect."""
+        if cooldown_seconds <= 0:
+            return
+        now = time.monotonic()
+        expired = [
+            pid for pid, last in self._last_request.items() if now - last >= cooldown_seconds
+        ]
+        for pid in expired:
+            del self._last_request[pid]
+        self._last_request[principal_id] = now
+
 
 _REPORT_NOTE = (
     "Your own recent rejected requests, read from the persisted audit stream. "
@@ -124,6 +204,20 @@ class RecentDenialsReport(pyd.BaseModel):
             "True when the underlying audit-stream scan hit its configured cap "
             "before finishing the window — this caller's own denial list may be "
             "incomplete as a result."
+        ),
+    )
+    # TODO.md item 171: True when the scan stopped on the heuristic
+    # max_consecutive_out_of_window early-exit (item 141) rather than
+    # reaching the true start of the window — distinguishes "genuinely
+    # complete" from "heuristically stopped early". Independent of
+    # `truncated`. See `docs/THREAT_MODEL.md` QG-43.
+    scan_ended_on_out_of_window_run: bool = pyd.Field(
+        default=False,
+        description=(
+            "True when the scan stopped on a heuristic assumption that the "
+            "window had genuinely ended, rather than reaching its true start "
+            "— this caller's own denial list may be incomplete as a result, "
+            "independent of `truncated`."
         ),
     )
     note: str = _REPORT_NOTE
@@ -215,7 +309,9 @@ def build_recent_denials_report(
         # AnomalyThresholds' own default (docs/THREAT_MODEL.md QG-43).
         max_consecutive_out_of_window=max_consecutive_out_of_window,
     )
-    events, malformed, truncated = source.load_query_events(now=now, thresholds=thresholds)
+    events, malformed, truncated, ended_on_out_of_window_run = source.load_query_events(
+        now=now, thresholds=thresholds
+    )
     denials = select_recent_denials(events, principal_id=principal_id, limit=limit)
     own_denials_found = sum(1 for e in events if _is_own_denial(e, principal_id))
     return RecentDenialsReport(
@@ -223,6 +319,7 @@ def build_recent_denials_report(
         own_denials_found=own_denials_found,
         malformed=malformed,
         truncated=truncated,
+        scan_ended_on_out_of_window_run=ended_on_out_of_window_run,
         denials=denials,
         **base,
     )

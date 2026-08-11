@@ -19,7 +19,7 @@ all the dialect-specific behavior now lives in the adapter classes below.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import Dict, Optional
 
 import sqlalchemy as sa
 from sqlalchemy import event
@@ -106,6 +106,29 @@ class SessionDialectAdapter(ABC):
         schema-shape disclosure, not just a system-table one). Default is a
         no-op; MySQLSessionAdapter overrides it."""
         return ""
+
+    def cross_database_schema_qualifier(self, db_name: str) -> Optional[str]:
+        """The schema qualifier to reflect a table under when a
+        cross-connection join's SECONDARY connection is read through the
+        PRIMARY connection's own engine (TODO.md item 174), or `None` if this
+        dialect has no same-instance cross-database naming convention.
+        `validation/schema_validation.py`'s `_load_table` raises
+        `QueryValidationError` rather than guessing when this returns `None`
+        — the same reject-don't-emulate posture `is_connectable` above and
+        item 74's MSSQL `nulls` rejection already established for a genuinely
+        missing dialect capability.
+
+        Default `None` (unsupported): Postgres has no true cross-database
+        reference without an extension (`dblink`/`postgres_fdw`), and MySQL's
+        is a bare `<database>.<table>` with no schema segment at all — neither
+        maps onto this method's single-qualifier shape, so guessing one would
+        be exactly the "synthesize structure the caller never asked for"
+        CLAUDE.md's engine philosophy rules out. `MSSQLSessionAdapter`
+        overrides this with T-SQL's real `<database>.dbo.<table>` three-part
+        naming, the one dialect QueryGate has confirmed this against a live
+        server for.
+        """
+        return None
 
     def is_connectable(self) -> bool:
         """Whether `connections/engine.py`'s `init_engine` may proceed to
@@ -245,6 +268,13 @@ class MSSQLSessionAdapter(SessionDialectAdapter):
             # fmt: off
             await conn.execute(sa.text(f"KILL {spid}"))  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
             # fmt: on
+
+    def cross_database_schema_qualifier(self, db_name: str) -> Optional[str]:
+        # T-SQL's real three-part naming: <database>.<schema>.<table>. "dbo"
+        # is the default/near-universal schema — the same assumption
+        # `schema/reflection.py`'s `get_table_schema` already makes for a
+        # same-connection MSSQL reflection with no explicit schema.
+        return f"{db_name}.dbo"
 
 
 class MySQLSessionAdapter(SessionDialectAdapter):
