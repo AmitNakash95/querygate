@@ -489,6 +489,19 @@ All notable changes to QueryGate are documented here.
   vulnerability without a reviewed entry in `security/dependency-audit-allowlist.json`
   fails the release (deny-by-default) — publishing to a registry and cryptographic
   signing remain phase 2, deferred until this project has a real publishing pipeline.
+- **Two reproducible benchmarks answering the performance question every design
+  partner asks before routing real traffic through the gateway**:
+  `querygate-performance-benchmark`/`make performance-benchmark` measures per-request
+  latency overhead (raw SQL vs. the guardrail pipeline vs. a full REST round trip,
+  in-process over `ASGITransport`), and `querygate-load-benchmark`/`make load-benchmark`
+  measures throughput/latency under concurrent load across a worker-count sweep, driving
+  the real app over a real socket against a real, separately-spawned `uvicorn` process
+  (not `ASGITransport` — a confound specific to concurrency measurement, see
+  `docs/business/LOAD_BENCHMARK.md`). Both are informational (not pass/fail; the
+  single-request tool's `--max-overhead-ms` is the one exception), need a real Postgres,
+  and write a fresh, publish-ready `--markdown-out` results snapshot on every run
+  (`docs/business/PERFORMANCE_BENCHMARK_RESULTS.md` / `LOAD_BENCHMARK_RESULTS.md`). See
+  `docs/business/PERFORMANCE_BENCHMARK.md`/`LOAD_BENCHMARK.md` for full methodology.
 
 ### Fixed
 

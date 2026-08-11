@@ -109,18 +109,15 @@ def _apply_example_config() -> None:
     not a reconstruction of it. Points every ${QUERYGATE_DEMO_DB_URL} at the
     test Postgres.
     """
-    import querygate.schema.reflection as reflection
-
     os.environ["QUERYGATE_DEMO_DB_URL"] = _CONNECTION_STRING
     set_registry(ConnectionRegistry.from_file(f"{_EXAMPLES}/connections.example.yaml"))
     set_policy_store(PolicyStore.from_file(f"{_EXAMPLES}/policy.example.yaml"))
+    # reset_engines() also clears the reflection metadata-lock cache: the next
+    # query re-reflects, which acquires a per-connection asyncio.Lock, and
+    # pytest-asyncio gives each test its own event loop, so a lock cached from
+    # a prior test would be bound to a dead loop.
     reset_engines()
     in_process_limiter().clear()
-    # reset_engines() clears the reflection metadata cache, so the next query
-    # re-reflects — which acquires a per-connection asyncio.Lock. pytest-asyncio
-    # gives each test its own event loop, so a lock cached from a prior test is
-    # bound to a dead loop. Drop them so fresh locks bind to the current loop.
-    reflection._METADATA_LOCKS.clear()
 
 
 @pytest_asyncio.fixture
