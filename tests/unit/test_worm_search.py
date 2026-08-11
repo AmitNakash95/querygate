@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import boto3
 import pydantic as pyd
@@ -483,6 +483,614 @@ class TestForgedOrUnenvelopedSegmentsAreRejected:
         assert result.malformed == 0
 
 
+class TestChainLinkageVerification:
+    """TODO.md item 172: `TestForgedOrUnenvelopedSegmentsAreRejected` above
+    covers a record's OWN hash (item 154) — this class covers the gap item
+    154 explicitly left open: a segment's own record-to-record LINKAGE
+    (`seq` continuity, `prev_hash` continuity), which a per-record hash
+    check alone can never catch (a dropped or reordered record's SURVIVING
+    neighbors each still verify individually). Duplicating a whole genuine
+    segment to a second key is a separate, still-open residual — it isn't
+    detectable by a linkage check at all, since a full copy is itself a
+    valid chain — and needs its own design decision (see the item-172
+    Decision Log entry and docs/THREAT_MODEL.md QG-40); not covered here."""
+
+    async def test_records_dropped_from_the_end_of_a_segment_are_not_detected_yet(self, s3):
+        # Documents a known, disclosed residual (WS-172-3, 2026-08-10
+        # security-invariant-reviewer), not a defect in this item: item 172
+        # closes INTERIOR omission (a record dropped from the middle breaks
+        # the surviving records' linkage), but a record dropped from the
+        # END of a segment leaves a perfectly valid, self-contained prefix
+        # chain -- there is nothing past it to fail a continuity check
+        # against. Unlike the local audit/ledger.py reader's
+        # verify_chain(expected_head=...), no per-segment head anchor
+        # exists outside the object to compare against. If tail-truncation
+        # detection is ever added, THIS test must be updated to assert
+        # detection, not left passing by accident.
+        lines = _chain_lines([_event("a", minute=0), _event("b", minute=1), _event("c", minute=2)])
+        del lines[2:]  # drop the last record; "a" and "b" remain a valid prefix
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+        assert {e.connection_id for e in result.events} == {"a", "b"}
+        assert result.chain_breaks == 0
+        assert result.unverified == 0
+
+    async def test_a_record_dropped_from_the_middle_of_a_segment_is_detected(self, s3):
+        # Three genuinely chained records, then the middle line is removed
+        # from the OUTPUT before writing — simulating an operator (or an
+        # attacker with s3:PutObject) editing a segment object in place to
+        # remove one record. The third record's own hash is still perfectly
+        # self-consistent (item 154's check alone would pass it) but its
+        # prev_hash now points at a hash the reader never saw.
+        lines = _chain_lines([_event("a", minute=0), _event("b", minute=1), _event("c", minute=2)])
+        del lines[1]
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+        # The first record (genuinely first in the chain) is returned; the
+        # break is detected on the third record, so it — and anything that
+        # might follow it — is never returned.
+        assert len(result.events) == 1
+        assert result.events[0].connection_id == "a"
+        assert result.chain_breaks == 1
+        assert result.unverified == 1
+        # Nothing was left in the object past the breaking line itself here
+        # (2 lines total, break on the 2nd) — the non-trivial count is
+        # pinned separately below.
+        assert result.lines_skipped_after_chain_break == 0
+        assert result.malformed == 0
+        assert "broken internal chain link" in result.note
+
+    async def test_a_segment_whose_first_record_is_not_the_genuine_genesis_is_detected(self, s3):
+        # A single-record segment whose seq/prev_hash don't match the
+        # genuine genesis (seq=0, prev_hash=GENESIS_PREV_HASH) — e.g. a
+        # forger who has an HMAC key (or an unkeyed archive) and can produce
+        # a self-consistent record, but doesn't control what a genuine
+        # WormFlushMonitor.flush_once() would have started this segment
+        # with.
+        from querygate.audit.ledger import make_record
+
+        forged_first = make_record(
+            seq=1,  # not 0
+            prev_hash="a" * 64,  # not GENESIS_PREV_HASH
+            event=_event("a", minute=0).model_dump(mode="json", exclude_none=True),
+        )
+        _put_segment(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [forged_first.model_dump_json()],
+        )
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+        assert result.events == []
+        assert result.chain_breaks == 1
+        assert result.unverified == 1
+
+    async def test_a_genuinely_intact_chain_across_multiple_segments_reports_no_breaks(self, s3):
+        # The control: real, unmodified multi-record, multi-segment chains
+        # (each segment independently starting its own genesis, per
+        # WormFlushMonitor's per-segment-not-cross-segment design) must
+        # report zero chain_breaks — proving the checks above are actually
+        # selective, not just always firing.
+        _put_events(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [_event("a", minute=0), _event("b", minute=1), _event("c", minute=2)],
+        )
+        _put_events(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120500-000001.jsonl",
+            [_event("d", minute=5), _event("e", minute=6)],
+        )
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+        assert len(result.events) == 5
+        assert result.chain_breaks == 0
+        assert result.unverified == 0
+
+    async def test_resuming_mid_segment_does_not_false_positive_on_the_first_consumed_line(
+        self, s3
+    ):
+        # A cursor legitimately resumes partway through one object — this
+        # scan never read the predecessor line, so it cannot (and must not)
+        # demand that the first CONSUMED record be the genuine genesis; it
+        # accepts that record's incoming link as given, the same way a
+        # rotated/truncated local ledger file's first record is accepted
+        # (audit/ledger.py's verify_chain has the identical carve-out).
+        # Every record AFTER the resume point must still be linkage-checked.
+        _put_events(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [_event("a", minute=0), _event("b", minute=1), _event("c", minute=2)],
+        )
+        first = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+            limit=1,
+        )
+        assert len(first.events) == 1
+        assert first.next_cursor is not None
+
+        second = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+            cursor=first.next_cursor,
+        )
+        # The resumed scan starts mid-segment (not at seq=0) but its own
+        # incoming link is genuinely intact (the real predecessor really is
+        # "b"'s prev_hash), so no false positive fires, and both remaining
+        # events are returned.
+        assert {e.connection_id for e in second.events} == {"b", "c"}
+        assert second.chain_breaks == 0
+        assert second.unverified == 0
+
+    async def test_resuming_exactly_at_a_break_still_detects_it(self, s3):
+        # TODO.md item 172 follow-up (2026-08-10 security-invariant-reviewer,
+        # WS-172-1): the predecessor line of a resumed page is NOT in a
+        # different file the reader lacks — the whole object was already
+        # fetched — so a record dropped exactly at a page boundary must
+        # still be caught, the same as it would be on a fresh (unpaged)
+        # scan of the same object. Without seeding the chain state from the
+        # nearest preceding verified line, every ordinary server-issued
+        # page boundary would silently exempt one link — this is the
+        # concrete case that gap would miss.
+        lines = _chain_lines([_event("a", minute=0), _event("b", minute=1), _event("c", minute=2)])
+        del lines[1]  # "b" dropped; "c"'s prev_hash now points at it
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+
+        first = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+            limit=1,
+        )
+        # Page 1 returns only "a" — genuinely the segment genesis.
+        assert [e.connection_id for e in first.events] == ["a"]
+        assert first.next_cursor is not None
+
+        second = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+            cursor=first.next_cursor,
+        )
+        # Page 2 resumes exactly at the dropped record's successor ("c").
+        # The break must be caught on THIS page, not silently accepted
+        # because it's the first record consumed on a resumed page.
+        assert second.events == []
+        assert second.chain_breaks == 1
+
+    async def test_metrics_and_note_still_disclose_key_rotation_separately(self, s3):
+        # A hash mismatch (item 154's own gap — likely a rotated key, not a
+        # linkage break) must not be misreported as a chain break: the two
+        # failure classes carry genuinely different implications for an
+        # operator and must stay distinguishable in the response.
+        _put_segment(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            _chain_lines([_event("a", minute=0)], key=b"a-different-key"),
+        )
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+        assert result.unverified == 1
+        assert result.chain_breaks == 0
+        assert "broken internal chain link" not in result.note
+
+    async def test_a_chain_break_below_the_line_cap_is_not_reported_as_a_capacity_truncation(
+        self, s3, monkeypatch
+    ):
+        # A deliberate "stop consuming this broken object" must never be
+        # confused with the genuine resource-bound truncation
+        # test_an_object_past_the_per_object_line_cap_truncates_instead_of_skipping
+        # (below) pins — those are two different reasons to stop scanning
+        # early, and a cursor that resumed back into an already-broken
+        # chain would just re-encounter the identical break. Lowers
+        # _MAX_LINES_PER_OBJECT so the object genuinely has more raw lines
+        # than the cap, with the chain break landing well BEFORE the
+        # (lowered) cap — proving the object-level `broke_chain` guard, not
+        # just the line-level break detection this class's other tests
+        # already cover.
+        monkeypatch.setattr(worm_search_module, "_MAX_LINES_PER_OBJECT", 3)
+        lines = _chain_lines(
+            [
+                _event("a", minute=0),
+                _event("b", minute=1),
+                _event("c", minute=2),
+                _event("d", minute=3),
+                _event("e", minute=4),
+            ]
+        )
+        del lines[1]  # break the chain at the 2nd consumed line, before the cap
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+        assert [e.connection_id for e in result.events] == ["a"]
+        assert result.chain_breaks == 1
+        # The whole request completed (this was the only segment) — a
+        # capacity-bound stop would instead have set truncated=True with a
+        # resumable next_cursor.
+        assert result.truncated is False
+        assert result.next_cursor is None
+
+    async def test_the_note_discloses_how_many_lines_a_break_skipped(self, s3):
+        # TODO.md item 172 follow-up (WS-172-2, security-invariant-reviewer,
+        # 2026-08-10): a break early in a large segment fails closed on
+        # everything after it — the RESPONSE must disclose the scale of
+        # that, not just a bare "chain_breaks: 1" a caller has no way to
+        # size. A 6-record segment with the break on the 3rd record leaves
+        # 3 further lines never read.
+        lines = _chain_lines(
+            [
+                _event("a", minute=0),
+                _event("b", minute=1),
+                _event("c", minute=2),
+                _event("d", minute=3),
+                _event("e", minute=4),
+                _event("f", minute=5),
+            ]
+        )
+        del lines[1]  # break lands on what is now the 2nd consumed line
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+        # 6 lines - 1 deleted = 5 remaining; break on the 2nd (index 1) of
+        # those 5 leaves 3 further lines (indices 2, 3, 4) never read.
+        assert [e.connection_id for e in result.events] == ["a"]
+        assert result.chain_breaks == 1
+        assert result.lines_skipped_after_chain_break == 3
+        assert "3 further line(s)" in result.note
+
+    async def test_the_key_rotation_sentence_excludes_chain_break_lines(self, s3):
+        # TODO.md item 172 follow-up (WS-172-4, security-invariant-reviewer,
+        # 2026-08-10): a chain-break line's own hash DID verify — it is not
+        # a key-mismatch candidate — so it must not inflate the "usually a
+        # key rotation" sentence's count, and that sentence must not appear
+        # for a request with a chain break but no genuine hash mismatch.
+        lines = _chain_lines([_event("a", minute=0), _event("b", minute=1), _event("c", minute=2)])
+        del lines[1]
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+        assert result.unverified == 1
+        assert result.chain_breaks == 1
+        # The chain-break sentence appears...
+        assert "broken internal chain link" in result.note
+        assert "not a key mismatch" in result.note
+        # ...but the key-rotation sentence, which would otherwise fire on
+        # any unverified > 0, must NOT — every unverified line here is
+        # accounted for by the chain break, not a genuine hash mismatch.
+        assert "AUDIT_LEDGER_HMAC_KEY" not in result.note
+
+    async def test_the_resumed_page_seed_walk_does_not_scan_an_unbounded_blank_run(self, s3):
+        # TODO.md item 172 follow-up (WS-172-7 secondary point,
+        # security-invariant-reviewer, 2026-08-10): a long blank run between
+        # two real records must not make resuming mid-object expensive —
+        # this is the integration-level correctness check that a resume
+        # landing immediately after a real record (the ordinary case: a
+        # genuine segment has ZERO blank lines at all — see
+        # `_seed_chain_state_from_predecessor`'s docstring — so any
+        # cursor position issued against a real archive, however it was
+        # issued, is always distance 1 from its predecessor, making the
+        # seed walk's own predecessor lookup a single, trivial step) still
+        # returns the right event once the FORWARD loop has skipped a large
+        # blank run to reach it, with the true, intact chain correctly
+        # confirmed (no false-positive break). This shape does not drive the
+        # seed walk anywhere near its own step bound — see
+        # `TestSeedChainStateFromPredecessor` below for that, including the
+        # WS-172-8 fail-closed behavior when the bound genuinely is
+        # exhausted.
+        chained = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        # 5,000 blank lines between "a" and "b" — exercises the FORWARD
+        # loop's blank-skipping cost, not the backward seed walk (whose own
+        # bound is pinned directly, not indirectly through this fixture).
+        lines = [chained[0]] + [""] * 5000 + [chained[1]]
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+
+        first = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            limit=1,
+            bounds=_bounds(default_limit=1),
+        )
+        assert [e.connection_id for e in first.events] == ["a"]
+        assert first.next_cursor is not None
+
+        # Resume right after "a": consume_from's immediate predecessor IS
+        # "a" (distance 1), so the seed walk finds it trivially regardless
+        # of the 5,000 blanks that follow — those are consumed by the
+        # forward loop as it advances from "a" to "b", not walked backward.
+        second = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            cursor=first.next_cursor,
+            bounds=_bounds(),
+        )
+        assert [e.connection_id for e in second.events] == ["b"]
+        assert second.chain_breaks == 0
+
+    async def test_resuming_deep_inside_a_blank_run_past_the_walk_bound_fails_closed(self, s3):
+        # TODO.md item 172 follow-up (WS-172-8, security-invariant-reviewer,
+        # 2026-08-11): an end-to-end reproduction of the seed walk's OWN
+        # step bound actually firing — unlike the adjacent test above (whose
+        # cursor always lands one step after a real record, so the seed
+        # walk never travels far), this cursor is built directly to resume
+        # from deep inside a long blank run: more than
+        # `_SEED_WALK_MAX_STEPS` lines from the nearest real record in
+        # either direction it has already looked. A cursor landing here in
+        # production could only come from a crafted/corrupted object (a
+        # genuine segment has zero blank lines — see
+        # `_seed_chain_state_from_predecessor`'s docstring); this test
+        # proves that when it does happen, the resumed page fails closed
+        # (reports a chain break) instead of silently accepting an
+        # unverifiable incoming link.
+        max_steps = worm_search_module._SEED_WALK_MAX_STEPS
+        chained = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        blank_run = max_steps + 2000
+        lines = [chained[0]] + [""] * blank_run + [chained[1]]
+        key = f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl"
+        _put_segment(s3, key, lines)
+
+        start_time = datetime(2026, 3, 15, tzinfo=timezone.utc)
+        end_time = datetime(2026, 3, 16, tzinfo=timezone.utc)
+        fingerprint = worm_search_module._filters_fingerprint(
+            start_time, end_time, None, None, None
+        )
+        # Resume line 2500: more than max_steps back from "a" (index 0),
+        # and every line in between is blank — the walk cannot reach "a"
+        # (start=2499, floor=2499-max_steps=1475, all indices 2499..1476
+        # visited are blank), so it must exhaust its bound.
+        cursor = worm_search_module._encode_cursor(date(2026, 3, 15), key, 2500, fingerprint)
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=start_time,
+            end_time=end_time,
+            cursor=cursor,
+            bounds=_bounds(),
+        )
+        # "b"'s own hash verifies, but its incoming link could not be
+        # confirmed within the walk's bound, so it is NOT returned as an
+        # event — the page fails closed and discloses a chain break rather
+        # than silently accepting "b" as given.
+        assert result.events == []
+        assert result.chain_breaks == 1
+
+
+class TestSeedChainStateFromPredecessor:
+    """TODO.md item 172 follow-up (WS-172-7, security-invariant-reviewer,
+    2026-08-10): direct, deterministic unit tests of the extracted
+    `_seed_chain_state_from_predecessor` helper — precise about the exact
+    step bound, which the integration-level test above can only observe
+    indirectly (via the graceful-degradation behavior, not an iteration
+    count)."""
+
+    def test_finds_the_predecessor_within_the_bound(self):
+        events = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            events, 1, ledger_key=None
+        )
+        parsed_a = json.loads(events[0])
+        assert prev_hash == parsed_a["hash"]
+        assert prev_seq == parsed_a["seq"]
+        assert exhausted is False
+
+    def test_skips_blank_lines_within_the_bound(self):
+        # lines = [a, "", "", b]; consume_from=3 means "b" (index 3) is the
+        # line about to be consumed, so its PREDECESSOR "a" (index 0) is
+        # what the walk must find, skipping the two blanks in between.
+        events = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        lines = [events[0], "", "", events[1]]
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            lines, 3, ledger_key=None
+        )
+        parsed_a = json.loads(events[0])
+        assert prev_hash == parsed_a["hash"]
+        assert prev_seq == parsed_a["seq"]
+        assert exhausted is False
+
+    def test_gives_up_exactly_at_the_step_bound_not_one_past_it(self):
+        # "a" sits at index 0; the line being resumed sits at index
+        # max_steps + 1, one step beyond what a max_steps-length walk
+        # starting at index max_steps (max_steps+1 - 1) can reach (it visits
+        # indices max_steps..1, never reaching index 0) — must NOT be found,
+        # and the walk genuinely used its whole budget doing so (WS-172-8).
+        events = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        max_steps = worm_search_module._SEED_WALK_MAX_STEPS
+        resume_at = max_steps + 1
+        lines = [events[0]] + [""] * (resume_at - 1) + [events[1]]
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            lines, resume_at, ledger_key=None
+        )
+        assert (prev_hash, prev_seq) == (None, None)
+        assert exhausted is True
+
+    def test_finds_the_predecessor_exactly_at_the_step_bound(self):
+        # Same shape, resumed one position earlier: the walk starts at
+        # index max_steps - 1 and visits exactly max_steps indices down to
+        # (and including) index 0 — "a" is the last one checked, and must
+        # be found.
+        events = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        max_steps = worm_search_module._SEED_WALK_MAX_STEPS
+        resume_at = max_steps
+        lines = [events[0]] + [""] * (resume_at - 1) + [events[1]]
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            lines, resume_at, ledger_key=None
+        )
+        parsed_a = json.loads(events[0])
+        assert prev_hash == parsed_a["hash"]
+        assert prev_seq == parsed_a["seq"]
+        assert exhausted is False
+
+    def test_the_ledger_key_is_actually_passed_through_to_verification(self):
+        # test-contract-reviewer, 2026-08-11: every other test in this class
+        # uses ledger_key=None (matching the shipped default), which cannot
+        # catch a swapped/dropped `key=` argument in the extracted helper —
+        # a broken passthrough would silently misclassify every resumed page
+        # on an HMAC-keyed deployment as a chain break. Pin the keyed case
+        # directly: seeding with the SAME key the chain was written with
+        # must find the predecessor; the WRONG key must not.
+        key = b"a-real-hmac-key"
+        events = _chain_lines([_event("a", minute=0), _event("b", minute=1)], key=key)
+        parsed_a = json.loads(events[0])
+
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            events, 1, ledger_key=key
+        )
+        assert prev_hash == parsed_a["hash"]
+        assert prev_seq == parsed_a["seq"]
+        assert exhausted is False
+
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            events, 1, ledger_key=b"the-wrong-key"
+        )
+        assert (prev_hash, prev_seq) == (None, None)
+        assert exhausted is False
+
+    def test_a_predecessor_that_does_not_verify_yields_nothing_to_seed_from(self):
+        events = _chain_lines([_event("a", minute=0)], key=b"a-different-key")
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            events, 1, ledger_key=None
+        )
+        # A predecessor that doesn't verify is a DIFFERENT case than the
+        # bound firing (WS-172-8): the caller's existing accept-as-given
+        # carve-out still applies here, not the new fail-closed path — the
+        # walk learned something concrete (this line is untrustworthy), it
+        # didn't merely run out of budget.
+        assert (prev_hash, prev_seq) == (None, None)
+        assert exhausted is False
+
+    def test_does_not_step_past_a_non_verifying_line_to_seed_from_a_stale_one_behind_it(self):
+        # A non-verifying predecessor must stop the walk right there, not
+        # skip over it looking for an older line that DOES verify — that
+        # older line is not actually this record's true predecessor.
+        stale = _chain_lines([_event("a", minute=0)])
+        tampered = json.loads(stale[0])
+        tampered["hash"] = "0" * 64  # corrupt: no longer recomputes
+        lines = [stale[0], json.dumps(tampered)]
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            lines, 2, ledger_key=None
+        )
+        assert (prev_hash, prev_seq) == (None, None)
+        assert exhausted is False
+
+    def test_a_corrupt_json_predecessor_yields_nothing_to_seed_from(self):
+        lines = ["{not valid json"]
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            lines, 1, ledger_key=None
+        )
+        assert (prev_hash, prev_seq) == (None, None)
+        assert exhausted is False
+
+    def test_consume_from_past_the_end_of_lines_does_not_crash(self):
+        # WS-172-1's own regression (an object shorter than a stale cursor
+        # expected) — clamped via min(consume_from, len(lines)), not an
+        # IndexError.
+        events = _chain_lines([_event("a", minute=0)])
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            events, 10_000, ledger_key=None
+        )
+        parsed_a = json.loads(events[0])
+        assert prev_hash == parsed_a["hash"]
+        assert prev_seq == parsed_a["seq"]
+        assert exhausted is False
+
+    def test_empty_lines_does_not_crash(self):
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            [], 5, ledger_key=None
+        )
+        assert (prev_hash, prev_seq) == (None, None)
+        assert exhausted is False
+
+
 class TestPagination:
     async def test_a_full_page_sets_truncated_and_a_resumable_cursor(self, s3):
         _put_events(
@@ -503,6 +1111,49 @@ class TestPagination:
         assert len(result.events) == 1
         assert result.truncated is True
         assert result.next_cursor is not None
+
+    async def test_a_cursor_pointing_past_the_end_of_an_object_does_not_crash(self, s3):
+        # TODO.md item 172 follow-up (WS-172-7, security-invariant-reviewer,
+        # 2026-08-10): the WS-172-1 fix added a backward seed-walk indexed
+        # by the cursor's own `line` field — a value the module's own
+        # documented cursor contract already treats as untrustworthy ("a
+        # resumption hint, not a promise the archive is unchanged"). A
+        # cursor whose `line` exceeds the object's actual current length
+        # (a hand-edited cursor, or an object legitimately replaced by a
+        # shorter one since the cursor was issued — Object Lock prevents
+        # deleting a version, not PUTting a new one) must degrade
+        # gracefully, not raise IndexError.
+        _put_events(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [_event("a", minute=0), _event("b", minute=1)],
+        )
+        first = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            limit=1,
+            bounds=_bounds(default_limit=1),
+        )
+        assert first.next_cursor is not None
+        payload = json.loads(base64.urlsafe_b64decode(first.next_cursor))
+        payload["line"] = 10_000  # the real object only has 2 lines
+        forged = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            cursor=forged,
+            bounds=_bounds(default_limit=1),
+        )
+        assert result.events == []
 
     async def test_paging_through_a_full_cursor_chain_yields_every_event_exactly_once(self, s3):
         _put_events(

@@ -444,23 +444,27 @@ claim when the work ships or before explicitly handing the item back.
   can), but the failure mode is a silent wrong-database read rather than an
   error; needs a design call (validate same-host at config-load time vs.
   document the assumption) before implementation.*
-- [ ] **171** — the audit windowed early-exit (item 141) can silently
-  under-report on a merged/multi-writer file, with no disclosure field or way
-  to tell caller-facing consumers apart. *Surfaced 2026-08-08 by three of the
-  four `auditors` reviewers auditing item 141's own commit, during that
-  item's own mandatory completion gate. The dominant risk and the operator
-  knob are already shipped (item 141); what remains is a Protocol return-shape
-  change (3-tuple → 4-tuple) across ~20 call sites in two production
-  consumers and three test files — mechanical but wide, deliberately not
-  folded into item 141 itself.* **Depends on 141.**
-- [ ] **172** — WORM archive segment verification checks each record's own
-  hash but never the chain's linkage within a segment (duplication/omission
-  undetectable, even against a keyed archive). *Surfaced 2026-08-09 by
-  `security-invariant-reviewer`/`test-contract-reviewer` auditing item 154's
-  own commit, during that item's own mandatory completion gate. Needs an
-  explicit design decision (recorded in the PRODUCT_GUIDE Decision Log) on
-  binding a segment to its own object key before the duplication half can be
-  fully closed, not just the linkage-break detection half.* **Depends on 154.**
+- [x] **171** — the audit windowed early-exit (item 141) can silently
+  under-report on a merged/multi-writer file. ✅ **Shipped**
+  (`scan_ended_on_out_of_window_run` disclosure field on all three reports).
+- [x] **172** — WORM archive segment verification checks each record's own
+  hash but never the chain's linkage within a segment. ✅ **Shipped**
+  (`seq`/`prev_hash` continuity check + `chain_breaks` field; segment
+  duplication to a second key remains a separate, undecided residual —
+  see item 177 for the follow-up metrics-counter gap it also surfaced).
+- [x] **126** — no per-caller rate limit on `GET /help/my-recent-denials`.
+  ✅ **Shipped** (per-principal cooldown + config knob + metrics counter).
+- [x] **174** — a cross-connection join's secondary-connection schema
+  qualifier is a hardcoded MSSQL `.dbo` idiom with zero dialect dispatch.
+  ✅ **Shipped** (`SessionDialectAdapter.cross_database_schema_qualifier`,
+  reject-don't-emulate for Postgres/MySQL).
+- [x] **173** — cross-connection connection-resolution is unmemoized, redone
+  on every call site that self-derives it. ✅ **Shipped** (`validate_schema`
+  reuses item 160's per-request `connection_resolver` snapshot).
+- [ ] **177** — `WormSearchResult.chain_breaks`/`unverified` have no
+  Prometheus counter, so the strongest WORM-archive tamper signal isn't
+  alertable. *Surfaced 2026-08-10 by `security-invariant-reviewer` auditing
+  item 172's own commit.* **Depends on 172.**
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 

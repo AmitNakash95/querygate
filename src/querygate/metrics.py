@@ -277,6 +277,22 @@ VERDICT_DURATION_SECONDS = Histogram(
     registry=REGISTRY,
 )
 
+PERSONAL_DENIALS_RATE_LIMITED_TOTAL = Counter(
+    "querygate_personal_denials_rate_limited_total",
+    "GET /help/my-recent-denials requests rejected by TODO.md item 126's "
+    "per-principal cooldown. No labels — this is a self-service, "
+    "no-admin-scope endpoint, so a `principal` label would be caller-chosen "
+    "cardinality and, combined with a burst, a weak per-principal activity "
+    "oracle to anyone who can read /metrics; a single counter still gives an "
+    "operator a real signal that the rate limit item 126 added is actually "
+    "engaging, without either cost. Deliberately a metric, not a persisted "
+    "audit event: an audit event per 429 would let a caller inflate the same "
+    "JSONL file this endpoint scans, making every principal's subsequent "
+    "scan more expensive — a self-amplifying feedback loop this metric "
+    "avoids by construction.",
+    registry=REGISTRY,
+)
+
 
 def classify_rejection(exc: BaseException) -> str:
     if isinstance(exc, QueueFullError):
@@ -330,6 +346,7 @@ __all__ = [
     "AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL",
     "VERDICTS_TOTAL",
     "VERDICT_DURATION_SECONDS",
+    "PERSONAL_DENIALS_RATE_LIMITED_TOTAL",
     "classify_rejection",
     "render_latest",
 ]

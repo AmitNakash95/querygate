@@ -50,14 +50,30 @@ far more likely cause in practice is a rotated/mismatched
 **Forgery-resistant only when a key is configured** — the default unkeyed
 chain is a public SHA-256 function anyone with `s3:PutObject` can compute,
 so it catches corruption and careless forgery, not a deliberate one (see
-`audit/worm_sink.py`'s module docstring for the full statement). **Two
-further residuals, neither closed by this control:** a genuine segment can
-still be silently withheld from a listing (left to the existing
-S3-listing/Object-Lock posture); and this reader verifies each RECORD's hash
-but never the CHAIN's linkage within a segment, so a genuine segment can be
-duplicated to a second key (returned twice) or have interior records dropped
-(silently omitted) without detection (TODO.md item 172). **No legacy-segment
-migration question**: this feature has no production deployment predating
+`audit/worm_sink.py`'s module docstring for the full statement). **One
+residual, not closed by this control:** a genuine segment can still be
+silently withheld from a listing (left to the existing S3-listing/Object-Lock
+posture). **Partially fixed further (TODO.md item 172):** this reader now
+also verifies each segment's internal CHAIN linkage (`seq`/`prev_hash`
+continuity across consumed records), not just each record's own hash — a
+record dropped from or reordered within the middle of a segment breaks the
+chain and stops that segment's scan there, counted both in `unverified` and
+in a distinct `chain_breaks` field (a stronger signal than an ordinary hash
+mismatch, since the record itself is otherwise self-consistent). **Still
+open (interior omission only, not every omission):** a genuine,
+individually-valid, fully-intact segment can still be COPIED WHOLESALE to a
+second S3 key and returned twice — undetectable by a linkage check alone,
+since a full copy is itself a valid chain; closing this needs a further
+design decision (binding a segment to its own object key) recorded as its
+own follow-up. Records dropped from the TAIL of a segment (not the middle)
+are ALSO still undetectable: the surviving prefix is a perfectly valid
+chain on its own (`seq 0..k-1`, every link intact), and — unlike the local
+`audit/ledger.py` reader's `verify_chain`, which has an `expected_head`
+parameter specifically to catch records dropped from the end of a file —
+no per-segment head anchor exists outside the object itself to compare
+against (WS-172-3, security-invariant-reviewer, 2026-08-10). **No
+legacy-segment migration question**:
+this feature has no production deployment predating
 this fix, so the reader requires an envelope unconditionally rather than
 supporting both shapes indefinitely — a bare line is treated as `malformed`,
 matching this module's existing "reject unenveloped/unverifiable, never
@@ -155,7 +171,12 @@ from typing import List, Literal, Optional, Tuple, get_args
 import pydantic as pyd
 
 from querygate.audit.events import PersistableEvent
-from querygate.audit.ledger import resolve_ledger_key, unwrap_envelope, verify_envelope_hash
+from querygate.audit.ledger import (
+    GENESIS_PREV_HASH,
+    resolve_ledger_key,
+    unwrap_envelope,
+    verify_envelope_hash,
+)
 from querygate.core.exceptions import QueryValidationError
 from querygate.metrics import (
     AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL,
@@ -317,8 +338,50 @@ class WormSearchResult(pyd.BaseModel):
     # Kept distinct from `malformed` so a caller isn't left reading a
     # silently-empty, "nothing happened"-looking result when the real cause
     # is a key mismatch — see the `note` field, which names this explicitly
-    # when non-zero.
+    # when non-zero. TODO.md item 172: ALSO includes the one breaking line
+    # of each chain-break counted in `chain_breaks` below — that line's own
+    # hash DID recompute, so `unverified - chain_breaks` (not this field
+    # alone) is the count actually likely to be a key mismatch; see the
+    # `note` field's two separate sentences.
     unverified: int = 0
+    # TODO.md item 172: a genuine segment can still be copied to a second S3
+    # key (returned twice) or have interior records dropped/reordered
+    # without EITHER of the two counts above ever firing — each surviving
+    # record's own hash still recomputes on its own, since neither field
+    # checks a record's LINK to its predecessor within the segment (`seq`
+    # continuity, `prev_hash` continuity). This counts SEGMENTS (not lines)
+    # where that link broke within the scanned window: the breaking line
+    # itself is also counted in `unverified` above (kept a real signal, not
+    # silently dropped), but unlike an ordinary hash mismatch — usually a
+    # rotated `AUDIT_LEDGER_HMAC_KEY`, see `unverified`'s own comment — a
+    # broken LINK on an otherwise self-consistent record is a stronger
+    # tamper/omission signal, so it is disclosed separately rather than
+    # folded into the same "probably just a key rotation" explanation. No
+    # further records from a broken segment are returned past the break
+    # (see the `note` field, and `docs/THREAT_MODEL.md` QG-40 for the
+    # residual this does NOT close: detecting a whole segment duplicated to
+    # a second key, which still needs a segment-to-object-key binding —
+    # deliberately out of scope here, see the item-172 Decision Log entry).
+    chain_breaks: int = 0
+    # TODO.md item 172 follow-up (WS-172-2, security-invariant-reviewer,
+    # 2026-08-10): fail-closed on a broken chain means every remaining line
+    # in the SAME object past the break is never read, however many genuine,
+    # individually hash-verifiable records they might hold — the safer
+    # posture (a record's claimed position past a break can't be trusted),
+    # but leaving the SCALE of that undisclosed would let a single corrupt
+    # or key-mismatched line silently cost far more than itself. This sums,
+    # across every broken object in the scan, the number of raw lines
+    # between the break and that object's own EFFECTIVE line cap
+    # (`_MAX_LINES_PER_OBJECT` or the object's true length, whichever is
+    # smaller) that were never read as a result. Not a precise count of
+    # suppressed RECORDS (some of those lines could themselves be blank or
+    # malformed), and — the one case where even this line count can
+    # undercount — an object whose true length exceeds
+    # `_MAX_LINES_PER_OBJECT` may hold further lines past the cap that
+    # neither this field nor a break accounts for; that gap is the
+    # pre-existing, unrelated line-cap truncation this field does not
+    # attempt to describe.
+    lines_skipped_after_chain_break: int = 0
     # True whenever next_cursor is set — the scan of the requested window is
     # NOT yet complete (a safety bound fired, or the page simply filled),
     # exactly the "next_cursor implies truncated" invariant this module
@@ -414,6 +477,86 @@ def _validate_limit(limit: Optional[int], bounds: WormSearchBounds) -> int:
     if limit < 1 or limit > bounds.max_limit:
         raise QueryValidationError(f"limit must be between 1 and {bounds.max_limit} (got {limit}).")
     return limit
+
+
+# TODO.md item 172 follow-up (WS-172-7 secondary point / WS-172-8,
+# security-invariant-reviewer, 2026-08-10/11): bounds `_seed_chain_state_from_
+# predecessor`'s backward walk — see that function's own docstring.
+_SEED_WALK_MAX_STEPS = 1024
+
+
+def _seed_chain_state_from_predecessor(
+    lines: List[str], consume_from: int, *, ledger_key: Optional[bytes]
+) -> Tuple[Optional[str], Optional[int], bool]:
+    """Seed a resumed page's chain-linkage state (TODO.md item 172,
+    WS-172-1) from the nearest preceding non-blank line that itself
+    verifies, so the first record actually consumed on a resumed page still
+    has its incoming link checked like every other record — otherwise every
+    ordinary page boundary the server itself issues would silently exempt
+    one link per page. `consume_from`'s predecessor line is NOT in a
+    different file the reader lacks — the whole object is already in
+    `lines` — unlike the rotated-LOCAL-ledger-file carve-out
+    `audit/ledger.py`'s `verify_chain` genuinely needs.
+
+    Returns `(hash, seq, exhausted_bound)`. `(None, None, False)` when a
+    predecessor was found but didn't verify, or was corrupt JSON, or there
+    was nothing to seed from at all (`consume_from <= 0` territory, handled
+    by the caller before this is even invoked) — the caller falls back to
+    accepting the resumed page's first consumed line's incoming link as
+    given, same as it always has. `(None, None, True)` is a DIFFERENT case
+    (WS-172-8, security-invariant-reviewer, 2026-08-11): the walk ran out of
+    its own step budget (`_SEED_WALK_MAX_STEPS`) without ever reaching a
+    non-blank line, so nothing about the true predecessor is known one way
+    or the other — the caller must fail closed on this one, not accept-as-
+    given, or a real dropped record hidden behind a long blank-padded run
+    placed exactly at a page boundary would verify silently.
+
+    `consume_from` is caller-controlled (a cursor's `line` field, only ever
+    checked for `>= 0` at decode time — see the module docstring's own "not
+    a promise the archive is unchanged" contract) with no upper bound
+    relative to `lines`'s actual length, which can differ from what it was
+    when the cursor was issued. `min(consume_from, len(lines))` clamps the
+    start index so a cursor pointing past the end of a shorter-than-expected
+    object degrades (nothing to seed from) rather than raising `IndexError`.
+
+    The walk is bounded in LENGTH, not by a wall-clock deadline (unlike the
+    forward line loop in `search_worm_archive`, which checks
+    `time.monotonic()` every 1,000 lines — item 154/WS-154-4): a genuine
+    segment never has ANY blank line at all (`worm_sink.py`'s
+    `_build_segment_body` joins records with `"\n"` and appends exactly one
+    trailing newline, so `str.splitlines()` on a real segment yields zero
+    empty elements) — so any bound at all is behaviorally lossless against a
+    real object, and capping how far back this walk looks is the cheapest
+    correct bound against a crafted one. An object crafted with a long
+    blank-line run immediately before `consume_from` costs at most
+    `_SEED_WALK_MAX_STEPS` `continue` iterations, not the full
+    (`_MAX_OBJECT_BYTES`-bounded, but still potentially large) object
+    length.
+    """
+    start = min(consume_from, len(lines)) - 1
+    floor = max(-1, start - _SEED_WALK_MAX_STEPS)
+    for back in range(start, floor, -1):
+        seed_raw = lines[back]
+        if not seed_raw.strip():
+            continue
+        try:
+            seed_parsed = json.loads(seed_raw)
+        except json.JSONDecodeError:
+            return None, None, False
+        if verify_envelope_hash(seed_parsed, key=ledger_key) is True:
+            return seed_parsed.get("hash"), seed_parsed.get("seq"), False
+        # Whether or not the predecessor verified, it is the nearest
+        # non-blank line — stop looking further back. If it did NOT verify
+        # (already reported when that line was itself consumed on an
+        # earlier page), there is nothing trustworthy to seed from.
+        return None, None, False
+    # The loop ran to completion without finding a single non-blank line.
+    # `exhausted_bound` is True only when the walk actually used its full
+    # step budget — distinct from simply having nowhere left to look
+    # (`start < 0`, or a short object with fewer than
+    # `_SEED_WALK_MAX_STEPS` lines before `start`, all genuinely blank).
+    exhausted_bound = (start - floor) >= _SEED_WALK_MAX_STEPS
+    return None, None, exhausted_bound
 
 
 def _matches(
@@ -576,6 +719,8 @@ async def search_worm_archive(
     events: List[PersistableEvent] = []
     malformed = 0
     unverified = 0
+    chain_breaks = 0
+    lines_skipped_after_chain_break = 0
     events_scanned = 0
     objects_scanned = 0
     deadline = time.monotonic() + bounds.request_timeout_seconds
@@ -586,14 +731,38 @@ async def search_worm_archive(
         # both "ok" and "error" if the model itself somehow failed to build
         # (security-invariant-reviewer, 2026-08-06, WS-7).
         note = _NOTE
-        if unverified:
+        # TODO.md item 172 follow-up (WS-172-4, security-invariant-reviewer,
+        # 2026-08-10): `unverified` counts BOTH a pure hash mismatch and a
+        # chain-break line (the latter's own hash still recomputed fine —
+        # see `chain_breaks`' field comment). The two have different likely
+        # causes and must not share one explanation: `hash_mismatches` below
+        # is the count that's actually a candidate for "probably a key
+        # rotation"; a chain-break line gets its own, separate sentence
+        # that explicitly says it is NOT that.
+        hash_mismatches = unverified - chain_breaks
+        if hash_mismatches:
             # TODO.md item 154: disclose a likely key mismatch rather than
             # leaving the caller to read a bare count with no explanation.
             note = (
-                f"{_NOTE} {unverified} line(s) were envelope-shaped but did not verify "
-                "under the configured AUDIT_LEDGER_HMAC_KEY — this usually means the "
-                "archive was written under a different (or since-rotated) key, not "
+                f"{_NOTE} {hash_mismatches} line(s) were envelope-shaped but did not "
+                "verify under the configured AUDIT_LEDGER_HMAC_KEY — this usually means "
+                "the archive was written under a different (or since-rotated) key, not "
                 "necessarily tampering."
+            )
+        if chain_breaks:
+            # TODO.md item 172: a broken internal chain link is a stronger
+            # signal than an ordinary hash mismatch — records were reordered
+            # or removed from the middle of a segment, not just written
+            # under a different key — so it gets its own sentence rather
+            # than being folded into the key-rotation explanation above.
+            note = (
+                f"{note} {chain_breaks} segment(s) had a broken internal chain link "
+                "(a record whose seq/prev_hash did not continue from its predecessor, "
+                "and whose own hash otherwise still verified — not a key mismatch) — "
+                "records may have been reordered or removed from the middle of a "
+                "segment, and this fails closed: "
+                f"{lines_skipped_after_chain_break} further line(s) in those affected "
+                "segments were never read as a result and may hold genuine records."
             )
         result = WormSearchResult(
             source="s3_worm",
@@ -604,6 +773,8 @@ async def search_worm_archive(
             events_scanned=events_scanned,
             malformed=malformed,
             unverified=unverified,
+            chain_breaks=chain_breaks,
+            lines_skipped_after_chain_break=lines_skipped_after_chain_break,
             truncated=truncated,
             next_cursor=next_cursor,
             note=note,
@@ -676,6 +847,32 @@ async def search_worm_archive(
 
                 consume_from = resume_line if (day == current_day and key == resume_key) else 0
                 last_line = min(len(lines), _MAX_LINES_PER_OBJECT)
+                # TODO.md item 172: chain-linkage state, scoped to THIS
+                # object/segment — `audit/worm_sink.py`'s `WormFlushMonitor`
+                # restarts every segment's own chain at seq=0/GENESIS_PREV_HASH
+                # (a per-segment, not cross-segment, chain — see
+                # `LedgerRecord`'s docstring), so linkage is never carried
+                # across objects. `None` means "no record from this object
+                # has been chain-checked yet" — distinct from a real prior
+                # hash, so the first CONSUMED record is handled specially
+                # below.
+                broke_chain = False
+                # TODO.md item 172 (WS-172-1, security-invariant-reviewer,
+                # 2026-08-10): seed the chain state from the nearest
+                # preceding non-blank line on a resumed page, bounded in
+                # length (WS-172-7) — see `_seed_chain_state_from_
+                # predecessor`'s own docstring for the full rationale.
+                # `None, None, False` when `consume_from == 0` (nothing to
+                # seed — this object's own genesis is checked directly
+                # below) or when a predecessor was found but didn't verify.
+                # `None, None, True` (WS-172-8) means the walk exhausted its
+                # own step bound without learning anything — the caller
+                # below must fail closed on that case, not accept-as-given.
+                prev_verified_hash, prev_seq, prev_seed_bound_exhausted = (
+                    _seed_chain_state_from_predecessor(lines, consume_from, ledger_key=ledger_key)
+                    if consume_from > 0
+                    else (None, None, False)
+                )
                 for line_no in range(consume_from, last_line):
                     # TODO.md item 154 (security-invariant-reviewer, WS-154-4):
                     # per-line envelope verification made this loop's body
@@ -715,6 +912,62 @@ async def search_worm_archive(
                     if verified is False:
                         unverified += 1
                         continue
+                    # TODO.md item 172: the record's OWN hash just verified
+                    # above — now check its LINK to the previous record
+                    # consumed from this segment. This must run for every
+                    # hash-verified record regardless of what happens to it
+                    # afterward (filtered out below, fails schema
+                    # validation, etc.) — the write-time chain sequence
+                    # doesn't care whether a record matches this caller's
+                    # search filter.
+                    seq = parsed.get("seq")
+                    prev_hash_field = parsed.get("prev_hash")
+                    if prev_verified_hash is None:
+                        # Either genuinely starting fresh at this object
+                        # (consume_from == 0 — must be the real segment
+                        # genesis), or resuming past a predecessor line that
+                        # itself didn't verify (the seeding loop above found
+                        # nothing trustworthy to check against — already
+                        # reported when that line was itself consumed on an
+                        # earlier page). A resumed page whose predecessor DID
+                        # verify never reaches this branch — it was seeded
+                        # above and goes through the normal `else` below.
+                        # TODO.md item 172 follow-up (WS-172-8,
+                        # security-invariant-reviewer, 2026-08-11): if the
+                        # seed walk exhausted its own step bound rather than
+                        # genuinely finding no predecessor, fail closed
+                        # instead of accepting this line's incoming link as
+                        # given — a genuine segment has zero blank lines (see
+                        # `_seed_chain_state_from_predecessor`'s docstring),
+                        # so this only fires against a crafted/corrupted
+                        # object, and accepting silently there would let a
+                        # real dropped record hide behind a long blank-padded
+                        # run placed exactly at a page boundary.
+                        chain_ok = (not prev_seed_bound_exhausted) and (
+                            consume_from > 0 or (seq == 0 and prev_hash_field == GENESIS_PREV_HASH)
+                        )
+                    else:
+                        chain_ok = seq == prev_seq + 1 and prev_hash_field == prev_verified_hash
+                    if not chain_ok:
+                        # Count the breaking line itself (also, still,
+                        # `unverified` — it never stopped being envelope-
+                        # shaped with a self-consistent hash) and stop
+                        # consuming this object: once linkage has broken, a
+                        # later record in the same object can no longer be
+                        # trusted to be genuinely positioned where it claims
+                        # to be, so nothing further from this object is
+                        # returned.
+                        unverified += 1
+                        chain_breaks += 1
+                        # TODO.md item 172 follow-up (WS-172-2): disclose
+                        # the SCALE of what fail-closed just cost — every
+                        # remaining raw line in this object, past the
+                        # breaking one, that will now never be read.
+                        lines_skipped_after_chain_break += last_line - (line_no + 1)
+                        broke_chain = True
+                        break
+                    prev_verified_hash = parsed.get("hash")
+                    prev_seq = seq
                     unwrapped = unwrap_envelope(parsed)
                     try:
                         event = _EVENT_ADAPTER.validate_python(unwrapped)
@@ -748,6 +1001,14 @@ async def search_worm_archive(
                                 keys, idx, day, end_day, fingerprint
                             )
                         return _finalize(truncated=next_cursor is not None, next_cursor=next_cursor)
+
+                if broke_chain:
+                    # TODO.md item 172: stopped deliberately on a broken
+                    # link, not because the line cap fired — move on to the
+                    # next object rather than treating this as a resumable
+                    # truncation (a cursor pointing back into the same
+                    # broken chain would just re-encounter the same break).
+                    continue
 
                 if last_line < len(lines):
                     # The per-object line cap fired and the page wasn't
