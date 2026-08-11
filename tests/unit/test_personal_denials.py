@@ -18,6 +18,7 @@ import pytest
 from querygate.admin.anomaly import JsonlAuditEventSource
 from querygate.audit.events import AuditEvent
 from querygate.help.personal_denials import (
+    PersonalDenialsCooldown,
     RecentDenialsReport,
     build_recent_denials_report,
     select_recent_denials,
@@ -258,6 +259,7 @@ def test_report_respects_configured_max_consecutive_out_of_window(tmp_path):
         lookback_seconds=3600.0,
     )
     assert default_report.own_denials_found == 1
+    assert default_report.scan_ended_on_out_of_window_run is False
 
     tight_report = build_recent_denials_report(
         JsonlAuditEventSource(str(path)),
@@ -267,6 +269,13 @@ def test_report_respects_configured_max_consecutive_out_of_window(tmp_path):
         max_consecutive_out_of_window=3,
     )
     assert tight_report.own_denials_found == 0
+    # TODO.md item 171: this is precisely the disclosure this item adds — a
+    # caller-facing consumer can now tell `own_denials_found == 0` here means
+    # "the scan heuristically stopped early on a merged/multi-writer-shaped
+    # file", not "this caller genuinely has no denials in the window". Before
+    # this field existed, `tight_report` and a genuinely-empty result were
+    # indistinguishable over the wire.
+    assert tight_report.scan_ended_on_out_of_window_run is True
 
 
 def test_report_never_leaks_another_principals_denial(tmp_path):
@@ -296,7 +305,7 @@ def test_report_is_redaction_safe():
 
     class _Source:
         def load_query_events(self, *, now, thresholds):
-            return [_event(at=_NOW, principal="user-a")], 0, False
+            return [_event(at=_NOW, principal="user-a")], 0, False, False
 
     report = build_recent_denials_report(_Source(), principal_id="user-a", now=_NOW)
     blob = report.model_dump_json()
@@ -309,3 +318,59 @@ def test_report_is_redaction_safe():
             lookback_seconds=1,
             leaked_field=1,  # type: ignore[call-arg]
         )
+
+
+class TestPersonalDenialsCooldown:
+    """TODO.md item 126. Direct, white-box tests of the cooldown class itself
+    (mirroring `test_health.py`'s coverage of `HealthMonitor`'s identical
+    per-key cooldown shape), plus the pruning fix a same-day
+    `security-invariant-reviewer` finding on this item's own completion gate
+    added."""
+
+    def test_first_call_is_always_allowed(self):
+        cooldown = PersonalDenialsCooldown()
+        assert cooldown.seconds_until_allowed("p1", 10.0) == 0.0
+
+    def test_second_call_within_the_window_is_blocked(self):
+        cooldown = PersonalDenialsCooldown()
+        cooldown.record_request("p1", 10.0)
+        remaining = cooldown.seconds_until_allowed("p1", 10.0)
+        assert 0 < remaining <= 10
+
+    def test_cooldown_is_scoped_per_principal(self):
+        cooldown = PersonalDenialsCooldown()
+        cooldown.record_request("p1", 10.0)
+        assert cooldown.seconds_until_allowed("p2", 10.0) == 0.0
+
+    def test_zero_cooldown_disables_the_limit(self):
+        cooldown = PersonalDenialsCooldown()
+        cooldown.record_request("p1", 0.0)
+        assert cooldown.seconds_until_allowed("p1", 0.0) == 0.0
+
+    def test_disabled_cooldown_records_nothing(self):
+        # If cooldown_seconds<=0 recorded anyway, the map would grow forever
+        # on every request even though seconds_until_allowed never consults
+        # it in that case — pure waste with no behavioral effect.
+        cooldown = PersonalDenialsCooldown()
+        cooldown.record_request("p1", 0.0)
+        assert cooldown._last_request == {}
+
+    def test_record_prunes_entries_whose_own_cooldown_has_elapsed(self, monkeypatch):
+        # TODO.md item 126 follow-up (2026-08-10 security-invariant-reviewer):
+        # an unpruned map would grow one permanent entry per distinct
+        # principal ever seen. Simulates 1,000 distinct principals recorded
+        # at t=1000, then one more recorded after their 0.01s cooldowns have
+        # all elapsed — only the newest entry should survive.
+        import querygate.help.personal_denials as personal_denials_module
+
+        fake_now = [1000.0]
+        monkeypatch.setattr(personal_denials_module.time, "monotonic", lambda: fake_now[0])
+        cooldown = PersonalDenialsCooldown()
+        for i in range(1000):
+            cooldown.record_request(f"p{i}", 0.01)
+        assert len(cooldown._last_request) == 1000
+
+        fake_now[0] += 1.0
+        cooldown.record_request("new-principal", 0.01)
+        assert len(cooldown._last_request) == 1
+        assert set(cooldown._last_request) == {"new-principal"}

@@ -3705,6 +3705,229 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-10 — `validate_schema` reuses the per-request connection-resolver
+  snapshot instead of re-deriving cross-connection resolution a second time
+  (TODO.md item 173).** Item 160 already built one fixed snapshot per
+  request (`_validate_and_compile`'s `connection_resolver`, via
+  `_snapshot_connection_resolver`) and threaded it into `validate_policy`
+  and `compile_structured_query` — but `validate_schema`'s own internal
+  `resolve_query_table_connections` walk had no way to receive it, so it
+  always fell through to a fresh live `resolve_visible_connection` lookup
+  for every non-primary connection a query's joins touch. Not a correctness
+  bug (each resolution was independently correct, and TOCTOU-safe within
+  its own call), just the same connection/Policy resolution work redone a
+  second time in one request — surfaced 2026-08-09 by
+  `security-invariant-reviewer` auditing item 160's own commit as a
+  performance follow-up, deliberately not folded into that item. **Decision
+  (recorded per this item's own scoping requirement):** thread the existing
+  snapshot through rather than add a second, parallel memoization
+  mechanism (a per-call dict cache keyed by `(connection_id, id(principal))`
+  was the item's other named option) — the snapshot already exists, is
+  already proven correct and TOCTOU-safe by item 160's own tests, and a
+  second cache would be a second solution to the same problem the codebase
+  already solved once. **Fix:** `validate_schema` gained an optional
+  `connection_resolver` parameter, threaded to both of its own internal
+  `resolve_query_table_connections` calls; `execution/service.py`'s
+  `_validate_and_compile` now passes its already-built `connection_resolver`
+  into its `validate_schema` call, so both the CTE-body and outer/nested-scope
+  resolution walks reuse the snapshot. `None` (every other caller —
+  `admin/service.py`'s template-binding validator, and every existing test)
+  falls back to the exact pre-173 live-resolution behavior; strictly
+  additive. `tests/unit/test_schema_validation.py`'s
+  `test_connection_resolver_snapshot_is_reused_not_rederived` patches the
+  live `resolve_visible_connection` to raise if called at all, proving both
+  the primary and joined connection resolve through the supplied snapshot
+  exclusively — mutation-verified (reverting the threading makes the test
+  fail on the patched-to-raise live lookup).
+- **2026-08-10 — The WORM archive reader now verifies a segment's internal
+  chain linkage, not just each record's own hash (TODO.md item 172).**
+  Item 154 made `audit/worm_search.py` verify each `LedgerRecord`'s own hash
+  before returning it, closing the gap where a fabricated, schema-valid
+  segment could be planted and returned indistinguishably from a genuine
+  one — but it never checked that a segment's records form a genuine,
+  complete chain. Against even a KEYED archive (where forging new content
+  is infeasible without the HMAC key), a principal with `s3:PutObject` on
+  the archive prefix could still upload an object containing an arbitrary
+  SUBSET of a genuine segment's records (drop the first, or one from the
+  middle) — each surviving record still verified individually, so the
+  omission produced no signal. Surfaced 2026-08-09 by
+  `security-invariant-reviewer`/`test-contract-reviewer` auditing item 154's
+  own commit. **Decision (this item's own first step, per its TODO.md
+  scoping):** implement linkage-break detection now; defer the harder,
+  separate problem — a genuine segment copied WHOLESALE to a second S3 key,
+  undetectable by any linkage check since a full copy is itself a valid
+  chain — to a future item, since closing it needs binding a segment to its
+  own object key (a write-format change with the same "explicit decision
+  before implementation" shape item 154's own two decisions had), not
+  something to default into alongside this item's narrower, well-specified
+  fix. **Fix:** `search_worm_archive`'s per-object line loop now tracks
+  `prev_verified_hash`/`prev_seq` across consumed lines, scoped to one
+  object (each WORM segment restarts its own chain at
+  `seq=0`/`GENESIS_PREV_HASH` — a per-segment, not cross-segment, design).
+  The first line actually CONSUMED when starting fresh at an object
+  (`consume_from == 0`) must be the genuine genesis; every subsequent
+  consumed line must continue `seq`/`prev_hash` from the one before it. On
+  a break, the breaking line is counted `unverified` (still envelope-shaped
+  and self-consistent — just not linked) plus a new, distinct
+  `WormSearchResult.chain_breaks` field (a stronger signal than an ordinary
+  hash mismatch, which is more often a key rotation than tampering), and the
+  scan stops consuming that object entirely — deliberately routed around the
+  existing per-object line-cap truncation path, since a cursor resuming into
+  an already-broken chain would just re-encounter the identical break.
+
+  **Hardened same-day by this item's own mandatory `security-invariant-reviewer`
+  gate**, which found the first cut's resumed-page handling genuinely
+  weaker than claimed: a cursor resuming mid-object (`consume_from > 0`,
+  which the SERVER itself issues at every ordinary page boundary, not just
+  a hand-crafted cursor) unconditionally accepted the incoming link of the
+  first record consumed on that page — the Decision Log's own draft
+  reasoning claimed this "mirrors `audit/ledger.py`'s `verify_chain`
+  carve-out for a rotated ledger file," which does not hold: `verify_chain`'s
+  carve-out exists because a rotated file's true predecessor lives in a
+  DIFFERENT file the verifier doesn't have, whereas here the whole object
+  (predecessor line included) was already fetched into memory. **Fix:**
+  before the line loop, when `consume_from > 0`, seed `prev_verified_hash`/
+  `prev_seq` from the nearest preceding non-blank line that itself verifies
+  — so the first record consumed on ANY page, resumed or not, has its
+  incoming link checked like every other record; the accept-as-given
+  carve-out now applies only in the one case it's actually unavoidable (the
+  predecessor line itself didn't verify). Also found and fixed: a broken
+  chain silently suppressed every remaining line in that object with no
+  disclosure of HOW MANY — added `WormSearchResult.
+  lines_skipped_after_chain_break`, summed across every broken object in
+  the scan and named in the response `note`; and the pre-existing
+  key-rotation sentence was miscounting a chain-break line (whose hash DID
+  verify) as a hash-mismatch candidate — the note now separates
+  `hash_mismatches = unverified - chain_breaks` for that sentence and gives
+  the chain-break sentence its own, explicitly-not-a-key-mismatch wording.
+  Also documented, not fixed (a genuinely separate residual, not swept into
+  this item): records dropped from the TAIL (not interior) of a segment
+  leave a self-contained valid prefix chain with nothing to fail a
+  continuity check against — unlike `verify_chain`'s `expected_head`
+  parameter, no per-segment head anchor exists outside the object to
+  compare against; pinned by a dedicated test asserting the current
+  non-detection so a future fix updates it deliberately rather than it
+  silently starting to pass.
+
+  **A second review pass on this same-day hardening caught one more
+  issue in the fix itself: it introduced a crash.** The resumed-page
+  seeding loop indexed `lines[back]` from `consume_from - 1` with no upper
+  bound against the object's actual current length — but `consume_from` is
+  a cursor's own `line` field, which this module's cursor contract already
+  treats as untrustworthy (a hand-edited cursor, or one whose target
+  object was legitimately replaced by a shorter body since issuance,
+  reaches the same unbounded index). Clamped to
+  `min(consume_from, len(lines))` so an out-of-range offset degrades
+  (nothing to seed from) instead of raising `IndexError`. See
+  [Security Model](#security-model).
+- **2026-08-10 — The audit windowed early-exit (item 141) now discloses
+  itself on the report, instead of looking identical to a genuinely complete
+  scan (TODO.md item 171).** Item 141 added `max_consecutive_out_of_window`
+  as a heuristic early-exit to the three tail-first audit readers
+  (`admin/anomaly.py`, `admin/config_trends.py`, `help/personal_denials.py`,
+  the last reusing the first's reader) — once enough consecutive
+  matching-type lines are all before the report's window start, the scan
+  stops on the assumption physical write order tracks `occurred_at` order,
+  an assumption a merged/restored/multi-writer audit file can violate (see
+  `docs/THREAT_MODEL.md` QG-43). Surfaced 2026-08-08 by three of the four
+  `auditors` reviewers auditing item 141's own commit: the stop didn't set
+  `truncated`, so a caller-facing consumer had no way to distinguish "no
+  more matches exist" from "the scan gave up early on a heuristic." **Fix:**
+  `AuditEventSource.load_query_events`/`ChangeEventSource.load_change_events`
+  widened from a 3-tuple `(events, malformed, truncated)` to a 4-tuple
+  `(events, malformed, truncated, scan_ended_on_out_of_window_run)` —
+  mechanical but wide, touching both `Jsonl*EventSource` implementations,
+  both `build_*_report` functions, and ~20 call sites across
+  `tests/unit/test_anomaly.py`, `tests/unit/test_config_trends.py`, and
+  `tests/unit/test_personal_denials.py`, exactly as item 141's own
+  deferral scoped it. `AnomalyReport`, `ConfigCatalogChangeTrend`, and
+  `RecentDenialsReport` each gained the matching
+  `scan_ended_on_out_of_window_run: bool` field, deliberately independent of
+  `truncated` (a resource-bound stop and a heuristic stop are different
+  facts, and either can fire without the other — both directions are
+  regression-tested). See
+  [Security Model](#security-model).
+- **2026-08-10 — A cross-connection join's secondary-connection schema
+  qualifier now dispatches through the registered dialect, instead of a
+  hardcoded MSSQL idiom (TODO.md item 174).** `validation/schema_validation.py`'s
+  `_load_table` reflects a joined table on a SECONDARY connection through the
+  PRIMARY connection's own engine (see item 163/170's entries below for why),
+  and used to qualify it with an unconditional `f"{db_name}.dbo"` — T-SQL's
+  three-part naming, hardcoded regardless of the secondary's actual dialect.
+  Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 166's own
+  commit: literal CLAUDE.md non-negotiable #6 territory (dialect differences
+  behind a Protocol + one class per variant + registry, never an inline
+  assumption at a call site) — and there wasn't even an `if dialect == ...`
+  branch, just the bare MSSQL idiom applied unconditionally. A cross-connection
+  join whose secondary is Postgres or MySQL reflected under a schema qualifier
+  neither dialect understands, failing closed with a masked `NoSuchTableError`
+  that named neither the real cause nor the dialect — a robustness/clarity
+  gap, not a policy bypass (no data ever reached the caller), but it meant
+  only an MSSQL secondary had ever actually worked in this configuration,
+  silently. **Fix:** `connections/dialects.py`'s `SessionDialectAdapter` gained
+  `cross_database_schema_qualifier(db_name) -> Optional[str]` (default `None`
+  — Postgres has no true cross-database reference without an extension, MySQL's
+  is a bare `<db>.<table>` with no schema segment, so guessing at either would
+  be exactly the "synthesize structure the caller never asked for" the engine
+  philosophy rules out); `MSSQLSessionAdapter` overrides it with the real
+  `<db>.dbo.<table>` naming. `_load_table` now dispatches through
+  `get_session_adapter(...)` and raises `QueryValidationError` naming the
+  dialect when the adapter returns `None`, the same reject-don't-emulate
+  posture item 74 set for MSSQL's missing `NULLS FIRST/LAST`, rather than
+  guessing at a convention that varies per dialect. **`QueryValidationError`
+  chosen over `ConfigValidationError`, reviewed and confirmed reasonable but
+  a nit (2026-08-10 `architecture-boundary-reviewer`):** `resolve_query_table_
+  connections`'s sibling checks (`is_connectable`, host-mismatch) use
+  `ConfigValidationError` for a deployment-wide fact true of every query
+  against that secondary; this one instead follows the item-74/`array_agg`
+  "dialect lacks a requested capability" precedent from
+  `compiler/dialect_adapters.py`. Both types currently map to the same HTTP
+  422 and no caller distinguishes them, so this is a documented judgment
+  call, not left ambiguous. See
+  [Why policy is per-connection, not global](#why-policy-is-per-connection-not-global).
+- **2026-08-10 — `GET /help/my-recent-denials` now carries a per-principal
+  cooldown (TODO.md item 126).** This is the only self-service (no
+  `admin:observability:read`) surface that triggers `admin/anomaly.py`'s
+  `JsonlAuditEventSource`'s O(file-size) scan of the persisted audit JSONL —
+  every other reader of that source requires the admin scope. Surfaced
+  2026-07-30 as consistent with (not worse than) the rest of the codebase's
+  no-REST-rate-limiting posture, and deliberately left open pending a
+  throttling-design decision rather than fixed unprompted. **Decision:** add
+  `AppConfig.personal_denials_cooldown_seconds` (default 5s, `0` disables) and
+  a `PersonalDenialsCooldown` tracker (`help/personal_denials.py`) — a plain
+  closure-scoped `Dict[principal_id, float]`, mirroring item 43's
+  `HealthMonitor._last_manual_test` cooldown shape but keyed by principal
+  instead of connection. A second call within the window gets `429` with
+  `Retry-After`. Kept as one router-closure instance (not a module-global
+  singleton) so each app build — including every test's own `create_app()` —
+  starts with a clean cooldown, the same reasoning `tests/conftest.py`'s
+  `in_process_limiter().clear()` gotcha documents for other in-process state,
+  without needing a new autouse-fixture reset.
+
+  **Hardened same-day by this item's own mandatory `security-invariant-reviewer`
+  gate**, which found the first cut real but under-disclosed and under-tested:
+  the cooldown is genuinely per-WORKER-PROCESS (undisclosed — `num_of_workers
+  > 1`/multiple replicas multiply the effective ceiling, the same limitation
+  `execution/quota.py`'s in-process limiter already documents for the
+  identical shape) and its bucket is `principal.subject`, which every
+  statically configured API key shares one of (docs/THREAT_MODEL.md QG-33
+  already documents the identical coupling for this endpoint's *data*
+  isolation — extended to note it now also covers the *rate limit*). Neither
+  is a bypass — both only make the limit stronger or more coarse, never
+  weaker — but both needed writing down, not just holding informally. Also
+  found and fixed: the cooldown map grew one permanent entry per distinct
+  principal ever seen with no eviction (`record_request` now prunes every
+  entry whose own cooldown has already elapsed on each call — behavior-
+  preserving, since an expired entry is semantically identical to an absent
+  one); and the 429 path was invisible to observability (added
+  `querygate_personal_denials_rate_limited_total`, a single unlabeled
+  counter — deliberately a metric, not a persisted audit event, since an
+  audit event per 429 would let a caller inflate the very file this endpoint
+  scans, a self-amplifying feedback loop). `tests/unit/test_personal_denials.py`
+  now exercises `PersonalDenialsCooldown` directly (first-call-allowed,
+  second-blocked, per-principal isolation, zero disables, pruning), and
+  `test_personal_denials_api.py` gained a shared-API-key-shares-one-bucket
+  regression test pinning the documented QG-33 coupling.
 - **2026-08-09 — a `join_group` spanning different physical hosts is now
   rejected, both at config-load time and (the load-bearing layer) at request
   time (TODO.md item 170).** Cross-connection joins reflect the joined table
@@ -7915,7 +8138,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   line is actually yielded. Measured: at the shipped 2,000,000-line default,
   a realistic ~800-byte audit line put per-request cost at ~1.6 GB read and
   10-40s of blocking work on `/help/my-recent-denials` — authenticated-only,
-  no admin scope, no rate limit — which is a bound in the formal sense and
+  no admin scope, no rate limit at the time — which is a bound in the formal sense and
   not one in the practical sense. Fixed with two new independent bounds
   inside `iter_lines_reverse` itself, both raising a typed
   `AuditFileReadBounded` rather than returning silently (so every caller's

@@ -8507,6 +8507,68 @@ the window computed nothing.
 **Effort: XL. Priority: high** (closes the ★ flagship pillar's success criterion).
 Depends on: items 100, 101.
 
+### 126. No per-caller rate limit on `GET /help/my-recent-denials` ✅ DONE
+
+**Surfaced 2026-07-30 by the `auditors` security-invariant review of item 45
+phase 2, not a regression in that pass.** `GET /api/v1/help/my-recent-denials`
+requires only authentication (no scope, matching `/help/my-access`'s posture),
+and its handler calls `admin/anomaly.py`'s `JsonlAuditEventSource`, which reads
+and JSON-parses every line of the audit JSONL file per call (the
+`max_events_scanned` cap only bounds what's *kept in memory*, not how much of
+the file is scanned). Every other caller of that reader (`GET
+/admin/observability/anomalies`) requires `admin:observability:read`; this was
+the first time the same O(file-size) scan became triggerable by *any*
+authenticated caller, with no REST-level rate limit anywhere in the codebase
+to bound repeated calls.
+
+**Decision:** add a lightweight per-principal cooldown scoped to this
+endpoint, mirroring item 43's existing `admin_connection_test_cooldown_seconds`
+precedent — `AppConfig.personal_denials_cooldown_seconds` (default 5s, `0`
+disables) plus a 429/`Retry-After` response inside the window.
+
+**Shipped 2026-08-10.** `PersonalDenialsCooldown` (`help/personal_denials.py`)
+is a plain per-principal `Dict[subject, float]`, closure-scoped inside
+`build_help_router` (one instance per app build, so every test's own
+`create_app()` starts clean with no autouse-fixture reset needed) — the same
+cooldown shape `health.py`'s item-43 `HealthMonitor._last_manual_test` already
+established, keyed by principal instead of connection. The check runs as the
+first statement of the handler, strictly before the expensive audit-JSONL
+scan.
+
+**Hardened same-day by this item's own mandatory `security-invariant-reviewer`
+gate**, which found the first cut real but under-disclosed and under-tested:
+the cooldown is genuinely per-WORKER-PROCESS (undisclosed — `num_of_workers >
+1`/multiple replicas multiply the effective ceiling, the same limitation
+`execution/quota.py`'s in-process limiter already documents for the identical
+shape — now written into the class docstring, the config field comment, and
+`docs/THREAT_MODEL.md` QG-33) and its bucket is `principal.subject`, which
+every statically configured API key shares one of (QG-33 already documented
+the identical coupling for this endpoint's *data* isolation — extended to
+note it now also covers the *rate limit*). Neither is a bypass — both only
+make the limit stronger or more coarse, never weaker — but both needed
+writing down. Also found and fixed: the cooldown map grew one permanent entry
+per distinct principal ever seen with no eviction (`record_request` now
+prunes every entry whose own cooldown has already elapsed on each call —
+behavior-preserving, since an expired entry is semantically identical to an
+absent one); and the 429 path was invisible to observability (added
+`querygate_personal_denials_rate_limited_total`, a single unlabeled
+counter — deliberately a metric, not a persisted audit event, since an audit
+event per 429 would let a caller inflate the very file this endpoint scans, a
+self-amplifying feedback loop). A second reviewer pass re-verified all four
+fixes against the final tree and found each one closed.
+
+**Coverage.** `tests/unit/test_personal_denials.py`'s `TestPersonalDenialsCooldown`
+exercises the class directly (first-call-allowed, second-blocked, per-principal
+isolation, zero disables, disabled-records-nothing, pruning — mutation-verified
+against the pruning logic and the metrics increment).
+`tests/integration/test_personal_denials_api.py` adds the REST-level
+second-call-429-with-Retry-After case, a cooldown-disabled-at-zero case, a
+per-principal (two distinct JWT subjects) isolation case, the documented
+shared-static-API-key-bucket case, and the metrics-counter-increments case.
+
+**Effort:** S. **Depends on:** 43 (cooldown-shape precedent), 45 (the
+endpoint itself).
+
 ### 127. Reject an MCP request whose routing headers disagree with its body (gateway confused-deputy) ✅ DONE
 
 **Surfaced 2026-07-30 by `competitive-scan`.** The MCP `2026-07-28`
@@ -12880,6 +12942,309 @@ on the final tree; `black --check` clean.
 **Effort:** S–M (a validator akin to item 158's for the first layer, plus a
 second, load-bearing layer this item's own audit found necessary, plus
 regression tests). **Depends on:** none.
+
+### 171. The audit windowed early-exit (item 141) can silently under-report on a merged/multi-writer file, with no disclosure field or way to tell caller-facing consumers apart ✅ DONE
+
+**Surfaced 2026-08-08 by three of the four `auditors` reviewers auditing item
+141's own commit** (security-invariant, architecture-boundary, and
+claim-reviewer independently), during that item's own mandatory completion
+gate — not a later external report. Item 141 added a `max_consecutive_out_of_
+window` early-exit to `admin/anomaly.py`/`admin/config_trends.py`'s tail-first
+audit-log scans (and `help/personal_denials.py`, which reuses the same
+reader): once enough consecutive matching-type lines are all before the
+report's window start, the scan stops WITHOUT setting `truncated`, on the
+assumption that physical write order tracks `occurred_at` order. Item 141
+also shipped a real fix for the dominant source of that assumption's risk
+(`audit/logger.py`'s `_persist` now re-stamps `occurred_at` immediately
+before the sink's `emit()`) and disclosed the residual in every relevant
+docstring/comment plus `docs/THREAT_MODEL.md` QG-43, and added an
+operator-facing config knob (`anomaly_max_consecutive_out_of_window`/
+`change_trend_max_consecutive_out_of_window`/`personal_denials_max_
+consecutive_out_of_window`) so a deployment that knows it's at risk can raise
+or disable the tolerance. What remained open, deliberately scoped out of item
+141 itself: a disclosure field on the report so a caller-facing consumer
+could tell "genuinely complete" from "heuristically stopped early".
+
+**Shipped 2026-08-10.** `AuditEventSource.load_query_events` and
+`ChangeEventSource.load_change_events` widened from a 3-tuple `(events,
+malformed, truncated)` to a 4-tuple `(events, malformed, truncated,
+scan_ended_on_out_of_window_run)`, threaded through both
+`JsonlAuditEventSource`/`JsonlChangeEventSource`, both `build_*_report`
+functions, and `help/personal_denials.py`'s direct reuse of the anomaly
+reader — ~20 call sites across `tests/unit/test_anomaly.py`,
+`tests/unit/test_config_trends.py`, and `tests/unit/test_personal_denials.py`,
+plus the three production consumers, exactly as scoped. `AnomalyReport`,
+`ConfigCatalogChangeTrend`, and `RecentDenialsReport` each gained
+`scan_ended_on_out_of_window_run: bool`, set `True` only when the loop broke
+on the `max_consecutive_out_of_window` heuristic — deliberately independent
+of `truncated` (a resource-bound stop and a heuristic stop are different
+facts; either can fire without the other).
+
+**Coverage.** Every existing `test_jsonl_source_early_exit_*` test in both
+`test_anomaly.py` and `test_config_trends.py` now asserts
+`scan_ended_on_out_of_window_run` directly — `True` on each heuristic-exit
+path, `False` where the counter reset before the threshold (proving it isn't
+just always-True). `test_jsonl_source_bounds_and_reports_truncation` in both
+files asserts the opposite direction (`truncated=True`,
+`scan_ended_on_out_of_window_run=False`), pinning independence. A new
+`test_report_discloses_the_heuristic_early_exit` in both files confirms the
+reader's 4th value actually reaches the caller-facing report, not just the
+reader. `test_personal_denials.py`'s existing
+`test_report_respects_configured_max_consecutive_out_of_window` — already
+exercising the exact disclosed merged/multi-writer failure mode (a caller's
+own in-window denial sitting physically behind a run of out-of-window events
+from another principal) — now asserts the field distinguishes the tight
+(heuristically-stopped, `own_denials_found=0`) case from the default
+(genuinely-complete, `own_denials_found=1`) case, closing the "regression
+test exercising the disclosed failure mode itself" requirement. Mutation-
+verified: reverting the `ended_on_out_of_window_run = True` assignment before
+each `break` makes every one of the above fail for exactly that reason.
+
+**Effort:** M (mechanical but wide — a Protocol return-shape change with a
+real test-suite blast radius). **Depends on:** 141.
+
+### 172. WORM archive segment verification checks each record's own hash but never the chain's linkage within a segment ✅ DONE
+
+**Surfaced 2026-08-09 by `security-invariant-reviewer` and `test-contract-
+reviewer` auditing item 154's own commit, during that item's own mandatory
+completion gate.** Item 154 made `audit/worm_search.py` verify each
+`LedgerRecord`'s own hash (`verify_envelope_hash`) before returning it —
+closing the gap where a fabricated, schema-valid segment could be planted
+and returned indistinguishably from a genuine one. What it did NOT do: check
+that a segment's records form a genuine, complete chain. Concretely, against
+even a KEYED archive (where forging new content is infeasible without the
+HMAC key), a principal with `s3:PutObject` on the archive prefix could still
+upload an object containing an arbitrary SUBSET of a genuine segment's
+records (drop the first record, or one from the middle) — because linkage
+(`seq` monotonicity, `prev_hash` continuity) was never checked, each
+surviving record verified on its own and the omission produced no signal.
+
+**Decision (this item's own first step, per its TODO.md scoping):**
+implement linkage-break detection now; defer the harder, separate problem —
+a genuine segment copied WHOLESALE to a second S3 key, undetectable by any
+linkage check since a full copy is itself a valid chain — to a future item,
+since closing it needs binding a segment to its own object key (a
+write-format change), not something to default into alongside this item's
+narrower, well-specified fix.
+
+**Shipped 2026-08-10.** `search_worm_archive`'s per-object line loop tracks
+`prev_verified_hash`/`prev_seq` across consumed lines, scoped to one object
+(each WORM segment restarts its own chain at `seq=0`/`GENESIS_PREV_HASH` —
+a per-segment, not cross-segment, design). The first line consumed when
+starting fresh at an object (`consume_from == 0`) must be the genuine
+genesis; every subsequent consumed line must continue `seq`/`prev_hash` from
+the one before it. On a break, the breaking line is counted `unverified`
+plus a new, distinct `WormSearchResult.chain_breaks` field, and the scan
+stops consuming that object entirely — routed around the existing
+per-object line-cap truncation path so a cursor doesn't resume back into an
+already-broken chain.
+
+**Hardened same-day by this item's own mandatory `security-invariant-reviewer`
+gate**, which found the first cut's resumed-page handling genuinely weaker
+than claimed: a cursor resuming mid-object (`consume_from > 0` — which the
+SERVER itself issues at every ordinary page boundary, not just a
+hand-crafted cursor) unconditionally accepted the incoming link of the first
+record consumed on that page. The draft's own reasoning ("mirrors
+`audit/ledger.py`'s `verify_chain` carve-out for a rotated ledger file") did
+not hold: that carve-out exists because a rotated file's true predecessor
+lives in a DIFFERENT file the verifier doesn't have, whereas here the whole
+object — predecessor line included — was already fetched into memory.
+**Fix:** before the line loop, when `consume_from > 0`, seed
+`prev_verified_hash`/`prev_seq` from the nearest preceding non-blank line
+that itself verifies, so the first record consumed on ANY page has its
+incoming link checked like every other record; the accept-as-given carve-out
+now applies only when the predecessor line itself didn't verify. Also found
+and fixed: a broken chain silently suppressed every remaining line in that
+object with no disclosure of HOW MANY — added
+`WormSearchResult.lines_skipped_after_chain_break`; and the key-rotation
+note sentence was miscounting a chain-break line (whose hash DID verify) as
+a hash-mismatch candidate — the note now separates `hash_mismatches =
+unverified - chain_breaks` for that sentence and gives the chain-break
+sentence its own, explicitly-not-a-key-mismatch wording. Also documented,
+not fixed (a genuinely separate residual): records dropped from the TAIL
+(not interior) of a segment leave a self-contained valid prefix chain with
+nothing to fail a continuity check against — filed as TODO.md item 177 for
+the missing metrics counter, and pinned as a known non-detection by a
+dedicated test rather than left undocumented.
+
+**A second review pass on the WS-172-1 fix itself (same day) caught one more
+issue: the fix introduced a crash.** The backward-seeding loop indexed
+`lines[back]` starting from `consume_from - 1` with no upper bound relative
+to the object's actual length — but `consume_from` is a cursor's own `line`
+field, which the module's documented cursor contract already treats as
+untrustworthy ("a resumption hint, not a promise the archive is
+unchanged"). A cursor whose `line` exceeds the object's real current length
+(hand-edited, or an object legitimately replaced by a shorter one since the
+cursor was issued — Object Lock prevents deleting a version, not PUTting a
+new one) raised `IndexError`, masked to a generic 500 by the route's
+`mask_unexpected()` — availability/contract-breakage, not disclosure, but a
+real regression against "degrade rather than error." **Fix (WS-172-7):**
+clamp the seed loop's start index to `min(consume_from, len(lines))`, so a
+too-large offset yields nothing to seed from (falls back to the pre-existing
+accept-as-given carve-out) instead of indexing out of range.
+
+**Coverage.** `tests/unit/test_worm_search.py`'s `TestChainLinkageVerification`
+(10 tests): a record dropped from the middle is detected; a forged non-genesis
+first record is detected; a genuinely intact multi-segment chain reports zero
+breaks (the control); resuming mid-segment on an intact chain doesn't
+false-positive; resuming exactly at a break still detects it (the WS-172-1
+regression); a break below a lowered line cap isn't misreported as a
+capacity truncation; the note discloses how many lines a break skipped
+(WS-172-2); the key-rotation sentence excludes chain-break lines (WS-172-4);
+and a dedicated test pins the tail-omission residual as a documented
+non-detection (WS-172-3). `TestPagination` gained
+`test_a_cursor_pointing_past_the_end_of_an_object_does_not_crash`
+(WS-172-7). Mutation-verified: the genesis/linkage check, the resumed-page
+seeding fix, the object-level truncation-misreporting guard, the
+skipped-lines counter, and the out-of-range clamp were each individually
+reverted and confirmed to make the corresponding test fail for exactly that
+reason, then restored.
+
+**Hardened again 2026-08-11 (WS-172-8) by a follow-up `security-invariant-
+reviewer` pass on the WS-172-7 clamp itself: the backward seed walk's own
+step bound (`_SEED_WALK_MAX_STEPS = 1024`) fired into silence.** The walk was
+extracted into a standalone `_seed_chain_state_from_predecessor` function
+returning `(hash, seq, exhausted_bound)`; when the walk exhausts its step
+budget without ever reaching a non-blank line, `exhausted_bound=True`
+distinguishes "genuinely learned nothing" from "found a predecessor that
+didn't verify" (`exhausted_bound=False` in both of the latter cases). The
+caller now fails closed on `exhausted_bound=True` — reports a chain break via
+the same disclosure machinery every other bound in this file already uses —
+instead of silently falling back to accept-as-given, which would have let a
+real dropped record hide behind a long blank-padded run placed exactly at a
+page boundary. A genuine segment has zero blank lines at all (`worm_sink.py`'s
+`_build_segment_body` joins with `"\n"` and one trailing newline, so
+`splitlines()` never yields an empty element), so this only fires against a
+crafted/corrupted object — no false-positive cost against real archives.
+`TestSeedChainStateFromPredecessor` gained direct step-bound/non-verifying-
+predecessor/corrupt-JSON coverage (including a mutation-gap the reviewer
+flagged: a verifying record must not be seeded from behind a non-verifying
+one), and `TestChainLinkageVerification` gained an end-to-end reproduction
+(`test_resuming_deep_inside_a_blank_run_past_the_walk_bound_fails_closed`,
+built with a hand-encoded cursor landing deep inside a blank run, since no
+naturally-issued cursor from a real archive lands anywhere but immediately
+after a real record). Mutation-verified: the fail-closed gate and the
+non-verifying-predecessor stop were each individually reverted and confirmed
+to make their corresponding test fail for exactly that reason, then restored.
+The same review pass also found a pre-existing (not introduced by this fix)
+type-confusion gap — a hash-verified record with a non-int `seq` raises
+`TypeError` instead of being counted `unverified` — filed as TODO.md item 178
+(WS-172-9) rather than fixed here, since its remedy touches raw-`seq` reads
+outside this diff's scope.
+
+**Effort:** M. **Depends on:** 154.
+
+### 173. Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives ✅ DONE
+
+**Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 160's own
+commit, during that item's own mandatory completion gate (SIR-160F3-4).**
+Pre-existing since item 156, not introduced by item 160 — but item 160 added
+three new call sites (`validate_policy`, `compile_structured_query`,
+`applied_column_masks`) that can each now independently self-derive
+`scope_connections` via `resolve_scope_connections` when a caller supplies
+`connection_resolver` without it, and the request pipeline
+(`execution/service.py`) calls into more than one of those functions per
+request. Each self-derivation walks every join in the query and calls the
+resolver (`resolve_visible_connection` in production, hitting the
+`ConnectionRegistry`/`PolicyStore`) once per referenced connection, with no
+caching across the calls within a single request — so a query with N
+cross-connection joins redid that resolution work 2-3x per request instead
+of once. Not a correctness bug (each resolution is independently correct)
+and not unbounded (bounded by the policy's `max_joins` cap), so a
+performance follow-up, not a blocker on item 160 itself.
+
+**Decision (recorded per this item's own scoping requirement):** thread the
+existing per-request `connection_resolver` snapshot (item 160's
+`_snapshot_connection_resolver`, already proven correct and TOCTOU-safe)
+through `validate_schema` rather than add a second, parallel memoization
+mechanism (a per-call dict cache keyed by `(connection_id, id(principal))`
+was the item's other named option) — the snapshot already exists and a
+second cache would be a second solution to the same problem.
+
+**Shipped 2026-08-10.** `validate_schema` gained an optional
+`connection_resolver` parameter, threaded to both of its own internal
+`resolve_query_table_connections` calls (the CTE-body walk and the
+outer/nested-scope walk); `execution/service.py`'s `_validate_and_compile`
+now passes its already-built `connection_resolver` into its `validate_schema`
+call. `None` (every other caller — `admin/service.py`'s template-binding
+validator, and every existing test) falls back to the exact pre-173
+live-resolution behavior; strictly additive, no wire-shape change.
+
+**Coverage.** `tests/unit/test_schema_validation.py`'s
+`test_connection_resolver_snapshot_is_reused_not_rederived` patches the live
+`resolve_visible_connection` to raise if called at all, then supplies a
+`connection_resolver` for a cross-connection join query — proving both the
+primary and joined connection resolve through the supplied snapshot
+exclusively, never the live path. Mutation-verified: reverting the threading
+makes the test fail on the patched-to-raise live lookup, then restored.
+`tests/unit/test_service.py`'s existing
+`test_validate_schema_receives_principal_context` updated to assert the new
+`connection_resolver` kwarg is passed through end-to-end. Full unit
+(2221 passed), security (480 passed), and non-real-db integration
+(370 passed) suites green on the final tree.
+
+**Effort:** S. **Depends on:** 160.
+
+### 174. A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch ✅ DONE
+
+**Surfaced 2026-08-09 by `security-invariant-reviewer` auditing item 166's own
+commit, during that item's own mandatory completion gate (SIR-166-2).**
+Pre-existing since cross-connection joins/`join_group` first shipped, not
+introduced or closed by item 166. `_load_table`
+(`validation/schema_validation.py`) reflected a joined table on a SECONDARY
+connection through the PRIMARY connection's own engine, qualified by a
+hardcoded schema string (`f"{physical_db_name(table_connection)}.dbo"`) —
+literal CLAUDE.md non-negotiable 6 territory (dialect differences go behind a
+Protocol + one class per variant + registry, never an inline assumption at a
+call site), and there wasn't even an `if dialect == ...` branch: one
+dialect's idiom (MSSQL's `<database>.dbo.<table>` three-part naming) was
+hardcoded unconditionally. A cross-connection join whose SECONDARY connection
+was Postgres or MySQL reflected under a schema qualifier that dialect cannot
+resolve, producing a masked `NoSuchTableError` naming neither the real cause
+nor the dialect — the same failure shape item 163 was raised specifically to
+eliminate for a not-connectable secondary, reappearing one layer downstream
+for a connectable-but-wrong-idiom one. Failed closed (no data reached the
+caller), so a robustness/clarity gap, not a policy bypass — but it meant only
+an MSSQL secondary had ever actually worked in this configuration, silently.
+
+**Shipped 2026-08-10.** `connections/dialects.py`'s `SessionDialectAdapter`
+gained a new concrete method `cross_database_schema_qualifier(db_name: str)
+-> Optional[str]`, default `None` (unsupported — Postgres has no true
+cross-database reference without an extension like `dblink`/`postgres_fdw`,
+MySQL uses a bare `<database>.<table>` with no schema segment, so guessing at
+either would synthesize structure the caller never asked for);
+`MSSQLSessionAdapter` overrides it with the real `<db>.dbo.<table>` naming.
+`_load_table` now dispatches through `get_session_adapter(...)` (the same
+seam `resolve_query_table_connections` already uses for its `is_connectable()`
+check) instead of the hardcoded f-string, raising `QueryValidationError`
+naming the dialect when the adapter returns `None` — the same
+reject-don't-emulate posture item 74 set for MSSQL's missing
+`NULLS FIRST/LAST`.
+
+**Reviewed by `architecture-boundary-reviewer` (2026-08-10):** confirmed
+clean on pipeline ownership, Protocol/registry dispatch, mechanical-not-
+spoon-fed dialect translation, model consistency, and async call sites/state
+lifecycle; confirmed the new `get_registry().get(table_connection).dialect`
+lookup cannot leak connection existence/dialect to an unauthorized caller
+(visibility is already resolved upstream in `resolve_query_table_connections`
+before `_load_table` is ever reached). One documented nit, not fixed:
+`QueryValidationError` (chosen, following item 74's precedent) vs.
+`ConfigValidationError` (used by this function's sibling checks) — both map
+to the same HTTP 422 today and no caller distinguishes them, so left as a
+reasoned judgment call rather than churned.
+
+**Coverage.** `tests/unit/test_schema_validation.py` adds
+`test_load_table_rejects_unsupported_secondary_dialect` (Postgres secondary,
+`_load_table` called directly, asserts `QueryValidationError` naming the
+dialect and that `get_table_schema` — the actual reflection I/O — is never
+reached) and `test_load_table_mssql_secondary_still_uses_dbo_qualifier` (a
+regression guard confirming the previously-working MSSQL case still resolves
+`<db>.dbo`). Mutation-verified: reverting the rejection to a silent fallback
+(`schema = f"{physical_db_name(table_connection)}.dbo"`) makes the negative
+test fail for exactly that reason.
+
+**Effort:** S. **Depends on:** cross-connection joins/`join_group` (shipped),
+163 (shipped — same `is_connectable()` seam this reuses).
 
 ### 175. `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" ✅ DONE
 

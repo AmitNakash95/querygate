@@ -16,6 +16,7 @@ from httpx import ASGITransport, AsyncClient
 from querygate.api.app import create_app
 from querygate.audit.events import AuditEvent
 from querygate.core.config import AppConfig
+from querygate.metrics import REGISTRY
 
 pytestmark = pytest.mark.integration
 
@@ -315,3 +316,145 @@ async def test_my_recent_denials_respects_configured_max_consecutive_out_of_wind
     body = resp.json()
     assert body["denials"] == []
     assert body["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_my_recent_denials_second_call_within_cooldown_is_rate_limited():
+    # TODO.md item 126: this is the only self-service (no-admin-scope)
+    # endpoint reachable with authentication alone that does an O(file-size)
+    # scan per call; a burst of repeated calls must be bounded per caller.
+    app = create_app(
+        _settings(
+            api_keys=["reader-key"],
+            api_key_subject="reader",
+            personal_denials_cooldown_seconds=60.0,
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        first = await client.get(
+            "/api/v1/help/my-recent-denials", headers={"Authorization": "Bearer reader-key"}
+        )
+        second = await client.get(
+            "/api/v1/help/my-recent-denials", headers={"Authorization": "Bearer reader-key"}
+        )
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert int(second.headers["Retry-After"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_my_recent_denials_rate_limit_increments_a_metrics_counter():
+    # TODO.md item 126 follow-up (2026-08-10 security-invariant-reviewer): the
+    # 429 path used to be invisible to observability — no metric, no audit
+    # event. Deliberately a metric, not an audit event (an audit event per
+    # 429 would let a caller inflate the very file this endpoint scans).
+    before = REGISTRY.get_sample_value("querygate_personal_denials_rate_limited_total") or 0.0
+    app = create_app(
+        _settings(
+            api_keys=["reader-key"],
+            api_key_subject="reader",
+            personal_denials_cooldown_seconds=60.0,
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        await client.get(
+            "/api/v1/help/my-recent-denials", headers={"Authorization": "Bearer reader-key"}
+        )
+        second = await client.get(
+            "/api/v1/help/my-recent-denials", headers={"Authorization": "Bearer reader-key"}
+        )
+    assert second.status_code == 429
+    after = REGISTRY.get_sample_value("querygate_personal_denials_rate_limited_total") or 0.0
+    assert after == before + 1
+
+
+@pytest.mark.asyncio
+async def test_my_recent_denials_cooldown_is_disabled_when_set_to_zero():
+    app = create_app(
+        _settings(
+            api_keys=["reader-key"],
+            api_key_subject="reader",
+            personal_denials_cooldown_seconds=0.0,
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        first = await client.get(
+            "/api/v1/help/my-recent-denials", headers={"Authorization": "Bearer reader-key"}
+        )
+        second = await client.get(
+            "/api/v1/help/my-recent-denials", headers={"Authorization": "Bearer reader-key"}
+        )
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_my_recent_denials_cooldown_is_scoped_per_principal():
+    # A different principal must never be blocked by another principal's
+    # cooldown — the cooldown key must be the principal, not global state.
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key = private_key.public_key()
+
+    def _token(subject: str) -> str:
+        return jwt.encode(
+            {"sub": subject, "iss": "https://idp.example.com/", "aud": "querygate"},
+            private_key,
+            algorithm="RS256",
+        )
+
+    app = create_app(
+        _settings(
+            jwt_enabled=True,
+            jwt_jwks_url="https://idp.example.com/.well-known/jwks.json",
+            jwt_issuer="https://idp.example.com/",
+            jwt_audience="querygate",
+            personal_denials_cooldown_seconds=60.0,
+        )
+    )
+    with patch(
+        "jwt.PyJWKClient.get_signing_key_from_jwt",
+        lambda self, tok: type("K", (), {"key": public_key})(),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+            first = await client.get(
+                "/api/v1/help/my-recent-denials",
+                headers={"Authorization": f"Bearer {_token('agent-a')}"},
+            )
+            second = await client.get(
+                "/api/v1/help/my-recent-denials",
+                headers={"Authorization": f"Bearer {_token('agent-b')}"},
+            )
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_static_api_keys_share_one_cooldown_bucket():
+    """Documents a known, disclosed limitation (2026-08-10
+    `security-invariant-reviewer` finding on item 126's own completion gate),
+    not a defect: `ApiKeyAuthenticator` hands every key in `AppConfig.api_keys`
+    the identical `principal.subject`, so the cooldown — keyed by
+    `principal.subject`, same as `_is_own_denial`'s data isolation — is one
+    shared bucket across two different callers holding two different keys.
+    One caller's request can 429 the other's. This only ever makes the limit
+    stronger, never bypassable (see docs/THREAT_MODEL.md QG-33's extended
+    residual paragraph); a deployment that needs real per-caller throttling
+    must use JWT auth, exactly like item 45's own data-isolation caveat."""
+    app = create_app(
+        _settings(
+            api_keys=["key-a", "key-b"],
+            personal_denials_cooldown_seconds=60.0,
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        first = await client.get(
+            "/api/v1/help/my-recent-denials", headers={"Authorization": "Bearer key-a"}
+        )
+        second = await client.get(
+            "/api/v1/help/my-recent-denials", headers={"Authorization": "Bearer key-b"}
+        )
+    assert first.status_code == 200
+    assert second.status_code == 429

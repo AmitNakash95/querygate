@@ -1,7 +1,7 @@
 <!-- GENERATED FILE — do not hand-edit. Regenerate with `make trust-page` (scripts/generate_trust_page.py). -->
 # QueryGate — Trust & Evidence Packet
 
-*Generated 2026-08-08 for QueryGate 0.1.0. Composed, read-only, from the checked-in docs and dependency-audit results below (TODO.md item 147) — this file asserts no claim of its own; every statement here is backed by the cited source doc and, where named, a reproducible `make` command. It does not imply any control, certification, or third-party attestation that isn't explicitly stated in a source doc.*
+*Generated 2026-08-11 for QueryGate 0.1.0. Composed, read-only, from the checked-in docs and dependency-audit results below (TODO.md item 147) — this file asserts no claim of its own; every statement here is backed by the cited source doc and, where named, a reproducible `make` command. It does not imply any control, certification, or third-party attestation that isn't explicitly stated in a source doc.*
 
 ## Current dependency audit status
 
@@ -46,7 +46,7 @@ that weakened any of them would fail the build.
 | **Container image** | OS + library CVEs, secrets, misconfig | **Trivy** on the shipped image | ✅ **0 HIGH/CRITICAL** (no exceptions) | `make scan-image` |
 | **Secrets** | No credential ever committed | **gitleaks** over full git history | ✅ Clean | `make scan-secrets` |
 | **DAST** | Fuzz the API for validation bypass / crashes | **Schemathesis** against the live OpenAPI schema | ✅ 0 server errors, 0 bypass | `make test-dast` |
-| **Adversarial suite** | Known bypass classes as regressions | Purpose-built pytest suite (`-m security`) | ✅ 463 tests | `make test-security` |
+| **Adversarial suite** | Known bypass classes as regressions | Purpose-built pytest suite (`-m security`) | ✅ 480 tests | `make test-security` |
 | **Reliability** | Guardrails hold under real concurrent load | Real-Postgres soak/load gates | ✅ Enforced in CI | `make test-load` / `make test-soak` |
 | **Credential isolation** | No secret on any returned model | Asserted against live OpenAPI + MCP schemas | ✅ Enforced | `pytest tests/unit/test_credential_redaction.py` |
 | **Best-practices self-assessment** | OpenSSF criteria maturity | **OpenSSF Best Practices** criteria (self-assessed) | 🟡 Self-assessed | see [below](#external-attestations) |
@@ -88,10 +88,12 @@ Two complementary open-source static analyzers run on every push:
   required for the public rule packs). Same **deny-by-default** posture and same
   inline-allowlist discipline as Bandit: any finding fails CI, and the accepted
   ones are annotated `# nosemgrep: <rule-id>` with a written justification. There
-  are currently four, all the same rule (`avoid-sqlalchemy-text`) on the
-  session-guardrail and `EXPLAIN` statements that must interpolate an integer
-  timeout — `connections/dialects.py` (×3) and `execution/cost_estimation.py`.
-  None takes caller input; see the rationale comments at those lines.
+  are currently twelve, all the same rule (`avoid-sqlalchemy-text`) on
+  session-guardrail/`EXPLAIN` statements that must interpolate an integer
+  timeout or a fixed, dialect-controlled interval keyword —
+  `connections/dialects.py` (×9), `compiler/dialect_adapters.py` (×2), and
+  `execution/cost_estimation.py` (×1). None takes caller input; see the
+  rationale comments at those lines.
 
 > CodeQL is the natural upgrade if GitHub Advanced Security is adopted; it is
 > free only on public repositories. Bandit + Semgrep cover the same
@@ -169,8 +171,8 @@ Two checks gate the run (deny-by-default):
   client error, proving the validation boundary holds and no malformed AST slips
   through to compilation or execution.
 
-Latest run: **846/846 checks passed across 59 operations, zero server errors,
-zero accepted malformed payloads.** The recursive query-executing endpoints
+Latest run: **1755/1755 checks passed across 72 operations, zero server
+errors, zero accepted malformed payloads.** The recursive query-executing endpoints
 (which take the nested `StructuredQuery` AST) are covered *more deeply* by the
 dedicated malformed-input fuzzer above rather than by generic schema fuzzing.
 
@@ -181,7 +183,7 @@ hand-written adversarial suite.
 ## Adversarial regression suite
 
 Beyond automated fuzzing, QueryGate carries a purpose-built adversarial suite
-(463 tests, `pytest -m security`) encoding specific known bypass classes:
+(480 tests, `pytest -m security`) encoding specific known bypass classes:
 denied-column inference, undeclared-table smuggling, predicate-as-SQL,
 schema-discovery leaks, policy-cap boundary breaches, and audit no-leak checks.
 New attack vectors are added here as regressions (see the `adversarial-probe`
@@ -263,8 +265,16 @@ make security-scan   # sast + semgrep + scan-secrets + sbom + test-dast in one s
                      # (test-security and scan-image stay separate)
 ```
 
-*Last reviewed: 2026-07-27 (bump this date whenever a row changes). Keep this page honest with the `claim-verify`
-workflow — every row must point at a gate that exists and passes.*
+*Last reviewed: 2026-08-11 — every row in the table above was independently
+re-run against this exact tree that day, not carried forward from a prior CI
+result: `make sast` (Bandit, clean), `make semgrep` (0 findings), `make
+scan-secrets` (gitleaks, 352 commits scanned, no leaks), `poetry build` +
+`make sbom` (pip-audit clean, 1 allowlisted entry as documented), `make
+scan-image` (Trivy, debian 12.15 base + 57 Python packages, 0
+vulnerabilities), `make test-security` (480 tests), and `make test-dast`
+(1755/1755 checks, 72 operations). (Bump this date whenever a row changes.)
+Keep this page honest with the `claim-verify` workflow — every row must
+point at a gate that exists and passes.*
 
 ## Compliance control mapping
 

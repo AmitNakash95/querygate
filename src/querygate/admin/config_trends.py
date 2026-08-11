@@ -131,6 +131,12 @@ class ConfigCatalogChangeTrend(pyd.BaseModel):
     # `ChangeTrendThresholds.max_consecutive_out_of_window` and
     # `docs/THREAT_MODEL.md` QG-43.
     truncated: bool = False
+    # TODO.md item 171: True when the scan stopped on the heuristic
+    # `max_consecutive_out_of_window` early-exit (item 141) rather than
+    # reaching the true start of the window — distinguishes "genuinely
+    # complete" from "heuristically stopped early". Independent of
+    # `truncated`. See `docs/THREAT_MODEL.md` QG-43.
+    scan_ended_on_out_of_window_run: bool = False
     note: str = _REPORT_NOTE
 
     config_recent: ChangeWindowStat = pyd.Field(default_factory=ChangeWindowStat)
@@ -238,16 +244,18 @@ class ChangeEventSource(Protocol):
 
     def load_change_events(
         self, *, now: datetime, thresholds: ChangeTrendThresholds
-    ) -> Tuple[List[ChangeEvent], int, bool]:
-        """Return (events, malformed_line_count, truncated). `truncated` is True
-        when the scan stopped on a resource bound — either `max_events_scanned`
-        in-window events were already found, or `max_lines_read` lines were
-        read — before it could be SURE no more recent-window events remained.
-        A fourth, undisclosed way the scan can end early:
+    ) -> Tuple[List[ChangeEvent], int, bool, bool]:
+        """Return (events, malformed_line_count, truncated,
+        scan_ended_on_out_of_window_run). `truncated` is True when the scan
+        stopped on a resource bound — either `max_events_scanned` in-window
+        events were already found, or `max_lines_read` lines were read —
+        before it could be SURE no more recent-window events remained.
+        `scan_ended_on_out_of_window_run` (TODO.md item 171) is a DIFFERENT,
+        independent way the scan can end early:
         `thresholds.max_consecutive_out_of_window` (TODO.md item 141) is a
-        heuristic exit that returns `truncated=False` on the assumption the
-        window has genuinely ended — an assumption a merged/restored/
-        multi-writer audit file can violate. See `docs/THREAT_MODEL.md` QG-43."""
+        heuristic exit that stops on the assumption the window has genuinely
+        ended — an assumption a merged/restored/multi-writer audit file can
+        violate. See `docs/THREAT_MODEL.md` QG-43."""
         ...
 
 
@@ -266,7 +274,7 @@ class JsonlChangeEventSource:
 
     def load_change_events(
         self, *, now: datetime, thresholds: ChangeTrendThresholds
-    ) -> Tuple[List[ChangeEvent], int, bool]:
+    ) -> Tuple[List[ChangeEvent], int, bool, bool]:
         window_start = now - timedelta(
             seconds=thresholds.recent_window_seconds + thresholds.baseline_window_seconds
         )
@@ -274,9 +282,10 @@ class JsonlChangeEventSource:
         malformed = 0
         lines_read = 0
         stopped_early = False
+        ended_on_out_of_window_run = False
         consecutive_out_of_window = 0
         if not self.path.exists():
-            return [], 0, False
+            return [], 0, False, False
         try:
             for line in iter_lines_reverse(self.path):
                 if len(kept) >= thresholds.max_events_scanned:
@@ -320,9 +329,11 @@ class JsonlChangeEventSource:
                 if occurred <= window_start:
                     # TODO.md item 141: a run this long is treated as proof
                     # the window has genuinely ended — stop without setting
-                    # `stopped_early`/`truncated`.
+                    # `stopped_early`/`truncated`. TODO.md item 171: this IS
+                    # disclosed separately, via `ended_on_out_of_window_run`.
                     consecutive_out_of_window += 1
                     if consecutive_out_of_window >= thresholds.max_consecutive_out_of_window:
+                        ended_on_out_of_window_run = True
                         break
                     continue
                 consecutive_out_of_window = 0
@@ -331,7 +342,7 @@ class JsonlChangeEventSource:
                 kept.append(event)
         except AuditFileReadBounded:
             stopped_early = True
-        return kept, malformed, stopped_early
+        return kept, malformed, stopped_early, ended_on_out_of_window_run
 
 
 def build_change_trend_report(
@@ -354,7 +365,9 @@ def build_change_trend_report(
     if source is None:
         return ConfigCatalogChangeTrend(source="disabled", **base)
 
-    events, malformed, truncated = source.load_change_events(now=now, thresholds=thresholds)
+    events, malformed, truncated, ended_on_out_of_window_run = source.load_change_events(
+        now=now, thresholds=thresholds
+    )
     config_recent, config_baseline, catalog_recent, catalog_baseline = build_change_trend(
         events, now=now, thresholds=thresholds
     )
@@ -363,6 +376,7 @@ def build_change_trend_report(
         events_scanned=len(events),
         malformed=malformed,
         truncated=truncated,
+        scan_ended_on_out_of_window_run=ended_on_out_of_window_run,
         config_recent=config_recent,
         config_baseline=config_baseline,
         config_volume_ratio=_volume_ratio(config_recent, config_baseline, thresholds),

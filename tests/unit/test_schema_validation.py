@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.core.auth import Principal
-from querygate.core.exceptions import ConfigValidationError, NotFoundError
+from querygate.core.exceptions import ConfigValidationError, NotFoundError, QueryValidationError
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.policy.models import Policy
 from querygate.compiler.sqlalchemy_compiler import compile_structured_query
@@ -430,6 +430,59 @@ class TestCrossConnectionJoins:
         assert table_connection_map["orders"] == "primary"
         assert table_connection_map["customers"] == "other"
 
+    async def test_connection_resolver_snapshot_is_reused_not_rederived(self, monkeypatch):
+        """TODO.md item 173: `validate_schema`'s own internal
+        `resolve_query_table_connections` walk used to always fall through
+        to a fresh live `resolve_visible_connection` lookup regardless of
+        whether the caller already built a resolver snapshot (the one
+        `execution/service.py`'s `_validate_and_compile` builds via
+        `_snapshot_connection_resolver`, item 160) — redoing the same
+        connection/policy resolution a second time in the same request.
+        Passing `connection_resolver` must route every lookup through the
+        supplied snapshot instead of ever touching the live registry/store."""
+        from querygate.connections.registry import get_registry
+
+        self._two_connections(group_a="shared", group_b="shared")
+        tables = _make_tables()
+        _patch_load_table(monkeypatch, tables)
+
+        primary_profile = get_registry().get("primary")
+        other_profile = get_registry().get("other")
+        policy = Policy()
+        calls: List[str] = []
+
+        def snapshot_resolver(connection_id, principal):
+            calls.append(connection_id)
+            profile = primary_profile if connection_id == "primary" else other_profile
+            return profile, policy
+
+        def _unexpected_live_lookup(*args, **kwargs):
+            raise AssertionError(
+                "resolve_visible_connection must not be called when a full "
+                "connection_resolver snapshot is supplied"
+            )
+
+        monkeypatch.setattr(sv, "resolve_visible_connection", _unexpected_live_lookup)
+
+        query = StructuredQuery(
+            from_table="orders",
+            select=["orders.id", "customers.name"],
+            joins=[
+                JoinSpec(
+                    table="customers",
+                    on=["orders.customer_id", "customers.id"],
+                    connection="other",
+                )
+            ],
+            limit=5,
+        )
+        await sv.validate_schema(
+            query, connection_id="primary", connection_resolver=snapshot_resolver
+        )
+        # Both the primary and the joined connection resolve through the
+        # supplied snapshot — never the live resolver patched to raise above.
+        assert set(calls) == {"primary", "other"}
+
     async def test_different_join_group_rejected(self, monkeypatch):
         self._two_connections(group_a="group-a", group_b="group-b")
         tables = _make_tables()
@@ -589,6 +642,67 @@ class TestCrossConnectionJoins:
         )
         with pytest.raises(ConfigValidationError, match="cannot yet open a live connection"):
             await sv.validate_schema(query, connection_id="primary")
+
+    async def test_load_table_rejects_unsupported_secondary_dialect(self, monkeypatch):
+        """TODO.md item 174. `_load_table`'s SECONDARY-connection schema
+        qualifier used to be a hardcoded MSSQL `.dbo` idiom (`f"{db}.dbo"`)
+        applied unconditionally, regardless of the secondary connection's
+        actual dialect — a Postgres or MySQL secondary would silently
+        reflect under a schema qualifier neither dialect understands,
+        producing a masked `NoSuchTableError` that names neither the real
+        cause nor the dialect. It must now dispatch through
+        `SessionDialectAdapter.cross_database_schema_qualifier` and reject
+        cleanly, naming the dialect, before the engine is ever touched for
+        reflection."""
+        primary = ConnectionProfile(
+            id="primary",
+            dialect="mssql",
+            connection_string="mssql+aioodbc://user:pass@host/primary_db",
+        )
+        other = ConnectionProfile(
+            id="other",
+            dialect="postgresql",
+            connection_string="postgresql+asyncpg://user:pass@host/other_db",
+        )
+        set_registry(ConnectionRegistry({"primary": primary, "other": other}))
+        # `get_table_schema` (the actual reflection I/O) must never be
+        # reached — the whole point is a clean rejection before any
+        # reflection is attempted. `get_engine` itself is sync (just looks up
+        # or lazily builds a connection-pool object, no I/O) and legitimately
+        # runs first in `_load_table`, so it is left real rather than mocked.
+        monkeypatch.setattr(
+            sv,
+            "get_table_schema",
+            AsyncMock(side_effect=AssertionError("get_table_schema must not be called")),
+        )
+        with pytest.raises(QueryValidationError, match="postgresql"):
+            await sv._load_table("primary", "orders", "other")
+
+    async def test_load_table_mssql_secondary_still_uses_dbo_qualifier(self, monkeypatch):
+        """Same-shape positive case: an MSSQL secondary (the one dialect this
+        has always worked for) must keep reflecting under `<db>.dbo` after
+        the dispatch — a regression guard for item 174's fix."""
+        primary = ConnectionProfile(
+            id="primary",
+            dialect="postgresql",
+            connection_string="postgresql+asyncpg://user:pass@host/primary_db",
+        )
+        other = ConnectionProfile(
+            id="other",
+            dialect="mssql",
+            connection_string="mssql+aioodbc://user:pass@host/other_db",
+        )
+        set_registry(ConnectionRegistry({"primary": primary, "other": other}))
+        monkeypatch.setattr(sv, "get_engine", lambda connection_id: object())
+        captured = {}
+
+        async def fake_get_table_schema(table_name, connection_id, engine, *, schema=None):
+            captured["schema"] = schema
+            return sa.Table(table_name, sa.MetaData(), schema=schema)
+
+        monkeypatch.setattr(sv, "get_table_schema", fake_get_table_schema)
+        await sv._load_table("primary", "orders", "other")
+        assert captured["schema"] == "other_db.dbo"
 
     async def test_join_group_uses_per_principal_policy(self, monkeypatch):
         self._two_connections(group_a="shared", group_b="shared")

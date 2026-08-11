@@ -182,7 +182,7 @@ def test_jsonl_source_reads_config_and_catalog_events_and_ignores_others(tmp_pat
         ),
     )
     source = JsonlChangeEventSource(str(path))
-    loaded, malformed, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, malformed, truncated, _ = source.load_change_events(now=_NOW, thresholds=th)
     assert len(loaded) == 5
     assert malformed == 0
     assert truncated is False
@@ -200,7 +200,7 @@ def test_jsonl_source_counts_malformed_lines(tmp_path):
         ),
     )
     source = JsonlChangeEventSource(str(path))
-    loaded, malformed, _ = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, malformed, _, _ = source.load_change_events(now=_NOW, thresholds=th)
     assert len(loaded) == 3
     assert malformed == 2
 
@@ -213,7 +213,7 @@ def test_jsonl_source_filters_out_of_window_events(tmp_path):
     future = [_config_event(at=_NOW + timedelta(seconds=60))]
     _write_jsonl(path, in_window + stale + future)
     source = JsonlChangeEventSource(str(path))
-    loaded, _, _ = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, _, _, _ = source.load_change_events(now=_NOW, thresholds=th)
     assert len(loaded) == 4
 
 
@@ -234,10 +234,11 @@ def test_jsonl_source_early_exit_stops_before_reading_older_lines(tmp_path):
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     source = JsonlChangeEventSource(str(path))
-    loaded, malformed, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, malformed, truncated, ended_on_run = source.load_change_events(now=_NOW, thresholds=th)
     assert len(loaded) == 2
     assert malformed == 0  # the sentinel was never reached
     assert truncated is False
+    assert ended_on_run is True
 
 
 def test_jsonl_source_early_exit_fires_at_exactly_the_threshold(tmp_path):
@@ -252,10 +253,11 @@ def test_jsonl_source_early_exit_fires_at_exactly_the_threshold(tmp_path):
     lines = ["{not json"] + [e.model_dump_json(exclude_none=True) for e in out_of_window]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     source = JsonlChangeEventSource(str(path))
-    loaded, malformed, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, malformed, truncated, ended_on_run = source.load_change_events(now=_NOW, thresholds=th)
     assert loaded == []
     assert malformed == 0  # the sentinel was never reached
     assert truncated is False
+    assert ended_on_run is True
 
 
 def test_jsonl_source_early_exit_counter_shared_across_both_matching_types(tmp_path):
@@ -277,10 +279,11 @@ def test_jsonl_source_early_exit_counter_shared_across_both_matching_types(tmp_p
     lines = ["{not json"] + [e.model_dump_json(exclude_none=True) for e in mixed]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     source = JsonlChangeEventSource(str(path))
-    loaded, malformed, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, malformed, truncated, ended_on_run = source.load_change_events(now=_NOW, thresholds=th)
     assert loaded == []
     assert malformed == 0  # the sentinel was never reached
     assert truncated is False
+    assert ended_on_run is True
 
 
 def test_jsonl_source_early_exit_counter_resets_on_an_in_window_event(tmp_path):
@@ -297,10 +300,11 @@ def test_jsonl_source_early_exit_counter_resets_on_an_in_window_event(tmp_path):
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     source = JsonlChangeEventSource(str(path))
-    loaded, malformed, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, malformed, truncated, ended_on_run = source.load_change_events(now=_NOW, thresholds=th)
     assert len(loaded) == 1  # only the interrupter is in-window
     assert malformed == 1  # the sentinel WAS reached: no premature exit
     assert truncated is False
+    assert ended_on_run is False
 
 
 def test_jsonl_source_early_exit_counter_ignores_other_event_types(tmp_path):
@@ -322,10 +326,11 @@ def test_jsonl_source_early_exit_counter_ignores_other_event_types(tmp_path):
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     source = JsonlChangeEventSource(str(path))
-    loaded, malformed, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, malformed, truncated, ended_on_run = source.load_change_events(now=_NOW, thresholds=th)
     assert len(loaded) == 0
     assert malformed == 0  # the sentinel was never reached
     assert truncated is False
+    assert ended_on_run is True
 
 
 def test_jsonl_source_bounds_and_reports_truncation(tmp_path):
@@ -335,9 +340,12 @@ def test_jsonl_source_bounds_and_reports_truncation(tmp_path):
         path, _spread(10, start=_NOW - timedelta(seconds=1800), span_seconds=1800, kind="config")
     )
     source = JsonlChangeEventSource(str(path))
-    loaded, _, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, _, truncated, ended_on_run = source.load_change_events(now=_NOW, thresholds=th)
     assert len(loaded) == 3
     assert truncated is True
+    # TODO.md item 171: a resource-bound stop is NOT the heuristic exit —
+    # independent from the early-exit tests' truncated=False/ended_on_run=True.
+    assert ended_on_run is False
 
 
 def test_jsonl_source_at_exact_cap_is_not_truncated(tmp_path):
@@ -353,7 +361,7 @@ def test_jsonl_source_at_exact_cap_is_not_truncated(tmp_path):
         path, _spread(10, start=_NOW - timedelta(seconds=1800), span_seconds=1800, kind="config")
     )
     source = JsonlChangeEventSource(str(path))
-    loaded, _, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, _, truncated, _ = source.load_change_events(now=_NOW, thresholds=th)
     assert len(loaded) == 10
     assert truncated is False
 
@@ -368,7 +376,7 @@ def test_jsonl_source_finds_recent_window_past_a_huge_prefix_of_old_lines(tmp_pa
     recent = _spread(4, start=_NOW - timedelta(seconds=1800), span_seconds=1800, kind="config")
     _write_jsonl(path, ancient + recent)
     source = JsonlChangeEventSource(str(path))
-    loaded, _, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, _, truncated, _ = source.load_change_events(now=_NOW, thresholds=th)
     assert len(loaded) == 4
     assert truncated is True  # can't prove completeness without reading the whole file
 
@@ -379,7 +387,7 @@ def test_jsonl_source_bounds_lines_read_not_just_events_retained(tmp_path):
     noise = _spread(10_000, start=_NOW - timedelta(days=30), span_seconds=3600, kind="config")
     _write_jsonl(path, noise)
     source = JsonlChangeEventSource(str(path))
-    loaded, _, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, _, truncated, _ = source.load_change_events(now=_NOW, thresholds=th)
     assert len(loaded) == 0
     assert truncated is True
 
@@ -392,14 +400,14 @@ def test_jsonl_source_reports_truncated_when_the_underlying_reader_bails(tmp_pat
     path = tmp_path / "audit.jsonl"
     path.write_bytes(b"x" * 2_000_000)  # one giant line, no newline anywhere
     source = JsonlChangeEventSource(str(path))
-    loaded, malformed, truncated = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, malformed, truncated, _ = source.load_change_events(now=_NOW, thresholds=th)
     assert loaded == []
     assert truncated is True
 
 
 def test_jsonl_source_missing_file_is_empty_not_error(tmp_path):
     source = JsonlChangeEventSource(str(tmp_path / "does-not-exist.jsonl"))
-    loaded, malformed, truncated = source.load_change_events(now=_NOW, thresholds=_thresholds())
+    loaded, malformed, truncated, _ = source.load_change_events(now=_NOW, thresholds=_thresholds())
     assert loaded == [] and malformed == 0 and truncated is False
 
 
@@ -412,7 +420,7 @@ def test_jsonl_source_reads_hash_chained_ledger(tmp_path):
     for event in _spread(5, start=_NOW - timedelta(seconds=1800), span_seconds=1800, kind="config"):
         sink.emit(event)
     source = JsonlChangeEventSource(str(path), ledger_key=b"k")
-    loaded, malformed, _ = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, malformed, _, _ = source.load_change_events(now=_NOW, thresholds=th)
     assert len(loaded) == 5
     assert malformed == 0
 
@@ -441,7 +449,7 @@ def test_jsonl_source_rejects_a_forged_chain_record(tmp_path):
         f.write(forged.model_dump_json() + "\n")
 
     source = JsonlChangeEventSource(str(path), ledger_key=b"k")
-    loaded, malformed, _ = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, malformed, _, _ = source.load_change_events(now=_NOW, thresholds=th)
     assert len(loaded) == 1
     assert malformed == 1
 
@@ -463,7 +471,7 @@ def test_jsonl_source_rejects_a_bare_envelope_less_line_when_backend_is_chained(
         f.write(bare_event.model_dump_json(exclude_none=True) + "\n")
 
     source = JsonlChangeEventSource(str(path), ledger_key=b"k", require_envelope=True)
-    loaded, malformed, _ = source.load_change_events(now=_NOW, thresholds=th)
+    loaded, malformed, _, _ = source.load_change_events(now=_NOW, thresholds=th)
     assert len(loaded) == 1
     assert malformed == 1
 
@@ -493,6 +501,21 @@ def test_report_end_to_end_computes_volume_ratio(tmp_path):
     assert report.config_recent.total == 40
     assert report.config_baseline.total == 10
     assert report.config_volume_ratio == pytest.approx(4.0)
+    assert report.scan_ended_on_out_of_window_run is False
+
+
+def test_report_discloses_the_heuristic_early_exit(tmp_path):
+    # TODO.md item 171: the reader's 4th return value must actually reach
+    # the caller-facing report, not just exist on the reader.
+    path = tmp_path / "audit.jsonl"
+    out_of_window = _spread(
+        5, start=_NOW - timedelta(seconds=50_000), span_seconds=1000, kind="config"
+    )
+    _write_jsonl(path, out_of_window)
+    th = _thresholds(max_consecutive_out_of_window=3)
+    report = build_change_trend_report(JsonlChangeEventSource(str(path)), now=_NOW, thresholds=th)
+    assert report.events_scanned == 0
+    assert report.scan_ended_on_out_of_window_run is True
 
 
 def test_volume_ratio_is_none_when_baseline_is_empty(tmp_path):
@@ -516,7 +539,7 @@ def test_report_is_redaction_safe():
 
     class _Source:
         def load_change_events(self, *, now, thresholds):
-            return events, 0, False
+            return events, 0, False, False
 
     report = build_change_trend_report(_Source(), now=_NOW, thresholds=_thresholds())
     blob = report.model_dump_json()
