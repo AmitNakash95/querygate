@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import boto3
 import pydantic as pyd
@@ -838,6 +838,229 @@ class TestChainLinkageVerification:
         # any unverified > 0, must NOT — every unverified line here is
         # accounted for by the chain break, not a genuine hash mismatch.
         assert "AUDIT_LEDGER_HMAC_KEY" not in result.note
+
+    async def test_the_resumed_page_seed_walk_does_not_scan_an_unbounded_blank_run(self, s3):
+        # TODO.md item 172 follow-up (WS-172-7 secondary point,
+        # security-invariant-reviewer, 2026-08-10): a long blank run between
+        # two real records must not make resuming mid-object expensive —
+        # this is the integration-level correctness check that a resume
+        # landing immediately after a real record (the ordinary case: the
+        # cursor's `line` is always `last-consumed-index + 1`, so the seed
+        # walk's own predecessor lookup is a single, trivial step) still
+        # returns the right event once the FORWARD loop has skipped a large
+        # blank run to reach it, with the true, intact chain correctly
+        # confirmed (no false-positive break). This shape does not drive the
+        # seed walk anywhere near its own step bound — see
+        # `TestSeedChainStateFromPredecessor` below for that, including the
+        # WS-172-8 fail-closed behavior when the bound genuinely is
+        # exhausted.
+        chained = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        # 5,000 blank lines between "a" and "b" — exercises the FORWARD
+        # loop's blank-skipping cost, not the backward seed walk (whose own
+        # bound is pinned directly, not indirectly through this fixture).
+        lines = [chained[0]] + [""] * 5000 + [chained[1]]
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+
+        first = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            limit=1,
+            bounds=_bounds(default_limit=1),
+        )
+        assert [e.connection_id for e in first.events] == ["a"]
+        assert first.next_cursor is not None
+
+        # Resume right after "a": consume_from's immediate predecessor IS
+        # "a" (distance 1), so the seed walk finds it trivially regardless
+        # of the 5,000 blanks that follow — those are consumed by the
+        # forward loop as it advances from "a" to "b", not walked backward.
+        second = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            cursor=first.next_cursor,
+            bounds=_bounds(),
+        )
+        assert [e.connection_id for e in second.events] == ["b"]
+        assert second.chain_breaks == 0
+
+    async def test_resuming_deep_inside_a_blank_run_past_the_walk_bound_fails_closed(self, s3):
+        # TODO.md item 172 follow-up (WS-172-8, security-invariant-reviewer,
+        # 2026-08-11): an end-to-end reproduction of the seed walk's OWN
+        # step bound actually firing — unlike the adjacent test above (whose
+        # cursor always lands one step after a real record, so the seed
+        # walk never travels far), this cursor is built directly to resume
+        # from deep inside a long blank run: more than
+        # `_SEED_WALK_MAX_STEPS` lines from the nearest real record in
+        # either direction it has already looked. A cursor landing here in
+        # production could only come from a crafted/corrupted object (a
+        # genuine segment has zero blank lines — see
+        # `_seed_chain_state_from_predecessor`'s docstring); this test
+        # proves that when it does happen, the resumed page fails closed
+        # (reports a chain break) instead of silently accepting an
+        # unverifiable incoming link.
+        max_steps = worm_search_module._SEED_WALK_MAX_STEPS
+        chained = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        blank_run = max_steps + 2000
+        lines = [chained[0]] + [""] * blank_run + [chained[1]]
+        key = f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl"
+        _put_segment(s3, key, lines)
+
+        start_time = datetime(2026, 3, 15, tzinfo=timezone.utc)
+        end_time = datetime(2026, 3, 16, tzinfo=timezone.utc)
+        fingerprint = worm_search_module._filters_fingerprint(
+            start_time, end_time, None, None, None
+        )
+        # Resume line 2500: more than max_steps back from "a" (index 0),
+        # and every line in between is blank — the walk cannot reach "a"
+        # (start=2499, floor=2499-max_steps=1475, all indices 2499..1476
+        # visited are blank), so it must exhaust its bound.
+        cursor = worm_search_module._encode_cursor(date(2026, 3, 15), key, 2500, fingerprint)
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=start_time,
+            end_time=end_time,
+            cursor=cursor,
+            bounds=_bounds(),
+        )
+        # "b"'s own hash verifies, but its incoming link could not be
+        # confirmed within the walk's bound, so it is NOT returned as an
+        # event — the page fails closed and discloses a chain break rather
+        # than silently accepting "b" as given.
+        assert result.events == []
+        assert result.chain_breaks == 1
+
+
+class TestSeedChainStateFromPredecessor:
+    """TODO.md item 172 follow-up (WS-172-7, security-invariant-reviewer,
+    2026-08-10): direct, deterministic unit tests of the extracted
+    `_seed_chain_state_from_predecessor` helper — precise about the exact
+    step bound, which the integration-level test above can only observe
+    indirectly (via the graceful-degradation behavior, not an iteration
+    count)."""
+
+    def test_finds_the_predecessor_within_the_bound(self):
+        events = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            events, 1, ledger_key=None
+        )
+        parsed_a = json.loads(events[0])
+        assert prev_hash == parsed_a["hash"]
+        assert prev_seq == parsed_a["seq"]
+        assert exhausted is False
+
+    def test_skips_blank_lines_within_the_bound(self):
+        # lines = [a, "", "", b]; consume_from=3 means "b" (index 3) is the
+        # line about to be consumed, so its PREDECESSOR "a" (index 0) is
+        # what the walk must find, skipping the two blanks in between.
+        events = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        lines = [events[0], "", "", events[1]]
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            lines, 3, ledger_key=None
+        )
+        parsed_a = json.loads(events[0])
+        assert prev_hash == parsed_a["hash"]
+        assert prev_seq == parsed_a["seq"]
+        assert exhausted is False
+
+    def test_gives_up_exactly_at_the_step_bound_not_one_past_it(self):
+        # "a" sits at index 0; the line being resumed sits at index
+        # max_steps + 1, one step beyond what a max_steps-length walk
+        # starting at index max_steps (max_steps+1 - 1) can reach (it visits
+        # indices max_steps..1, never reaching index 0) — must NOT be found,
+        # and the walk genuinely used its whole budget doing so (WS-172-8).
+        events = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        max_steps = worm_search_module._SEED_WALK_MAX_STEPS
+        resume_at = max_steps + 1
+        lines = [events[0]] + [""] * (resume_at - 1) + [events[1]]
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            lines, resume_at, ledger_key=None
+        )
+        assert (prev_hash, prev_seq) == (None, None)
+        assert exhausted is True
+
+    def test_finds_the_predecessor_exactly_at_the_step_bound(self):
+        # Same shape, resumed one position earlier: the walk starts at
+        # index max_steps - 1 and visits exactly max_steps indices down to
+        # (and including) index 0 — "a" is the last one checked, and must
+        # be found.
+        events = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        max_steps = worm_search_module._SEED_WALK_MAX_STEPS
+        resume_at = max_steps
+        lines = [events[0]] + [""] * (resume_at - 1) + [events[1]]
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            lines, resume_at, ledger_key=None
+        )
+        parsed_a = json.loads(events[0])
+        assert prev_hash == parsed_a["hash"]
+        assert prev_seq == parsed_a["seq"]
+        assert exhausted is False
+
+    def test_a_predecessor_that_does_not_verify_yields_nothing_to_seed_from(self):
+        events = _chain_lines([_event("a", minute=0)], key=b"a-different-key")
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            events, 1, ledger_key=None
+        )
+        # A predecessor that doesn't verify is a DIFFERENT case than the
+        # bound firing (WS-172-8): the caller's existing accept-as-given
+        # carve-out still applies here, not the new fail-closed path — the
+        # walk learned something concrete (this line is untrustworthy), it
+        # didn't merely run out of budget.
+        assert (prev_hash, prev_seq) == (None, None)
+        assert exhausted is False
+
+    def test_does_not_step_past_a_non_verifying_line_to_seed_from_a_stale_one_behind_it(self):
+        # A non-verifying predecessor must stop the walk right there, not
+        # skip over it looking for an older line that DOES verify — that
+        # older line is not actually this record's true predecessor.
+        stale = _chain_lines([_event("a", minute=0)])
+        tampered = json.loads(stale[0])
+        tampered["hash"] = "0" * 64  # corrupt: no longer recomputes
+        lines = [stale[0], json.dumps(tampered)]
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            lines, 2, ledger_key=None
+        )
+        assert (prev_hash, prev_seq) == (None, None)
+        assert exhausted is False
+
+    def test_a_corrupt_json_predecessor_yields_nothing_to_seed_from(self):
+        lines = ["{not valid json"]
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            lines, 1, ledger_key=None
+        )
+        assert (prev_hash, prev_seq) == (None, None)
+        assert exhausted is False
+
+    def test_consume_from_past_the_end_of_lines_does_not_crash(self):
+        # WS-172-1's own regression (an object shorter than a stale cursor
+        # expected) — clamped via min(consume_from, len(lines)), not an
+        # IndexError.
+        events = _chain_lines([_event("a", minute=0)])
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            events, 10_000, ledger_key=None
+        )
+        parsed_a = json.loads(events[0])
+        assert prev_hash == parsed_a["hash"]
+        assert prev_seq == parsed_a["seq"]
+        assert exhausted is False
+
+    def test_empty_lines_does_not_crash(self):
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            [], 5, ledger_key=None
+        )
+        assert (prev_hash, prev_seq) == (None, None)
+        assert exhausted is False
 
 
 class TestPagination:
