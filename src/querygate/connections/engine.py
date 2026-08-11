@@ -33,6 +33,7 @@ from querygate.connections.registry import get_registry
 from querygate.core.config import config as app_config
 from querygate.core.exceptions import ConfigValidationError
 from querygate.policy.models import Policy
+from querygate.schema import reflection
 
 ENGINES: dict[str, AsyncEngine] = {}
 SESSIONMAKERS: dict[str, async_sessionmaker] = {}
@@ -199,6 +200,17 @@ def reset_engines() -> None:
     ENGINES.clear()
     SESSIONMAKERS.clear()
     METADATAS.clear()
+    # schema/reflection.py caches one asyncio.Lock per connection_id,
+    # keyed independently of METADATAS above. A lock created in one event
+    # loop raises "bound to a different event loop" if reused from another —
+    # a real gap this function didn't close, caught independently twice:
+    # tests/integration/test_large_domain_stress.py's _apply_example_config
+    # worked around it locally, and performance_benchmark.py's benchmark
+    # harness hit it again (reusing a fixed connection_id across separate
+    # pytest-asyncio event loops) before this fix moved it to its owning
+    # module. Clearing it here means any future caller of reset_engines()
+    # gets this for free.
+    reflection.clear_metadata_locks()
 
 
 async def dispose_engine(connection_id: str) -> None:
@@ -213,5 +225,8 @@ async def dispose_engine(connection_id: str) -> None:
     engine = ENGINES.pop(connection_id, None)
     SESSIONMAKERS.pop(connection_id, None)
     METADATAS.pop(connection_id, None)
+    # See reset_engines()'s comment above — the same per-connection lock leak,
+    # scoped to just this connection_id instead of clearing every one.
+    reflection.clear_metadata_locks(connection_id)
     if engine is not None:
         await engine.dispose()
