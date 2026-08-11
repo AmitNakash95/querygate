@@ -154,6 +154,12 @@ These are deliberate choices, not gaps we haven't gotten to — if asked, say
   them is backed by an automated test that runs on every code change,
   including a dedicated suite whose whole job is to try to break the
   access rules. Not a one-time audit — continuous enforcement.
+- **"How much time does QueryGate add to a query?"** Low single-digit
+  milliseconds in a representative run — regenerate it yourself with
+  `make performance-benchmark` for your own hardware, never quote a number
+  from memory. It compiles your query into standard SQL rather than
+  generating different query structure, though it does apply session-level
+  guardrails (a statement/lock timeout) Postgres then executes under.
 
 If you get a question this section doesn't cover, it's almost certainly in
 the [FAQ](#faq-for-marketingpositioning-conversations) further down — that
@@ -274,11 +280,93 @@ connection (`src/querygate/policy/models.py`):
 That last point is deliberate and easy to get wrong: a naive implementation
 might only check columns that appear in `select`, letting a caller filter or
 sort on a column they're not allowed to *see* (e.g. `where Employee.salary >
-100000` without ever selecting `salary`) and infer its value indirectly. The
-module's own helper, `_iter_column_refs`, walks every clause of the query
-specifically so a denied column can't be smuggled in through a side door.
+100000` without ever selecting `salary`) and infer its value indirectly.
+`iter_column_refs` — the single canonical reference visitor (item 96) — walks
+every clause of the query specifically so a denied column can't be smuggled in
+through a side door.
 (`tests/unit/test_policy_validation.py::test_denied_column_rejected_when_only_used_in_where`
 locks this behavior in.)
+
+#### The one-walk rule, in plain terms
+
+This is worth understanding on its own, because it is the quiet reason the
+allow/deny guarantee actually holds — and it is the part of the design that is
+hardest for a competitor to copy.
+
+**The problem.** "Don't let them see the `salary` column" sounds like one rule.
+It isn't. A SQL query can mention a column in a *lot* of places: the select
+list, a join key, an extra join condition, a `WHERE` predicate, `GROUP BY`,
+`HAVING`, `ORDER BY`, a window's `PARTITION BY`, inside a `CASE`, inside
+arithmetic, as an argument to a function or an aggregate, inside a date
+expression — and then again inside every subquery, every CTE, and every arm of
+a `UNION`. That's more than a dozen distinct positions.
+
+The naive way to enforce a column rule is to check each of those places
+wherever you happen to need it. That works right up until someone adds a new
+AST feature and updates *eleven* of the twelve checks. The twelfth is now a
+silent bypass, and no test fails, because the feature works perfectly — it just
+isn't policed. This is the single most likely way a gateway like this gets
+quietly broken over time.
+
+**What QueryGate does instead.** There is exactly **one** function that knows
+where columns can appear: `iter_column_refs`. It yields every real
+`Table.Column` reference in a query, tagged with *which position* it came from.
+Policy validation (allow/deny and masking), schema validation, and
+`referenced_tables` all consume that same walk rather than each maintaining
+their own. Add a new AST feature and you teach the walk once — every consumer
+is enforced by construction, not by remembering.
+
+Its sibling, `iter_query_scopes`, does the same job one level up: it yields the
+outer query *plus* every CTE body, every set-operation arm, and every nested
+subquery as an **independent** validation scope, each resolving against its own
+tables. So a denied column is not reachable from inside a subquery either, and
+complexity caps are summed across the whole tree rather than per level — which
+is what stops nesting from being used as a cap multiplier.
+
+**The detail that shows the idea is real.** Positions are not interchangeable,
+and one distinction carries a security guarantee: a *bare* column in the select
+list is the **only** place a masked column may appear. Ask for `salary * 2`
+instead of `salary` and that reference is classified as *nested*, not bare — and
+`policy_validation.py` then **rejects the query outright** rather than masking in
+place, because an unmasked reference inside arithmetic (or a filter, join,
+ordering, grouping, or function argument) would leak the real value by
+inference. This is the same reject-don't-emulate posture the engine takes
+elsewhere: refuse the shape rather than half-satisfy it.
+
+Note the failure mode this closes. An implementation that applies masks by
+matching a *column name* sees `salary * 2`, finds no bare `salary` to match,
+and returns the true number. Here the classification happens in the shared walk,
+so the enforcement can't be skipped by wrapping the column in something.
+`tests/unit/test_reference_visitor.py` pins the classification ("a column inside
+a computed projection must NOT claim that position, or masking silently stops
+applying to arithmetic") alongside a kitchen-sink query exercising every known
+position; `policy_validation.py` applies the rule per scope, so a masked column
+can't hide inside a subquery either.
+
+**It is not a performance feature — don't sell it as one.** Walking the AST once
+instead of a dozen times is a rounding error next to the query itself. Policy
+validation is fast for a different reason: it is a pure in-memory comparison
+against config with no network call and no database round trip, so a violating
+query dies before a connection is touched (see `docs/business/PERFORMANCE_BENCHMARK.md`
+for the measured end-to-end overhead, and regenerate it on your own hardware
+rather than quoting a number). The one-walk rule buys **correctness that
+survives the next ten AST features**, which is a different and more valuable
+thing than speed.
+
+**What it does and does not prove.** It makes a whole class of bug unlikely —
+the one where a new feature is added and eleven of twelve enforcement points get
+updated. It is not a proof of correctness: the guarantee still rests on that one
+visitor being right, exercised by the suite rather than formally verified, and
+QueryGate has had no third-party penetration test. Claim *drift resistance*,
+not *proven safe*. `docs/SECURITY_POSTURE.md` ("External attestations") states
+this posture in the form a security reviewer will ask for.
+
+**Why it matters commercially.** "No raw SQL" is the headline, but competitors
+are converging on that claim. *Enforcement completeness* — the guarantee that a
+denied column is denied in all dozen-plus places at once, including inside
+subqueries — is the harder thing to reproduce, because it is an architectural
+decision made early, not a feature that can be bolted on. See
+`sales/comparison.html` for how to demo it.
 
 **Why it runs first:** it's the cheapest possible check — pure in-memory
 comparison against config, no network call, no database round trip — so an
@@ -3303,6 +3391,79 @@ distributed limiter (used for multi-replica deployments) has its own
 separate tests for cross-instance atomicity and fail-open/fail-closed
 behavior.
 
+### Performance benchmark: how much does QueryGate add to a request?
+
+`poetry run querygate-performance-benchmark run` (`make performance-benchmark`,
+needs `make compose-up` first) answers the question a design partner asks
+before routing real traffic through the gateway: how much latency does this
+add, and does it slow down database access? Full methodology in
+`docs/business/PERFORMANCE_BENCHMARK.md`; the runner is
+`querygate.performance_benchmark`.
+
+It times the same query at three tiers — raw SQL direct against Postgres
+(`baseline`), the real `StructuredQueryService` pipeline with no HTTP
+(`pipeline`), and a full REST round trip through the real FastAPI app
+(`rest`) — across a point lookup, a filtered scan, and a `GROUP BY`
+aggregation, against a throwaway table the benchmark seeds and drops itself.
+`rest - baseline` is the number a customer means by "overhead"; `pipeline -
+baseline` isolates the guardrail/compile cost from HTTP/JSON transport, so a
+slow number can be attributed to the right layer instead of guessed at. It's
+informational (distributions, not a pass/fail gate) — unlike the security
+benchmark, it needs a real database, so it can't run in the default
+`pytest -m unit` suite; its own integration test does run automatically in
+CI's `postgres-live` job on every push/PR (checking the harness works end to
+end, not asserting a specific latency number), while the published figures in
+`docs/business/PERFORMANCE_BENCHMARK.md` come from a manual, regenerate-it-
+yourself run.
+
+### Load benchmark: does per-request cost hold up under concurrent traffic?
+
+`poetry run querygate-load-benchmark run` (`make load-benchmark`, needs
+`make compose-up` first) is the performance benchmark's sibling — the second
+half of the same design-partner question ("does this add latency, *and does
+it slow down under real traffic, and does adding capacity fix it*?"). Full
+methodology in `docs/business/LOAD_BENCHMARK.md`; the runner is
+`querygate.load_benchmark`.
+
+It reuses the performance benchmark's seeded table and scenarios, and sweeps
+**two dimensions**: worker-process count (default `1, 2, 4`) and concurrency
+level (default `1, 5, 15, 30`). For each worker count, a real
+`querygate.api.app:app` is launched via real `uvicorn --workers N`, bound to
+a real localhost socket — not the in-process `ASGITransport` trick the
+single-request benchmark uses — and the full concurrency sweep runs against
+it, measuring achieved throughput/latency for `baseline` (raw SQL) vs. `rest`
+(a real HTTP round trip) at each combination. It is **not** the same tool as
+`make test-load`/`make test-soak` (`docs/LOAD_TESTING.md`), which prove the
+concurrency cap's *rejection/queueing* behavior with a deliberately tight
+cap — this benchmark raises the cap so it never binds, to measure
+performance instead.
+
+**Why a real socket, not `ASGITransport`:** an earlier version reused the
+single-request benchmark's in-process transport, which puts the test client
+and the measured server in the same process/event loop — at high concurrency
+the client's own bookkeeping competes with QueryGate's CPU-bound work for
+the same CPU, a confound no real deployment has. Verified directly: the same
+sweep run in-process vs. over a real socket showed the same *shape*
+(throughput rises, peaks, then falls off — a real single-process CPU
+ceiling) but a much worse *magnitude* in-process. Fixed by always driving a
+real server process now, with the worker count as a measured sweep dimension
+instead of an assumption.
+
+**A result is only as clean as the machine it's measured on** — this is
+CPU-bound-throughput measurement, so anything else competing for CPU on the
+same host directly steals from the number (confirmed directly while building
+this: a clean run showing workers helping was rerun minutes later on the
+same machine with unrelated heavy processes now also running, and showed no
+improvement at all — same code, different result). Run it on an otherwise
+idle machine and treat one run as one sample, not a certified number.
+
+**Every run of either benchmark also writes a fresh, publish-ready Markdown
+results snapshot** (`docs/business/LOAD_BENCHMARK_RESULTS.md` /
+`PERFORMANCE_BENCHMARK_RESULTS.md`, overwritten each time, `--markdown-out`
+to redirect or `--no-markdown` to skip) — data only, no interpretation, so
+there's always a shareable artifact ready the moment a run finishes, without
+a manual write-up step.
+
 ### Semantic-memory benchmark
 
 `poetry run querygate-semantic-memory evaluate` (`make
@@ -3513,9 +3674,19 @@ Alphabetical. Each term links back to the section that covers it in depth.
   schema fact) > `inferred` (generated suggestion) > `learned` (noticed from
   usage patterns). A lower tier can never silently overwrite a higher one.
   See [Catalog / Semantic Layer](#catalog--semantic-layer).
+- **Load benchmark** — `querygate-load-benchmark` / `make load-benchmark`: the
+  performance benchmark's sibling, measuring throughput and latency across a
+  concurrency sweep (raw SQL vs. full QueryGate REST) against a real
+  database — distinct from `make test-load`'s concurrency-cap *correctness*
+  check. See [Testing, Release & Operations](#testing-release--operations).
 - **MCP (Model Context Protocol)** — the standard protocol AI agents use to
   discover and call a server's tools. One of QueryGate's two transports
   (the other is REST). See [Auth & Transports](#auth--transports-rest--mcp).
+- **Performance benchmark** — `querygate-performance-benchmark` /
+  `make performance-benchmark`: measures how much latency QueryGate adds to a
+  query against a real database, split into raw-SQL baseline, pipeline
+  (no HTTP), and full REST tiers. See
+  [Testing, Release & Operations](#testing-release--operations).
 - **Policy** — the per-connection (optionally per-principal) configuration
   that bounds a query: table/column allow-deny lists, complexity caps (max
   joins, max `where` depth, etc.), mandatory row filters, and which other
