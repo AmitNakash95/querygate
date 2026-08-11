@@ -479,6 +479,86 @@ def _validate_limit(limit: Optional[int], bounds: WormSearchBounds) -> int:
     return limit
 
 
+# TODO.md item 172 follow-up (WS-172-7 secondary point / WS-172-8,
+# security-invariant-reviewer, 2026-08-10/11): bounds `_seed_chain_state_from_
+# predecessor`'s backward walk — see that function's own docstring.
+_SEED_WALK_MAX_STEPS = 1024
+
+
+def _seed_chain_state_from_predecessor(
+    lines: List[str], consume_from: int, *, ledger_key: Optional[bytes]
+) -> Tuple[Optional[str], Optional[int], bool]:
+    """Seed a resumed page's chain-linkage state (TODO.md item 172,
+    WS-172-1) from the nearest preceding non-blank line that itself
+    verifies, so the first record actually consumed on a resumed page still
+    has its incoming link checked like every other record — otherwise every
+    ordinary page boundary the server itself issues would silently exempt
+    one link per page. `consume_from`'s predecessor line is NOT in a
+    different file the reader lacks — the whole object is already in
+    `lines` — unlike the rotated-LOCAL-ledger-file carve-out
+    `audit/ledger.py`'s `verify_chain` genuinely needs.
+
+    Returns `(hash, seq, exhausted_bound)`. `(None, None, False)` when a
+    predecessor was found but didn't verify, or was corrupt JSON, or there
+    was nothing to seed from at all (`consume_from <= 0` territory, handled
+    by the caller before this is even invoked) — the caller falls back to
+    accepting the resumed page's first consumed line's incoming link as
+    given, same as it always has. `(None, None, True)` is a DIFFERENT case
+    (WS-172-8, security-invariant-reviewer, 2026-08-11): the walk ran out of
+    its own step budget (`_SEED_WALK_MAX_STEPS`) without ever reaching a
+    non-blank line, so nothing about the true predecessor is known one way
+    or the other — the caller must fail closed on this one, not accept-as-
+    given, or a real dropped record hidden behind a long blank-padded run
+    placed exactly at a page boundary would verify silently.
+
+    `consume_from` is caller-controlled (a cursor's `line` field, only ever
+    checked for `>= 0` at decode time — see the module docstring's own "not
+    a promise the archive is unchanged" contract) with no upper bound
+    relative to `lines`'s actual length, which can differ from what it was
+    when the cursor was issued. `min(consume_from, len(lines))` clamps the
+    start index so a cursor pointing past the end of a shorter-than-expected
+    object degrades (nothing to seed from) rather than raising `IndexError`.
+
+    The walk is bounded in LENGTH, not by a wall-clock deadline (unlike the
+    forward line loop in `search_worm_archive`, which checks
+    `time.monotonic()` every 1,000 lines — item 154/WS-154-4): a genuine
+    segment never has ANY blank line at all (`worm_sink.py`'s
+    `_build_segment_body` joins records with `"\n"` and appends exactly one
+    trailing newline, so `str.splitlines()` on a real segment yields zero
+    empty elements) — so any bound at all is behaviorally lossless against a
+    real object, and capping how far back this walk looks is the cheapest
+    correct bound against a crafted one. An object crafted with a long
+    blank-line run immediately before `consume_from` costs at most
+    `_SEED_WALK_MAX_STEPS` `continue` iterations, not the full
+    (`_MAX_OBJECT_BYTES`-bounded, but still potentially large) object
+    length.
+    """
+    start = min(consume_from, len(lines)) - 1
+    floor = max(-1, start - _SEED_WALK_MAX_STEPS)
+    for back in range(start, floor, -1):
+        seed_raw = lines[back]
+        if not seed_raw.strip():
+            continue
+        try:
+            seed_parsed = json.loads(seed_raw)
+        except json.JSONDecodeError:
+            return None, None, False
+        if verify_envelope_hash(seed_parsed, key=ledger_key) is True:
+            return seed_parsed.get("hash"), seed_parsed.get("seq"), False
+        # Whether or not the predecessor verified, it is the nearest
+        # non-blank line — stop looking further back. If it did NOT verify
+        # (already reported when that line was itself consumed on an
+        # earlier page), there is nothing trustworthy to seed from.
+        return None, None, False
+    # The loop ran to completion without finding a single non-blank line.
+    # `exhausted_bound` is True only when the walk actually used its full
+    # step budget — distinct from simply having nowhere left to look
+    # (`start < 0`, or a short object with fewer than
+    # `_SEED_WALK_MAX_STEPS` lines before `start`, all genuinely blank).
+    exhausted_bound = (start - floor) >= _SEED_WALK_MAX_STEPS
+    return None, None, exhausted_bound
+
+
 def _matches(
     event: PersistableEvent,
     *,
@@ -776,57 +856,23 @@ async def search_worm_archive(
                 # has been chain-checked yet" — distinct from a real prior
                 # hash, so the first CONSUMED record is handled specially
                 # below.
-                prev_verified_hash: Optional[str] = None
-                prev_seq: Optional[int] = None
                 broke_chain = False
-                if consume_from > 0:
-                    # TODO.md item 172 (WS-172-1, security-invariant-reviewer,
-                    # 2026-08-10): a resumed page's predecessor line is NOT
-                    # in a different file the reader lacks — the whole
-                    # object was already fetched into `lines` above — so
-                    # there is no reason to skip checking the boundary link
-                    # the way a rotated LOCAL ledger file genuinely must
-                    # (audit/ledger.py's verify_chain carve-out, where the
-                    # true predecessor really does live outside what the
-                    # verifier has). Seed the chain state from the nearest
-                    # preceding non-blank line so the first record actually
-                    # consumed on a resumed page still has its incoming
-                    # link checked, exactly like every other record —
-                    # otherwise every ordinary page boundary the server
-                    # itself issues (`_encode_cursor(day, key, line_no + 1,
-                    # ...)` below) would silently exempt one link per page.
-                    # TODO.md item 172 follow-up (WS-172-7,
-                    # security-invariant-reviewer, 2026-08-10): `consume_from`
-                    # is caller-controlled (a cursor's `line` field, only
-                    # ever checked for `>= 0` at decode time — see the
-                    # module docstring's own "not a promise the archive is
-                    # unchanged" contract) with no upper bound relative to
-                    # THIS object's actual length, which can differ from
-                    # what it was when the cursor was issued. Clamp the
-                    # start index to `len(lines)` so a cursor pointing past
-                    # the end of a shorter-than-expected object degrades
-                    # (nothing to seed from, nothing to consume) rather than
-                    # raising `IndexError` — `min(...) - 1` is `-1` when
-                    # `lines` is empty, making the range empty too.
-                    for back in range(min(consume_from, len(lines)) - 1, -1, -1):
-                        seed_raw = lines[back]
-                        if not seed_raw.strip():
-                            continue
-                        try:
-                            seed_parsed = json.loads(seed_raw)
-                        except json.JSONDecodeError:
-                            break
-                        if verify_envelope_hash(seed_parsed, key=ledger_key) is True:
-                            prev_verified_hash = seed_parsed.get("hash")
-                            prev_seq = seed_parsed.get("seq")
-                        # Whether or not the predecessor verified, it is the
-                        # nearest one — stop looking further back. If it did
-                        # NOT verify (already reported when that line was
-                        # itself consumed on an earlier page), there is
-                        # nothing trustworthy to seed from; the resumed
-                        # scan's first record is then accepted as given —
-                        # the one case this reader genuinely cannot check.
-                        break
+                # TODO.md item 172 (WS-172-1, security-invariant-reviewer,
+                # 2026-08-10): seed the chain state from the nearest
+                # preceding non-blank line on a resumed page, bounded in
+                # length (WS-172-7) — see `_seed_chain_state_from_
+                # predecessor`'s own docstring for the full rationale.
+                # `None, None, False` when `consume_from == 0` (nothing to
+                # seed — this object's own genesis is checked directly
+                # below) or when a predecessor was found but didn't verify.
+                # `None, None, True` (WS-172-8) means the walk exhausted its
+                # own step bound without learning anything — the caller
+                # below must fail closed on that case, not accept-as-given.
+                prev_verified_hash, prev_seq, prev_seed_bound_exhausted = (
+                    _seed_chain_state_from_predecessor(lines, consume_from, ledger_key=ledger_key)
+                    if consume_from > 0
+                    else (None, None, False)
+                )
                 for line_no in range(consume_from, last_line):
                     # TODO.md item 154 (security-invariant-reviewer, WS-154-4):
                     # per-line envelope verification made this loop's body
@@ -886,8 +932,19 @@ async def search_worm_archive(
                         # earlier page). A resumed page whose predecessor DID
                         # verify never reaches this branch — it was seeded
                         # above and goes through the normal `else` below.
-                        chain_ok = consume_from > 0 or (
-                            seq == 0 and prev_hash_field == GENESIS_PREV_HASH
+                        # TODO.md item 172 follow-up (WS-172-8,
+                        # security-invariant-reviewer, 2026-08-11): if the
+                        # seed walk exhausted its own step bound rather than
+                        # genuinely finding no predecessor, fail closed
+                        # instead of accepting this line's incoming link as
+                        # given — a genuine segment has zero blank lines (see
+                        # `_seed_chain_state_from_predecessor`'s docstring),
+                        # so this only fires against a crafted/corrupted
+                        # object, and accepting silently there would let a
+                        # real dropped record hide behind a long blank-padded
+                        # run placed exactly at a page boundary.
+                        chain_ok = (not prev_seed_bound_exhausted) and (
+                            consume_from > 0 or (seq == 0 and prev_hash_field == GENESIS_PREV_HASH)
                         )
                     else:
                         chain_ok = seq == prev_seq + 1 and prev_hash_field == prev_verified_hash

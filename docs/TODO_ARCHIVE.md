@@ -13100,6 +13100,38 @@ skipped-lines counter, and the out-of-range clamp were each individually
 reverted and confirmed to make the corresponding test fail for exactly that
 reason, then restored.
 
+**Hardened again 2026-08-11 (WS-172-8) by a follow-up `security-invariant-
+reviewer` pass on the WS-172-7 clamp itself: the backward seed walk's own
+step bound (`_SEED_WALK_MAX_STEPS = 1024`) fired into silence.** The walk was
+extracted into a standalone `_seed_chain_state_from_predecessor` function
+returning `(hash, seq, exhausted_bound)`; when the walk exhausts its step
+budget without ever reaching a non-blank line, `exhausted_bound=True`
+distinguishes "genuinely learned nothing" from "found a predecessor that
+didn't verify" (`exhausted_bound=False` in both of the latter cases). The
+caller now fails closed on `exhausted_bound=True` — reports a chain break via
+the same disclosure machinery every other bound in this file already uses —
+instead of silently falling back to accept-as-given, which would have let a
+real dropped record hide behind a long blank-padded run placed exactly at a
+page boundary. A genuine segment has zero blank lines at all (`worm_sink.py`'s
+`_build_segment_body` joins with `"\n"` and one trailing newline, so
+`splitlines()` never yields an empty element), so this only fires against a
+crafted/corrupted object — no false-positive cost against real archives.
+`TestSeedChainStateFromPredecessor` gained direct step-bound/non-verifying-
+predecessor/corrupt-JSON coverage (including a mutation-gap the reviewer
+flagged: a verifying record must not be seeded from behind a non-verifying
+one), and `TestChainLinkageVerification` gained an end-to-end reproduction
+(`test_resuming_deep_inside_a_blank_run_past_the_walk_bound_fails_closed`,
+built with a hand-encoded cursor landing deep inside a blank run, since no
+naturally-issued cursor from a real archive lands anywhere but immediately
+after a real record). Mutation-verified: the fail-closed gate and the
+non-verifying-predecessor stop were each individually reverted and confirmed
+to make their corresponding test fail for exactly that reason, then restored.
+The same review pass also found a pre-existing (not introduced by this fix)
+type-confusion gap — a hash-verified record with a non-int `seq` raises
+`TypeError` instead of being counted `unverified` — filed as TODO.md item 178
+(WS-172-9) rather than fixed here, since its remedy touches raw-`seq` reads
+outside this diff's scope.
+
 **Effort:** M. **Depends on:** 154.
 
 ### 173. Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives ✅ DONE

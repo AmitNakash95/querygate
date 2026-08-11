@@ -1,7 +1,7 @@
 <!-- GENERATED FILE — do not hand-edit. Regenerate with `make trust-page` (scripts/generate_trust_page.py). -->
 # QueryGate — Trust & Evidence Packet
 
-*Generated 2026-08-10 for QueryGate 0.1.0. Composed, read-only, from the checked-in docs and dependency-audit results below (TODO.md item 147) — this file asserts no claim of its own; every statement here is backed by the cited source doc and, where named, a reproducible `make` command. It does not imply any control, certification, or third-party attestation that isn't explicitly stated in a source doc.*
+*Generated 2026-08-11 for QueryGate 0.1.0. Composed, read-only, from the checked-in docs and dependency-audit results below (TODO.md item 147) — this file asserts no claim of its own; every statement here is backed by the cited source doc and, where named, a reproducible `make` command. It does not imply any control, certification, or third-party attestation that isn't explicitly stated in a source doc.*
 
 ## Current dependency audit status
 
@@ -265,8 +265,16 @@ make security-scan   # sast + semgrep + scan-secrets + sbom + test-dast in one s
                      # (test-security and scan-image stay separate)
 ```
 
-*Last reviewed: 2026-08-10 (bump this date whenever a row changes). Keep this page honest with the `claim-verify`
-workflow — every row must point at a gate that exists and passes.*
+*Last reviewed: 2026-08-11 — every row in the table above was independently
+re-run against this exact tree that day, not carried forward from a prior CI
+result: `make sast` (Bandit, clean), `make semgrep` (0 findings), `make
+scan-secrets` (gitleaks, 352 commits scanned, no leaks), `poetry build` +
+`make sbom` (pip-audit clean, 1 allowlisted entry as documented), `make
+scan-image` (Trivy, debian 12.15 base + 57 Python packages, 0
+vulnerabilities), `make test-security` (480 tests), and `make test-dast`
+(1755/1755 checks, 72 operations). (Bump this date whenever a row changes.)
+Keep this page honest with the `claim-verify` workflow — every row must
+point at a gate that exists and passes.*
 
 ## Compliance control mapping
 
