@@ -209,6 +209,9 @@ order-of-magnitude, not commitments.
 | 176 | Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line: `sales/index.html`'s guardrails still forbid claiming managed search, `CUSTOMER_README.md` flatly denies it exists, and `TODO.md`'s own Quick-scan row for item 134 says phase 2 "not started" | S | 134 |
 | 177 | `WormSearchResult.chain_breaks`/`unverified` have no Prometheus counter, so the strongest WORM-archive tamper signal isn't alertable — only visible to whoever happens to run an ad-hoc search over the right window | S | 172 |
 | 178 | A hash-verified WORM record with a non-int `seq` (type-confused, not corrupt) raises `TypeError` instead of being counted `unverified` | S | 172 |
+| 179 | ✅ Cumulative disclosure budget: bound multi-query differencing per purpose — the one structural form of "governing intent" | L | 88, 145 |
+| 180 | Escalate an exhausted disclosure budget into the item-92 approval gate instead of rejecting | M | 92, 179 |
+| 181 | `redis_quota.py`'s `Retry-After` is always the full window — the Lua indexes a nested `WITHSCORES` reply | S | 50 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2780,3 +2783,91 @@ counted like any other forgery class instead of raising.
 
 **Effort:** S. **Depends on:** 172 (shipped).
 
+### 179. Cumulative disclosure budget: bound multi-query differencing per purpose, the one form of "governing intent" that is structural ✅ DONE
+
+Two off-by-default `Policy` caps (`max_shape_repeats_per_window`,
+`max_aggregate_queries_per_window`) that bound, per (principal, connection,
+declared purpose, table) over a rolling window, how many times one *literal-free
+query shape* may be re-run against a k-floored table and how many aggregate
+queries may touch it at all — the multi-query counterpart to `min_group_size`.
+Repetition, not variety, is the differencing signal. Rejects on exhaustion;
+approval-escalation deferred to item 180. Bounds R3, does not close it.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 179).
+
+### 180. Escalate an exhausted disclosure budget into the item-92 approval gate instead of rejecting
+
+**Deferred deliberately from item 179 (2026-08-11), with the maintainer.** Item
+179 rejects when a principal's cumulative disclosure budget is spent
+(`DisclosureBudgetExceededError` → REST 429 / MCP `RATE_LIMITED`). The
+alternative considered and not taken: return 428 and let a human holding
+`query:approve` grant the next N queries, reusing item 92's shipped
+stateless-HMAC approval-token machinery end to end.
+
+**Why it was deferred rather than built.** It is the better UX — "you've
+exhausted this purpose's budget, a human can extend it" beats a dead end — but
+it carries a specific failure mode worth deciding against evidence rather than
+taste: an approval gate on a *disclosure* budget can become "click here to buy
+unlimited disclosure", and approvers habituate to clicking. Item 179's own
+false-positive calibration is also still open (no audit-stream replay data
+exists yet), so we would be tuning an escalation path before knowing how often
+the budget legitimately trips.
+
+**What to do (when prioritized):** decide first, from real usage, whether the
+budget trips often enough on legitimate work to need an escape hatch at all. If
+it does: raise `ApprovalRequiredError` instead of
+`DisclosureBudgetExceededError` when `Policy` opts in, bound what one approval
+grants (a fixed extra N, never "unlimited for the window"), make the grant
+itself an audited event distinct from an ordinary query approval, and ensure an
+approval cannot be replayed across purposes or tables — the token is
+fingerprint-bound today, and a budget grant is a different shape of authority
+from "run this specific expensive query".
+
+**Effort:** M. **Depends on:** 92, 179 (both shipped).
+
+### 181. `redis_quota.py`'s `Retry-After` is always the full window: the Lua reads `ZRANGE … WITHSCORES` and indexes a nested reply
+
+**Found 2026-08-11 while building item 179's Redis sibling**, by a parity test
+that rejects at a *non-zero* window age. `execution/redis_quota.py`'s
+`_RESERVE_SCRIPT` computes its retry hint as:
+
+```lua
+local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+local oldest_ts = oldest[2] and tonumber(oldest[2]) or now
+```
+
+Measured under `fakeredis`, the Lua bridge surfaces a `WITHSCORES` reply as a
+**nested** table, so `oldest[2]` is `nil`, `oldest_ts` falls back to `now`, and
+the countdown collapses to `math.ceil(window - 0)` — i.e. **every** rejection
+reports the full window rather than the true time until capacity returns. Item
+179's `redis_disclosure_budget.py` had the identical line and now uses a
+portable `ZRANGE` + `ZSCORE` pair instead; this file was deliberately left
+unchanged, since altering a shipped feature's caller-visible retry hint is its
+own change.
+
+**Why no existing test catches it.** `tests/unit/test_redis_quota.py`'s
+`test_request_cap_admits_then_rejects_with_retry_after` charges and rejects at
+the *same* instant (`now=100.0`), where the correct answer and the buggy answer
+coincide at `window_seconds`. The same blind spot existed in item 179's first
+draft and is exactly what the added non-zero-age test exposed.
+
+**Impact:** availability/UX, not disclosure. A caller told to retry in 3600s
+when capacity actually returns in 12s will back off far longer than necessary;
+a well-behaved client honoring `Retry-After` is penalised most. The in-process
+`InProcessQuotaLimiter` computes this correctly, so single-instance deployments
+are unaffected — this is Redis-backend-only.
+
+**What to do (when prioritized):**
+
+1. **Verify against a REAL Redis first.** This was measured under `fakeredis`
+   only. Real Redis returns a *flat* array for `ZRANGE … WITHSCORES`, in which
+   case `oldest[2]` is correct there and the defect is a fakeredis artifact —
+   which would mean the bug is in the *test double*, not production. Do not
+   "fix" production until that is settled; the two-call form is correct under
+   both, so it is the safe landing either way.
+2. Apply the same `ZRANGE` + `ZSCORE` pair item 179 uses, and add a
+   non-zero-age assertion to `test_redis_quota.py` (charge at `now=100.0`,
+   reject at `now=400.0` with `window_seconds=600`, assert `300`).
+3. Check `execution/redis_concurrency.py` for the same pattern while there.
+
+**Effort:** S. **Depends on:** 50 (shipped).

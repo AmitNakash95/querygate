@@ -490,6 +490,29 @@ All notable changes to QueryGate are documented here.
   fails the release (deny-by-default) — publishing to a registry and cryptographic
   signing remain phase 2, deferred until this project has a real publishing pipeline.
 
+- **Cumulative disclosure budget (optional, off by default)** — bounds the
+  multi-query differencing that `min_group_size`'s k-anonymity floor alone does
+  not: a prober re-runs one aggregate shape with a sliding constant and
+  subtracts the answers. Two new `Policy` caps,
+  `max_shape_repeats_per_window` (how many times one query *shape* may be
+  re-run) and `max_aggregate_queries_per_window` (how many aggregate queries may
+  touch one table at all), applied per principal, connection, declared purpose
+  and table over a rolling `disclosure_budget_window_seconds`. Because the
+  recorded query shape carries no predicate literals, a differencing probe is
+  one shape re-sent N times — so re-runs are the signal. Exhausting a budget
+  refuses the query with the existing REST 429 + `Retry-After` / MCP
+  `RATE_LIMITED` contract, and is counted by a new
+  `querygate_disclosure_budget_rejections_total{connection,budget_kind}`.
+  Both caps require `min_group_size` on the same policy (a budget with no floor
+  to defend is now rejected at load time rather than silently enforcing
+  nothing), and only `execute` spends budget — `explain`/`verdict` return no
+  rows. With `CONCURRENCY_BACKEND=redis` the window is a shared cross-replica
+  budget; unlike the quota and concurrency limiters, that backend **fails
+  closed**. **This bounds multi-query differencing, it does not close it** — a
+  caller inside its budget still differences successfully, and no threshold is
+  recommended because none has been calibrated against real traffic. See
+  `docs/INFERENCE_RISKS.md` R3.
+
 ### Fixed
 
 - A deployment running the tamper-evident hash-chained audit backend

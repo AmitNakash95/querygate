@@ -113,10 +113,26 @@ QUERY_QUOTA_REJECTIONS_TOTAL = Counter(
     "Execution attempts refused before running by a per-principal quota "
     "(TODO.md item 50), by connection and which cap tripped. quota_kind: "
     "requests (rolling-window request-count cap) | bytes (rolling-window "
-    "response-byte cap). Single-instance visibility only — the default "
-    "in-process quota window is per-replica, like the in-process concurrency "
-    "limiter; a Redis-backed cross-replica quota is item 50 phase 2.",
+    "response-byte cap). The default in-process quota window is per-replica, "
+    "like the in-process concurrency limiter, so this counter is "
+    "single-instance visibility only under it; with CONCURRENCY_BACKEND=redis "
+    "the RedisQuotaLimiter (item 50 phase 2) makes the window a true "
+    "cross-replica budget, though each replica still exports its own counter.",
     ["connection", "quota_kind"],
+    registry=REGISTRY,
+)
+
+DISCLOSURE_BUDGET_REJECTIONS_TOTAL = Counter(
+    "querygate_disclosure_budget_rejections_total",
+    "Aggregate queries refused before running by a cumulative disclosure "
+    "budget (TODO.md item 179), by connection and which cap tripped. "
+    "budget_kind: disclosure_shape (one query shape re-run past its per-window "
+    "cap — the multi-query differencing signature) | disclosure_table (too "
+    "many aggregate queries against one table however the shape varied). "
+    "Deliberately NOT labeled by table or principal: which table a prober is "
+    "working is exactly the disclosure this guardrail exists to withhold, and "
+    "principal is unbounded cardinality. Use the audit stream for attribution.",
+    ["connection", "budget_kind"],
     registry=REGISTRY,
 )
 
@@ -327,6 +343,7 @@ __all__ = [
     "QUERIES_REJECTED_TOTAL",
     "QUERY_DURATION_SECONDS",
     "QUERY_QUOTA_REJECTIONS_TOTAL",
+    "DISCLOSURE_BUDGET_REJECTIONS_TOTAL",
     "CONCURRENCY_IN_USE",
     "CONCURRENCY_MAX",
     "QUEUE_DEPTH",

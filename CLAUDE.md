@@ -75,7 +75,7 @@ automate these):
 - **Item numbers are permanent and file-global.** Never renumber or reuse one —
   the repo has ~176 internal "item N" cross-refs plus CLAUDE.md and test
   references that must keep resolving. A new item takes the next unused number
-  (check the highest `### N` heading in TODO.md; currently 136 — note 98 was
+  (check the highest `### N` heading in TODO.md; currently 180 — note 98 was
   never allocated and is deliberately left unused).
 - **When an item ships fully** (its `###` heading ends in exactly `✅ DONE`, no
   trailing qualifier): move its full body to `docs/TODO_ARCHIVE.md` in numeric
