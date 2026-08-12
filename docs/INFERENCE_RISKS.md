@@ -173,8 +173,10 @@ contribution (multi-query differencing).
   is unaffected by all four of those vectors — its key carries no fingerprint at
   all — so until item 186 lands, set the per-table cap and do not rely on the
   per-shape cap alone.** It is not a general bound: it does not cover the
-  write-preview path (item 191), it partitions per declared purpose, and its
-  in-process window is per flushing process. Two further
+  write-preview path (item 191), it partitions per declared purpose
+  when the operator configured `allowed_purposes` (a caller cannot invent one
+  to mint a fresh budget), and its in-process window is per serving process —
+  per replica and per uvicorn worker — unless `CONCURRENCY_BACKEND=redis`. Two further
   scoping residuals: a cross-connection joined table is charged under the
   *requesting* connection (so one physical table reachable via two connections
   carries two budgets), and under static API-key auth every caller sharing a key
