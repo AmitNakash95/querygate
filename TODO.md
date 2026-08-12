@@ -3265,22 +3265,31 @@ the WORM-search class specifically and its sweep confirmed no fourth *WORM*
 surface. These are a different class the same review turned up, filed rather
 than folded in because none is about item 134:
 
-1. **Six sites still say cost estimation is Postgres-only.**
-   `estimate_mssql_query_cost` ships and is dispatched in `service.py`; item 26
-   is `✅ DONE` including phase 2, and CLAUDE.md records the exception as
-   resolved. Grepped site list (2026-08-12) — fix **all** of them:
-   `README.md:501` (a whole stale paragraph), `README.md:1950-1953`,
-   `docs/THREAT_MODEL.md:162` (the QG-08 row), `docs/THREAT_MODEL.md:295-298`,
-   `docs/PRODUCT_GUIDE.md:7505` (a Decision Log sentence — **re-word, do not
-   delete**, since CLAUDE.md already records the exception as resolved), and
-   the generated `docs/product-guide.html` mirror. Note
-   `docs/PRODUCT_GUIDE.md:972` is a *different* Postgres-only claim
-   (`INTERSECT ALL`/`EXCEPT ALL`) and is correct — do not "fix" it.
-   *A fifth denial class, unfiled until now: `landing/security.html:498`
-   states QueryGate "does not yet estimate a database execution plan" at all.
-   That file carried unrelated uncommitted work when this was found, so it was
-   left; use `sales/index.html`'s honest framing ("cost estimation that
-   prevents *every* expensive plan") as the model.*
+1. **Cost estimation is described as Postgres-only across the repo.**
+   `estimate_mssql_query_cost` ships (`execution/cost_estimation.py`), is
+   dispatched (`execution/service.py`), and is live-tested
+   (`tests/integration/test_mssql_cost_estimation.py`); item 26 is `✅ DONE`
+   including phase 2 and CLAUDE.md records the exception as resolved.
+   **Do not hand-assemble the site list — derive it:**
+   `poetry run python scripts/claim_drift_sites.py cost-estimation`.
+   Live sites include `README.md:483/501/1950-1953` (`:501` is a whole stale
+   paragraph) and `README.md:609`, which is **drifted, not merely stale** —
+   `Policy.estimate_needed` fires on `approval_cost_gate_enabled`, so
+   `approval_max_estimated_*` does work on MSSQL; plus
+   `examples/policy.example.yaml:172` (**ships to customers**),
+   `src/querygate/metrics.py:53` and `:141-142`,
+   `src/querygate/core/exceptions.py:127`,
+   `src/querygate/execution/service.py:653` and `:947`,
+   `src/querygate/compiler/dialect_adapters.py:13`,
+   `src/querygate/policy/models.py:25`, `docs/THREAT_MODEL.md:162` and
+   `:295-298`, `docs/PRODUCT_GUIDE.md:7505` (**re-word, don't delete**), the
+   generated `docs/product-guide.html`, `TECHNICAL_REVIEW.md:249`,
+   `docs/TODO_ARCHIVE.md:1240` and `:4202-4203`, and
+   `tests/unit/test_service.py:387`. Re-run the scan after fixing. *A fifth
+   denial class sits in `landing/security.html`, which says QueryGate does not
+   estimate a plan **at all** — left only because that file carried unrelated
+   uncommitted work; use `sales/index.html`'s "prevents *every* expensive plan"
+   framing.*
 2. **`landing/security.html` lists a four-eyes config approval workflow and an
    administration UI as not shipped.** Both ship — item 42
    (`ADMIN_CONFIG_APPROVE_SCOPE`, `require_config_approvals`, author ≠ approver
@@ -3299,14 +3308,18 @@ than folded in because none is about item 134:
    QG-40, `docs/PRODUCT_GUIDE.md` (twice), the generated
    `docs/product-guide.html`, and `CHANGELOG.md`. True for every bound except
    the day-listing truncation — that is item 184. One clause naming item 184 at
-   each site. Grepped site list (2026-08-12): `src/querygate/audit/worm_search.py:126`,
-   `README.md:195`, `docs/THREAT_MODEL.md:193` (QG-40),
-   `docs/PRODUCT_GUIDE.md:1304` and `:5777`, `docs/product-guide.html:436`,
-   `CHANGELOG.md:164`, and `src/querygate/core/config.py:366-370` — the comment
-   on `audit_worm_search_max_objects_scanned`, the very knob item 184 breaks.
-   (`config.py:376-378`, the timeout comment, is **correct** — that bound does
-   resume. Do not "fix" it.) *Extended twice, on 2026-08-12: the original filing
-   named 3 of 8 and the first extension still missed the config.py comment.*
+   each site. **Derive the list, don't hand-assemble it:**
+   `poetry run python scripts/claim_drift_sites.py worm-resumable`. Two hand
+   attempts named 3 of ~14 and then 8 of ~14, and the second pointed at
+   `worm_search.py:126` — the `request_timeout_seconds` bullet, the one bound
+   that genuinely *does* resume — while missing `worm_search.py:117-119`, the
+   `max_objects_scanned` bullet describing the exact bound item 184 breaks.
+   Live sites also include `worm_search.py:104` and `:313`,
+   `docs/THREAT_MODEL.md:193` **and `:415`**, `docs/PRODUCT_GUIDE.md:1304` and
+   `:5779-5780`, **both** instances in `docs/product-guide.html` (436 and 780),
+   `README.md:195`, `CHANGELOG.md:164`, `src/querygate/core/config.py:366-370`,
+   and `docs/TODO_ARCHIVE.md:9463`. The script's `KNOWN_OK` table records why
+   the timeout-bound lines must be left alone.
 5. **`docs/TODO_ARCHIVE.md:1240`'s item-26 write-up still says "Phase 2 — MSSQL
    estimated-plan equivalent, not started"** while item 26 is `✅ DONE`
    including phase 2 and `estimate_mssql_query_cost` ships. Internal-only, same
@@ -3325,15 +3338,32 @@ than folded in because none is about item 134:
    `docs/business/GO_TO_MARKET.md` and README now carry. Omission, not a false
    statement — but the public security page is exactly who needs it.
 
+8. **`src/querygate/execution/disclosure_budget.py:25-34` and
+   `src/querygate/policy/models.py:501-510`** still call the shape cap "the
+   targeted probe cap" and say `shape_fingerprint` "closes the evasion at the
+   shape layer too" — the two places an engineer reads first, both wrong per
+   item 186. *Found 2026-08-12 (round 5).*
+9. **`docs/business/MARKET_DOMINATION_ANALYSIS.md:516-518`** still says
+   multi-query differencing "stays honestly out of scope"; item 179 bounds it.
+   *Found 2026-08-12 (round 5).*
+10. **The four-eyes rollback exemption has no test.** Five surfaces now state it
+   as a security residual, but flipping the gate to cover rollback (breaking DR)
+   or dropping it entirely fails nothing. Add
+   `test_rollback_to_a_previously_active_version_needs_no_approvals`.
+   *Found 2026-08-12 (round 5).*
+
 **Method note — read before fixing any of the above.** Four consecutive
 `claim-reviewer` rounds (2026-08-12) each found that the *previous* round's fix
 was scoped to the site list in the filing, and that every filing's list was
-shorter than reality. The failure is the method, not the diligence. So: derive
-the site list by grepping the whole repo — including `src/` comments,
-`examples/`, `docs/business/`, `docs/TRUST_EVIDENCE.md`,
-`docs/COMPLIANCE_MAPPING.md`, `sales/PUBLIC_LANDING_RUNBOOK.md`, `CHANGELOG.md`
-and the generated `docs/product-guide.html` — record it with line numbers in
-the item *before* editing, and re-grep after. A sweep that excludes a directory
+shorter than reality. A fifth round then found that the hand-grepped lists
+written to fix exactly that were themselves short — 6 of ~17 and 8 of ~14. The
+failure is the method, not the diligence, so the method is now a script:
+`poetry run python scripts/claim_drift_sites.py <class>` (or `--all`). Fix every
+hit that is a live claim, then re-run to confirm. Adding a class is three lines
+in its `_CLASSES` table. It over-reports by design — a historical release note
+and a live claim look identical to a regex — so every hit needs a human read,
+and its `KNOWN_OK` table records the lookalikes a previous sweep already
+cleared, with the reason, so a true statement is not "fixed" by mistake. A sweep that excludes a directory
 can conclude only that the searched subset is clean, never that a class is
 closed.
 

@@ -66,7 +66,7 @@ install` prints afterward.
 - **Redis is required once you run more than one QueryGate instance.**
   `CONCURRENCY_BACKEND=redis` makes `Policy.max_concurrency` actually mean
   something across replicas; without it, each instance enforces the cap
-  independently and the real ceiling silently multiplies by replica count.
+  independently and the real ceiling silently multiplies by (replicas × worker processes).
 - **`/metrics`, `/health`, and the `/admin/*` routes are unauthenticated or
   privileged-only respectively** — restrict network access to them at the
   proxy/ingress/firewall layer, not just at the application layer. See
