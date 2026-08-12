@@ -240,6 +240,38 @@ class TestWormFlushMonitorFlush:
             assert record["seq"] == 0
             assert record["prev_hash"] == GENESIS_PREV_HASH
 
+    async def test_a_flushed_segment_writes_every_seq_as_a_bare_integer(self):
+        """TODO.md item 178: `audit/worm_search.py`'s `_chain_seq` rejects a
+        non-`int` `seq` as a chain break, and the claim that this is
+        false-positive-free rests entirely on THIS writer never emitting one.
+
+        `== 0` is not enough to pin that: `0.0 == 0` and `False == 0` are both
+        `True` in Python, and both are values `_chain_seq` refuses — so a
+        serialization change to either would leave the sibling assertion above
+        green while the reader started reporting `chain_breaks` against
+        genuine, untampered segments. That is the worst false positive this
+        product can produce, so assert the TYPE, on every line, not just the
+        first."""
+        bucket = self._bucket()
+        buffer = InProcessWormEventBuffer(max_size=100)
+        monitor = self._monitor(bucket, buffer=buffer)
+        for name in ("a", "b", "c"):
+            buffer.enqueue(_event(name))
+        await monitor.flush_once()
+
+        client = boto3.client("s3", region_name="us-east-1")
+        keys = [o["Key"] for o in client.list_objects_v2(Bucket=bucket)["Contents"]]
+        assert keys
+        seen = 0
+        for key in keys:
+            body = client.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
+            for line in body.splitlines():
+                if not line.strip():
+                    continue
+                assert type(json.loads(line)["seq"]) is int
+                seen += 1
+        assert seen == 3
+
     async def test_flushed_event_body_is_byte_identical_to_the_local_chained_sink(self, tmp_path):
         """Redaction-safety (non-negotiable #3) must hold identically here:
         WORM never constructs its own event body, so the `event` embedded in

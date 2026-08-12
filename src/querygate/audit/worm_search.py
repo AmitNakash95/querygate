@@ -58,11 +58,25 @@ also verifies each segment's internal CHAIN linkage (`seq`/`prev_hash`
 continuity across consumed records), not just each record's own hash — a
 record dropped from or reordered within the middle of a segment — or a
 segment whose first consumed record is not the genuine genesis, or a resumed
-page whose incoming link can't be confirmed within the seed-walk bound —
-breaks the chain and stops that segment's scan there, counted both in
-`unverified` and in a distinct `chain_breaks` field (a stronger signal than
-an ordinary hash mismatch, since the record itself is otherwise
-self-consistent). **Reachable
+page whose incoming link can't be confirmed within the seed-walk bound, or
+(TODO.md item 178) a record whose `seq` is not the `int` it is typed as
+even though its hash recomputes — breaks the chain and stops that segment's
+scan there, counted both in `unverified` and in a distinct `chain_breaks`
+field (a stronger signal than an ordinary hash mismatch, since the record
+itself is otherwise self-consistent). Each of those four is a COUNTED
+outcome — the line is reported as `malformed`/`unverified` rather than
+raised. **That is NOT yet a whole-module guarantee, and must not be read as
+one (TODO.md item 194):** three crafted-or-corrupt line shapes still escape
+`search_worm_archive` as unhandled exceptions the route masks as a generic 500 — a
+`hash` containing any non-ASCII character (`hmac.compare_digest` raises
+`TypeError`; reachable by ORDINARY CORRUPTION, since `_get_object_text`
+decodes with `errors="replace"`, so one bad byte becomes U+FFFD), and two
+unbounded recursions on a deeply-nested line (`json.loads`, whose `except`
+clause names only `json.JSONDecodeError`; and `_contains_forbidden_content`,
+which walks `query_shape` with no depth cap). All three predate item 178 and
+are the same defect class it closed for `seq`; none leaks (the masked body is
+`PUBLIC_INTERNAL_ERROR`) — the cost is availability plus the loss of a whole
+page's already-accumulated genuine records. **Reachable
 by alerting, not just by reading a response (TODO.md item 177):** both counts
 are also published as `querygate_audit_worm_search_chain_breaks_total` and
 `querygate_audit_worm_search_unverified_total`, on the served path AND when a
@@ -191,7 +205,7 @@ import math
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import List, Literal, Optional, Tuple, get_args
+from typing import Any, List, Literal, Optional, Tuple, get_args
 
 import pydantic as pyd
 
@@ -378,7 +392,9 @@ class WormSearchResult(pyd.BaseModel):
     # without EITHER of the two counts above ever firing — each surviving
     # record's own hash still recomputes on its own, since neither field
     # checks a record's LINK to its predecessor within the segment (`seq`
-    # continuity, `prev_hash` continuity). This counts SEGMENTS (not lines)
+    # continuity, `prev_hash` continuity, and — TODO.md item 178 — that
+    # `seq` is the `int` it is typed as in the first place). This counts
+    # SEGMENTS (not lines)
     # where that link broke within the scanned window: the breaking line
     # itself is also counted in `unverified` above (kept a real signal, not
     # silently dropped), but unlike an ordinary hash mismatch — usually a
@@ -514,6 +530,59 @@ def _validate_limit(limit: Optional[int], bounds: WormSearchBounds) -> int:
 _SEED_WALK_MAX_STEPS = 1024
 
 
+def _chain_seq(parsed: Any) -> Optional[int]:
+    """The chain position of an already-hash-verified envelope, or `None`
+    when it isn't the `int` `LedgerRecord.seq` is typed as (TODO.md item 178).
+
+    `verify_envelope_hash` returning `True` proves only that `hash`
+    recomputes over what was signed — NOT that `seq` is an `int`. It parses
+    the line through `LedgerRecord.model_validate`, whose lax coercion turns
+    the string `"3"` and the float `3.0` into `3` (and `True`/`False` into
+    `1`/`0`) before the digest is computed, so a crafted line whose raw `seq`
+    is any of those can carry a perfectly self-consistent hash and still
+    verify. The chain checks
+    downstream then do `seq == prev_seq + 1` against the RAW dict value.
+    Note precisely which operand raised: `"3" == 4` is merely `False`, so an
+    unpaged scan always decided correctly — the `TypeError` came from
+    `prev_seq + 1` once a crafted string reached `prev_seq`, which needs a
+    RESUMED page (`consume_from > 0`), reachable either through the seed
+    walk or through the accept-as-given branch. It then escaped the route as
+    a generic 500.
+
+    A non-`int` is reported as no position at all, which the callers turn
+    into an ordinary chain break: `audit/worm_sink.py`'s writer emits `seq`
+    through `LedgerRecord.model_dump_json()`, which always writes a bare
+    integer (asserted per line by `test_a_flushed_segment_writes_every_seq_
+    as_a_bare_integer`), so a genuine segment can never reach this — a line
+    that does is crafted, and treating it as a break is both
+    false-positive-free and the fail-closed direction. Note this is
+    deliberately STRICTER than
+    `audit/ledger.py`'s `verify_chain`, which reads the coerced
+    `record.seq`: that reader reports a typed failure rather than raising,
+    and the local ledger file is not the attacker-writable surface an S3
+    archive with `s3:PutObject` granted is.
+
+    `bool` is excluded explicitly — `isinstance(True, int)` is `True` in
+    Python, and `True == prev_seq + 1` would silently pass a crafted record
+    off as position 1 (and `false` would satisfy the genesis check's
+    `seq == 0`).
+
+    The non-dict / missing-key branch is DEFENSIVE, not a reachable forgery
+    class: both production call sites reach this only after
+    `verify_envelope_hash` returned `True`, which already established that
+    `parsed` is a `dict` carrying all four envelope keys. It is kept (rather
+    than dropped the way the unreachable in-branch `seq is not None` conjunct
+    was) because this is a standalone helper a future caller could reach
+    without that precondition, and because `None` is the only answer it could
+    correctly give — but do not read its unit coverage as evidence about the
+    integrated path.
+    """
+    seq = parsed.get("seq") if isinstance(parsed, dict) else None
+    if isinstance(seq, bool) or not isinstance(seq, int):
+        return None
+    return seq
+
+
 def _seed_chain_state_from_predecessor(
     lines: List[str], consume_from: int, *, ledger_key: Optional[bytes]
 ) -> Tuple[Optional[str], Optional[int], bool]:
@@ -527,18 +596,25 @@ def _seed_chain_state_from_predecessor(
     `lines` — unlike the rotated-LOCAL-ledger-file carve-out
     `audit/ledger.py`'s `verify_chain` genuinely needs.
 
-    Returns `(hash, seq, exhausted_bound)`. `(None, None, False)` when a
-    predecessor was found but didn't verify, or was corrupt JSON, or there
-    was nothing to seed from at all (`consume_from <= 0` territory, handled
-    by the caller before this is even invoked) — the caller falls back to
-    accepting the resumed page's first consumed line's incoming link as
-    given, same as it always has. `(None, None, True)` is a DIFFERENT case
-    (WS-172-8, security-invariant-reviewer, 2026-08-11): the walk ran out of
-    its own step budget (`_SEED_WALK_MAX_STEPS`) without ever reaching a
-    non-blank line, so nothing about the true predecessor is known one way
-    or the other — the caller must fail closed on this one, not accept-as-
-    given, or a real dropped record hidden behind a long blank-padded run
-    placed exactly at a page boundary would verify silently.
+    Returns `(hash, seq, fail_closed)`, where a non-`None` hash always comes
+    with a real `int` position. `(None, None, False)` when a predecessor was
+    found but didn't verify, or was corrupt JSON, or there was nothing to
+    seed from at all (`consume_from <= 0` territory, handled by the caller
+    before this is even invoked) — the caller falls back to accepting the
+    resumed page's first consumed line's incoming link as given, same as it
+    always has. `(None, None, True)` is a DIFFERENT case the caller must
+    fail closed on rather than accept-as-given, for either of two reasons:
+
+    - the walk ran out of its own step budget (`_SEED_WALK_MAX_STEPS`)
+      without ever reaching a non-blank line (WS-172-8,
+      security-invariant-reviewer, 2026-08-11), so nothing about the true
+      predecessor is known one way or the other — accepting silently there
+      would let a real dropped record hide behind a long blank-padded run
+      placed exactly at a page boundary; or
+    - the predecessor verified but its `seq` is not the `int` it is typed
+      as (TODO.md item 178, see `_chain_seq`) — its claimed position is
+      unusable, and a crafted line is not a reason to exempt the resumed
+      page's first link from being checked.
 
     `consume_from` is caller-controlled (a cursor's `line` field, only ever
     checked for `>= 0` at decode time — see the module docstring's own "not
@@ -573,16 +649,27 @@ def _seed_chain_state_from_predecessor(
         except json.JSONDecodeError:
             return None, None, False
         if verify_envelope_hash(seed_parsed, key=ledger_key) is True:
-            return seed_parsed.get("hash"), seed_parsed.get("seq"), False
+            # TODO.md item 178: a verified predecessor whose `seq` is
+            # type-confused (see `_chain_seq`) yields NO seed at all, and
+            # fails closed rather than accept-as-given — returning its
+            # `hash` while reporting no position would leave the caller
+            # with `prev_verified_hash` set and `prev_seq` None, which is
+            # the same `TypeError` one branch further down. The invariant
+            # the caller relies on is: a non-`None` seed hash always comes
+            # with a real `int` seed position.
+            seed_seq = _chain_seq(seed_parsed)
+            if seed_seq is None:
+                return None, None, True
+            return seed_parsed.get("hash"), seed_seq, False
         # Whether or not the predecessor verified, it is the nearest
         # non-blank line — stop looking further back. If it did NOT verify
         # (already reported when that line was itself consumed on an
         # earlier page), there is nothing trustworthy to seed from.
         return None, None, False
     # The loop ran to completion without finding a single non-blank line.
-    # `exhausted_bound` is True only when the walk actually used its full
-    # step budget — distinct from simply having nowhere left to look
-    # (`start < 0`, or a short object with fewer than
+    # This particular fail-closed reason applies only when the walk actually
+    # used its full step budget — distinct from simply having nowhere left
+    # to look (`start < 0`, or a short object with fewer than
     # `_SEED_WALK_MAX_STEPS` lines before `start`, all genuinely blank).
     exhausted_bound = (start - floor) >= _SEED_WALK_MAX_STEPS
     return None, None, exhausted_bound
@@ -812,9 +899,10 @@ async def search_worm_archive(
             note = (
                 f"{note} {chain_breaks} segment(s) had a broken internal chain link "
                 "(a record whose seq/prev_hash did not continue from its predecessor, "
-                "and whose own hash otherwise still verified — not a key mismatch) — "
-                "records may have been reordered or removed from the middle of a "
-                "segment, and this fails closed: "
+                "or whose seq was not an integer at all, and whose own hash otherwise "
+                "still verified — not a key mismatch) — records may have been reordered "
+                "or removed from the middle of a segment, or a record's claimed position "
+                "was retyped, and this fails closed: "
                 f"{lines_skipped_after_chain_break} further line(s) in those affected "
                 "segments were never read as a result and may hold genuine records."
             )
@@ -920,10 +1008,13 @@ async def search_worm_archive(
                 # `None, None, False` when `consume_from == 0` (nothing to
                 # seed — this object's own genesis is checked directly
                 # below) or when a predecessor was found but didn't verify.
-                # `None, None, True` (WS-172-8) means the walk exhausted its
-                # own step bound without learning anything — the caller
-                # below must fail closed on that case, not accept-as-given.
-                prev_verified_hash, prev_seq, prev_seed_bound_exhausted = (
+                # `None, None, True` means the caller must fail closed
+                # rather than accept-as-given — either the walk exhausted
+                # its own step bound without learning anything (WS-172-8),
+                # or the predecessor verified but its `seq` is type-confused
+                # (TODO.md item 178). When the seed hash is non-`None`,
+                # `prev_seq` is guaranteed to be a real `int`.
+                prev_verified_hash, prev_seq, prev_seed_fail_closed = (
                     _seed_chain_state_from_predecessor(lines, consume_from, ledger_key=ledger_key)
                     if consume_from > 0
                     else (None, None, False)
@@ -975,9 +1066,22 @@ async def search_worm_archive(
                     # validation, etc.) — the write-time chain sequence
                     # doesn't care whether a record matches this caller's
                     # search filter.
-                    seq = parsed.get("seq")
+                    # TODO.md item 178: `_chain_seq`, not `parsed["seq"]` —
+                    # the hash verifying does not make the raw value an
+                    # `int`, and the linkage arithmetic below would raise on
+                    # a crafted string instead of deciding.
+                    seq = _chain_seq(parsed)
                     prev_hash_field = parsed.get("prev_hash")
-                    if prev_verified_hash is None:
+                    if seq is None:
+                        # No usable position at all: checked ONCE here rather
+                        # than as a conjunct inside each branch below, which
+                        # is also what makes it load-bearing — in the linked
+                        # branch a `None` would merely compare unequal
+                        # (`prev_seq` is guaranteed a real `int`, so
+                        # `prev_seq + 1` cannot raise), so an in-branch guard
+                        # there would have been unreachable, untestable code.
+                        chain_ok = False
+                    elif prev_verified_hash is None:
                         # Either genuinely starting fresh at this object
                         # (consume_from == 0 — must be the real segment
                         # genesis), or resuming past a predecessor line that
@@ -998,7 +1102,7 @@ async def search_worm_archive(
                         # object, and accepting silently there would let a
                         # real dropped record hide behind a long blank-padded
                         # run placed exactly at a page boundary.
-                        chain_ok = (not prev_seed_bound_exhausted) and (
+                        chain_ok = (not prev_seed_fail_closed) and (
                             consume_from > 0 or (seq == 0 and prev_hash_field == GENESIS_PREV_HASH)
                         )
                     else:
@@ -1022,6 +1126,9 @@ async def search_worm_archive(
                         broke_chain = True
                         break
                     prev_verified_hash = parsed.get("hash")
+                    # `chain_ok` above is False for a `None` seq, so this
+                    # only ever carries a real `int` forward (TODO.md item
+                    # 178) — the same invariant the seed function upholds.
                     prev_seq = seq
                     unwrapped = unwrap_envelope(parsed)
                     try:
