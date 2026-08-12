@@ -4199,8 +4199,10 @@ dispatched abstract bases — one concrete class per dialect, no inline
   are thin dispatchers; `test_dialects.py` unchanged + a new registry test).
 
 Adding a dialect (item 19) is now: implement both adapters + register. The one
-remaining gap is the cost-estimation hook's MSSQL side, which is blocked on
+remaining gap at the time was the cost-estimation hook's MSSQL side, blocked on
 MSSQL estimated-plan support (item 26 ph2), not on the adapter interface.
+*(Closed since: item 26 phase 2 shipped, and `_estimate_cost` is a per-dialect
+dispatch.)*
 
 <details><summary>Original scope</summary>
 
@@ -5002,8 +5004,9 @@ dropping a dialect stays a contained, plug-in change. This is item 57
 ("Pluggable dialect-adapter architecture"), already scoped in the backlog
 under P4 — this closes the compiler-scoped slice of it (not
 `connections/dialects.py`'s session guardrails or
-`execution/cost_estimation.py`'s Postgres-only EXPLAIN hook, which item 57
-also mentions but which are separate concerns left for a future pass).
+`execution/cost_estimation.py`'s then-Postgres-only EXPLAIN hook, which item 57
+also mentions but which are separate concerns left for a future pass — the
+estimation hook covers Postgres and MSSQL since item 26 phase 2).
 
 **Shipped.** New `compiler/dialect_adapters.py`: an `abc.ABC`
 `DialectAdapter` with three methods — `date_bucket`, `order_by_terms`,
@@ -9460,7 +9463,9 @@ enforced ceiling); the actual S3 work is separately bounded per request by
 `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
 `AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS`. An out-of-bound request is
 rejected with a 422 before any S3 call is made; a bound hit mid-scan
-degrades to a truncated page with a resumable, opaque cursor (encoding
+degrades to a truncated page with an opaque cursor — resumable for every bound
+except a day listing over `max_objects_scanned`, whose cursor repeats that day
+(item 184, found later) — (encoding
 `day`/`key`/`line` plus a fingerprint of the request's own filters, so
 replaying a cursor against different filters is rejected rather than
 silently returning a mismatched page) rather than continuing an

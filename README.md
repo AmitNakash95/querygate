@@ -193,6 +193,7 @@ that window out. `start_time`/`end_time` are required on every request (no
 scan is bounded by `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
 `AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS` — an over-wide/missing range is
 rejected outright, a bound hit mid-scan degrades to a truncated, resumable
+(except a day listing over the object budget — TODO item 184)
 page rather than a slow or unbounded scan.
 
 That search also verifies each segment's internal hash-chain linkage, and
@@ -480,7 +481,7 @@ already closes. Masking is audited distinctly from denial — the success event
 carries `masked_columns` (output names only, never the pre-mask value) so
 operators can tell "masked" access apart from "denied" in the one stream.
 
-### Pre-execution cost estimation (Postgres)
+### Pre-execution cost estimation (Postgres and SQL Server)
 
 Row limits, timeouts, and concurrency caps are all reactive — they bound a
 query only once it's already running. `Policy.max_estimated_rows` /
@@ -498,12 +499,13 @@ default:
   cost_estimation_mode: enforce   # or "observe" — see below
 ```
 
-This is Postgres-only for now. MSSQL's estimated-plan equivalent
-(`SET SHOWPLAN_XML ON`) can't be composed as a prefix on an already-compiled
-statement the way Postgres's `EXPLAIN` can — it needs its own dedicated
-connection lifecycle — so setting these fields on an MSSQL connection is
-accepted but has no effect (see `execution/cost_estimation.py` and TODO.md
-item 26). `run_structured_queries(mode="explain")` (MCP) and
+Both dialects are supported (TODO.md item 26, phases 1 and 2). MSSQL's
+estimated-plan equivalent (`SET SHOWPLAN_XML ON`) can't be composed as a prefix
+on an already-compiled statement the way Postgres's `EXPLAIN` can, so it runs
+over its own dedicated connection — the dispatch lives in
+`StructuredQueryService._estimate_cost`, and a dialect with no estimator (MySQL,
+Snowflake, BigQuery) returns `None` and proceeds under the reactive guardrails
+(see `execution/cost_estimation.py`). `run_structured_queries(mode="explain")` (MCP) and
 `POST .../query/explain` (REST) never open a database session at all (by
 design — it stays a pure, always-cheap compile preview), so this check
 runs only on `mode="execute"` (the default)/`POST .../query`, not
@@ -1947,10 +1949,13 @@ Being upfront about what's not done yet:
   writes" above. `WritePolicy.enabled` is `false` until an operator turns it
   on per table/operation, so a default deployment is read-only in practice;
   there is still no raw-DML string field on either transport.
-- **Pre-execution cost estimation is Postgres-only** — `max_estimated_rows`/
-  `max_estimated_cost` (above) have no effect on an MSSQL connection yet;
-  MSSQL's estimated-plan mechanism needs its own connection lifecycle that
-  hasn't been built (TODO item 26 phase 2).
+- **Pre-execution cost estimation covers Postgres and MSSQL only** —
+  `max_estimated_rows`/`max_estimated_cost` (above) are enforced on both
+  (TODO item 26 phases 1–2: inline `EXPLAIN` on Postgres, a dedicated
+  `SET SHOWPLAN_XML ON` connection on MSSQL). MySQL, Snowflake and BigQuery
+  have no estimator, so the check returns nothing there and those connections
+  fall back to the reactive guardrails. The check is also fail-open by design:
+  an estimation failure degrades to "not enforced for this query".
 - **Distributed concurrency enforcement (Redis-backed) is opt-in** — the
   default is an in-process semaphore, correct for a single instance only;
   set `concurrency_backend: redis` for multi-instance deployments.

@@ -133,8 +133,48 @@ KNOWN_OK: List[Tuple[str, str, str]] = [
     ),
     (
         "src/querygate/audit/worm_search.py",
-        "request_timeout",
-        "Same as above: the timeout bound's truncation encodes a forward position.",
+        "rather than hanging",
+        "The request_timeout bullet: that bound's truncation encodes a forward position.",
+    ),
+    (
+        "src/querygate/audit/worm_search.py",
+        "honestly with a resumable cursor rather than silently",
+        "The per-object line cap encodes `last_line`, so this cursor genuinely advances.",
+    ),
+    (
+        "src/querygate/core/config.py",
+        "rather than hanging past this bound",
+        "The timeout bound genuinely DOES resume — only max_objects_scanned (item 184) does not.",
+    ),
+    (
+        "docs/ENGINE_EXPRESSIVENESS_PLAN.md",
+        "EXCEPT ALL",
+        "A set-operation dialect claim, not cost estimation.",
+    ),
+    (
+        "src/querygate/policy/models.py",
+        "Both dialects are supported since item 26 phase 2",
+        "States the CORRECT post-phase-2 position; matches only because it names the item.",
+    ),
+    (
+        "tests/integration/test_mssql_cost_estimation.py",
+        "",
+        "The MSSQL estimation test itself — naming item 26 phase 2 is correct here.",
+    ),
+    (
+        "scripts/claim_drift_sites.py",
+        "",
+        "This scanner's own pattern table matches itself; not a claim surface.",
+    ),
+    (
+        "TODO.md",
+        "",
+        "The worklist DESCRIBES these drifts; it is the tracker, not a claim surface.",
+    ),
+    (
+        "ROADMAP.md",
+        "",
+        "As TODO.md: describes the drift items rather than making the claim.",
     ),
 ]
 

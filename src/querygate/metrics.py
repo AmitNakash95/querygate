@@ -50,7 +50,8 @@ QUERIES_REJECTED_TOTAL = Counter(
     # already met (TODO.md item 35 phase 2) — broken out from `concurrency`
     # so operators can tell "the queue's own pressure control tripped" apart
     # from "waited and ran out of time". cost_estimate: rejected by a
-    # pre-execution Postgres EXPLAIN cost check (TODO.md item 26) — broken
+    # pre-execution plan-estimate cost check (TODO.md item 26; Postgres EXPLAIN
+    # or MSSQL SHOWPLAN_XML) — broken
     # out from the coarser `policy` bucket so operators can tell threshold
     # tuning apart from allow/deny rules. quota: rejected before execution by a
     # per-principal rate/byte quota (TODO.md item 50) — broken out from `policy`
@@ -138,9 +139,10 @@ DISCLOSURE_BUDGET_REJECTIONS_TOTAL = Counter(
 
 COST_ESTIMATION_ATTEMPTS_TOTAL = Counter(
     "querygate_cost_estimation_attempts_total",
-    "Pre-execution Postgres cost-estimation attempts — execute() calls where "
-    "Policy.cost_estimation_enabled is true and the dialect is postgresql — "
-    "by connection. Pairs with querygate_cost_estimation_unavailable_total to "
+    "Pre-execution plan-estimation attempts — execute() calls where "
+    "Policy.cost_estimation_enabled is true and the dialect has an estimator "
+    "(Postgres via inline EXPLAIN, MSSQL via a dedicated SHOWPLAN_XML "
+    "connection; item 26 phases 1-2) — by connection. Pairs with querygate_cost_estimation_unavailable_total to "
     "compute a fail-open rate.",
     ["connection"],
     registry=REGISTRY,
@@ -154,7 +156,7 @@ COST_ESTIMATION_UNAVAILABLE_TOTAL = Counter(
     "max_estimated_rows/max_estimated_cost has silently stopped protecting "
     "this connection.",
     # reason: compile_failed (statement can't render with literal binds) |
-    # explain_failed (the EXPLAIN itself errored) | plan_parse_failed
+    # explain_failed (the EXPLAIN/SHOWPLAN_XML itself errored) | plan_parse_failed
     # (unexpected plan JSON shape) — see execution/cost_estimation.py.
     ["connection", "reason"],
     registry=REGISTRY,

@@ -124,7 +124,8 @@ class QueryCancellationNotReadyError(ValueError):
 
 
 class CostEstimateExceededError(PolicyViolationError):
-    """Raised when a Postgres EXPLAIN-based pre-execution cost estimate
+    """Raised when a pre-execution plan-estimate cost check (Postgres EXPLAIN or
+    MSSQL SHOWPLAN_XML, TODO.md item 26 phases 1-2)
     exceeds `Policy.max_estimated_rows`/`max_estimated_cost` (see
     execution/cost_estimation.py). Subclasses PolicyViolationError so
     existing `except ValueError`/`except PolicyViolationError` handling

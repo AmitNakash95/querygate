@@ -3258,7 +3258,24 @@ behavior change.
 
 **Effort:** M. **Depends on:** 177, 179 (both shipped).
 
-### 190. Four claim drifts on outward-facing surfaces, unrelated to WORM search
+### 190. Claim drifts on outward-facing surfaces, unrelated to WORM search
+
+**Status 2026-08-12: #1, #4, #8, #9 and #10 are DONE** — cost estimation
+(README, `examples/policy.example.yaml`, five `src/` comments, THREAT_MODEL,
+the PRODUCT_GUIDE Decision Log, TECHNICAL_REVIEW, two TODO_ARCHIVE write-ups
+and a test docstring), the unconditional "resumable page" claim (both
+`worm_search.py` bullets, its `WormSearchBounds` docstring, README, QG-40,
+THREAT_MODEL, PRODUCT_GUIDE ×2, the generated HTML, CHANGELOG, TODO_ARCHIVE),
+the two disclosure-budget code docs, MARKET_DOMINATION_ANALYSIS, and the
+rollback-exemption test (mutation-verified: closing the exemption fails it,
+and a control proves the gate is still on). Verified by re-running
+`scripts/claim_drift_sites.py --all`. **Open: #2, #3, #5, #6, #7** — all four
+remaining surfaces are `landing/security.html`, `README.md:1944`, and
+`sales/PUBLIC_LANDING_RUNBOOK.md`, and the two landing/sales files carried
+unrelated uncommitted work, so they were deliberately not edited. **#6 (the
+runbook's stop-list) should be fixed first: it is the instruction sheet the
+landing copy is written from, i.e. the mechanism by which #2 keeps recurring.**
+
 
 **Surfaced 2026-08-12 by `claim-reviewer` auditing item 176.** Item 176 closed
 the WORM-search class specifically and its sweep confirmed no fourth *WORM*

@@ -650,7 +650,7 @@ class StructuredQueryService:
     ) -> None:
         """In-query human-in-the-loop gate (TODO.md item 92). If the query trips a
         policy approval trigger — a catalog sensitivity label (phase 2, dialect-
-        agnostic) or the cost/row estimate (phase 1, Postgres; `estimate` may be
+        agnostic) or the cost/row estimate (Postgres and MSSQL; `estimate` may be
         None otherwise) — require a valid approval token bound to this exact
         query; otherwise raise `ApprovalRequiredError` so the caller can obtain
         one from a `query:approve` holder and re-submit. No-op when the gate is
@@ -944,7 +944,7 @@ class StructuredQueryService:
                                     self._observe_cost_estimate(estimate, policy)
                         # Human-in-the-loop approval gate (item 92) runs after the
                         # hard cost gate (a query rejected by ENFORCE never reaches
-                        # here). It combines the cost-estimate trigger (Postgres;
+                        # here). It combines the cost-estimate trigger (Postgres/MSSQL;
                         # `estimate` may be None otherwise) with the dialect-
                         # agnostic catalog sensitivity-label trigger, so a single
                         # approval token covers whatever tripped it.

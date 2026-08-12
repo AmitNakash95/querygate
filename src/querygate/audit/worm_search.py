@@ -101,7 +101,9 @@ leak" posture for every other forgery class below.
 **Bounds — enforced, not advisory (`WormSearchBounds`).** A request outside
 these is REJECTED (422, `QueryValidationError`) before any S3 call is made;
 a request inside them that still can't finish scanning within one call is
-TRUNCATED with a resumable `next_cursor` — the same "stop and disclose
+TRUNCATED with a `next_cursor` — resumable for every bound EXCEPT the day
+listing, see `max_objects_scanned` below (TODO.md item 184) — the same "stop
+and disclose
 honestly, never silently serve past a bound" posture
 `admin/anomaly.py`'s `max_lines_read`/`max_events_scanned` already
 established for the local reader:
@@ -116,7 +118,11 @@ established for the local reader:
   real cost driver of a scan (each is a network round trip against a segment
   up to `AUDIT_WORM_MAX_BUFFERED_EVENTS` events large). Hit mid-scan, the
   response is truncated with a cursor to resume from exactly where it
-  stopped — never a full-archive linear scan in one request.
+  stopped — never a full-archive linear scan in one request. **Exception
+  (TODO.md item 184): when a single DAY holds more keys than this budget, the
+  day-listing truncation emits a cursor pointing at the START of that same day,
+  so a good-faith pager loops and segments past the budget are unreachable.
+  That is the one bound here whose cursor does not advance.**
 - `request_timeout_seconds` — wall-clock budget for one request's S3 work,
   checked between object fetches and day-prefix listings, AND periodically
   (every 1,000 lines) inside a single object's own line loop (TODO.md item
@@ -310,7 +316,9 @@ _NOTE = (
 class WormSearchBounds(pyd.BaseModel):
     """Server-enforced ceilings a request cannot exceed. A request outside
     these is REJECTED before any S3 call; a request inside them that can't
-    finish in one call is TRUNCATED with a resumable cursor."""
+    finish in one call is TRUNCATED with a cursor — resumable for every bound
+    except a day listing that exceeds `max_objects_scanned` (TODO.md item
+    184)."""
 
     max_window_seconds: float = pyd.Field(gt=0)
     max_objects_scanned: int = pyd.Field(ge=1)
