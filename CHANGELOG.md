@@ -549,6 +549,24 @@ All notable changes to QueryGate are documented here.
 
 ### Fixed
 
+- A crafted WORM-archive line whose chain position (`seq`) was
+  type-confused rather than corrupt — a JSON string, float, or boolean that
+  still carried a self-consistent hash, because the envelope is validated
+  through a model that coerces those back to an integer before the digest is
+  checked — defeated the archive's chain-linkage verification in one of two
+  ways, depending on the type (TODO.md item 178). A **string** made
+  `GET /api/v1/admin/observability/worm-search` fail with a generic HTTP 500
+  instead of counting it, on any page resumed with a cursor (which the server
+  itself issues at every ordinary page boundary). A **float or boolean** did
+  not crash at all — worse, it was silently ACCEPTED as a valid link
+  (`1 == 0.0 + 1`), so a retyped chain position passed verification and the
+  crafted record was returned as a genuine event. Such a line is now reported
+  like any other forgery class:
+  counted in both `unverified` and `chain_breaks`, with that segment's scan
+  stopping there. No genuine segment can be affected — QueryGate's own
+  archival writer emits `seq` through a typed model, now asserted per line
+  by `test_a_flushed_segment_writes_every_seq_as_a_bare_integer` — so this
+  changes nothing for an untampered archive.
 - A deployment running the tamper-evident hash-chained audit backend
   (`AUDIT_SINK_BACKEND=jsonl_chained`) lost four observability read
   surfaces — the personal denial-history view, the anomaly report, the

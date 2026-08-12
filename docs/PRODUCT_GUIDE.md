@@ -4031,6 +4031,38 @@ reasoning behind them, newest first. Added to incrementally as work happens
   `docs/INFERENCE_RISKS.md` R3 and `THREAT_MODEL.md` QG-29 were updated to say
   "bounded since item 179, still residual" rather than "closed".
 
+- **2026-08-12 — A hash-verified WORM record whose `seq` is type-confused is
+  REJECTED as a chain break, not accepted at its coerced value (TODO.md item
+  178).** `verify_envelope_hash` validates a line through
+  `LedgerRecord.model_validate` before computing the digest, and pydantic's lax
+  coercion accepts `"3"`, `3.0` and `true` for an `int` field — so the digest is
+  computed over the *coerced* value and a crafted line can be perfectly
+  self-consistent while still holding a non-integer raw position. Reading that
+  raw value back and doing `seq == prev_seq + 1` on it failed in two different
+  ways, and only one of them was the crash: a **string** made `prev_seq + 1`
+  raise `TypeError` out of the scan on any cursor-resumed page, masked as a
+  generic HTTP 500 (availability), while a **float or boolean** raised nothing
+  and was silently accepted as a valid link — `1 == 0.0 + 1` and
+  `1 == False + 1` are both true — so an attacker-retyped chain position passed
+  verification and the record was returned as genuine (integrity, the more
+  serious of the two).
+  **Decision:** narrow the type at the reader (`_chain_seq`) and treat a
+  non-integer as an ordinary chain break — counted in `unverified` and
+  `chain_breaks`, that segment's scan stopped — rather than reading the coerced
+  `LedgerRecord.seq`, which would have silently normalised a value an attacker
+  deliberately retyped. This is **deliberately stricter than
+  `audit/ledger.py`'s `verify_chain`**, which still accepts the coerced value:
+  the S3 archive is writable by anyone holding `s3:PutObject` (necessarily
+  including QueryGate's own role) while the local ledger file is not, and
+  `verify_chain` returns a typed failure rather than raising, so it has no
+  crash to avoid. The asymmetry is intentional and recorded at both ends. It
+  cannot false-positive: the archival writer emits `seq` through
+  `LedgerRecord.model_dump_json()`, now asserted per line by a test. **What
+  this deliberately does NOT claim:** the reader still has three unhandled-
+  exception paths for other crafted-or-corrupt line shapes (item 194), one
+  reachable by ordinary corruption — so "a bad line is always counted, never
+  raised" is a goal, not yet a guarantee.
+
 - **2026-08-11 — The WORM archive's two integrity signals are now Prometheus
   counters, so a broken hash chain is alertable rather than merely
   inspectable (TODO.md item 177).** Item 172 added

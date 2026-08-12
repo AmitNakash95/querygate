@@ -385,10 +385,14 @@ def test_verify_envelope_hash_returns_false_when_verified_with_the_wrong_key():
 def test_verify_envelope_hash_returns_false_for_a_shape_valid_but_type_invalid_envelope():
     """The `except pyd.ValidationError: return False` branch — a dict with
     all four envelope keys (so it passes `unwrap_envelope`'s own shape check)
-    but a field of the wrong TYPE for `LedgerRecord` (a string `seq` instead
-    of an int). Removing this except and letting the exception propagate
+    but a field `LedgerRecord` cannot accept at all (a NON-NUMERIC string
+    `seq`). Removing this except and letting the exception propagate
     uncaught would crash every reader's scan on one malformed line instead of
-    counting it `malformed`."""
+    counting it `malformed`.
+
+    Note the precise reason it fails: not "a string where an int is typed"
+    (a *numeric* string coerces and verifies — see the test below) but a
+    string that cannot be coerced at all."""
     raw = {
         "seq": "not-an-int",
         "prev_hash": GENESIS_PREV_HASH,
@@ -396,6 +400,31 @@ def test_verify_envelope_hash_returns_false_for_a_shape_valid_but_type_invalid_e
         "hash": "deadbeef",
     }
     assert verify_envelope_hash(raw) is False
+
+
+@pytest.mark.parametrize("raw_seq", ["0", 0.0, False], ids=["str", "float", "bool"])
+def test_verify_envelope_hash_is_true_for_a_type_confused_but_coercible_seq(raw_seq):
+    """TODO.md item 178: a `True` from this function says nothing about the
+    RAW dict's field types.
+
+    `LedgerRecord.model_validate` runs first and pydantic's lax coercion turns
+    `"0"`, `0.0` and `False` into `0` BEFORE the digest is computed — so a
+    line whose raw `seq` is any of those verifies while still holding a
+    non-`int` for any caller that reads the field back off the raw dict. That
+    is precisely how a crafted archive line reached `seq == prev_seq + 1` and
+    raised `TypeError` in `audit/worm_search.py`.
+
+    Pinned HERE, at the function that makes the guarantee, rather than only
+    inside the one reader that currently narrows the type: three other
+    readers (`admin/anomaly.py`, `admin/config_trends.py`,
+    `api/admin_ui_routes.py`) call this and then read raw fields. If a future
+    pydantic version or a strict-mode switch stopped coercing, this test
+    fails loudly and `worm_search._chain_seq` becomes dead code — which is
+    the signal that should not be silent."""
+    record = make_record(0, GENESIS_PREV_HASH, _event("q1"))
+    raw = json.loads(record.model_dump_json())
+    raw["seq"] = raw_seq
+    assert verify_envelope_hash(raw) is True
 
 
 def test_resolve_ledger_key_converts_a_non_blank_string_to_bytes():

@@ -208,7 +208,7 @@ order-of-magnitude, not commitments.
 | 175 | ✅ `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" | S | 2 |
 | 176 | ✅ Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line: `sales/index.html`'s guardrails still forbid claiming managed search, `CUSTOMER_README.md` flatly denies it exists, and `TODO.md`'s own Quick-scan row for item 134 says phase 2 "not started" | S | 134 |
 | 177 | ✅ `WormSearchResult.chain_breaks`/`unverified` have no Prometheus counter, so the strongest WORM-archive tamper signal isn't alertable — only visible to whoever happens to run an ad-hoc search over the right window | S | 172 |
-| 178 | A hash-verified WORM record with a non-int `seq` (type-confused, not corrupt) raises `TypeError` instead of being counted `unverified` | S | 172 |
+| 178 | ✅ A hash-verified WORM record with a non-int `seq` (type-confused, not corrupt) raises `TypeError` instead of being counted `unverified` | S | 172 |
 | 179 | ✅ Cumulative disclosure budget: bound multi-query differencing per purpose — the one structural form of "governing intent" | L | 88, 145 |
 | 180 | Escalate an exhausted disclosure budget into the item-92 approval gate instead of rejecting | M | 92, 179 |
 | 181 | `redis_quota.py`'s `Retry-After` is always the full window — the Lua indexes a nested `WITHSCORES` reply | S | 50 |
@@ -224,6 +224,7 @@ order-of-magnitude, not commitments.
 | 191 | `write_preview` is an unfloored, unbudgeted exact-count oracle, so a write-scoped caller can difference around items 88 and 179 | S–M | 93, 179 |
 | 192 | The disclosure budget's Redis script passes multiple KEYS, which fails CROSSSLOT on Redis Cluster — turning a fail-closed control into an outage on the queries it protects | S | 179 |
 | 193 | `docs/product-guide.html` has no freshness gate against `docs/PRODUCT_GUIDE.md`, so the generated copy most likely to be shared goes stale silently | S | — |
+| 194 | Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as a masked 500: a non-ASCII `hash` (reachable by ordinary corruption) and two unbounded recursions | S–M | 134 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2730,36 +2731,15 @@ response.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 177).
 
-### 178. A hash-verified WORM record with a non-int `seq` (type-confused, not corrupt) raises instead of being counted `unverified`
+### 178. A hash-verified WORM record with a non-int `seq` (type-confused, not corrupt) raises instead of being counted `unverified` ✅ DONE
 
-**Surfaced 2026-08-11 by `security-invariant-reviewer` auditing item 172's
-own WS-172-8 follow-up commit (WS-172-9), during that follow-up's own
-mandatory completion gate.** Pre-existing since item 154/172, not introduced
-by the WS-172-8 fix — the reviewer found it while reading the surrounding
-code the fix touches. `audit/worm_search.py` reads `parsed.get("seq")` as a
-raw, unvalidated dict value at two sites (`_seed_chain_state_from_
-predecessor`'s `seed_parsed.get("seq")`, and the main line loop's own
-`seq = parsed.get("seq")`) after `verify_envelope_hash` has confirmed the
-envelope's hash recomputes — but `verify_envelope_hash` only proves the hash
-matches what was signed, not that `seq` is the `int` `LedgerRecord.seq` is
-typed as. A crafted line whose `seq` is (for example) the *string* `"3"` can
-still have a self-consistent hash (`compute_record_hash` digests whatever
-`seq` value is present, coerced or not) and passes `verify_envelope_hash`,
-but the downstream `seq == prev_seq + 1` comparison then raises `TypeError`
-(`str` + `int`), which escapes to the route's `mask_unexpected()` as a
-generic 500 — availability/contract-breakage, not disclosure (no
-credential/bucket/driver text leaks), but a real regression against this
-module's own "malformed/unverified, never an unhandled exception" posture
-for a crafted line.
+Both raw `parsed.get("seq")` reads in `audit/worm_search.py` now go through a
+`_chain_seq` helper that rejects anything that is not a genuine `int`, so a
+crafted-but-hash-valid line is counted like every other forgery class
+(`unverified` + `chain_breaks`, segment scan stopped) instead of raising
+`TypeError` out as a generic 500.
 
-**What to do (when prioritized):** read the *validated* record via
-`LedgerRecord.model_validate(parsed)` (or an explicit
-`isinstance(seq, int) and not isinstance(seq, bool)` guard, treating a
-non-int as `unverified` and stopping consumption of that object) at each of
-the two raw-dict `seq` reads, so a type-confused-but-hash-valid line is
-counted like any other forgery class instead of raising.
-
-**Effort:** S. **Depends on:** 172 (shipped).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 178).
 
 ### 179. Cumulative disclosure budget: bound multi-query differencing per purpose, the one form of "governing intent" that is structural ✅ DONE
 
@@ -3452,3 +3432,67 @@ embeds a timestamp, that has to be excluded or made stable first.
 
 **Effort:** S. **Depends on:** nothing.
 
+### 194. Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as an unhandled exception the route masks as a 500
+
+**Surfaced 2026-08-12 by `security-invariant-reviewer` and `claim-reviewer`
+independently, auditing item 178's own commit, and measured — not reasoned —
+against the post-fix tree.** All three are **pre-existing** (items 154/172),
+not caused by item 178; what item 178 briefly added was a module-docstring
+sentence asserting they did not exist, corrected in that same commit to name
+them and point here.
+
+Each is the same defect class item 178 closed for `seq`: a line the reader is
+supposed to *count* as `malformed`/`unverified` instead raises out of
+`search_worm_archive`, hits the route's `mask_unexpected()`
+(`api/admin_observability_routes.py`), and returns a generic HTTP 500. The
+cost is availability plus the loss of every genuine record the page had
+already accumulated — nothing leaks (the masked body is
+`PUBLIC_INTERNAL_ERROR`). Because a WORM object is immutable, one bad object
+poisons every future search whose window covers that day, permanently.
+
+1. **A non-ASCII `hash` raises `TypeError` in `hmac.compare_digest`**
+   (`audit/ledger.py`'s `verify_envelope_hash`). `LedgerRecord.hash` is a
+   plain `str` with no hex/ASCII constraint. **This is the one that does not
+   need an attacker:** `_get_object_text` decodes the object body with
+   `errors="replace"`, so a single corrupted byte inside a genuine segment's
+   `hash` field becomes U+FFFD and 500s the endpoint. Measured:
+   `verify_envelope_hash({... "hash": "abc\ufffd"})` raises rather than
+   returning `False`.
+2. **`json.loads` on a deeply-nested line raises `RecursionError`**, which is
+   a `RuntimeError` and so is not caught by the `except json.JSONDecodeError`
+   at either call site (the main line loop and the seed walk). Measured:
+   1,000 nested arrays raises, 900 does not — and that is a ~2 KB line
+   (`"[" * 1000 + "]" * 1000`), four orders of magnitude under
+   `_MAX_OBJECT_BYTES`, so the byte bounds are no defence at all. The
+   available stack inside an async request handler is smaller than in a bare
+   probe, so the production threshold is lower still.
+3. **`_contains_forbidden_content` walks `query_shape` with no depth cap.**
+   Measured through the real function, and the threshold is **shape-dependent**:
+   LIST nesting raises at depth ~480 (300 is fine), while DICT nesting survives
+   to ~1000. The ~2x gap is structural — the list branch is
+   `any(_contains_forbidden_content(item) for item in node)`, costing a
+   generator frame *plus* a call frame per level, where the dict branch costs
+   one. Any cap must therefore be sized against the LIST cost, not the dict
+   one. Reachable past every other guard — the envelope
+   can be genuine, hash-verifying, chain-linked, and schema-valid, since
+   `query_shape` is a `Dict[str, Any]` that `extra="forbid"` cannot constrain.
+
+**What to do (when prioritized).** (1) and (2) are mechanical: make
+`verify_envelope_hash` return `False` for a non-ASCII `hash` (an `.isascii()`
+pre-check, or compare on `.encode()`d bytes) — note it is shared by four
+readers, so the change is theirs too, and `audit/ledger.py`'s own
+`verify_chain` has the SAME `hmac.compare_digest(expected, record.hash)`
+hazard (measured: identical `TypeError`), reachable via `querygate-audit
+verify` against a locally-corrupted ledger, so the real scope is five call
+sites and both readers, not four and one; and widen both handlers to
+`except (json.JSONDecodeError, RecursionError)`. (3) needs **a maintainer
+decision on the depth cap**, which is why this is not a same-session fix: the
+screener is a security control whose `True` means *reject*, so a cap must
+fail closed (over-nested ⇒ `malformed`) and must sit above anything
+`audit/events.py`'s `normalize_query_shape` can legitimately emit — bounded
+by `max_where_depth` plus a constant for `set_op` arms and cte bodies, which
+should be measured rather than assumed. Pin each shape with its own
+regression test, then restore the absolute form of the module docstring's
+standing-contract sentence.
+
+**Effort:** S–M. **Depends on:** 134 (shipped).

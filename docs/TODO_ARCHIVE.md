@@ -13557,6 +13557,171 @@ tests in the evidence column), `README.md`'s WORM section, `CHANGELOG.md`
 **Effort:** S. **Depends on:** 172 (shipped). **Surfaced:** items 184, 185
 (filed as 179 and 180 on this item's own branch; renumbered on merge).
 
+### 178. A hash-verified WORM record with a non-int `seq` (type-confused, not corrupt) raises instead of being counted `unverified` ✅ DONE
+
+**Surfaced 2026-08-11 by `security-invariant-reviewer` auditing item 172's
+own WS-172-8 follow-up commit (WS-172-9), during that follow-up's own
+mandatory completion gate.** Pre-existing since item 154/172, not introduced
+by the WS-172-8 fix — the reviewer found it while reading the surrounding
+code the fix touches. `audit/worm_search.py` read `parsed.get("seq")` as a
+raw, unvalidated dict value at two sites (`_seed_chain_state_from_
+predecessor`'s `seed_parsed.get("seq")`, and the main line loop's own
+`seq = parsed.get("seq")`) after `verify_envelope_hash` had confirmed the
+envelope's hash recomputes — but `verify_envelope_hash` only proves the hash
+matches what was signed, not that `seq` is the `int` `LedgerRecord.seq` is
+typed as. Availability/contract-breakage, not disclosure (no
+credential/bucket/driver text leaks), but a real regression against this
+module's own "malformed/unverified, never an unhandled exception" posture
+for a crafted line.
+
+**The premise, measured rather than assumed.** `verify_envelope_hash` parses
+through `LedgerRecord.model_validate` before computing the digest, and
+pydantic's lax coercion accepts `"3"`, `3.0` and `True` for an `int` field
+(confirmed directly: all three validate to `3`/`3`/`1`; `None`, a list and a
+dict raise). The digest is therefore computed over the COERCED value, so a
+crafted line whose raw `seq` is a string can carry a perfectly self-consistent
+hash, verify, and leave a `str` in the raw dict the linkage arithmetic then
+reads.
+
+**Shipped:**
+
+- A new `_chain_seq(parsed)` helper returns the chain position of an
+  already-hash-verified envelope, or `None` when it is not a genuine `int`.
+  `bool` is excluded explicitly (`isinstance(True, int)` is `True` in Python,
+  and `True == prev_seq + 1` would otherwise pass a crafted record off as
+  position 1).
+- Both raw reads now go through it. In the main line loop a `None` position is
+  checked **once**, ahead of both linkage branches, which routes it into the
+  existing chain-break path: counted in `unverified` AND `chain_breaks`, that
+  segment's scan stopped there, with `lines_skipped_after_chain_break`
+  disclosing the cost — the same treatment every other forgery class gets, and
+  item 177's Prometheus counters pick it up for free.
+- `_seed_chain_state_from_predecessor` now **fails closed** (returns
+  `(None, None, True)`) when a verified predecessor's `seq` is type-confused,
+  rather than seeding from it. Returning its `hash` while reporting no position
+  would have left `prev_verified_hash` set with `prev_seq` `None` — the same
+  `TypeError`, one branch further along. The helper's third return value was
+  renamed `exhausted_bound` → `fail_closed`, since it now carries two distinct
+  reasons; the invariant it upholds is stated explicitly: **a non-`None` seed
+  hash always comes with a real `int` seed position.**
+
+**Decision — reject, don't accept the coerced value.** The item offered two
+routes: read the validated `LedgerRecord.seq` (which would silently accept
+`"3"` as position 3), or treat a non-`int` as unverified. This ships the
+second, deliberately stricter than `audit/ledger.py`'s `verify_chain` (which
+reads the coerced `record.seq`): `audit/worm_sink.py`'s writer emits `seq`
+through `LedgerRecord.model_dump_json()`, which always writes a bare integer,
+so a genuine segment can never reach this — the rule is false-positive-free by
+construction. That last clause is no longer an inference: the completion audit
+found its only backing was a `record["seq"] == 0` assertion that also passes
+for `0.0` and `False` — both values `_chain_seq` rejects — so
+`test_a_flushed_segment_writes_every_seq_as_a_bare_integer` now asserts the
+TYPE, on every line of a flushed segment. A serialization change emitting a
+float would otherwise have left the suite green while the reader began
+reporting forged-archive alarms against untampered segments, the worst false
+positive this product can produce. `verify_chain` also reports a typed failure rather than raising,
+and the local ledger file is not the attacker-writable surface an S3 bucket
+with `s3:PutObject` granted is. The divergence is recorded in `_chain_seq`'s
+own docstring.
+
+**Coverage** (+7 test functions / 15 collected cases in
+`tests/unit/test_worm_search.py`, 91 in the file — all counts measured with
+`--collect-only`, not reasoned; plus three tests deliberately placed at other
+surfaces, see the audit section below):
+
+- Two end-to-end reproductions through `search_worm_archive`, one per raw-read
+  site — the seed path (a hash-valid string-`seq` predecessor on a resumed
+  page) and the accept-as-given path (a non-verifying predecessor, so the
+  crafted record's own `seq` is carried forward into `prev_seq` and raises on
+  the FOLLOWING line). The `str` cases raised `TypeError: can only
+  concatenate str (not "int") to str` against the pre-fix module; the `float`
+  and `bool` cases raised nothing there and were silently ACCEPTED as a valid
+  link, returning the crafted record as a genuine event. All now report
+  `chain_breaks == 1`/`unverified == 1`.
+- A `_retype_seq` fixture helper that rewrites a line's raw `seq` leaving the
+  hash untouched, and every test using it **asserts the crafted line still
+  passes `verify_envelope_hash`** — so a future change that made it fail
+  verification instead shows up as a failed premise rather than as a silently
+  vacuous test.
+- A value taxonomy over `_chain_seq` (`str`/`float`/`bool`/`null`/`"0"`/list/
+  dict rejected, `int` accepted, missing key and non-dict rejected), with the
+  int case as an explicit positive control so a helper that returned `None` for
+  everything — disabling chain verification entirely — cannot pass.
+- The unpaged genesis case, where `"0" == 0` was already `False` and so never
+  raised, pinned so it keeps being counted now that the guard short-circuits
+  the branch.
+
+**Mutation-verified** (4/4 enforcement rules; each broken deliberately, suite
+re-run, failure confirmed for that reason, reverted): `_chain_seq`'s int-only
+rule, its `bool` exclusion, the seed's fail-closed return, and the hoisted
+`seq is None` check. A fifth drafted guard — a `seq is not None` conjunct
+inside the linked branch — was **deleted** when mutation testing proved no
+test could distinguish it: with `prev_seq` guaranteed `int`, a `None` there
+merely compares unequal and cannot raise, so it was unreachable, untestable
+code. Hoisting the check to a single site ahead of both branches made the one
+remaining guard load-bearing. (Same posture as item 177's deleted idempotence
+guard.)
+
+**Docs:** the `audit/worm_search.py` module docstring's list of what breaks a
+chain gained this case; `CHANGELOG.md` `[Unreleased] / Fixed`; `README.md`'s
+`chain_breaks_total` cause list; the response `note`, the `chain_breaks` field
+comment, and `AUDIT_WORM_SEARCH_CHAIN_BREAKS_TOTAL`'s Prometheus HELP (each an
+operator-facing enumeration of break causes that item 177 had written as a
+closed list); `docs/THREAT_MODEL.md` QG-40 (narrative + per-test evidence
+column), matching what items 154/172/177 each did in their own commits; and
+`verify_envelope_hash`'s own docstring in `audit/ledger.py` — the coercion
+hazard belongs at the function that makes the guarantee, since three other
+readers (`admin/anomaly.py`, `admin/config_trends.py`,
+`api/admin_ui_routes.py`) also call it and then read raw envelope fields.
+
+**The completion audit's most important finding was an overclaim this item
+itself introduced.** The first draft added a module-docstring sentence
+asserting an absolute: "a crafted or corrupt line is reported as `malformed`/
+`unverified`, never raised as an unhandled exception the route has to mask."
+Two reviewers independently disproved it and it was **measured** false against
+the post-fix tree — three other line shapes still escape as a masked 500, one
+of them (a non-ASCII `hash` reaching `hmac.compare_digest`) reachable by
+ORDINARY CORRUPTION rather than crafting, because the object body is decoded
+with `errors="replace"`. The sentence now states what is actually proven (the
+four enumerated chain-break causes are counted outcomes) and names the residual
+explicitly, tracked as **item 194**. Filed rather than fixed here because the
+third shape needs a maintainer decision on a depth cap for a security screener
+whose `True` means *reject*, and the first changes a primitive shared by four
+readers — the same reason item 178 was itself filed off item 172 rather than
+folded into it.
+
+Three further audit fixes worth recording, each a case where a test looked
+like coverage and was not: the two end-to-end tests planted **byte-identical**
+segment bytes and asserted an **identical** count triple, so only the
+hand-built cursor's `line` made one of them exercise the seed path — and
+`_decode_cursor` defaults a missing `line` to 0, so a cursor reshape could have
+silently turned it into a duplicate of the genesis test (both now pin
+`lines_skipped_after_chain_break`, the one observable that differs by
+position). The genesis test **passes against the entire pre-fix module** — it
+is a characterization test, now labelled as one, so nobody deletes the single
+test that actually pins the main-loop read. And the resumed-page test is now
+parametrized over `str`, `float` and `bool`, which did NOT behave alike before
+the fix: a string raised, while a float and a bool were silently ACCEPTED as a
+valid link (`1 == 0.0 + 1` and `1 == False + 1` are both true), so the crafted
+record was returned as a genuine event.
+
+A second review round on the fixed tree caught one more, and it is the same
+lesson a third time: the route-level test added in the first round **planted
+the one `seq` shape that never raised.** An unpaged scan evaluates `"0" == 0`,
+which is merely `False` — already a correct chain break pre-fix — so the test
+passed against the entire pre-fix module while its docstring claimed to pin the
+masked-500 boundary. It now plants two chained records with the FIRST retyped
+and resumes at line 1 via the route's own `cursor` parameter, and was verified
+to fail `assert 500 == 200` against the pre-fix module with the `TypeError`
+logged. The new `note` clause was also unasserted by any test until this round,
+and the coverage counts drifted twice more before being measured with
+`--collect-only` rather than reasoned.
+
+**Suites on the final tree:** unit 2811, integration 389 (excluding `real_db`),
+security 480 — all passing; `make release-check` green.
+
+**Effort:** S. **Depends on:** 172 (shipped). **Surfaced:** item 194.
+
 ### 179. Cumulative disclosure budget: bound multi-query differencing per purpose, the one form of "governing intent" that is structural ✅ DONE
 
 **Surfaced 2026-08-11** from a direct question — *we govern what the query is

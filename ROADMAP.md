@@ -479,9 +479,12 @@ claim when the work ships or before explicitly handing the item back.
   deleted after mutation testing proved it unreachable and untested).
   *Surfaced 2026-08-10 by `security-invariant-reviewer` auditing item 172's
   own commit.* **Depends on 172.**
-- [ ] **178** — a hash-verified WORM record with a non-int `seq`
+- [x] **178** — a hash-verified WORM record with a non-int `seq`
   (type-confused, not corrupt) raises `TypeError` instead of being counted
-  `unverified`, escaping as a generic 500. *Surfaced 2026-08-11 by
+  `unverified`, escaping as a generic 500. ✅ **Shipped** (a `_chain_seq`
+  helper at both raw reads; a type-confused line is now an ordinary chain
+  break, and the seed walk fails closed rather than seeding from one).
+  *Surfaced 2026-08-11 by
   `security-invariant-reviewer` auditing item 172's WS-172-9 follow-up.
   Placed here 2026-08-11 by the `roadmap-next` walk that shipped item 177 —
   filed in TODO.md the same day but never given a roadmap position.
@@ -580,6 +583,18 @@ claim when the work ships or before explicitly handing the item back.
   deny-by-default and separately granted), but it makes `INFERENCE_RISKS.md`'s
   "bounded since item 179" read broader than it is; the docs half is
   unambiguous, the flooring half is a product decision.* **Depends on 93, 179.**
+- [ ] **194** — three crafted-or-corrupt WORM lines still escape
+  `search_worm_archive` as an unhandled exception the route masks as a 500 (a
+  non-ASCII `hash` in `hmac.compare_digest`, plus unbounded recursion in
+  `json.loads` and in `_contains_forbidden_content`). *Surfaced 2026-08-12 by
+  `security-invariant-reviewer` and `claim-reviewer` independently while
+  auditing item 178, and **measured** against the post-fix tree. Pre-existing
+  since items 154/172 — the same defect class item 178 closed for `seq`. The
+  non-ASCII one needs no attacker: the object body is decoded with
+  `errors="replace"`, so one corrupted byte in a genuine segment 500s the
+  endpoint. Two thirds is mechanical; the depth cap on the forbidden-content
+  screener is a maintainer decision, since that control's `True` means reject.*
+  **Depends on 134.**
 - [ ] **190** — four claim drifts on outward-facing surfaces unrelated to WORM
   search (MSSQL cost estimation, four-eyes approval + admin UI, a README
   self-contradiction, the unconditional "resumable page" claim). *Surfaced

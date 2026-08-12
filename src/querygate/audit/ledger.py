@@ -135,6 +135,18 @@ def verify_envelope_hash(raw: Any, *, key: Optional[bytes] = None) -> Optional[b
     edited record whose author didn't also recompute a correct digest — e.g.
     the `{"hash": "anything"}` fabrication this item's report describes.
     Uses the same constant-time `hmac.compare_digest` `verify_chain` does.
+
+    **A `True` says nothing about the RAW dict's field types (TODO.md item
+    178).** This validates through `LedgerRecord.model_validate` first, and
+    pydantic's lax coercion accepts `"3"`, `3.0` and `True` for the `int`-typed
+    `seq` — the digest is then computed over the COERCED value, so a crafted
+    line whose raw `seq` is a string can be perfectly self-consistent and
+    still verify. A caller that reads a field back off the raw dict (rather
+    than off a validated `LedgerRecord`) and then does arithmetic or an
+    order comparison on it must narrow the type itself first; `seq == prev + 1`
+    against a raw string raises `TypeError`. `audit/worm_search.py`'s
+    `_chain_seq` is the worked example, and is deliberately stricter than
+    `verify_chain` below, which reads the coerced `record.seq` and accepts it.
     """
     if not (
         isinstance(raw, dict)
