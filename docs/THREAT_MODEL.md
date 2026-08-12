@@ -326,17 +326,22 @@ defaults.
   (`AppConfig.mcp_max_request_bytes` / `mcp_max_request_depth`) with generous
   defaults, so the MCP surface matches REST's "malformed input is a clean
   client error, never a 5xx" posture.
-- **Configuration governance has version history and rollback, but no
-  approval workflow yet:** the `/admin/config/*` API validates, versions,
-  previews document-level changes, attributes, and audits every change, and a single `admin:config:write`
-  caller can stage and apply a version in one session with no second-
-  approver/four-eyes requirement or scheduled apply. `POST /admin/config/diff`
+- **Configuration governance has version history, rollback, and an opt-in
+  four-eyes approval workflow:** the `/admin/config/*` API validates, versions,
+  previews document-level changes, attributes, and audits every change. When
+  `require_config_approvals` is enabled (TODO item 42), applying a staged
+  version requires a second principal holding `admin:config:approve`, with
+  author ≠ approver enforced server-side; the admin UI drives the
+  approve/reject step. With it **disabled — the default** — a single
+  `admin:config:write` caller can still stage and apply in one session. There
+  is no scheduled apply. `POST /admin/config/diff`
   (QG-20, TODO item 40 phase 1) adds a resolved-access semantic diff, but only
   at the connection baseline — per-principal resolution and blast-radius
   analysis are later phases. The preview is deliberately content-free; a
   write-only caller sees only submitted/inherited rather than an equality
-  result, so write scope cannot be used as read scope. No admin UI (TODO item
-  31).
+  result, so write scope cannot be used as read scope. An admin UI over these
+  same scoped routes ships (TODO item 31); it introduces no mutation path of
+  its own — see QG-30/QG-31 for its own threat surface.
 - **Secrets lifecycle:** connection secrets resolve from either the
   environment or, optionally, HashiCorp Vault (token auth only — no
   AppRole/Kubernetes auth yet). `VAULT_TOKEN` itself is still a static,
