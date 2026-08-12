@@ -539,7 +539,11 @@ All notable changes to QueryGate are documented here.
   budget; unlike the quota and concurrency limiters, that backend **fails
   closed**. **This bounds multi-query differencing, it does not close it** — a
   caller inside its budget still differences successfully, and no threshold is
-  recommended because none has been calibrated against real traffic. See
+  recommended because none has been calibrated against real traffic. **Set the
+  per-table cap:** `max_shape_repeats_per_window` is currently evadable (item
+  186) because the shape fingerprint does not canonicalize a referenced select
+  alias, a cte rename, a nested-scope alias, or list order;
+  `max_aggregate_queries_per_window` is unaffected. See
   `docs/INFERENCE_RISKS.md` R3.
 
 ### Fixed

@@ -3265,11 +3265,22 @@ the WORM-search class specifically and its sweep confirmed no fourth *WORM*
 surface. These are a different class the same review turned up, filed rather
 than folded in because none is about item 134:
 
-1. **`README.md` and `docs/THREAT_MODEL.md` still say cost estimation is
-   Postgres-only** ("MSSQL has no equivalent yet (item 26 phase 2)").
+1. **Six sites still say cost estimation is Postgres-only.**
    `estimate_mssql_query_cost` ships and is dispatched in `service.py`; item 26
    is `✅ DONE` including phase 2, and CLAUDE.md records the exception as
-   resolved.
+   resolved. Grepped site list (2026-08-12) — fix **all** of them:
+   `README.md:501` (a whole stale paragraph), `README.md:1950-1953`,
+   `docs/THREAT_MODEL.md:162` (the QG-08 row), `docs/THREAT_MODEL.md:295-298`,
+   `docs/PRODUCT_GUIDE.md:7505` (a Decision Log sentence — **re-word, do not
+   delete**, since CLAUDE.md already records the exception as resolved), and
+   the generated `docs/product-guide.html` mirror. Note
+   `docs/PRODUCT_GUIDE.md:972` is a *different* Postgres-only claim
+   (`INTERSECT ALL`/`EXCEPT ALL`) and is correct — do not "fix" it.
+   *A fifth denial class, unfiled until now: `landing/security.html:498`
+   states QueryGate "does not yet estimate a database execution plan" at all.
+   That file carried unrelated uncommitted work when this was found, so it was
+   left; use `sales/index.html`'s honest framing ("cost estimation that
+   prevents *every* expensive plan") as the model.*
 2. **`landing/security.html` lists a four-eyes config approval workflow and an
    administration UI as not shipped.** Both ship — item 42
    (`ADMIN_CONFIG_APPROVE_SCOPE`, `require_config_approvals`, author ≠ approver
@@ -3288,14 +3299,43 @@ than folded in because none is about item 134:
    QG-40, `docs/PRODUCT_GUIDE.md` (twice), the generated
    `docs/product-guide.html`, and `CHANGELOG.md`. True for every bound except
    the day-listing truncation — that is item 184. One clause naming item 184 at
-   each site. *Site list extended 2026-08-12 by `claim-reviewer`: the original
-   filing named 3 of the 6, so a fix following it verbatim would have left
-   PRODUCT_GUIDE and its generated HTML — the copy most likely to be sent to a
-   reader — still wrong.*
-5. **`docs/TODO_ARCHIVE.md`'s item-26 write-up still says "Phase 2 — MSSQL
+   each site. Grepped site list (2026-08-12): `src/querygate/audit/worm_search.py:126`,
+   `README.md:195`, `docs/THREAT_MODEL.md:193` (QG-40),
+   `docs/PRODUCT_GUIDE.md:1304` and `:5777`, `docs/product-guide.html:436`,
+   `CHANGELOG.md:164`, and `src/querygate/core/config.py:366-370` — the comment
+   on `audit_worm_search_max_objects_scanned`, the very knob item 184 breaks.
+   (`config.py:376-378`, the timeout comment, is **correct** — that bound does
+   resume. Do not "fix" it.) *Extended twice, on 2026-08-12: the original filing
+   named 3 of 8 and the first extension still missed the config.py comment.*
+5. **`docs/TODO_ARCHIVE.md:1240`'s item-26 write-up still says "Phase 2 — MSSQL
    estimated-plan equivalent, not started"** while item 26 is `✅ DONE`
    including phase 2 and `estimate_mssql_query_cost` ships. Internal-only, same
    root as #1. *Found 2026-08-12 by `claim-reviewer`; previously unfiled.*
+6. **`sales/PUBLIC_LANDING_RUNBOOK.md:57-60` forbids claiming four shipped
+   capabilities** — four-eyes approval (item 42), an administration UI (item
+   31), a WORM audit store (item 134 phase 1) and a production Helm reference
+   (`deploy/helm/querygate`, asserted by `tests/unit/test_helm_ha_deployment.py`).
+   **This file is the instruction sheet for landing-page copy**, so a stale
+   stop-list actively reproduces #2's and #1's denials on every future edit —
+   it is the mechanism by which `landing/security.html` stayed wrong, and it
+   should be fixed FIRST. Left untouched here only because it carried unrelated
+   uncommitted work.
+7. **`landing/security.html:502` omits the item-184 non-exhaustive-paging
+   caveat** that `CUSTOMER_README.md`, `sales/index.html`,
+   `docs/business/GO_TO_MARKET.md` and README now carry. Omission, not a false
+   statement — but the public security page is exactly who needs it.
+
+**Method note — read before fixing any of the above.** Four consecutive
+`claim-reviewer` rounds (2026-08-12) each found that the *previous* round's fix
+was scoped to the site list in the filing, and that every filing's list was
+shorter than reality. The failure is the method, not the diligence. So: derive
+the site list by grepping the whole repo — including `src/` comments,
+`examples/`, `docs/business/`, `docs/TRUST_EVIDENCE.md`,
+`docs/COMPLIANCE_MAPPING.md`, `sales/PUBLIC_LANDING_RUNBOOK.md`, `CHANGELOG.md`
+and the generated `docs/product-guide.html` — record it with line numbers in
+the item *before* editing, and re-grep after. A sweep that excludes a directory
+can conclude only that the searched subset is clean, never that a class is
+closed.
 
 **Effort:** S. **Depends on:** nothing.
 

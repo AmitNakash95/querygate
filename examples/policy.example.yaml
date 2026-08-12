@@ -276,6 +276,11 @@ connections:
     # Placeholders, NOT recommendations — pick your own from your audit stream.
     # Both caps also require min_group_size above to be set; a policy that
     # configures a budget without a k-floor is rejected at load time.
+    # SET THE PER-TABLE CAP. max_shape_repeats_per_window is currently evadable
+    # (TODO.md item 186): the shape fingerprint does not canonicalize a
+    # referenced select alias, a cte rename, a nested-scope alias, or list
+    # order, so a prober can mint a fresh shape bucket per probe. The per-table
+    # cap below is unaffected and is the load-bearing one until 186 lands.
     # max_shape_repeats_per_window: <n>       # one shape, re-run n times
     # max_aggregate_queries_per_window: <n>   # any aggregate on the table
     # disclosure_budget_window_seconds: 3600  # the one real default

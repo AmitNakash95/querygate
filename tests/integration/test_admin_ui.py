@@ -748,27 +748,32 @@ def test_audit_browser_exposes_exactly_four_filters_in_the_ui():
     markup = (ui_root / "index.html").read_text(encoding="utf-8")
     app_js = (ui_root / "app.js").read_text(encoding="utf-8")
 
-    control_ids = set(
-        re.findall(r'id="(audit-(?:event-type|outcome|principal|connection|action))"', markup)
-    )
+    # Slice the filter form and enumerate whatever ids are inside it. A fixed
+    # alternation would only pin the four names against *removal* — a fifth
+    # control (say `audit-table`) would match nothing and the test would pass
+    # while the docs went stale, which is the exact drift this exists to catch.
+    form_open = markup.index('<form id="audit-filters"')
+    form = markup[markup.index(">", form_open) + 1 : markup.index("</form>", form_open)]
+    control_ids = set(re.findall(r'id="([^"]+)"', form))
     assert control_ids == {
         "audit-event-type",
         "audit-outcome",
         "audit-principal",
         "audit-connection",
-    }, "the admin UI's audit filter controls changed — update the customer-facing docs that name them"
+    }, (
+        "the admin UI's audit filter controls changed — update the customer-facing docs "
+        "that enumerate them (CUSTOMER_README.md, sales/index.html)"
+    )
 
     # And that the request builder sends exactly those four, so a control could not
     # be added to the markup while silently never reaching the endpoint (or vice versa).
-    audit_query = app_js[app_js.index("function auditQuery(") :][:600]
-    sent = set(
-        re.findall(
-            r"^\s*(event_type|outcome|principal_id|connection_id|action):", audit_query, re.M
-        )
-    )
+    # Enumerated from the `fields` object literal for the same reason as above.
+    fields_start = app_js.index("const fields = {", app_js.index("function auditQuery("))
+    fields = app_js[fields_start : app_js.index("};", fields_start)]
+    sent = set(re.findall(r"^\s*([A-Za-z_]+):", fields, re.M))
     assert sent == {"event_type", "outcome", "principal_id", "connection_id"}, (
-        "the admin UI's audit request builder changed — `action` reaching it would make "
-        "the docs' four-filter claim wrong"
+        "the admin UI's audit request builder changed — a filter reaching it that the "
+        "docs don't name (or vice versa) makes the four-filter claim wrong"
     )
 
 
