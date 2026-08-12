@@ -12,12 +12,15 @@ connection) through the same `Policy` this caller already resolves.
 Enforcement shape mirrors the concurrency guard:
 
 * A narrow `QuotaLimiter` Protocol (CLAUDE.md's "Composable single-purpose
-  interfaces" section) with one in-process implementation today. The default
-  `InProcessQuotaLimiter` is correct for a single instance — like the default
-  in-process concurrency limiter, its window is silently per-replica under a
-  load balancer. A Redis-backed cross-replica limiter that makes the quota a
-  true shared budget is TODO.md item 50 phase 2 (not started), and drops in
-  behind this same Protocol without touching any call site.
+  interfaces" section) with two implementations, dispatched through whichever
+  instance is currently active. The default `InProcessQuotaLimiter` is correct
+  for a single instance — like the default in-process concurrency limiter, its
+  window is silently per-replica under a load balancer. The cross-replica
+  sibling that makes the quota a true shared budget is
+  `execution/redis_quota.py`'s `RedisQuotaLimiter` (TODO.md item 50 phase 2,
+  shipped); it sits behind this same Protocol and touches no call site. Note
+  there is no separate quota backend switch — `init_redis_quota_limiter` is
+  installed by `api/app.py` only when `CONCURRENCY_BACKEND=redis`.
 * `reserve()` is called *before* execution and atomically prunes the window,
   checks both caps, and — if admitted — records the attempt, so N concurrent
   in-flight queries can't each slip past a check-then-act race. A rejected

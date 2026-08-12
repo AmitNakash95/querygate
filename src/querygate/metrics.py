@@ -113,10 +113,26 @@ QUERY_QUOTA_REJECTIONS_TOTAL = Counter(
     "Execution attempts refused before running by a per-principal quota "
     "(TODO.md item 50), by connection and which cap tripped. quota_kind: "
     "requests (rolling-window request-count cap) | bytes (rolling-window "
-    "response-byte cap). Single-instance visibility only — the default "
-    "in-process quota window is per-replica, like the in-process concurrency "
-    "limiter; a Redis-backed cross-replica quota is item 50 phase 2.",
+    "response-byte cap). The default in-process quota window is per-replica, "
+    "like the in-process concurrency limiter, so this counter is "
+    "single-instance visibility only under it; with CONCURRENCY_BACKEND=redis "
+    "the RedisQuotaLimiter (item 50 phase 2) makes the window a true "
+    "cross-replica budget, though each replica still exports its own counter.",
     ["connection", "quota_kind"],
+    registry=REGISTRY,
+)
+
+DISCLOSURE_BUDGET_REJECTIONS_TOTAL = Counter(
+    "querygate_disclosure_budget_rejections_total",
+    "Aggregate queries refused before running by a cumulative disclosure "
+    "budget (TODO.md item 179), by connection and which cap tripped. "
+    "budget_kind: disclosure_shape (one query shape re-run past its per-window "
+    "cap — the multi-query differencing signature) | disclosure_table (too "
+    "many aggregate queries against one table however the shape varied). "
+    "Deliberately NOT labeled by table or principal: which table a prober is "
+    "working is exactly the disclosure this guardrail exists to withhold, and "
+    "principal is unbounded cardinality. Use the audit stream for attribution.",
+    ["connection", "budget_kind"],
     registry=REGISTRY,
 )
 
@@ -234,12 +250,12 @@ AUDIT_WORM_BUFFER_DROPPED_TOTAL = Counter(
 # Managed search over the WORM archive (TODO.md item 134 phase 2,
 # audit/worm_search.py). `outcome` is one of "ok" | "rejected" | "error" —
 # "rejected" means a bound was violated and no S3 call was made at all.
-# NOTE (TODO.md item 180): in production this currently only ever counts
+# NOTE (TODO.md item 185): in production this currently only ever counts
 # CURSOR rejections (a cursor that doesn't match the current filters, or
 # whose day falls outside the window). A missing/over-wide time range or an
 # out-of-range limit is rejected earlier, by `build_worm_search_result`'s own
 # `_validate_window`/`_validate_limit`, which never reaches the counter — see
-# item 180 for the fix. "error" means S3 itself failed mid-scan
+# item 185 for the fix. "error" means S3 itself failed mid-scan
 # (unreachable, misconfigured bucket); "ok" covers every genuinely served
 # request, complete or truncated.
 AUDIT_WORM_SEARCH_REQUESTS_TOTAL = Counter(
@@ -391,6 +407,7 @@ __all__ = [
     "QUERIES_REJECTED_TOTAL",
     "QUERY_DURATION_SECONDS",
     "QUERY_QUOTA_REJECTIONS_TOTAL",
+    "DISCLOSURE_BUDGET_REJECTIONS_TOTAL",
     "CONCURRENCY_IN_USE",
     "CONCURRENCY_MAX",
     "QUEUE_DEPTH",
