@@ -303,7 +303,8 @@ make test-ts-client                      # or: cd clients/typescript && npm test
 ```
 
 The default suite excludes tests marked `real_db`; CI also runs dedicated
-Postgres and MSSQL jobs. `test_sqlite_end_to_end.py` uses SQLite internally
+Postgres, MSSQL, and MySQL jobs (`postgres-live` / `mssql-live` / `mysql-live`),
+so all three *supported* registry dialects are live-verified against a real engine. `test_sqlite_end_to_end.py` uses SQLite internally
 as a compiler/execution test, but SQLite is not a supported registry dialect.
 
 ## Architecture
@@ -518,7 +519,11 @@ without an estimator returns None (proceeds under the reactive guardrails).
   stringified annotations there fail to resolve at registration time. Keep
   annotations as real objects in all six files.
 - `ConnectionProfile.dialect` accepts `"postgresql"`, `"mssql"`, `"mysql"`
-  (item 19 phase 1), or `"snowflake"`/`"bigquery"` (item 19 phases 2/3 —
+  (item 19 phase 1 — **live-verified for reads, dialect idioms, and session
+  guardrails**: `tests/integration/test_mysql_live.py` runs against a real MySQL
+  8.4 in the dedicated `mysql-live` CI job, marker `mysql_live`. Governed-write
+  *execution* is live-proven on Postgres/MSSQL only — MySQL has no
+  insert/update/delete round-trip test), or `"snowflake"`/`"bigquery"` (item 19 phases 2/3 —
   both accepted, but `connections/engine.py`'s `init_engine` refuses to
   actually connect for either; rendering-level only, not live-verified) —
   SQLite is used internally for tests/examples by monkeypatching

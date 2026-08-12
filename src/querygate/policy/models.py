@@ -499,8 +499,21 @@ class Policy(pyd.BaseModel):
     max_response_bytes: int = pyd.Field(default=10_000_000)
 
     # Execution guardrails.
-    timeout_seconds: int = pyd.Field(default=30)
-    max_concurrency: int = pyd.Field(default=8)
+    # ge=1: reaches connections/dialects.py's raw `SET LOCAL statement_timeout`/
+    # `SET LOCK_TIMEOUT` session guardrails unvalidated. Postgres treats
+    # `'0s'` as DISABLED (no timeout at all) — the loosest possible setting,
+    # not "instant timeout" as the number might suggest — so silently
+    # accepting 0 here would be a config mistake that's invisible until an
+    # unbounded query finally causes an incident (2026-08-11
+    # architecture-boundary-reviewer finding, same reasoning as
+    # max_concurrency's bound below).
+    timeout_seconds: int = pyd.Field(default=30, ge=1)
+    # ge=1: a value of 0 fails every caller closed (harmless but pointless);
+    # a negative value reaches asyncio.Semaphore(n) and raises ValueError at
+    # first request instead of at config-validation time (2026-08-11
+    # security-invariant-reviewer finding, surfaced by load_benchmark.py
+    # computing this from CLI-supplied concurrency levels).
+    max_concurrency: int = pyd.Field(default=8, ge=1)
     concurrency_wait_seconds: float = pyd.Field(default=10)
 
     # Queue-depth pressure controls (TODO.md item 35 phase 2). Unset/None

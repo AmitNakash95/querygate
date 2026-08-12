@@ -105,6 +105,14 @@ test-security: ## Run the adversarial security regression suite
 security-benchmark: ## Run the reproducible adversarial security benchmark (item 58): catch rate vs. a modeled raw-SQL baseline. Pass ARGS="--json" or ARGS="list".
 	poetry run querygate-security-benchmark $(or $(ARGS),run)
 
+.PHONY: performance-benchmark
+performance-benchmark: ## Measure QueryGate's per-request latency overhead vs. raw SQL against the real demo Postgres (compose-up first). Pass ARGS="--json" for machine-readable output.
+	poetry run querygate-performance-benchmark run $(ARGS)
+
+.PHONY: load-benchmark
+load-benchmark: ## Measure QueryGate's throughput/latency under concurrent load vs. raw SQL against the real demo Postgres (compose-up first; complements performance-benchmark, distinct from test-load's guardrail-correctness check). Pass ARGS="--json" for machine-readable output.
+	poetry run querygate-load-benchmark run $(ARGS)
+
 .PHONY: anomaly-ui-smoke
 anomaly-ui-smoke: ## Render the item-59 anomaly panel with the real admin UI in headless Chromium and assert the visualization (screenshot -> dist/anomaly-ui-smoke.png; SKIPs if no browser)
 	poetry run python scripts/anomaly_ui_smoke.py
