@@ -328,13 +328,20 @@ defaults.
   client error, never a 5xx" posture.
 - **Configuration governance has version history, rollback, and an opt-in
   four-eyes approval workflow:** the `/admin/config/*` API validates, versions,
-  previews document-level changes, attributes, and audits every change. When
-  `require_config_approvals` is enabled (TODO item 42), applying a staged
-  version requires a second principal holding `admin:config:approve`, with
-  author ≠ approver enforced server-side; the admin UI drives the
-  approve/reject step. With it **disabled — the default** — a single
-  `admin:config:write` caller can still stage and apply in one session. There
-  is no scheduled apply. `POST /admin/config/diff`
+  previews document-level changes, attributes, and audits every change.
+  `AppConfig.require_config_approvals` (an integer count, **default 0 —
+  off**) gates first activation: when set above 0, applying a staged version
+  requires that many approvals from principals holding
+  `admin:config:approve`, each distinct from the author and from each other,
+  enforced server-side (TODO item 42); the admin UI drives the approve/reject
+  step. Two residuals to state plainly. **Rollback is deliberately exempt** —
+  reactivating a previously-active version needs no re-approval, on the
+  reasoning that it was approved when first applied and gating DR on
+  re-approval would be unsafe; the consequence is that an
+  `admin:config:write` caller can reach any previously-active configuration
+  without a second party. And at the default of 0 a single
+  `admin:config:write` caller stages and applies in one session. There is no
+  scheduled apply. `POST /admin/config/diff`
   (QG-20, TODO item 40 phase 1) adds a resolved-access semantic diff, but only
   at the connection baseline — per-principal resolution and blast-radius
   analysis are later phases. The preview is deliberately content-free; a
