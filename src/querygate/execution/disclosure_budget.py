@@ -23,7 +23,13 @@ that counted *distinct* shapes would have missed the attack completely.
 Two caps, both `None` (disabled) by default, either one tripping refuses:
 
 * `Policy.max_shape_repeats_per_window` — how many times one
-  (table, normalized-shape) pair may be re-run. The targeted probe cap.
+  (table, normalized-shape) pair may be re-run. Intended as the targeted probe
+  cap. **It does not currently deliver that bound (TODO.md item 186):**
+  `_canonicalize` rewrites only *dotted* refs and only from the OUTERMOST
+  scope's alias map, so a referenced select alias, a cte rename, a nested-scope
+  alias, or a reordered list each mint a fresh bucket per probe — measured at 20
+  distinct fingerprints for 20 alias-walked probes. Until 186 lands, the
+  per-table cap below is the load-bearing one.
 * `Policy.max_aggregate_queries_per_window` — how many aggregate queries may
   touch one table however the shape varies. The blunt backstop, and what makes
   the shape cap non-trivial to evade: `normalize_query_shape` deliberately
@@ -31,7 +37,9 @@ Two caps, both `None` (disabled) by default, either one tripping refuses:
   `top_n.n`, a percentile `fraction`), so without this second cap a caller
   could mint a fresh shape bucket per probe just by walking `limit`.
   `shape_fingerprint` below strips those same numbers before hashing, which
-  closes the evasion at the shape layer too — the two are belt and braces.
+  closes *that* evasion at the shape layer too. It does **not** close the alias/
+  cte/order evasions — see item 186 above — so the two are not belt and braces
+  today: the per-table cap is carrying the weight.
 
 **Scope of the key: `(connection_id, principal, purpose, table)`.** Principal,
 not actor: under item 90 the principal IS the human whose policy applied (the

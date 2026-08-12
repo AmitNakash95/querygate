@@ -1301,7 +1301,8 @@ archive: a required, capped time range plus `event_type`/`connection_id`/
 file has long since rotated that window out. Every bound (window width,
 objects scanned, wall-clock timeout, page size) is enforced server-side —
 an over-wide or missing range is rejected outright, a bound hit mid-scan
-degrades to a truncated, resumable page rather than an unbounded scan.
+degrades to a truncated, resumable page rather than an unbounded scan — except
+a day listing over `max_objects_scanned`, whose cursor does not advance (item 184).
 
 **MCP as an OAuth 2.0 resource server (opt-in).** For deployments that put the
 MCP surface behind a real authorization server, QueryGate can run it as a
@@ -5777,7 +5778,8 @@ reasoning behind them, newest first. Added to incrementally as work happens
   exists for, still a real enforced ceiling), and one request's actual S3
   work is separately bounded by `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
   `AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS` — a bound hit mid-scan
-  degrades to a truncated, resumable page (an opaque cursor encoding
+  degrades to a truncated, resumable page — except a day listing over
+`max_objects_scanned`, whose cursor repeats that day (item 184) — (an opaque cursor encoding
   `day`/`key`/`line` plus a fingerprint of the request's own filters, so
   replaying a cursor against different filters is rejected rather than
   silently returning a mismatched page) instead of continuing an
@@ -7502,8 +7504,10 @@ reasoning behind them, newest first. Added to incrementally as work happens
   class + registry) but the two layers stay distinct. Behavior-preserving (the
   module functions are kept as thin dispatchers; proven by the unchanged
   `test_dialects.py` plus a new registry test). The cost-estimation hook the
-  item also mentions stays Postgres-only until MSSQL cost estimation (item 26
-  ph2) exists — that remains the one documented inline-branch exception.
+  item also mentions was Postgres-only at this date, and was the one documented
+  inline-branch exception. *(Superseded: item 26 phase 2 shipped MSSQL
+  `SHOWPLAN_XML` estimation, and `_estimate_cost` is now a per-dialect dispatch,
+  so the exception is resolved — CLAUDE.md records it as such.)*
 - **2026-07-23 — Bounded nested subqueries are added as a recursive AST node with
   caps enforced TREE-WIDE, not per-level, and only the uncorrelated/single-
   connection/depth-capped subset (item 97; maintainer-approved).** The AST gains

@@ -383,8 +383,11 @@ async def test_execute_rejects_query_over_cost_estimate_threshold():
 
 @pytest.mark.asyncio
 async def test_execute_skips_cost_estimation_for_non_postgres_dialect():
-    """max_estimated_rows/max_estimated_cost are accepted for any dialect
-    but only enforced for Postgres — see TODO.md item 26 phase 2 for MSSQL.
+    """max_estimated_rows/max_estimated_cost are accepted for any dialect but
+    only enforced where an estimator exists — Postgres (inline EXPLAIN) and
+    MSSQL (a dedicated SHOWPLAN_XML connection), item 26 phases 1-2. MySQL,
+    Snowflake and BigQuery have none, so the gate is skipped and the query
+    proceeds under the reactive guardrails.
     """
     table = _company_table()
     query = StructuredQuery(from_table="customers", select=["customers.id"], limit=10)
