@@ -428,7 +428,14 @@ query, so a caller can't single out an individual by aggregating over a
 razor-thin filter — a `count(*)` over a group backed by fewer than *k* rows is
 suppressed rather than returned. It is the aggregate analog of a mandatory row
 filter (policy-driven, injected, non-removable) and applies only to aggregate
-queries; it closes single-query singling-out, not multi-query differencing.
+queries; it closes single-query singling-out. Multi-query *differencing* is
+bounded — not closed — by the opt-in cumulative disclosure budget
+(`max_shape_repeats_per_window` / `max_aggregate_queries_per_window`, item 179),
+which caps how often one query shape may be re-run and how many aggregate
+queries may touch one table, per principal and declared purpose over a rolling
+window. Both are off by default and the budget requires `min_group_size`. Set
+the per-table cap: the per-shape half is currently evadable (item 186). See
+`docs/INFERENCE_RISKS.md` R3.
 Because the floor counts *joined* rows, a join that can match many rows per row
 would inflate the count — so while `min_group_size` is set, such a join is refused
 on an aggregate query rather than silently answered (item 118). Joining onto the

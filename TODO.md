@@ -2985,9 +2985,20 @@ that the default `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` (2000) exceeds the
 per **flushing process**, not per deployment. Segment keys are
 `prefix/YYYY/MM/DD/<timestamp>-<microsecond>.jsonl` and every replica and every
 uvicorn worker runs its own interval-driven `WormFlushMonitor` writing into the
-*same* day prefix. So two replicas — or one pod with `NUM_OF_WORKERS=2` — produce
-~2880 objects/day at stock settings and **trigger this with no knob lowered and
-no interval shortened**, on exactly the topology `deploy/HA_DR.md` recommends.
+*same* day prefix. So the per-process ceiling multiplies: two replicas — or one
+pod with `NUM_OF_WORKERS=2` — **can** produce ~2880 objects/day against the 2000
+default, on exactly the topology `deploy/HA_DR.md` recommends, with no knob
+lowered and no interval shortened.
+
+**State the precondition, don't drop it.** ~1440/day/process is an upper bound
+under *sustained* traffic, not a property of the configuration: `flush_once`
+returns immediately on an empty drain, so a segment is written only for an
+interval that actually had an event, and nothing in QueryGate emits audit events
+on a schedule. Reaching the ceiling needs ≥1 auditable event in essentially every
+60s window in each process for a day. A busy multi-replica deployment hits this
+at stock settings; an idle one does not. (An earlier revision of this note
+asserted the stock-settings trigger without that precondition — overstating a
+defect is its own inaccuracy, and the customer-facing copies inherited it.)
 It also triggers on any single-process deployment that lowers the object budget
 below its daily segment count or shortens the flush interval below ~43s.
 
@@ -3273,9 +3284,18 @@ than folded in because none is about item 134:
    governance mutation API "REST-only for now, no admin UI", another describes
    the admin UI browser control plane in the same file.
 4. **"a bound hit mid-scan degrades to a truncated, resumable page" is asserted
-   unconditionally** in `audit/worm_search.py`, `README.md` and THREAT_MODEL
-   QG-40. True for every bound except the day-listing truncation — that is item
-   184. One clause naming item 184 at each site.
+   unconditionally** in `audit/worm_search.py`, `README.md`, THREAT_MODEL
+   QG-40, `docs/PRODUCT_GUIDE.md` (twice), the generated
+   `docs/product-guide.html`, and `CHANGELOG.md`. True for every bound except
+   the day-listing truncation — that is item 184. One clause naming item 184 at
+   each site. *Site list extended 2026-08-12 by `claim-reviewer`: the original
+   filing named 3 of the 6, so a fix following it verbatim would have left
+   PRODUCT_GUIDE and its generated HTML — the copy most likely to be sent to a
+   reader — still wrong.*
+5. **`docs/TODO_ARCHIVE.md`'s item-26 write-up still says "Phase 2 — MSSQL
+   estimated-plan equivalent, not started"** while item 26 is `✅ DONE`
+   including phase 2 and `estimate_mssql_query_cost` ships. Internal-only, same
+   root as #1. *Found 2026-08-12 by `claim-reviewer`; previously unfiled.*
 
 **Effort:** S. **Depends on:** nothing.
 

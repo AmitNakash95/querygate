@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+import querygate.api.app as _app_module
 from querygate.api.app import create_app
 from querygate.audit.events import AuditEvent, ConfigChangeEvent, ConnectionProbeEvent
 from querygate.core.auth import Principal
@@ -726,6 +729,47 @@ async def test_audit_browser_finds_newest_events_past_a_huge_prefix_of_old_lines
     ids = [e["event_id"] for e in body["events"]]
     assert ids == ["recent-2", "recent-1", "recent-0"]
     assert body["truncated"] is True
+
+
+def test_audit_browser_exposes_exactly_four_filters_in_the_ui():
+    """`CUSTOMER_README.md`, `sales/index.html` and `docs/business/GO_TO_MARKET.md`
+    each tell a customer or a salesperson which filters the admin UI's Audit view
+    offers. That claim was wrong once already — an earlier revision said five,
+    counting the `action` parameter that the REST endpoint accepts but the UI has
+    no control for — so pin the set rather than trusting prose to stay in step.
+
+    Deliberately asserts the *UI's* controls, not the endpoint's signature: the
+    endpoint may legitimately accept more than the UI exposes (it does), and it is
+    the UI surface the docs describe.
+    """
+    # Resolved exactly as api/app.py mounts it, so the test cannot pass against a
+    # directory the server does not actually serve.
+    ui_root = Path(_app_module.__file__).resolve().parent.parent / "admin_ui"
+    markup = (ui_root / "index.html").read_text(encoding="utf-8")
+    app_js = (ui_root / "app.js").read_text(encoding="utf-8")
+
+    control_ids = set(
+        re.findall(r'id="(audit-(?:event-type|outcome|principal|connection|action))"', markup)
+    )
+    assert control_ids == {
+        "audit-event-type",
+        "audit-outcome",
+        "audit-principal",
+        "audit-connection",
+    }, "the admin UI's audit filter controls changed — update the customer-facing docs that name them"
+
+    # And that the request builder sends exactly those four, so a control could not
+    # be added to the markup while silently never reaching the endpoint (or vice versa).
+    audit_query = app_js[app_js.index("function auditQuery(") :][:600]
+    sent = set(
+        re.findall(
+            r"^\s*(event_type|outcome|principal_id|connection_id|action):", audit_query, re.M
+        )
+    )
+    assert sent == {"event_type", "outcome", "principal_id", "connection_id"}, (
+        "the admin UI's audit request builder changed — `action` reaching it would make "
+        "the docs' four-filter claim wrong"
+    )
 
 
 @pytest.mark.asyncio

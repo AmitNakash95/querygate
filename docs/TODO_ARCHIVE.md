@@ -13327,19 +13327,22 @@ across the two lists rather than simply being deleted from the second: "Safe to
 claim now" gains a dedicated bullet naming the endpoint, its own
 `admin:audit:worm-search` scope, the required-and-capped time window, the
 `event_type`/`connection_id`/`principal_id` filters and cursor pagination; "Do
-not claim yet" now forbids the three things a salesperson could otherwise
-stretch it into — a SIEM, a search *user interface*, and managed search over
-the plain local JSONL sink — with a pointer to the adjacent list so the two
-read as one instruction instead of a contradiction.
+not claim yet" now forbids a SIEM and a long-retention search *UI*, with a
+pointer to the other list so the two read as one instruction instead of a
+contradiction. **This fix originally added a third prohibition — managed search
+over the plain local JSONL sink — which was itself false** and was removed on
+2026-08-12: `GET /api/v1/admin/ui/audit/events` and the admin UI's Audit view
+are exactly a bounded, filtered, paginated search over that sink.
 
 **2. `CUSTOMER_README.md`.** "There is still no managed search interface over
 either sink" was directly false. Replaced with a description of the shipped
 endpoint at the same level of detail the README and PRODUCT_GUIDE already use,
 keeping the two real limits explicit: it is an API and not a SIEM UI, and it
-searches the S3 WORM archive only — the "either sink" half of the old sentence
-was the part that stayed true, so it is preserved rather than dropped, along
-with the recommendation to collect the stream into a customer's own SIEM for
-dashboards and correlation.
+searches the S3 WORM archive only. **The "either sink" half of the old sentence
+was wrong too**, and this fix initially preserved it: the local JSONL sink has
+its own bounded admin-UI browse surface. That was corrected on 2026-08-12, and
+the paragraph now describes both surfaces and keeps the recommendation to
+collect the stream into a customer's own SIEM for dashboards and correlation.
 
 **3. TODO.md's own Quick-scan row for item 134** read "phase 1: S3 Object Lock;
 phase 2: managed search not started", contradicting its own `✅ DONE` heading

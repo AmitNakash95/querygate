@@ -251,8 +251,8 @@ cumulative disclosure budget (`max_shape_repeats_per_window` /
 `max_aggregate_queries_per_window`, which requires `min_group_size`) limits how
 often one query shape may be re-run, and how many aggregate queries may touch
 one table, per principal and declared purpose over a rolling window. The
-per-shape half is currently evadable by varying a select alias (TODO.md item
-186), so set the per-table cap rather than relying on the shape cap alone. See
+per-shape half is currently evadable by varying a select alias that the query
+also references (TODO.md item 186), so set the per-table cap rather than relying on the shape cap alone. See
 `docs/INFERENCE_RISKS.md` R3 for what each does and does not cover.
 
 ## Authentication and authorization
@@ -425,9 +425,11 @@ a table over the returned events' `query_shape`. Paging is not exhaustive on
 every deployment: a day holding more segments than
 `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` returns a cursor that repeats that day
 (TODO.md item 184). Every replica and every worker process writes into the same
-day prefix, so at stock settings two flushing processes already exceed the
-default budget — this affects multi-replica deployments as configured, not only
-ones that lowered the knob or shortened the flush interval. This
+day prefix, so under sustained traffic two such processes can exceed the default
+budget with no knob lowered — this can affect a busy multi-replica deployment as
+configured, not only one that lowered the knob or shortened the flush interval.
+(A segment is written only for a flush interval that actually had an event, so
+an idle deployment does not reach it.) This
 endpoint is an API with no user interface of its own, and it searches only the
 S3 WORM archive. Customers wanting dashboards, correlation with non-QueryGate
 sources, or long-term analytics should still collect the audit stream into
