@@ -251,8 +251,9 @@ cumulative disclosure budget (`max_shape_repeats_per_window` /
 `max_aggregate_queries_per_window`, which requires `min_group_size`) limits how
 often one query shape may be re-run, and how many aggregate queries may touch
 one table, per principal and declared purpose over a rolling window. The
-per-shape half is currently evadable by varying a select alias that the query
-also references (TODO.md item 186), so set the per-table cap rather than relying on the shape cap alone. See
+per-shape half is currently evadable — by varying a select alias the query also
+references, and by three further vectors from the same root cause (TODO.md
+item 186), so set the per-table cap rather than relying on the shape cap alone. See
 `docs/INFERENCE_RISKS.md` R3 for what each does and does not cover.
 
 ## Authentication and authorization
@@ -452,10 +453,17 @@ no longer valid is rejected without replacing the active configuration.
 Governance actions are attributed to the principal and included in the audit
 trail without copying raw YAML into the audit event.
 
-The built-in governance API provides version history and rollback, but it does
-not currently provide a second-approver workflow, scheduled activation, or an
-administrative user interface. Teams that require four-eyes approval should
-enforce it in their GitOps or change-management process.
+The built-in governance API provides version history, rollback, and an opt-in
+four-eyes approval workflow: `require_config_approvals` (an integer count,
+default 0 — off) gates a staged version's *first* activation on that many
+approvals from principals holding `admin:config:approve`, each distinct from
+the author and from each other, enforced server-side. The admin UI drives the
+review step. Two limits worth stating: **rollback is deliberately exempt**, so
+reactivating a previously-active version needs no re-approval (disaster
+recovery is never blocked, at the cost that a single `admin:config:write`
+caller can reach any previously-active configuration), and there is no
+scheduled activation. Teams wanting approval on rollback too should enforce it
+in their GitOps or change-management process.
 
 See the [operational runbook](deploy/runbook.md) for reload, rollback, secret
 rotation, health, metrics, and audit procedures.

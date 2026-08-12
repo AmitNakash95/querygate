@@ -2326,7 +2326,10 @@ Two caps, each `None` (off) by default, each applying per **(principal,
 connection, declared purpose, table)** over a rolling window:
 
 - `max_shape_repeats_per_window` — how many times one query shape may be re-run
-  against one table. The targeted probe cap.
+  against one table. Intended as the targeted probe cap, but **currently
+  evadable** (item 186) — the fingerprint does not canonicalize a referenced
+  select alias, a cte rename, a nested-scope alias, or list order, so a prober
+  can mint a fresh bucket per probe. Do not set this cap alone until that lands.
 - `max_aggregate_queries_per_window` — how many aggregate queries may touch one
   table however the shape varies. The blunt backstop that catches a prober who
   varies its shape to dodge the first cap.

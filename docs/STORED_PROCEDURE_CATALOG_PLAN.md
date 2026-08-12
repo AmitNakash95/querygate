@@ -393,13 +393,13 @@ shippable and independently reviewable, in dependency order:
    before phase 3 (if built at all), not an assumption baked into phases 0–2.
 4. **Does any review/approval gate belong on the *declaration* itself** (i.e.
    should adding a new procedure to the catalog require a second approver,
-   the way config-governance four-eyes approval — item 42, not yet shipped —
+   the way config-governance four-eyes approval — item 42, shipped —
    would work for policy changes), or is operator-authored YAML + the
    existing config-governance audit trail sufficient? Given a mis-declared
    `confirmed_read_only` flag is the one thing this design cannot
    independently verify (§2), a stronger case exists here than for an
    ordinary connections.yaml/policy.yaml edit — but adding a bespoke review
-   gate for just this one file, before item 42's general four-eyes mechanism
+   gate for just this one file, alongside item 42's general four-eyes mechanism
    ships, may be premature machinery. **Needs a decision**, ideally informed
    by whether item 42 is likely to ship before item 18's phase 0.
 5. **Multi-statement / result-set-returning procedures.** Some procedures
