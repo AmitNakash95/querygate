@@ -399,9 +399,10 @@ shippable and independently reviewable, in dependency order:
    `confirmed_read_only` flag is the one thing this design cannot
    independently verify (§2), a stronger case exists here than for an
    ordinary connections.yaml/policy.yaml edit — but adding a bespoke review
-   gate for just this one file, alongside item 42's general four-eyes mechanism
-   ships, may be premature machinery. **Needs a decision**, ideally informed
-   by whether item 42 is likely to ship before item 18's phase 0.
+   gate for just this one file may be premature machinery now that item 42's
+   general four-eyes mechanism ships. **Needs a decision** on whether to reuse
+   item 42's shipped gate for this file or rely on the config-governance audit
+   trail.
 5. **Multi-statement / result-set-returning procedures.** Some procedures
    return one or more result sets (common in MSSQL/MySQL), not just OUT
    parameters. Does phase 1's execution service need to handle multiple

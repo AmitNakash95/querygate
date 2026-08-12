@@ -400,7 +400,7 @@ certification effort starts from a mapped baseline rather than a blank page.
 
 | Criterion | QueryGate control | Evidence | Status |
 |---|---|---|---|
-| CC8.1 Authorized, tested, approved changes | Release gates (`make release-check`/`release-smoke`) for product changes; governed config changes with validation, versioning, attribution, and rollback for runtime changes. (Four-eyes approval + policy simulation/diff/blast-radius are roadmap items 42/39/40/41, not yet shipped — see gaps.) | `docs/RELEASING.md` (item 24); `admin/service.py` (item 25) | Product-provided |
+| CC8.1 Authorized, tested, approved changes | Release gates (`make release-check`/`release-smoke`) for product changes; governed config changes with validation, versioning, attribution, and rollback for runtime changes. Four-eyes approval (item 42) is opt-in via `require_config_approvals` (default 0) and gates a staged version's **first activation only** — rollback to a previously-active version is exempt by design; policy simulation (item 39), semantic access diff (item 40) and blast-radius analysis (item 41) have shipped. | `docs/RELEASING.md` (item 24); `admin/service.py` (item 25); `admin/service.py` `apply()` four-eyes gate + `tests/unit/test_config_approval.py` (item 42) | Product-provided |
 
 ### CC9 — Risk Mitigation
 
