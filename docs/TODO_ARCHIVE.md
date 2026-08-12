@@ -13789,6 +13789,16 @@ code before being accepted, and each now has a named regression test.
    physical table via `effective_name_map` — and by adding the select-item
    `alias` to the stripped-key set. (`test_identifier_case_...`,
    `test_renaming_an_alias_...`.)
+   **Correction (2026-08-12): this closed only half the class.** Stripping the
+   `alias` key removes an alias *definition*; it does nothing about an alias
+   *reference*, which the shape emits as a bare string under `order_by[].col`,
+   `group_by[]`, `top_n.order_by[].col` and inside `having`. `_canonicalize`
+   rewrites only *dotted* refs, so a bare `n7` passes through. Walking the
+   alias and its reference together mints a fresh bucket per probe —
+   measured on the merged tree as 20 distinct fingerprints for 20 probes, with
+   the alias held fixed collapsing correctly to 1. Tracked as **item 186**;
+   until it lands, `max_aggregate_queries_per_window` is the load-bearing cap
+   and `max_shape_repeats_per_window` must not be relied on alone.
 3. **A non-aggregating CTE wrapper charged nothing at all.** Wrap the table in
    a cte that does not aggregate and aggregate over the cte in the outer scope:
    the body contributed nothing (not an aggregate) and the outer scope's only

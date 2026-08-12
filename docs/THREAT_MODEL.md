@@ -285,8 +285,12 @@ defaults.
 
 - **Authorized inference:** QueryGate blocks use of denied columns, but a caller
   authorized for an aggregate can still infer facts from permitted counts and
-  narrow filters. Minimum-group-size, differential-privacy, and query-history
-  controls are not implemented.
+  narrow filters. Two opt-in, off-by-default controls bound this and neither
+  closes it: a minimum group size (item 88) and a cumulative disclosure budget
+  over a rolling window (item 179). Differential privacy and query-set auditing
+  are not implemented. See QG-29 and `docs/INFERENCE_RISKS.md` R3 — including
+  the recorded gap that the budget's per-shape cap is currently evadable
+  (item 186), so the per-table cap is the load-bearing one.
 - **Pre-execution cost:** limits and timeouts are primarily reactive, but an
   optional Postgres `EXPLAIN`-based check (`Policy.max_estimated_rows`/
   `max_estimated_cost`, unset/disabled by default) can reject a likely full
