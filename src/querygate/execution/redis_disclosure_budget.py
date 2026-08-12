@@ -98,10 +98,14 @@ def _redis_key(key: DisclosureBudgetKey) -> str:
     """Flatten a budget key into one Redis key.
 
     Every component is percent-escaped before joining. Two of them —
-    `principal` (an IdP-issued subject) and `purpose` (free text up to 200
-    chars when the connection has not opted into purpose gating) — can legally
-    contain the `:` separator, so a raw f-string would let two distinct logical
-    keys flatten to the same Redis key. The in-process backend keys on a tuple
+    `principal` (an IdP-issued subject) and `purpose` (a closed-set token the
+    operator declared, per item 145) — can legally contain the `:` separator,
+    so a raw f-string would let two distinct logical
+    keys flatten to the same Redis key. (An earlier version of this comment
+    justified the escaping with an *un-gated* free-text purpose; that case
+    cannot reach here — `enforce_disclosure_budget` forces `purpose = ""`
+    unless the connection opted into purpose gating. The escaping is still
+    required, for the two reasons above.) The in-process backend keys on a tuple
     and has no such ambiguity; escaping is what keeps the two implementations of
     this Protocol agreeing on key identity.
     """

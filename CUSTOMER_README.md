@@ -244,7 +244,14 @@ A denied column cannot be selected, filtered, joined, grouped, ranked, or
 sorted. This closes common indirect paths around a projection-only deny rule.
 As with any analytical system, however, a caller may still infer information
 from aggregates it is legitimately authorized to request. QueryGate does not
-provide differential privacy or query-history-based inference controls.
+provide differential privacy or query-set auditing. Two opt-in, off-by-default
+controls bound — but do not close — that risk: a minimum group size
+(`min_group_size`) suppresses aggregate groups backed by too few rows, and a
+cumulative disclosure budget (`max_shape_repeats_per_window` /
+`max_aggregate_queries_per_window`, which requires `min_group_size`) limits how
+often one query shape may be re-run, and how many aggregate queries may touch
+one table, per principal and declared purpose over a rolling window. See
+`docs/INFERENCE_RISKS.md` for what each does and does not cover.
 
 ## Authentication and authorization
 
@@ -388,7 +395,12 @@ may contain diagnostic exception details, intent text, and SQL rendered
 according to policy. Protect and retain them accordingly.
 
 The default JSONL sink is rotation-friendly and local-file-only — it is not
-itself a WORM archive, SIEM, or search interface. Customers with a compliance
+itself a WORM archive or a SIEM. It does have a bounded browse surface: the
+admin UI's Audit view, over `GET /api/v1/admin/ui/audit/events`
+(`admin:config:read`), filters by event type, outcome, principal, connection,
+and action with "load older events" paging, reading a bounded number of lines
+from the tail of the local file — useful for recent operational review, not a
+long-retention search. Customers with a compliance
 retention requirement can additionally enable
 `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm`, which archives a batched copy to
 S3 under Object Lock COMPLIANCE mode — composed with, not replacing, the
@@ -402,11 +414,17 @@ deliberately separate from `admin:observability:read`), provides bounded,
 filtered search over that S3 archive: `start_time`/`end_time` are required on
 every request (there is no "search everything" mode) and the window is capped,
 with optional `event_type`, `connection_id`, and `principal_id` filters and
-cursor-based pagination. It answers questions like "every query against
-`pii_customers` in the last 18 months" after the local hash-chained file has
-rotated that window out. It is an API, not a SIEM user interface, and it
-searches only the S3 WORM archive — there is no managed search over the plain
-local JSONL sink. Customers wanting dashboards, correlation with non-QueryGate
+cursor-based pagination. It reaches events the local hash-chained file has
+already rotated out, so an 18-month lookback is within the default 730-day
+window cap. Narrowing to a specific table is not a server-side filter —
+filtering is by event type, connection, and principal, and a caller narrows to
+a table over the returned events' `query_shape`. Paging is complete for the
+default object budget; a day holding more segments than
+`AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` currently returns a cursor that repeats
+that day (TODO.md item 184), so do not rely on exhaustive paging on a
+deployment that lowered that knob or shortened the flush interval. This
+endpoint is an API with no user interface of its own, and it searches only the
+S3 WORM archive. Customers wanting dashboards, correlation with non-QueryGate
 sources, or long-term analytics should still collect the audit stream into
 their own SIEM.
 
