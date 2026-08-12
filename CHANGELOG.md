@@ -161,7 +161,8 @@ All notable changes to QueryGate are documented here.
   `admin:audit:worm-search` scope, not implied by general observability
   read access) lets an authorized operator search the archive directly —
   bounded by a mandatory time window (default cap 730 days) and per-request
-  scan limits, with a resumable cursor for a truncated page. **Upgrade
+  scan limits, with a resumable cursor for a truncated page (except a day
+  listing over the object budget — see TODO item 184). **Upgrade
   impact:** none for a deployment that doesn't set
   `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm`; a deployment that does should
   read the fail-open buffering caveat above and monitor

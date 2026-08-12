@@ -22,7 +22,7 @@ class CostEstimationMode(StrEnum):
     """How `Policy.max_estimated_rows`/`max_estimated_cost` are applied once
     cost estimation is enabled (see `Policy.cost_estimation_enabled`).
 
-    ENFORCE (default) rejects a query whose Postgres EXPLAIN estimate
+    ENFORCE (default) rejects a query whose plan estimate
     exceeds the configured threshold — the original TODO.md item 26 phase 1
     behavior, unchanged. OBSERVE records what *would* have been rejected
     (a `cost_estimation.observed_would_reject` log line plus
@@ -508,6 +508,12 @@ class Policy(pyd.BaseModel):
     # aggregate queries against one table however the shape varies — which is
     # also what catches a caller varying `limit`/`offset` to manufacture a
     # fresh shape bucket.
+    #
+    # SET THE PER-TABLE CAP. `max_shape_repeats_per_window` does not currently
+    # deliver its bound (TODO.md item 186): the fingerprint does not
+    # canonicalize a referenced select alias, a cte rename, a nested-scope
+    # alias, or list order, so a prober mints a fresh bucket per probe. The
+    # backstop is unaffected — its key carries no fingerprint at all.
     #
     # Both default to None (disabled) and BOTH only ever apply on a connection
     # that also sets `min_group_size`: with no k-floor there is nothing to
