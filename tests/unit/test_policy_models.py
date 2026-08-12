@@ -76,6 +76,31 @@ def test_min_group_size_rejects_k_below_two():
         Policy(min_group_size=0)
 
 
+def test_max_concurrency_rejects_zero_or_negative():
+    # 0 would fail every caller closed after a full concurrency_wait_seconds
+    # (harmless but pointless); negative reaches asyncio.Semaphore(n) and
+    # raises ValueError at first request instead of at config-validation
+    # time (2026-08-11 security-invariant-reviewer finding).
+    with pytest.raises(ValueError, match="max_concurrency"):
+        Policy(max_concurrency=0)
+    with pytest.raises(ValueError, match="max_concurrency"):
+        Policy(max_concurrency=-1)
+    assert Policy(max_concurrency=1).max_concurrency == 1
+
+
+def test_timeout_seconds_rejects_zero_or_negative():
+    # Postgres treats statement_timeout='0s' as DISABLED, not "instant
+    # timeout" — silently accepting 0 here would be a config mistake
+    # invisible until an unbounded query causes an incident (2026-08-11
+    # architecture-boundary-reviewer finding, same reasoning as
+    # max_concurrency's bound above).
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        Policy(timeout_seconds=0)
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        Policy(timeout_seconds=-1)
+    assert Policy(timeout_seconds=1).timeout_seconds == 1
+
+
 # --- Policy.for_purpose (TODO.md item 145, feature F7) ---------------------
 
 
