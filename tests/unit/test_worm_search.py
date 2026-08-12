@@ -22,7 +22,7 @@ from moto import mock_aws
 
 from querygate.audit import worm_search as worm_search_module
 from querygate.audit.events import AuditEvent, ConnectionProbeEvent
-from querygate.audit.ledger import GENESIS_PREV_HASH, make_record
+from querygate.audit.ledger import GENESIS_PREV_HASH, make_record, verify_envelope_hash
 from querygate.audit.worm_search import (
     WormSearchBounds,
     build_worm_search_result,
@@ -98,6 +98,29 @@ def _chain_lines(events: list, *, key: bytes = None) -> list:
 
 def _put_events(client, key: str, events: list) -> None:
     _put_segment(client, key, _chain_lines(events))
+
+
+def _retype_seq(line: str, raw_seq) -> str:
+    """TODO.md item 178: rewrite one chained line's RAW `seq` to a non-int
+    JSON value, leaving its `hash` byte-for-byte untouched.
+
+    The resulting line still passes `verify_envelope_hash`, because that
+    function parses through `LedgerRecord.model_validate` first and
+    pydantic's lax coercion turns `"3"` / `3.0` / `True` back into an `int`.
+    That is the whole point: the hash verifying proves nothing about the raw
+    value's TYPE, which is what the chain-linkage arithmetic downstream then
+    operates on.
+
+    The caller must pass a value that coerces to THIS record's own `seq` —
+    the digest is recomputed over the coerced value, so `_retype_seq(line,
+    "3")` on a seq-0 record fails verification for an ordinary hash mismatch
+    and tests nothing. Every test using this asserts the line still verifies,
+    which converts that mistake (and any future change to the coercion rules)
+    into an obvious failed premise instead of a confusing downstream count
+    mismatch."""
+    parsed = json.loads(line)
+    parsed["seq"] = raw_seq
+    return json.dumps(parsed)
 
 
 @pytest.fixture
@@ -1096,6 +1119,195 @@ class TestSeedChainStateFromPredecessor:
         )
         assert (prev_hash, prev_seq) == (None, None)
         assert exhausted is False
+
+    def test_a_predecessor_whose_seq_is_type_confused_fails_closed(self):
+        # TODO.md item 178: the predecessor's own hash verifies, so the
+        # pre-fix code seeded `prev_seq` with the raw string and the very
+        # next `seq == prev_seq + 1` raised TypeError. It must instead yield
+        # NO seed at all AND fail closed — returning the hash without a
+        # position would just move the same TypeError one branch along.
+        chained = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        lines = [_retype_seq(chained[0], "0"), chained[1]]
+        # Premise: the crafted predecessor genuinely still verifies.
+        assert verify_envelope_hash(json.loads(lines[0]), key=None) is True
+
+        prev_hash, prev_seq, fail_closed = worm_search_module._seed_chain_state_from_predecessor(
+            lines, 1, ledger_key=None
+        )
+        assert (prev_hash, prev_seq) == (None, None)
+        assert fail_closed is True
+
+
+class TestTypeConfusedSeq:
+    """TODO.md item 178: a WORM record whose `seq` is type-confused rather
+    than corrupt — hash-valid, but not the `int` `LedgerRecord.seq` is typed
+    as — must be counted like any other forgery class, never raise.
+
+    Pre-fix, both raw `parsed.get("seq")` reads fed `seq == prev_seq + 1`
+    directly, so a crafted string raised `TypeError` out of
+    `search_worm_archive` and escaped the route as a generic 500.
+    """
+
+    # `str`/`float`/`bool` are the three that genuinely reach `_chain_seq` in
+    # the integrated path: each coerces under `LedgerRecord.model_validate`,
+    # so the digest is computed over the coerced value and the crafted line
+    # VERIFIES. The rest (`null`, list, dict) fail validation earlier and are
+    # already counted `unverified`, so they only pin the helper's own
+    # defensive contract — do not read them as evidence about the scan path.
+    @pytest.mark.parametrize(
+        "raw_seq",
+        ["3", 3.0, True, None, "0", [3], {"seq": 3}],
+        ids=["str", "float", "bool", "null", "str-zero", "list", "dict"],
+    )
+    def test_a_non_int_seq_is_no_position_at_all(self, raw_seq):
+        assert worm_search_module._chain_seq({"seq": raw_seq}) is None
+
+    def test_a_genuine_int_seq_is_returned_unchanged(self):
+        # The positive control, and it needs BOTH assertions: `== 0` alone
+        # also passes for a `return False` mutant (`False == 0` is True), so
+        # the non-zero case is what pins a real int. Without this test a
+        # `_chain_seq` returning None for everything would satisfy every
+        # other case in this class while disabling chain verification.
+        assert worm_search_module._chain_seq({"seq": 0}) == 0
+        assert worm_search_module._chain_seq({"seq": 7}) == 7
+
+    def test_a_missing_seq_or_a_non_dict_is_no_position_at_all(self):
+        # Defensive branch only — unreachable from both production call
+        # sites, which run after `verify_envelope_hash` already established a
+        # dict with all four envelope keys. See `_chain_seq`'s docstring.
+        assert worm_search_module._chain_seq({}) is None
+        assert worm_search_module._chain_seq("not a dict") is None
+
+    @pytest.mark.parametrize("raw_seq", ["0", 0.0, False], ids=["str", "float", "bool"])
+    async def test_a_type_confused_predecessor_on_a_resumed_page_is_a_chain_break(
+        self, s3, raw_seq
+    ):
+        # Site 1 of 2 (`_seed_chain_state_from_predecessor`): the resumed
+        # page's predecessor is hash-valid with a non-int `seq`, so the seed
+        # carried it into the linkage arithmetic. `line` is a
+        # caller-controlled cursor field (see the module docstring), and the
+        # archive is the surface an attacker with `s3:PutObject` writes.
+        # Parametrized over all three classes that reach here, which did NOT
+        # behave alike pre-fix: a `str` raised `TypeError`, while a `float`
+        # and a `bool` were silently ACCEPTED as a valid link (`1 == 0.0 + 1`
+        # and `1 == False + 1` are both True) — so the crafted record was
+        # returned as a genuine event. All three must now be chain breaks.
+        # `False` (not `True`) is the bool that coerces to this record's own
+        # seq of 0, which is what keeps the premise assertion below true.
+        chained = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        lines = [_retype_seq(chained[0], raw_seq), chained[1]]
+        assert verify_envelope_hash(json.loads(lines[0]), key=None) is True
+        key = f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl"
+        _put_segment(s3, key, lines)
+
+        start_time = datetime(2026, 3, 15, tzinfo=timezone.utc)
+        end_time = datetime(2026, 3, 16, tzinfo=timezone.utc)
+        fingerprint = worm_search_module._filters_fingerprint(
+            start_time, end_time, None, None, None
+        )
+        cursor = worm_search_module._encode_cursor(date(2026, 3, 15), key, 1, fingerprint)
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=start_time,
+            end_time=end_time,
+            cursor=cursor,
+            bounds=_bounds(),
+        )
+        # "b" is not returned: its incoming link could not be confirmed
+        # against a predecessor whose claimed position is unusable.
+        assert result.events == []
+        assert result.chain_breaks == 1
+        assert result.unverified == 1
+        # POSITIONAL DISCRIMINATOR (test-contract-reviewer, 2026-08-12).
+        # This test and the genesis test below plant byte-identical segment
+        # bytes and assert an identical count triple — only the hand-built
+        # cursor's `line` makes this one exercise the SEED path. Since
+        # `_decode_cursor` defaults a missing `line` to 0, a future cursor
+        # reshape could silently resume at 0 and turn this into a duplicate
+        # of the genesis test. Breaking on the LAST line skips nothing;
+        # breaking on line 0 of 2 skips 1. That is the only observable that
+        # differs between the two positions, so it is what pins the path.
+        assert result.lines_skipped_after_chain_break == 0
+
+    async def test_a_type_confused_record_accepted_as_given_does_not_poison_the_next_link(self, s3):
+        # Site 2 of 2 (the main line loop's own `seq` read): the resumed
+        # page's predecessor does NOT verify, so the first consumed record
+        # takes the accept-as-given branch — where, pre-fix, no comparison
+        # touched its `seq` at all, and the raw string was carried forward
+        # into `prev_seq` and raised on the FOLLOWING line.
+        chained = _chain_lines(
+            [_event("a", minute=0), _event("b", minute=1), _event("c", minute=2)]
+        )
+        corrupt = json.loads(chained[0])
+        corrupt["hash"] = "0" * 64  # no longer recomputes: nothing to seed from
+        lines = [json.dumps(corrupt), _retype_seq(chained[1], "1"), chained[2]]
+        assert verify_envelope_hash(json.loads(lines[1]), key=None) is True
+        key = f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl"
+        _put_segment(s3, key, lines)
+
+        start_time = datetime(2026, 3, 15, tzinfo=timezone.utc)
+        end_time = datetime(2026, 3, 16, tzinfo=timezone.utc)
+        fingerprint = worm_search_module._filters_fingerprint(
+            start_time, end_time, None, None, None
+        )
+        cursor = worm_search_module._encode_cursor(date(2026, 3, 15), key, 1, fingerprint)
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=start_time,
+            end_time=end_time,
+            cursor=cursor,
+            bounds=_bounds(),
+        )
+        assert result.events == []
+        assert result.chain_breaks == 1
+        assert result.unverified == 1
+        # Fail-closed stopped consumption at the crafted line, so "c" was
+        # never read — and the scale of that is disclosed, not silent.
+        assert result.lines_skipped_after_chain_break == 1
+
+    async def test_a_type_confused_genesis_record_is_a_chain_break_not_an_error(self, s3):
+        # The unpaged case: a crafted first line of a segment. `"0" == 0` is
+        # already False so this never raised, but it must still be counted
+        # (and must keep being counted once `_chain_seq` short-circuits the
+        # branch) rather than quietly compared away.
+        # NOTE this is a CHARACTERIZATION test — it passes against the whole
+        # pre-fix module. The main-loop `seq` read is pinned as a regression
+        # only by `test_a_type_confused_record_accepted_as_given_...` above;
+        # the two are not interchangeable, so do not delete that one on the
+        # strength of this one.
+        chained = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
+        lines = [_retype_seq(chained[0], "0"), chained[1]]
+        assert verify_envelope_hash(json.loads(lines[0]), key=None) is True
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", lines)
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+        assert result.events == []
+        assert result.chain_breaks == 1
+        assert result.unverified == 1
+        # The other half of the positional discriminator: breaking on line 0
+        # of 2 leaves exactly one line unread.
+        assert result.lines_skipped_after_chain_break == 1
+        # The operator-facing disclosure must name THIS cause, not just count
+        # it — the pre-existing sentence explains a break as records being
+        # "reordered or removed", which is the wrong investigation to send a
+        # compliance reviewer on when a position field was retyped instead.
+        assert "not an integer at all" in result.note
 
 
 class TestPagination:

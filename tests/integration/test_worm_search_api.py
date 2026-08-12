@@ -7,7 +7,8 @@ moto-mocked S3 archive, and rejection of out-of-bound requests.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import json
+from datetime import date, datetime, timedelta, timezone
 
 import boto3
 import pytest
@@ -16,7 +17,8 @@ from moto import mock_aws
 
 from querygate.api.app import create_app
 from querygate.audit.events import AuditEvent
-from querygate.audit.ledger import GENESIS_PREV_HASH, make_record
+from querygate.audit.ledger import GENESIS_PREV_HASH, make_record, verify_envelope_hash
+from querygate.audit.worm_search import _encode_cursor, _filters_fingerprint
 from querygate.core.config import AppConfig
 
 pytestmark = pytest.mark.integration
@@ -250,3 +252,90 @@ async def test_pagination_cursor_round_trips_through_the_route(s3):
     body2 = resp2.json()
     assert len(body2["events"]) == 1
     assert body1["events"][0]["connection_id"] != body2["events"][0]["connection_id"]
+
+
+@pytest.mark.asyncio
+async def test_a_type_confused_seq_is_a_200_with_counts_not_a_masked_500(s3):
+    """TODO.md item 178, at the surface the claim is actually made about.
+
+    The defect's symptom was a generic HTTP 500 from the route's
+    `mask_unexpected()`, and `CHANGELOG.md` describes the fix in exactly those
+    route-level terms — but every other test for it calls
+    `search_worm_archive` directly and only observes the returned model. This
+    pins the transport boundary: a crafted line must produce a 200 carrying
+    honest integrity counts, so a future change to the route's exception
+    handling (or a new raise anywhere in the line loop) re-breaks it loudly.
+
+    It must therefore plant the shape that ACTUALLY raised — which is not the
+    obvious one. An unpaged scan never raised: the genesis branch evaluates
+    `"0" == 0`, which is merely `False`, so a single crafted line was already
+    counted correctly pre-fix. The `TypeError` came from `prev_seq + 1` once
+    the crafted string reached `prev_seq`, and that needs a RESUMED page. So:
+    two chained records, the FIRST retyped, and a cursor resuming at line 1 —
+    the seed walk then verifies line 0, reads its non-int position, and
+    (pre-fix) poisoned the arithmetic. `cursor` is a real query parameter of
+    this route, so this is an ordinary request, not a reach into internals.
+    A test built on the unpaged shape would pass against the entire pre-fix
+    module and pin nothing.
+    """
+    first = AuditEvent(
+        connection_id="pii_customers",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "pii_customers"},
+        duration_ms=3,
+        occurred_at=datetime(2026, 3, 15, 12, 0, tzinfo=timezone.utc),
+    )
+    second = AuditEvent(
+        connection_id="pii_customers",
+        policy_decision="allowed",
+        outcome="success",
+        query_shape={"from": "pii_customers"},
+        duration_ms=4,
+        occurred_at=datetime(2026, 3, 15, 12, 1, tzinfo=timezone.utc),
+    )
+    r0 = make_record(0, GENESIS_PREV_HASH, first.model_dump(mode="json", exclude_none=True))
+    r1 = make_record(1, r0.hash, second.model_dump(mode="json", exclude_none=True))
+    # Retype record 0's raw `seq` to the STRING "0", hash untouched — it still
+    # passes `verify_envelope_hash`, because `LedgerRecord.model_validate`
+    # coerces "0" back to 0 before the digest is recomputed. That is the whole
+    # premise, so assert it rather than assume it.
+    raw0 = json.loads(r0.model_dump_json())
+    raw0["seq"] = "0"
+    assert verify_envelope_hash(raw0) is True
+    key = f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl"
+    body_bytes = (json.dumps(raw0) + "\n" + r1.model_dump_json() + "\n").encode("utf-8")
+    s3.put_object(
+        Bucket=_BUCKET,
+        Key=key,
+        Body=body_bytes,
+        ObjectLockMode="COMPLIANCE",
+        ObjectLockRetainUntilDate=datetime.now(timezone.utc) + timedelta(days=1),
+    )
+
+    start_time = datetime(2026, 3, 15, tzinfo=timezone.utc)
+    end_time = datetime(2026, 3, 16, tzinfo=timezone.utc)
+    cursor = _encode_cursor(
+        date(2026, 3, 15),
+        key,
+        1,
+        _filters_fingerprint(start_time, end_time, None, None, None),
+    )
+
+    app = create_app(_settings((_WORM_SEARCH_SCOPE,), backend="jsonl_chained_s3_worm"))
+    resp = await _get(
+        app,
+        {
+            "start_time": "2026-03-15T00:00:00+00:00",
+            "end_time": "2026-03-16T00:00:00+00:00",
+            "cursor": cursor,
+        },
+    )
+    # Pre-fix this request is a masked 500; the assertion that matters most is
+    # the status code, and the counts prove it was COUNTED rather than merely
+    # not-crashing.
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["chain_breaks"] == 1
+    assert body["unverified"] == 1
+    assert body["events"] == []

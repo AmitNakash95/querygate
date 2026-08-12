@@ -203,8 +203,10 @@ metrics pipeline instead of living only in a response body:
 - `querygate_audit_worm_search_chain_breaks_total` — a record whose
   `seq`/`prev_hash` did not continue from its predecessor while its own hash
   still verified (a record dropped from or reordered within a segment, a
-  segment whose first record isn't the genuine genesis, or a crafted object
-  that exhausts the resumed-page seed walk). The strongest signal here:
+  segment whose first record isn't the genuine genesis, a crafted object
+  that exhausts the resumed-page seed walk, or a record whose `seq` is not
+  the integer it is typed as even though its own hash recomputes). The
+  strongest signal here:
   unlike the counter below it is *not* explained by a rotated key.
 - `querygate_audit_worm_search_unverified_total` — an envelope-shaped line
   that did not verify under the configured `AUDIT_LEDGER_HMAC_KEY`, **plus**
