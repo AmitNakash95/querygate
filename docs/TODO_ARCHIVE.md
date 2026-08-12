@@ -13307,3 +13307,176 @@ than a novel fix needing independent verification.
 
 **Effort:** S (mirrors an already-shipped fixture pattern). **Depends on:**
 2 (shipped — same resource-lifecycle gap, found once before).
+
+### 177. `WormSearchResult.chain_breaks`/`unverified` have no Prometheus counter, so the strongest WORM-archive tamper signal isn't alertable ✅ DONE
+
+**Surfaced 2026-08-10 by `security-invariant-reviewer` auditing item 172's
+own commit (WS-172-6), during that item's own mandatory completion gate.**
+Item 172 added `chain_breaks` (a segment-level chain-linkage-break count) to
+`WormSearchResult` — the strongest tamper/omission signal the WORM search
+surface can produce, stronger than an ordinary `unverified` hash mismatch —
+but it was only ever visible to whoever happened to run an ad-hoc
+`GET /api/v1/admin/observability/worm-search` request over the right window.
+Nobody was paged. Given the Proof pillar is a product claim, "detected" there
+meant "detectable on demand", not "monitored" — an operator relying on
+dashboards/alerts (the normal operational posture) would never learn a chain
+broke.
+
+**What shipped.** Two unlabelled counters in `metrics.py` —
+`querygate_audit_worm_search_chain_breaks_total` and
+`querygate_audit_worm_search_unverified_total` — incremented from a single
+`_count_integrity_signals()` helper in `audit/worm_search.py`, alongside the
+existing `AUDIT_WORM_SEARCH_REQUESTS_TOTAL`/
+`AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL` pattern. Both are deliberately
+label-free, matching item 126's `PERSONAL_DENIALS_RATE_LIMITED_TOTAL`
+precedent: a `connection`/`principal` label would be caller-chosen
+cardinality and a weak per-principal activity oracle over the audit archive
+to anyone able to read `/metrics` (scope-gated since item 144).
+`unverified_total` includes each chain break's own breaking line, mirroring
+the result model's field relationship exactly, so
+`unverified_total - chain_breaks_total` is the count actually likely to be a
+key rotation — the same split the response `note` already makes in prose.
+
+**Two decisions beyond the item's literal scope, both deliberate.**
+
+1. **The counters also fire on the mid-scan S3 failure path**, not only the
+   served path. The item's own text said "incremented in `_finalize`", which
+   would have left a real hole: a scan that finds a chain break and then
+   fails against S3 never reaches `_finalize`, so the strongest tamper signal
+   the surface produces would be swallowed by the exception — exactly the
+   silent-signal failure mode this item exists to close. Pinned by
+   `test_a_chain_break_found_before_a_mid_scan_failure_is_still_counted`.
+2. **An idempotence guard was removed rather than shipped.** The first cut
+   carried an `integrity_counted` flag so the helper could not double-count
+   across its two call sites. Mutation testing showed it was unreachable:
+   every `_finalize` call site is a `return _finalize(...)`, and `_finalize`
+   does nothing that can raise between counting and returning, so a request
+   that counted on the served path can never reach the exception handler.
+   Deleting the flag left all 69 tests in the file green — i.e. it was both
+   unreachable and untested, the same call item 114 made on its fifth
+   hand-rolled predicate enumerator. The reasoning is recorded in a comment
+   at the site so a future edit that makes `_finalize` fallible restores the
+   guard *with* a test.
+
+**Mutation verification** (per CLAUDE.md's working agreement — every new
+enforcement point broken deliberately, suite re-run, failure confirmed to be
+*for that reason*, then reverted):
+
+All counts below were re-run against the **final** tree (the post-audit test
+set), not the tree the mutation was first tried on:
+
+| Mutation | Result |
+| --- | --- |
+| `CHAIN_BREAKS_TOTAL.inc(chain_breaks)` → `.inc(0)` | 5 tests fail on the chain-break counter assertion |
+| `UNVERIFIED_TOTAL.inc(unverified)` → `.inc(0)` | 5 tests fail on the unverified counter assertion |
+| `_count_integrity_signals()` dropped from the error path | only the mid-scan-failure test fails |
+| idempotence guard removed | **nothing fails** — which is why the guard was deleted rather than shipped |
+| either counter boolean-ized (`.inc(1 if x else 0)`) | only the magnitude test fails |
+| `UNVERIFIED_TOTAL.inc(unverified + malformed)` | only the malformed-exclusion test fails |
+| `_count_integrity_signals()` moved ABOVE the `WormSearchResult(...)` construction in `_finalize` | only `test_a_result_that_fails_to_build_counts_the_signals_once_not_twice` fails, with `+2` — the real double-count hazard |
+
+**What this item's own `auditors` gate changed before commit.** Four
+reviewers ran, twice (a second pass over the post-fix tree). No reviewer
+found a defect in the counting mechanism itself — placement, unlabelled
+shape, redaction safety and the exactly-once reasoning all held under
+independent tracing. What the gate did produce: two claim corrections, seven
+test gaps, and two new defect items (179, 180). The corrections mattered more
+than the mechanism did.
+
+1. **The central claim was narrowed on every surface.** Three reviewers
+   independently found the first draft's "detected becomes monitored" framing
+   overstated: `search_worm_archive` has exactly one production caller (the
+   scope-gated REST route) and nothing scans on a schedule, so the counters
+   only advance while a search actually runs. What shipped makes a finding
+   *reachable by alerting*; genuine monitoring needs the operator to schedule
+   a periodic search. An operator who configured
+   `increase(...[1h]) > 0`, saw silence, and read it as "the archive is
+   intact" would have been worse off than before the item. README,
+   THREAT_MODEL QG-40, PRODUCT_GUIDE, CHANGELOG, both metric help strings and
+   the module docstring were narrowed rather than the code widened.
+2. **The counters count findings PER SCAN, not distinct segments.** A WORM
+   object is immutable, so a real break is permanent and every later search
+   reaching it counts again. "Alert on any non-zero rate" was therefore bad
+   operational advice (it pages forever after one triaged break, and can't
+   distinguish a new break from re-observation of the old); it is now "alert
+   on the first non-zero increase and treat it as sticky until triaged."
+3. **Seven test gaps closed.** No test pinned counter *magnitude* — every
+   fixture produced 0 or 1, so `.inc(1 if chain_breaks else 0)` passed the
+   whole suite and the documented `unverified_total - chain_breaks_total`
+   arithmetic rested on nothing. Nothing pinned `malformed` staying *out* of
+   the unverified counter (`.inc(unverified + malformed)` was green
+   everywhere), which would have conflated exactly the two classes item 154
+   split apart. The error-path test asserted only one of the two counters.
+   The control test could not distinguish "not incremented" from "series does
+   not exist" (`_sample`'s `or 0.0`). The newly-documented cancellation limit
+   had no test. The "exactly one production caller" fact the whole narrowed
+   scope claim rests on had no test. And the exactly-once invariant was, at
+   first, guarded only by a source-shape proxy (below).
+4. **The no-label claim and the deleted guard's invariant are asserted
+   properly, on the second pass.** The first attempt at both was weak and the
+   re-review said so. The no-label assertion reached into
+   `Counter._labelnames`, a private attribute; it now uses the public registry
+   API, since a labelled Counter can never emit an empty-label sample — same
+   property, nothing to break on a library upgrade. More seriously, the
+   exactly-once invariant was guarded by a test that string-matched source
+   lines for `return _finalize(`. That was a proxy for the real invariant and
+   wrong in both directions: it would false-fail on a docstring mentioning
+   `_finalize(` (this module's docstrings are edited constantly), and it
+   false-passed on the edit that actually double-counts — moving
+   `_count_integrity_signals()` above the `WormSearchResult(...)`
+   construction. It was replaced with a behavioural test that makes the model
+   construction raise and asserts `+1`, not `+2`. Writing it also surfaced
+   that the *final* `_finalize` call site sits outside the `try`, so a
+   construction failure there counts nothing at all — a not-counted case, not
+   a double-counted one, pre-existing and equally true of the request counter,
+   now recorded in the test's own comment. The replacement additionally covers
+   the WS-7 "build the response first, count after" ordering rationale, which
+   had been comment-only since item 134 phase 2.
+
+**Tests.** Eleven in `tests/unit/test_worm_search.py::TestMetrics`. Original
+four: a chain break increments both counters and they agree with the same
+request's returned `WormSearchResult`; a plain hash mismatch (key rotation)
+increments `unverified` but *not* `chain_breaks`; an intact archive leaves
+both untouched (and both series exist); a break found before a mid-scan S3
+failure is still counted (now asserting both counters). Added by the audit:
+`test_the_counters_carry_the_real_magnitude_not_just_a_boolean` (two broken
+segments + one key-mismatched segment → `chain_breaks == 2`,
+`unverified == 3`, and the documented subtraction asserted on the counter
+deltas rather than on the response fields),
+`test_malformed_lines_move_neither_integrity_counter`,
+`test_the_same_break_is_counted_once_per_scan_not_once_per_segment` (pins the
+per-scan semantics deliberately, so a future dedup must be a conscious
+decision), `test_both_integrity_counters_carry_no_labels`,
+`test_a_result_that_fails_to_build_counts_the_signals_once_not_twice`,
+`test_a_cancelled_scan_counts_nothing`, and
+`test_the_worm_search_has_exactly_one_production_call_site`.
+
+**Known limits, documented rather than papered over.** No scheduled scan (see
+above). Per-scan counting (see above). A request cancelled by client
+disconnect or shutdown counts nothing, because `asyncio.CancelledError`
+derives from `BaseException` and the handler catches `Exception` — left as-is
+deliberately, and now pinned by `test_a_cancelled_scan_counts_nothing`. (An
+earlier draft of this write-up justified that by claiming a `BaseException`
+handler would reintroduce the deleted idempotence guard; the re-review showed
+that reasoning is unsound — `_finalize` is a plain `def` with no await point
+between counting and returning, so cancellation cannot be delivered there and
+could not double-count. The honest reason to leave it: counting on
+shutdown-driven cancellation would add noise on every rolling deploy, and a
+cancelled scan's partial findings are re-found by the next scan, since the
+archive is immutable.) `malformed` findings — including a line rejected for
+forbidden content nested in `query_shape`, which is a forgery signal — are
+not published as a counter at all; only the two chain-integrity signals are.
+Counter magnitude is additionally
+untrustworthy on any deployment where a single day's segment count can exceed
+`AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED`, because of a pre-existing
+non-advancing-cursor defect filed separately as **item 179**.
+
+**Docs.** `docs/PRODUCT_GUIDE.md` Decision Log (2026-08-11, including both
+out-of-scope decisions and the audit's scope correction), `docs/THREAT_MODEL.md`
+QG-40 (the item-172 clause now states the detection is reachable by alerting,
+with both limits, the alert-on guidance, the no-label rationale, and the nine
+tests in the evidence column), `README.md`'s WORM section, `CHANGELOG.md`
+`[Unreleased] / Added`, both metric help strings, and the
+`audit/worm_search.py` module docstring.
+
+**Effort:** S. **Depends on:** 172 (shipped). **Surfaced:** items 179, 180.

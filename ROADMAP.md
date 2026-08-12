@@ -461,10 +461,46 @@ claim when the work ships or before explicitly handing the item back.
 - [x] **173** — cross-connection connection-resolution is unmemoized, redone
   on every call site that self-derives it. ✅ **Shipped** (`validate_schema`
   reuses item 160's per-request `connection_resolver` snapshot).
-- [ ] **177** — `WormSearchResult.chain_breaks`/`unverified` have no
+- [ ] **176** — three claim-accuracy drifts left behind by item 134 phase 2
+  (`sales/index.html`'s sales-guardrail list, `CUSTOMER_README.md:399`, and
+  TODO.md's own Quick-scan row for item 134 all still say managed WORM search
+  doesn't exist). *Surfaced 2026-08-10 by `claim-reviewer`. Placed here
+  2026-08-11 by the `roadmap-next` walk that shipped item 177 — it had been
+  filed in TODO.md but never given a roadmap position, so the automated walk
+  could not reach it. Sibling of items 152/153; outward-facing, S effort.*
+  **Depends on 134.**
+- [x] **177** — `WormSearchResult.chain_breaks`/`unverified` have no
   Prometheus counter, so the strongest WORM-archive tamper signal isn't
-  alertable. *Surfaced 2026-08-10 by `security-invariant-reviewer` auditing
-  item 172's own commit.* **Depends on 172.**
+  alertable. ✅ **Shipped** (two unlabelled counters, incremented on the
+  served path *and* on a mid-scan S3 failure; a drafted idempotence guard was
+  deleted after mutation testing proved it unreachable and untested).
+  *Surfaced 2026-08-10 by `security-invariant-reviewer` auditing item 172's
+  own commit.* **Depends on 172.**
+- [ ] **178** — a hash-verified WORM record with a non-int `seq`
+  (type-confused, not corrupt) raises `TypeError` instead of being counted
+  `unverified`, escaping as a generic 500. *Surfaced 2026-08-11 by
+  `security-invariant-reviewer` auditing item 172's WS-172-9 follow-up.
+  Placed here 2026-08-11 by the `roadmap-next` walk that shipped item 177 —
+  filed in TODO.md the same day but never given a roadmap position.
+  Availability/contract regression against this module's own
+  "malformed/unverified, never an unhandled exception" posture, not
+  disclosure; S effort.* **Depends on 172.**
+- [ ] **179** — a day holding more segments than `max_objects_scanned` returns
+  a cursor that never advances: part of the WORM archive becomes silently
+  unreachable, a good-faith pager loops forever, and item 177's integrity
+  counters inflate without bound. *Surfaced 2026-08-11 by three of the four
+  `auditors` reviewers independently, auditing item 177. Pre-existing since
+  item 134 phase 2; not default-triggering (needs a lowered object budget or
+  a shortened flush interval). Filed separately because the fix is a cursor
+  format change (`after_key` + `StartAfter`), M effort, not a metrics-commit
+  drive-by.* **Depends on 134.**
+- [ ] **180** — `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is
+  unreachable for the bound rejections its own comment claims to count,
+  because `build_worm_search_result` validates before calling
+  `search_worm_archive`. *Surfaced 2026-08-11 by
+  `architecture-boundary-reviewer` auditing item 177. Pre-existing since item
+  134 phase 2; the existing test passes only because it calls the inner
+  function directly. S effort.* **Depends on 134.**
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
