@@ -250,8 +250,10 @@ controls bound — but do not close — that risk: a minimum group size
 cumulative disclosure budget (`max_shape_repeats_per_window` /
 `max_aggregate_queries_per_window`, which requires `min_group_size`) limits how
 often one query shape may be re-run, and how many aggregate queries may touch
-one table, per principal and declared purpose over a rolling window. See
-`docs/INFERENCE_RISKS.md` for what each does and does not cover.
+one table, per principal and declared purpose over a rolling window. The
+per-shape half is currently evadable by varying a select alias (TODO.md item
+186), so set the per-table cap rather than relying on the shape cap alone. See
+`docs/INFERENCE_RISKS.md` R3 for what each does and does not cover.
 
 ## Authentication and authorization
 
@@ -397,9 +399,10 @@ according to policy. Protect and retain them accordingly.
 The default JSONL sink is rotation-friendly and local-file-only — it is not
 itself a WORM archive or a SIEM. It does have a bounded browse surface: the
 admin UI's Audit view, over `GET /api/v1/admin/ui/audit/events`
-(`admin:config:read`), filters by event type, outcome, principal, connection,
-and action with "load older events" paging, reading a bounded number of lines
-from the tail of the local file — useful for recent operational review, not a
+(`admin:config:read`), filters by event type, outcome, principal, and
+connection with "load older events" paging, reading a bounded number of lines
+from the tail of the local file (the endpoint additionally accepts an `action`
+filter that the UI does not expose) — useful for recent operational review, not a
 long-retention search. Customers with a compliance
 retention requirement can additionally enable
 `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm`, which archives a batched copy to
@@ -418,11 +421,13 @@ cursor-based pagination. It reaches events the local hash-chained file has
 already rotated out, so an 18-month lookback is within the default 730-day
 window cap. Narrowing to a specific table is not a server-side filter —
 filtering is by event type, connection, and principal, and a caller narrows to
-a table over the returned events' `query_shape`. Paging is complete for the
-default object budget; a day holding more segments than
-`AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` currently returns a cursor that repeats
-that day (TODO.md item 184), so do not rely on exhaustive paging on a
-deployment that lowered that knob or shortened the flush interval. This
+a table over the returned events' `query_shape`. Paging is not exhaustive on
+every deployment: a day holding more segments than
+`AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` returns a cursor that repeats that day
+(TODO.md item 184). Every replica and every worker process writes into the same
+day prefix, so at stock settings two flushing processes already exceed the
+default budget — this affects multi-replica deployments as configured, not only
+ones that lowered the knob or shortened the flush interval. This
 endpoint is an API with no user interface of its own, and it searches only the
 S3 WORM archive. Customers wanting dashboards, correlation with non-QueryGate
 sources, or long-term analytics should still collect the audit stream into

@@ -170,8 +170,11 @@ contribution (multi-query differencing).
   prober who walks the alias alongside the sliding constant lands in a fresh
   bucket every probe and `max_shape_repeats_per_window` never trips — measured
   at 20 distinct fingerprints for 20 probes. **`max_aggregate_queries_per_window`
-  is unaffected and does bound every known vector, so until item 186 lands, set
-  the per-table cap and do not rely on the per-shape cap alone.** Two further
+  is unaffected by all four of those vectors — its key carries no fingerprint at
+  all — so until item 186 lands, set the per-table cap and do not rely on the
+  per-shape cap alone.** It is not a general bound: it does not cover the
+  write-preview path (item 191), it partitions per declared purpose, and its
+  in-process window is per flushing process. Two further
   scoping residuals: a cross-connection joined table is charged under the
   *requesting* connection (so one physical table reachable via two connections
   carries two budgets), and under static API-key auth every caller sharing a key
