@@ -195,6 +195,45 @@ scan is bounded by `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
 rejected outright, a bound hit mid-scan degrades to a truncated, resumable
 page rather than a slow or unbounded scan.
 
+That search also verifies each segment's internal hash-chain linkage, and
+publishes its two **chain-integrity** findings as counters, so they reach your
+metrics pipeline instead of living only in a response body:
+
+- `querygate_audit_worm_search_chain_breaks_total` — a record whose
+  `seq`/`prev_hash` did not continue from its predecessor while its own hash
+  still verified (a record dropped from or reordered within a segment, a
+  segment whose first record isn't the genuine genesis, or a crafted object
+  that exhausts the resumed-page seed walk). The strongest signal here:
+  unlike the counter below it is *not* explained by a rotated key.
+- `querygate_audit_worm_search_unverified_total` — an envelope-shaped line
+  that did not verify under the configured `AUDIT_LEDGER_HMAC_KEY`, **plus**
+  each chain break's own breaking line (whose hash did recompute). So
+  `unverified_total - chain_breaks_total` is the part usually explained by a
+  rotated or mismatched key — treat a sustained rate there as a configuration
+  signal first. Lines counted `malformed` — not envelope-shaped, unparseable,
+  rejected by the event schema, or rejected for forbidden content nested in
+  `query_shape` — are a separate class: they move neither counter and are not
+  published as a metric at all, so a planted line rejected for forbidden
+  content is visible only in a search response.
+
+Both are also recorded when a scan fails against S3 partway through, so an S3
+failure doesn't discard a break the scan had already found. (A client
+disconnect or shutdown cancels the request without counting — cancellation is
+not an `Exception`.)
+
+**Two limits worth knowing before you write an alert.** These counters make a
+finding *alertable*; they do not make the archive *monitored*. QueryGate never
+scans on a schedule — the counters only advance while a search actually runs,
+so a segment tampered inside a window nobody searches produces no signal.
+Pair them with a periodic (e.g. cron'd) worm-search over a rolling window, and
+alert on the absence of searches too. And they count findings **per scan**,
+not distinct segments: a WORM object is immutable, so a real break is
+permanent and every later search reaching it counts again. So for
+`chain_breaks_total`, alert on the first non-zero increase and treat it as
+sticky until triaged — never on an absolute magnitude. (The sustained-rate
+guidance above still applies to `unverified_total`, where a steady rate is
+the signal that the archive was written under a different key.)
+
 ### Prove the boundary: the adversarial security benchmark
 
 A fixed, versioned attack corpus, run against the real request-pipeline

@@ -207,8 +207,10 @@ order-of-magnitude, not commitments.
 | 174 | ✅ A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch | S | 163 |
 | 175 | ✅ `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" | S | 2 |
 | 176 | Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line: `sales/index.html`'s guardrails still forbid claiming managed search, `CUSTOMER_README.md` flatly denies it exists, and `TODO.md`'s own Quick-scan row for item 134 says phase 2 "not started" | S | 134 |
-| 177 | `WormSearchResult.chain_breaks`/`unverified` have no Prometheus counter, so the strongest WORM-archive tamper signal isn't alertable — only visible to whoever happens to run an ad-hoc search over the right window | S | 172 |
+| 177 | ✅ `WormSearchResult.chain_breaks`/`unverified` have no Prometheus counter, so the strongest WORM-archive tamper signal isn't alertable — only visible to whoever happens to run an ad-hoc search over the right window | S | 172 |
 | 178 | A hash-verified WORM record with a non-int `seq` (type-confused, not corrupt) raises `TypeError` instead of being counted `unverified` | S | 172 |
+| 179 | A day holding more segments than `max_objects_scanned` returns a cursor that never advances, so part of the WORM archive is unreachable, a good-faith pager loops forever, and item 177's integrity counters inflate without bound | M | 134 |
+| 180 | `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is unreachable for the bound rejections its own comment claims to count, because `build_worm_search_result` validates before calling `search_worm_archive` | S | 134 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -2724,30 +2726,15 @@ the archived-stub convention rather than restating stale phase status.
 
 **Effort:** S. **Depends on:** 134 (shipped).
 
-### 177. `WormSearchResult.chain_breaks`/`unverified` have no Prometheus counter, so the strongest WORM-archive tamper signal isn't alertable
+### 177. `WormSearchResult.chain_breaks`/`unverified` have no Prometheus counter, so the strongest WORM-archive tamper signal isn't alertable ✅ DONE
 
-**Surfaced 2026-08-10 by `security-invariant-reviewer` auditing item 172's
-own commit (WS-172-6), during that item's own mandatory completion gate.**
-Item 172 added `chain_breaks` (a segment-level chain-linkage-break count) to
-`WormSearchResult` — the strongest tamper/omission signal the WORM search
-surface can produce, stronger than an ordinary `unverified` hash mismatch —
-but it is only ever visible to whoever happens to run an ad-hoc
-`GET /api/v1/admin/observability/worm-search` request over the right window.
-Nobody is paged. Given the Proof pillar is a product claim, "detected" here
-means "detectable on demand", not "monitored" — an operator relying on
-dashboards/alerts (the normal operational posture) would never learn a
-chain broke.
+`querygate_audit_worm_search_chain_breaks_total` and
+`..._unverified_total` (both unlabelled) now publish item 172's chain-linkage
+findings on the served path *and* on a mid-scan S3 failure, so a broken
+segment chain is alertable rather than only visible inside an ad-hoc search
+response.
 
-**What to do (when prioritized):** add a
-`querygate_audit_worm_search_chain_breaks_total` counter (and an
-`..._unverified_total` sibling, if not already covered) in `metrics.py`,
-incremented in `audit/worm_search.py`'s `_finalize` alongside the existing
-`AUDIT_WORM_SEARCH_REQUESTS_TOTAL`/`AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL`
-pattern. No labels beyond what those two already carry (avoid a
-caller-chosen-cardinality/activity-oracle risk on an admin-scoped surface,
-matching item 126's `PERSONAL_DENIALS_RATE_LIMITED_TOTAL` precedent).
-
-**Effort:** S. **Depends on:** 172 (shipped).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 177).
 
 ### 178. A hash-verified WORM record with a non-int `seq` (type-confused, not corrupt) raises instead of being counted `unverified`
 
@@ -2780,3 +2767,98 @@ counted like any other forgery class instead of raising.
 
 **Effort:** S. **Depends on:** 172 (shipped).
 
+
+### 179. A day holding more segments than `max_objects_scanned` returns a cursor that never advances, so part of the WORM archive is unreachable and both integrity counters inflate without bound
+
+**Surfaced 2026-08-11 by three of the four `auditors` reviewers
+(`security-invariant-reviewer`, `architecture-boundary-reviewer`,
+`test-contract-reviewer`, independently) auditing item 177's own commit.**
+Pre-existing since item 134 phase 2 — item 177 neither caused it nor touched
+the code path; it is filed separately because the fix is a **cursor format
+change**, which deserves its own scoping and tests rather than riding in on a
+metrics commit.
+
+`_list_day_keys` is called with `max_keys=bounds.max_objects_scanned` and no
+`StartAfter`. When one day directory holds strictly more keys than that
+budget it returns the first N with `stopped_early=True`. The key loop then
+consumes exactly those N objects without re-tripping the
+`objects_scanned >= max` guard (checked at the top of each iteration, so it
+fires only at `idx == N`, which is out of range), falls through to
+`if listing_truncated:` and returns
+`next_cursor = _encode_cursor(day, None, 0, fingerprint)` — **the start of the
+same day**, discarding the within-day position. Replaying that cursor sets
+`resume_key = None`, so `start_index` stays 0, the same N keys are listed and
+fetched again, the same events are returned again, and the same cursor comes
+back. Three consequences:
+
+1. **Silently unreachable compliance records.** Every segment past key N in
+   that day can never be reached, while the response reports `truncated=True`
+   as if they were merely deferred — a compliance search cannot produce
+   records the archive holds.
+2. **An infinite paging loop** for a caller following `next_cursor` in good
+   faith, at `max_objects_scanned` real S3 GETs per lap.
+3. **Unbounded inflation of item 177's counters.** Each lap re-counts the
+   day's `chain_breaks`/`unverified`, so
+   `querygate_audit_worm_search_chain_breaks_total` climbs with how long the
+   pager ran rather than with how many segments actually broke. Item 177's
+   docs disclose per-scan counting, but this makes the magnitude untrustworthy
+   even within a single logical search.
+
+**Not default-triggering:** default `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED`
+(2000) exceeds the ~1440 segments/day a default 60s flush interval can
+produce. It triggers on any deployment that lowers the object budget (a
+documented cost knob) below its daily segment count, or shortens the flush
+interval below ~43s.
+
+**What to do (when prioritized):** make the day-truncation cursor exclusive
+rather than day-resetting — add an `after_key` field to the cursor payload
+(the existing fingerprint already protects it, and it is only ever used as a
+`StartAfter` listing marker, never as a raw `GetObject` key, so the module's
+"a cursor key is never used as a raw key path" property is preserved), give
+`_list_day_keys` a `start_after` parameter, emit
+`_encode_cursor(day, key=None, after_key=keys[-1], line=0, ...)` when `keys`
+is non-empty, and pass it through on resume. Keep the current day-start cursor
+only when `keys` is empty.
+
+**Acceptance criteria:** a test putting 5 single-event segments in one day
+with `max_objects_scanned=2` follows `next_cursor` to exhaustion and sees all
+5 events exactly once, with no cursor repeating and the loop terminating; a
+companion test asserts `chain_breaks_total` rises by exactly 1 across a whole
+cursor chain over one broken segment. Both fail today.
+
+**Effort:** M. **Depends on:** 134 (shipped).
+
+### 180. `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is unreachable for the rejections its own comment claims to count
+
+**Surfaced 2026-08-11 by `architecture-boundary-reviewer` auditing item 177's
+own commit.** Pre-existing since item 134 phase 2; unrelated to item 177's
+change beyond sitting in the same file.
+
+`build_worm_search_result` — the only production caller, from
+`api/admin_observability_routes.py` — runs `_validate_window` and
+`_validate_limit` **itself**, before deciding whether the backend is enabled
+and before calling `search_worm_archive`. So a missing `start_time`, an
+over-wide window, or an out-of-range `limit` raises there and never reaches
+`search_worm_archive`'s own
+`except QueryValidationError: ...labels(outcome="rejected").inc()`. In
+production that label therefore only ever counts cursor-fingerprint/day-range
+rejections — yet `metrics.py`'s comment on the counter explicitly lists
+"missing/over-wide time range, limit out of range" as what it counts. An
+operator alerting on a spike of bound-violating callers sees nothing.
+
+The existing test
+(`test_a_rejected_request_increments_the_rejected_outcome_not_ok`) passes
+because it calls `search_worm_archive` **directly**, exercising a path
+production never takes — so the gap is invisible to the suite.
+
+**What to do (when prioritized):** either move the counter up into
+`build_worm_search_result` (wrapping its two validation calls in the same
+`except QueryValidationError` + `.inc()`), or narrow `metrics.py`'s comment to
+say "cursor rejections only". The first is preferable — the metric is more
+useful where the rejections actually happen.
+
+**Acceptance criteria:** an integration test hitting
+`GET /api/v1/admin/observability/worm-search` with no `start_time` asserts the
+`rejected` counter rose by 1. Fails today.
+
+**Effort:** S. **Depends on:** 134 (shipped).
