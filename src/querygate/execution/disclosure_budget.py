@@ -86,7 +86,6 @@ from querygate.core.exceptions import DisclosureBudgetExceededError
 from querygate.policy.models import Policy
 from querygate.query_ast.models import StructuredQuery, is_aggregate_scope
 from querygate.validation.schema_validation import (
-    declared_cte_names,
     effective_name_map,
     iter_query_scopes,
 )
@@ -226,6 +225,13 @@ class InProcessDisclosureBudgetLimiter:
         limiters are: window state seeded by one test must not leak into the
         next."""
         self._windows.clear()
+        # `_last_sweep` is state too, and `reserve()` accepts an explicit `now`:
+        # a test that sweeps at a large `now` would otherwise leave the clock
+        # ahead, so a later test passing a smaller `now` could never satisfy
+        # `now - _last_sweep > window_seconds` and its sweep would silently not
+        # run. No production impact (`time.monotonic()` never goes backwards) —
+        # this keeps the docstring's "all state" promise literally true.
+        self._last_sweep = 0.0
 
     def _prune(self, key: DisclosureBudgetKey, cutoff: float) -> List[_WindowEntry]:
         entries = [e for e in self._windows.get(key, ()) if e.ts > cutoff]

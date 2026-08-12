@@ -564,6 +564,29 @@ async def test_clear_resets_all_windows():
     await lim.reserve([(KEY_A, 1, KIND_SHAPE, 1)], window_seconds=600, now=100.0)
 
 
+@pytest.mark.asyncio
+async def test_clear_resets_the_sweep_clock_too():
+    """`clear()` promises to reset *all* state, and `reserve()` takes an explicit
+    `now`. If the sweep clock survived, a test sweeping at a large `now` would
+    leave it ahead of every later test's smaller `now`, so
+    `now - _last_sweep > window_seconds` could never hold and the sweep would
+    silently stop running — order-dependent, and for a reason nobody would look
+    for. Asserted on the observable consequence (the sweep reclaims aged-out
+    keys) rather than on `_last_sweep` alone, so it fails if either the reset or
+    the sweep itself regresses."""
+    lim = InProcessDisclosureBudgetLimiter()
+    await lim.reserve([(KEY_A, 5, KIND_SHAPE, 1)], window_seconds=600, now=100_000.0)
+    lim.clear()
+    for index in range(3):
+        key = ("demo", "agent", "", "employees", f"shape-{index}")
+        await lim.reserve([(key, 5, KIND_SHAPE, 1)], window_seconds=600, now=10.0)
+    assert len(lim._windows) == 3
+    # Two windows on from `now=10.0`, one unrelated charge must reclaim all three.
+    # With `_last_sweep` left at 100_000.0 the sweep never fires and this is 4.
+    await lim.reserve([(KEY_A, 5, KIND_SHAPE, 1)], window_seconds=600, now=2_000.0)
+    assert len(lim._windows) == 1
+
+
 # ---------------------------------------------------------------------------
 # enforce_disclosure_budget
 # ---------------------------------------------------------------------------
