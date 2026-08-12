@@ -13356,10 +13356,19 @@ parser change: a free-text-vs-body consistency check is a different item, and
 `claim-reviewer` already catches this class on the surfaces that matter most
 (the outward-facing ones), which is exactly how this item was filed.
 
-**Scope discipline.** A sweep of every `*.md`/`*.html` outside `docs/` and
-`archive/` for the same class of denial ("no managed search", "search
-interface over", "managed search … not started") found no fourth surface, so
-the class is closed rather than the three named instances patched. Nothing in
+**Scope discipline — and where it failed.** A sweep of every `*.md`/`*.html`
+outside `docs/` and `archive/` for the same class of denial ("no managed
+search", "search interface over", "managed search … not started") found no
+fourth surface, and this write-up originally concluded "the class is closed".
+**That conclusion was wrong, and the sweep's own exclusion is why:**
+`docs/business/GO_TO_MARKET.md` lives under `docs/`, and it carries its own
+"Safe to claim / Do not claim yet" lists — structurally the same artifact as
+`sales/index.html`, which this item did fix. It was still telling a seller the
+endpoint does not exist. Caught 2026-08-12 by `claim-reviewer` re-auditing this
+item's own fix, and corrected then. The lesson is narrow and worth keeping: a
+sweep that excludes a directory cannot conclude a *class* is closed, only that
+the searched subset is clean — and `docs/business/` holds sales-facing
+artifacts despite the `docs/` prefix. Nothing in
 `landing/` needed a change — item 1 had already corrected `security.html`, and
 `index.html` claims WORM *retention* without denying search.
 
