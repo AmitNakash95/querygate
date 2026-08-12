@@ -12,9 +12,9 @@ real Postgres instance — not an estimate.
 > TL;DR of a representative run (your hardware will differ — regenerate the
 > exact current numbers with the command below, never quote these from
 > memory): across three query shapes (point lookup, filtered scan,
-> aggregation), QueryGate's full REST round trip added a **mean of ~2.7ms**
+> aggregation), QueryGate's full REST round trip added a **mean of ~2.8ms**
 > over raw SQL executed directly against the same Postgres instance — of
-> which **~1.9ms** is the guardrail pipeline itself (policy validation,
+> which **~1.6ms** is the guardrail pipeline itself (policy validation,
 > cached schema validation, compilation, execution — audit persistence is
 > off for this run, see "What it measures" below) and the remainder is
 > HTTP/JSON transport. Both baseline and QueryGate queries completed in low
