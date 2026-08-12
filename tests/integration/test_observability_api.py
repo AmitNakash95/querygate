@@ -109,6 +109,11 @@ async def test_overview_carries_only_low_cardinality_aggregates_no_values():
         "concurrency_max_total",
         "concurrency_utilization",
         "quota_rejections_by_kind",
+        # Item 179. Low cardinality by construction: `budget_kind` is a fixed
+        # two-value set, and the counter deliberately carries no table or
+        # principal label — which table a prober is working is exactly the
+        # disclosure the guardrail exists to withhold.
+        "disclosure_budget_rejections_by_kind",
         "cost_estimation",
         "by_connection",
     }
@@ -125,5 +130,14 @@ async def test_overview_carries_only_low_cardinality_aggregates_no_values():
                 "queue_full",
                 "cost_estimate",
                 "quota",
+                # A real `classify_rejection` bucket since item 92 that this
+                # allow-list never listed — no test in this process had ever
+                # tripped the approval gate before item 179's approval
+                # double-charge test did. Pre-existing gap, surfaced not caused.
+                "approval_required",
                 "db_error",
             }
+        # Item 179's breakdown is the same shape: a fixed two-value set, never a
+        # table or a principal.
+        for budget_kind in conn.get("disclosure_budget_rejections_by_kind", {}):
+            assert budget_kind in {"disclosure_shape", "disclosure_table"}

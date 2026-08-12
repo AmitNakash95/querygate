@@ -485,7 +485,44 @@ claim when the work ships or before explicitly handing the item back.
   Availability/contract regression against this module's own
   "malformed/unverified, never an unhandled exception" posture, not
   disclosure; S effort.* **Depends on 172.**
-- [ ] **179** — a day holding more segments than `max_objects_scanned` returns
+- [x] **179** — cumulative disclosure budget: bound multi-query differencing
+  per purpose. ✅ **Shipped** (two off-by-default caps on re-runs of one
+  literal-free query shape and on aggregate queries per k-floored table, keyed
+  by principal/connection/purpose/table; in-process + fail-closed Redis
+  backends; rejects on exhaustion). *The only structural form of "governing
+  intent" that is buildable — NL-intent enforcement was rejected outright as
+  product identity, see the PRODUCT_GUIDE Decision Log (2026-08-11).*
+  **Bounds, does not close**, the residual item 88, `INFERENCE_RISKS.md` R3 and
+  THREAT_MODEL QG-29 document; R3 is explicit that closing it needs query-set
+  auditing or differential privacy. The false-positive threshold remains
+  uncalibrated — no default is recommended.
+- [ ] **181** — `redis_quota.py`'s `Retry-After` is always the full window: the
+  Lua indexes `oldest[2]` of a `WITHSCORES` reply the Lua bridge returns
+  *nested*, so the countdown collapses. *Found 2026-08-11 by item 179's
+  non-zero-age parity test; item 179's own sibling was fixed, this one left
+  alone deliberately. **Verify against a real Redis before changing production**
+  — under real Redis the reply may be flat, making this a test-double artifact
+  rather than a shipped bug.* **Depends on 50.**
+- [ ] **182** — observe mode for the disclosure budget: record what *would* have
+  been refused without refusing it. *Closes item 179's one honest gap — no
+  threshold is recommended because none has been calibrated, so an operator
+  enabling it today picks an unvalidated number. Follows `CostEstimationMode.OBSERVE`'s
+  shipped precedent exactly. Note the non-cosmetic design question in the item
+  body: item 179's charge is all-or-nothing, so a naive wrap-the-call-site
+  observe mode stops measuring at the cap and never learns how far past it real
+  traffic goes.* **Depends on 179, 26.**
+- [ ] **183** — suggest a disclosure-budget threshold from observed behavior,
+  for human approval. *Nice-to-have; a client can use or ignore it. Stays inside
+  the 32C boundary (propose only, never self-publish, 32B review path). The trap
+  is in the item body: a prober active during the observation window poisons the
+  baseline, so suggest from a percentile and present the distribution rather than
+  a bare number.* **Depends on 182.**
+- [ ] **180** — escalate an exhausted disclosure budget into item 92's approval
+  gate instead of rejecting. *Deliberately deferred from item 179: better UX,
+  but risks becoming "click here to buy unlimited disclosure", and item 179's
+  own false-positive rate is uncalibrated — decide from real usage data, not
+  taste.* **Depends on 92, 179.**
+- [ ] **184** — a day holding more segments than `max_objects_scanned` returns
   a cursor that never advances: part of the WORM archive becomes silently
   unreachable, a good-faith pager loops forever, and item 177's integrity
   counters inflate without bound. *Surfaced 2026-08-11 by three of the four
@@ -493,14 +530,16 @@ claim when the work ships or before explicitly handing the item back.
   item 134 phase 2; not default-triggering (needs a lowered object budget or
   a shortened flush interval). Filed separately because the fix is a cursor
   format change (`after_key` + `StartAfter`), M effort, not a metrics-commit
-  drive-by.* **Depends on 134.**
-- [ ] **180** — `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is
+  drive-by.* **Filed as item 179 on the item-177 branch; renumbered on merge
+  (2026-08-12) — see TODO.md's note at item 184.** **Depends on 134.**
+- [ ] **185** — `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is
   unreachable for the bound rejections its own comment claims to count,
   because `build_worm_search_result` validates before calling
   `search_worm_archive`. *Surfaced 2026-08-11 by
   `architecture-boundary-reviewer` auditing item 177. Pre-existing since item
   134 phase 2; the existing test passes only because it calls the inner
-  function directly. S effort.* **Depends on 134.**
+  function directly. S effort.* **Filed as item 180 on the item-177 branch;
+  renumbered on merge (2026-08-12).** **Depends on 134.**
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 

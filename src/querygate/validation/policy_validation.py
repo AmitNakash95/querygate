@@ -20,7 +20,7 @@ from querygate.query_ast.models import (
     WindowExpr,
     WindowSelectItem,
     interval_magnitude_days,
-    _AGGREGATE_SELECT_ITEM_TYPES,
+    is_aggregate_scope,
 )
 from querygate.validation.schema_validation import (
     ConnectionResolver,
@@ -187,9 +187,7 @@ def _reject_windows_outside_projections(query: StructuredQuery) -> None:
                     "argument — no dialect allows it; project the inner window in "
                     "one query and window over that result in a second"
                 )
-    if has_window and (
-        query.group_by or any(isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in query.select)
-    ):
+    if has_window and is_aggregate_scope(query):
         raise PolicyViolationError(
             "a window function cannot be combined with group_by or aggregate "
             "select items — a window projects a value per row, so aggregate in "

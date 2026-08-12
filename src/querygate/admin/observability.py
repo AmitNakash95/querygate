@@ -87,6 +87,11 @@ class ConnectionObservability(pyd.BaseModel):
     queue_depth: float = 0.0
     queue_wait_by_outcome: Dict[str, WaitStat] = pyd.Field(default_factory=dict)
     quota_rejections_by_kind: Dict[str, int] = pyd.Field(default_factory=dict)
+    # Cumulative disclosure budget (TODO.md item 179). Separate from the quota
+    # breakdown above because the two answer different operator questions:
+    # "this caller is running too many queries" vs. "this caller is probing one
+    # table's aggregates". budget_kind: disclosure_shape | disclosure_table.
+    disclosure_budget_rejections_by_kind: Dict[str, int] = pyd.Field(default_factory=dict)
     cost_estimation: CostEstimationStat = pyd.Field(default_factory=CostEstimationStat)
 
     model_config = pyd.ConfigDict(extra="forbid")
@@ -115,6 +120,11 @@ class ObservabilityOverview(pyd.BaseModel):
     concurrency_utilization: Optional[float] = None
 
     quota_rejections_by_kind: Dict[str, int] = pyd.Field(default_factory=dict)
+    # Cumulative disclosure budget (TODO.md item 179). Separate from the quota
+    # breakdown above because the two answer different operator questions:
+    # "this caller is running too many queries" vs. "this caller is probing one
+    # table's aggregates". budget_kind: disclosure_shape | disclosure_table.
+    disclosure_budget_rejections_by_kind: Dict[str, int] = pyd.Field(default_factory=dict)
     cost_estimation: CostEstimationStat = pyd.Field(default_factory=CostEstimationStat)
 
     by_connection: List[ConnectionObservability] = pyd.Field(default_factory=list)
@@ -137,6 +147,7 @@ class _ConnAccumulator:
         self.wait_count: Dict[str, int] = {}
         self.wait_sum: Dict[str, float] = {}
         self.quota_by_kind: Dict[str, int] = {}
+        self.disclosure_by_kind: Dict[str, int] = {}
         self.cost_attempts = 0
         self.cost_unavailable_by_reason: Dict[str, int] = {}
         self.cost_would_reject = 0
@@ -207,6 +218,10 @@ def build_overview(registry: CollectorRegistry = REGISTRY) -> ObservabilityOverv
                 a = acc(labels)
                 kind = labels.get("quota_kind", "unknown")
                 a.quota_by_kind[kind] = a.quota_by_kind.get(kind, 0) + int(value)
+            elif name == "querygate_disclosure_budget_rejections_total":
+                a = acc(labels)
+                kind = labels.get("budget_kind", "unknown")
+                a.disclosure_by_kind[kind] = a.disclosure_by_kind.get(kind, 0) + int(value)
             elif name == "querygate_cost_estimation_attempts_total":
                 acc(labels).cost_attempts += int(value)
             elif name == "querygate_cost_estimation_unavailable_total":
@@ -239,6 +254,7 @@ def build_overview(registry: CollectorRegistry = REGISTRY) -> ObservabilityOverv
                 for outcome in sorted(set(a.wait_count) | set(a.wait_sum))
             },
             quota_rejections_by_kind=dict(a.quota_by_kind),
+            disclosure_budget_rejections_by_kind=dict(a.disclosure_by_kind),
             cost_estimation=CostEstimationStat(
                 attempts=a.cost_attempts,
                 unavailable=cost_unavailable,
@@ -263,6 +279,10 @@ def build_overview(registry: CollectorRegistry = REGISTRY) -> ObservabilityOverv
         overview.concurrency_in_use_total += conn_model.concurrency_in_use
         overview.concurrency_max_total += conn_model.concurrency_max
         _merge_counts(overview.quota_rejections_by_kind, conn_model.quota_rejections_by_kind)
+        _merge_counts(
+            overview.disclosure_budget_rejections_by_kind,
+            conn_model.disclosure_budget_rejections_by_kind,
+        )
         overview.cost_estimation.attempts += conn_model.cost_estimation.attempts
         overview.cost_estimation.would_reject += conn_model.cost_estimation.would_reject
         _merge_counts(
