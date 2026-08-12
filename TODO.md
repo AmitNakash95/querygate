@@ -164,7 +164,7 @@ order-of-magnitude, not commitments.
 | 131 | ✅ Publish the StructuredQuery AST as a namespaced MCP extension | M | 128 |
 | 132 | ✅ Reconcile stale shipped-status claims left behind by items 90–93 | S | — |
 | 133 | ✅ Caller-facing quota-metered verdict endpoint (play P4) — reuses 31/39's decision logic | M–L | 26, 31, 39, 45, 121 |
-| 134 | ✅ Compliance-grade (WORM) audit retention (phase 1: S3 Object Lock; phase 2: managed search not started) | L | 91, 136 |
+| 134 | ✅ Compliance-grade (WORM) audit retention + managed search | L | 91, 136 |
 | 135 | ✅ Automatic (TTL/lease-driven) credential re-resolution, without an operator reload | M | 13 |
 | 136 | ✅ `jsonl_chained` audit backend silently disables four shipped read surfaces | S–M | 91 |
 | 137 | ✅ Audit read surfaces neither verify nor disclose hash-chain integrity | S–M | 91, 136 |
@@ -206,7 +206,7 @@ order-of-magnitude, not commitments.
 | 173 | ✅ Cross-connection connection-resolution is unmemoized per join, redone on every call site that self-derives | S | 160 |
 | 174 | ✅ A cross-connection join's secondary-connection schema qualifier is a hardcoded MSSQL `.dbo` idiom, with no dialect dispatch | S | 163 |
 | 175 | ✅ `test_mssql_write_execution.py` leaks real aioodbc connections across tests, intermittently failing CI with "Connection is busy with results for another command" | S | 2 |
-| 176 | Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line: `sales/index.html`'s guardrails still forbid claiming managed search, `CUSTOMER_README.md` flatly denies it exists, and `TODO.md`'s own Quick-scan row for item 134 says phase 2 "not started" | S | 134 |
+| 176 | ✅ Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line: `sales/index.html`'s guardrails still forbid claiming managed search, `CUSTOMER_README.md` flatly denies it exists, and `TODO.md`'s own Quick-scan row for item 134 says phase 2 "not started" | S | 134 |
 | 177 | ✅ `WormSearchResult.chain_breaks`/`unverified` have no Prometheus counter, so the strongest WORM-archive tamper signal isn't alertable — only visible to whoever happens to run an ad-hoc search over the right window | S | 172 |
 | 178 | A hash-verified WORM record with a non-int `seq` (type-confused, not corrupt) raises `TypeError` instead of being counted `unverified` | S | 172 |
 | 179 | ✅ Cumulative disclosure budget: bound multi-query differencing per purpose — the one structural form of "governing intent" | L | 88, 145 |
@@ -2699,37 +2699,16 @@ identical `reset_engines()`-doesn't-dispose gap (item 2).
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 175).
 
-### 176. Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line
+### 176. Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line ✅ DONE
 
-**Surfaced 2026-08-10 by `claim-reviewer` auditing the item-1 landing-copy fix**
-(`landing/security.html`'s "Audit durability and search" line, corrected to
-describe the now-shipped `GET /api/v1/admin/observability/worm-search`
-endpoint). The reviewer confirmed that fix is accurate, but found three other
-surfaces describing the same item-134-phase-2 capability that still say it
-doesn't exist:
+`sales/index.html`'s two sales-guardrail lists, `CUSTOMER_README.md`, and
+TODO.md's own Quick-scan row for item 134 now describe the shipped
+`GET /api/v1/admin/observability/worm-search` endpoint instead of denying it
+exists — each scoped to what actually ships (a bounded API over the S3 WORM
+archive, not a SIEM, no UI, and no managed search over the plain local JSONL
+sink).
 
-1. `sales/index.html`'s "Safe to claim now" / "Do not claim yet" guardrail
-   list (around lines 494 and 498) still tells sales staff there is no
-   managed search over the WORM archive — last touched by item 152
-   (2026-08-06, before phase 2 shipped later the same day) and never updated
-   afterward.
-2. `CUSTOMER_README.md:399` states "There is still no managed search
-   interface over either sink" — directly false now.
-3. `TODO.md`'s own Quick-scan table row for item 134 (line 167) reads "phase
-   2: managed search not started," contradicting its own `✅ DONE` heading
-   (no trailing qualifier) two thousand lines later and the full write-up in
-   `docs/TODO_ARCHIVE.md`. `scripts/check_worklist.py` only reconciles the
-   ✅ checkmark against the heading, not this free-text description, so the
-   drift is invisible to the automated gate.
-
-**What to do:** update all three to describe the shipped endpoint (scope,
-required time window, `event_type`/`connection_id`/`principal_id` filters),
-matching the wording now used in `landing/security.html`, `README.md`, and
-`docs/PRODUCT_GUIDE.md`. For (1), move the claim from "Do not claim yet" to
-"Safe to claim now." For (3), trim the Quick-scan row's free-text to match
-the archived-stub convention rather than restating stale phase status.
-
-**Effort:** S. **Depends on:** 134 (shipped).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 176).
 
 ### 177. `WormSearchResult.chain_breaks`/`unverified` have no Prometheus counter, so the strongest WORM-archive tamper signal isn't alertable ✅ DONE
 
