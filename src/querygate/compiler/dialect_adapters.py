@@ -10,7 +10,7 @@ variance points (date bucketing, ORDER BY nulls handling, statistical
 aggregate function names, window frame grammar, set-operation
 availability) — `connections/dialects.py`'s
 session guardrails
-and `execution/cost_estimation.py`'s Postgres-only EXPLAIN hook are separate
+and `execution/cost_estimation.py`'s per-dialect plan-estimation hooks are separate
 concerns with their own dialect handling, not folded in here.
 """
 

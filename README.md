@@ -193,7 +193,47 @@ that window out. `start_time`/`end_time` are required on every request (no
 scan is bounded by `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
 `AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS` — an over-wide/missing range is
 rejected outright, a bound hit mid-scan degrades to a truncated, resumable
+(except a day listing over the object budget — TODO item 184)
 page rather than a slow or unbounded scan.
+
+That search also verifies each segment's internal hash-chain linkage, and
+publishes its two **chain-integrity** findings as counters, so they reach your
+metrics pipeline instead of living only in a response body:
+
+- `querygate_audit_worm_search_chain_breaks_total` — a record whose
+  `seq`/`prev_hash` did not continue from its predecessor while its own hash
+  still verified (a record dropped from or reordered within a segment, a
+  segment whose first record isn't the genuine genesis, or a crafted object
+  that exhausts the resumed-page seed walk). The strongest signal here:
+  unlike the counter below it is *not* explained by a rotated key.
+- `querygate_audit_worm_search_unverified_total` — an envelope-shaped line
+  that did not verify under the configured `AUDIT_LEDGER_HMAC_KEY`, **plus**
+  each chain break's own breaking line (whose hash did recompute). So
+  `unverified_total - chain_breaks_total` is the part usually explained by a
+  rotated or mismatched key — treat a sustained rate there as a configuration
+  signal first. Lines counted `malformed` — not envelope-shaped, unparseable,
+  rejected by the event schema, or rejected for forbidden content nested in
+  `query_shape` — are a separate class: they move neither counter and are not
+  published as a metric at all, so a planted line rejected for forbidden
+  content is visible only in a search response.
+
+Both are also recorded when a scan fails against S3 partway through, so an S3
+failure doesn't discard a break the scan had already found. (A client
+disconnect or shutdown cancels the request without counting — cancellation is
+not an `Exception`.)
+
+**Two limits worth knowing before you write an alert.** These counters make a
+finding *alertable*; they do not make the archive *monitored*. QueryGate never
+scans on a schedule — the counters only advance while a search actually runs,
+so a segment tampered inside a window nobody searches produces no signal.
+Pair them with a periodic (e.g. cron'd) worm-search over a rolling window, and
+alert on the absence of searches too. And they count findings **per scan**,
+not distinct segments: a WORM object is immutable, so a real break is
+permanent and every later search reaching it counts again. So for
+`chain_breaks_total`, alert on the first non-zero increase and treat it as
+sticky until triaged — never on an absolute magnitude. (The sustained-rate
+guidance above still applies to `unverified_total`, where a steady rate is
+the signal that the archive was written under a different key.)
 
 ### Prove the boundary: the adversarial security benchmark
 
@@ -389,7 +429,14 @@ query, so a caller can't single out an individual by aggregating over a
 razor-thin filter — a `count(*)` over a group backed by fewer than *k* rows is
 suppressed rather than returned. It is the aggregate analog of a mandatory row
 filter (policy-driven, injected, non-removable) and applies only to aggregate
-queries; it closes single-query singling-out, not multi-query differencing.
+queries; it closes single-query singling-out. Multi-query *differencing* is
+bounded — not closed — by the opt-in cumulative disclosure budget
+(`max_shape_repeats_per_window` / `max_aggregate_queries_per_window`, item 179),
+which caps how often one query shape may be re-run and how many aggregate
+queries may touch one table, per principal and declared purpose over a rolling
+window. Both are off by default and the budget requires `min_group_size`. Set
+the per-table cap: the per-shape half is currently evadable (item 186). See
+`docs/INFERENCE_RISKS.md` R3.
 Because the floor counts *joined* rows, a join that can match many rows per row
 would inflate the count — so while `min_group_size` is set, such a join is refused
 on an aggregate query rather than silently answered (item 118). Joining onto the
@@ -434,7 +481,7 @@ already closes. Masking is audited distinctly from denial — the success event
 carries `masked_columns` (output names only, never the pre-mask value) so
 operators can tell "masked" access apart from "denied" in the one stream.
 
-### Pre-execution cost estimation (Postgres)
+### Pre-execution cost estimation (Postgres and SQL Server)
 
 Row limits, timeouts, and concurrency caps are all reactive — they bound a
 query only once it's already running. `Policy.max_estimated_rows` /
@@ -452,12 +499,13 @@ default:
   cost_estimation_mode: enforce   # or "observe" — see below
 ```
 
-This is Postgres-only for now. MSSQL's estimated-plan equivalent
-(`SET SHOWPLAN_XML ON`) can't be composed as a prefix on an already-compiled
-statement the way Postgres's `EXPLAIN` can — it needs its own dedicated
-connection lifecycle — so setting these fields on an MSSQL connection is
-accepted but has no effect (see `execution/cost_estimation.py` and TODO.md
-item 26). `run_structured_queries(mode="explain")` (MCP) and
+Both dialects are supported (TODO.md item 26, phases 1 and 2). MSSQL's
+estimated-plan equivalent (`SET SHOWPLAN_XML ON`) can't be composed as a prefix
+on an already-compiled statement the way Postgres's `EXPLAIN` can, so it runs
+over its own dedicated connection — the dispatch lives in
+`StructuredQueryService._estimate_cost`, and a dialect with no estimator (MySQL,
+Snowflake, BigQuery) returns `None` and proceeds under the reactive guardrails
+(see `execution/cost_estimation.py`). `run_structured_queries(mode="explain")` (MCP) and
 `POST .../query/explain` (REST) never open a database session at all (by
 design — it stays a pure, always-cheap compile preview), so this check
 runs only on `mode="execute"` (the default)/`POST .../query`, not
@@ -687,9 +735,10 @@ naming which cap tripped and roughly when to retry. Quota rejections are
 audited exactly like other policy denials (`policy_decision: denied`) and
 counted under `querygate_queries_rejected_total{reason="quota"}` plus a
 dedicated `querygate_query_quota_rejections_total{connection,quota_kind}`
-(`requests` / `bytes`). Like `max_concurrency`, enforcement is in-process:
+(`requests` / `bytes`). Like `max_concurrency`, enforcement defaults to in-process:
 correct for a single instance, but the window is per-replica under a load
-balancer (a Redis-backed cross-replica quota is TODO.md item 50 phase 2).
+balancer. Set `CONCURRENCY_BACKEND=redis` and the `RedisQuotaLimiter` (item 50
+phase 2) makes it one shared fleet-wide budget.
 `explain` is never quota-gated — it compiles a preview without executing.
 
 For production, the safest connection-discovery posture is deny by default:
@@ -1900,10 +1949,13 @@ Being upfront about what's not done yet:
   writes" above. `WritePolicy.enabled` is `false` until an operator turns it
   on per table/operation, so a default deployment is read-only in practice;
   there is still no raw-DML string field on either transport.
-- **Pre-execution cost estimation is Postgres-only** — `max_estimated_rows`/
-  `max_estimated_cost` (above) have no effect on an MSSQL connection yet;
-  MSSQL's estimated-plan mechanism needs its own connection lifecycle that
-  hasn't been built (TODO item 26 phase 2).
+- **Pre-execution cost estimation covers Postgres and MSSQL only** —
+  `max_estimated_rows`/`max_estimated_cost` (above) are enforced on both
+  (TODO item 26 phases 1–2: inline `EXPLAIN` on Postgres, a dedicated
+  `SET SHOWPLAN_XML ON` connection on MSSQL). MySQL, Snowflake and BigQuery
+  have no estimator, so the check returns nothing there and those connections
+  fall back to the reactive guardrails. The check is also fail-open by design:
+  an estimation failure degrades to "not enforced for this query".
 - **Distributed concurrency enforcement (Redis-backed) is opt-in** — the
   default is an in-process semaphore, correct for a single instance only;
   set `concurrency_backend: redis` for multi-instance deployments.

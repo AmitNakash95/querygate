@@ -122,6 +122,46 @@ async def test_apply_blocked_until_required_approvals_present(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_rollback_to_a_previously_active_version_needs_no_approvals(tmp_path):
+    """The four-eyes gate covers a staged version's FIRST activation only —
+    reactivating a previously-active version is deliberately exempt, so disaster
+    recovery is never blocked behind a second reviewer who may not be available.
+
+    That exemption is a real residual: an `admin:config:write` holder can reach
+    ANY previously-active configuration with zero approvals, at any setting of
+    `require_config_approvals`. It is now stated as such on five surfaces
+    (README, CUSTOMER_README, THREAT_MODEL §8, TRUST_EVIDENCE,
+    COMPLIANCE_MAPPING), and nothing pinned it — so closing the exemption (which
+    would break DR) or widening it silently would have failed no test.
+    """
+    store = _store(tmp_path)
+    author = Principal(subject="author-a", scopes={"admin:config:write"}, auth_method="api_key")
+
+    # Two versions, both activated while the gate is off, so both are genuinely
+    # "previously active" rather than merely staged.
+    open_cfg = AppConfig(environment="localhost")
+    first = _stage(store, actor="author-a")
+    await governance.apply(open_cfg, author, first)
+    second = _stage(store, actor="author-a")
+    await governance.apply(open_cfg, author, second)
+    assert store.get_version(first).status == ConfigVersionStatus.INACTIVE
+
+    # Now turn the gate on hard. Rolling back to `first` carries zero approvals.
+    gated_cfg = AppConfig(environment="localhost", require_config_approvals=2)
+    version, _reload = await governance.apply(gated_cfg, author, first)
+    assert version.status == ConfigVersionStatus.ACTIVE, (
+        "rollback must stay exempt from the four-eyes gate — see the residual "
+        "documented in docs/THREAT_MODEL.md §8"
+    )
+
+    # Control, so this cannot pass by the gate being off: a NEWLY staged version
+    # under the same config is still blocked.
+    fresh = _stage(store, actor="author-a")
+    with pytest.raises(PolicyViolationError):
+        await governance.apply(gated_cfg, author, fresh)
+
+
+@pytest.mark.asyncio
 async def test_single_admin_mode_applies_without_approvals(tmp_path):
     store = _store(tmp_path)
     vid = _stage(store, actor="author-a")

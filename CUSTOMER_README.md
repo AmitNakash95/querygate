@@ -244,7 +244,17 @@ A denied column cannot be selected, filtered, joined, grouped, ranked, or
 sorted. This closes common indirect paths around a projection-only deny rule.
 As with any analytical system, however, a caller may still infer information
 from aggregates it is legitimately authorized to request. QueryGate does not
-provide differential privacy or query-history-based inference controls.
+provide differential privacy or query-set auditing. Two opt-in, off-by-default
+controls bound — but do not close — that risk: a minimum group size
+(`min_group_size`) suppresses aggregate groups backed by too few rows, and a
+cumulative disclosure budget (`max_shape_repeats_per_window` /
+`max_aggregate_queries_per_window`, which requires `min_group_size`) limits how
+often one query shape may be re-run, and how many aggregate queries may touch
+one table, per principal and declared purpose over a rolling window. The
+per-shape half is currently evadable — by varying a select alias the query also
+references, and by three further vectors from the same root cause (TODO.md
+item 186), so set the per-table cap rather than relying on the shape cap alone. See
+`docs/INFERENCE_RISKS.md` R3 for what each does and does not cover.
 
 ## Authentication and authorization
 
@@ -388,7 +398,13 @@ may contain diagnostic exception details, intent text, and SQL rendered
 according to policy. Protect and retain them accordingly.
 
 The default JSONL sink is rotation-friendly and local-file-only — it is not
-itself a WORM archive, SIEM, or search interface. Customers with a compliance
+itself a WORM archive or a SIEM. It does have a bounded browse surface: the
+admin UI's Audit view, over `GET /api/v1/admin/ui/audit/events`
+(`admin:config:read`), filters by event type, outcome, principal, and
+connection with "load older events" paging, reading a bounded number of lines
+from the tail of the local file (the endpoint additionally accepts an `action`
+filter that the UI does not expose) — useful for recent operational review, not a
+long-retention search. Customers with a compliance
 retention requirement can additionally enable
 `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm`, which archives a batched copy to
 S3 under Object Lock COMPLIANCE mode — composed with, not replacing, the
@@ -396,9 +412,29 @@ existing hash-chained ledger — genuinely undeletable for the configured
 retention window. That archival path is buffered and fail-open by design: a
 flush failure never blocks the triggering query, and only a sustained outage
 past the buffer's bound can drop the oldest buffered events, visibly metered.
-There is still no managed search interface over either sink; customers with
-audit-durability or search requirements should collect and monitor the audit
-stream externally.
+A scope-gated REST endpoint,
+`GET /api/v1/admin/observability/worm-search` (`admin:audit:worm-search`,
+deliberately separate from `admin:observability:read`), provides bounded,
+filtered search over that S3 archive: `start_time`/`end_time` are required on
+every request (there is no "search everything" mode) and the window is capped,
+with optional `event_type`, `connection_id`, and `principal_id` filters and
+cursor-based pagination. It reaches events the local hash-chained file has
+already rotated out, so an 18-month lookback is within the default 730-day
+window cap. Narrowing to a specific table is not a server-side filter —
+filtering is by event type, connection, and principal, and a caller narrows to
+a table over the returned events' `query_shape`. Paging is not exhaustive on
+every deployment: a day holding more segments than
+`AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` returns a cursor that repeats that day
+(TODO.md item 184). Every replica and every worker process writes into the same
+day prefix, so under sustained traffic two such processes can exceed the default
+budget with no knob lowered — this can affect a busy multi-replica deployment as
+configured, not only one that lowered the knob or shortened the flush interval.
+(A segment is written only for a flush interval that actually had an event, so
+an idle deployment does not reach it.) This
+endpoint is an API with no user interface of its own, and it searches only the
+S3 WORM archive. Customers wanting dashboards, correlation with non-QueryGate
+sources, or long-term analytics should still collect the audit stream into
+their own SIEM.
 
 ## Configuration lifecycle
 
@@ -417,10 +453,17 @@ no longer valid is rejected without replacing the active configuration.
 Governance actions are attributed to the principal and included in the audit
 trail without copying raw YAML into the audit event.
 
-The built-in governance API provides version history and rollback, but it does
-not currently provide a second-approver workflow, scheduled activation, or an
-administrative user interface. Teams that require four-eyes approval should
-enforce it in their GitOps or change-management process.
+The built-in governance API provides version history, rollback, and an opt-in
+four-eyes approval workflow: `require_config_approvals` (an integer count,
+default 0 — off) gates a staged version's *first* activation on that many
+approvals from principals holding `admin:config:approve`, each distinct from
+the author and from each other, enforced server-side. The admin UI drives the
+review step. Two limits worth stating: **rollback is deliberately exempt**, so
+reactivating a previously-active version needs no re-approval (disaster
+recovery is never blocked, at the cost that a single `admin:config:write`
+caller can reach any previously-active configuration), and there is no
+scheduled activation. Teams wanting approval on rollback too should enforce it
+in their GitOps or change-management process.
 
 See the [operational runbook](deploy/runbook.md) for reload, rollback, secret
 rotation, health, metrics, and audit procedures.

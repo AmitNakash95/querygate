@@ -22,7 +22,7 @@ class CostEstimationMode(StrEnum):
     """How `Policy.max_estimated_rows`/`max_estimated_cost` are applied once
     cost estimation is enabled (see `Policy.cost_estimation_enabled`).
 
-    ENFORCE (default) rejects a query whose Postgres EXPLAIN estimate
+    ENFORCE (default) rejects a query whose plan estimate
     exceeds the configured threshold — the original TODO.md item 26 phase 1
     behavior, unchanged. OBSERVE records what *would* have been rejected
     (a `cost_estimation.observed_would_reject` log line plus
@@ -491,6 +491,44 @@ class Policy(pyd.BaseModel):
     # allowed.
     min_group_size: Optional[int] = pyd.Field(default=None, ge=2)
 
+    # Cumulative disclosure budget (TODO.md item 179) — the multi-query
+    # counterpart to `min_group_size` directly above, which bounds only what a
+    # SINGLE query may reveal. Fifty individually-legal aggregates whose
+    # predicates differ by a sliding constant still reconstruct the row the
+    # k-floor exists to hide; these two caps bound that reconstruction over a
+    # rolling window, per (principal, connection, declared purpose, table).
+    #
+    # Because the recorded query shape is free of predicate literals by construction
+    # (`audit/events.normalize_query_shape` — the same redaction guarantee the
+    # audit event relies on), a differencing probe is the SAME shape re-sent
+    # with a different constant. Repetition, not variety, is therefore the
+    # signal: `max_shape_repeats_per_window` caps how many times one
+    # (table, normalized-shape) pair may be re-run, and
+    # `max_aggregate_queries_per_window` is the blunter backstop that caps ALL
+    # aggregate queries against one table however the shape varies — which is
+    # also what catches a caller varying `limit`/`offset` to manufacture a
+    # fresh shape bucket.
+    #
+    # SET THE PER-TABLE CAP. `max_shape_repeats_per_window` does not currently
+    # deliver its bound (TODO.md item 186): the fingerprint does not
+    # canonicalize a referenced select alias, a cte rename, a nested-scope
+    # alias, or list order, so a prober mints a fresh bucket per probe. The
+    # backstop is unaffected — its key carries no fingerprint at all.
+    #
+    # Both default to None (disabled) and BOTH only ever apply on a connection
+    # that also sets `min_group_size`: with no k-floor there is nothing to
+    # differentiate around, since the caller could read the rows directly.
+    # No default threshold is recommended anywhere, in code or docs — the
+    # calibration data (audit-stream replay against real traffic) does not
+    # exist yet, so an operator enabling this is choosing an unvalidated
+    # number and the docs say exactly that.
+    max_shape_repeats_per_window: Optional[int] = pyd.Field(default=None, ge=1)
+    max_aggregate_queries_per_window: Optional[int] = pyd.Field(default=None, ge=1)
+    # Deliberately separate from `quota_window_seconds` (60s): a rate quota
+    # bounds burst abuse over seconds, whereas differencing is patient and is
+    # meaningful over hours.
+    disclosure_budget_window_seconds: int = pyd.Field(default=3600, ge=1)
+
     # `max_limit`/`max_limit_aggregate` cap row *count*; this caps response
     # *size* — a wide TEXT/JSONB/BLOB column selected across many rows is a
     # policy-compliant query that can still blow up the response body. Rows
@@ -551,8 +589,10 @@ class Policy(pyd.BaseModel):
     # disabled — existing deployments behave identically. The quota is scoped
     # per principal per connection and is only enforced for an authenticated
     # caller (an anonymous/unattributable request can't be rate-limited per
-    # principal, so it's skipped). Enforcement is in-process — correct for a
-    # single instance; a Redis-backed cross-replica quota is item 50 phase 2.
+    # principal, so it's skipped). Enforcement defaults to in-process — correct
+    # for a single instance; setting CONCURRENCY_BACKEND=redis installs
+    # `execution/redis_quota.py`'s RedisQuotaLimiter (item 50 phase 2, shipped)
+    # so the window becomes one shared cross-replica budget.
     # `max_response_bytes_per_window` counts a query's response size *after* it
     # runs, so the request that crosses the byte ceiling still completes and the
     # next one is refused (rolling total already at/over the cap).
@@ -659,6 +699,47 @@ class Policy(pyd.BaseModel):
         return (
             self.max_requests_per_window is not None
             or self.max_response_bytes_per_window is not None
+        )
+
+    @pyd.model_validator(mode="after")
+    def _disclosure_budget_needs_a_k_floor(self) -> "Policy":
+        """Reject a disclosure budget configured without `min_group_size`
+        (TODO.md item 179).
+
+        The budget only ever applies to aggregate queries on a connection that
+        also sets a k-anonymity floor — with no floor the caller can read the
+        rows directly, so bounding aggregate differencing protects nothing. That
+        coupling is deliberate, but leaving it *silent* would be the worst kind
+        of misconfiguration: the config loads clean, the caps show up in the
+        admin effective-guardrails view and in an access diff, and nothing is
+        ever enforced. Failing at load time means an operator finds out
+        immediately rather than believing a control is live. Both fields are new
+        in item 179, so no existing configuration can break on this.
+        """
+        if self.disclosure_budget_enabled and self.min_group_size is None:
+            raise ValueError(
+                "max_shape_repeats_per_window/max_aggregate_queries_per_window "
+                "(the cumulative disclosure budget) require min_group_size to be "
+                "set on the same policy: the budget bounds multi-query "
+                "differencing around the k-anonymity floor, and without a floor "
+                "there is nothing to difference around. Set min_group_size, or "
+                "remove the disclosure-budget caps."
+            )
+        return self
+
+    @property
+    def disclosure_budget_enabled(self) -> bool:
+        """True when either cumulative-disclosure cap is configured (TODO.md
+        item 179). Deliberately independent of `min_group_size`: the budget
+        only ever *applies* to an aggregate query on a connection that also
+        sets a k-anonymity floor (see
+        `execution/disclosure_budget.resolve_disclosure_budget`), but whether
+        an operator configured the caps at all is a separate question from
+        whether they bite on a given query.
+        """
+        return (
+            self.max_shape_repeats_per_window is not None
+            or self.max_aggregate_queries_per_window is not None
         )
 
     def table_allowed(self, table_name: str) -> bool:
@@ -844,7 +925,12 @@ GUARDRAIL_FIELDS: tuple[str, ...] = tuple(
 # `min_group_size`: a larger k suppresses more result groups.
 # `quota_window_seconds`: the same request budget spread over a longer window is
 # a lower sustained rate.
-INVERTED_GUARDRAIL_FIELDS = frozenset({"min_group_size", "quota_window_seconds"})
+# `disclosure_budget_window_seconds`: identical reasoning (item 179) — the same
+# probe budget spread over a longer window is a lower sustained probe rate, so
+# LENGTHENING it is the tighter posture.
+INVERTED_GUARDRAIL_FIELDS = frozenset(
+    {"min_group_size", "quota_window_seconds", "disclosure_budget_window_seconds"}
+)
 
 # Deriving the field set fixes "a new cap is invisible", but a new cap could
 # still be diffed in the WRONG DIRECTION — the same silent-wrongness one layer
@@ -860,6 +946,10 @@ _DIRECTION_REVIEWED_GUARDRAILS = frozenset(
         "timeout_seconds",  # longer query budget = looser
         "concurrency_wait_seconds",  # longer admission wait = looser
         "quota_window_seconds",  # INVERTED: same budget over longer = lower rate
+        # INVERTED, same reasoning as quota_window_seconds (item 179): the same
+        # number of permitted probes spread over a longer window is a lower
+        # sustained probe rate, so a longer window is the TIGHTER setting.
+        "disclosure_budget_window_seconds",
         "min_group_size",  # INVERTED: a larger k-anonymity floor hides more
         "cost_estimation_mode",  # OBSERVE never blocks; ENFORCE can
         "log_query_literals",  # logging raw literals is the looser posture

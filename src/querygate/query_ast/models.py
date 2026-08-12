@@ -1037,6 +1037,24 @@ _AGGREGATE_SELECT_ITEM_TYPES = (
 )
 
 
+def is_aggregate_scope(query: "StructuredQuery") -> bool:
+    """Whether one query *scope* aggregates — it has a GROUP BY, or projects at
+    least one aggregate select item (so a single implicit group).
+
+    The single definition of "this is an aggregate query", shared by the two
+    guardrails that must agree on it: `compiler/sqlalchemy_compiler.py`'s
+    `min_group_size` k-anonymity floor (TODO.md item 88), and
+    `execution/disclosure_budget.py`'s cumulative budget (item 179), which
+    exists specifically to bound differencing *around* that floor. If these two
+    ever disagreed about what counts as an aggregate, a query could be k-floored
+    but unbudgeted (or the reverse) — so they read one function, not two copies
+    of the same boolean.
+    """
+    return bool(query.group_by) or any(
+        isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in query.select
+    )
+
+
 class JoinSpec(pyd.BaseModel):
     table: str
     alias: Optional[str] = pyd.Field(
@@ -1679,7 +1697,7 @@ class StructuredQuery(pyd.BaseModel):
         """
         if not any(isinstance(item, WindowSelectItem) for item in self.select):
             return self
-        if self.group_by or any(isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in self.select):
+        if is_aggregate_scope(self):
             raise ValueError(
                 "a window function cannot be combined with group_by or aggregate "
                 "select items — a window projects a value per row, so aggregate in "

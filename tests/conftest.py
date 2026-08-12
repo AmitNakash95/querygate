@@ -75,6 +75,10 @@ from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.execution.async_execution import async_execution_store
 from querygate.execution.concurrency import clear_redis_limiter, in_process_limiter
+from querygate.execution.disclosure_budget import (
+    clear_redis_disclosure_budget_limiter,
+    in_process_disclosure_budget_limiter,
+)
 from querygate.execution.quota import clear_redis_quota_limiter, in_process_quota_limiter
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.templates.loader import TemplateStore, set_template_store
@@ -111,6 +115,8 @@ def reset_state(tmp_path):
     clear_redis_limiter()
     in_process_quota_limiter().clear()
     clear_redis_quota_limiter()
+    in_process_disclosure_budget_limiter().clear()
+    clear_redis_disclosure_budget_limiter()
     reset_usage_signal_buffer()
     reset_worm_buffer()
     async_execution_store().clear()
@@ -121,6 +127,8 @@ def reset_state(tmp_path):
     clear_redis_limiter()
     in_process_quota_limiter().clear()
     clear_redis_quota_limiter()
+    in_process_disclosure_budget_limiter().clear()
+    clear_redis_disclosure_budget_limiter()
     reset_usage_signal_buffer()
     reset_worm_buffer()
     async_execution_store().clear()

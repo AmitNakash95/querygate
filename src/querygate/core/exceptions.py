@@ -124,7 +124,8 @@ class QueryCancellationNotReadyError(ValueError):
 
 
 class CostEstimateExceededError(PolicyViolationError):
-    """Raised when a Postgres EXPLAIN-based pre-execution cost estimate
+    """Raised when a pre-execution plan-estimate cost check (Postgres EXPLAIN or
+    MSSQL SHOWPLAN_XML, TODO.md item 26 phases 1-2)
     exceeds `Policy.max_estimated_rows`/`max_estimated_cost` (see
     execution/cost_estimation.py). Subclasses PolicyViolationError so
     existing `except ValueError`/`except PolicyViolationError` handling
@@ -156,6 +157,26 @@ class QuotaExceededError(PolicyViolationError):
         super().__init__(message)
         self.quota_kind = quota_kind
         self.retry_after_seconds = retry_after_seconds
+
+
+class DisclosureBudgetExceededError(QuotaExceededError):
+    """A principal's cumulative *disclosure* budget for one table over a rolling
+    window (TODO.md item 179) is exhausted, so this aggregate query is refused
+    before it runs.
+
+    Subclasses `QuotaExceededError` rather than `PolicyViolationError` directly
+    so it inherits, unchanged, the REST 429 + `Retry-After` mapping, the MCP
+    `RATE_LIMITED` code, and `metrics.classify_rejection`'s `quota` bucket — the
+    caller-visible contract is identical to any other budget rejection ("you
+    have spent an allowance; retry later"), and inventing a second one would
+    tell an attacker which guardrail they tripped.
+
+    `quota_kind` is `"disclosure_shape"` (one query shape re-run too many times
+    — the differencing-probe signature) or `"disclosure_table"` (too many
+    aggregate queries against one table however the shape varied). The message
+    deliberately names neither the table nor the shape: which table is close to
+    its budget is itself a disclosure channel.
+    """
 
 
 class ApprovalRequiredError(PolicyViolationError):
