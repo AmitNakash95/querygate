@@ -726,9 +726,10 @@ naming which cap tripped and roughly when to retry. Quota rejections are
 audited exactly like other policy denials (`policy_decision: denied`) and
 counted under `querygate_queries_rejected_total{reason="quota"}` plus a
 dedicated `querygate_query_quota_rejections_total{connection,quota_kind}`
-(`requests` / `bytes`). Like `max_concurrency`, enforcement is in-process:
+(`requests` / `bytes`). Like `max_concurrency`, enforcement defaults to in-process:
 correct for a single instance, but the window is per-replica under a load
-balancer (a Redis-backed cross-replica quota is TODO.md item 50 phase 2).
+balancer. Set `CONCURRENCY_BACKEND=redis` and the `RedisQuotaLimiter` (item 50
+phase 2) makes it one shared fleet-wide budget.
 `explain` is never quota-gated — it compiles a preview without executing.
 
 For production, the safest connection-discovery posture is deny by default:

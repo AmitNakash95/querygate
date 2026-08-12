@@ -332,7 +332,8 @@ this line — item numbers have gone stale in a plan doc before, see the engine
 plan's own warning about exactly this). Proposed phases, each independently
 shippable and independently reviewable, in dependency order:
 
-- **Phase 0 (proposed item 178) — Decisions + model + registry, no execution.**
+- **Phase 0 (a follow-up item, numbered when prioritized) — Decisions + model +
+  registry, no execution.**
   Resolve §7's open decisions, record them in the PRODUCT_GUIDE Decision Log
   (the same "decide before implementing" discipline item 172's segment-binding
   question and item 74's MSSQL-nulls question were held to), then build
@@ -340,7 +341,8 @@ shippable and independently reviewable, in dependency order:
   wiring, and `ProcedurePolicy`. No REST/MCP surface yet, no execution path —
   this phase is entirely declarative, reviewable on its own without touching
   the execution/security surface at all.
-- **Phase 1 (proposed item 179) — Read-only execution only.** Build
+- **Phase 1 (a follow-up item, numbered when prioritized) — Read-only
+  execution only.** Build
   `ProcedureExecutionService` restricted to `confirmed_read_only=True`
   procedures only (`allowed_procedures` gate + parameter validation +
   dialect-adapter `CALL`/`EXEC` compilation + audit), REST + MCP surface,
@@ -348,13 +350,15 @@ shippable and independently reviewable, in dependency order:
   entirely in this phase — ships the lower-risk half first, the same
   incremental-safety posture item 19's phased dialect rollout (MySQL, then
   Snowflake, then BigQuery) used.
-- **Phase 2 (proposed item 180) — Non-read-only procedures + approval gate.**
+- **Phase 2 (a follow-up item, numbered when prioritized) — Non-read-only
+  procedures + approval gate.**
   Only once phase 1 has shipped and been reviewed: extend execution to
   `confirmed_read_only=False` procedures, gated behind the approval-token
   machinery from §3. This is the highest-risk phase and should get its own
   dedicated `security-invariant-reviewer` pass plus `adversarial-probe`
   coverage before shipping, not bundled into phase 1's review.
-- **Phase 3 (proposed item 181, optional) — Preview/dry-run, only if §7
+- **Phase 3 (a follow-up item, numbered when prioritized; optional) —
+  Preview/dry-run, only if §7
   decision 3 concludes a safe concept exists.** If not, this phase is
   dropped and the design doc updated to say so explicitly, rather than left
   as a silently-abandoned placeholder.

@@ -383,6 +383,14 @@ def test_every_guardrail_field_produces_a_change_when_it_moves():
     hand-written field list, so loosening one was diffed as nothing at all. Driven
     off `GUARDRAIL_FIELDS` itself, so a cap added later is covered automatically.
     """
+    # Fields that cannot legally be set on their own. The disclosure-budget caps
+    # (item 179) are rejected without `min_group_size`, because a budget with no
+    # k-anonymity floor to defend would enforce nothing — so both sides of the
+    # diff carry the floor, leaving the cap as the only thing that moved.
+    co_required = {
+        "max_shape_repeats_per_window": {"min_group_size": 5},
+        "max_aggregate_queries_per_window": {"min_group_size": 5},
+    }
     # A value that differs from the default for each field's type, chosen so the
     # change is unambiguous rather than clever.
     for field in GUARDRAIL_FIELDS:
@@ -395,7 +403,8 @@ def test_every_guardrail_field_produces_a_change_when_it_moves():
             moved = 7
         else:
             moved = type(current)(current + 1)
-        change = _guardrail_change(Policy(), Policy(**{field: moved}))
+        extra = co_required.get(field, {})
+        change = _guardrail_change(Policy(**extra), Policy(**{field: moved}, **extra))
         assert change.object == field, field
         assert change.direction in ("loosening", "tightening"), (field, change.direction)
 

@@ -13469,7 +13469,8 @@ not published as a counter at all; only the two chain-integrity signals are.
 Counter magnitude is additionally
 untrustworthy on any deployment where a single day's segment count can exceed
 `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED`, because of a pre-existing
-non-advancing-cursor defect filed separately as **item 179**.
+non-advancing-cursor defect filed separately as **item 184** (filed as 179 on
+this item's own branch; renumbered on merge — see TODO.md item 184).
 
 **Docs.** `docs/PRODUCT_GUIDE.md` Decision Log (2026-08-11, including both
 out-of-scope decisions and the audit's scope correction), `docs/THREAT_MODEL.md`
@@ -13479,4 +13480,318 @@ tests in the evidence column), `README.md`'s WORM section, `CHANGELOG.md`
 `[Unreleased] / Added`, both metric help strings, and the
 `audit/worm_search.py` module docstring.
 
-**Effort:** S. **Depends on:** 172 (shipped). **Surfaced:** items 179, 180.
+**Effort:** S. **Depends on:** 172 (shipped). **Surfaced:** items 184, 185
+(filed as 179 and 180 on this item's own branch; renumbered on merge).
+
+### 179. Cumulative disclosure budget: bound multi-query differencing per purpose, the one form of "governing intent" that is structural ✅ DONE
+
+**Surfaced 2026-08-11** from a direct question — *we govern what the query is
+allowed to be; can we also govern the intent?* The answer splits three ways
+and only one is buildable. (a) **Declared purpose as a token** — shipped, item
+145: a closed-set `StructuredQuery.purpose` gated by `Policy.allowed_purposes`
+and narrowing the effective policy via `for_purpose`. (b) **The
+natural-language ask** (`StructuredQuery.intent`, free text) — deliberately
+**not** governable and must stay that way: enforcing it means inspecting a
+string and judging its meaning, which contradicts NORTH_STAR.md's "by
+construction, never by inspecting a string," makes a deterministic gate
+probabilistic, opens a prompt-injection surface inside the control plane, and
+is self-attested by the exact party being governed (an agent that would
+exfiltrate will also write "routine reporting"). Do not build (b). (c) **Intent
+as read off the query shape, accumulated across a session** — this item.
+
+**The actual gap.** Enforcement today is strictly per-request. `Policy.
+min_group_size` (item 88) injects `HAVING count(*) >= k` so no single query
+returns a below-*k* group, and the quota (`execution/quota.py`) counts
+requests. Nothing bounds cumulative *disclosure* — the quota rate-limits the
+probing a differencing attack needs (`INFERENCE_RISKS.md` credits it as a
+partial mitigation) but it counts requests, not what they reveal, so it is
+blind to how much a caller reconstructs from *many individually legal*
+queries: N aggregates whose predicates differ only in a narrowing
+constant will isolate the row the *k*-floor exists to hide. This is not a
+newly-discovered hole — item 88's own body states "multi-query differencing
+stays honestly out of scope", `docs/INFERENCE_RISKS.md` (item 55) carries it
+as residual R3, and `docs/THREAT_MODEL.md` QG-29 lists it among the residuals
+identifier allow/deny structurally cannot close. It is a *documented,
+unenforced* residual, and it is the one place where "govern the intent" names
+something real.
+
+**Why it's on-thesis and not a non-goal.** It is still query *shape*, still
+deterministic, still explainable line-by-line in a security review, and it
+needs no model, no string inspection, and no new caller-facing input. It is
+the Structural pillar extended over *time* rather than over one AST. It also
+upgrades item 145 from a config knob into a materially stronger one: a
+purpose would then bound not only what a caller may see per query but how
+much it may triangulate per window. Immuta *enforces* a declared purpose —
+gating on a declared reason from an allowed set, rather than merely logging a
+justification string — which `MARKET_DOMINATION_ANALYSIS.md` F7 found "barely
+exists" elsewhere.
+
+**Be precise about what our own briefs actually establish here, because it is
+less than it first looks.** MDA §4 **F2** (and the exec summary) verify that
+Immuta deprecated k-anonymization (EOL Apr 2025) and dropped differential
+privacy, and that the surveyed access proxies ship neither k-anonymity/
+min-group-size nor DP. That is *absence of k-anon/DP*, which is not the same
+claim as *absence of a cumulative disclosure budget* — a vendor could ship a
+per-principal budget without shipping DP, and no brief surveys that capability
+as its own line item. Two further caveats: the briefs cover none of the
+warehouse-native, semantic-layer, or gateway categories on this question (and
+warehouse-native is the likeliest to ship a per-user privacy budget), and F2's
+verified proxy roster (Cyral/Formal/Teleport/StrongDM/**IndyKite**) does not
+match the roster `COMPETITOR_ACCESS_PROXIES.md` currently defines
+(…/**Bytebase**) — so "the five proxies" is not a clean verified set either.
+Re-verify all of this with `competitive-scan` before it informs anything, and
+**never carry a bare "no competitor offers this" onto a customer-facing
+surface** on the strength of what is written here.
+
+**Feasibility pre-check (done 2026-08-11, before writing this item).**
+`audit/events.py`'s `normalize_query_shape`/`_where_shape` record predicate
+*operators*, column identifiers, `group_by` keys, and join structure, and
+strip every predicate/expression literal — recursively, through set-op arms,
+ctes, and nested subqueries. (Not *every* number is stripped: `requested_limit`,
+`offset`, `top_n.n` and a percentile `fraction` are retained as structure, per
+`AuditEvent`'s own docstring wording — "identifiers and operators … without
+retaining predicate literals". None of them is SQL, a predicate value, a row,
+an exception, or a credential, so non-negotiable #3 genuinely stays intact —
+but note a probe that varies *only* LIMIT/OFFSET **is** distinguishable in the
+recorded shape, unlike one that varies a predicate constant.) So the signal a
+budget needs is already computable from redaction-safe structure. The
+limitation this forces, which must be accepted rather than engineered around:
+with literals stripped, the budget cannot tell "same shape, different
+constant" (the real differencing probe) from "same shape, same constant" (an
+innocent repeat), so it is a deliberately **conservative** bound that will
+also count benign repetition. That is the correct failure direction. **Do not
+"fix" it by persisting predicate values** — that trades a documented residual
+for an invariant violation.
+
+**What to do** (the scoping decisions this originally waited on are settled —
+see the block below it):
+
+1. New optional `Policy` guardrail, **off by default** like `min_group_size`
+   and `max_requests_per_window` (note `quota_window_seconds` defaults to 60
+   and is always on — the *cap* is the opt-in, not the window), and
+   expressible per-purpose by putting the declared purpose in the budget KEY —
+   deliberately NOT as a cap on `PurposePolicyDelta`, which would have been the
+   first subtractive/scalar field on that delta and would have broken
+   `validate_structural_caps`' documented monotonicity argument.
+   **This is the one part of the design with a real trap in it:** every
+   field `for_purpose` narrows today is a list/dict it *unions* onto the base
+   policy, and `validate_structural_caps`' safety argument
+   (`validation/policy_validation.py`, the 2026-08-07 docstring correction)
+   rests explicitly on that additive-only property — it states that if
+   `PurposePolicyDelta` ever gains a subtractive field, the monotonicity
+   argument licensing `_validate_and_compile`'s un-narrowed pre-check
+   **breaks**. A scalar budget would be the first cap `for_purpose` narrows
+   and needs `min()`, not a union. Re-examine that pre-check as part of this
+   item, do not assume the existing semantics carry over.
+2. Enforcement state follows the established in-process/Redis pair pattern
+   (`execution/quota.py` + `execution/redis_quota.py`, `execution/
+   concurrency.py` + `redis_concurrency.py`) — a Protocol with two registered
+   implementations, cleared in `tests/conftest.py` like the concurrency
+   singleton. **Do not route this through `admin/anomaly.py`**: that module's
+   docstring commits it to being read-only and explicitly non-feedback, per
+   the 32C boundary in `CLAUDE.md` — making it enforce would violate its own
+   stated contract.
+3. Decide explicitly which surfaces consume budget. `verdict` is already
+   quota-metered (item 133) and is the cheap probe, so it very likely should.
+   `explain` is the harder call: `execution/quota.py`'s module docstring
+   records a deliberate decision that it is **not** quota-gated ("it compiles
+   a preview and never executes against the database"), and it emits no audit
+   event at all — so metering it both reverses a recorded decision and would
+   spend budget invisibly to the audit-stream replay this item's threshold
+   work depends on. Weigh that recorded rationale carefully rather than
+   deferring to it: it predates item 133's own finding that a cold-cache
+   reflection **is** a real DB round trip — the reason `verdict` got metered —
+   and `explain` performs the same reflection. Neither property is pinned by a
+   test today (nothing asserts explain consumes no quota or emits no audit
+   event), so add those two tests as part of this item's DoD whichever way the
+   decision goes. Note also that the *stateful* guardrails this item models
+   itself on (quota, concurrency, approval) are enforced in `execute()`/
+   `verdict()`'s bodies, **not** in the `_validate_and_compile` seam where the
+   policy-validation and compile-time caps live — so "same choke point as
+   every other guardrail" is not available; pick one deliberately.
+
+**Scoping decisions — settled 2026-08-11 with the maintainer, before
+implementation.** These replace this item's original open questions.
+
+- **A correction to this item's own premise, found while scoping it.** An
+  earlier draft of this item implied the unit should be the count of
+  *distinct* normalized shapes. That is backwards and would have missed the
+  attack entirely. Because `normalize_query_shape` strips predicate literals,
+  a differencing probe — `… WHERE age > 40`, `> 41`, `> 42`, … — is the
+  **same** normalized shape re-sent N times. Variety is the signature of
+  ordinary exploratory work; *repetition* is the signature of a probe. The
+  budget therefore counts **re-runs of one shape**, not distinct shapes.
+- **Unit: two independent knobs** (maintainer decision — both, not one).
+  `max_shape_repeats_per_window` caps how many times a single
+  (table, normalized-shape) pair may be re-run; `max_aggregate_queries_per_window`
+  caps total aggregate queries against one k-floored table regardless of
+  shape, catching the slower probe that also varies its shape. Each is
+  `Optional[int]`, each defaults to `None` (disabled), and either tripping
+  rejects.
+- **Subject: `(connection_id, principal_subject, purpose, table, shape)`** —
+  the same principal-and-connection scoping `execution/quota.py`'s `QuotaKey`
+  already uses, extended by table (a budget on `salaries` must not be spent by
+  querying `products`), by the declared purpose, and by the shape hash for the
+  per-shape knob. Principal, not actor: under item 90's delegation the principal
+  *is* the human whose policy applied, which is the Proof-pillar subject; keying
+  on the actor would budget a whole agent fleet as one identity and let one
+  agent deny service to every other. (Honest limit: with a *non-delegated*
+  shared credential the principal is the fleet.) Purpose sits in the KEY rather
+  than becoming a cap on `PurposePolicyDelta` — see the note below on why.
+- **Exhaustion: reject.** A `DisclosureBudgetExceededError` (a
+  `QuotaExceededError` subclass, so it inherits the existing REST 429 +
+  `Retry-After` and MCP `RATE_LIMITED` mapping for free). Escalating into item
+  92's approval gate instead is deliberately **deferred to item 180** — it is
+  the better UX but risks becoming "click here to buy unlimited disclosure",
+  and it should be decided against real usage data rather than guessed at now.
+- **The false-positive story stays honestly open.** Both knobs are off by
+  default and no threshold is recommended in code or docs, precisely because
+  the calibration data (audit-stream replay against real traffic) does not
+  exist yet. An operator switching this on is choosing a number we have not
+  validated for them, and the docs must say so rather than imply a safe
+  default exists.
+
+**Shipped 2026-08-11.**
+
+- `execution/disclosure_budget.py` — `shape_fingerprint` (literal-free, with
+  `requested_limit`/`offset`/`top_n.n`/percentile `fraction` stripped so
+  walking `limit` can't mint a fresh bucket), `budgeted_tables` (walks the
+  canonical `iter_query_scopes`, charges only aggregating scopes, excludes cte
+  names), `resolve_disclosure_budget` (the `min_group_size` coupling), the
+  `DisclosureBudgetLimiter` Protocol + `InProcessDisclosureBudgetLimiter` with
+  all-or-nothing multi-key charging, and `enforce_disclosure_budget`.
+- `execution/redis_disclosure_budget.py` — the cross-replica sibling, one Lua
+  script, **fail-closed** (a deliberate divergence from the quota/concurrency
+  limiters, argued in its module docstring).
+- `Policy.max_shape_repeats_per_window` / `max_aggregate_queries_per_window` /
+  `disclosure_budget_window_seconds` + `disclosure_budget_enabled`; the window
+  field registered in `INVERTED_GUARDRAIL_FIELDS` (a longer window is the
+  *tighter* posture, same as `quota_window_seconds`).
+- `DisclosureBudgetExceededError(QuotaExceededError)` — inherits the REST 429 +
+  `Retry-After` / MCP `RATE_LIMITED` contract unchanged; its message names
+  neither the table nor the shape, since which table is near its budget is
+  itself a disclosure channel.
+- Enforced in `execution/service.py`'s `execute()` **after** the approval gate,
+  so a query paused for approval and retried (item 107) charges exactly once
+  without needing a `_reserved_budget` parameter.
+- `querygate_disclosure_budget_rejections_total{connection,budget_kind}`, with
+  no table or principal label (cardinality + the same disclosure-channel
+  reasoning as the error message).
+- `query_ast/models.is_aggregate_scope` extracted so the compiler's k-floor and
+  this budget cannot drift apart about what "aggregate" means.
+
+**Coverage.** 75 new tests: `tests/unit/test_disclosure_budget.py` (46),
+`tests/unit/test_redis_disclosure_budget.py` (12),
+`tests/integration/test_disclosure_budget_e2e.py` (17) — whose headline test
+runs a real salary-differencing probe against a seeded database and proves it
+is cut off partway through, with every probe carrying a *different* literal.
+The REST 429 + `Retry-After` and MCP `RATE_LIMITED` mappings are pinned
+behaviorally for the new exception type rather than assumed from its
+inheritance.
+
+**Mutation-verified (10/10).** Removing the `execute()` enforcement call, the
+`min_group_size` coupling, the aggregate-scope filter, the cte-name exclusion,
+the all-or-nothing two-phase split, the volatile-key stripping, the
+no-principal skip, the `>=` bound, `purpose` in the key, and the tripped-kind
+attribution were each broken in turn and each produced a failing test. **Two of
+those ten initially did NOT fail** — the cte-name exclusion (the test's outer
+scope didn't aggregate, so the excluded name was never reached) and the
+tripped-kind attribution (no in-process test asserted *which* kind was
+reported). Both were real test gaps, closed with
+`test_an_aggregate_over_a_cte_name_still_never_charges_the_cte` and
+`test_the_tripped_key_determines_the_reported_kind` before landing.
+
+**Docs.** New `docs/PRODUCT_GUIDE.md` section ("Cumulative disclosure budget")
++ Decision Log entry recording the NL-intent rejection as product identity;
+`docs/INFERENCE_RISKS.md` R3 and `docs/THREAT_MODEL.md` QG-29 both changed from
+"still residual" to "bounded since item 179, still residual" — deliberately not
+"closed"; `examples/policy.example.yaml` documents both caps and states plainly
+that no threshold is recommended because none has been calibrated.
+
+**Post-implementation audit (same day) found three real bypasses — all fixed
+before landing.** The `auditors` gate ran four reviewers; `security-invariant-`
+and `architecture-boundary-reviewer` independently found the first, and the
+security reviewer alone found the third. Each was reproduced against the built
+code before being accepted, and each now has a named regression test.
+
+1. **A rotated `purpose` minted unlimited budgets.** With `allowed_purposes`
+   empty (the default), `resolve_purpose_policy` accepts ANY purpose string a
+   caller invents — so keying the budget on it let a prober send
+   `purpose="p1"`, `"p2"`, … and land every probe in a fresh bucket, defeating
+   both caps completely on the default configuration. Worse, the first version
+   of `test_each_declared_purpose_carries_its_own_budget` *pinned the bypass as
+   intended behavior*. Fixed by mirroring the rule `service.py` already applies
+   before persisting a purpose to the audit event: a purpose partitions the
+   budget only when the operator declared the closed set.
+   (`test_an_undeclared_purpose_cannot_mint_a_fresh_budget`.)
+2. **Identifier case and alias renames minted fresh shape buckets.**
+   `normalize_query_shape` records the caller's own casing and *effective*
+   names, so `Employees.Id` vs `employees.id`, or `emp.salary` vs
+   `employees.salary`, hashed differently. Fixed by canonicalizing the shape
+   before hashing — casefold every string, rewrite alias-qualified refs to the
+   physical table via `effective_name_map` — and by adding the select-item
+   `alias` to the stripped-key set. (`test_identifier_case_...`,
+   `test_renaming_an_alias_...`.)
+3. **A non-aggregating CTE wrapper charged nothing at all.** Wrap the table in
+   a cte that does not aggregate and aggregate over the cte in the outer scope:
+   the body contributed nothing (not an aggregate) and the outer scope's only
+   table was the cte NAME, which the first version skipped — so the query
+   charged zero while the compiler still applied the k-floor and returned real
+   answers. Fixed by resolving cte names to their base tables transitively
+   (`_cte_base_tables`). (`test_a_non_aggregating_cte_wrapper_still_charges_the_base_table`,
+   `test_a_cte_chain_resolves_transitively_to_its_base_table`, plus an e2e
+   sibling.)
+
+**Four further weaknesses fixed in the same pass.** (a) One statement bought
+several probe answers — a 3-arm `UNION` over one table returned three answers
+for one unit — so charges are now *weighted* by aggregating-scope occurrence in
+both backends. (b) A budget configured without `min_group_size` was silently
+inert; `Policy` now rejects that combination at load time rather than shipping a
+control that enforces nothing. (c) The in-process window map was never swept, so
+a key charged once lived for the process's lifetime (the key carries a shape
+fingerprint, so its cardinality grows with distinct queries); an amortized sweep
+now bounds it. (d) The Redis key was an unescaped f-string join over components
+(`principal`, `purpose`) that may legally contain `:`; components are now
+percent-escaped so the two Protocol implementations agree on key identity.
+
+**A latent Lua bug, found by a parity test rather than by reading.** The
+retry-after countdown read `ZRANGE … WITHSCORES` and indexed `reply[2]`, which
+the Lua bridge surfaces as a NESTED table — so the score was `nil` and every
+rejection reported the full window instead of the true countdown. Only visible
+because the new test rejects at a non-zero window age; the original test (and
+`redis_quota.py`'s, which uses the identical pattern) charged and rejected at the
+same instant, where the wrong answer and the right answer coincide. Fixed here
+with a portable `ZRANGE` + `ZSCORE` pair. **`execution/redis_quota.py` still has
+the same pattern and is left unchanged** — correcting a shipped feature's retry
+hint is out of this item's scope and cannot be verified here without a real
+Redis. Worth its own item.
+
+**Also corrected in the audit:** the new counter now reaches
+`admin/observability.py` (it was defined and never aggregated, so the admin
+overview showed a `quota` rejection with no breakdown); `is_aggregate_scope`'s
+consolidation was completed (two hand-rolled copies of the same boolean
+remained, in `query_ast/models.py` and `validation/policy_validation.py`); a
+redundant `__init__` override, a missing `metrics.__all__` entry, and a code
+comment describing a `min_group_size` purpose-narrowing that `PurposePolicyDelta`
+cannot express were all removed. Docs: the stale "item 50 phase 2 not shipped"
+claim was reconciled on `README.md` and `examples/policy.example.yaml` (two
+surfaces the first pass missed), `landing/security.html`'s "query-history
+controls are not implemented" was corrected, `deploy/HA_DR.md` gained a
+fifth shared-state row and a fail-closed note in its Redis-loss drill, and
+several overstated absolutes were narrowed ("every other guardrail judges one
+query" → only those judging *disclosure*; "literal-free" → "predicate-literal-
+free"). `examples/policy.example.yaml`'s illustrative numbers became
+placeholders, since concrete values three lines under "there is no recommended
+value" are a de-facto recommendation.
+
+**Two pre-existing test gaps surfaced, not caused, by this work:**
+`test_observability_api.py`'s low-cardinality allow-list never listed
+`approval_required` (a real `classify_rejection` bucket since item 92 — no test
+in that process had ever tripped the approval gate until item 179's
+double-charge test did), and `test_config_semantic_diff.py`'s generic guardrail
+walk needed to learn about co-required fields.
+
+**Suites on the final tree:** unit 2560, integration 387 (excluding `real_db`),
+security 480 — all passing.
+
+**Effort:** L. **Depends on:** 88, 145 (both shipped).
