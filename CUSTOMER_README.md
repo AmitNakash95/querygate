@@ -396,9 +396,19 @@ existing hash-chained ledger — genuinely undeletable for the configured
 retention window. That archival path is buffered and fail-open by design: a
 flush failure never blocks the triggering query, and only a sustained outage
 past the buffer's bound can drop the oldest buffered events, visibly metered.
-There is still no managed search interface over either sink; customers with
-audit-durability or search requirements should collect and monitor the audit
-stream externally.
+A scope-gated REST endpoint,
+`GET /api/v1/admin/observability/worm-search` (`admin:audit:worm-search`,
+deliberately separate from `admin:observability:read`), provides bounded,
+filtered search over that S3 archive: `start_time`/`end_time` are required on
+every request (there is no "search everything" mode) and the window is capped,
+with optional `event_type`, `connection_id`, and `principal_id` filters and
+cursor-based pagination. It answers questions like "every query against
+`pii_customers` in the last 18 months" after the local hash-chained file has
+rotated that window out. It is an API, not a SIEM user interface, and it
+searches only the S3 WORM archive — there is no managed search over the plain
+local JSONL sink. Customers wanting dashboards, correlation with non-QueryGate
+sources, or long-term analytics should still collect the audit stream into
+their own SIEM.
 
 ## Configuration lifecycle
 

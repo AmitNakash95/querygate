@@ -13308,6 +13308,63 @@ than a novel fix needing independent verification.
 **Effort:** S (mirrors an already-shipped fixture pattern). **Depends on:**
 2 (shipped — same resource-lifecycle gap, found once before).
 
+### 176. Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line ✅ DONE
+
+**Surfaced 2026-08-10 by `claim-reviewer` auditing the item-1 landing-copy fix**
+(`landing/security.html`'s "Audit durability and search" line, corrected to
+describe the now-shipped `GET /api/v1/admin/observability/worm-search`
+endpoint). The reviewer confirmed that fix is accurate, but found three other
+surfaces describing the same item-134-phase-2 capability that still said it
+doesn't exist. All three were still live when this item was picked up on
+2026-08-12 and are now corrected.
+
+**1. `sales/index.html`'s two guardrail lists.** Last touched by item 152 on
+2026-08-06, before phase 2 shipped later the same day, and never revisited. The
+"Safe to claim now" WORM bullet ended "there is no managed search over the
+archive yet—say retention, not search", and "Do not claim yet" listed "Managed
+search over the WORM audit archive". Both are now correct, and the claim moved
+across the two lists rather than simply being deleted from the second: "Safe to
+claim now" gains a dedicated bullet naming the endpoint, its own
+`admin:audit:worm-search` scope, the required-and-capped time window, the
+`event_type`/`connection_id`/`principal_id` filters and cursor pagination; "Do
+not claim yet" now forbids the three things a salesperson could otherwise
+stretch it into — a SIEM, a search *user interface*, and managed search over
+the plain local JSONL sink — with a pointer to the adjacent list so the two
+read as one instruction instead of a contradiction.
+
+**2. `CUSTOMER_README.md`.** "There is still no managed search interface over
+either sink" was directly false. Replaced with a description of the shipped
+endpoint at the same level of detail the README and PRODUCT_GUIDE already use,
+keeping the two real limits explicit: it is an API and not a SIEM UI, and it
+searches the S3 WORM archive only — the "either sink" half of the old sentence
+was the part that stayed true, so it is preserved rather than dropped, along
+with the recommendation to collect the stream into a customer's own SIEM for
+dashboards and correlation.
+
+**3. TODO.md's own Quick-scan row for item 134** read "phase 1: S3 Object Lock;
+phase 2: managed search not started", contradicting its own `✅ DONE` heading
+(no trailing qualifier) two thousand lines below it and the full write-up in
+this file. Trimmed to "Compliance-grade (WORM) audit retention + managed
+search", matching the archived-stub convention.
+
+**The gate could not have caught this.** `scripts/check_worklist.py` reconciles
+the Quick-scan `✅` column against the heading, but nothing reconciles the
+row's free *text* — so (3) was invisible to `make worklist-check` and to the
+pre-commit hook. That remains true after this fix; the row is correct now, but
+the same drift can recur. Left as-is deliberately rather than widened into a
+parser change: a free-text-vs-body consistency check is a different item, and
+`claim-reviewer` already catches this class on the surfaces that matter most
+(the outward-facing ones), which is exactly how this item was filed.
+
+**Scope discipline.** A sweep of every `*.md`/`*.html` outside `docs/` and
+`archive/` for the same class of denial ("no managed search", "search
+interface over", "managed search … not started") found no fourth surface, so
+the class is closed rather than the three named instances patched. Nothing in
+`landing/` needed a change — item 1 had already corrected `security.html`, and
+`index.html` claims WORM *retention* without denying search.
+
+**Effort:** S. **Depends on:** 134 (shipped).
+
 ### 177. `WormSearchResult.chain_breaks`/`unverified` have no Prometheus counter, so the strongest WORM-archive tamper signal isn't alertable ✅ DONE
 
 **Surfaced 2026-08-10 by `security-invariant-reviewer` auditing item 172's
