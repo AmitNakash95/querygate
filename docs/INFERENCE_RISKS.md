@@ -137,11 +137,51 @@ contribution (multi-query differencing).
   joins on a non-unique column and non-conjunctive conditions are refused.
   Asserted by `test_k_anonymity_floor_cannot_be_defeated_by_a_fan_out_join`, which
   was inverted from the test that originally pinned the leak.
-- **Multi-query differencing: still residual.** Isolating an individual by
-  subtracting two *independently* compliant aggregates (each ≥ *k*) is not
-  closed by a per-query group-size floor; defending it needs query-set auditing
-  or differential privacy, deliberately out of scope. Documented, not
-  half-built.
+- **Multi-query differencing: bounded since item 179, still residual.**
+  Isolating an individual by subtracting two *independently* compliant
+  aggregates (each ≥ *k*) is not closed by a per-query group-size floor, and
+  **closing** it properly still needs query-set auditing or differential
+  privacy — both deliberately out of scope.
+
+  What changed is that the sequence is now *bounded* rather than unlimited.
+  `Policy.max_shape_repeats_per_window` / `max_aggregate_queries_per_window`
+  (`execution/disclosure_budget.py`) cap, per (principal, connection, declared
+  purpose, table) over a rolling window, how many times one aggregate query
+  shape may be re-run and how many aggregate queries may touch one table at
+  all. Both are off by default and both apply only where `min_group_size` is
+  also set. The key property: because the recorded query shape is predicate-literal-free
+  (`audit/events.normalize_query_shape`), a differencing probe walking a
+  constant is **one** shape re-sent N times, so counting re-runs is what
+  detects it.
+
+  **Read the limits honestly.** A caller *inside* its budget still differences
+  successfully — this raises the cost of the attack and caps the disclosure per
+  window, it does not prevent it. And because the shape is predicate-literal-free, the
+  budget cannot tell a probe from an innocent repeat of the same query, so it
+  is deliberately conservative and will also count benign repetition. No
+  threshold is recommended: we have not calibrated these against real traffic.
+  Asserted by `tests/unit/test_disclosure_budget.py` and
+  `tests/integration/test_disclosure_budget_e2e.py`, whose headline test runs an
+  actual salary-differencing probe and proves it is cut off partway through.
+
+  **Known gap (2026-08-12, TODO.md item 186): the per-shape cap is currently
+  evadable.** `shape_fingerprint` does not canonicalize a select-alias
+  *reference* (nor a CTE rename, a nested-scope alias, or list order), so a
+  prober who walks the alias alongside the sliding constant lands in a fresh
+  bucket every probe and `max_shape_repeats_per_window` never trips — measured
+  at 20 distinct fingerprints for 20 probes. **`max_aggregate_queries_per_window`
+  is unaffected by all four of those vectors — its key carries no fingerprint at
+  all — so until item 186 lands, set the per-table cap and do not rely on the
+  per-shape cap alone.** It is not a general bound: it does not cover the
+  write-preview path (item 191), it partitions per declared purpose
+  when the operator configured `allowed_purposes` (a caller cannot invent one
+  to mint a fresh budget), and its in-process window is per serving process —
+  per replica and per uvicorn worker — unless `CONCURRENCY_BACKEND=redis`. Two further
+  scoping residuals: a cross-connection joined table is charged under the
+  *requesting* connection (so one physical table reachable via two connections
+  carries two budgets), and under static API-key auth every caller sharing a key
+  collapses into one principal bucket. The write-preview path is unbudgeted
+  entirely — item 191.
 
 ### R4 — Existence and row-count probing
 
@@ -153,8 +193,10 @@ at all.
   controls shrink the surface without pretending to remove it: mandatory row
   filters (item 6) bound every query to the caller's own partition, column
   masking (item 49) removes raw sensitive values from results, per-principal
-  quotas (item 50) rate-limit the probing needed for a differencing attack, and
-  the audit trail (item 23) makes a probing pattern observable after the fact.
+  quotas (item 50) rate-limit the probing needed for a differencing attack, the
+  cumulative disclosure budget (item 179) bounds how many times one aggregate
+  shape may be re-run against a *k*-floored table, and the audit trail (item 23)
+  makes a probing pattern observable after the fact.
 
 ## Summary
 
@@ -164,8 +206,8 @@ unharvested reference. Class B (semantic correlation, derived columns,
 aggregate differencing, existence probing) is **not closable by identifier
 allow/deny**; R1 is closed by policy configuration, R3's single-query
 singling-out is closed by the opt-in `Policy.min_group_size` guardrail (item 88),
-including across joins since item 118 — with multi-query differencing left an
-honest residual, and R2/R4 are accepted
+including across joins since item 118 — with multi-query differencing **bounded
+but not closed** by the opt-in disclosure budget (item 179), and R2/R4 are accepted
 residuals mitigated in depth by mandatory filters, masking, quotas, and audit.
 
 *Wording note (item 104, 2026-07-27).* "Multi-query differencing" is now slightly

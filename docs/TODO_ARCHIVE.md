@@ -4199,8 +4199,10 @@ dispatched abstract bases — one concrete class per dialect, no inline
   are thin dispatchers; `test_dialects.py` unchanged + a new registry test).
 
 Adding a dialect (item 19) is now: implement both adapters + register. The one
-remaining gap is the cost-estimation hook's MSSQL side, which is blocked on
+remaining gap at the time was the cost-estimation hook's MSSQL side, blocked on
 MSSQL estimated-plan support (item 26 ph2), not on the adapter interface.
+*(Closed since: item 26 phase 2 shipped, and `_estimate_cost` is a per-dialect
+dispatch.)*
 
 <details><summary>Original scope</summary>
 
@@ -5002,8 +5004,9 @@ dropping a dialect stays a contained, plug-in change. This is item 57
 ("Pluggable dialect-adapter architecture"), already scoped in the backlog
 under P4 — this closes the compiler-scoped slice of it (not
 `connections/dialects.py`'s session guardrails or
-`execution/cost_estimation.py`'s Postgres-only EXPLAIN hook, which item 57
-also mentions but which are separate concerns left for a future pass).
+`execution/cost_estimation.py`'s then-Postgres-only EXPLAIN hook, which item 57
+also mentions but which are separate concerns left for a future pass — the
+estimation hook covers Postgres and MSSQL since item 26 phase 2).
 
 **Shipped.** New `compiler/dialect_adapters.py`: an `abc.ABC`
 `DialectAdapter` with three methods — `date_bucket`, `order_by_terms`,
@@ -9460,7 +9463,9 @@ enforced ceiling); the actual S3 work is separately bounded per request by
 `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
 `AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS`. An out-of-bound request is
 rejected with a 422 before any S3 call is made; a bound hit mid-scan
-degrades to a truncated page with a resumable, opaque cursor (encoding
+degrades to a truncated page with an opaque cursor — resumable for every bound
+except a day listing over `max_objects_scanned`, whose cursor repeats that day
+(item 184, found later) — (encoding
 `day`/`key`/`line` plus a fingerprint of the request's own filters, so
 replaying a cursor against different filters is rejected rather than
 silently returning a mismatched page) rather than continuing an
@@ -13307,3 +13312,570 @@ than a novel fix needing independent verification.
 
 **Effort:** S (mirrors an already-shipped fixture pattern). **Depends on:**
 2 (shipped — same resource-lifecycle gap, found once before).
+
+### 176. Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line ✅ DONE
+
+**Surfaced 2026-08-10 by `claim-reviewer` auditing the item-1 landing-copy fix**
+(`landing/security.html`'s "Audit durability and search" line, corrected to
+describe the now-shipped `GET /api/v1/admin/observability/worm-search`
+endpoint). The reviewer confirmed that fix is accurate, but found three other
+surfaces describing the same item-134-phase-2 capability that still said it
+doesn't exist. All three were still live when this item was picked up on
+2026-08-12 and are now corrected.
+
+**1. `sales/index.html`'s two guardrail lists.** Last touched by item 152 on
+2026-08-06, before phase 2 shipped later the same day, and never revisited. The
+"Safe to claim now" WORM bullet ended "there is no managed search over the
+archive yet—say retention, not search", and "Do not claim yet" listed "Managed
+search over the WORM audit archive". Both are now correct, and the claim moved
+across the two lists rather than simply being deleted from the second: "Safe to
+claim now" gains a dedicated bullet naming the endpoint, its own
+`admin:audit:worm-search` scope, the required-and-capped time window, the
+`event_type`/`connection_id`/`principal_id` filters and cursor pagination; "Do
+not claim yet" now forbids a SIEM and a long-retention search *UI*, with a
+pointer to the other list so the two read as one instruction instead of a
+contradiction. **This fix originally added a third prohibition — managed search
+over the plain local JSONL sink — which was itself false** and was removed on
+2026-08-12: `GET /api/v1/admin/ui/audit/events` and the admin UI's Audit view
+are exactly a bounded, filtered, paginated search over that sink.
+
+**2. `CUSTOMER_README.md`.** "There is still no managed search interface over
+either sink" was directly false. Replaced with a description of the shipped
+endpoint at the same level of detail the README and PRODUCT_GUIDE already use,
+keeping the two real limits explicit: it is an API and not a SIEM UI, and it
+searches the S3 WORM archive only. **The "either sink" half of the old sentence
+was wrong too**, and this fix initially preserved it: the local JSONL sink has
+its own bounded admin-UI browse surface. That was corrected on 2026-08-12, and
+the paragraph now describes both surfaces and keeps the recommendation to
+collect the stream into a customer's own SIEM for dashboards and correlation.
+
+**3. TODO.md's own Quick-scan row for item 134** read "phase 1: S3 Object Lock;
+phase 2: managed search not started", contradicting its own `✅ DONE` heading
+(no trailing qualifier) two thousand lines below it and the full write-up in
+this file. Trimmed to "Compliance-grade (WORM) audit retention + managed
+search", matching the archived-stub convention.
+
+**The gate could not have caught this.** `scripts/check_worklist.py` reconciles
+the Quick-scan `✅` column against the heading, but nothing reconciles the
+row's free *text* — so (3) was invisible to `make worklist-check` and to the
+pre-commit hook. That remains true after this fix; the row is correct now, but
+the same drift can recur. Left as-is deliberately rather than widened into a
+parser change: a free-text-vs-body consistency check is a different item, and
+`claim-reviewer` already catches this class on the surfaces that matter most
+(the outward-facing ones), which is exactly how this item was filed.
+
+**Scope discipline — and where it failed.** A sweep of every `*.md`/`*.html`
+outside `docs/` and `archive/` for the same class of denial ("no managed
+search", "search interface over", "managed search … not started") found no
+fourth surface, and this write-up originally concluded "the class is closed".
+**That conclusion was wrong, and the sweep's own exclusion is why:**
+`docs/business/GO_TO_MARKET.md` lives under `docs/`, and it carries its own
+"Safe to claim / Do not claim yet" lists — structurally the same artifact as
+`sales/index.html`, which this item did fix. It was still telling a seller the
+endpoint does not exist. Caught 2026-08-12 by `claim-reviewer` re-auditing this
+item's own fix, and corrected then. The lesson is narrow and worth keeping: a
+sweep that excludes a directory cannot conclude a *class* is closed, only that
+the searched subset is clean — and `docs/business/` holds sales-facing
+artifacts despite the `docs/` prefix. Nothing in
+`landing/` needed a change — item 1 had already corrected `security.html`, and
+`index.html` claims WORM *retention* without denying search.
+
+**Effort:** S. **Depends on:** 134 (shipped).
+
+### 177. `WormSearchResult.chain_breaks`/`unverified` have no Prometheus counter, so the strongest WORM-archive tamper signal isn't alertable ✅ DONE
+
+**Surfaced 2026-08-10 by `security-invariant-reviewer` auditing item 172's
+own commit (WS-172-6), during that item's own mandatory completion gate.**
+Item 172 added `chain_breaks` (a segment-level chain-linkage-break count) to
+`WormSearchResult` — the strongest tamper/omission signal the WORM search
+surface can produce, stronger than an ordinary `unverified` hash mismatch —
+but it was only ever visible to whoever happened to run an ad-hoc
+`GET /api/v1/admin/observability/worm-search` request over the right window.
+Nobody was paged. Given the Proof pillar is a product claim, "detected" there
+meant "detectable on demand", not "monitored" — an operator relying on
+dashboards/alerts (the normal operational posture) would never learn a chain
+broke.
+
+**What shipped.** Two unlabelled counters in `metrics.py` —
+`querygate_audit_worm_search_chain_breaks_total` and
+`querygate_audit_worm_search_unverified_total` — incremented from a single
+`_count_integrity_signals()` helper in `audit/worm_search.py`, alongside the
+existing `AUDIT_WORM_SEARCH_REQUESTS_TOTAL`/
+`AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL` pattern. Both are deliberately
+label-free, matching item 126's `PERSONAL_DENIALS_RATE_LIMITED_TOTAL`
+precedent: a `connection`/`principal` label would be caller-chosen
+cardinality and a weak per-principal activity oracle over the audit archive
+to anyone able to read `/metrics` (scope-gated since item 144).
+`unverified_total` includes each chain break's own breaking line, mirroring
+the result model's field relationship exactly, so
+`unverified_total - chain_breaks_total` is the count actually likely to be a
+key rotation — the same split the response `note` already makes in prose.
+
+**Two decisions beyond the item's literal scope, both deliberate.**
+
+1. **The counters also fire on the mid-scan S3 failure path**, not only the
+   served path. The item's own text said "incremented in `_finalize`", which
+   would have left a real hole: a scan that finds a chain break and then
+   fails against S3 never reaches `_finalize`, so the strongest tamper signal
+   the surface produces would be swallowed by the exception — exactly the
+   silent-signal failure mode this item exists to close. Pinned by
+   `test_a_chain_break_found_before_a_mid_scan_failure_is_still_counted`.
+2. **An idempotence guard was removed rather than shipped.** The first cut
+   carried an `integrity_counted` flag so the helper could not double-count
+   across its two call sites. Mutation testing showed it was unreachable:
+   every `_finalize` call site is a `return _finalize(...)`, and `_finalize`
+   does nothing that can raise between counting and returning, so a request
+   that counted on the served path can never reach the exception handler.
+   Deleting the flag left all 69 tests in the file green — i.e. it was both
+   unreachable and untested, the same call item 114 made on its fifth
+   hand-rolled predicate enumerator. The reasoning is recorded in a comment
+   at the site so a future edit that makes `_finalize` fallible restores the
+   guard *with* a test.
+
+**Mutation verification** (per CLAUDE.md's working agreement — every new
+enforcement point broken deliberately, suite re-run, failure confirmed to be
+*for that reason*, then reverted):
+
+All counts below were re-run against the **final** tree (the post-audit test
+set), not the tree the mutation was first tried on:
+
+| Mutation | Result |
+| --- | --- |
+| `CHAIN_BREAKS_TOTAL.inc(chain_breaks)` → `.inc(0)` | 5 tests fail on the chain-break counter assertion |
+| `UNVERIFIED_TOTAL.inc(unverified)` → `.inc(0)` | 5 tests fail on the unverified counter assertion |
+| `_count_integrity_signals()` dropped from the error path | only the mid-scan-failure test fails |
+| idempotence guard removed | **nothing fails** — which is why the guard was deleted rather than shipped |
+| either counter boolean-ized (`.inc(1 if x else 0)`) | only the magnitude test fails |
+| `UNVERIFIED_TOTAL.inc(unverified + malformed)` | only the malformed-exclusion test fails |
+| `_count_integrity_signals()` moved ABOVE the `WormSearchResult(...)` construction in `_finalize` | only `test_a_result_that_fails_to_build_counts_the_signals_once_not_twice` fails, with `+2` — the real double-count hazard |
+
+**What this item's own `auditors` gate changed before commit.** Four
+reviewers ran, twice (a second pass over the post-fix tree). No reviewer
+found a defect in the counting mechanism itself — placement, unlabelled
+shape, redaction safety and the exactly-once reasoning all held under
+independent tracing. What the gate did produce: two claim corrections, seven
+test gaps, and two new defect items (179, 180). The corrections mattered more
+than the mechanism did.
+
+1. **The central claim was narrowed on every surface.** Three reviewers
+   independently found the first draft's "detected becomes monitored" framing
+   overstated: `search_worm_archive` has exactly one production caller (the
+   scope-gated REST route) and nothing scans on a schedule, so the counters
+   only advance while a search actually runs. What shipped makes a finding
+   *reachable by alerting*; genuine monitoring needs the operator to schedule
+   a periodic search. An operator who configured
+   `increase(...[1h]) > 0`, saw silence, and read it as "the archive is
+   intact" would have been worse off than before the item. README,
+   THREAT_MODEL QG-40, PRODUCT_GUIDE, CHANGELOG, both metric help strings and
+   the module docstring were narrowed rather than the code widened.
+2. **The counters count findings PER SCAN, not distinct segments.** A WORM
+   object is immutable, so a real break is permanent and every later search
+   reaching it counts again. "Alert on any non-zero rate" was therefore bad
+   operational advice (it pages forever after one triaged break, and can't
+   distinguish a new break from re-observation of the old); it is now "alert
+   on the first non-zero increase and treat it as sticky until triaged."
+3. **Seven test gaps closed.** No test pinned counter *magnitude* — every
+   fixture produced 0 or 1, so `.inc(1 if chain_breaks else 0)` passed the
+   whole suite and the documented `unverified_total - chain_breaks_total`
+   arithmetic rested on nothing. Nothing pinned `malformed` staying *out* of
+   the unverified counter (`.inc(unverified + malformed)` was green
+   everywhere), which would have conflated exactly the two classes item 154
+   split apart. The error-path test asserted only one of the two counters.
+   The control test could not distinguish "not incremented" from "series does
+   not exist" (`_sample`'s `or 0.0`). The newly-documented cancellation limit
+   had no test. The "exactly one production caller" fact the whole narrowed
+   scope claim rests on had no test. And the exactly-once invariant was, at
+   first, guarded only by a source-shape proxy (below).
+4. **The no-label claim and the deleted guard's invariant are asserted
+   properly, on the second pass.** The first attempt at both was weak and the
+   re-review said so. The no-label assertion reached into
+   `Counter._labelnames`, a private attribute; it now uses the public registry
+   API, since a labelled Counter can never emit an empty-label sample — same
+   property, nothing to break on a library upgrade. More seriously, the
+   exactly-once invariant was guarded by a test that string-matched source
+   lines for `return _finalize(`. That was a proxy for the real invariant and
+   wrong in both directions: it would false-fail on a docstring mentioning
+   `_finalize(` (this module's docstrings are edited constantly), and it
+   false-passed on the edit that actually double-counts — moving
+   `_count_integrity_signals()` above the `WormSearchResult(...)`
+   construction. It was replaced with a behavioural test that makes the model
+   construction raise and asserts `+1`, not `+2`. Writing it also surfaced
+   that the *final* `_finalize` call site sits outside the `try`, so a
+   construction failure there counts nothing at all — a not-counted case, not
+   a double-counted one, pre-existing and equally true of the request counter,
+   now recorded in the test's own comment. The replacement additionally covers
+   the WS-7 "build the response first, count after" ordering rationale, which
+   had been comment-only since item 134 phase 2.
+
+**Tests.** Eleven in `tests/unit/test_worm_search.py::TestMetrics`. Original
+four: a chain break increments both counters and they agree with the same
+request's returned `WormSearchResult`; a plain hash mismatch (key rotation)
+increments `unverified` but *not* `chain_breaks`; an intact archive leaves
+both untouched (and both series exist); a break found before a mid-scan S3
+failure is still counted (now asserting both counters). Added by the audit:
+`test_the_counters_carry_the_real_magnitude_not_just_a_boolean` (two broken
+segments + one key-mismatched segment → `chain_breaks == 2`,
+`unverified == 3`, and the documented subtraction asserted on the counter
+deltas rather than on the response fields),
+`test_malformed_lines_move_neither_integrity_counter`,
+`test_the_same_break_is_counted_once_per_scan_not_once_per_segment` (pins the
+per-scan semantics deliberately, so a future dedup must be a conscious
+decision), `test_both_integrity_counters_carry_no_labels`,
+`test_a_result_that_fails_to_build_counts_the_signals_once_not_twice`,
+`test_a_cancelled_scan_counts_nothing`, and
+`test_the_worm_search_has_exactly_one_production_call_site`.
+
+**Known limits, documented rather than papered over.** No scheduled scan (see
+above). Per-scan counting (see above). A request cancelled by client
+disconnect or shutdown counts nothing, because `asyncio.CancelledError`
+derives from `BaseException` and the handler catches `Exception` — left as-is
+deliberately, and now pinned by `test_a_cancelled_scan_counts_nothing`. (An
+earlier draft of this write-up justified that by claiming a `BaseException`
+handler would reintroduce the deleted idempotence guard; the re-review showed
+that reasoning is unsound — `_finalize` is a plain `def` with no await point
+between counting and returning, so cancellation cannot be delivered there and
+could not double-count. The honest reason to leave it: counting on
+shutdown-driven cancellation would add noise on every rolling deploy, and a
+cancelled scan's partial findings are re-found by the next scan, since the
+archive is immutable.) `malformed` findings — including a line rejected for
+forbidden content nested in `query_shape`, which is a forgery signal — are
+not published as a counter at all; only the two chain-integrity signals are.
+Counter magnitude is additionally
+untrustworthy on any deployment where a single day's segment count can exceed
+`AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED`, because of a pre-existing
+non-advancing-cursor defect filed separately as **item 184** (filed as 179 on
+this item's own branch; renumbered on merge — see TODO.md item 184).
+
+**Docs.** `docs/PRODUCT_GUIDE.md` Decision Log (2026-08-11, including both
+out-of-scope decisions and the audit's scope correction), `docs/THREAT_MODEL.md`
+QG-40 (the item-172 clause now states the detection is reachable by alerting,
+with both limits, the alert-on guidance, the no-label rationale, and the nine
+tests in the evidence column), `README.md`'s WORM section, `CHANGELOG.md`
+`[Unreleased] / Added`, both metric help strings, and the
+`audit/worm_search.py` module docstring.
+
+**Effort:** S. **Depends on:** 172 (shipped). **Surfaced:** items 184, 185
+(filed as 179 and 180 on this item's own branch; renumbered on merge).
+
+### 179. Cumulative disclosure budget: bound multi-query differencing per purpose, the one form of "governing intent" that is structural ✅ DONE
+
+**Surfaced 2026-08-11** from a direct question — *we govern what the query is
+allowed to be; can we also govern the intent?* The answer splits three ways
+and only one is buildable. (a) **Declared purpose as a token** — shipped, item
+145: a closed-set `StructuredQuery.purpose` gated by `Policy.allowed_purposes`
+and narrowing the effective policy via `for_purpose`. (b) **The
+natural-language ask** (`StructuredQuery.intent`, free text) — deliberately
+**not** governable and must stay that way: enforcing it means inspecting a
+string and judging its meaning, which contradicts NORTH_STAR.md's "by
+construction, never by inspecting a string," makes a deterministic gate
+probabilistic, opens a prompt-injection surface inside the control plane, and
+is self-attested by the exact party being governed (an agent that would
+exfiltrate will also write "routine reporting"). Do not build (b). (c) **Intent
+as read off the query shape, accumulated across a session** — this item.
+
+**The actual gap.** Enforcement today is strictly per-request. `Policy.
+min_group_size` (item 88) injects `HAVING count(*) >= k` so no single query
+returns a below-*k* group, and the quota (`execution/quota.py`) counts
+requests. Nothing bounds cumulative *disclosure* — the quota rate-limits the
+probing a differencing attack needs (`INFERENCE_RISKS.md` credits it as a
+partial mitigation) but it counts requests, not what they reveal, so it is
+blind to how much a caller reconstructs from *many individually legal*
+queries: N aggregates whose predicates differ only in a narrowing
+constant will isolate the row the *k*-floor exists to hide. This is not a
+newly-discovered hole — item 88's own body states "multi-query differencing
+stays honestly out of scope", `docs/INFERENCE_RISKS.md` (item 55) carries it
+as residual R3, and `docs/THREAT_MODEL.md` QG-29 lists it among the residuals
+identifier allow/deny structurally cannot close. It is a *documented,
+unenforced* residual, and it is the one place where "govern the intent" names
+something real.
+
+**Why it's on-thesis and not a non-goal.** It is still query *shape*, still
+deterministic, still explainable line-by-line in a security review, and it
+needs no model, no string inspection, and no new caller-facing input. It is
+the Structural pillar extended over *time* rather than over one AST. It also
+upgrades item 145 from a config knob into a materially stronger one: a
+purpose would then bound not only what a caller may see per query but how
+much it may triangulate per window. Immuta *enforces* a declared purpose —
+gating on a declared reason from an allowed set, rather than merely logging a
+justification string — which `MARKET_DOMINATION_ANALYSIS.md` F7 found "barely
+exists" elsewhere.
+
+**Be precise about what our own briefs actually establish here, because it is
+less than it first looks.** MDA §4 **F2** (and the exec summary) verify that
+Immuta deprecated k-anonymization (EOL Apr 2025) and dropped differential
+privacy, and that the surveyed access proxies ship neither k-anonymity/
+min-group-size nor DP. That is *absence of k-anon/DP*, which is not the same
+claim as *absence of a cumulative disclosure budget* — a vendor could ship a
+per-principal budget without shipping DP, and no brief surveys that capability
+as its own line item. Two further caveats: the briefs cover none of the
+warehouse-native, semantic-layer, or gateway categories on this question (and
+warehouse-native is the likeliest to ship a per-user privacy budget), and F2's
+verified proxy roster (Cyral/Formal/Teleport/StrongDM/**IndyKite**) does not
+match the roster `COMPETITOR_ACCESS_PROXIES.md` currently defines
+(…/**Bytebase**) — so "the five proxies" is not a clean verified set either.
+Re-verify all of this with `competitive-scan` before it informs anything, and
+**never carry a bare "no competitor offers this" onto a customer-facing
+surface** on the strength of what is written here.
+
+**Feasibility pre-check (done 2026-08-11, before writing this item).**
+`audit/events.py`'s `normalize_query_shape`/`_where_shape` record predicate
+*operators*, column identifiers, `group_by` keys, and join structure, and
+strip every predicate/expression literal — recursively, through set-op arms,
+ctes, and nested subqueries. (Not *every* number is stripped: `requested_limit`,
+`offset`, `top_n.n` and a percentile `fraction` are retained as structure, per
+`AuditEvent`'s own docstring wording — "identifiers and operators … without
+retaining predicate literals". None of them is SQL, a predicate value, a row,
+an exception, or a credential, so non-negotiable #3 genuinely stays intact —
+but note a probe that varies *only* LIMIT/OFFSET **is** distinguishable in the
+recorded shape, unlike one that varies a predicate constant.) So the signal a
+budget needs is already computable from redaction-safe structure. The
+limitation this forces, which must be accepted rather than engineered around:
+with literals stripped, the budget cannot tell "same shape, different
+constant" (the real differencing probe) from "same shape, same constant" (an
+innocent repeat), so it is a deliberately **conservative** bound that will
+also count benign repetition. That is the correct failure direction. **Do not
+"fix" it by persisting predicate values** — that trades a documented residual
+for an invariant violation.
+
+**What to do** (the scoping decisions this originally waited on are settled —
+see the block below it):
+
+1. New optional `Policy` guardrail, **off by default** like `min_group_size`
+   and `max_requests_per_window` (note `quota_window_seconds` defaults to 60
+   and is always on — the *cap* is the opt-in, not the window), and
+   expressible per-purpose by putting the declared purpose in the budget KEY —
+   deliberately NOT as a cap on `PurposePolicyDelta`, which would have been the
+   first subtractive/scalar field on that delta and would have broken
+   `validate_structural_caps`' documented monotonicity argument.
+   **This is the one part of the design with a real trap in it:** every
+   field `for_purpose` narrows today is a list/dict it *unions* onto the base
+   policy, and `validate_structural_caps`' safety argument
+   (`validation/policy_validation.py`, the 2026-08-07 docstring correction)
+   rests explicitly on that additive-only property — it states that if
+   `PurposePolicyDelta` ever gains a subtractive field, the monotonicity
+   argument licensing `_validate_and_compile`'s un-narrowed pre-check
+   **breaks**. A scalar budget would be the first cap `for_purpose` narrows
+   and needs `min()`, not a union. Re-examine that pre-check as part of this
+   item, do not assume the existing semantics carry over.
+2. Enforcement state follows the established in-process/Redis pair pattern
+   (`execution/quota.py` + `execution/redis_quota.py`, `execution/
+   concurrency.py` + `redis_concurrency.py`) — a Protocol with two registered
+   implementations, cleared in `tests/conftest.py` like the concurrency
+   singleton. **Do not route this through `admin/anomaly.py`**: that module's
+   docstring commits it to being read-only and explicitly non-feedback, per
+   the 32C boundary in `CLAUDE.md` — making it enforce would violate its own
+   stated contract.
+3. Decide explicitly which surfaces consume budget. `verdict` is already
+   quota-metered (item 133) and is the cheap probe, so it very likely should.
+   `explain` is the harder call: `execution/quota.py`'s module docstring
+   records a deliberate decision that it is **not** quota-gated ("it compiles
+   a preview and never executes against the database"), and it emits no audit
+   event at all — so metering it both reverses a recorded decision and would
+   spend budget invisibly to the audit-stream replay this item's threshold
+   work depends on. Weigh that recorded rationale carefully rather than
+   deferring to it: it predates item 133's own finding that a cold-cache
+   reflection **is** a real DB round trip — the reason `verdict` got metered —
+   and `explain` performs the same reflection. Neither property is pinned by a
+   test today (nothing asserts explain consumes no quota or emits no audit
+   event), so add those two tests as part of this item's DoD whichever way the
+   decision goes. Note also that the *stateful* guardrails this item models
+   itself on (quota, concurrency, approval) are enforced in `execute()`/
+   `verdict()`'s bodies, **not** in the `_validate_and_compile` seam where the
+   policy-validation and compile-time caps live — so "same choke point as
+   every other guardrail" is not available; pick one deliberately.
+
+**Scoping decisions — settled 2026-08-11 with the maintainer, before
+implementation.** These replace this item's original open questions.
+
+- **A correction to this item's own premise, found while scoping it.** An
+  earlier draft of this item implied the unit should be the count of
+  *distinct* normalized shapes. That is backwards and would have missed the
+  attack entirely. Because `normalize_query_shape` strips predicate literals,
+  a differencing probe — `… WHERE age > 40`, `> 41`, `> 42`, … — is the
+  **same** normalized shape re-sent N times. Variety is the signature of
+  ordinary exploratory work; *repetition* is the signature of a probe. The
+  budget therefore counts **re-runs of one shape**, not distinct shapes.
+- **Unit: two independent knobs** (maintainer decision — both, not one).
+  `max_shape_repeats_per_window` caps how many times a single
+  (table, normalized-shape) pair may be re-run; `max_aggregate_queries_per_window`
+  caps total aggregate queries against one k-floored table regardless of
+  shape, catching the slower probe that also varies its shape. Each is
+  `Optional[int]`, each defaults to `None` (disabled), and either tripping
+  rejects.
+- **Subject: `(connection_id, principal_subject, purpose, table, shape)`** —
+  the same principal-and-connection scoping `execution/quota.py`'s `QuotaKey`
+  already uses, extended by table (a budget on `salaries` must not be spent by
+  querying `products`), by the declared purpose, and by the shape hash for the
+  per-shape knob. Principal, not actor: under item 90's delegation the principal
+  *is* the human whose policy applied, which is the Proof-pillar subject; keying
+  on the actor would budget a whole agent fleet as one identity and let one
+  agent deny service to every other. (Honest limit: with a *non-delegated*
+  shared credential the principal is the fleet.) Purpose sits in the KEY rather
+  than becoming a cap on `PurposePolicyDelta` — see the note below on why.
+- **Exhaustion: reject.** A `DisclosureBudgetExceededError` (a
+  `QuotaExceededError` subclass, so it inherits the existing REST 429 +
+  `Retry-After` and MCP `RATE_LIMITED` mapping for free). Escalating into item
+  92's approval gate instead is deliberately **deferred to item 180** — it is
+  the better UX but risks becoming "click here to buy unlimited disclosure",
+  and it should be decided against real usage data rather than guessed at now.
+- **The false-positive story stays honestly open.** Both knobs are off by
+  default and no threshold is recommended in code or docs, precisely because
+  the calibration data (audit-stream replay against real traffic) does not
+  exist yet. An operator switching this on is choosing a number we have not
+  validated for them, and the docs must say so rather than imply a safe
+  default exists.
+
+**Shipped 2026-08-11.**
+
+- `execution/disclosure_budget.py` — `shape_fingerprint` (literal-free, with
+  `requested_limit`/`offset`/`top_n.n`/percentile `fraction` stripped so
+  walking `limit` can't mint a fresh bucket), `budgeted_tables` (walks the
+  canonical `iter_query_scopes`, charges only aggregating scopes, excludes cte
+  names), `resolve_disclosure_budget` (the `min_group_size` coupling), the
+  `DisclosureBudgetLimiter` Protocol + `InProcessDisclosureBudgetLimiter` with
+  all-or-nothing multi-key charging, and `enforce_disclosure_budget`.
+- `execution/redis_disclosure_budget.py` — the cross-replica sibling, one Lua
+  script, **fail-closed** (a deliberate divergence from the quota/concurrency
+  limiters, argued in its module docstring).
+- `Policy.max_shape_repeats_per_window` / `max_aggregate_queries_per_window` /
+  `disclosure_budget_window_seconds` + `disclosure_budget_enabled`; the window
+  field registered in `INVERTED_GUARDRAIL_FIELDS` (a longer window is the
+  *tighter* posture, same as `quota_window_seconds`).
+- `DisclosureBudgetExceededError(QuotaExceededError)` — inherits the REST 429 +
+  `Retry-After` / MCP `RATE_LIMITED` contract unchanged; its message names
+  neither the table nor the shape, since which table is near its budget is
+  itself a disclosure channel.
+- Enforced in `execution/service.py`'s `execute()` **after** the approval gate,
+  so a query paused for approval and retried (item 107) charges exactly once
+  without needing a `_reserved_budget` parameter.
+- `querygate_disclosure_budget_rejections_total{connection,budget_kind}`, with
+  no table or principal label (cardinality + the same disclosure-channel
+  reasoning as the error message).
+- `query_ast/models.is_aggregate_scope` extracted so the compiler's k-floor and
+  this budget cannot drift apart about what "aggregate" means.
+
+**Coverage.** 75 new tests: `tests/unit/test_disclosure_budget.py` (46),
+`tests/unit/test_redis_disclosure_budget.py` (12),
+`tests/integration/test_disclosure_budget_e2e.py` (17) — whose headline test
+runs a real salary-differencing probe against a seeded database and proves it
+is cut off partway through, with every probe carrying a *different* literal.
+The REST 429 + `Retry-After` and MCP `RATE_LIMITED` mappings are pinned
+behaviorally for the new exception type rather than assumed from its
+inheritance.
+
+**Mutation-verified (10/10).** Removing the `execute()` enforcement call, the
+`min_group_size` coupling, the aggregate-scope filter, the cte-name exclusion,
+the all-or-nothing two-phase split, the volatile-key stripping, the
+no-principal skip, the `>=` bound, `purpose` in the key, and the tripped-kind
+attribution were each broken in turn and each produced a failing test. **Two of
+those ten initially did NOT fail** — the cte-name exclusion (the test's outer
+scope didn't aggregate, so the excluded name was never reached) and the
+tripped-kind attribution (no in-process test asserted *which* kind was
+reported). Both were real test gaps, closed with
+`test_an_aggregate_over_a_cte_name_still_never_charges_the_cte` and
+`test_the_tripped_key_determines_the_reported_kind` before landing.
+
+**Docs.** New `docs/PRODUCT_GUIDE.md` section ("Cumulative disclosure budget")
++ Decision Log entry recording the NL-intent rejection as product identity;
+`docs/INFERENCE_RISKS.md` R3 and `docs/THREAT_MODEL.md` QG-29 both changed from
+"still residual" to "bounded since item 179, still residual" — deliberately not
+"closed"; `examples/policy.example.yaml` documents both caps and states plainly
+that no threshold is recommended because none has been calibrated.
+
+**Post-implementation audit (same day) found three real bypasses — all fixed
+before landing.** The `auditors` gate ran four reviewers; `security-invariant-`
+and `architecture-boundary-reviewer` independently found the first, and the
+security reviewer alone found the third. Each was reproduced against the built
+code before being accepted, and each now has a named regression test.
+
+1. **A rotated `purpose` minted unlimited budgets.** With `allowed_purposes`
+   empty (the default), `resolve_purpose_policy` accepts ANY purpose string a
+   caller invents — so keying the budget on it let a prober send
+   `purpose="p1"`, `"p2"`, … and land every probe in a fresh bucket, defeating
+   both caps completely on the default configuration. Worse, the first version
+   of `test_each_declared_purpose_carries_its_own_budget` *pinned the bypass as
+   intended behavior*. Fixed by mirroring the rule `service.py` already applies
+   before persisting a purpose to the audit event: a purpose partitions the
+   budget only when the operator declared the closed set.
+   (`test_an_undeclared_purpose_cannot_mint_a_fresh_budget`.)
+2. **Identifier case and alias renames minted fresh shape buckets.**
+   `normalize_query_shape` records the caller's own casing and *effective*
+   names, so `Employees.Id` vs `employees.id`, or `emp.salary` vs
+   `employees.salary`, hashed differently. Fixed by canonicalizing the shape
+   before hashing — casefold every string, rewrite alias-qualified refs to the
+   physical table via `effective_name_map` — and by adding the select-item
+   `alias` to the stripped-key set. (`test_identifier_case_...`,
+   `test_renaming_an_alias_...`.)
+   **Correction (2026-08-12): this closed only half the class.** Stripping the
+   `alias` key removes an alias *definition*; it does nothing about an alias
+   *reference*, which the shape emits as a bare string under `order_by[].col`,
+   `group_by[]`, `top_n.order_by[].col` and inside `having`. `_canonicalize`
+   rewrites only *dotted* refs, so a bare `n7` passes through. Walking the
+   alias and its reference together mints a fresh bucket per probe —
+   measured on the merged tree as 20 distinct fingerprints for 20 probes, with
+   the alias held fixed collapsing correctly to 1. Tracked as **item 186**;
+   until it lands, `max_aggregate_queries_per_window` is the load-bearing cap
+   and `max_shape_repeats_per_window` must not be relied on alone.
+3. **A non-aggregating CTE wrapper charged nothing at all.** Wrap the table in
+   a cte that does not aggregate and aggregate over the cte in the outer scope:
+   the body contributed nothing (not an aggregate) and the outer scope's only
+   table was the cte NAME, which the first version skipped — so the query
+   charged zero while the compiler still applied the k-floor and returned real
+   answers. Fixed by resolving cte names to their base tables transitively
+   (`_cte_base_tables`). (`test_a_non_aggregating_cte_wrapper_still_charges_the_base_table`,
+   `test_a_cte_chain_resolves_transitively_to_its_base_table`, plus an e2e
+   sibling.)
+
+**Four further weaknesses fixed in the same pass.** (a) One statement bought
+several probe answers — a 3-arm `UNION` over one table returned three answers
+for one unit — so charges are now *weighted* by aggregating-scope occurrence in
+both backends. (b) A budget configured without `min_group_size` was silently
+inert; `Policy` now rejects that combination at load time rather than shipping a
+control that enforces nothing. (c) The in-process window map was never swept, so
+a key charged once lived for the process's lifetime (the key carries a shape
+fingerprint, so its cardinality grows with distinct queries); an amortized sweep
+now bounds it. (d) The Redis key was an unescaped f-string join over components
+(`principal`, `purpose`) that may legally contain `:`; components are now
+percent-escaped so the two Protocol implementations agree on key identity.
+
+**A latent Lua bug, found by a parity test rather than by reading.** The
+retry-after countdown read `ZRANGE … WITHSCORES` and indexed `reply[2]`, which
+the Lua bridge surfaces as a NESTED table — so the score was `nil` and every
+rejection reported the full window instead of the true countdown. Only visible
+because the new test rejects at a non-zero window age; the original test (and
+`redis_quota.py`'s, which uses the identical pattern) charged and rejected at the
+same instant, where the wrong answer and the right answer coincide. Fixed here
+with a portable `ZRANGE` + `ZSCORE` pair. **`execution/redis_quota.py` still has
+the same pattern and is left unchanged** — correcting a shipped feature's retry
+hint is out of this item's scope and cannot be verified here without a real
+Redis. Worth its own item.
+
+**Also corrected in the audit:** the new counter now reaches
+`admin/observability.py` (it was defined and never aggregated, so the admin
+overview showed a `quota` rejection with no breakdown); `is_aggregate_scope`'s
+consolidation was completed (two hand-rolled copies of the same boolean
+remained, in `query_ast/models.py` and `validation/policy_validation.py`); a
+redundant `__init__` override, a missing `metrics.__all__` entry, and a code
+comment describing a `min_group_size` purpose-narrowing that `PurposePolicyDelta`
+cannot express were all removed. Docs: the stale "item 50 phase 2 not shipped"
+claim was reconciled on `README.md` and `examples/policy.example.yaml` (two
+surfaces the first pass missed), `landing/security.html`'s "query-history
+controls are not implemented" was corrected, `deploy/HA_DR.md` gained a
+fifth shared-state row and a fail-closed note in its Redis-loss drill, and
+several overstated absolutes were narrowed ("every other guardrail judges one
+query" → only those judging *disclosure*; "literal-free" → "predicate-literal-
+free"). `examples/policy.example.yaml`'s illustrative numbers became
+placeholders, since concrete values three lines under "there is no recommended
+value" are a de-facto recommendation.
+
+**Two pre-existing test gaps surfaced, not caused, by this work:**
+`test_observability_api.py`'s low-cardinality allow-list never listed
+`approval_required` (a real `classify_rejection` bucket since item 92 — no test
+in that process had ever tripped the approval gate until item 179's
+double-charge test did), and `test_config_semantic_diff.py`'s generic guardrail
+walk needed to learn about co-required fields.
+
+**Suites on the final tree:** unit 2560, integration 387 (excluding `real_db`),
+security 480 — all passing.
+
+**Effort:** L. **Depends on:** 88, 145 (both shipped).

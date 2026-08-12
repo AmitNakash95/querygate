@@ -83,6 +83,22 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- **Two Prometheus counters put the WORM archive's chain-integrity findings on
+  `/metrics`** (TODO.md item 177):
+  `querygate_audit_worm_search_chain_breaks_total` and
+  `querygate_audit_worm_search_unverified_total`. The managed WORM search
+  already detected a broken segment hash chain, but only ever reported it
+  inside the response body of an ad-hoc search. Alert on
+  `chain_breaks_total` — unlike `unverified_total`, it is not explained by a
+  rotated `AUDIT_LEDGER_HMAC_KEY`. Both are unlabelled (no caller-chosen
+  cardinality, no per-principal activity oracle over the archive) and are
+  also recorded when a scan fails against S3 partway through, so an S3
+  failure doesn't discard a break the scan had already found. **Two limits
+  are documented rather than papered over:** QueryGate does not scan the
+  archive on a schedule, so these only advance while a search runs (pair them
+  with a cron'd search — see `README.md`); and they count findings per scan,
+  not distinct segments, so alert on the first non-zero increase rather than
+  on a magnitude. Purely additive.
 - **MySQL 8.4+ as a supported connection dialect** (TODO.md item 19 phase 1),
   alongside the existing Postgres and MSSQL support — verified against a real
   MySQL server, not just rendering-only tests. Purely additive; no existing
@@ -145,7 +161,8 @@ All notable changes to QueryGate are documented here.
   `admin:audit:worm-search` scope, not implied by general observability
   read access) lets an authorized operator search the archive directly —
   bounded by a mandatory time window (default cap 730 days) and per-request
-  scan limits, with a resumable cursor for a truncated page. **Upgrade
+  scan limits, with a resumable cursor for a truncated page (except a day
+  listing over the object budget — see TODO item 184). **Upgrade
   impact:** none for a deployment that doesn't set
   `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm`; a deployment that does should
   read the fail-open buffering caveat above and monitor
@@ -502,6 +519,33 @@ All notable changes to QueryGate are documented here.
   and write a fresh, publish-ready `--markdown-out` results snapshot on every run
   (`docs/business/PERFORMANCE_BENCHMARK_RESULTS.md` / `LOAD_BENCHMARK_RESULTS.md`). See
   `docs/business/PERFORMANCE_BENCHMARK.md`/`LOAD_BENCHMARK.md` for full methodology.
+
+- **Cumulative disclosure budget (optional, off by default)** — bounds the
+  multi-query differencing that `min_group_size`'s k-anonymity floor alone does
+  not: a prober re-runs one aggregate shape with a sliding constant and
+  subtracts the answers. Two new `Policy` caps,
+  `max_shape_repeats_per_window` (how many times one query *shape* may be
+  re-run) and `max_aggregate_queries_per_window` (how many aggregate queries may
+  touch one table at all), applied per principal, connection, declared purpose
+  and table over a rolling `disclosure_budget_window_seconds`. Because the
+  recorded query shape carries no predicate literals, a differencing probe is
+  one shape re-sent N times — so re-runs are the signal. Exhausting a budget
+  refuses the query with the existing REST 429 + `Retry-After` / MCP
+  `RATE_LIMITED` contract, and is counted by a new
+  `querygate_disclosure_budget_rejections_total{connection,budget_kind}`.
+  Both caps require `min_group_size` on the same policy (a budget with no floor
+  to defend is now rejected at load time rather than silently enforcing
+  nothing), and only `execute` spends budget — `explain`/`verdict` return no
+  rows. With `CONCURRENCY_BACKEND=redis` the window is a shared cross-replica
+  budget; unlike the quota and concurrency limiters, that backend **fails
+  closed**. **This bounds multi-query differencing, it does not close it** — a
+  caller inside its budget still differences successfully, and no threshold is
+  recommended because none has been calibrated against real traffic. **Set the
+  per-table cap:** `max_shape_repeats_per_window` is currently evadable (item
+  186) because the shape fingerprint does not canonicalize a referenced select
+  alias, a cte rename, a nested-scope alias, or list order;
+  `max_aggregate_queries_per_window` is unaffected. See
+  `docs/INFERENCE_RISKS.md` R3.
 
 ### Fixed
 

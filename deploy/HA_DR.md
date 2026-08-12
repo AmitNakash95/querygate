@@ -25,15 +25,16 @@ step only you can run — treat "Failover drill" below as the checklist for it.
 
 ## 1. Shared-state correctness matrix (read this first)
 
-QueryGate replicas are stateless request handlers, but four kinds of state
+QueryGate replicas are stateless request handlers, but five kinds of state
 behave differently under more than one replica. Getting a cap or a budget
 "right" per-replica but wrong in aggregate is the classic multi-instance
 footgun, so this is spelled out per-kind:
 
 | State | Cross-replica behavior | How to make it correct |
 |---|---|---|
-| **In-flight concurrency cap** (`Policy.max_concurrency`, item 9) | **Correct & shared** when `CONCURRENCY_BACKEND=redis` — all replicas count against one Redis-backed limiter. With the in-process backend each replica enforces the cap independently, so the real ceiling silently multiplies by replica count. | Set `CONCURRENCY_BACKEND=redis` and a real `CONCURRENCY_REDIS_URL` whenever `replicaCount > 1`. The HA overlay does this. |
-| **Per-principal rate / byte quota** (item 50) | **Shared & correct** when `CONCURRENCY_BACKEND=redis` — the `RedisQuotaLimiter` (item 50 phase 2) enforces a principal's request/byte rolling-window budget against the true cross-replica window via one Redis, so the budget is a single fleet-wide cap. With the **in-process** backend the window is per-replica, so the effective quota multiplies by replica count (up to N×). | Set `CONCURRENCY_BACKEND=redis` (the same setting that makes the concurrency cap shared) whenever `replicaCount > 1`; the HA overlay does this. Only the in-process fallback (single-replica) is per-replica. |
+| **In-flight concurrency cap** (`Policy.max_concurrency`, item 9) | **Correct & shared** when `CONCURRENCY_BACKEND=redis` — all replicas count against one Redis-backed limiter. With the in-process backend each replica enforces the cap independently, so the real ceiling silently multiplies by (replicas × worker processes). | Set `CONCURRENCY_BACKEND=redis` and a real `CONCURRENCY_REDIS_URL` whenever `replicaCount > 1` **or `NUM_OF_WORKERS > 1`** (the in-process state is a module global, so each worker process gets its own). The HA overlay does this. |
+| **Per-principal rate / byte quota** (item 50) | **Shared & correct** when `CONCURRENCY_BACKEND=redis` — the `RedisQuotaLimiter` (item 50 phase 2) enforces a principal's request/byte rolling-window budget against the true cross-replica window via one Redis, so the budget is a single fleet-wide cap. With the **in-process** backend the window is per-replica, so the effective quota multiplies by (replicas × worker processes). | Set `CONCURRENCY_BACKEND=redis` (the same setting that makes the concurrency cap shared) whenever `replicaCount > 1` **or `NUM_OF_WORKERS > 1`** (the in-process state is a module global, so each worker process gets its own); the HA overlay does this. Only the in-process fallback (single-replica) is per-replica. |
+| **Cumulative disclosure budget** (`Policy.max_shape_repeats_per_window` / `max_aggregate_queries_per_window`, item 179) | **Shared & correct** when `CONCURRENCY_BACKEND=redis` — the `RedisDisclosureBudgetLimiter` counts a principal's aggregate probes against one cross-replica window. With the **in-process** default the window is per-replica, so a prober gets up to N× the probes you configured against a k-anonymity floor you believe is defended. **Unlike the quota and concurrency limiters, this one fails CLOSED**: if Redis is unreachable, aggregate queries on connections that set both `min_group_size` and a disclosure cap are refused rather than silently admitted, because failing open would suspend a privacy guarantee while the config still claimed it. There is deliberately no `fail_open` switch for it. | Set `CONCURRENCY_BACKEND=redis` whenever `replicaCount > 1` **or `NUM_OF_WORKERS > 1`** (uvicorn runs one worker *process* per worker, each importing the app afresh, so each gets its own in-process window and a single replica multiplies the budget too — the same is true of the concurrency and quota limiters above, whose in-process state is likewise a module global). Same setting as the two rows above; the HA overlay does this. Size your Redis availability accordingly — a Redis outage degrades *aggregate* queries on budgeted connections to refusals; every other read is unaffected. |
 | **Config-governance version store** (Path B API, item 17/42) | **Per-pod** by default (each replica's own `CONFIG_GOVERNANCE_DIR`). A governance `apply` reloads **only the replica that served the request**; there is no cross-replica reload broadcast. | Prefer the GitOps/ConfigMap path (§2) for multi-replica config changes. If you need the governance *API* in an HA deployment, set `configGovernance.enabled=true` (an RWX PVC shared by all replicas) **and** roll the fleet after an `apply` so every replica reloads — or fan the `apply`/`reload-config` call out to each pod. |
 | **Persisted audit ledger** (JSONL / `jsonl_chained`, item 91) | **Per-replica file.** Each pod writes its own file; the hash-chain integrity is *per file*, not fleet-global. Every event is also on the pod's stdout regardless. | Treat **stdout + your log aggregator** as the unified, durable audit stream. Persist per-pod JSONL (a PVC) only if you also want the local chained copy; verify each file's chain independently with `querygate-audit verify`. |
 
@@ -194,7 +195,11 @@ before a pilot depends on it:
 3. **Redis loss.** Kill Redis. Confirm behavior matches your chosen posture
    (fail-closed vs. degraded) and that recovery is automatic when Redis returns.
    The quota limiter fails open on a Redis error (a request is admitted rather
-   than blocked), so confirm that matches your posture too.
+   than blocked), so confirm that matches your posture too — and note the
+   **disclosure budget (item 179) fails CLOSED** on the same error, so if any
+   connection sets both `min_group_size` and a disclosure cap, expect its
+   aggregate queries to be refused for the duration of the outage while every
+   other read continues.
 4. **Full-region loss (multi-region only).** Repoint the global LB to the second
    region; confirm RTO against your target and that audit from both regions
    lands in the central store.

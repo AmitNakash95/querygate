@@ -245,9 +245,11 @@ non-negotiable were checked directly against the implementation, not just the
 docs, and held:
 
 - No inline `if dialect == ...` branching outside the registered
-  `DialectAdapter`/`SessionDialectAdapter` classes (the one exception,
-  `execution/service.py`'s Postgres-only cost-estimation hook, is the
-  existing, documented, deliberate exception — not a new instance).
+  `DialectAdapter`/`SessionDialectAdapter` classes (the one exception at the
+  time of this review, `execution/service.py`'s then-Postgres-only
+  cost-estimation hook, was the existing, documented, deliberate exception —
+  not a new instance). *(Since resolved: item 26 phase 2 added MSSQL
+  estimation and `_estimate_cost` became a per-dialect dispatch.)*
 - No SQL-injection surface in session-guardrail string interpolation
   (`connections/dialects.py`'s `SET LOCAL`/`SET LOCK_TIMEOUT` calls
   interpolate only policy-validated integers, never caller input).

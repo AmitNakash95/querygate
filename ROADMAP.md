@@ -461,10 +461,130 @@ claim when the work ships or before explicitly handing the item back.
 - [x] **173** — cross-connection connection-resolution is unmemoized, redone
   on every call site that self-derives it. ✅ **Shipped** (`validate_schema`
   reuses item 160's per-request `connection_resolver` snapshot).
-- [ ] **177** — `WormSearchResult.chain_breaks`/`unverified` have no
+- [x] **176** — three claim-accuracy drifts left behind by item 134 phase 2
+  (`sales/index.html`'s two sales-guardrail lists, `CUSTOMER_README.md`, and
+  TODO.md's own Quick-scan row for item 134 all said managed WORM search
+  doesn't exist). ✅ **Shipped** (all three now describe the endpoint, each
+  scoped to a bounded API over the S3 archive — not a SIEM, no UI, no search
+  over the plain local JSONL sink; a sweep found no fourth surface).
+  *Surfaced 2026-08-10 by `claim-reviewer`. Placed here
+  2026-08-11 by the `roadmap-next` walk that shipped item 177 — it had been
+  filed in TODO.md but never given a roadmap position, so the automated walk
+  could not reach it. Sibling of items 152/153; outward-facing, S effort.*
+  **Depends on 134.**
+- [x] **177** — `WormSearchResult.chain_breaks`/`unverified` have no
   Prometheus counter, so the strongest WORM-archive tamper signal isn't
-  alertable. *Surfaced 2026-08-10 by `security-invariant-reviewer` auditing
-  item 172's own commit.* **Depends on 172.**
+  alertable. ✅ **Shipped** (two unlabelled counters, incremented on the
+  served path *and* on a mid-scan S3 failure; a drafted idempotence guard was
+  deleted after mutation testing proved it unreachable and untested).
+  *Surfaced 2026-08-10 by `security-invariant-reviewer` auditing item 172's
+  own commit.* **Depends on 172.**
+- [ ] **178** — a hash-verified WORM record with a non-int `seq`
+  (type-confused, not corrupt) raises `TypeError` instead of being counted
+  `unverified`, escaping as a generic 500. *Surfaced 2026-08-11 by
+  `security-invariant-reviewer` auditing item 172's WS-172-9 follow-up.
+  Placed here 2026-08-11 by the `roadmap-next` walk that shipped item 177 —
+  filed in TODO.md the same day but never given a roadmap position.
+  Availability/contract regression against this module's own
+  "malformed/unverified, never an unhandled exception" posture, not
+  disclosure; S effort.* **Depends on 172.**
+- [x] **179** — cumulative disclosure budget: bound multi-query differencing
+  per purpose. ✅ **Shipped** (two off-by-default caps on re-runs of one
+  literal-free query shape and on aggregate queries per k-floored table, keyed
+  by principal/connection/purpose/table; in-process + fail-closed Redis
+  backends; rejects on exhaustion). *The only structural form of "governing
+  intent" that is buildable — NL-intent enforcement was rejected outright as
+  product identity, see the PRODUCT_GUIDE Decision Log (2026-08-11).*
+  **Bounds, does not close**, the residual item 88, `INFERENCE_RISKS.md` R3 and
+  THREAT_MODEL QG-29 document; R3 is explicit that closing it needs query-set
+  auditing or differential privacy. The false-positive threshold remains
+  uncalibrated — no default is recommended.
+- [ ] **181** — `redis_quota.py`'s `Retry-After` is always the full window: the
+  Lua indexes `oldest[2]` of a `WITHSCORES` reply the Lua bridge returns
+  *nested*, so the countdown collapses. *Found 2026-08-11 by item 179's
+  non-zero-age parity test; item 179's own sibling was fixed, this one left
+  alone deliberately. **Verify against a real Redis before changing production**
+  — under real Redis the reply may be flat, making this a test-double artifact
+  rather than a shipped bug.* **Depends on 50.**
+- [ ] **182** — observe mode for the disclosure budget: record what *would* have
+  been refused without refusing it. *Closes item 179's one honest gap — no
+  threshold is recommended because none has been calibrated, so an operator
+  enabling it today picks an unvalidated number. Follows `CostEstimationMode.OBSERVE`'s
+  shipped precedent exactly. Note the non-cosmetic design question in the item
+  body: item 179's charge is all-or-nothing, so a naive wrap-the-call-site
+  observe mode stops measuring at the cap and never learns how far past it real
+  traffic goes.* **Depends on 179, 26.**
+- [ ] **183** — suggest a disclosure-budget threshold from observed behavior,
+  for human approval. *Nice-to-have; a client can use or ignore it. Stays inside
+  the 32C boundary (propose only, never self-publish, 32B review path). The trap
+  is in the item body: a prober active during the observation window poisons the
+  baseline, so suggest from a percentile and present the distribution rather than
+  a bare number.* **Depends on 182.**
+- [ ] **180** — escalate an exhausted disclosure budget into item 92's approval
+  gate instead of rejecting. *Deliberately deferred from item 179: better UX,
+  but risks becoming "click here to buy unlimited disclosure", and item 179's
+  own false-positive rate is uncalibrated — decide from real usage data, not
+  taste.* **Depends on 92, 179.**
+- [ ] **184** — a day holding more segments than `max_objects_scanned` returns
+  a cursor that never advances: part of the WORM archive becomes silently
+  unreachable, a good-faith pager loops forever, and item 177's integrity
+  counters inflate without bound. *Surfaced 2026-08-11 by three of the four
+  `auditors` reviewers independently, auditing item 177. Pre-existing since
+  item 134 phase 2; not default-triggering (needs a lowered object budget or
+  a shortened flush interval). Filed separately because the fix is a cursor
+  format change (`after_key` + `StartAfter`), M effort, not a metrics-commit
+  drive-by.* **Filed as item 179 on the item-177 branch; renumbered on merge
+  (2026-08-12) — see TODO.md's note at item 184.** **Depends on 134.**
+- [ ] **185** — `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is
+  unreachable for the bound rejections its own comment claims to count,
+  because `build_worm_search_result` validates before calling
+  `search_worm_archive`. *Surfaced 2026-08-11 by
+  `architecture-boundary-reviewer` auditing item 177. Pre-existing since item
+  134 phase 2; the existing test passes only because it calls the inner
+  function directly. S effort.* **Filed as item 180 on the item-177 branch;
+  renumbered on merge (2026-08-12).** **Depends on 134.**
+- [ ] **186** — the disclosure budget's per-shape cap is evadable: a select-alias
+  *reference* mints a fresh shape bucket per probe, so
+  `max_shape_repeats_per_window` never trips. *Surfaced 2026-08-12 by
+  `security-invariant-reviewer` and `architecture-boundary-reviewer`
+  independently, auditing the item-179 merge, and **measured** (20 probes → 20
+  fingerprints; alias held fixed → 1). **Leads this group:** it is the only one
+  where a shipped control does not deliver the bound its own docs advertise, and
+  item 179's archive write-up records the defect class as already fixed. Needs a
+  maintainer decision — the cheap containment (require the table cap alongside
+  the shape cap) is a breaking config change.* **Depends on 179.**
+- [ ] **187** — a disclosure-budget refusal names which cap tripped, its value,
+  and the window, contradicting the exception's own stated contract and handing
+  the caller item 186's evasion strategy. *Surfaced 2026-08-12 by
+  `security-invariant-reviewer`. Pair with 186 — fixing 186 without this leaves
+  the map to the next gap in the response body.* **Depends on 179.**
+- [ ] **188** — a principal policy override can fail `Policy` validation at
+  request time and 500 every query for that principal, after `validate-config`
+  accepted it. *Surfaced 2026-08-12 by `security-invariant-reviewer` auditing the
+  item-179 merge; item 179 added the first cross-field validator on `Policy`, so
+  this is a new failure mode, not a latent one.* **Depends on 179.**
+- [ ] **192** — the disclosure budget's Redis script passes multiple KEYS, which
+  fails CROSSSLOT on Redis Cluster, turning a fail-closed control into an outage
+  on exactly the queries it protects. *Surfaced 2026-08-12 by
+  `test-contract-reviewer`; `HA_DR.md` recommends the Redis backend without
+  qualifying the topology, and `fakeredis` cannot model slots.* **Depends on 179.**
+- [ ] **189** — test-contract gaps in the item-179 budget and item-177 counters
+  (charge weight, 3 of 5 volatile shape keys, Redis-limiter wiring, observability
+  aggregation, +5). *Surfaced 2026-08-12 by `test-contract-reviewer`. Grouped
+  deliberately: no production behavior change, one review. Worth doing near 186
+  — several of these are the reason 186 survived its own branch audit.*
+  **Depends on 177, 179.**
+- [ ] **191** — `write_preview` is an unfloored, unbudgeted exact-count oracle,
+  so a write-scoped caller differences around items 88 and 179. *Surfaced
+  2026-08-12 by `security-invariant-reviewer`. Low severity (write scope is
+  deny-by-default and separately granted), but it makes `INFERENCE_RISKS.md`'s
+  "bounded since item 179" read broader than it is; the docs half is
+  unambiguous, the flooring half is a product decision.* **Depends on 93, 179.**
+- [ ] **190** — four claim drifts on outward-facing surfaces unrelated to WORM
+  search (MSSQL cost estimation, four-eyes approval + admin UI, a README
+  self-contradiction, the unconditional "resumable page" claim). *Surfaced
+  2026-08-12 by `claim-reviewer` auditing item 176 — a different class from that
+  item's, hence filed rather than folded in. Sibling of 152/153/176.*
 
 ### Phase 4 — ★ Flagship pillar: Expressive Query Engine (deepen the Structural pillar)
 
@@ -727,6 +847,13 @@ position.
 - [x] **50 (phase 2)** — Per-principal rate limits / query quotas over time. ✅
   **Shipped** (`RedisQuotaLimiter` — cross-replica shared quota budget via Lua,
   closing the per-replica-multiplication gap).
+- [ ] **193** — `docs/product-guide.html` has no freshness gate against its
+  markdown source. *Surfaced 2026-08-12 by `architecture-boundary-reviewer` and
+  `claim-reviewer` when the item-179 merge landed with the generated copy stale
+  — by three whole sections plus two Decision Log entries, and stale since
+  `f995e35` rather than merge-caused (regenerated by hand in that pass). Filed here rather than in Phase 3 because it is derived-artifact
+  tooling, not a governance control — the same shape as
+  `scripts/check_worklist.py`'s mirror check, and equally cheap.*
 
 ---
 
