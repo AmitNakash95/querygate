@@ -461,10 +461,13 @@ claim when the work ships or before explicitly handing the item back.
 - [x] **173** — cross-connection connection-resolution is unmemoized, redone
   on every call site that self-derives it. ✅ **Shipped** (`validate_schema`
   reuses item 160's per-request `connection_resolver` snapshot).
-- [ ] **176** — three claim-accuracy drifts left behind by item 134 phase 2
-  (`sales/index.html`'s sales-guardrail list, `CUSTOMER_README.md:399`, and
-  TODO.md's own Quick-scan row for item 134 all still say managed WORM search
-  doesn't exist). *Surfaced 2026-08-10 by `claim-reviewer`. Placed here
+- [x] **176** — three claim-accuracy drifts left behind by item 134 phase 2
+  (`sales/index.html`'s two sales-guardrail lists, `CUSTOMER_README.md`, and
+  TODO.md's own Quick-scan row for item 134 all said managed WORM search
+  doesn't exist). ✅ **Shipped** (all three now describe the endpoint, each
+  scoped to a bounded API over the S3 archive — not a SIEM, no UI, no search
+  over the plain local JSONL sink; a sweep found no fourth surface).
+  *Surfaced 2026-08-10 by `claim-reviewer`. Placed here
   2026-08-11 by the `roadmap-next` walk that shipped item 177 — it had been
   filed in TODO.md but never given a roadmap position, so the automated walk
   could not reach it. Sibling of items 152/153; outward-facing, S effort.*
