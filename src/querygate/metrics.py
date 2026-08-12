@@ -233,9 +233,13 @@ AUDIT_WORM_BUFFER_DROPPED_TOTAL = Counter(
 
 # Managed search over the WORM archive (TODO.md item 134 phase 2,
 # audit/worm_search.py). `outcome` is one of "ok" | "rejected" | "error" —
-# "rejected" means a bound was violated (missing/over-wide time range,
-# limit out of range, a cursor that doesn't match the current filters) and
-# no S3 call was made at all; "error" means S3 itself failed mid-scan
+# "rejected" means a bound was violated and no S3 call was made at all.
+# NOTE (TODO.md item 180): in production this currently only ever counts
+# CURSOR rejections (a cursor that doesn't match the current filters, or
+# whose day falls outside the window). A missing/over-wide time range or an
+# out-of-range limit is rejected earlier, by `build_worm_search_result`'s own
+# `_validate_window`/`_validate_limit`, which never reaches the counter — see
+# item 180 for the fix. "error" means S3 itself failed mid-scan
 # (unreachable, misconfigured bucket); "ok" covers every genuinely served
 # request, complete or truncated.
 AUDIT_WORM_SEARCH_REQUESTS_TOTAL = Counter(
@@ -251,6 +255,66 @@ AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL = Counter(
     "requests — the real cost driver of a search; watch this alongside "
     "querygate_audit_worm_search_requests_total for a caller repeatedly "
     "paging a wide window.",
+    registry=REGISTRY,
+)
+
+# TODO.md item 177: the two integrity signals a WORM search can produce, moved
+# out of the response body and onto the metrics endpoint. Before this,
+# `WormSearchResult.chain_breaks`/`unverified` were visible only to whoever
+# read the response of an ad-hoc
+# GET /api/v1/admin/observability/worm-search over the right window.
+#
+# **Scope of the claim, stated precisely** (the item's own audit found the
+# first draft overstated it): these make a finding REACHABLE BY ALERTING, not
+# continuously monitored. Nothing in QueryGate scans the archive on a
+# schedule — `search_worm_archive` has exactly one production caller, the
+# scope-gated REST route — so a counter only advances while a search actually
+# runs. An operator who wants real monitoring must schedule that search;
+# alerting on these alone is only as live as the search cadence.
+#
+# No labels on either. `PERSONAL_DENIALS_RATE_LIMITED_TOTAL` (below) is the
+# precedent, and `AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL` (above) is the
+# unlabelled sibling; the other sibling,
+# `AUDIT_WORM_SEARCH_REQUESTS_TOTAL`, carries only a fixed, non-caller-chosen
+# `outcome` label. A `connection`/`principal` label here would be
+# caller-chosen cardinality and a weak activity oracle over the audit archive
+# itself, on a surface whose whole point is that reading it is privileged.
+#
+# Both are incremented by the RUNNING TOTALS of a single search request, on
+# both the served ("ok") and the mid-scan-failure ("error") path — a chain
+# break found just before S3 died is a real discovery, and dropping it is the
+# exact silent-tamper-signal failure this item exists to close.
+AUDIT_WORM_SEARCH_CHAIN_BREAKS_TOTAL = Counter(
+    "querygate_audit_worm_search_chain_breaks_total",
+    "Chain-break FINDINGS across WORM search requests: a record whose "
+    "seq/prev_hash did not continue from its predecessor while its own hash "
+    "still verified — or a segment whose first record is not the genuine "
+    "genesis, or a resumed page whose incoming link could not be confirmed "
+    "within the seed-walk bound (fails closed). The strongest "
+    "tamper/omission signal this surface "
+    "produces — unlike querygate_audit_worm_search_unverified_total it is NOT "
+    "explained by a rotated AUDIT_LEDGER_HMAC_KEY. Counts findings per scan, "
+    "not distinct segments: a WORM object is immutable, so a real break is "
+    "permanent and every later search reaching it counts again. Alert on the "
+    "FIRST non-zero increase and treat it as sticky until the affected "
+    "segment is triaged; do not alert on an absolute magnitude. Only advances "
+    "while a search runs — QueryGate does not scan on a schedule.",
+    registry=REGISTRY,
+)
+
+AUDIT_WORM_SEARCH_UNVERIFIED_TOTAL = Counter(
+    "querygate_audit_worm_search_unverified_total",
+    "Envelope-shaped lines found during WORM search that did not verify under "
+    "the configured AUDIT_LEDGER_HMAC_KEY. Usually a rotated or mismatched "
+    "key rather than tampering — treat a sustained rate as a configuration "
+    "signal first. Deliberately includes the one breaking line of each chain "
+    "break (whose own hash DID recompute), mirroring "
+    "WormSearchResult.unverified, so unverified_total - chain_breaks_total is "
+    "the part actually likely to be a key mismatch. Excludes `malformed` "
+    "lines (not envelope-shaped, unparseable, rejected by the event schema, "
+    "or rejected for forbidden content nested in query_shape), which are a "
+    "distinct class and are NOT published as a counter at all. Counts "
+    "findings per scan, not distinct lines — see the chain-breaks counter.",
     registry=REGISTRY,
 )
 
@@ -344,6 +408,8 @@ __all__ = [
     "AUDIT_WORM_BUFFER_DROPPED_TOTAL",
     "AUDIT_WORM_SEARCH_REQUESTS_TOTAL",
     "AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL",
+    "AUDIT_WORM_SEARCH_CHAIN_BREAKS_TOTAL",
+    "AUDIT_WORM_SEARCH_UNVERIFIED_TOTAL",
     "VERDICTS_TOTAL",
     "VERDICT_DURATION_SECONDS",
     "PERSONAL_DENIALS_RATE_LIMITED_TOTAL",

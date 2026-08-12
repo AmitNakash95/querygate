@@ -56,11 +56,30 @@ silently withheld from a listing (left to the existing S3-listing/Object-Lock
 posture). **Partially fixed further (TODO.md item 172):** this reader now
 also verifies each segment's internal CHAIN linkage (`seq`/`prev_hash`
 continuity across consumed records), not just each record's own hash — a
-record dropped from or reordered within the middle of a segment breaks the
-chain and stops that segment's scan there, counted both in `unverified` and
-in a distinct `chain_breaks` field (a stronger signal than an ordinary hash
-mismatch, since the record itself is otherwise self-consistent). **Still
-open (interior omission only, not every omission):** a genuine,
+record dropped from or reordered within the middle of a segment — or a
+segment whose first consumed record is not the genuine genesis, or a resumed
+page whose incoming link can't be confirmed within the seed-walk bound —
+breaks the chain and stops that segment's scan there, counted both in
+`unverified` and in a distinct `chain_breaks` field (a stronger signal than
+an ordinary hash mismatch, since the record itself is otherwise
+self-consistent). **Reachable
+by alerting, not just by reading a response (TODO.md item 177):** both counts
+are also published as `querygate_audit_worm_search_chain_breaks_total` and
+`querygate_audit_worm_search_unverified_total`, on the served path AND when a
+scan fails against S3 partway through, so a finding reaches the metrics
+pipeline instead of living only in a response body someone had to think to
+ask for. **This is not continuous monitoring, and the counters must not be
+read as such:** nothing here scans on a schedule — this function has exactly
+one production caller (the scope-gated REST route), so a counter only
+advances while a search actually runs, and a segment tampered inside a window
+nobody searches produces no signal at all. An operator wanting genuine
+coverage must schedule a periodic search over a rolling window; alerting on
+these counters is only as live as that cadence. They also count findings PER
+SCAN, not distinct segments — a WORM object is immutable, so a real break is
+permanent and every later search reaching it counts again (and a client that
+retries a failed scan counts its partial findings again). Alert on the first
+non-zero increase, not on a magnitude. **Still open (interior omission only,
+not every omission):** a genuine,
 individually-valid, fully-intact segment can still be COPIED WHOLESALE to a
 second S3 key and returned twice — undetectable by a linkage check alone,
 since a full copy is itself a valid chain; closing this needs a further
@@ -179,8 +198,10 @@ from querygate.audit.ledger import (
 )
 from querygate.core.exceptions import QueryValidationError
 from querygate.metrics import (
+    AUDIT_WORM_SEARCH_CHAIN_BREAKS_TOTAL,
     AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL,
     AUDIT_WORM_SEARCH_REQUESTS_TOTAL,
+    AUDIT_WORM_SEARCH_UNVERIFIED_TOTAL,
 )
 
 
@@ -725,6 +746,31 @@ async def search_worm_archive(
     objects_scanned = 0
     deadline = time.monotonic() + bounds.request_timeout_seconds
 
+    def _count_integrity_signals() -> None:
+        # TODO.md item 177: publish this request's two integrity signals so an
+        # operator on dashboards/alerts learns a chain broke, instead of the
+        # signal existing only inside an ad-hoc search response nobody may ever
+        # run. Called from BOTH the served path (`_finalize`) and the mid-scan
+        # S3-failure path — a chain break discovered just before the failure is
+        # a real discovery and must not be swallowed by the exception.
+        #
+        # Exactly once per request, with no idempotence flag: the two call
+        # sites are mutually exclusive by construction. Every `_finalize` call
+        # site is a `return _finalize(...)`, and `_finalize` does nothing that
+        # can raise between this call and its own `return`, so a request that
+        # counted here on the served path cannot then reach the handler below.
+        # (An earlier draft carried a `counted` guard for this; it was
+        # unreachable and untested, so it went — same call as item 114's fifth
+        # predicate enumerator. If a future edit makes `_finalize` fallible
+        # after this point, restore the guard WITH a test.)
+        #
+        # `.inc(0)` unconditionally rather than guarding on non-zero: both
+        # counters are unlabelled, so prometheus_client already exports them
+        # at 0 from process start — a guard would save nothing observable and
+        # only add a branch to reason about.
+        AUDIT_WORM_SEARCH_CHAIN_BREAKS_TOTAL.inc(chain_breaks)
+        AUDIT_WORM_SEARCH_UNVERIFIED_TOTAL.inc(unverified)
+
     def _finalize(*, truncated: bool, next_cursor: Optional[str]) -> WormSearchResult:
         # Build the response FIRST, count the metric only once construction
         # actually succeeds — reversed order would double-count a request as
@@ -781,6 +827,7 @@ async def search_worm_archive(
             events=events,
         )
         AUDIT_WORM_SEARCH_REQUESTS_TOTAL.labels(outcome="ok").inc()
+        _count_integrity_signals()
         return result
 
     try:
@@ -1034,6 +1081,11 @@ async def search_worm_archive(
             day = day + timedelta(days=1)
     except Exception:
         AUDIT_WORM_SEARCH_REQUESTS_TOTAL.labels(outcome="error").inc()
+        # TODO.md item 177: whatever integrity signals this scan managed to
+        # find before failing are still real findings — publish them rather
+        # than letting the exception swallow the strongest tamper signal the
+        # surface produces.
+        _count_integrity_signals()
         raise
 
     # Every day in [start_day, end_day] was scanned without hitting a
