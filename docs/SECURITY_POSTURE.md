@@ -227,6 +227,34 @@ claim here matters more than badge-count:
   maintainer step (TODO.md item 30/89 phase 2) is cutting the *first* signed
   release (a deliberate tag push, never automatic) and choosing a Python
   package-index; the signing/provenance mechanism itself is in place.
+- **Independent penetration test / third-party audit — none yet.** Every result
+  in this document is produced by *our own* gates: our test suite, our
+  adversarial regression suite, and industry-standard scanners we run ourselves.
+  That is real evidence and it is reproducible by anyone with a checkout
+  (see [Reproduce the whole posture](#reproduce-the-whole-posture)), but it is
+  **self-attested**. No external party has yet tried to break QueryGate under
+  contract. State this plainly in a security review rather than letting
+  "adversarial suite" be heard as "pentested" — and treat commissioning one as
+  the single cheapest upgrade to this document's standing.
+- **Tested is not proven.** The no-raw-SQL and column-policy guarantees rest on
+  the correctness of our validators, exercised by the suite — not on formal
+  verification or a machine-checked proof, and we do not claim otherwise. What
+  the architecture buys is *drift resistance*: because every column reference
+  flows through one canonical visitor
+  (`validation/schema_validation.py`'s `iter_column_refs`, consumed by policy
+  and schema validation alike), a new AST feature is policed in one place rather
+  than a dozen — the failure mode where eleven of twelve checks get updated and
+  the twelfth silently becomes a bypass. That materially lowers the odds of a
+  gap; it does not reduce them to zero.
+- **Audit persistence is opt-in, and the tamper-evident ledger is a further
+  opt-in.** Be precise, because this is three settings and not one:
+  audit logging **to stdout is always on**; `AUDIT_SINK_BACKEND` defaults to
+  `none`, so nothing is *persisted* until an operator sets `jsonl`; and the
+  hash-chained envelope requires `jsonl_chained` on top of that. Left unkeyed the chain is SHA-256, so
+  tamper-*evidence* depends on externally anchoring the head hash
+  (`querygate-audit verify --expected-head`); `AUDIT_LEDGER_HMAC_KEY` makes it
+  unforgeable without the key. Describe it as "available and independently
+  verifiable," never as "on by default."
 - **SOC 2 / ISO 27001 control mapping — available.** A control-by-control map of
   QueryGate's product controls to the SOC 2 Trust Service Criteria and ISO 27001
   Annex A, each row backed by a concrete code/test/doc artifact, with an honest
