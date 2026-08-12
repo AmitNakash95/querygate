@@ -332,7 +332,8 @@ this line — item numbers have gone stale in a plan doc before, see the engine
 plan's own warning about exactly this). Proposed phases, each independently
 shippable and independently reviewable, in dependency order:
 
-- **Phase 0 (proposed item 178) — Decisions + model + registry, no execution.**
+- **Phase 0 (a follow-up item, numbered when prioritized) — Decisions + model +
+  registry, no execution.**
   Resolve §7's open decisions, record them in the PRODUCT_GUIDE Decision Log
   (the same "decide before implementing" discipline item 172's segment-binding
   question and item 74's MSSQL-nulls question were held to), then build
@@ -340,7 +341,8 @@ shippable and independently reviewable, in dependency order:
   wiring, and `ProcedurePolicy`. No REST/MCP surface yet, no execution path —
   this phase is entirely declarative, reviewable on its own without touching
   the execution/security surface at all.
-- **Phase 1 (proposed item 179) — Read-only execution only.** Build
+- **Phase 1 (a follow-up item, numbered when prioritized) — Read-only
+  execution only.** Build
   `ProcedureExecutionService` restricted to `confirmed_read_only=True`
   procedures only (`allowed_procedures` gate + parameter validation +
   dialect-adapter `CALL`/`EXEC` compilation + audit), REST + MCP surface,
@@ -348,13 +350,15 @@ shippable and independently reviewable, in dependency order:
   entirely in this phase — ships the lower-risk half first, the same
   incremental-safety posture item 19's phased dialect rollout (MySQL, then
   Snowflake, then BigQuery) used.
-- **Phase 2 (proposed item 180) — Non-read-only procedures + approval gate.**
+- **Phase 2 (a follow-up item, numbered when prioritized) — Non-read-only
+  procedures + approval gate.**
   Only once phase 1 has shipped and been reviewed: extend execution to
   `confirmed_read_only=False` procedures, gated behind the approval-token
   machinery from §3. This is the highest-risk phase and should get its own
   dedicated `security-invariant-reviewer` pass plus `adversarial-probe`
   coverage before shipping, not bundled into phase 1's review.
-- **Phase 3 (proposed item 181, optional) — Preview/dry-run, only if §7
+- **Phase 3 (a follow-up item, numbered when prioritized; optional) —
+  Preview/dry-run, only if §7
   decision 3 concludes a safe concept exists.** If not, this phase is
   dropped and the design doc updated to say so explicitly, rather than left
   as a silently-abandoned placeholder.
@@ -389,15 +393,16 @@ shippable and independently reviewable, in dependency order:
    before phase 3 (if built at all), not an assumption baked into phases 0–2.
 4. **Does any review/approval gate belong on the *declaration* itself** (i.e.
    should adding a new procedure to the catalog require a second approver,
-   the way config-governance four-eyes approval — item 42, not yet shipped —
+   the way config-governance four-eyes approval — item 42, shipped —
    would work for policy changes), or is operator-authored YAML + the
    existing config-governance audit trail sufficient? Given a mis-declared
    `confirmed_read_only` flag is the one thing this design cannot
    independently verify (§2), a stronger case exists here than for an
    ordinary connections.yaml/policy.yaml edit — but adding a bespoke review
-   gate for just this one file, before item 42's general four-eyes mechanism
-   ships, may be premature machinery. **Needs a decision**, ideally informed
-   by whether item 42 is likely to ship before item 18's phase 0.
+   gate for just this one file may be premature machinery now that item 42's
+   general four-eyes mechanism ships. **Needs a decision** on whether to reuse
+   item 42's shipped gate for this file or rely on the config-governance audit
+   trail.
 5. **Multi-statement / result-set-returning procedures.** Some procedures
    return one or more result sets (common in MSSQL/MySQL), not just OUT
    parameters. Does phase 1's execution service need to handle multiple

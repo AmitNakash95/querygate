@@ -400,7 +400,7 @@ certification effort starts from a mapped baseline rather than a blank page.
 
 | Criterion | QueryGate control | Evidence | Status |
 |---|---|---|---|
-| CC8.1 Authorized, tested, approved changes | Release gates (`make release-check`/`release-smoke`) for product changes; governed config changes with validation, versioning, attribution, and rollback for runtime changes. (Four-eyes approval + policy simulation/diff/blast-radius are roadmap items 42/39/40/41, not yet shipped — see gaps.) | `docs/RELEASING.md` (item 24); `admin/service.py` (item 25) | Product-provided |
+| CC8.1 Authorized, tested, approved changes | Release gates (`make release-check`/`release-smoke`) for product changes; governed config changes with validation, versioning, attribution, and rollback for runtime changes. Four-eyes approval (item 42) is opt-in via `require_config_approvals` (default 0) and gates a staged version's **first activation only** — rollback to a previously-active version is exempt by design; policy simulation (item 39), semantic access diff (item 40) and blast-radius analysis (item 41) have shipped. | `docs/RELEASING.md` (item 24); `admin/service.py` (item 25); `admin/service.py` `apply()` four-eyes gate + `tests/unit/test_config_approval.py` (item 42) | Product-provided |
 
 ### CC9 — Risk Mitigation
 
@@ -469,12 +469,15 @@ are what a deploying org completes to reach an actual report/certificate:
 3. **Access-review evidence formalization.** QueryGate exposes the inputs
    (scope catalog, per-principal policy, audit of admin actions); turning those
    into a scheduled, signed-off access review is an org process to stand up.
-4. **Config-change separation-of-duties (product roadmap, not yet shipped).**
-   Four-eyes config approval (item 42), draft-aware policy simulation (item 39),
-   semantic access diff (item 40), and blast-radius analysis (item 41) will
-   further strengthen CC8.1 change management once shipped. Today, change
-   integrity rests on release gates + the governed config plane (item 25); these
-   four are enhancements, not a claimed-but-missing control.
+4. **Config-change separation-of-duties (shipped; one residual).** Four-eyes
+   config approval (item 42), draft-aware policy simulation (item 39), semantic
+   access diff (item 40), and blast-radius analysis (item 41) have all shipped
+   and back CC8.1 change management alongside release gates and the governed
+   config plane (item 25). The approval gate is **opt-in**
+   (`require_config_approvals`, default 0) and covers a staged version's first
+   activation only — **rollback to a previously-active version is exempt by
+   design**, so an org requiring approval on every activation must add that in
+   its own change-management process.
 
 The product-side of item 54 — the mapping and the honest gap analysis above — is
 complete. Items 53 (auditor) and any org-process standup are the human/vendor

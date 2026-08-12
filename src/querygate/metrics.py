@@ -50,7 +50,8 @@ QUERIES_REJECTED_TOTAL = Counter(
     # already met (TODO.md item 35 phase 2) — broken out from `concurrency`
     # so operators can tell "the queue's own pressure control tripped" apart
     # from "waited and ran out of time". cost_estimate: rejected by a
-    # pre-execution Postgres EXPLAIN cost check (TODO.md item 26) — broken
+    # pre-execution plan-estimate cost check (TODO.md item 26; Postgres EXPLAIN
+    # or MSSQL SHOWPLAN_XML) — broken
     # out from the coarser `policy` bucket so operators can tell threshold
     # tuning apart from allow/deny rules. quota: rejected before execution by a
     # per-principal rate/byte quota (TODO.md item 50) — broken out from `policy`
@@ -113,18 +114,35 @@ QUERY_QUOTA_REJECTIONS_TOTAL = Counter(
     "Execution attempts refused before running by a per-principal quota "
     "(TODO.md item 50), by connection and which cap tripped. quota_kind: "
     "requests (rolling-window request-count cap) | bytes (rolling-window "
-    "response-byte cap). Single-instance visibility only — the default "
-    "in-process quota window is per-replica, like the in-process concurrency "
-    "limiter; a Redis-backed cross-replica quota is item 50 phase 2.",
+    "response-byte cap). The default in-process quota window is per-replica, "
+    "like the in-process concurrency limiter, so this counter is "
+    "single-instance visibility only under it; with CONCURRENCY_BACKEND=redis "
+    "the RedisQuotaLimiter (item 50 phase 2) makes the window a true "
+    "cross-replica budget, though each replica still exports its own counter.",
     ["connection", "quota_kind"],
+    registry=REGISTRY,
+)
+
+DISCLOSURE_BUDGET_REJECTIONS_TOTAL = Counter(
+    "querygate_disclosure_budget_rejections_total",
+    "Aggregate queries refused before running by a cumulative disclosure "
+    "budget (TODO.md item 179), by connection and which cap tripped. "
+    "budget_kind: disclosure_shape (one query shape re-run past its per-window "
+    "cap — the multi-query differencing signature) | disclosure_table (too "
+    "many aggregate queries against one table however the shape varied). "
+    "Deliberately NOT labeled by table or principal: which table a prober is "
+    "working is exactly the disclosure this guardrail exists to withhold, and "
+    "principal is unbounded cardinality. Use the audit stream for attribution.",
+    ["connection", "budget_kind"],
     registry=REGISTRY,
 )
 
 COST_ESTIMATION_ATTEMPTS_TOTAL = Counter(
     "querygate_cost_estimation_attempts_total",
-    "Pre-execution Postgres cost-estimation attempts — execute() calls where "
-    "Policy.cost_estimation_enabled is true and the dialect is postgresql — "
-    "by connection. Pairs with querygate_cost_estimation_unavailable_total to "
+    "Pre-execution plan-estimation attempts — execute() calls where "
+    "Policy.cost_estimation_enabled is true and the dialect has an estimator "
+    "(Postgres via inline EXPLAIN, MSSQL via a dedicated SHOWPLAN_XML "
+    "connection; item 26 phases 1-2) — by connection. Pairs with querygate_cost_estimation_unavailable_total to "
     "compute a fail-open rate.",
     ["connection"],
     registry=REGISTRY,
@@ -138,7 +156,7 @@ COST_ESTIMATION_UNAVAILABLE_TOTAL = Counter(
     "max_estimated_rows/max_estimated_cost has silently stopped protecting "
     "this connection.",
     # reason: compile_failed (statement can't render with literal binds) |
-    # explain_failed (the EXPLAIN itself errored) | plan_parse_failed
+    # explain_failed (the EXPLAIN/SHOWPLAN_XML itself errored) | plan_parse_failed
     # (unexpected plan JSON shape) — see execution/cost_estimation.py.
     ["connection", "reason"],
     registry=REGISTRY,
@@ -233,9 +251,13 @@ AUDIT_WORM_BUFFER_DROPPED_TOTAL = Counter(
 
 # Managed search over the WORM archive (TODO.md item 134 phase 2,
 # audit/worm_search.py). `outcome` is one of "ok" | "rejected" | "error" —
-# "rejected" means a bound was violated (missing/over-wide time range,
-# limit out of range, a cursor that doesn't match the current filters) and
-# no S3 call was made at all; "error" means S3 itself failed mid-scan
+# "rejected" means a bound was violated and no S3 call was made at all.
+# NOTE (TODO.md item 185): in production this currently only ever counts
+# CURSOR rejections (a cursor that doesn't match the current filters, or
+# whose day falls outside the window). A missing/over-wide time range or an
+# out-of-range limit is rejected earlier, by `build_worm_search_result`'s own
+# `_validate_window`/`_validate_limit`, which never reaches the counter — see
+# item 185 for the fix. "error" means S3 itself failed mid-scan
 # (unreachable, misconfigured bucket); "ok" covers every genuinely served
 # request, complete or truncated.
 AUDIT_WORM_SEARCH_REQUESTS_TOTAL = Counter(
@@ -251,6 +273,66 @@ AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL = Counter(
     "requests — the real cost driver of a search; watch this alongside "
     "querygate_audit_worm_search_requests_total for a caller repeatedly "
     "paging a wide window.",
+    registry=REGISTRY,
+)
+
+# TODO.md item 177: the two integrity signals a WORM search can produce, moved
+# out of the response body and onto the metrics endpoint. Before this,
+# `WormSearchResult.chain_breaks`/`unverified` were visible only to whoever
+# read the response of an ad-hoc
+# GET /api/v1/admin/observability/worm-search over the right window.
+#
+# **Scope of the claim, stated precisely** (the item's own audit found the
+# first draft overstated it): these make a finding REACHABLE BY ALERTING, not
+# continuously monitored. Nothing in QueryGate scans the archive on a
+# schedule — `search_worm_archive` has exactly one production caller, the
+# scope-gated REST route — so a counter only advances while a search actually
+# runs. An operator who wants real monitoring must schedule that search;
+# alerting on these alone is only as live as the search cadence.
+#
+# No labels on either. `PERSONAL_DENIALS_RATE_LIMITED_TOTAL` (below) is the
+# precedent, and `AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL` (above) is the
+# unlabelled sibling; the other sibling,
+# `AUDIT_WORM_SEARCH_REQUESTS_TOTAL`, carries only a fixed, non-caller-chosen
+# `outcome` label. A `connection`/`principal` label here would be
+# caller-chosen cardinality and a weak activity oracle over the audit archive
+# itself, on a surface whose whole point is that reading it is privileged.
+#
+# Both are incremented by the RUNNING TOTALS of a single search request, on
+# both the served ("ok") and the mid-scan-failure ("error") path — a chain
+# break found just before S3 died is a real discovery, and dropping it is the
+# exact silent-tamper-signal failure this item exists to close.
+AUDIT_WORM_SEARCH_CHAIN_BREAKS_TOTAL = Counter(
+    "querygate_audit_worm_search_chain_breaks_total",
+    "Chain-break FINDINGS across WORM search requests: a record whose "
+    "seq/prev_hash did not continue from its predecessor while its own hash "
+    "still verified — or a segment whose first record is not the genuine "
+    "genesis, or a resumed page whose incoming link could not be confirmed "
+    "within the seed-walk bound (fails closed). The strongest "
+    "tamper/omission signal this surface "
+    "produces — unlike querygate_audit_worm_search_unverified_total it is NOT "
+    "explained by a rotated AUDIT_LEDGER_HMAC_KEY. Counts findings per scan, "
+    "not distinct segments: a WORM object is immutable, so a real break is "
+    "permanent and every later search reaching it counts again. Alert on the "
+    "FIRST non-zero increase and treat it as sticky until the affected "
+    "segment is triaged; do not alert on an absolute magnitude. Only advances "
+    "while a search runs — QueryGate does not scan on a schedule.",
+    registry=REGISTRY,
+)
+
+AUDIT_WORM_SEARCH_UNVERIFIED_TOTAL = Counter(
+    "querygate_audit_worm_search_unverified_total",
+    "Envelope-shaped lines found during WORM search that did not verify under "
+    "the configured AUDIT_LEDGER_HMAC_KEY. Usually a rotated or mismatched "
+    "key rather than tampering — treat a sustained rate as a configuration "
+    "signal first. Deliberately includes the one breaking line of each chain "
+    "break (whose own hash DID recompute), mirroring "
+    "WormSearchResult.unverified, so unverified_total - chain_breaks_total is "
+    "the part actually likely to be a key mismatch. Excludes `malformed` "
+    "lines (not envelope-shaped, unparseable, rejected by the event schema, "
+    "or rejected for forbidden content nested in query_shape), which are a "
+    "distinct class and are NOT published as a counter at all. Counts "
+    "findings per scan, not distinct lines — see the chain-breaks counter.",
     registry=REGISTRY,
 )
 
@@ -327,6 +409,7 @@ __all__ = [
     "QUERIES_REJECTED_TOTAL",
     "QUERY_DURATION_SECONDS",
     "QUERY_QUOTA_REJECTIONS_TOTAL",
+    "DISCLOSURE_BUDGET_REJECTIONS_TOTAL",
     "CONCURRENCY_IN_USE",
     "CONCURRENCY_MAX",
     "QUEUE_DEPTH",
@@ -344,6 +427,8 @@ __all__ = [
     "AUDIT_WORM_BUFFER_DROPPED_TOTAL",
     "AUDIT_WORM_SEARCH_REQUESTS_TOTAL",
     "AUDIT_WORM_SEARCH_OBJECTS_SCANNED_TOTAL",
+    "AUDIT_WORM_SEARCH_CHAIN_BREAKS_TOTAL",
+    "AUDIT_WORM_SEARCH_UNVERIFIED_TOTAL",
     "VERDICTS_TOTAL",
     "VERDICT_DURATION_SECONDS",
     "PERSONAL_DENIALS_RATE_LIMITED_TOTAL",

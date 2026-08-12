@@ -1301,7 +1301,8 @@ archive: a required, capped time range plus `event_type`/`connection_id`/
 file has long since rotated that window out. Every bound (window width,
 objects scanned, wall-clock timeout, page size) is enforced server-side —
 an over-wide or missing range is rejected outright, a bound hit mid-scan
-degrades to a truncated, resumable page rather than an unbounded scan.
+degrades to a truncated, resumable page rather than an unbounded scan — except
+a day listing over `max_objects_scanned`, whose cursor does not advance (item 184).
 
 **MCP as an OAuth 2.0 resource server (opt-in).** For deployments that put the
 MCP surface behind a real authorization server, QueryGate can run it as a
@@ -2298,6 +2299,79 @@ choke point and get the same treatment. The declared purpose is persisted to
 the audit event (unlike `intent`, which is deliberately excluded): it's a
 fixed token from an operator-configured allow-list, not caller-authored
 prose, so recording it doesn't touch the redaction guarantee.
+
+### Cumulative disclosure budget: bounding what many legal queries add up to
+
+**File:** `src/querygate/execution/disclosure_budget.py` (+ its cross-replica
+sibling `redis_disclosure_budget.py`), item 179.
+
+Every guardrail in QueryGate that judges *disclosure* judges **one query**. (The quota and the concurrency limiter do span requests — but they count requests and bytes, not what those requests reveal.) The k-anonymity floor
+(`min_group_size`, above) is the clearest case: it injects
+`HAVING count(*) >= k`, so no single aggregate returns a group backed by fewer
+than *k* rows. But a caller who asks fifty *individually* legal, individually
+k-compliant questions can still reconstruct the row the floor was hiding —
+`salary > 50000`, `> 60000`, `> 70000`, and the differences between the answers
+are the people in between. Item 88 said this was out of scope; this is the piece
+that bounds it.
+
+**The key insight is that repetition, not variety, is the signal.** The query
+shape QueryGate records (`audit/events.normalize_query_shape`) keeps operators,
+column names, `group_by` keys and join structure but strips predicate
+literals — the same redaction-safe projection that makes the audit event safe
+to persist. So a differencing probe walking a constant is **one shape re-sent N
+times**, while genuine exploration is N *different* shapes. A design that
+counted distinct shapes would have missed the attack completely; this one counts
+re-runs.
+
+Two caps, each `None` (off) by default, each applying per **(principal,
+connection, declared purpose, table)** over a rolling window:
+
+- `max_shape_repeats_per_window` — how many times one query shape may be re-run
+  against one table. Intended as the targeted probe cap, but **currently
+  evadable** (item 186) — the fingerprint does not canonicalize a referenced
+  select alias, a cte rename, a nested-scope alias, or list order, so a prober
+  can mint a fresh bucket per probe. Do not set this cap alone until that lands.
+- `max_aggregate_queries_per_window` — how many aggregate queries may touch one
+  table however the shape varies. The blunt backstop that catches a prober who
+  varies its shape to dodge the first cap.
+
+Design decisions worth knowing:
+
+- **Purpose is in the key**, so each declared purpose carries its own
+  independent budget. That is what turns item 145's purpose from a per-query
+  narrowing into a *cumulative* bound. It deliberately does **not** put a cap on
+  `PurposePolicyDelta`: every field `for_purpose` narrows today is a list or
+  table-keyed dict it unions, and `validate_structural_caps`' safety argument explicitly breaks if
+  the delta ever gains a subtractive field. Keying the window by purpose gets
+  the same outcome without touching that argument.
+- **Principal, not actor.** Under item 90's delegation (RFC 8693) the principal
+  is the *human* whose policy applied and the actor is the agent, so keying on
+  the actor would budget an entire agent fleet as one identity and let one agent
+  deny service to every other. Note the honest limit: with a **non-delegated**
+  shared service credential the principal *is* the fleet, and the budget is
+  shared by everything using that credential — delegated identity is what makes
+  per-human budgeting real.
+- **Only `execute` spends budget.** `explain` and `verdict` return no rows, so
+  they disclose nothing for a disclosure budget to meter — they neither spend a
+  budget nor are refused by a spent one.
+- **Both caps require `min_group_size`.** With no k-floor a caller can read the
+  rows directly, so bounding aggregate differencing would cost availability and
+  protect nothing.
+- **The Redis backend fails closed**, unlike the quota limiter (which fails
+  open unconditionally) and the concurrency limiter (which fails open by
+  default, via `concurrency_redis_fail_open`). Those are anti-abuse controls where admitting traffic is the
+  right degradation; this one defends a privacy guarantee, and failing open
+  would silently suspend it while the operator's config still said it was
+  enforced.
+
+**What this is not.** It is a *bound*, not a closure. A caller inside its budget
+still differences successfully. Because the shape is predicate-literal-free the budget
+cannot distinguish a probe from an innocent repeat, so it is deliberately
+conservative and will also count benign repetition. And there is **no
+recommended threshold** — we have not calibrated these against real traffic, so
+an operator switching this on is choosing a number we have not validated for
+them. Closing multi-query differencing properly needs query-set auditing or
+differential privacy, both still out of scope (`docs/INFERENCE_RISKS.md` R3).
 
 ## Catalog / Semantic Layer
 
@@ -3611,11 +3685,15 @@ correct rather than merely running:
   drops, and no replica is left on stale config. This is the multi-replica
   answer to the fact that the governance API's in-process reload only affects
   the single replica that served the request.
-- **Honest shared-state boundaries.** The in-flight concurrency cap is a true
-  fleet-wide cap under `CONCURRENCY_BACKEND=redis`; per-principal *quotas* are
-  still enforced per-replica (item 50 phase 2 not shipped), so under N replicas
-  a quota is effectively N×. `deploy/HA_DR.md`'s shared-state matrix states this
-  plainly rather than implying a budget QueryGate doesn't yet enforce.
+- **Honest shared-state boundaries.** The in-flight concurrency cap and the
+  per-principal rate/byte *quota* are both true fleet-wide budgets under
+  `CONCURRENCY_BACKEND=redis` (the one setting installs the Redis-backed
+  concurrency limiter *and* the `RedisQuotaLimiter`, item 50 phase 2). On the
+  in-process default each replica enforces its own window, so under N replicas
+  both effectively multiply by N. `deploy/HA_DR.md`'s shared-state matrix states
+  the per-kind behavior plainly rather than implying a budget QueryGate doesn't
+  enforce — the config-governance version store and the persisted audit ledger
+  remain genuinely per-replica.
 - **DR without an app database.** QueryGate owns no configuration database — its
   durable footprint is config (GitOps-backed), an optional governance PVC, and
   the audit stream (stdout → your log store). Recovery is a redeploy from a
@@ -3876,6 +3954,146 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-12 — Two filed items were renumbered 179→184 and 180→185 when two
+  concurrent branches were merged; the sole deviation from "item numbers are
+  permanent".** Item 177 (WORM integrity counters) and item 179 (cumulative
+  disclosure budget) were built in separate worktrees cut from the same base
+  commit and neither was merged before the other finished. Each allocated the
+  next free numbers against the TODO.md it could see, so **both** filed an item
+  179 and an item 180, for four different pieces of work. CLAUDE.md's rule that
+  numbers are permanent and never reused cannot hold when two allocations of the
+  same number already exist — one pair had to move. **Decision:** the disclosure
+  budget keeps 179 (and its deferred approval-escalation follow-up keeps 180),
+  because it is shipped code whose number is referenced from roughly thirty
+  files including `execution/disclosure_budget.py`, `policy/models.py`,
+  `deploy/HA_DR.md`, `docs/INFERENCE_RISKS.md` and its own tests; the item-177
+  branch's two were **filed-only** — no code implements them — so moving them
+  cost two `metrics.py` comment lines and three archive cross-references. The
+  WORM non-advancing-cursor defect is now **item 184** and the unreachable
+  `rejected` metric label is now **item 185**; both carry a permanent note of
+  their prior number in their TODO.md body, and item 177's archive entry points
+  at the new numbers. **The real lesson is the process one:** a worktree that
+  files new items allocates numbers against a base that another worktree cannot
+  see, so long-lived unmerged branches make collisions structural rather than
+  unlucky. Merge (or at least reserve numbers centrally) before filing follow-up
+  items from a branch. `docs/STORED_PROCEDURE_CATALOG_PLAN.md`'s four
+  *proposed* phase numbers (178–181) were the same trap already latent in the
+  tree — they now say "numbered when prioritized" instead of naming a number
+  nothing had reserved.
+- **2026-08-11 — "Governing intent" resolved as a cumulative disclosure budget,
+  and NL-intent enforcement rejected outright (TODO.md item 179).** Asked
+  whether QueryGate could govern an agent's *intent* as well as its query, we
+  split the word three ways and answered each separately. (1) **Declared
+  purpose as a closed-set token** — already shipped as item 145. (2) **The
+  natural-language ask** (`StructuredQuery.intent`, free text) — **deliberately
+  not governable, and recorded here so it isn't revisited under pressure.**
+  Enforcing it means inspecting a string and judging its meaning, which
+  contradicts the North Star's "by construction, never by inspecting a string",
+  turns a deterministic gate probabilistic, opens a prompt-injection surface
+  inside the control plane, and is self-attested by the exact party being
+  governed — an agent that would exfiltrate will also write "routine
+  reporting". Adding it would need a NORTH_STAR decision, not just this log.
+  (3) **Intent as read off the query shape, accumulated over time** — built,
+  as item 179.
+
+  **Two things were corrected during the work and are worth preserving.**
+  First, the item's own original premise was backwards: it implied budgeting
+  *distinct* query shapes. Because `normalize_query_shape` strips predicate
+  literals, a differencing probe (`salary > 50000`, `> 60000`, …) is ONE shape
+  re-sent N times — so counting distinct shapes would have left the guardrail
+  silently inert against the exact attack it exists for. Repetition, not
+  variety, is the signal. Second, the "should `explain`/`verdict` spend budget"
+  question that blocked the item resolved itself once framed correctly: they
+  return no rows, so they disclose nothing a *disclosure* budget could meter.
+  No change to `explain`'s deliberate non-quota-gating was needed.
+
+  **Decisions:** two independent caps rather than one (`max_shape_repeats_per_window`
+  for the targeted probe, `max_aggregate_queries_per_window` as the blunt
+  backstop against a shape-varying prober); key on
+  (principal, connection, purpose, table) — purpose in the *key* rather than a
+  cap on `PurposePolicyDelta`, which would have been the first subtractive
+  field on that delta and would have broken `validate_structural_caps`'
+  documented monotonicity argument; principal not actor, since the actor is the
+  agent and a fleet shares it; reject on exhaustion rather than escalating into
+  item 92's approval gate (deferred as item 180, to be decided against real
+  usage data rather than guessed at, and because "click here to buy unlimited
+  disclosure" is a real failure mode); and both caps inert unless
+  `min_group_size` is also set, since with no k-floor there is nothing to
+  difference around. The Redis backend **fails closed**, diverging from the
+  quota/concurrency limiters — those are anti-abuse controls where admitting
+  traffic is the right degradation, whereas failing open here would silently
+  suspend a privacy guarantee the operator's config still claimed.
+
+  **Stated as a bound, not a closure, everywhere it is documented.** A caller
+  inside its budget still differences successfully, the literal-free shape
+  cannot distinguish a probe from an innocent repeat, and no threshold is
+  recommended because none has been calibrated against real traffic.
+  `docs/INFERENCE_RISKS.md` R3 and `THREAT_MODEL.md` QG-29 were updated to say
+  "bounded since item 179, still residual" rather than "closed".
+
+- **2026-08-11 — The WORM archive's two integrity signals are now Prometheus
+  counters, so a broken hash chain is alertable rather than merely
+  inspectable (TODO.md item 177).** Item 172 added
+  `WormSearchResult.chain_breaks` — the strongest tamper/omission signal this
+  surface produces, stronger than an ordinary `unverified` hash mismatch
+  because the record's own hash still verified — but it was only ever visible
+  to whoever happened to run an ad-hoc
+  `GET /api/v1/admin/observability/worm-search` over the right window.
+  Nobody was paged. Since the Proof pillar is a product claim, that made
+  "detected" mean "detectable on demand" rather than "monitored": an operator
+  on the normal dashboards/alerts posture would never learn a chain broke.
+  **Decision:** `querygate_audit_worm_search_chain_breaks_total` and
+  `querygate_audit_worm_search_unverified_total` in `metrics.py`, incremented
+  in `audit/worm_search.py`'s `_finalize` alongside the existing
+  `AUDIT_WORM_SEARCH_REQUESTS_TOTAL`/`..._OBJECTS_SCANNED_TOTAL` pattern.
+  Both are **unlabelled**, matching item 126's
+  `PERSONAL_DENIALS_RATE_LIMITED_TOTAL` precedent — a `connection`/
+  `principal` label here would be caller-chosen cardinality and a weak
+  activity oracle over the audit archive itself, on a surface whose whole
+  point is that reading it is privileged. `unverified_total` deliberately
+  includes each chain break's own breaking line, mirroring the result model's
+  field relationship exactly, so `unverified_total - chain_breaks_total` is
+  the count actually likely to be a key rotation — the same split the
+  response `note` already makes in prose.
+  **Two decisions beyond the item's literal scope, both deliberate:**
+  (1) the counters also fire on the **mid-scan S3 failure** path, not only
+  the served path — a chain break found just before S3 died is a real
+  discovery, and letting the exception swallow it would reproduce the exact
+  silent-signal failure this item exists to close; the item's own text said
+  only "in `_finalize`", which would have left that hole. (2) An idempotence
+  guard drafted for the two call sites was **removed** rather than shipped:
+  mutation testing confirmed it was unreachable (every `_finalize` call site
+  is a `return`, and `_finalize` cannot raise after counting) and therefore
+  untestable — the same call item 114 made on its fifth hand-rolled predicate
+  enumerator. The reasoning is recorded in a comment at the site, and the
+  invariant it rested on is now pinned *behaviourally* by
+  `test_a_result_that_fails_to_build_counts_the_signals_once_not_twice`, which
+  makes the result-model construction raise and asserts the signals are counted
+  once, not twice. (A first attempt guarded this by string-matching `_finalize`
+  call sites in the module source; the audit's second pass showed that proxy
+  false-passed on the one edit that genuinely double-counts — moving the
+  counting call above the model construction — and false-failed on a docstring
+  mentioning `_finalize(`, so it was replaced. The behavioural test also covers
+  the WS-7 "build the response first, count only after construction succeeds"
+  ordering, comment-only since item 134 phase 2.)
+  **Scope corrected by this item's own `auditors` gate, before commit.**
+  Reviewers independently flagged that the first draft's framing —
+  "detected" becomes "monitored" — overstated what shipped: nothing in
+  QueryGate scans the archive on a schedule (`search_worm_archive` has exactly
+  one production caller, the scope-gated REST route), so the counters only
+  advance while a search actually runs. A segment tampered inside a window
+  nobody searches still produces no signal. What this item delivers is
+  precisely that a finding becomes *reachable by alerting* rather than only
+  readable in a response body; genuine monitoring additionally requires the
+  operator to schedule a periodic search, which README/THREAT_MODEL now say.
+  A false sense of coverage would have been worse than the gap it replaced, so
+  the claim was narrowed on every surface rather than the code widened. The
+  same gate also established that the counters count findings **per scan**,
+  not distinct segments (a WORM object is immutable, so a real break is
+  permanent and re-counted by every later search that reaches it) — hence the
+  guidance to alert on the first non-zero increase, not on a magnitude. A
+  scheduled verifier, if wanted, is a new item rather than a doc edit.
+  See [Security Model](#security-model).
 - **2026-08-10 — `validate_schema` reuses the per-request connection-resolver
   snapshot instead of re-deriving cross-connection resolution a second time
   (TODO.md item 173).** Item 160 already built one fixed snapshot per
@@ -5560,7 +5778,8 @@ reasoning behind them, newest first. Added to incrementally as work happens
   exists for, still a real enforced ceiling), and one request's actual S3
   work is separately bounded by `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
   `AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS` — a bound hit mid-scan
-  degrades to a truncated, resumable page (an opaque cursor encoding
+  degrades to a truncated, resumable page — except a day listing over
+`max_objects_scanned`, whose cursor repeats that day (item 184) — (an opaque cursor encoding
   `day`/`key`/`line` plus a fingerprint of the request's own filters, so
   replaying a cursor against different filters is rejected rather than
   silently returning a mismatched page) instead of continuing an
@@ -7285,8 +7504,10 @@ reasoning behind them, newest first. Added to incrementally as work happens
   class + registry) but the two layers stay distinct. Behavior-preserving (the
   module functions are kept as thin dispatchers; proven by the unchanged
   `test_dialects.py` plus a new registry test). The cost-estimation hook the
-  item also mentions stays Postgres-only until MSSQL cost estimation (item 26
-  ph2) exists — that remains the one documented inline-branch exception.
+  item also mentions was Postgres-only at this date, and was the one documented
+  inline-branch exception. *(Superseded: item 26 phase 2 shipped MSSQL
+  `SHOWPLAN_XML` estimation, and `_estimate_cost` is now a per-dialect dispatch,
+  so the exception is resolved — CLAUDE.md records it as such.)*
 - **2026-07-23 — Bounded nested subqueries are added as a recursive AST node with
   caps enforced TREE-WIDE, not per-level, and only the uncorrelated/single-
   connection/depth-capped subset (item 97; maintainer-approved).** The AST gains
@@ -7400,11 +7621,14 @@ reasoning behind them, newest first. Added to incrementally as work happens
   with `maxUnavailable: 0`. The governance API remains correct for single-replica
   or staging; the optional RWX `configGovernance` PVC shares *history* across
   replicas but still requires a roll to propagate an apply — documented, not
-  hidden. **(2) Quota honesty.** The in-flight concurrency cap is fleet-wide via
-  Redis, but per-principal rate/byte quotas (item 50) are still per-replica; the
-  Redis-backed shared budget is item 50 phase 2 (not started). We chose to state
+  hidden. **(2) Quota honesty.** *(Superseded — item 50 phase 2 has since shipped;
+  retained as the record of the decision made while it had not. Current state:
+  the quota is a true fleet-wide budget under `CONCURRENCY_BACKEND=redis`, per
+  `deploy/HA_DR.md`'s matrix.)* At the time, the in-flight concurrency cap was
+  fleet-wide via Redis, but per-principal rate/byte quotas (item 50) were still
+  per-replica. We chose to state
   the N× multiplication plainly in `deploy/HA_DR.md`'s shared-state matrix and
-  size guidance around it, rather than imply a cross-fleet budget the code does
+  size guidance around it, rather than imply a cross-fleet budget the code did
   not yet enforce. The rejected alternative — quietly shipping the HA overlay and
   letting operators assume quotas were global — was declined because a security
   product's operational claims have to match what the code does. Chart invariants

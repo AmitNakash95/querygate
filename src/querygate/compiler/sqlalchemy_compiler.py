@@ -46,7 +46,7 @@ from querygate.query_ast.models import (
     WindowCall,
     WindowExpr,
     WindowSelectItem,
-    _AGGREGATE_SELECT_ITEM_TYPES,
+    is_aggregate_scope,
 )
 from querygate.validation.schema_validation import (
     ConnectionResolver,
@@ -1609,9 +1609,9 @@ def _compile_scope_body(
         having_ctx = where_ctx._replace(allow_value_set_subquery=False)
         stmt = stmt.having(_compile_where(query.having, tables, alias_map, dialect, ctx=having_ctx))
 
-    is_aggregate = bool(query.group_by) or any(
-        isinstance(i, _AGGREGATE_SELECT_ITEM_TYPES) for i in query.select
-    )
+    # Shared with the item-179 disclosure budget, which must agree with this
+    # floor about what an aggregate query is — see `is_aggregate_scope`.
+    is_aggregate = is_aggregate_scope(query)
 
     # k-anonymity guardrail (TODO.md item 88): on an aggregate query, suppress
     # any result group backed by fewer than policy.min_group_size underlying

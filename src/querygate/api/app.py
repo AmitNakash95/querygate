@@ -33,6 +33,8 @@ from querygate.core.config import config as default_config
 from querygate.core.logging import ContextLogger, context_logger, get_logger
 from querygate.core.scopes import ADMIN_METRICS_READ_SCOPE
 from querygate.execution.concurrency import clear_redis_limiter, init_redis_limiter
+from querygate.execution.disclosure_budget import clear_redis_disclosure_budget_limiter
+from querygate.execution.quota import clear_redis_quota_limiter
 from querygate.health import HealthMonitor
 from querygate.metrics import CONTENT_TYPE_LATEST, render_latest
 
@@ -129,7 +131,13 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
 
             from querygate.execution.redis_concurrency import RedisConcurrencyLimiter
 
+            from querygate.execution.disclosure_budget import (
+                init_redis_disclosure_budget_limiter,
+            )
             from querygate.execution.quota import init_redis_quota_limiter
+            from querygate.execution.redis_disclosure_budget import (
+                RedisDisclosureBudgetLimiter,
+            )
             from querygate.execution.redis_quota import RedisQuotaLimiter
 
             redis_client = redis_asyncio.Redis.from_url(conf.concurrency_redis_url)
@@ -145,6 +153,11 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             # phase 2), so a principal's rate/byte budget is one shared window
             # across replicas rather than one-per-replica.
             init_redis_quota_limiter(RedisQuotaLimiter(redis_client))
+            # ...and the cumulative disclosure budget (item 179), for the same
+            # reason and with more at stake: a per-replica probe budget gives a
+            # prober N× the probes the operator configured against a k-anonymity
+            # floor they believe is defended.
+            init_redis_disclosure_budget_limiter(RedisDisclosureBudgetLimiter(redis_client))
 
         try:
             if conf.mcp_enabled:
@@ -178,7 +191,16 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             if worm_flush_monitor is not None:
                 await worm_flush_monitor.stop()
             if redis_client is not None:
+                # Revert every module-global limiter this app installed before
+                # the client it wraps is closed. Leaving the disclosure-budget
+                # limiter installed matters more than the others: it fails
+                # CLOSED, so a later in-process `execute()` (a second
+                # `create_app`, an embedded MCP server, a worker) would refuse
+                # every aggregate query on a k-floored connection against a
+                # dead client.
                 clear_redis_limiter()
+                clear_redis_quota_limiter()
+                clear_redis_disclosure_budget_limiter()
                 await redis_client.aclose()
 
     application = FastAPI(
